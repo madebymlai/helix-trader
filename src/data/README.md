@@ -153,13 +153,24 @@ canned bars.
 
 1. **Instruments.** Write those not yet in the catalog
    (`catalog.instruments(ids)`), so a re-run adds no file.
-2. **Resume.** Per bar type, one at a time: the last stored `ts_init` from
-   `query_last_timestamp`; request from just after it (or `start`) to `end`.
-   A window already covered is skipped, not an error.
-3. **Check.** Refuse an empty response and any bar of another bar type.
+2. **Resume.** Per bar type, one at a time: the resume point is the
+   catalog's last timestamp for that exact bar type (`query_last_timestamp`
+   with the bar type string, so other bar types of the same instrument do
+   not count); request from 1 ns after it (or `start`, if later) to `end`.
+   A window already covered (resume point at or after `end`) asks the
+   source for nothing and is not an error.
+3. **Check.** Refuse an empty response (also after a resume: a window
+   not yet covered must have bars) and any bar of another bar type.
    Drop bars at or before the resume point, sort by `ts_init`, drop
-   duplicate `ts_init`.
-4. **Write** one bar type per call with `write_to_parquet`.
+   duplicate `ts_init`. If nothing is left, nothing is written and that is
+   not an error.
+4. **Write** one bar type per call with `write_to_parquet`, recording the
+   file's interval end as `end` (or the newest bar, if later), not the
+   newest bar. The catalog's last timestamp is then the end of the window
+   already asked for, so a re-run over the same window asks for nothing,
+   even when the last bar closed before `end`. A response whose bars were
+   all dropped records no coverage, so the next run asks for that tail
+   again.
 
 Any error stops the run. What was written stays valid; a re-run resumes.
 

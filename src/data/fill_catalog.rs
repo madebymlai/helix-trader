@@ -2,7 +2,7 @@
 //!
 //! Source-agnostic, no node: the bars come from a fetch function the caller
 //! passes, backed by an adapter's historical client (`ib.rs`). Per bar type
-//! it resumes after the last stored bar (`query_last_timestamp`), checks the
+//! it resumes after the last stored timestamp (`query_last_timestamp`), checks the
 //! response, sorts it by `ts_init` and writes it with `write_instruments`
 //! and `write_to_parquet` on a `ParquetDataCatalog` (`nautilus_persistence`).
 //! Nautilus does not persist requested data on its own.
@@ -22,8 +22,15 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 /// Fills `catalog` with `instruments`, then with the bars of each bar type
 /// over `[start, end]`, fetched one bar type at a time through `fetch_bars`.
 ///
-/// Any error stops the run. An empty response or a bar of another bar type
-/// is an error. Bars are stored sorted by `ts_init`, duplicates dropped.
+/// Instruments already in the catalog are not written again. Each bar type
+/// resumes 1 ns after the catalog's last timestamp for it, which is the end
+/// of the window last filled (or its newest bar, if later): a covered window
+/// asks for nothing, and returned bars at or before that point are dropped.
+///
+/// Any error stops the run; bar types written before it stay stored. An
+/// empty response or a bar of another bar type is an error, a response of
+/// only already stored bars is not. Bars are stored sorted by `ts_init`,
+/// duplicates dropped.
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
