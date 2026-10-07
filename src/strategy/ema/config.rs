@@ -100,7 +100,10 @@ mod tests {
 
     #[test]
     fn rejects_an_invalid_cadence_at_load() {
-        let toml = TOML.replace("step = 1, aggregation = \"HOUR\"", "step = 60, aggregation = \"MINUTE\"");
+        let toml = TOML.replace(
+            "step = 1, aggregation = \"HOUR\"",
+            "step = 60, aggregation = \"MINUTE\"",
+        );
         assert!(toml::from_str::<EmaCrossConfig>(&toml).is_err());
     }
 

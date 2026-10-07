@@ -40,9 +40,13 @@ impl Book {
     /// Signed target position, or `None` until both EMAs are warm.
     pub(super) fn target(&self, instrument_id: &InstrumentId) -> Option<Decimal> {
         let signal = self.signals.get(instrument_id)?;
-        signal
-            .is_long()
-            .map(|long| if long { self.trade_size } else { -self.trade_size })
+        signal.is_long().map(|long| {
+            if long {
+                self.trade_size
+            } else {
+                -self.trade_size
+            }
+        })
     }
 }
 

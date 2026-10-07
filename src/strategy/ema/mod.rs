@@ -8,10 +8,7 @@ pub use config::EmaCrossConfig;
 
 use nautilus_common::actor::DataActor;
 use nautilus_model::{
-    data::Bar,
-    enums::OrderSide,
-    identifiers::InstrumentId,
-    instruments::Instrument,
+    data::Bar, enums::OrderSide, identifiers::InstrumentId, instruments::Instrument,
 };
 use nautilus_trading::{
     nautilus_strategy,
@@ -63,7 +60,11 @@ impl EmaCross {
                 .instrument(&instrument_id)
                 .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?
         };
-        let side = if delta > Decimal::ZERO { OrderSide::Buy } else { OrderSide::Sell };
+        let side = if delta > Decimal::ZERO {
+            OrderSide::Buy
+        } else {
+            OrderSide::Sell
+        };
         let quantity = instrument.make_qty_from_decimal(delta.abs(), None);
         let order = self.order().market(
             instrument_id,
