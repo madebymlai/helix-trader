@@ -323,11 +323,15 @@ mod tests {
         r.unwrap();
         let (r, _) = fill_window(&mut catalog, vec![instrument()], &[day], 0, 50, bars).await;
         r.unwrap();
-        let (r, asked) =
-            fill_window(&mut catalog, vec![instrument()], &[hour, day], 0, 200, |bt| {
-                Ok(vec![bar_at(bt, 150)])
-            })
-            .await;
+        let (r, asked) = fill_window(
+            &mut catalog,
+            vec![instrument()],
+            &[hour, day],
+            0,
+            200,
+            |bt| Ok(vec![bar_at(bt, 150)]),
+        )
+        .await;
         r.unwrap();
         assert_eq!(asked, vec![(hour, 101, 200), (day, 51, 200)]);
     }
@@ -406,5 +410,76 @@ mod tests {
         let ids = vec!["ESZ21.GLBX".to_string()];
         let stored = catalog.instruments(Some(&ids), None, None).unwrap();
         assert_eq!(stored.len(), 1);
+    }
+    #[tokio::test]
+    async fn failure_on_the_second_bar_type_keeps_the_first_and_a_rerun_fetches_only_the_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let hour = bar_type();
+        let day: BarType = "ESZ21.GLBX-1-DAY-LAST-EXTERNAL".parse().unwrap();
+        let (r, _) = fill_window(
+            &mut catalog,
+            vec![instrument()],
+            &[hour, day],
+            0,
+            100,
+            |bt| {
+                if bt == day {
+                    bail!("source down")
+                }
+                Ok(vec![bar_at(bt, 10)])
+            },
+        )
+        .await;
+        r.unwrap_err();
+        assert_eq!(stored_ts(&mut catalog, hour), vec![10]);
+        let (r, asked) = fill_window(
+            &mut catalog,
+            vec![instrument()],
+            &[hour, day],
+            0,
+            100,
+            |bt| Ok(vec![bar_at(bt, 20)]),
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(asked, vec![(day, 0, 100)]);
+        assert_eq!(stored_ts(&mut catalog, day), vec![20]);
+    }
+
+    #[tokio::test]
+    async fn empty_response_after_the_resume_point_is_still_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 100, |bt| {
+            Ok(vec![bar_at(bt, 10)])
+        })
+        .await;
+        r.unwrap();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 200, |_| {
+            Ok(vec![])
+        })
+        .await;
+        let err = r.unwrap_err();
+        assert!(err.to_string().contains(&bt.to_string()), "{err}");
+    }
+    #[tokio::test]
+    async fn bar_after_the_window_end_moves_the_resume_point_past_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 100, |bt| {
+            Ok(vec![bar_at(bt, 10), bar_at(bt, 150)])
+        })
+        .await;
+        r.unwrap();
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 200, |bt| {
+            Ok(vec![bar_at(bt, 150), bar_at(bt, 180)])
+        })
+        .await;
+        r.unwrap();
+        assert_eq!(asked, vec![(bt, 151, 200)]);
+        assert_eq!(stored_ts(&mut catalog, bt), vec![10, 150, 180]);
     }
 }
