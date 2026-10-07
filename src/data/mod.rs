@@ -6,4 +6,5 @@
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
 mod ib;
+pub use ib::{IbGateway, IbHistory};
 mod rolls;

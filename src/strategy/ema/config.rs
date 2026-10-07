@@ -42,7 +42,11 @@ impl EmaCrossConfig {
             .collect()
     }
 
-    pub(super) fn validate(&self) -> anyhow::Result<()> {
+    /// # Errors
+    ///
+    /// Returns an error if the config is inconsistent: no instruments,
+    /// several venues, periods out of order, a non-positive size or warmup.
+    pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.instrument_ids.is_empty(), "no instruments");
         let venue = self.instrument_ids[0].venue;
         ensure!(

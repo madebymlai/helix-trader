@@ -227,6 +227,26 @@ client.request_bars(bar_specifications: Vec<&str>, end_date_time: Timestamp,
     use_rth: bool, timeout: u64) .await -> anyhow::Result<Vec<Bar>>
 ```
 
+Our wrapper, `IbHistory` (exported with `IbGateway` from `data`):
+
+```rust
+IbHistory::connect(gateway: IbGateway, bar_types: &[BarType], end: Timestamp, now: Timestamp)
+    .await -> anyhow::Result<IbHistory>   // checks cadence and end before connecting
+history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
+history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fetch_bars of fill_catalog
+```
+
+- **Checked before connecting.** Every bar type must be one IB serves (see
+  bar spec strings below, `EXTERNAL`, priced `LAST`/`BID`/`ASK`/`MID`), and
+  `end` must be at least the longest bar before `now`: IB answers a window
+  ending within one bar of now with the bar still in progress, and
+  `fill_catalog` would store it and resume past it. `main` reads the clock.
+- **Every instrument or none.** `request_instruments` answers an unknown or
+  expired id with nothing and only a warning; `instruments` fails naming the
+  missing ids, before any bar request.
+- **Logging.** The adapter warns through `tracing`. `fill-catalog` runs no
+  node, so `main` installs Nautilus' own logger and tracing bridge for that
+  command, as a node would (`NAUTILUS_LOG`, `RUST_LOG`).
 - **No node.** `connect` opens the IB socket through the adapter's shared
   client registry and initialises an instrument provider; no message bus,
   cache or clock. It needs a Tokio runtime and a running IB Gateway or TWS.
