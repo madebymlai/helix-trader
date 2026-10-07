@@ -7,12 +7,15 @@
 //! and `write_to_parquet` on a `ParquetDataCatalog` (`nautilus_persistence`).
 //! Nautilus does not persist requested data on its own.
 
+use std::collections::HashSet;
+
 use anyhow::{Context, bail};
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, NautilusDataType},
-    instruments::InstrumentAny,
+    identifiers::InstrumentId,
+    instruments::{Instrument, InstrumentAny},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
@@ -29,8 +32,19 @@ pub async fn fill_catalog(
     end: Timestamp,
     mut fetch_bars: impl AsyncFnMut(BarType, Timestamp, Timestamp) -> anyhow::Result<Vec<Bar>>,
 ) -> anyhow::Result<()> {
+    let ids: Vec<String> = instruments.iter().map(|i| i.id().to_string()).collect();
+    let stored: HashSet<InstrumentId> = catalog
+        .instruments(Some(&ids), None, None)
+        .context("reading stored instruments")?
+        .iter()
+        .map(Instrument::id)
+        .collect();
+    let new = instruments
+        .into_iter()
+        .filter(|i| !stored.contains(&i.id()))
+        .collect();
     catalog
-        .write_instruments(instruments)
+        .write_instruments(new)
         .context("writing instruments")?;
     let end_ns = to_unix_nanos(end)?;
     for &bar_type in bar_types {
@@ -86,8 +100,7 @@ fn just_after(last: UnixNanos) -> anyhow::Result<Timestamp> {
 mod tests {
     use super::*;
     use nautilus_model::{
-        identifiers::InstrumentId,
-        instruments::{Instrument, stubs::futures_contract_es},
+        instruments::stubs::futures_contract_es,
         types::{Price, Quantity},
     };
 
@@ -369,5 +382,29 @@ mod tests {
         .await;
         r.unwrap();
         assert_eq!(stored_ts(&mut catalog, bt), vec![10, 20]);
+    }
+    #[tokio::test]
+    async fn instruments_are_written_once_across_two_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let instrument_at = |ts: u64| {
+            let mut es = futures_contract_es(None, None);
+            es.ts_init = UnixNanos::from(ts);
+            InstrumentAny::FuturesContract(es)
+        };
+        let (r, _) = fill_window(&mut catalog, vec![instrument_at(1)], &[bt], 0, 100, |bt| {
+            Ok(vec![bar_at(bt, 10)])
+        })
+        .await;
+        r.unwrap();
+        let (r, _) = fill_window(&mut catalog, vec![instrument_at(2)], &[bt], 0, 200, |bt| {
+            Ok(vec![bar_at(bt, 150)])
+        })
+        .await;
+        r.unwrap();
+        let ids = vec!["ESZ21.GLBX".to_string()];
+        let stored = catalog.instruments(Some(&ids), None, None).unwrap();
+        assert_eq!(stored.len(), 1);
     }
 }
