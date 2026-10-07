@@ -1,0 +1,22 @@
+[package]
+name = "helix-trader"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bon = "=3.9.3"
+jiff = { version = "0.2", features = ["serde"] }
+log = "0.4"
+nautilus-common = "=0.65.0"
+nautilus-core = "=0.65.0"
+nautilus-indicators = "=0.65.0"
+nautilus-model = "=0.65.0"
+nautilus-trading = "=0.65.0"
+rust_decimal = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+toml = "1"
