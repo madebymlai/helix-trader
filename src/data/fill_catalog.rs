@@ -184,4 +184,29 @@ mod tests {
         assert!(err.to_string().contains(&other.to_string()), "{err}");
         assert!(stored_ts(&mut catalog, bt).is_empty());
     }
+
+    #[tokio::test]
+    async fn each_bar_type_is_fetched_over_the_window_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let hour = bar_type();
+        let day: BarType = "ESZ21.GLBX-1-DAY-LAST-EXTERNAL".parse().unwrap();
+        let start = Timestamp::from_second(100).unwrap();
+        let end = Timestamp::from_second(900).unwrap();
+        let mut asked = Vec::new();
+        fill_catalog(
+            &mut catalog,
+            vec![instrument()],
+            &[hour, day],
+            start,
+            end,
+            async |bt, s, e| {
+                asked.push((bt, s, e));
+                Ok(vec![bar_at(bt, 10)])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(asked, vec![(hour, start, end), (day, start, end)]);
+    }
 }
