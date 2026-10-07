@@ -263,6 +263,11 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   exchange, `includeExpired: true`), the form that resolved the expired
   `ESU5` on the paper gateway; then it fails naming the ids still missing,
   before any bar request.
+- **Market data subscription.** Historical bars through the API need the
+  Level 1 real-time subscription of the exchange (for ES, "CME Real-Time
+  (NP,L1)") with "Market Data API access" enabled, shared with the paper
+  account. Without it every bar request fails with IB error 2188, also for
+  old windows and with delayed data (tested on the paper gateway).
 - **Client id.** `fill-catalog` defaults to IB client id 10, not the adapter
   default 1, so it can run beside a live node.
 - **Logging.** The adapter warns through `tracing`. `fill-catalog` runs no
