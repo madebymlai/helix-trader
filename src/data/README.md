@@ -309,8 +309,16 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   `ts_event = ts_init` = the bar close, on the hour. Weekly bars break the
   rule: the adapter's `bar_close_from_open` returns the open for WEEK, so
   `ib.rs` refuses WEEK before connecting.
-- **Regular hours.** `use_rth` must equal the live data client's
-  `use_regular_trading_hours`, or backtest and live bars differ.
+- **Full session, not regular hours.** The data client config built in
+  `ib.rs` sets `use_regular_trading_hours: false`, and every bar request
+  passes that same setting as `use_rth`. With regular hours on (the adapter
+  default), IB's first regular-hours bar of a day is partial (13:30-14:00
+  UTC for ES) while the adapter stamps every bar at open + bar size, so
+  that bar is stamped 14:30, half an hour after its close (seen on the
+  paper gateway 2026-10-07: ESZ6 1-HOUR bars stamped 14:30 then 15:00).
+  With the full session every bar is on the hour. Futures trade nearly
+  around the clock, so the full session is also the real market. The live
+  data client must use the same setting, or backtest and live bars differ.
 - **Venue.** `Simplified` symbology takes the contract's IB exchange as the
   venue (`ESM4.CME`). For a MIC venue set `symbol_to_mic_venue` per root.
   Never set `convert_exchange_to_mic_venue`: it looks the exchange up in a

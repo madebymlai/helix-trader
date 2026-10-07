@@ -225,7 +225,12 @@ Both configs implement `ClientConfig` and `Default`; build them with
 
 The history side (`data/ib.rs`) uses the same config type for its
 historical client. `use_regular_trading_hours` must equal the `use_rth` of
-the history requests, or backtest and live bars differ.
+the history requests, or backtest and live bars differ. History uses the
+full session (`use_regular_trading_hours: false`), so the live data client
+must set `false` too, overriding the default: with regular hours, IB's
+first bar of a futures day is partial (13:30-14:00 UTC for ES) and the
+adapter stamps it at open + bar size, half an hour after its real close
+(see "Full session, not regular hours" in the data README).
 
 ### Execution client config
 

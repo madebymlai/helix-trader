@@ -31,8 +31,24 @@ pub struct IbGateway {
 /// A connection to IB for history: instruments and bars, no node.
 pub struct IbHistory {
     client: HistoricalInteractiveBrokersClient,
+    requests: BarRequests,
+}
+
+/// The settings every bar request passes, taken from the data client
+/// config so history and live agree on the session.
+#[derive(Debug, Clone, Copy)]
+struct BarRequests {
     use_rth: bool,
     timeout_secs: u64,
+}
+
+impl BarRequests {
+    fn of(config: &InteractiveBrokersDataClientConfig) -> Self {
+        Self {
+            use_rth: config.use_regular_trading_hours,
+            timeout_secs: config.request_timeout,
+        }
+    }
 }
 
 impl IbHistory {
@@ -55,17 +71,12 @@ impl IbHistory {
         }
         ensure_bars_closed(bar_types, end, now)?;
         let config = data_client_config(gateway);
-        let use_rth = config.use_regular_trading_hours;
-        let timeout_secs = config.request_timeout;
+        let requests = BarRequests::of(&config);
         let address = format!("{}:{}", config.host, config.port);
         let client = HistoricalInteractiveBrokersClient::connect(config)
             .await
             .with_context(|| format!("connecting to IB at {address}"))?;
-        Ok(Self {
-            client,
-            use_rth,
-            timeout_secs,
-        })
+        Ok(Self { client, requests })
     }
 
     /// The instruments of `ids`, as IB defines them. A future IB does not
@@ -120,8 +131,8 @@ impl IbHistory {
                 None,
                 None,
                 Some(vec![bar_type.instrument_id()]),
-                self.use_rth,
-                self.timeout_secs,
+                self.requests.use_rth,
+                self.requests.timeout_secs,
             )
             .await
     }
@@ -129,8 +140,11 @@ impl IbHistory {
 
 /// The IB data client config, the one the live data client uses.
 ///
-/// Adapter defaults otherwise: `Simplified` symbology (ids like
-/// `ESM4.CME`), regular trading hours only. Never sets
+/// The full session, not regular trading hours: IB's first regular-hours
+/// bar of a day is partial (13:30-14:00 UTC for ES) but the adapter stamps
+/// every bar at open + bar size, so that bar would be stamped half an hour
+/// after its close. Adapter defaults otherwise: `Simplified` symbology (ids
+/// like `ESM4.CME`). Never sets
 /// `convert_exchange_to_mic_venue`: it makes the venue of a CME contract
 /// change between processes.
 fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
@@ -138,6 +152,7 @@ fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig 
         host: gateway.host,
         port: gateway.port,
         client_id: gateway.client_id,
+        use_regular_trading_hours: false,
         ..Default::default()
     }
 }
@@ -292,6 +307,22 @@ mod tests {
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn the_data_client_config_uses_the_full_session() {
+        assert!(!data_client_config(closed_gateway()).use_regular_trading_hours);
+    }
+
+    #[test]
+    fn bar_requests_use_the_regular_hours_setting_of_the_data_client_config() {
+        let config = data_client_config(closed_gateway());
+        assert!(!BarRequests::of(&config).use_rth);
+        let regular = InteractiveBrokersDataClientConfig {
+            use_regular_trading_hours: true,
+            ..config
+        };
+        assert!(BarRequests::of(&regular).use_rth);
     }
 
     #[test]
