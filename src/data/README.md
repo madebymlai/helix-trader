@@ -260,7 +260,8 @@ Our wrapper, `IbHistory` (exported with `IbGateway` from `data`):
 IbHistory::connect(gateway: IbGateway, bar_types: &[BarType], end: Timestamp, now: Timestamp)
     .await -> anyhow::Result<IbHistory>   // checks cadence and end before connecting
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
-history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fetch_bars of fill_catalog
+history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fetch_bars of fill_catalog;
+                                                                       // (start, end], sorted, unique
 ```
 
 - **Checked before connecting.** Every bar type must be one IB serves (see
@@ -297,11 +298,52 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   1/2/3/5/10/15/20/30 MINUTE; 1/2/3/4/8 HOUR; 1 DAY; 1 WEEK. `ib.rs`
   accepts all but WEEK (see "Timestamps"). Anything else fails. Only time
   bars.
-- **Segments.** With a start, the client splits the window into segments and
-  requests them in sequence. A failed request or a timeout fails the whole
-  call. A contract that cannot be resolved is logged and skipped, so its
-  answer is empty: `fill_catalog` refuses it on a first fill, and on a
-  resumed window takes it as nothing new.
+- **Walking back, not segments.** Given a start, the client splits a
+  window into an `N D` segment ending at `end` and a seconds segment
+  ending N x 24 h earlier. IB counts `D` in trading sessions, not 24 h, so
+  bars between the two segments go missing without an error (paper
+  gateway 2026-10-07: ESZ6 1-HOUR over `[10-05T00:00Z, 10-07T18:00Z]` lacked
+  10-05 19:00-21:00). The live data client shares that segmentation
+  (`data/convert.rs` in the adapter). `bars` never passes a start: it
+  walks back from `end` (`walk_back`), each request with an explicit
+  duration (one segment, `start_date_time: None`) ending at the oldest
+  bar so far, so consecutive answers overlap by a bar and leave no hole.
+  It stops once a bar at or before `start` arrived, on an empty answer, or
+  when an answer brings nothing older than the request's end (no endless
+  loop when IB has no more). It returns the bars in `(start, end]`,
+  sorted by `ts_init`, duplicates at the joins dropped. An empty first
+  answer is returned empty; `fill_catalog` decides whether that is an
+  error. A failed request or a timeout fails the whole call. A contract
+  that cannot be resolved is logged and skipped, so its answer is empty:
+  `fill_catalog` refuses it on a first fill, and on a resumed window takes
+  it as nothing new.
+- **Duration per request** (`request_duration`), by bar size, within IB's
+  documented maximum duration per bar size (`S` seconds, `D` trading
+  sessions, `Y` years):
+
+  | Bar size | Duration | Requests for a year (about 252 sessions) |
+  |---|---|---|
+  | 1 SECOND | `1800 S` | thousands: short windows only |
+  | 5 SECOND | `3600 S` | thousands: short windows only |
+  | 15 SECOND | `14400 S` | about 1500: short windows only |
+  | 30 SECOND | `28800 S` | about 750: short windows only |
+  | 1 MINUTE | `1 D` | about 252 |
+  | 2 MINUTE | `2 D` | about 126 |
+  | 3, 5, 10 MINUTE | `5 D` | about 51 |
+  | 15, 20 MINUTE | `10 D` | about 26 |
+  | 30 MINUTE, 1/2/3/4/8 HOUR | `20 D` | about 13 |
+  | 1 DAY | `1 Y` | 1 |
+
+- **Pacing.** IB allows at most 60 historical requests in any ten minutes,
+  no identical request within 15 seconds, and no more than six requests
+  for the same contract within two seconds; a violation fails the request
+  (IB error 162), which fails the run. Bars over 30 seconds are, per IB,
+  paced softly (throttled rather than refused), small bars strictly. A
+  year of 1-HOUR bars takes about 13 requests; windows of minute bars
+  beyond a few months, or of second bars beyond a few hours, can reach the
+  limit. Split such a fill into several runs (each resumes where the last
+  stopped). The durations and pacing rules are from IB's documentation,
+  not tested on the gateway.
 - **Timestamps.** IB gives the bar open; the adapter stamps
   `ts_event = ts_init` = open + bar duration, the close. Bars come back
   sorted by `ts_event`. All intervals and roll dates are on the close.
@@ -325,9 +367,8 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   `std::collections::HashMap` where `CME` belongs to four MICs (`XCME`,
   `XCEC`, `XFXS`, `GLBX`), so the venue can change from one process to the
   next.
-- **Limits.** IB's own limits (duration per bar size, request pacing, how
-  far back history goes) are **unverified**. Request modest windows (months
-  for intraday bars).
+- **Limits.** How far back IB's history goes is **unverified** beyond the
+  expired futures below.
 - **Expired futures and depth.** On the paper gateway, the expired `ESU5`
   resolved only as an explicit contract with `includeExpired: true`;
   `ESH5`, `ESZ4` and `ESZ3` did not resolve at all, by id or by contract.
@@ -488,8 +529,12 @@ bar after a roll behaves when the new contract has not ticked yet is
     and writes no duplicate instrument; an empty first response or a
     foreign bar type is an error, an empty resumed response is not;
     unsorted and duplicate bars are stored sorted and unique.
-  - `ib.rs`: bar type to bar spec string; a cadence IB cannot serve is
-    rejected before connecting.
+  - `ib.rs`: bar type to bar spec string and to request duration; a
+    cadence IB cannot serve is rejected before connecting; the walk back
+    over canned answers (no hole at the joins, stops at start, on an empty
+    answer and on no progress, trims to `(start, end]`, sorted and
+    unique); the data client config and the bar requests use the full
+    session.
 - Integration tests in `tests/`, one node per file: a backtest of a
   continuous future over a fixture catalog and roll params, which also
   proves the engine accepts our params.

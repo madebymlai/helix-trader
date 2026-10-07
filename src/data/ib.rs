@@ -109,8 +109,10 @@ impl IbHistory {
         Ok(instruments)
     }
 
-    /// The bars of `bar_type` over `[start, end]`, with the regular-hours
-    /// setting of the live data client.
+    /// The bars of `bar_type` over `(start, end]`, sorted by `ts_init` and
+    /// unique, with the regular-hours setting of the live data client.
+    /// Walks back from `end` one request at a time, each of the duration
+    /// for the bar size (see `walk_back` and `request_duration`).
     ///
     /// # Errors
     ///
@@ -123,19 +125,59 @@ impl IbHistory {
         end: Timestamp,
     ) -> anyhow::Result<Vec<Bar>> {
         let spec = bar_spec(&bar_type)?;
-        self.client
-            .request_bars(
-                vec![&spec],
-                end,
-                Some(start),
-                None,
-                None,
-                Some(vec![bar_type.instrument_id()]),
-                self.requests.use_rth,
-                self.requests.timeout_secs,
-            )
-            .await
+        let duration = request_duration(&bar_type);
+        walk_back(start, end, async |cursor| {
+            self.client
+                .request_bars(
+                    vec![&spec],
+                    cursor,
+                    None,
+                    Some(duration),
+                    None,
+                    Some(vec![bar_type.instrument_id()]),
+                    self.requests.use_rth,
+                    self.requests.timeout_secs,
+                )
+                .await
+                .with_context(|| format!("requesting {duration} of bars ending at {cursor}"))
+        })
+        .await
     }
+}
+
+/// The bars over `(start, end]`, fetched by walking back from `end`:
+/// `fetch` gets one request ending at a cursor, first `end`, then the
+/// `ts_init` of the oldest bar so far. Stops once a bar at or before
+/// `start` arrived, on an empty answer, or when an answer brings nothing
+/// older than its cursor. Returns the bars sorted by `ts_init`, unique.
+///
+/// One request per cursor, each ending where the previous answer starts,
+/// so no hole opens between requests: the adapter's own split of a window
+/// into a days segment and a seconds remainder loses bars, because IB
+/// counts days in trading sessions.
+async fn walk_back(
+    start: Timestamp,
+    end: Timestamp,
+    mut fetch: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<Bar>>,
+) -> anyhow::Result<Vec<Bar>> {
+    let nanos = |bar: &Bar| i128::from(bar.ts_init.as_u64());
+    let mut bars = Vec::new();
+    let mut cursor = end;
+    loop {
+        let answer = fetch(cursor).await?;
+        let Some(oldest) = answer.iter().map(nanos).min() else {
+            break;
+        };
+        bars.extend(answer);
+        if oldest <= start.as_nanosecond() || oldest >= cursor.as_nanosecond() {
+            break;
+        }
+        cursor = Timestamp::from_nanosecond(oldest)?;
+    }
+    bars.retain(|bar| start.as_nanosecond() < nanos(bar) && nanos(bar) <= end.as_nanosecond());
+    bars.sort_by_key(|bar| bar.ts_init);
+    bars.dedup_by_key(|bar| bar.ts_init);
+    Ok(bars)
 }
 
 /// The IB data client config, the one the live data client uses.
@@ -185,6 +227,27 @@ fn bar_spec(bar_type: &BarType) -> anyhow::Result<String> {
          at the open, not the close)"
     );
     Ok(format!("{step}-{}-{}", spec.aggregation, spec.price_type))
+}
+
+/// The IB duration of one bar request of `bar_type`: within IB's maximum
+/// duration per bar size, and long enough that a year of 1-HOUR bars takes
+/// about 13 requests, well under IB's pacing limit of 60 requests in ten
+/// minutes. `D` counts trading sessions. Takes bar types `bar_spec`
+/// accepted.
+fn request_duration(bar_type: &BarType) -> &'static str {
+    let spec = bar_type.spec();
+    match (spec.aggregation, spec.step.get()) {
+        (BarAggregation::Second, 1) => "1800 S",
+        (BarAggregation::Second, 5) => "3600 S",
+        (BarAggregation::Second, 15) => "14400 S",
+        (BarAggregation::Second, _) => "28800 S",
+        (BarAggregation::Minute, 1) => "1 D",
+        (BarAggregation::Minute, 2) => "2 D",
+        (BarAggregation::Minute, 3..=10) => "5 D",
+        (BarAggregation::Minute, 15 | 20) => "10 D",
+        (BarAggregation::Minute | BarAggregation::Hour, _) => "20 D",
+        _ => "1 Y",
+    }
 }
 
 /// Fails if `end` is later than `now` minus the longest bar of `bar_types`.
@@ -309,6 +372,146 @@ mod tests {
         s.parse().unwrap()
     }
 
+    const HOUR_NS: u64 = 3_600_000_000_000;
+
+    /// The hour `h` after the epoch.
+    fn hour(h: u64) -> Timestamp {
+        Timestamp::from_nanosecond(i128::from(h * HOUR_NS)).unwrap()
+    }
+
+    /// A 1-HOUR bar of ESM4 closing at hour `h`.
+    fn hourly(h: u64) -> Bar {
+        use nautilus_core::UnixNanos;
+        use nautilus_model::types::{Price, Quantity};
+        let p = Price::from("5000.00");
+        let ts = UnixNanos::from(h * HOUR_NS);
+        let bt = bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL");
+        Bar::new(bt, p, p, p, p, Quantity::from(1), ts, ts)
+    }
+
+    fn hours(bars: &[Bar]) -> Vec<u64> {
+        bars.iter()
+            .map(|bar| bar.ts_init.as_u64() / HOUR_NS)
+            .collect()
+    }
+
+    /// A source holding a bar at each hour of `held` that answers a
+    /// request ending at `cursor` with the latest `per_answer` bars at or
+    /// before it, oldest first, as IB does; records each cursor.
+    fn source(
+        held: std::ops::RangeInclusive<u64>,
+        per_answer: usize,
+        cursors: &mut Vec<Timestamp>,
+    ) -> impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<Bar>> {
+        async move |cursor: Timestamp| {
+            cursors.push(cursor);
+            let mut answer: Vec<Bar> = held
+                .clone()
+                .map(hourly)
+                .filter(|bar| i128::from(bar.ts_init.as_u64()) <= cursor.as_nanosecond())
+                .collect();
+            answer.drain(..answer.len().saturating_sub(per_answer));
+            Ok(answer)
+        }
+    }
+
+    #[tokio::test]
+    async fn walks_back_from_end_with_each_request_ending_at_the_oldest_bar_so_far() {
+        let mut cursors = Vec::new();
+        let bars = walk_back(hour(5), hour(25), source(1..=30, 8, &mut cursors))
+            .await
+            .unwrap();
+        assert_eq!(hours(&bars), (6..=25).collect::<Vec<_>>());
+        assert_eq!(cursors, [hour(25), hour(18), hour(11)]);
+    }
+
+    /// Answers the requests with `answers` in turn, recording each cursor;
+    /// a request past the last answer is an error.
+    fn canned(
+        answers: Vec<Vec<u64>>,
+        cursors: &mut Vec<Timestamp>,
+    ) -> impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<Bar>> {
+        let mut answers = answers.into_iter();
+        async move |cursor: Timestamp| {
+            cursors.push(cursor);
+            let answer = answers.next().context("no answer left")?;
+            Ok(answer.into_iter().map(hourly).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn stops_once_a_bar_at_start_arrived() {
+        let mut cursors = Vec::new();
+        let bars = walk_back(hour(17), hour(25), source(1..=30, 5, &mut cursors))
+            .await
+            .unwrap();
+        assert_eq!(hours(&bars), (18..=25).collect::<Vec<_>>());
+        assert_eq!(cursors, [hour(25), hour(21)]);
+    }
+
+    #[tokio::test]
+    async fn stops_on_an_empty_answer() {
+        let mut cursors = Vec::new();
+        let answers = vec![(20..=25).collect(), vec![]];
+        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
+            .await
+            .unwrap();
+        assert_eq!(hours(&bars), (20..=25).collect::<Vec<_>>());
+        assert_eq!(cursors, [hour(25), hour(20)]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_first_answer_is_empty() {
+        let mut cursors = Vec::new();
+        let bars = walk_back(hour(5), hour(25), canned(vec![vec![]], &mut cursors))
+            .await
+            .unwrap();
+        assert!(bars.is_empty());
+        assert_eq!(cursors, [hour(25)]);
+    }
+
+    #[tokio::test]
+    async fn stops_when_an_answer_brings_nothing_older_than_its_cursor() {
+        let mut cursors = Vec::new();
+        let answers = vec![(20..=25).collect(), (20..=25).collect(), vec![]];
+        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
+            .await
+            .unwrap();
+        assert_eq!(hours(&bars), (20..=25).collect::<Vec<_>>());
+        assert_eq!(cursors, [hour(25), hour(20)]);
+    }
+
+    #[tokio::test]
+    async fn keeps_only_bars_after_start_and_up_to_end() {
+        let mut cursors = Vec::new();
+        let answers = vec![(3..=27).collect()];
+        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
+            .await
+            .unwrap();
+        assert_eq!(hours(&bars), (6..=25).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn returns_the_bars_sorted_and_unique() {
+        let mut cursors = Vec::new();
+        let answers = vec![vec![25, 23, 24, 22], vec![20, 22, 21, 21], vec![5]];
+        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
+            .await
+            .unwrap();
+        assert_eq!(hours(&bars), (20..=25).collect::<Vec<_>>());
+        assert_eq!(cursors, [hour(25), hour(22), hour(20)]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_fails_the_walk() {
+        let mut cursors = Vec::new();
+        let answers = vec![(20..=25).collect()];
+        let err = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no answer left"), "{err:#}");
+    }
+
     #[test]
     fn the_data_client_config_uses_the_full_session() {
         assert!(!data_client_config(closed_gateway()).use_regular_trading_hours);
@@ -404,6 +607,33 @@ mod tests {
         ] {
             let bt = bar_type(&format!("ESM4.CME-{spec}-EXTERNAL"));
             assert_eq!(bar_spec(&bt).unwrap(), spec);
+        }
+    }
+
+    #[test]
+    fn the_duration_of_one_request_depends_on_the_bar_size() {
+        for (spec, duration) in [
+            ("1-SECOND-LAST", "1800 S"),
+            ("5-SECOND-BID", "3600 S"),
+            ("15-SECOND-LAST", "14400 S"),
+            ("30-SECOND-LAST", "28800 S"),
+            ("1-MINUTE-LAST", "1 D"),
+            ("2-MINUTE-LAST", "2 D"),
+            ("3-MINUTE-LAST", "5 D"),
+            ("5-MINUTE-LAST", "5 D"),
+            ("10-MINUTE-LAST", "5 D"),
+            ("15-MINUTE-LAST", "10 D"),
+            ("20-MINUTE-LAST", "10 D"),
+            ("30-MINUTE-LAST", "20 D"),
+            ("1-HOUR-LAST", "20 D"),
+            ("2-HOUR-LAST", "20 D"),
+            ("3-HOUR-LAST", "20 D"),
+            ("4-HOUR-LAST", "20 D"),
+            ("8-HOUR-LAST", "20 D"),
+            ("1-DAY-LAST", "1 Y"),
+        ] {
+            let bt = bar_type(&format!("ESM4.CME-{spec}-EXTERNAL"));
+            assert_eq!(request_duration(&bt), duration, "{spec}");
         }
     }
 
