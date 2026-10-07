@@ -2,7 +2,7 @@
 //!
 //! Source-agnostic, no node: the bars come from a fetch function the caller
 //! passes, backed by an adapter's historical client (`ib.rs`). Per bar type
-//! it resumes after the last stored timestamp (`query_last_timestamp`), checks the
+//! it resumes after its stored range (`get_intervals`), checks the
 //! response, sorts it by `ts_init` and writes it with `write_instruments`
 //! and `write_to_parquet` on a `ParquetDataCatalog` (`nautilus_persistence`).
 //! Nautilus does not persist requested data on its own.
@@ -23,9 +23,11 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 /// over `[start, end]`, fetched one bar type at a time through `fetch_bars`.
 ///
 /// Instruments already in the catalog are not written again. Each bar type
-/// resumes 1 ns after the catalog's last timestamp for it, which is the end
-/// of the window last filled (or its newest bar, if later): a covered window
-/// asks for nothing, and returned bars at or before that point are dropped.
+/// is stored over the windows asked for (widened to its oldest and newest
+/// bar) and resumes 1 ns after the end of that range: a covered window asks
+/// for nothing, and returned bars at or before that point are dropped. A
+/// `start` before the stored range is an error, raised before fetching:
+/// extending history backwards is not supported.
 ///
 /// Any error stops the run; bar types written before it stay stored. An
 /// empty response or a bar of another bar type is an error, a response of
@@ -53,12 +55,23 @@ pub async fn fill_catalog(
     catalog
         .write_instruments(new)
         .context("writing instruments")?;
+    let start_ns = to_unix_nanos(start)?;
     let end_ns = to_unix_nanos(end)?;
     for &bar_type in bar_types {
-        let resume_point = catalog
-            .query_last_timestamp(&NautilusDataType::Bar.into(), Some(&bar_type.to_string()))
-            .with_context(|| format!("reading the last stored bar of {bar_type}"))?
-            .map(UnixNanos::from);
+        let intervals = catalog
+            .get_intervals(&NautilusDataType::Bar.into(), Some(&bar_type.to_string()))
+            .with_context(|| format!("reading the stored range of {bar_type}"))?;
+        if let (Some(&(first, _)), Some(&(_, last))) = (intervals.first(), intervals.last())
+            && start_ns < UnixNanos::from(first)
+        {
+            bail!(
+                "{bar_type} is stored over [{}, {}] and {start} is before it: \
+                 extending history backwards is not supported; use a new catalog",
+                UnixNanos::from(first),
+                UnixNanos::from(last),
+            );
+        }
+        let resume_point = intervals.last().map(|&(_, last)| UnixNanos::from(last));
         let from = match resume_point {
             Some(last) if last >= end_ns => continue,
             Some(last) => start.max(just_after(last)?),
@@ -81,11 +94,13 @@ pub async fn fill_catalog(
         }
         bars.sort_by_key(|bar| bar.ts_init);
         bars.dedup_by_key(|bar| bar.ts_init);
-        let Some(newest) = bars.last() else {
+        let (Some(oldest), Some(newest)) = (bars.first(), bars.last()) else {
             continue;
         };
+        let covered_from = to_unix_nanos(from)?.min(oldest.ts_init);
+        let covered_to = end_ns.max(newest.ts_init);
         catalog
-            .write_to_parquet(&bars, None, Some(end_ns.max(newest.ts_init)), None)
+            .write_to_parquet(&bars, Some(covered_from), Some(covered_to), None)
             .with_context(|| format!("writing bars of {bar_type}"))?;
     }
     Ok(())
@@ -488,5 +503,77 @@ mod tests {
         r.unwrap();
         assert_eq!(asked, vec![(bt, 151, 200)]);
         assert_eq!(stored_ts(&mut catalog, bt), vec![10, 150, 180]);
+    }
+    #[tokio::test]
+    async fn earlier_start_than_stored_is_an_error_and_fetches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 100, 200, |bt| {
+            Ok(vec![bar_at(bt, 150)])
+        })
+        .await;
+        r.unwrap();
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 50, 300, |bt| {
+            Ok(vec![bar_at(bt, 60), bar_at(bt, 250)])
+        })
+        .await;
+        let err = r.unwrap_err().to_string();
+        assert!(err.contains(&bt.to_string()), "{err}");
+        assert!(err.contains("backwards"), "{err}");
+        assert_eq!(asked, vec![]);
+        assert_eq!(stored_ts(&mut catalog, bt), vec![150]);
+    }
+    #[tokio::test]
+    async fn rerun_with_the_same_start_is_covered_from_the_window_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let bars = |bt| Ok(vec![bar_at(bt, 150)]);
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 100, 200, bars).await;
+        r.unwrap();
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 100, 200, bars).await;
+        r.unwrap();
+        assert_eq!(asked, vec![]);
+    }
+    #[tokio::test]
+    async fn start_inside_the_stored_range_resumes_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 100, 200, |bt| {
+            Ok(vec![bar_at(bt, 150)])
+        })
+        .await;
+        r.unwrap();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 300, 400, |bt| {
+            Ok(vec![bar_at(bt, 350)])
+        })
+        .await;
+        r.unwrap();
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 150, 500, |bt| {
+            Ok(vec![bar_at(bt, 450)])
+        })
+        .await;
+        r.unwrap();
+        assert_eq!(asked, vec![(bt, 401, 500)]);
+    }
+
+    #[tokio::test]
+    async fn stored_range_includes_bars_returned_before_the_window_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 100, 200, |bt| {
+            Ok(vec![bar_at(bt, 50), bar_at(bt, 150)])
+        })
+        .await;
+        r.unwrap();
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 50, 200, |bt| {
+            Ok(vec![bar_at(bt, 150)])
+        })
+        .await;
+        r.unwrap();
+        assert_eq!(asked, vec![]);
     }
 }
