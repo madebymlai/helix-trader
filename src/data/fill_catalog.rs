@@ -24,15 +24,18 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 ///
 /// Instruments already in the catalog are not written again. Each bar type
 /// is stored over the windows asked for (widened to its oldest and newest
-/// bar) and resumes 1 ns after the end of that range: a covered window asks
-/// for nothing, and returned bars at or before that point are dropped. A
-/// `start` before the stored range is an error, raised before fetching:
+/// bar). Once stored, it resumes 1 ns after the end of that range, whatever
+/// `start` (no hole between the stored range and `start`): a covered window
+/// asks for nothing, and returned bars at or before that point are dropped.
+/// A `start` before the stored range is an error, raised before fetching:
 /// extending history backwards is not supported.
 ///
 /// Any error stops the run; bar types written before it stay stored. An
-/// empty response or a bar of another bar type is an error, a response of
-/// only already stored bars is not. Bars are stored sorted by `ts_init`,
-/// duplicates dropped.
+/// empty response on a bar type's first fill, or a bar of another bar type,
+/// is an error. Once a bar type is stored, an empty response, or one of
+/// only already stored bars, means nothing new: nothing is written and the
+/// next bar types run. Bars are stored sorted by `ts_init`, duplicates
+/// dropped.
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
@@ -73,14 +76,16 @@ pub async fn fill_catalog(
         }
         let resume_point = intervals.last().map(|&(_, last)| UnixNanos::from(last));
         let from = match resume_point {
-            Some(last) if last >= end_ns => continue,
-            Some(last) => start.max(just_after(last)?),
+            Some(last) => just_after(last)?,
             None => start,
         };
+        if from >= end {
+            continue;
+        }
         let mut bars = fetch_bars(bar_type, from, end)
             .await
             .with_context(|| format!("fetching bars of {bar_type}"))?;
-        if bars.is_empty() {
+        if bars.is_empty() && resume_point.is_none() {
             bail!("empty response for bar type {bar_type}");
         }
         if let Some(foreign) = bars.iter().find(|bar| bar.bar_type != bar_type) {
@@ -359,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_point_before_the_window_asks_from_the_window_start() {
+    async fn later_start_than_the_stored_end_still_resumes_right_after_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let bt = bar_type();
@@ -369,12 +374,31 @@ mod tests {
         .await;
         r.unwrap();
         let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 500, 600, |bt| {
-            Ok(vec![bar_at(bt, 550)])
+            Ok(vec![bar_at(bt, 300), bar_at(bt, 550)])
         })
         .await;
         r.unwrap();
-        assert_eq!(asked, vec![(bt, 500, 600)]);
-        assert_eq!(stored_ts(&mut catalog, bt), vec![10, 550]);
+        assert_eq!(asked, vec![(bt, 101, 600)]);
+        assert_eq!(stored_ts(&mut catalog, bt), vec![10, 300, 550]);
+    }
+
+    #[tokio::test]
+    async fn window_ending_right_after_the_stored_end_asks_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let bt = bar_type();
+        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 100, |bt| {
+            Ok(vec![bar_at(bt, 10)])
+        })
+        .await;
+        r.unwrap();
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 101, |bt| {
+            Ok(vec![bar_at(bt, 101)])
+        })
+        .await;
+        r.unwrap();
+        assert_eq!(asked, vec![]);
+        assert_eq!(stored_ts(&mut catalog, bt), vec![10]);
     }
 
     #[tokio::test]
@@ -470,22 +494,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_response_after_the_resume_point_is_still_an_error() {
+    async fn empty_response_on_a_resumed_window_records_nothing_and_the_next_bar_types_run() {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let bt = bar_type();
-        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 100, |bt| {
-            Ok(vec![bar_at(bt, 10)])
+        let hour = bar_type();
+        let day: BarType = "ESZ21.GLBX-1-DAY-LAST-EXTERNAL".parse().unwrap();
+        let (r, _) = fill_window(
+            &mut catalog,
+            vec![instrument()],
+            &[hour, day],
+            0,
+            100,
+            |bt| Ok(vec![bar_at(bt, 10)]),
+        )
+        .await;
+        r.unwrap();
+        let (r, asked) = fill_window(
+            &mut catalog,
+            vec![instrument()],
+            &[hour, day],
+            0,
+            200,
+            |bt| {
+                Ok(if bt == hour {
+                    vec![]
+                } else {
+                    vec![bar_at(bt, 150)]
+                })
+            },
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(asked, vec![(hour, 101, 200), (day, 101, 200)]);
+        assert_eq!(stored_ts(&mut catalog, hour), vec![10]);
+        assert_eq!(stored_ts(&mut catalog, day), vec![10, 150]);
+        let (r, asked) = fill_window(&mut catalog, vec![instrument()], &[hour], 0, 200, |bt| {
+            Ok(vec![bar_at(bt, 150)])
         })
         .await;
         r.unwrap();
-        let (r, _) = fill_window(&mut catalog, vec![instrument()], &[bt], 0, 200, |_| {
-            Ok(vec![])
-        })
-        .await;
-        let err = r.unwrap_err();
-        assert!(err.to_string().contains(&bt.to_string()), "{err}");
+        assert_eq!(asked, vec![(hour, 101, 200)]);
     }
+
     #[tokio::test]
     async fn bar_after_the_window_end_moves_the_resume_point_past_it() {
         let dir = tempfile::tempdir().unwrap();

@@ -159,12 +159,17 @@ canned bars.
    range is an error naming the bar type and the range, raised before
    fetching: extending history backwards is not supported; use a new
    catalog. Otherwise the resume point is the end of the stored range;
-   request from 1 ns after it (or `start`, if later) to `end`. A window
-   already covered (resume point at or after `end`) asks the source for
+   request from 1 ns after it to `end`, even when `start` is later, so no
+   hole opens between the stored range and `start`. `start` counts only
+   for a bar type's first fill and for the backwards check. A window
+   already covered (request start at or after `end`) asks the source for
    nothing and is not an error.
-3. **Check.** Refuse an empty response (also after a resume: a window
-   not yet covered must have bars) and any bar of another bar type.
-   Drop bars at or before the resume point, sort by `ts_init`, drop
+3. **Check.** Refuse an empty response on a bar type's first fill (no
+   stored range: a contract with no data is never silently missing) and
+   any bar of another bar type. Once a bar type is stored, an empty
+   response means nothing new (an expired contract, a weekend): nothing
+   is written, no coverage is recorded, no error, and the next bar types
+   run. Drop bars at or before the resume point, sort by `ts_init`, drop
    duplicate `ts_init`. If nothing is left, nothing is written and that is
    not an error.
 4. **Write** one bar type per call with `write_to_parquet`, recording the
@@ -173,8 +178,14 @@ canned bars.
    newest bar, if later). The stored range then spans the windows already
    asked for, so a re-run with the same `start` and `end` asks for nothing,
    even when the bars start after `start` or close before `end`. A response whose bars were
-   all dropped records no coverage, so the next run asks for that tail
-   again.
+   all dropped, or an empty one after a resume, records no coverage, so
+   the next run asks for that tail again.
+
+   Coverage is the window asked for, not what the source had. When the
+   source has less (IB's history depth), the missing part is never asked
+   again. That is deliberate: the historical client fails the whole call
+   on a failed request, so a short answer that is not an error means the
+   source has no more.
 
 Any error stops the run. What was written stays valid; a re-run resumes.
 
@@ -288,7 +299,8 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
 - **Segments.** With a start, the client splits the window into segments and
   requests them in sequence. A failed request or a timeout fails the whole
   call. A contract that cannot be resolved is logged and skipped, so its
-  answer is empty: `fill_catalog` refuses it.
+  answer is empty: `fill_catalog` refuses it on a first fill, and on a
+  resumed window takes it as nothing new.
 - **Timestamps.** IB gives the bar open; the adapter stamps
   `ts_event = ts_init` = open + bar duration, the close. Bars come back
   sorted by `ts_event`. All intervals and roll dates are on the close.
@@ -437,7 +449,8 @@ bar after a roll behaves when the new contract has not ticked yet is
   resume from the stored range (`get_intervals`).
 - **No node** for filling the catalog: historical clients only.
 - **One source per instrument**, with the ids of the live broker.
-- **Check before writing**: refuse an empty response or a foreign bar type.
+- **Check before writing**: refuse a foreign bar type, and an empty
+  response on a bar type's first fill.
 - **Instruments before bars.**
 - **Per-contract bars are the stored truth**: never write an adjusted series;
   continuous series are built at read time.
@@ -455,9 +468,9 @@ bar after a roll behaves when the new contract has not ticked yet is
     decimal strings, each mode).
   - `fill_catalog.rs`: on a temp catalog, with a closure for `fetch_bars`:
     bars written and read back; a re-run requests only after the last bar
-    and writes no duplicate instrument; an empty response or a foreign bar
-    type is an error; unsorted and duplicate bars are stored sorted and
-    unique.
+    and writes no duplicate instrument; an empty first response or a
+    foreign bar type is an error, an empty resumed response is not;
+    unsorted and duplicate bars are stored sorted and unique.
   - `ib.rs`: bar type to bar spec string; a cadence IB cannot serve is
     rejected before connecting.
 - Integration tests in `tests/`, one node per file: a backtest of a
