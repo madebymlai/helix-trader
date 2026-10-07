@@ -369,19 +369,27 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   next.
 - **Limits.** How far back IB's history goes is **unverified** beyond the
   expired futures below.
-- **Expired futures and depth.** On the paper gateway, the expired `ESU5`
-  resolved only as an explicit contract with `includeExpired: true`;
-  `ESH5`, `ESZ4` and `ESZ3` did not resolve at all, by id or by contract.
-  Once `ESU5` is loaded that way, `request_bars` by instrument id returns
-  its bars (verified on the paper gateway 2026-10-07: 94 bars, id
-  `ESU5.CME`, precision 2), so `bars` always asks by id. Passing a
-  contract instead is worse: the contract-month form returned the bars
-  under another id (`ES202509.CME`) at the fallback precision 5. IB
-  documents history for expired futures for two years after expiry, so IB
-  as the source gives at most about two years of per-contract history, and
-  that bounds the backtest. First manual check: request bars of contracts
-  that expired one and three years ago. For more depth use another source
-  (see "Other sources").
+- **Expired futures and depth.** On the paper gateway (2026-10-07), an
+  expired future resolves only as an explicit contract with
+  `includeExpired: true`, and only back about 13 to 15 months: `ESZ5`
+  (expired 10 months earlier) and `ESU5` (12.6 months) resolved; `ESM5`
+  (15.5 months), `ESH5`, `ESZ4` and `ESZ3` did not, by id or by contract,
+  although IB documents two years. Once loaded that way, `request_bars` by
+  instrument id returns the bars (`ESU5.CME`, precision 2), so `bars`
+  always asks by id; the contract-month form returned them under another id
+  (`ES202509.CME`) at the fallback precision 5. **IB as the source gives
+  about one year of expired ES contracts**, and that bounds the backtest;
+  for more depth use another source (see "Other sources").
+- **After expiry.** IB keeps answering with flat, zero-volume bars after a
+  contract's last trade (`ESU5` on 2025-09-19: flat bars from 15:00 to
+  21:00 UTC). Rolls happen before expiry, so a continuous series never
+  uses them; a single-contract backtest through expiry would.
+- **Verified end to end** (paper gateway, 2026-10-07, `fill-catalog` on
+  `ESZ6.CME` and `ESU5.CME`, 1-HOUR-LAST): a fill reads back sorted and
+  unique; a re-run asks for nothing; a window filled in two runs equals the
+  same window filled in one (110 bars, identical); bars are stamped on the
+  hour, 23 per day over the full session; an end after a contract's expiry
+  works.
 - **`CONTFUT`.** IB's own continuous future is no substitute for the
   per-contract bars, even for older history: it is one series with IB's roll
   rule and adjustment, which the Nautilus continuous future (contract bars
