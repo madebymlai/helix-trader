@@ -294,8 +294,9 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
 - **Bar spec strings** are `"{step}-{aggregation}-{price_type}"`, for example
   `"1-HOUR-LAST"`. The historical client parses SECOND, MINUTE, HOUR, DAY and
   WEEK only (no MONTH). IB itself serves 1/5/15/30 SECOND;
-  1/2/3/5/10/15/20/30 MINUTE; 1/2/3/4/8 HOUR; 1 DAY; 1 WEEK. Anything else
-  fails. Only time bars.
+  1/2/3/5/10/15/20/30 MINUTE; 1/2/3/4/8 HOUR; 1 DAY; 1 WEEK. `ib.rs`
+  accepts all but WEEK (see "Timestamps"). Anything else fails. Only time
+  bars.
 - **Segments.** With a start, the client splits the window into segments and
   requests them in sequence. A failed request or a timeout fails the whole
   call. A contract that cannot be resolved is logged and skipped, so its
@@ -304,6 +305,10 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
 - **Timestamps.** IB gives the bar open; the adapter stamps
   `ts_event = ts_init` = open + bar duration, the close. Bars come back
   sorted by `ts_event`. All intervals and roll dates are on the close.
+  Verified on the paper gateway (2026-10-07): 1-HOUR bars stamp
+  `ts_event = ts_init` = the bar close, on the hour. Weekly bars break the
+  rule: the adapter's `bar_close_from_open` returns the open for WEEK, so
+  `ib.rs` refuses WEEK before connecting.
 - **Regular hours.** `use_rth` must equal the live data client's
   `use_regular_trading_hours`, or backtest and live bars differ.
 - **Venue.** `Simplified` symbology takes the contract's IB exchange as the
@@ -318,12 +323,16 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
 - **Expired futures and depth.** On the paper gateway, the expired `ESU5`
   resolved only as an explicit contract with `includeExpired: true`;
   `ESH5`, `ESZ4` and `ESZ3` did not resolve at all, by id or by contract.
-  Bars of expired contracts are **unverified** (the account lacked the CME
-  data subscription). IB documents history for expired futures for two
-  years after expiry, so IB as the source gives at most about two years of
-  per-contract history, and that bounds the backtest. First manual check: request bars of contracts that expired
-  one and three years ago. For more depth use another source (see "Other
-  sources").
+  Once `ESU5` is loaded that way, `request_bars` by instrument id returns
+  its bars (verified on the paper gateway 2026-10-07: 94 bars, id
+  `ESU5.CME`, precision 2), so `bars` always asks by id. Passing a
+  contract instead is worse: the contract-month form returned the bars
+  under another id (`ES202509.CME`) at the fallback precision 5. IB
+  documents history for expired futures for two years after expiry, so IB
+  as the source gives at most about two years of per-contract history, and
+  that bounds the backtest. First manual check: request bars of contracts
+  that expired one and three years ago. For more depth use another source
+  (see "Other sources").
 - **`CONTFUT`.** IB's own continuous future is no substitute for the
   per-contract bars, even for older history: it is one series with IB's roll
   rule and adjustment, which the Nautilus continuous future (contract bars

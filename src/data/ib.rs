@@ -145,7 +145,9 @@ fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig 
 /// The IB bar spec string of `bar_type`, for example `"1-HOUR-LAST"`.
 ///
 /// Only `EXTERNAL` time bars at a size IB serves, priced on last, bid, ask
-/// or mid. The historical client does not parse `MONTH`.
+/// or mid. The historical client does not parse `MONTH`. `WEEK` is refused
+/// too: the adapter stamps a weekly bar at its open, and the catalog needs
+/// `ts_init` on the close.
 fn bar_spec(bar_type: &BarType) -> anyhow::Result<String> {
     let spec = bar_type.spec();
     let step = spec.step.get();
@@ -153,7 +155,7 @@ fn bar_spec(bar_type: &BarType) -> anyhow::Result<String> {
         BarAggregation::Second => matches!(step, 1 | 5 | 15 | 30),
         BarAggregation::Minute => matches!(step, 1 | 2 | 3 | 5 | 10 | 15 | 20 | 30),
         BarAggregation::Hour => matches!(step, 1 | 2 | 3 | 4 | 8),
-        BarAggregation::Day | BarAggregation::Week => step == 1,
+        BarAggregation::Day => step == 1,
         _ => false,
     };
     let price_served = matches!(
@@ -163,8 +165,9 @@ fn bar_spec(bar_type: &BarType) -> anyhow::Result<String> {
     ensure!(
         size_served && price_served && bar_type.aggregation_source() == AggregationSource::External,
         "IB cannot serve bar type {bar_type}: only EXTERNAL time bars of \
-         1/5/15/30 SECOND, 1/2/3/5/10/15/20/30 MINUTE, 1/2/3/4/8 HOUR, 1 DAY or 1 WEEK, \
-         priced LAST, BID, ASK or MID"
+         1/5/15/30 SECOND, 1/2/3/5/10/15/20/30 MINUTE, 1/2/3/4/8 HOUR or 1 DAY, \
+         priced LAST, BID, ASK or MID (no WEEK: the adapter stamps weekly bars \
+         at the open, not the close)"
     );
     Ok(format!("{step}-{}-{}", spec.aggregation, spec.price_type))
 }
@@ -367,7 +370,6 @@ mod tests {
             "4-HOUR-LAST",
             "8-HOUR-LAST",
             "1-DAY-LAST",
-            "1-WEEK-LAST",
         ] {
             let bt = bar_type(&format!("ESM4.CME-{spec}-EXTERNAL"));
             assert_eq!(bar_spec(&bt).unwrap(), spec);
@@ -382,6 +384,7 @@ mod tests {
             "ESM4.CME-12-MINUTE-LAST-EXTERNAL",
             "ESM4.CME-6-HOUR-LAST-EXTERNAL",
             "ESM4.CME-2-DAY-LAST-EXTERNAL",
+            "ESM4.CME-1-WEEK-LAST-EXTERNAL",
             "ESM4.CME-1-MONTH-LAST-EXTERNAL",
             "ESM4.CME-100-TICK-LAST-EXTERNAL",
             "ESM4.CME-1-HOUR-MARK-EXTERNAL",
