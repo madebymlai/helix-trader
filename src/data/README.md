@@ -153,13 +153,28 @@ canned bars.
 
 1. **Instruments.** Write those not yet in the catalog
    (`catalog.instruments(ids)`), so a re-run adds no file.
-2. **Resume.** Per bar type, one at a time: the last stored `ts_init` from
-   `query_last_timestamp`; request from just after it (or `start`) to `end`.
-   A window already covered is skipped, not an error.
-3. **Check.** Refuse an empty response and any bar of another bar type.
+2. **Resume.** Per bar type, one at a time, from the stored range of that
+   exact bar type (`get_intervals` with the bar type string, so other bar
+   types of the same instrument do not count). A `start` before the stored
+   range is an error naming the bar type and the range, raised before
+   fetching: extending history backwards is not supported; use a new
+   catalog. Otherwise the resume point is the end of the stored range;
+   request from 1 ns after it (or `start`, if later) to `end`. A window
+   already covered (resume point at or after `end`) asks the source for
+   nothing and is not an error.
+3. **Check.** Refuse an empty response (also after a resume: a window
+   not yet covered must have bars) and any bar of another bar type.
    Drop bars at or before the resume point, sort by `ts_init`, drop
-   duplicate `ts_init`.
-4. **Write** one bar type per call with `write_to_parquet`.
+   duplicate `ts_init`. If nothing is left, nothing is written and that is
+   not an error.
+4. **Write** one bar type per call with `write_to_parquet`, recording the
+   file's interval as the window asked for, not the bars' own span: from
+   the request start (or the oldest bar, if earlier) to `end` (or the
+   newest bar, if later). The stored range then spans the windows already
+   asked for, so a re-run with the same `start` and `end` asks for nothing,
+   even when the bars start after `start` or close before `end`. A response whose bars were
+   all dropped records no coverage, so the next run asks for that tail
+   again.
 
 Any error stops the run. What was written stays valid; a re-run resumes.
 
@@ -172,8 +187,8 @@ ParquetDataCatalog::new(base_path: &Path, None, None, None, None)   // panics on
 catalog.write_instruments(instruments: Vec<InstrumentAny>) -> anyhow::Result<Vec<PathBuf>>
 catalog.write_to_parquet(data: &[Bar], start: Option<UnixNanos>, end: Option<UnixNanos>,
                          skip_disjoint_check: Option<bool>) -> anyhow::Result<PathBuf>
-catalog.query_last_timestamp(&NautilusDataType::Bar.into(), Some(bar_type_str))
-    -> anyhow::Result<Option<u64>>
+catalog.get_intervals(&NautilusDataType::Bar.into(), Some(bar_type_str))
+    -> anyhow::Result<Vec<(u64, u64)>>             // stored [start, end] per file, sorted
 ```
 
 `write_to_parquet` returns an empty path for empty data and writes nothing.
@@ -187,7 +202,8 @@ Write constraints:
 - **Disjoint intervals.** Each write makes one file named after its
   `[first, last]` `ts_init`. A new interval must not touch an existing one:
   a shared timestamp is an overlap and an error. Appending a later window
-  works; rewriting an overlapping one fails. Never pass
+  works; rewriting an overlapping one fails. `fill_catalog` passes the
+  window asked for as the interval (see step 4). Never pass
   `skip_disjoint_check`: an overlap means a bug in the windows.
 - **Instruments** go one file per id, named by the instrument's `ts_init`;
   a later definition adds a file.
@@ -205,7 +221,7 @@ Layout on disk:
 catalog.bars(ids: Option<Vec<String>>, start: Option<UnixNanos>, end: Option<UnixNanos>)
     -> anyhow::Result<Vec<Bar>>                      // &mut self; ordered by ts_init
 catalog.instruments(ids: Option<&[String]>, start, end) -> anyhow::Result<Vec<InstrumentAny>>
-catalog.query_last_timestamp(..)                     // where a re-run resumes
+catalog.get_intervals(..)                            // the stored range a re-run resumes from
 ```
 
 For bars an id is a full bar type string or an instrument id (which matches
@@ -407,7 +423,7 @@ bar after a roll behaves when the new contract has not ticked yet is
   beyond the params this module returns.
 - **`fill_catalog` writes, nobody else** writes the catalog.
 - **Sort, split, append**: sorted by `ts_init`, one bar type per file,
-  resume from `query_last_timestamp`.
+  resume from the stored range (`get_intervals`).
 - **No node** for filling the catalog: historical clients only.
 - **One source per instrument**, with the ids of the live broker.
 - **Check before writing**: refuse an empty response or a foreign bar type.
