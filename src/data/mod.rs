@@ -4,5 +4,6 @@
 //! and bar types come from the strategy config.
 
 mod fill_catalog;
+pub use fill_catalog::fill_catalog;
 mod ib;
 mod rolls;
