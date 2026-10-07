@@ -2,7 +2,8 @@
 
 `data` is build step 1. It fills the Nautilus Parquet catalog with the
 history of the instruments the strategy trades; backtest reads that catalog.
-It adds what Nautilus does not provide: the ingest actor and the roll dates.
+It adds what Nautilus does not provide: filling the catalog from a
+historical source, and the roll dates.
 
 APIs are those of the `nautilus-*` crates at `0.65.0`; **unverified** marks
 what the sources did not confirm. Examples use the future `ESM4.CME`, its
@@ -12,17 +13,19 @@ predecessor `ESH4.CME` and the continuous root `ES.CME`.
 
 ```
 data/
-  mod.rs        declares the modules, exposes only what others call
-  ingest.rs     the DataActor that fills the catalog
-  rolls.rs      roll dates -> continuous_future_transitions params
+  mod.rs           declares the modules, exposes only what others call
+  fill_catalog.rs  source-agnostic: resume, check, sort, write
+  ib.rs            Interactive Brokers history: instruments and bars
+  rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
-No port of our own: the Nautilus `DataClient` trait is the port for history
-(any adapter implements it), `CatalogWriter` the port for storage.
+No node and no port of our own. A source is an adapter's historical
+client, which returns Nautilus types (`Vec<InstrumentAny>`, `Vec<Bar>`);
+`ParquetDataCatalog` is the storage.
 
 ```
-strategy config ──► ingest ──(DataClient)──► adapter
-                      └─────(CatalogWriter)──► ParquetDataCatalog ──► backtest
+strategy config ──► fill_catalog ──► ib.rs ──(HistoricalInteractiveBrokersClient)──► IB Gateway
+                         └──► ParquetDataCatalog ──► backtest
 rolls ◄── catalog bars of each contract ──► params for the INTERNAL bar type
 ```
 
@@ -30,11 +33,12 @@ rolls ◄── catalog bars of each contract ──► params for the INTERNAL 
 
 Nautilus has no universe type, and neither do we. The strategy config is the
 single source of the instruments and the bar type (see the strategy README).
-`main` reads them from it and passes Nautilus types to ingest, backtest and
+`main` reads them from it and passes Nautilus types to `fill_catalog`, backtest and
 live: `Vec<InstrumentId>` and `BarType`. This module never names an
-instrument.
+instrument. The history window is a run argument of `fill-catalog`
+(`--start`, `--end`), not config.
 
-Two bar types matter: the `EXTERNAL` one per contract (what ingest requests
+Two bar types matter: the `EXTERNAL` one per contract (what `fill_catalog` requests
 and the catalog stores) and the `INTERNAL` one per continuous root (what the
 strategy subscribes to).
 
@@ -66,7 +70,7 @@ the checked forms for anything read from config.
 
 So `60-MINUTE` is rejected: write `1-HOUR`. Valid for Nautilus is not valid
 for the adapter: each adapter serves its own bar sizes (for IB see below),
-and a cadence the adapter cannot serve is rejected before ingest starts.
+and a cadence the adapter cannot serve is rejected before fill_catalog starts.
 
 **Aggregation source**, the last token:
 
@@ -80,85 +84,106 @@ and a cadence the adapter cannot serve is rejected before ingest starts.
 `INTERNAL`. `request_bars` rejects a composite `bar_type` (pass it through
 the `bar_types` param instead); `subscribe_bars` takes it directly.
 
-## ingest.rs
+### Instrument ids across sources
 
-A Nautilus `DataActor` on a `LiveNode` with a data client and no execution
-client (the data-only node, see the live README). It requests instruments
-and bars and writes each response into the catalog. It stops the node when
-every request has answered. Ingest is its own process run.
+The id a source gives a contract must be the id the strategy config, the
+catalog and the live broker use. Sources disagree on the venue:
 
-### The actor
-
-```rust
-#[derive(Debug)]
-pub struct Ingest {
-    core: DataActorCore,            // DataActorCore::new(DataActorConfig)
-    catalog: ParquetDataCatalog,
-    // pending requests, per bar type the last stored ts_init
-}
-nautilus_common::nautilus_actor!(Ingest);   // the field must be named `core`
-impl DataActor for Ingest { .. }
-```
-
-### Requests and callbacks
-
-On `DataActor` (`nautilus_common::actor`); times are `jiff::Timestamp`, not
-after now, `start <= end`:
-
-```rust
-fn request_instrument(&mut self, instrument_id: InstrumentId, start: Option<Timestamp>,
-    end: Option<Timestamp>, client_id: Option<ClientId>, params: Option<Params>)
-    -> anyhow::Result<UUID4>
-fn request_instruments(&mut self, venue: Option<Venue>, start: Option<Timestamp>,
-    end: Option<Timestamp>, client_id: Option<ClientId>, params: Option<Params>)
-    -> anyhow::Result<UUID4>
-fn request_bars(&mut self, bar_type: BarType, start: Option<Timestamp>,
-    end: Option<Timestamp>, limit: Option<NonZeroUsize>, client_id: Option<ClientId>,
-    params: Option<Params>) -> anyhow::Result<UUID4>
-```
-
-| Request | Callback |
+| Source and setting | June 2024 ES |
 |---|---|
-| `request_instrument`, `request_instruments` | `on_instrument(&InstrumentAny)`, once per instrument |
-| `request_bars` | `on_historical_bars(&[Bar])`, once per response, the whole batch |
+| IB, default (`Simplified`, venue = the contract's exchange) | `ESM4.CME` |
+| IB, `symbol_to_mic_venue: {"ES": "XCME"}` | `ESM4.XCME` |
+| Databento, default | `ESM4.GLBX` |
+| Databento, `use_exchange_as_venue` | `ESM4.XCME` |
 
-- The callbacks carry no request id. Attribute bars by `bars[0].bar_type`,
-  or run one request at a time.
-- `on_instrument` also fires for live instrument updates; do not assume
-  every call answers a request.
-- An empty response may or may not reach `on_historical_bars`
-  (**unverified**): track pending requests and treat a missing answer as an
-  error.
-- `Params` (`nautilus_core::Params`) is a map of `serde_json::Value`.
+- The symbol matches (`ESM4`); only the venue differs. No default setting
+  makes two sources agree: matching IB and Databento takes `XCME` on both.
+- **One source per instrument** in a catalog, with the ids of the live
+  broker. Changing source or venue means new config ids and a refilled
+  catalog.
+- **The decade is not in the id.** `ESM4` is June 2014 and June 2024 alike,
+  in both sources, and Nautilus has no option to add it. The catalog keeps
+  the two apart in time, but one run cannot hold both: the cache has one
+  instrument per id. With IB as the source it should not arise (about two
+  years of history, unverified). A longer history needs one
+  catalog per decade, or a symbol rewrite that breaks the match with the
+  live broker.
+
+## fill_catalog.rs
+
+Fills the catalog for a list of bar types over one window. No node: a
+source's historical client is a plain async call returning Nautilus types,
+the same pattern the Nautilus docs use for every source (a client or loader,
+then `catalog.write_*`). Filling the catalog is its own process run.
+
+### Why not a node
+
+The generic history path in Rust is `DataClient` behind a `LiveNode`:
+`DataClient::request_bars` returns `()` and the bars reach an actor's
+`on_historical_bars` through the data engine. That callback carries no
+request id (an empty response arrives as an empty slice), and an `Err` from
+it is only logged, so a failed fill would still exit cleanly. The historical
+clients return the data and propagate errors with `?`.
 
 ### Nautilus does not persist responses
 
 In Rust, a requested response is never written to a catalog by Nautilus.
-The `update_catalog` param only routes a request to the client instead of a
-registered catalog. The ingest actor is the persistence step, and the ingest
-node registers no catalog, so every request reaches the adapter.
+The data engine serves a request from a registered catalog and asks the
+adapter for the missing intervals, but writes nothing back; the
+`update_catalog` param only routes a request to the client. The streaming
+writer records published live data only, and history responses are not
+published. Filling the catalog is ours.
+
+### Interface
+
+```rust
+pub async fn fill_catalog(
+    catalog: &mut ParquetDataCatalog,
+    instruments: Vec<InstrumentAny>,           // from the source, before any bars
+    bar_types: &[BarType],
+    start: Timestamp,
+    end: Timestamp,
+    fetch_bars: impl AsyncFnMut(BarType, Timestamp, Timestamp) -> anyhow::Result<Vec<Bar>>,
+) -> anyhow::Result<()>
+```
+
+`fetch_bars` is the seam: `ib.rs` supplies it now, another source another
+function. No trait until a second source exists. Tests pass a closure with
+canned bars.
+
+1. **Instruments.** Write those not yet in the catalog
+   (`catalog.instruments(ids)`), so a re-run adds no file.
+2. **Resume.** Per bar type, one at a time: the last stored `ts_init` from
+   `query_last_timestamp`; request from just after it (or `start`) to `end`.
+   A window already covered is skipped, not an error.
+3. **Check.** Refuse an empty response and any bar of another bar type.
+   Drop bars at or before the resume point, sort by `ts_init`, drop
+   duplicate `ts_init`.
+4. **Write** one bar type per call with `write_to_parquet`.
+
+Any error stops the run. What was written stays valid; a re-run resumes.
 
 ### Writing
 
-`CatalogWriter` (`nautilus_persistence::catalog::traits`), implemented by
-`ParquetDataCatalog`:
-
-```rust
-fn write_instruments(&mut self, instruments: &[InstrumentAny]) -> anyhow::Result<()>;
-fn write_data(&mut self, data: &[Data], start: Option<UnixNanos>, end: Option<UnixNanos>,
-              params: Option<Params>) -> anyhow::Result<()>;   // bars as Data::Bar
-```
+Inherent methods of `ParquetDataCatalog` (`nautilus_persistence::backend::parquet::catalog`):
 
 ```rust
 ParquetDataCatalog::new(base_path: &Path, None, None, None, None)   // panics on a bad path
-ParquetDataCatalog::from_uri(uri: &str, ..)                          // Result; also s3://, gs://
+catalog.write_instruments(instruments: Vec<InstrumentAny>) -> anyhow::Result<Vec<PathBuf>>
+catalog.write_to_parquet(data: &[Bar], start: Option<UnixNanos>, end: Option<UnixNanos>,
+                         skip_disjoint_check: Option<bool>) -> anyhow::Result<PathBuf>
+catalog.query_last_timestamp(&NautilusDataType::Bar.into(), Some(bar_type_str))
+    -> anyhow::Result<Option<u64>>
 ```
+
+`write_to_parquet` returns an empty path for empty data and writes nothing.
+The trait `CatalogWriter` (`write_data` over `&[Data]`) groups mixed data
+for you; with one bar type per call the inherent method is enough.
 
 Write constraints:
 
 - **Ascending `ts_init`.** Sort before writing; a descent is an error.
-- **One bar type per file.** `write_data` groups a mixed slice for you;
-  the lower-level `write_to_parquet` refuses mixed bar types.
+- **One bar type per file.** `write_to_parquet` refuses mixed bar types.
 - **Disjoint intervals.** Each write makes one file named after its
   `[first, last]` `ts_init`. A new interval must not touch an existing one:
   a shared timestamp is an overlap and an error. Appending a later window
@@ -188,49 +213,73 @@ all its bar types).
 
 ### Interactive Brokers specifics (history)
 
-- **Bar sizes.** IB serves only 1/5/15/30 SECOND; 1/2/3/5/10/15/20/30
-  MINUTE; 1/2/3/4/8 HOUR; 1 DAY; 1 WEEK; 1 MONTH. Anything else fails
-  ("Unsupported bar aggregation/step combination"). Only time bars.
-- **Node.** The data-only node of the live README with
-  `InteractiveBrokersDataClientFactory`, an `InteractiveBrokersDataClientConfig`
-  and default routing. The IB crate's `node_data_tester` example is the same
-  shape.
-- **Instruments first.** `request_bars` fails ("Instrument ... not found in
-  provider") unless the provider already holds the contract: load it through
-  `load_ids` / `load_contracts` in the provider config (see the live README).
-- **Instrument requests.** `request_instrument` loads an unknown contract and
-  answers with it; it ignores `start` and `end`. `request_instruments` is not
-  "list all": it returns only the contracts named in the `ib_contracts`
-  param, and nothing without it. Use `request_instrument` per contract.
+`ib.rs` wraps `HistoricalInteractiveBrokersClient`
+(`nautilus_interactive_brokers::historical`).
+
+```rust
+HistoricalInteractiveBrokersClient::connect(config: InteractiveBrokersDataClientConfig)
+    .await -> anyhow::Result<Self>
+client.request_instruments(instrument_ids: Option<Vec<InstrumentId>>,
+    contracts: Option<Vec<Contract>>) .await -> anyhow::Result<Vec<InstrumentAny>>
+client.request_bars(bar_specifications: Vec<&str>, end_date_time: Timestamp,
+    start_date_time: Option<Timestamp>, duration: Option<&str>,
+    contracts: Option<Vec<Contract>>, instrument_ids: Option<Vec<InstrumentId>>,
+    use_rth: bool, timeout: u64) .await -> anyhow::Result<Vec<Bar>>
+```
+
+- **No node.** `connect` opens the IB socket through the adapter's shared
+  client registry and initialises an instrument provider; no message bus,
+  cache or clock. It needs a Tokio runtime and a running IB Gateway or TWS.
+  The config is the data client config of the live README.
+- **Instruments first.** Bars of a contract the provider does not hold come
+  out with a fallback precision (5, 0). Call `request_instruments` with the
+  config's ids before `request_bars`.
+- **Bar spec strings** are `"{step}-{aggregation}-{price_type}"`, for example
+  `"1-HOUR-LAST"`. The historical client parses SECOND, MINUTE, HOUR, DAY and
+  WEEK only (no MONTH). IB itself serves 1/5/15/30 SECOND;
+  1/2/3/5/10/15/20/30 MINUTE; 1/2/3/4/8 HOUR; 1 DAY; 1 WEEK. Anything else
+  fails. Only time bars.
+- **Segments.** With a start, the client splits the window into segments and
+  requests them in sequence. A failed request or a timeout fails the whole
+  call. A contract that cannot be resolved is logged and skipped, so its
+  answer is empty: `fill_catalog` refuses it.
 - **Timestamps.** IB gives the bar open; the adapter stamps
-  `ts_event = ts_init` = open + bar duration, the close. All intervals and
-  roll dates are on that close.
-- **Gaps.** The adapter splits a long range into segments and runs them in
-  sequence, with no pacing and no retry. **A failed segment is logged and
-  skipped, and the response arrives with a hole.** Check coverage (first and
-  last bar, expected count) before writing.
+  `ts_event = ts_init` = open + bar duration, the close. Bars come back
+  sorted by `ts_event`. All intervals and roll dates are on the close.
+- **Regular hours.** `use_rth` must equal the live data client's
+  `use_regular_trading_hours`, or backtest and live bars differ.
+- **Venue.** `Simplified` symbology takes the contract's IB exchange as the
+  venue (`ESM4.CME`). For a MIC venue set `symbol_to_mic_venue` per root.
+  Never set `convert_exchange_to_mic_venue`: it looks the exchange up in a
+  `std::collections::HashMap` where `CME` belongs to four MICs (`XCME`,
+  `XCEC`, `XFXS`, `GLBX`), so the venue can change from one process to the
+  next.
 - **Limits.** IB's own limits (duration per bar size, request pacing, how
   far back history goes) are **unverified**. Request modest windows (months
-  for intraday bars), one at a time, and treat a short answer as an error.
-- **Regular hours.** `use_regular_trading_hours` in the data client config
-  applies to every request; history and live must agree.
-- **Expired futures.** `includeExpired: true` in a contract spec exists, but
-  whether an expired contract loads end to end is **unverified**. Test it
-  against a gateway before planning the history on it.
-- **`CONTFUT`.** IB's own continuous future is one back-adjusted series with
-  no explicit end. Do not ingest it: rolls need the per-contract bars.
-- **Fallback.** `HistoricalInteractiveBrokersClient`
-  (`nautilus_interactive_brokers::historical`) fetches bars without a node:
+  for intraday bars).
+- **Expired futures and depth.** `includeExpired: true` in a contract spec
+  exists, but whether an expired contract loads end to end is
+  **unverified**. IB documents history for expired futures only for about
+  two years after expiry (**unverified** against a gateway), so IB as the
+  source gives roughly two years of per-contract history, and that bounds
+  the backtest. First manual check: request bars of contracts that expired
+  one and three years ago. For more depth use another source (see "Other
+  sources").
+- **`CONTFUT`.** IB's own continuous future is no substitute for the
+  per-contract bars, even for older history: it is one series with IB's roll
+  rule and adjustment, which the Nautilus continuous future (contract bars
+  plus our transitions) cannot use and live cannot trade. The client also
+  drops the end date for it and returns a single segment anchored at now.
+  Do not store it.
 
-  ```rust
-  HistoricalInteractiveBrokersClient::connect(config).await?
-      .request_bars(bar_specs: Vec<&str>, end: Timestamp, start: Option<Timestamp>,
-          duration: Option<&str>, contracts: Option<Vec<Contract>>,
-          instrument_ids: Option<Vec<InstrumentId>>, use_rth: bool, timeout: u64)
-          .await?   // Vec<Bar>, ready for write_data
-  ```
+### Other sources
 
-  It ties `ingest.rs` to IB, so use it only if the node path proves awkward.
+Databento (`nautilus-databento`, not used yet) has the same shape:
+`DatabentoHistoricalClient::get_range_instruments(RangeQueryParams)` and
+`get_range_bars(params, aggregation, timestamp_on_close)`, returning
+`Vec<InstrumentAny>` and `Vec<Bar>`. A `databento.rs` next to `ib.rs` would
+supply its own `fetch_bars`. Its ids are on `GLBX` unless
+`use_exchange_as_venue` is set (see "Instrument ids across sources").
 
 ## rolls.rs
 
@@ -336,10 +385,12 @@ bar after a roll behaves when the new contract has not ticked yet is
   this module receives them as Nautilus types.
 - **Only Nautilus types**: no parallel `Symbol`, `Bar` or `Roll` types
   beyond the params this module returns.
-- **Ingest writes, nobody else** writes the catalog.
+- **`fill_catalog` writes, nobody else** writes the catalog.
 - **Sort, split, append**: sorted by `ts_init`, one bar type per file,
   resume from `query_last_timestamp`.
-- **Check before writing**: refuse a short or empty response.
+- **No node** for filling the catalog: historical clients only.
+- **One source per instrument**, with the ids of the live broker.
+- **Check before writing**: refuse an empty response or a foreign bar type.
 - **Instruments before bars.**
 - **Per-contract bars are the stored truth**: never write an adjusted series;
   continuous series are built at read time.
@@ -347,7 +398,7 @@ bar after a roll behaves when the new contract has not ticked yet is
   engine call.
 - **No clock and no I/O** in `rolls.rs`: time comes in as
   arguments.
-- **Cadence checked against the adapter** before ingest starts.
+- **Cadence checked against the adapter** before `fill_catalog` starts.
 
 ## Tests
 
@@ -355,13 +406,15 @@ bar after a roll behaves when the new contract has not ticked yet is
   - `rolls.rs`: detection on small synthetic series (clean roll, a gap, no
     overlap); params checked as JSON (increasing times, contiguous chain,
     decimal strings, each mode).
-  - `ingest.rs`: the pure parts: windows, ordering, coverage check, resume
-    point.
-- Integration tests in `tests/`, one node per file:
-  - catalog round trip on a temp dir: write two bar types and an instrument,
-    read them back; overlapping and mixed writes fail;
-  - the ingest actor on a node with a stub `DataClient` returning canned
-    responses;
-  - a backtest of a continuous future over a fixture catalog and roll params,
-    which also proves the engine accepts our params.
-- Anything against a real gateway is a manual check.
+  - `fill_catalog.rs`: on a temp catalog, with a closure for `fetch_bars`:
+    bars written and read back; a re-run requests only after the last bar
+    and writes no duplicate instrument; an empty response or a foreign bar
+    type is an error; unsorted and duplicate bars are stored sorted and
+    unique.
+  - `ib.rs`: bar type to bar spec string; a cadence IB cannot serve is
+    rejected before connecting.
+- Integration tests in `tests/`, one node per file: a backtest of a
+  continuous future over a fixture catalog and roll params, which also
+  proves the engine accepts our params.
+- Anything against a real gateway is a manual check: fill a small window of
+  one contract on the paper gateway and read it back.

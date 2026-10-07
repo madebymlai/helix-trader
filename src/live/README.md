@@ -1,9 +1,9 @@
 # Running live
 
-The `live` module builds and runs a Nautilus `LiveNode`. It serves two
-callers: the strategy on a paper then a real account (build step 3), and the
-ingest actor of step 1, which runs on a node with a data client only. It adds
-no trading logic: it wires broker clients, a strategy or actor, and the node.
+The `live` module builds and runs a Nautilus `LiveNode` for the strategy, on
+a paper then a real account (build step 3). It adds no trading logic: it
+wires broker clients, the strategy and the node. Filling the catalog needs
+no node (see the data README).
 
 APIs are those of the `nautilus-*` crates at `0.65.0`; open points are under
 "Unverified". Process-wide rules (one node per process, Nautilus owns the
@@ -82,36 +82,18 @@ fn add_exec_client_with_routing(/* same shape, Box<dyn ExecutionClientFactory> *
   the only client for a venue routes it; several clients for one venue with
   no route or default make `build()` fail.
 
-### Data-only node
-
-This is the node the ingest actor runs on (see the data README). A node with
-no exec client is supported: reconciliation finds no client and skips.
-
-```rust
-let mut node = LiveNode::builder(trader_id, Environment::Live)?
-    .with_name("INGEST-001")
-    .add_data_client_with_routing(None, data_factory, data_config, routing)?
-    .build()?;
-node.add_actor(ingest_actor)?;
-node.run().await?;   // the actor stops the node through node.handle() when done
-```
-
-### Strategy and actor
+### Strategy
 
 ```rust
 fn add_strategy<T>(&mut self, strategy: T) -> anyhow::Result<()>
 where T: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static
-fn add_actor<T>(&mut self, actor: T) -> anyhow::Result<()>
-where T: DataActor + DataActorNative + Component + Actor + 'static
 ```
 
 - `add_strategy` has the same bound as the backtest engine's `add_strategy`
   (reached through `BacktestNode::get_engine_mut`), so the same strategy
   type goes to both.
-- Add everything before `run()`: both fail unless the node is `Idle`. A
+- Add it before `run()`: it fails unless the node is `Idle`. A
   duplicate strategy id is an error.
-- An actor is a `DataActorCore` holder with `nautilus_actor!(Type)` and a
-  hand-written `DataActor` impl, as a strategy is with its core.
 
 ### Reconciliation and timeouts
 
@@ -183,7 +165,7 @@ let config = LiveNodeConfig {
 let builder = LiveNodeBuilder::from_config(config)?;   // then the same with_* chain
 ```
 
-Point it at the catalog ingest wrote. Catalog names must be unique.
+Point it at the catalog `fill_catalog` wrote. Catalog names must be unique.
 
 ### Recording live data
 
@@ -241,8 +223,9 @@ Both configs implement `ClientConfig` and `Default`; build them with
 | `connection_timeout` (s) | `300` |
 | `instrument_provider` | default provider config |
 
-`use_regular_trading_hours` must be the same for history and live, or
-backtest and live bars differ.
+The history side (`data/ib.rs`) uses the same config type for its
+historical client. `use_regular_trading_hours` must equal the `use_rth` of
+the history requests, or backtest and live bars differ.
 
 ### Execution client config
 
@@ -312,12 +295,12 @@ serde_json::json!({
 Other keys: `localSymbol`, `tradingClass`, `lastTradeDateOrContractMonth`,
 `conId`, `multiplier`, `includeExpired`, `primaryExchange`.
 
-Instrument ids with `Simplified`: the IB local symbol and the exchange as
-venue. A future is `ESM4.CME` (the year can be 1, 2 or 4 digits); a stock
-`AAPL.SMART`; forex `EUR/USD.IDEALPRO`. `Raw` keeps the security type
-(`AAPL=STK.SMART`). Config, bar types and catalog must use the same
-symbology. The examples in this repo use `ESM4.CME`; the exact venue IB
-returns for a future is unverified.
+Instrument ids with `Simplified`: the IB local symbol and the contract's
+exchange as venue. A future is `ESM4.CME` (the year can be 1, 2 or 4
+digits); a stock `AAPL.SMART`; forex `EUR/USD.IDEALPRO`. `Raw` keeps the
+security type (`AAPL=STK.SMART`). Config, bar types and catalog must use the
+same symbology and venue; the venue rules (never
+`convert_exchange_to_mic_venue`) are in the data README.
 
 ### Gateway
 
@@ -346,7 +329,7 @@ paper.
 
 ## Rules
 
-- **Everything before `run()`**: clients, strategies, actors, claims.
+- **Everything before `run()`**: clients, the strategy, claims.
 - **Reconcile on** for any node that trades, and claim the strategy's
   instruments.
 - **Owned run mode**: Nautilus handles signals; code stops through
@@ -359,7 +342,7 @@ paper.
 - Unit tests in a `#[cfg(test)] mod tests` at the bottom of each file, for
   what needs no node and no broker.
 - Integration tests in `tests/`, one node per file: a node with no broker
-  client or a test data client, the strategy or actor added, stopped through
+  client or a test data client, the strategy added, stopped through
   `handle().stop()` from a spawned task, asserting on the result of `run()`.
   Use `#[tokio::test(flavor = "current_thread")]`.
 
@@ -367,5 +350,5 @@ paper.
 
 - How `limit` behaves when a request is served by a catalog plus the adapter.
 - Whether warmup can read a catalog while streaming promotes into it.
-- The exact venue IB returns for a future, and which bar sizes and history
-  depths IB serves (see the data README).
+- Whether IB reports ES's exchange as `CME` (the venue comes from that
+  field), and which history depths IB serves (see the data README).

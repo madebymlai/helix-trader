@@ -26,7 +26,7 @@ The folder exposes only the config and the constructor.
 ## Config
 
 The strategy config is the single source of what the strategy trades: the
-instruments and the bar type. Nautilus has no universe type; ingest,
+instruments and the bar type. Nautilus has no universe type; `fill_catalog`,
 backtest and live get the instruments and bar type from this config,
 through `main`, as Nautilus types.
 
@@ -44,7 +44,7 @@ pub struct TrendConfig {
     #[serde(default = "default_base")]
     #[builder(default = default_base())]
     pub base: StrategyConfig,
-    /// The contracts traded and ingested.
+    /// The contracts traded and stored in the catalog.
     pub instrument_ids: Vec<InstrumentId>,
     /// The cadence: one bar type per instrument, all at the same spec.
     pub bar_spec: BarSpecification,

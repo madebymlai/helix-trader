@@ -16,7 +16,7 @@ pub struct EmaCrossConfig {
     #[serde(default = "default_base")]
     #[builder(default = default_base())]
     pub base: StrategyConfig,
-    /// The contracts traded and ingested.
+    /// The contracts traded and stored in the catalog.
     pub instrument_ids: Vec<InstrumentId>,
     /// The cadence, the same for every instrument.
     pub bar_spec: BarSpecification,

@@ -18,7 +18,7 @@ Nautilus does not already provide.
 - **One cadence.** A strategy runs on one bar cadence, and that cadence can
   be intraday.
 - **The strategy config is the universe.** Instruments and cadence live in
-  the strategy's TOML config, the single source for ingest, backtest and
+  the strategy's TOML config, the single source for fill-catalog, backtest and
   live. No universe type, no instruments in code.
 - **One simulator.** Nautilus runs both backtest and live. The same strategy
   type runs in backtest, paper and live.

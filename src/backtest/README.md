@@ -135,8 +135,8 @@ let data_config = BacktestDataConfig::builder()
   never loaded.
 - `start_time`, `end_time` narrow what is loaded. Data before the run
   `start` is loaded but skipped by the replay.
-- The node loads the instruments of the catalog in `build`, so ingest must
-  have written them.
+- The node loads the instruments of the catalog in `build`, so
+  `fill_catalog` must have written them.
 
 ### Engine config
 
