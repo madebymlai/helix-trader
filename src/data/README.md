@@ -258,8 +258,13 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   ending within one bar of now with the bar still in progress, and
   `fill_catalog` would store it and resume past it. `main` reads the clock.
 - **Every instrument or none.** `request_instruments` answers an unknown or
-  expired id with nothing and only a warning; `instruments` fails naming the
-  missing ids, before any bar request.
+  expired id with nothing and only a warning. `instruments` asks again for
+  each missing future as an explicit contract (root symbol, local symbol,
+  exchange, `includeExpired: true`), the form that resolved the expired
+  `ESU5` on the paper gateway; then it fails naming the ids still missing,
+  before any bar request.
+- **Client id.** `fill-catalog` defaults to IB client id 10, not the adapter
+  default 1, so it can run beside a live node.
 - **Logging.** The adapter warns through `tracing`. `fill-catalog` runs no
   node, so `main` installs Nautilus' own logger and tracing bridge for that
   command, as a node would (`NAUTILUS_LOG`, `RUST_LOG`).
@@ -293,12 +298,13 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
 - **Limits.** IB's own limits (duration per bar size, request pacing, how
   far back history goes) are **unverified**. Request modest windows (months
   for intraday bars).
-- **Expired futures and depth.** `includeExpired: true` in a contract spec
-  exists, but whether an expired contract loads end to end is
-  **unverified**. IB documents history for expired futures only for about
-  two years after expiry (**unverified** against a gateway), so IB as the
-  source gives roughly two years of per-contract history, and that bounds
-  the backtest. First manual check: request bars of contracts that expired
+- **Expired futures and depth.** On the paper gateway, the expired `ESU5`
+  resolved only as an explicit contract with `includeExpired: true`;
+  `ESH5`, `ESZ4` and `ESZ3` did not resolve at all, by id or by contract.
+  Bars of expired contracts are **unverified** (the account lacked the CME
+  data subscription). IB documents history for expired futures for two
+  years after expiry, so IB as the source gives at most about two years of
+  per-contract history, and that bounds the backtest. First manual check: request bars of contracts that expired
   one and three years ago. For more depth use another source (see "Other
   sources").
 - **`CONTFUT`.** IB's own continuous future is no substitute for the

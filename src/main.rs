@@ -59,8 +59,9 @@ struct FillCatalogArgs {
     /// IB Gateway or TWS port (4002: paper gateway).
     #[arg(long, default_value_t = 4002)]
     port: u16,
-    /// IB client id of this process.
-    #[arg(long, default_value_t = 1)]
+    /// IB client id of this process; not the adapter default 1, so a live
+    /// node with the default id can run at the same time.
+    #[arg(long, default_value_t = 10)]
     client_id: i32,
 }
 
@@ -79,13 +80,6 @@ enum Strategy {
     Ema,
 }
 
-/// What a strategy config says to fill: its instruments and bar types.
-#[derive(Debug)]
-struct Universe {
-    instrument_ids: Vec<InstrumentId>,
-    bar_types: Vec<BarType>,
-}
-
 /// An RFC 3339 timestamp, or a date taken as midnight UTC.
 fn parse_time(s: &str) -> anyhow::Result<Timestamp> {
     if let Ok(timestamp) = s.parse::<Timestamp>() {
@@ -97,22 +91,33 @@ fn parse_time(s: &str) -> anyhow::Result<Timestamp> {
     Ok(date.to_zoned(TimeZone::UTC)?.timestamp())
 }
 
-/// Reads the config of `strategy` from `path` and returns what it trades.
-fn load_universe(strategy: Strategy, path: &Path) -> anyhow::Result<Universe> {
-    let read = || -> anyhow::Result<Universe> {
+/// Reads the config of `strategy` from `path` and returns what it trades:
+/// its instrument ids and bar types.
+fn load_config(
+    strategy: Strategy,
+    path: &Path,
+) -> anyhow::Result<(Vec<InstrumentId>, Vec<BarType>)> {
+    let read = || -> anyhow::Result<(Vec<InstrumentId>, Vec<BarType>)> {
         let text = fs::read_to_string(path)?;
         match strategy {
             Strategy::Ema => {
                 let config: EmaCrossConfig = toml::from_str(&text)?;
                 config.validate()?;
-                Ok(Universe {
-                    bar_types: config.bar_types(),
-                    instrument_ids: config.instrument_ids,
-                })
+                let bar_types = config.bar_types();
+                Ok((config.instrument_ids, bar_types))
             }
         }
     };
     read().with_context(|| format!("loading the {strategy:?} config {}", path.display()))
+}
+
+/// The logger config from `NAUTILUS_LOG`: the default when it is unset, an
+/// error when it is malformed.
+fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<LoggerConfig> {
+    match spec {
+        Err(std::env::VarError::NotPresent) => Ok(LoggerConfig::default()),
+        spec => LoggerConfig::from_spec(&spec?).context("parsing NAUTILUS_LOG"),
+    }
 }
 
 #[tokio::main]
@@ -126,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
 /// the instruments and fills the catalog.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.window()?;
-    let universe = load_universe(args.strategy, &args.config)?;
+    let (instrument_ids, bar_types) = load_config(args.strategy, &args.config)?;
     // No node runs in this process, so no node installs Nautilus' logger:
     // install it here, as a node would, so the `log` output of this crate and
     // Nautilus, and the adapter's `tracing` warnings (why a contract did not
@@ -134,7 +139,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
-        LoggerConfig::from_env().unwrap_or_default(),
+        logger_config(std::env::var("NAUTILUS_LOG"))?,
         FileWriterConfig::default(),
     )?;
     init_tracing()?;
@@ -143,15 +148,15 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         port: args.port,
         client_id: args.client_id,
     };
-    let ib = IbHistory::connect(gateway, &universe.bar_types, end, Timestamp::now()).await?;
-    let instruments = ib.instruments(&universe.instrument_ids).await?;
+    let ib = IbHistory::connect(gateway, &bar_types, end, Timestamp::now()).await?;
+    let instruments = ib.instruments(&instrument_ids).await?;
     fs::create_dir_all(&args.catalog)
         .with_context(|| format!("creating the catalog {}", args.catalog.display()))?;
     let mut catalog = ParquetDataCatalog::new(&args.catalog, None, None, None, None);
     fill_catalog(
         &mut catalog,
         instruments,
-        &universe.bar_types,
+        &bar_types,
         start,
         end,
         async |bar_type, from, to| ib.bars(bar_type, from, to).await,
@@ -196,7 +201,7 @@ mod tests {
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.host, "127.0.0.1");
         assert_eq!(args.port, 4002);
-        assert_eq!(args.client_id, 1);
+        assert_eq!(args.client_id, 10);
     }
 
     #[test]
@@ -230,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_ema_universe_from_its_toml_config() {
+    fn loads_the_ema_instruments_and_bar_types_from_its_toml_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ema.toml");
         std::fs::write(
@@ -243,15 +248,15 @@ mod tests {
             "#,
         )
         .unwrap();
-        let universe = load_universe(Strategy::Ema, &path).unwrap();
+        let (instrument_ids, bar_types) = load_config(Strategy::Ema, &path).unwrap();
         assert_eq!(
-            universe.instrument_ids,
+            instrument_ids,
             [
                 InstrumentId::from("ESH4.CME"),
                 InstrumentId::from("ESM4.CME")
             ]
         );
-        let bar_types: Vec<String> = universe.bar_types.iter().map(ToString::to_string).collect();
+        let bar_types: Vec<String> = bar_types.iter().map(ToString::to_string).collect();
         assert_eq!(
             bar_types,
             [
@@ -275,7 +280,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let err = format!("{:#}", load_universe(Strategy::Ema, &path).unwrap_err());
+        let err = format!("{:#}", load_config(Strategy::Ema, &path).unwrap_err());
         assert!(err.contains("no instruments"), "{err}");
     }
 
@@ -293,10 +298,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ema.toml");
         std::fs::write(&path, "instrument_ids = []").unwrap();
-        let err = format!("{:#}", load_universe(Strategy::Ema, &path).unwrap_err());
+        let err = format!("{:#}", load_config(Strategy::Ema, &path).unwrap_err());
         assert!(err.contains("ema.toml"), "{err}");
         let missing = dir.path().join("missing.toml");
-        let err = format!("{:#}", load_universe(Strategy::Ema, &missing).unwrap_err());
+        let err = format!("{:#}", load_config(Strategy::Ema, &missing).unwrap_err());
         assert!(err.contains("missing.toml"), "{err}");
+    }
+
+    #[test]
+    fn logger_config_defaults_when_unset_and_rejects_a_malformed_spec() {
+        assert!(logger_config(Err(std::env::VarError::NotPresent)).is_ok());
+        let not_unicode = std::ffi::OsString::from("x");
+        assert!(logger_config(Err(std::env::VarError::NotUnicode(not_unicode))).is_err());
+        assert!(logger_config(Ok("stdout=Debug".to_string())).is_ok());
+        assert!(logger_config(Ok("stdout=Loud".to_string())).is_err());
     }
 }
