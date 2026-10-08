@@ -39,7 +39,7 @@ enum Command {
 
 /// The arguments of a subcommand working on a window of the catalog.
 #[derive(Debug, Args)]
-struct WindowArgs {
+struct RunArgs {
     /// The strategy whose instruments and bar types are used.
     strategy: Strategy,
     /// The strategy's TOML config.
@@ -56,7 +56,7 @@ struct WindowArgs {
     catalog: PathBuf,
 }
 
-impl WindowArgs {
+impl RunArgs {
     /// The window `[start, end]`, checked.
     fn window(&self) -> anyhow::Result<(Timestamp, Timestamp)> {
         let (start, end) = (self.start, self.end);
@@ -68,7 +68,7 @@ impl WindowArgs {
 #[derive(Debug, Args)]
 struct FillCatalogArgs {
     #[command(flatten)]
-    window: WindowArgs,
+    run: RunArgs,
     /// IB Gateway or TWS host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -84,7 +84,7 @@ struct FillCatalogArgs {
 #[derive(Debug, Args)]
 struct BacktestArgs {
     #[command(flatten)]
-    window: WindowArgs,
+    run: RunArgs,
     /// Commission charged once per order, for example "3 EUR".
     #[arg(long, value_parser = parse_money)]
     commission: Money,
@@ -146,10 +146,10 @@ async fn main() -> anyhow::Result<()> {
 /// Checks everything that needs no gateway, then connects to IB, fetches
 /// the instruments and fills the catalog.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
-    let (start, end) = args.window.window()?;
-    let (instrument_ids, bar_types) = match args.window.strategy {
+    let (start, end) = args.run.window()?;
+    let (instrument_ids, bar_types) = match args.run.strategy {
         Strategy::Ema => {
-            let config = load_ema_config(&args.window.config)?;
+            let config = load_ema_config(&args.run.config)?;
             let bar_types = config.bar_types();
             (config.instrument_ids, bar_types)
         }
@@ -172,7 +172,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     };
     let ib = IbHistory::connect(gateway, &bar_types, end, Timestamp::now()).await?;
     let instruments = ib.instruments(&instrument_ids).await?;
-    let catalog_dir = &args.window.catalog;
+    let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
@@ -190,12 +190,12 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 /// Builds the strategy from its config, runs it over the window of the
 /// catalog and prints the results to stdout.
 fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
-    let (start, end) = args.window.window()?;
+    let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let backtest = |bar_types, warmup| Backtest {
-        catalog: args.window.catalog.clone(),
+        catalog: args.run.catalog.clone(),
         bar_types,
         start,
         end,
@@ -204,9 +204,9 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         balance: args.balance,
         logging,
     };
-    let result = match args.window.strategy {
+    let result = match args.run.strategy {
         Strategy::Ema => {
-            let config = load_ema_config(&args.window.config)?;
+            let config = load_ema_config(&args.run.config)?;
             backtest(config.bar_types(), config.warmup).run(EmaCross::new(config)?)?
         }
     };
@@ -261,17 +261,17 @@ mod tests {
     #[test]
     fn parses_fill_catalog_with_paper_gateway_defaults() {
         let args = parse(&REQUIRED).unwrap();
-        assert_eq!(args.window.strategy, Strategy::Ema);
-        assert_eq!(args.window.config, PathBuf::from("ema.toml"));
+        assert_eq!(args.run.strategy, Strategy::Ema);
+        assert_eq!(args.run.config, PathBuf::from("ema.toml"));
         assert_eq!(
-            args.window.start,
+            args.run.start,
             "2024-01-02T00:00:00Z".parse::<Timestamp>().unwrap()
         );
         assert_eq!(
-            args.window.end,
+            args.run.end,
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
-        assert_eq!(args.window.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.run.catalog, PathBuf::from("catalog"));
         assert_eq!(args.host, "127.0.0.1");
         assert_eq!(args.port, 4002);
         assert_eq!(args.client_id, 10);
@@ -291,7 +291,7 @@ mod tests {
             "42",
         ]);
         let args = parse(&argv).unwrap();
-        assert_eq!(args.window.catalog, PathBuf::from("/data/cat"));
+        assert_eq!(args.run.catalog, PathBuf::from("/data/cat"));
         assert_eq!(args.host, "10.0.0.5");
         assert_eq!(args.port, 7497);
         assert_eq!(args.client_id, 42);
@@ -310,13 +310,13 @@ mod tests {
     #[test]
     fn parses_a_backtest_with_its_costs() {
         let args = parse_backtest(&backtest_required()).unwrap();
-        assert_eq!(args.window.strategy, Strategy::Ema);
-        assert_eq!(args.window.config, PathBuf::from("ema.toml"));
+        assert_eq!(args.run.strategy, Strategy::Ema);
+        assert_eq!(args.run.config, PathBuf::from("ema.toml"));
         assert_eq!(
-            args.window.end,
+            args.run.end,
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
-        assert_eq!(args.window.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.run.catalog, PathBuf::from("catalog"));
         assert_eq!(args.commission, Money::from("3 EUR"));
         assert_eq!(args.balance, Money::from("10000 EUR"));
     }
@@ -393,17 +393,12 @@ mod tests {
     fn rejects_a_start_not_before_the_end() {
         let mut argv = REQUIRED.to_vec();
         argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse(&argv)
-            .unwrap()
-            .window
-            .window()
-            .unwrap_err()
-            .to_string();
+        let err = parse(&argv).unwrap().run.window().unwrap_err().to_string();
         assert!(err.contains("before"), "{err}");
-        assert!(parse(&REQUIRED).unwrap().window.window().is_ok());
+        assert!(parse(&REQUIRED).unwrap().run.window().is_ok());
         let mut argv = backtest_required();
         argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse_backtest(&argv).unwrap().window.window().unwrap_err();
+        let err = parse_backtest(&argv).unwrap().run.window().unwrap_err();
         assert!(err.to_string().contains("before"), "{err}");
     }
 
