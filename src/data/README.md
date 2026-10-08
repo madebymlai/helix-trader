@@ -390,6 +390,21 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   same window filled in one (110 bars, identical); bars are stamped on the
   hour, 23 per day over the full session; an end after a contract's expiry
   works.
+- **Xetra ETF (`SXR8.IBIS`).** Verified on the paper gateway (2026-10-08,
+  1-HOUR-LAST, 4,078 bars from 2025-10-01 to 2026-10-02; a fresh fill of
+  2026-06-01 to 2026-10-01 was identical, and its re-run asked for
+  nothing). Unlike ES:
+  - The full session runs 07:30-23:00 Frankfurt time, so the UTC hours
+    move with daylight saving: bars stamped 06:30-21:00 UTC in summer,
+    07:30-22:00 UTC in winter, 16 a day (6 on 24 and 31 December).
+    Continuous trading is 09:00-17:30: median volume per bar 3,800-9,200
+    shares for the bars closing 10:00-18:00, 30-200 for the others.
+  - The first bar of the day is a half-hour bar (07:30-08:00, equal to the
+    first 30-MINUTE bar) stamped open + 1 h, at 08:30: 30 minutes after its
+    close, the partial-bar effect of regular hours on ES. Every other bar
+    is stamped at its close, on the hour.
+  - IB's minimum tick is `0.0001`, so the instrument has price precision 4
+    although trades print in whole cents.
 - **`CONTFUT`.** IB's own continuous future is no substitute for the
   per-contract bars, even for older history: it is one series with IB's roll
   rule and adjustment, which the Nautilus continuous future (contract bars

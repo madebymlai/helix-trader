@@ -317,6 +317,9 @@ let fill = FillModelAny::OneTickSlippage(OneTickSlippageFillModel::new(1.0, 0.0,
 
 The other variants are for options. A fixed fee matches IB Fixed pricing on
 Xetra below EUR 6,000 an order, where the EUR 3 minimum always applies.
+Above it the fee understates IB's: a strategy that flips from short to long
+sends twice its trade size, so EMA with `trade_size = 5` on SXR8 (EUR
+590-745) sends orders of EUR 5,900-7,300 (see "Verified on IB data").
 
 ### Fills
 
@@ -341,6 +344,48 @@ ask, so it slips whatever `prob_slippage`; with `prob_fill_on_limit = 1.0`
 the seed draws nothing that changes a result. With bars and no quotes the
 best price is the bar's: a market order sent in `on_bar` fills at the
 same timestamp, at that bar's close plus (buy) or minus (sell) one tick.
+The tick is the instrument's `price_increment`, from IB's minimum tick:
+`0.0001` for SXR8.IBIS (price precision 4) although its trades print in
+whole cents, so on SXR8 one tick of slippage costs next to nothing.
+
+## Verified on IB data
+
+Paper gateway, 2026-10-08, SXR8.IBIS 1-HOUR-LAST, EMA 10/30 (the
+defaults), `trade_size = 5`, `warmup = "720h"`:
+
+```
+helix-trader fill-catalog ema --config sxr8.toml --catalog sxr8-cat \
+  --start 2025-10-01 --end 2026-10-03
+helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
+  --start 2026-01-01 --end 2026-10-01 --commission "3 EUR" --balance "10000 EUR"
+```
+
+It prints `Orders: 113`, `PnL (total): -525.70`, a final balance of
+`9474.30 EUR`, no `NaN`. Checked against the stored bars, outside Nautilus:
+
+- **Trade count.** EMA 10/30 recomputed on the closes (SMA seed, as
+  Nautilus' EMA) over the 295 warmup bars of `[2025-12-02, 2026-01-01]`
+  then the 3,047 replayed bars gives 113 orders: the first on the first
+  replayed bar (warm from the start), then one per crossing. All 113 match
+  the fills in bar, side and size (5, then 10 per flip).
+- **Commission.** The same run at `"0 EUR"` has the same fills and ends at
+  `9813.30 EUR` (PnL -186.70): the difference is 339.00 = 113 × 3 EUR.
+  IB Fixed would have charged 377.32: 112 of the 113 orders are flips of
+  10 shares, above EUR 6,000 (see Fees).
+- **Fills.** All 113 (`OrderFilled` with `NAUTILUS_LOG=stdout=Info`) are
+  at their bar's close plus (buy) or minus (sell) `0.0001`, the
+  instrument's tick, stamped at the bar's `ts_event`.
+- **Session.** 58 of the 113 orders were sent on bars that close outside
+  Xetra's continuous trading (09:00-17:30 Frankfurt time): 9 on the first
+  bar of the day (a half-hour bar, see the data README), 9 on the
+  pre-opening hour, 40 after the close, 33 of them on the 19:00-23:00
+  bars (median volume 154 shares a bar, 12 under 100, one with 0). Bars
+  in continuous trading had a median 6,429. Those fills are at prices with
+  little or no volume behind them, which a live order on Xetra might not
+  get; the thin bars also move the EMAs. The results above are therefore
+  optimistic about fills.
+- `Long Ratio: 0.500000` with 57 long of 113 positions: Nautilus rounds it
+  to two decimals.
 
 ## Rules
 
