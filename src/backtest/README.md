@@ -397,16 +397,130 @@ bid/ask close 709.44/709.48, previous hour 710.22/710.29):
 All six fills of each run followed the row. The strategy received its
 own bar type only, every bar in order, whatever else was replayed.
 
-So quote-based fills need LAST out of the replay, a volume put on IB's
-BID and ASK bars (our code, at load or fill time), the strategy deciding
-on MID (or BID) bars added after the quotes, and the engine rather than
-the node to control the tie order. In continuous trading the half spread
-they would charge is about 0.3 bps (data README), against a commission
-of 3 EUR or more per order; a slippage in basis points of the price is
-therefore the choice, at 0.5 bps for SXR8 (the median half spread in
-continuous trading rounded up; the 75th percentile half spread is 0.55
-bps). It would understate the 2.5 bps half spread outside, where the
-strategy no longer trades.
+So fills on IB's bars as such would need LAST out of the replay, a
+volume put on the BID and ASK bars, the strategy deciding on MID (or
+BID) bars added after them, and control of the tie order. The way that
+works is to turn each BID and ASK pair into one quote tick and switch
+`bar_execution` off: see "Fills on quotes". A slippage in basis points
+of the price (0.5 bps for SXR8, the median half spread in continuous
+trading rounded up, data README) stays only as the fallback.
+
+### Fills on quotes
+
+Can orders fill on quotes while bars drive the strategy? Tested on
+2026-10-08 with a throwaway probe (a scratch crate on the `nautilus-*`
+crates, nothing kept). Answer: **yes**, with the venue's `bar_execution`
+off and each quote stamped 1 ns before its bar's close.
+
+Setup:
+
+- A scratch catalog: SXR8.IBIS (price precision 4, size precision 0,
+  tick 0.0001), its 1-HOUR-LAST bars, and one `QuoteTick` per BID and
+  ASK bar pair of IB (see the data README) over the run window: bid =
+  BID close, ask = ASK close, size 1,000,000 on both sides, `ts_event =
+  ts_init =` the bars' close − 1 ns, written with `write_to_parquet`.
+- The node as in `node.rs` (netting, margin, L1 book, fixed fee) but
+  `.bar_execution(false)`, and a second `BacktestDataConfig` with
+  `.data_type(NautilusDataType::QuoteTick)` and `.instrument_id(..)`.
+  Run 2026-09-01 to 09-26, warmup 72 h.
+- A probe subscribed to the LAST bars only: it asks for its warmup,
+  sends 12 market orders of 10 shares on chosen bars (in and out of
+  Xetra's session, one with a crossed quote, one whose quote was
+  removed), and on the 2026-09-03 14:00 UTC bar a buy limit and a sell
+  stop, both at 710.00, canceled at 17:00.
+
+What the probe got, fill model `Default` (a selection; all 12 orders
+followed the rule):
+
+| Decision bar (UTC) | Side | LAST close | Bid/ask, this hour | Bid/ask, previous hour | Fill |
+|---|---|---|---|---|---|
+| 09-02 09:00 | buy | 709.54 | 709.44/709.48 | 710.22/710.29 | 709.48 |
+| 09-02 12:00 | sell | 711.00 | 711.04/711.12 | 709.54/709.62 | 711.04 |
+| 09-02 19:00 | buy | 713.36 | 712.96/713.36 | 713.24/713.64 | 713.36 |
+| 09-02 21:00 | sell | 713.96 | 712.48/713.18 | 713.22/713.54 | 712.48 |
+| 09-03 06:30 | buy | 712.32 | 712.58/712.28, crossed | 712.48/713.18 | 712.28 |
+| 09-04 10:00 | buy | 719.38 | removed | 719.16/719.18 | 719.18 |
+| 09-18 15:00 | buy | 717.56 | 717.91/718.00 | 717.92/717.95 | 718.00 |
+
+Every market order filled in full, in one fill stamped at the decision
+bar's close, at that hour's ask (buy) or bid (sell), even where the LAST
+close lies outside the quote (2,328 of the year's 4,078 hours); the
+hour without a quote filled on the previous one. The same orders in
+variants:
+
+| Variant | Market orders fill at |
+|---|---|
+| as above, bars data config first | this hour's quote |
+| quotes data config first | this hour's quote |
+| quotes stamped at the close, bars first | the **previous** hour's quote |
+| quotes stamped at the close, quotes first | this hour's quote |
+| `BestPrice` fill model | the same prices as `Default` |
+| quote size 5 | 5 at the quote, 5 one tick worse |
+| quote prices at precision 2 | nothing: every quote skipped (`Invalid bid_price precision 2, expected 4`, an `ERROR` after 20), every order rejected `No market` |
+| `bar_execution` on | the LAST close (two orders only partly, the rest one tick worse); the limit and the stop filled at 710.00 |
+| run `start` on a bar's close | that bar: rejected `No market`; its quote (start − 1 ns) precedes the run and is skipped, even when stored. Starting 1 ns earlier fills it |
+
+- **Bars.** In every variant `on_bar` received all 302 LAST bars of the
+  window, in order, with their closes.
+  With `bar_execution` off `process_bar` returns at once: bars never
+  touch the book.
+- **The 1 ns stamp.** The quote sorts strictly before its bar, so the
+  venue holds the hour's closing quote when the strategy decides on the
+  bar, whatever order the data configs are in. Stamped at the close it
+  ties with the bar and the tie goes to the config added first (see
+  above): bars first means every fill one hour stale. The close quote is
+  the last of its hour, so 1 ns earlier adds no look-ahead.
+- **Fill model.** `Default` with `(1.0, 0.0, seed)` adds nothing to the
+  quote. `BestPrice` gave the same market fills, but ignores the quote
+  size and fills limit orders at or inside the spread at their own price
+  (`fill_limit_inside_spread`): `Default` it is.
+- **Size.** `liquidity_consumption` is off by default: every order sees
+  the full quote size, nothing is used up between orders. A market order
+  larger than the size is not refused: the rest fills one tick worse
+  (`apply_fills`, exhausted L1 volume). At 1,000,000 shares the size
+  never limits an order.
+- **Warmup.** The warmup request is answered from the catalog's bars as
+  before (16 bars before the first `on_bar`), with quotes stored only
+  from the start or also before it: warmup needs no quotes.
+- **Crossed quotes** (ask < bid) are taken as they are (a warning in
+  debug builds only): a buy fills at the ask, below the bid. In the year,
+  178 of 4,087 pairs are crossed: 176 on the bars closing 08:30 and 09:00
+  Frankfurt time (pre-opening), 2 at 14:00 on 24 and 31 December (half
+  days, after the close; 659.40/628.53 on the 24th). 6 are locked (ask =
+  bid).
+- **Missing quotes.** An hour without a quote fills on the last earlier
+  one, silently; with no quote yet the order is rejected `No market`.
+  In the year every LAST bar has its BID and ASK pair (9 pairs have no
+  LAST bar: first bars of the day).
+
+Recommended:
+
+- Venue as in `node.rs` with `.bar_execution(false)`;
+  `liquidity_consumption` left off; the quotes of every instrument as a
+  `QuoteTick` data config next to the bars.
+- Fill model `FillModelAny::Default(DefaultFillModel::new(1.0, 0.0,
+  Some(seed)))`.
+- Quotes: bid and ask at the instrument's price precision (IB's bars
+  already are), size 1,000,000 at its size precision, `ts_event = ts_init
+  =` the bars' close − 1 ns.
+- Crossed pairs dropped by the conversion, like a pair missing a side:
+  the hour then fills on the previous quote rather than on an impossible
+  price.
+- A run `start` on a bar's close leaves that bar without its quote:
+  start the run 1 ns earlier, or accept that an order on it is rejected.
+  (At such a `start` the warmup response also holds the bar at `start`,
+  which the replay delivers again.)
+
+Known limits:
+
+- **Resting orders are checked only against quotes**, once an hour. The
+  buy limit and the sell stop at 710.00 were not filled although the
+  next hour's LAST low was 702.01, its closing quote 715.50/715.54; with
+  `bar_execution` on both filled at 710.00.
+- A missing quote leaves the previous one in force, up to an hour or
+  more stale.
+- Quote sizes are nominal: no depth, so large orders on illiquid
+  instruments look too easy.
 
 ## Verified on IB data
 
