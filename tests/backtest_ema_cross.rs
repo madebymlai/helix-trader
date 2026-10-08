@@ -21,20 +21,21 @@ fn the_ema_crossover_trades_pays_the_commission_per_order_and_reproduces_its_fig
     let commission = EMA_PNL_WITHOUT_COMMISSION - pnl["PnL (total)"];
     assert_eq!(commission, EMA_ORDERS as f64 * 3.0);
 
-    // The figures of the first run inside the session, reproduced by every
-    // run since. They replaced those of the run around the clock: the
-    // session keeps 8 of the 24 bars a day, so the EMAs see a coarser wave
-    // and cross less often.
-    assert_eq!(pnl["PnL (total)"], -243.60000000000036);
-    assert_eq!(pnl["PnL% (total)"], -2.436000000000004);
-    assert_eq!(pnl["Max Loser"], -99.9);
-    assert_eq!(pnl["Expectancy"], -60.900000000000006);
+    // The figures of the first run filling on quotes, reproduced by every
+    // run since. They replaced those of the run filling one tick (0.01 EUR)
+    // beyond the bar's close: the same 4 orders now fill at the fixture's
+    // ask or bid, 0.05 EUR from the close: 0.04 EUR more a share, 2.40 EUR
+    // over the 60 shares of the closed positions (PnL -243.60 then).
+    assert_eq!(pnl["PnL (total)"], -246.0);
+    assert_eq!(pnl["PnL% (total)"], -2.46);
+    assert_eq!(pnl["Max Loser"], -100.7);
+    assert_eq!(pnl["Expectancy"], -61.5);
     assert_eq!(
         result.stats_returns["Sharpe Ratio (252 days)"],
-        -8.386133812602697
+        -8.452374688882992
     );
     assert_eq!(
         result.summary["account.IBIS.balance.EUR.total"],
-        "9756.40 EUR"
+        "9754.00 EUR"
     );
 }

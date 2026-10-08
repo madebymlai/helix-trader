@@ -1,8 +1,11 @@
 //! The fixture of the backtest tests: a temporary catalog holding one ETF,
-//! SXR8.IBIS in EUR, and synthetic hourly bars whose closes follow a wave,
-//! so that a fast and a slow EMA cross several times.
+//! SXR8.IBIS in EUR, synthetic hourly bars whose closes follow a wave, so
+//! that a fast and a slow EMA cross several times, and one quote per bar
+//! around its close.
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
+
+pub mod probe;
 
 use std::path::Path;
 
@@ -12,8 +15,9 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp, civil::time, tz::TimeZone};
 use nautilus_common::logging::logger::LoggerConfig;
+use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{Bar, BarType},
+    data::{Bar, BarType, QuoteTick},
     identifiers::{InstrumentId, Symbol},
     instruments::{InstrumentAny, stubs::equity_aapl},
     types::{Currency, Money, Price, Quantity},
@@ -82,9 +86,36 @@ pub fn bars() -> Vec<Bar> {
         .collect()
 }
 
+/// Half the spread of every quote.
+pub fn half_spread() -> Price {
+    Price::from("0.05")
+}
+
+/// One quote per bar, oldest first: the close less (bid) and plus (ask)
+/// the half spread, sizes 1,000,000, stamped 1 ns before the bar's close.
+pub fn quotes() -> Vec<QuoteTick> {
+    let size = Quantity::from(1_000_000);
+    bars()
+        .iter()
+        .map(|bar| {
+            let ts = UnixNanos::from(bar.ts_event.as_u64() - 1);
+            QuoteTick::new(
+                bar.bar_type.instrument_id(),
+                bar.close - half_spread(),
+                bar.close + half_spread(),
+                size,
+                size,
+                ts,
+                ts,
+            )
+        })
+        .collect()
+}
+
 /// Writes the instrument and the bars to a new temporary catalog, stored
-/// over `[first_close, end]` as a fill up to `end` stores them.
-pub fn catalog() -> TempDir {
+/// over `[first_close, end]` as a fill up to `end` stores them, but no
+/// quotes.
+pub fn catalog_without_quotes() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
@@ -95,6 +126,18 @@ pub fn catalog() -> TempDir {
             Some(end().into()),
             None,
         )
+        .unwrap();
+    dir
+}
+
+/// The catalog without quotes, plus the quotes stored from the first one
+/// to `end`.
+pub fn catalog() -> TempDir {
+    let dir = catalog_without_quotes();
+    let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let quotes = quotes();
+    catalog
+        .write_to_parquet(&quotes, Some(quotes[0].ts_init), Some(end().into()), None)
         .unwrap();
     dir
 }
@@ -142,5 +185,6 @@ pub fn ema_cross() -> EmaCross {
 
 /// The orders the EMA crossover sends on the fixture.
 pub const EMA_ORDERS: usize = 4;
-/// Its PnL (total) on the fixture without commission, slippage included.
-pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -231.60000000000036;
+/// Its PnL (total) on the fixture without commission: the spread paid
+/// included.
+pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -234.0;

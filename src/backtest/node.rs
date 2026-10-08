@@ -1,8 +1,9 @@
 //! Backtest run over the catalog.
 //!
 //! Builds a Nautilus `BacktestRunConfig` (`nautilus_backtest::config`): the
-//! venue (`BacktestVenueConfig`), the catalog data (`BacktestDataConfig`) and
-//! the engine config, then runs it on a `BacktestNode`: `build`, the strategy
+//! venue (`BacktestVenueConfig`), the catalog data (`BacktestDataConfig`, one
+//! for the bars and one per instrument for its quotes) and the engine
+//! config, then runs it on a `BacktestNode`: `build`, the strategy
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 
 use std::fmt::Debug;
@@ -29,9 +30,12 @@ use crate::data::to_unix_nanos;
 const RUN_ID: &str = "backtest";
 
 /// The run config of `backtest`: one venue named after the bar types'
-/// venue, the bars of the window from the catalog, and the catalog
-/// registered in the engine so that it serves the strategy's warmup
-/// requests. Build and run errors are raised, not only logged.
+/// venue, which fills orders on the quotes alone (bars reach the strategy
+/// only), the bars and the instruments' quotes of the window from the
+/// catalog, and the catalog registered in the engine so that it serves the
+/// strategy's warmup requests. The engine starts 1 ns before `start` (see
+/// `Backtest::engine_start`). Build and run errors are raised, not only
+/// logged.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     let venue = venue(&backtest.bar_types)?;
     // Absolute: the node's DataFusion reader finds no object store for a
@@ -49,13 +53,23 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .starting_balances(vec![backtest.balance.to_string()])
         .fee_model(costs::fee_model(backtest.commission)?)
         .fill_model(costs::fill_model()?)
-        .bar_adaptive_high_low_ordering(true)
+        .bar_execution(false)
         .build()?;
-    let data_config = BacktestDataConfig::builder()
+    let bars = BacktestDataConfig::builder()
         .data_type(NautilusDataType::Bar)
         .catalog_path(catalog.clone())
         .bar_types(backtest.bar_types.iter().map(ToString::to_string).collect())
         .build()?;
+    let mut data = vec![bars];
+    for instrument_id in backtest.instrument_ids() {
+        data.push(
+            BacktestDataConfig::builder()
+                .data_type(NautilusDataType::QuoteTick)
+                .catalog_path(catalog.clone())
+                .instrument_id(instrument_id)
+                .build()?,
+        );
+    }
     let engine_config = BacktestEngineConfig::builder()
         .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
         .logging(backtest.logging.clone())
@@ -63,9 +77,9 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
     Ok(BacktestRunConfig::builder()
         .id(RUN_ID.to_string())
         .venues(vec![venue_config])
-        .data(vec![data_config])
+        .data(data)
         .engine(engine_config)
-        .start(to_unix_nanos(backtest.start)?)
+        .start(to_unix_nanos(backtest.engine_start()?)?)
         .end(to_unix_nanos(backtest.end)?)
         .raise_exception(true)
         .build()?)
@@ -138,7 +152,6 @@ mod tests {
         assert_eq!(venue.oms_type(), OmsType::Netting);
         assert_eq!(venue.account_type(), AccountType::Margin);
         assert_eq!(venue.book_type(), BookType::L1_MBP);
-        assert!(venue.bar_adaptive_high_low_ordering());
     }
 
     #[test]
@@ -150,11 +163,21 @@ mod tests {
     }
 
     #[test]
+    fn orders_fill_on_quotes_only_at_the_quoted_price() {
+        let config = run_config(&backtest()).unwrap();
+        let venue = &config.venues()[0];
+        assert!(!venue.bar_execution());
+        assert!(!venue.liquidity_consumption());
+        assert_eq!(
+            venue.fill_model().unwrap().to_string(),
+            "DefaultFillModel(prob_fill_on_limit=1, prob_slippage=0)"
+        );
+    }
+
+    #[test]
     fn the_bars_of_every_bar_type_come_from_the_catalog() {
         let config = run_config(&backtest()).unwrap();
-        let [data] = config.data() else {
-            panic!("{:?}", config.data())
-        };
+        let data = &config.data()[0];
         assert_eq!(data.data_type(), &NautilusDataType::Bar);
         assert_eq!(data.catalog_path(), "/data/catalog");
         assert_eq!(
@@ -164,6 +187,34 @@ mod tests {
                 "EUNL.IBIS-1-HOUR-LAST-EXTERNAL"
             ]
         );
+    }
+
+    /// The instrument of each quote data config, after the bars' one.
+    fn quoted(config: &BacktestRunConfig) -> Vec<String> {
+        config.data()[1..]
+            .iter()
+            .map(|data| {
+                assert_eq!(data.data_type(), &NautilusDataType::QuoteTick);
+                assert_eq!(data.catalog_path(), "/data/catalog");
+                data.instrument_id().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_quotes_of_every_instrument_come_from_the_catalog() {
+        let config = run_config(&backtest()).unwrap();
+        assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
+    }
+
+    #[test]
+    fn an_instrument_of_several_bar_types_has_its_quotes_loaded_once() {
+        let mut backtest = backtest();
+        backtest
+            .bar_types
+            .push(BarType::from("SXR8.IBIS-1-DAY-LAST-EXTERNAL"));
+        let config = run_config(&backtest).unwrap();
+        assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
     #[test]
@@ -194,10 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn runs_over_the_window_and_raises_errors() {
+    fn runs_from_one_nanosecond_before_the_start_to_the_end_and_raises_errors() {
         let config = run_config(&backtest()).unwrap();
         let ns = |ts: &str| to_unix_nanos(ts.parse::<Timestamp>().unwrap()).unwrap();
-        assert_eq!(config.start(), Some(ns("2026-07-01T00:00:00Z")));
+        assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
         assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
         assert!(config.raise_exception());
     }

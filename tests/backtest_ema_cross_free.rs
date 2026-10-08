@@ -7,7 +7,7 @@ mod common;
 use common::{EMA_ORDERS, EMA_PNL_WITHOUT_COMMISSION};
 
 #[test]
-fn without_commission_the_ema_crossover_pays_only_the_slippage() {
+fn without_commission_the_ema_crossover_pays_only_the_spread() {
     let catalog = common::catalog();
     let result = common::backtest(catalog.path(), "0 EUR")
         .run(common::ema_cross())

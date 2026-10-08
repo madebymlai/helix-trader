@@ -2,12 +2,12 @@
 //!
 //! Builds the Nautilus `FeeModelAny` and `FillModelAny`
 //! (`nautilus_execution`) that `BacktestVenueConfig` takes: a fixed
-//! commission per order (`FixedFeeModel`) and one tick of slippage on every
-//! fill (`OneTickSlippageFillModel`).
+//! commission per order (`FixedFeeModel`) and fills at the quote with no
+//! slippage of their own (`DefaultFillModel`): the spread is the cost.
 
 use nautilus_execution::models::{
     fee::{FeeModelAny, FixedFeeModel},
-    fill::{FillModelAny, OneTickSlippageFillModel},
+    fill::{DefaultFillModel, FillModelAny},
 };
 use nautilus_model::types::Money;
 
@@ -26,12 +26,14 @@ pub(super) fn fee_model(commission: Money) -> anyhow::Result<FeeModelAny> {
     )?))
 }
 
-/// Every fill one tick worse than the best price; limit orders always fill
-/// when touched.
+/// Market orders fill at the quote (a buy at the ask, a sell at the bid),
+/// with no slippage; limit orders always fill when touched.
 pub(super) fn fill_model() -> anyhow::Result<FillModelAny> {
-    Ok(FillModelAny::OneTickSlippage(
-        OneTickSlippageFillModel::new(1.0, 0.0, Some(FILL_SEED))?,
-    ))
+    Ok(FillModelAny::Default(DefaultFillModel::new(
+        1.0,
+        0.0,
+        Some(FILL_SEED),
+    )?))
 }
 
 #[cfg(test)]
@@ -97,10 +99,10 @@ mod tests {
     }
 
     #[test]
-    fn slips_one_tick() {
-        assert!(matches!(
-            fill_model().unwrap(),
-            FillModelAny::OneTickSlippage(_)
-        ));
+    fn fills_at_the_quote_with_no_slippage() {
+        assert_eq!(
+            fill_model().unwrap().to_string(),
+            "DefaultFillModel(prob_fill_on_limit=1, prob_slippage=0)"
+        );
     }
 }
