@@ -144,14 +144,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Checks everything that needs no gateway, then connects to IB, fetches
-/// the instruments and fills the catalog.
+/// the instruments and fills the catalog with their bars and quotes.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
-    let (instrument_ids, bar_types) = match args.run.strategy {
+    // Quotes come at the strategy's bar cadence for now.
+    let (instrument_ids, bar_types, quote_spec) = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
             let bar_types = config.bar_types();
-            (config.instrument_ids, bar_types)
+            (config.instrument_ids, bar_types, config.bar_spec)
         }
     };
     // No node runs in this process, so no node installs Nautilus' logger:
@@ -183,6 +184,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         start,
         end,
         async |bar_type, from, to| ib.bars(bar_type, from, to).await,
+        async |id, from, to| ib.quotes(id, quote_spec, from, to).await,
     )
     .await
 }

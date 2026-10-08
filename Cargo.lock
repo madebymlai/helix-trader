@@ -2001,6 +2001,7 @@ dependencies = [
  "nautilus-interactive-brokers",
  "nautilus-model",
  "nautilus-persistence",
+ "nautilus-serialization",
  "nautilus-trading",
  "rust_decimal",
  "serde",
