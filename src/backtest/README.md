@@ -13,7 +13,7 @@ Nautilus owns the logger) are in `docs/ARCHITECTURE.md`.
 
 ```
 backtest/
-  mod.rs      the step 2 entry point
+  mod.rs      Backtest: the one public type
   node.rs     the BacktestRunConfig and the BacktestNode run
   costs.rs    fee and fill models of the simulated venue
 ```
@@ -23,8 +23,30 @@ Dependencies, all pinned at `=0.65.0`:
 - `nautilus-backtest` with the `streaming` feature, which enables the
   `node` module and catalog registration.
 - `nautilus-execution` (fee and fill models), `nautilus-persistence`
-  (`DataCatalogConfig`), `nautilus-analysis` (extra statistics),
-  `nautilus-common` (`LoggerConfig`).
+  (`DataCatalogConfig`), `nautilus-analysis` for statistics not in the
+  default set (see Results).
+
+## The entry point
+
+```rust
+pub struct Backtest {
+    pub catalog: PathBuf,          // bars, instruments, warmup
+    pub bar_types: Vec<BarType>,   // instruments and venue derive from them
+    pub start: Timestamp,
+    pub end: Timestamp,
+    pub commission: Money,         // per order
+    pub balance: Money,
+}
+
+impl Backtest {
+    pub fn run<S>(&self, strategy: S) -> anyhow::Result<BacktestResult>
+    where S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static;
+}
+```
+
+Only Nautilus types cross it. `run` fails before building the node on no
+bar types, bar types on several venues, a negative commission, or `start`
+after `end`.
 
 ## The run
 
@@ -53,7 +75,8 @@ pub fn dispose(&mut self);
   `add_strategy` takes any type with the bound
   `Strategy + StrategyNative + DataActorNative + Component + Debug +
   'static`, so `node.rs` is generic over the strategy and never names one.
-- One run config per node, one node per process.
+- One run config per node: `new` rejects more ("kernel MessageBus is a
+  thread-local singleton"). One node per process.
 - With the default `dispose_on_completion = true` the node is spent after
   `run`; the process ends there anyway.
 
@@ -70,7 +93,12 @@ validates and returns a `Result`.
 | `engine: BacktestEngineConfig` | logging, warmup catalog |
 | `start`, `end: Option<UnixNanos>` | the run window |
 | `chunk_size: Option<usize>` | stream the data in chunks instead of loading it all |
+| `raise_exception` | default `false`: set it `true` (see below) |
 | `dispose_on_completion` | default `true` |
+
+With `raise_exception = false`, a build or run error is only logged, the
+run is skipped, and `node.run()` returns `Ok` with no result. We set it
+`true`, so the error is returned.
 
 ```rust
 let run_config = BacktestRunConfig::builder()
@@ -80,6 +108,7 @@ let run_config = BacktestRunConfig::builder()
     .engine(engine_config)
     .start(start)
     .end(end)
+    .raise_exception(true)
     .build()?;
 ```
 
@@ -89,52 +118,41 @@ let run_config = BacktestRunConfig::builder()
 
 | Field | Value |
 |---|---|
-| `name` | the venue, for example `"CME"` |
+| `name` | the bar types' venue, for example `"IBIS"` |
 | `oms_type` | `OmsType::Netting` |
-| `account_type` | `AccountType::Margin` |
-| `book_type` | `BookType::L1_MBP` (deeper fails with bars only) |
-| `starting_balances: Vec<String>` | for example `vec!["100_000 USD".into()]` |
-| `fee_model: Option<FeeModelAny>` | required: `build()` fails without it, so a missing fee never becomes zero |
+| `account_type` | `AccountType::Margin` (the EMA strategy goes short) |
+| `book_type` | `BookType::L1_MBP` (`new` rejects deeper books without book data) |
+| `starting_balances: Vec<String>` | the balance, `Money::to_string()`, for example `"10000.00 EUR"` |
+| `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | slippage (see Costs) |
 
 Flags worth knowing: `bar_execution` (default `true`, bars drive matching),
-`bar_adaptive_high_low_ordering` (default `false`; per bar, visit the
-extreme closest to the open first), `use_reduce_only` (`true`),
+`bar_adaptive_high_low_ordering` (default `false`, we set `true`; per bar,
+visit the extreme closest to the open first), `use_reduce_only` (`true`),
 `allow_cash_borrowing` (`false`). Optional: `margin_model`,
 `latency_model`, `default_leverage`, `leverages`, `base_currency`.
 
-```rust
-let venue_config = BacktestVenueConfig::builder()
-    .name("CME")
-    .oms_type(OmsType::Netting)
-    .account_type(AccountType::Margin)
-    .book_type(BookType::L1_MBP)
-    .starting_balances(vec!["100_000 USD".to_string()])
-    .fee_model(fee_model)      // from costs.rs
-    .fill_model(fill_model)    // from costs.rs
-    .bar_adaptive_high_low_ordering(true)
-    .build()?;
-```
-
 ### Data
 
-`BacktestDataConfig`, `bon` builder, one per data stream:
+`BacktestDataConfig`, `bon` builder, one per data stream; ours is one for
+all the bar types:
 
 ```rust
 let data_config = BacktestDataConfig::builder()
     .data_type(NautilusDataType::Bar)
     .catalog_path(catalog_path)
-    .instrument_ids(instrument_ids)          // or .instrument_id(id)
-    .bar_spec(spec)                          // or .bar_types(vec![..])
+    .bar_types(bar_types.iter().map(ToString::to_string).collect())
     .build()?;
 ```
 
-- With `bar_spec`, the node loads `{instrument_id}-{bar_spec}-EXTERNAL`
-  bars. The engine replays `EXTERNAL` bars only; `INTERNAL` bar types
-  (continuous futures) are built by the data engine from a subscription,
-  never loaded.
-- `start_time`, `end_time` narrow what is loaded. Data before the run
-  `start` is loaded but skipped by the replay.
+- `bar_types` are queried as given; with `instrument_id(s)` and `bar_spec`
+  instead, the node queries `{instrument_id}-{bar_spec}-EXTERNAL`. The
+  engine replays `EXTERNAL` bars only; `INTERNAL` bar types (continuous
+  futures) are built by the data engine from a subscription, never loaded
+  (*unverified*).
+- The node queries the catalog over the run window only (the intersection
+  with `start_time`, `end_time` if set): bars before the run `start` are not
+  loaded. Indicators warm up from the strategy's request, not the replay.
 - The node loads the instruments of the catalog in `build`, so
   `fill_catalog` must have written them.
 
@@ -145,8 +163,9 @@ let data_config = BacktestDataConfig::builder()
 
 | Field | Use |
 |---|---|
-| `logging: LoggerConfig` | log levels and files |
 | `catalogs: Vec<DataCatalogConfig>` | serves strategy warmup requests |
+
+`logging: LoggerConfig` is left at its default here.
 
 ## Warmup catalog
 
@@ -158,10 +177,21 @@ DataCatalogConfig::new(path: String, fs_protocol: Option<String>,
                        catalog_backend: Option<CatalogBackendType>) -> DataCatalogConfig
 ```
 
-Without it the warmup response is empty. The request window is clamped to
-simulated now, which is the run `start` when `on_start` runs, so warmup data
-must predate the run start; later bars arrive through the replay. Catalog
-names must be unique, and a bad path fails the build.
+The request window is clamped to simulated now, which is the run `start`
+when `on_start` runs, so warmup data must predate the run start; later bars
+arrive through the replay. What the strategy receives, as the runs showed:
+
+- **Catalog covers the window** (its stored intervals for the bar type span
+  `[start − warmup, start]`): one `on_historical_bars` with the bars of the
+  window, before the first `on_bar`. A covered window holding no bars still
+  calls it, with an empty slice.
+- **Catalog not registered, or a gap in the window**: the data engine asks
+  the venue's backtest data client for the missing part. That client does
+  not implement bar requests (a `WARN` is logged), no response ever comes,
+  and `on_historical_bars` is never called, not even with the stored part.
+  The run goes on with cold indicators.
+
+So the catalog must cover the whole warmup window for every bar type.
 
 ## Results
 
@@ -182,12 +212,25 @@ Default statistics:
 
 - `stats_pnls[currency]`: `PnL (total)`, `PnL% (total)`, `Max Winner`,
   `Avg Winner`, `Min Winner`, `Min Loser`, `Avg Loser`, `Max Loser`,
-  `Expectancy`, `Win Rate`, `Profit Factor`.
+  `Expectancy`, `Win Rate`. With no winning position the winner
+  statistics are `NaN`.
 - `stats_returns`: `Returns Volatility (252 days)`, `Returns Skewness`,
   `Returns Kurtosis`, `Average (Return)`, `Average Loss (Return)`,
   `Average Win (Return)`, `Sharpe Ratio (252 days)`,
-  `Sortino Ratio (252 days)`, `Tail Ratio`, `Risk Return Ratio`.
+  `Sortino Ratio (252 days)`, `Profit Factor`, `Tail Ratio`,
+  `Risk Return Ratio`.
 - `stats_general`: `Long Ratio`.
+- `summary`: `orders.total`, `orders.open`, `orders.closed`,
+  `positions.total`, `positions.open`, `positions.snapshots`, and per venue
+  `account.{venue}.balance.{currency}.total` (also `.free`, `.locked`), for
+  example `"9942.00 EUR"`.
+
+PnL is net of commissions: a position's realized PnL subtracts the
+commission of each fill in its settlement currency, the open position's
+included. The result has no commission figure of its own; with a fixed fee
+per order it is `total_orders × commission`. `total_positions` counts the
+snapshots of positions a netting flip closed, while `positions.total` in the
+summary counts only cached positions (one per instrument when netting).
 
 `Max Drawdown`, `CAGR (252 days)`, `Calmar Ratio (252 days)` are not in the
 default set. Compute them from `returns_series` with a `PortfolioAnalyzer`
@@ -209,20 +252,20 @@ The engine also logs its statistics at the end of the run.
 (`nautilus_execution::models`):
 
 ```rust
-let fee = FeeModelAny::PerContract(PerContractFeeModel::new(commission)?);
-let fill = FillModelAny::OneTickSlippage(OneTickSlippageFillModel::new(1.0, 0.0, Some(seed))?);
+let fee = FeeModelAny::Fixed(FixedFeeModel::new(commission, Some(true))?);
+let fill = FillModelAny::OneTickSlippage(OneTickSlippageFillModel::new(1.0, 0.0, Some(FILL_SEED))?);
 ```
 
 ### Fees
 
 | Variant | Constructor | Charges |
 |---|---|---|
-| `PerContract` | `PerContractFeeModel::new(Money)` | per contract, the broker model; `Err` if negative |
-| `Fixed` | `FixedFeeModel::new(Money, Option<bool>)` | flat per order, first fill only by default |
+| `Fixed` | `FixedFeeModel::new(Money, Option<bool>)` | flat per order, on its first fill only by default (`Some(true)`); `Err` if negative. Ours |
+| `PerContract` | `PerContractFeeModel::new(Money)` | per contract; `Err` if negative |
 | `MakerTaker` | `MakerTakerFeeModel::new(maker, taker)`, `::zero()` | notional rate by liquidity side |
 
-`MakerTakerFeeModel::zero()` is the explicit zero fee for tests. The other
-variants are for options.
+The other variants are for options. A fixed fee matches IB Fixed pricing on
+Xetra below EUR 6,000 an order, where the EUR 3 minimum always applies.
 
 ### Fills
 
@@ -242,8 +285,11 @@ random_seed: Option<u64>)`, probabilities in `[0, 1]`. Always pass a seed.
 | `CompetitionAware` | liquidity scaled by a `liquidity_factor` |
 | `VolumeSensitive`, `MarketHours` | depend on setters the node never calls: avoid |
 
-With bars and no quotes, slippage is the cost model: `OneTickSlippage` is the
-conservative fixed cost, `Probabilistic` half of it on average.
+`OneTickSlippage` quotes unlimited size one tick beyond the best bid and
+ask, so it slips whatever `prob_slippage`; with `prob_fill_on_limit = 1.0`
+the seed draws nothing that changes a result. With bars and no quotes the
+best price is the bar's: a market order sent in `on_bar` fills at the
+same timestamp, at that bar's close plus (buy) or minus (sell) one tick.
 
 ## Rules
 
@@ -251,17 +297,23 @@ conservative fixed cost, `Probabilistic` half of it on average.
   `BacktestNode`; no engine wrapper.
 - **One run per process**, no parameter sweeps.
 - **Costs always explicit.** A fee model always, even a zero one.
-- **Warmup before the start.** Warmup bars must predate the run start.
+- **Warmup before the start.** Warmup bars must predate the run start, and
+  the catalog must cover the whole warmup window.
 - **Seed all randomness**: the fill model and the strategy config.
 
 ## Tests
 
 - Unit tests in a `#[cfg(test)] mod tests` at the bottom of each file, for
-  pure code: the run config from our inputs, the cost models
-  (`PerContractFeeModel::new` rejects a negative commission, fill models
-  reject a probability outside `[0, 1]`).
-- Integration tests in `tests/`, one node per file, on a small fixture
-  catalog written with `ParquetDataCatalog::write_to_parquet`:
-  - a run produces fills and the expected commission;
-  - warmup bars arrive before the first `on_bar`;
-  - a seeded run reproduces the PnL figures recorded in the test.
+  pure code: the run config from our inputs, the cost models (a negative
+  commission is rejected, the commission is charged on the first fill only).
+- Integration tests in `tests/`, one node per file, on a fixture catalog
+  (`tests/common`: SXR8.IBIS in EUR, synthetic hourly bars on a wave)
+  written with `ParquetDataCatalog::write_to_parquet`:
+  - `backtest_warmup.rs`: a probe strategy receives the warmup bars, then
+    every replayed bar; its one market order fills one tick above the close
+    and pays the commission once.
+  - `backtest_ema_cross.rs`: the EMA strategy trades, its PnL is lower by
+    `orders × commission` than without commission, and it reproduces the
+    figures recorded in the test.
+  - `backtest_ema_cross_free.rs`: the same run without commission, the
+    reference for the commission check.

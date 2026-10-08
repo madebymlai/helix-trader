@@ -180,14 +180,15 @@ initialise and models to train. A model is trained by the strategy itself.
 - **Response.** The bars arrive in one batch in
   `on_historical_bars(&mut self, bars: &[Bar])`, before the first `on_bar`.
   An `Err` returned from it is logged, not propagated: a failed warmup does
-  not stop the run, so the strategy must notice it. Whether an empty
-  response still calls `on_historical_bars` is unverified; do not trade
-  until warmup has actually arrived.
+  not stop the run, so the strategy must notice it. An empty response
+  still calls it, with an empty slice; an unanswered request never does.
+  Do not trade until warmup has actually arrived.
 - **Who answers.** The data engine serves the request from a registered
   catalog and asks the data client only for the intervals the catalog lacks.
-  In backtest there is no client, so a catalog must be registered or the
-  response is empty (see the backtest README). In live it can be a catalog,
-  the adapter, or both (see the live README).
+  In backtest the client answers nothing, so the catalog must be registered
+  and cover the whole window, or no response comes (see the backtest
+  README). In live it can be a catalog, the adapter, or both (see the live
+  README).
 - **Bound it with `start`.** `self.clock().utc_now()` is the simulated time
   in backtest. Do not rely on `limit`: the catalog path ignores it, so with
   `start: None` the response holds every bar since the epoch. Do not assume
