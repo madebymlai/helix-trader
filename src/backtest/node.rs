@@ -34,10 +34,12 @@ const RUN_ID: &str = "backtest";
 /// requests. Build and run errors are raised, not only logged.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     let venue = venue(&backtest.bar_types)?;
-    let catalog = backtest
-        .catalog
+    // Absolute: the node's DataFusion reader finds no object store for a
+    // relative path ("file://catalog/...").
+    let catalog = std::path::absolute(&backtest.catalog)?;
+    let catalog = catalog
         .to_str()
-        .with_context(|| format!("catalog path {} is not UTF-8", backtest.catalog.display()))?
+        .with_context(|| format!("catalog path {} is not UTF-8", catalog.display()))?
         .to_string();
     let venue_config = BacktestVenueConfig::builder()
         .name(venue.as_str())
@@ -56,6 +58,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .build()?;
     let engine_config = BacktestEngineConfig::builder()
         .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
+        .logging(backtest.logging.clone())
         .build();
     Ok(BacktestRunConfig::builder()
         .id(RUN_ID.to_string())
@@ -101,6 +104,7 @@ mod tests {
     use std::path::PathBuf;
 
     use jiff::Timestamp;
+    use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::types::Money;
 
     use super::*;
@@ -117,6 +121,10 @@ mod tests {
             warmup: jiff::SignedDuration::from_hours(720),
             commission: Money::from("3 EUR"),
             balance: Money::from("10000 EUR"),
+            logging: LoggerConfig {
+                print_config: true,
+                ..LoggerConfig::default()
+            },
         }
     }
 
@@ -164,6 +172,25 @@ mod tests {
         let catalogs = &config.engine().catalogs;
         assert_eq!(catalogs.len(), 1);
         assert_eq!(catalogs[0].path(), "/data/catalog");
+    }
+
+    #[test]
+    fn a_relative_catalog_is_made_absolute() {
+        let backtest = Backtest {
+            catalog: PathBuf::from("catalog"),
+            ..backtest()
+        };
+        let config = run_config(&backtest).unwrap();
+        let absolute = std::env::current_dir().unwrap().join("catalog");
+        let absolute = absolute.to_str().unwrap();
+        assert_eq!(config.data()[0].catalog_path(), absolute);
+        assert_eq!(config.engine().catalogs[0].path(), absolute);
+    }
+
+    #[test]
+    fn the_node_installs_the_logger_as_configured() {
+        let config = run_config(&backtest()).unwrap();
+        assert!(config.engine().logging.print_config);
     }
 
     #[test]

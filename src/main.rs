@@ -10,18 +10,16 @@ use std::{
 use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
+    backtest::{self, Backtest},
     data::{IbGateway, IbHistory, fill_catalog},
-    strategy::ema::EmaCrossConfig,
+    strategy::ema::{EmaCross, EmaCrossConfig},
 };
 use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::UUID4;
-use nautilus_model::{
-    data::BarType,
-    identifiers::{InstrumentId, TraderId},
-};
+use nautilus_model::{identifiers::TraderId, types::Money};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 #[derive(Debug, Parser)]
@@ -35,11 +33,14 @@ struct Cli {
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from Interactive Brokers.
     FillCatalog(FillCatalogArgs),
+    /// Backtests the strategy over a window of the catalog and prints the results.
+    Backtest(BacktestArgs),
 }
 
+/// The arguments of a subcommand working on a window of the catalog.
 #[derive(Debug, Args)]
-struct FillCatalogArgs {
-    /// The strategy whose instruments and bar types are filled.
+struct WindowArgs {
+    /// The strategy whose instruments and bar types are used.
     strategy: Strategy,
     /// The strategy's TOML config.
     #[arg(long)]
@@ -53,6 +54,21 @@ struct FillCatalogArgs {
     /// The catalog directory.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
+}
+
+impl WindowArgs {
+    /// The window `[start, end]`, checked.
+    fn window(&self) -> anyhow::Result<(Timestamp, Timestamp)> {
+        let (start, end) = (self.start, self.end);
+        ensure!(start < end, "start {start} must be before end {end}");
+        Ok((start, end))
+    }
+}
+
+#[derive(Debug, Args)]
+struct FillCatalogArgs {
+    #[command(flatten)]
+    window: WindowArgs,
     /// IB Gateway or TWS host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -65,13 +81,16 @@ struct FillCatalogArgs {
     client_id: i32,
 }
 
-impl FillCatalogArgs {
-    /// The window `[start, end]`, checked.
-    fn window(&self) -> anyhow::Result<(Timestamp, Timestamp)> {
-        let (start, end) = (self.start, self.end);
-        ensure!(start < end, "start {start} must be before end {end}");
-        Ok((start, end))
-    }
+#[derive(Debug, Args)]
+struct BacktestArgs {
+    #[command(flatten)]
+    window: WindowArgs,
+    /// Commission charged once per order, for example "3 EUR".
+    #[arg(long, value_parser = parse_money)]
+    commission: Money,
+    /// Starting balance of the account, for example "10000 EUR".
+    #[arg(long, value_parser = parse_money)]
+    balance: Money,
 }
 
 /// The strategies, by command-line name.
@@ -91,24 +110,20 @@ fn parse_time(s: &str) -> anyhow::Result<Timestamp> {
     Ok(date.to_zoned(TimeZone::UTC)?.timestamp())
 }
 
-/// Reads the config of `strategy` from `path` and returns what it trades:
-/// its instrument ids and bar types.
-fn load_config(
-    strategy: Strategy,
-    path: &Path,
-) -> anyhow::Result<(Vec<InstrumentId>, Vec<BarType>)> {
-    let read = || -> anyhow::Result<(Vec<InstrumentId>, Vec<BarType>)> {
-        let text = fs::read_to_string(path)?;
-        match strategy {
-            Strategy::Ema => {
-                let config: EmaCrossConfig = toml::from_str(&text)?;
-                config.validate()?;
-                let bar_types = config.bar_types();
-                Ok((config.instrument_ids, bar_types))
-            }
-        }
+/// An amount and a currency code, for example "3 EUR". Explicit, since
+/// clap would otherwise pick `Money: From<&str>`, which panics.
+fn parse_money(s: &str) -> Result<Money, String> {
+    s.parse()
+}
+
+/// Reads the EMA crossover config from `path` and validates it.
+fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
+    let read = || -> anyhow::Result<EmaCrossConfig> {
+        let config: EmaCrossConfig = toml::from_str(&fs::read_to_string(path)?)?;
+        config.validate()?;
+        Ok(config)
     };
-    read().with_context(|| format!("loading the {strategy:?} config {}", path.display()))
+    read().with_context(|| format!("loading the EMA config {}", path.display()))
 }
 
 /// The logger config from `NAUTILUS_LOG`: the default when it is unset, an
@@ -124,14 +139,21 @@ fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<Log
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
+        Command::Backtest(args) => run_backtest(args),
     }
 }
 
 /// Checks everything that needs no gateway, then connects to IB, fetches
 /// the instruments and fills the catalog.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
-    let (start, end) = args.window()?;
-    let (instrument_ids, bar_types) = load_config(args.strategy, &args.config)?;
+    let (start, end) = args.window.window()?;
+    let (instrument_ids, bar_types) = match args.window.strategy {
+        Strategy::Ema => {
+            let config = load_ema_config(&args.window.config)?;
+            let bar_types = config.bar_types();
+            (config.instrument_ids, bar_types)
+        }
+    };
     // No node runs in this process, so no node installs Nautilus' logger:
     // install it here, as a node would, so the `log` output of this crate and
     // Nautilus, and the adapter's `tracing` warnings (why a contract did not
@@ -150,9 +172,10 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     };
     let ib = IbHistory::connect(gateway, &bar_types, end, Timestamp::now()).await?;
     let instruments = ib.instruments(&instrument_ids).await?;
-    fs::create_dir_all(&args.catalog)
-        .with_context(|| format!("creating the catalog {}", args.catalog.display()))?;
-    let mut catalog = ParquetDataCatalog::new(&args.catalog, None, None, None, None);
+    let catalog_dir = &args.window.catalog;
+    fs::create_dir_all(catalog_dir)
+        .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
+    let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     fill_catalog(
         &mut catalog,
         instruments,
@@ -164,14 +187,57 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     .await
 }
 
+/// Builds the strategy from its config, runs it over the window of the
+/// catalog and prints the results to stdout.
+fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
+    let (start, end) = args.window.window()?;
+    // The node installs Nautilus' logger from its engine config: pass the
+    // NAUTILUS_LOG config through, rather than install a logger here.
+    let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
+    let backtest = |bar_types, warmup| Backtest {
+        catalog: args.window.catalog.clone(),
+        bar_types,
+        start,
+        end,
+        warmup,
+        commission: args.commission,
+        balance: args.balance,
+        logging,
+    };
+    let result = match args.window.strategy {
+        Strategy::Ema => {
+            let config = load_ema_config(&args.window.config)?;
+            backtest(config.bar_types(), config.warmup).run(EmaCross::new(config)?)?
+        }
+    };
+    print!("{}", backtest::report(&result));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use nautilus_model::identifiers::InstrumentId;
+
     use super::*;
 
+    fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
+        let argv = ["helix-trader", subcommand]
+            .into_iter()
+            .chain(args.iter().copied());
+        Cli::try_parse_from(argv).map(|cli| cli.command)
+    }
+
     fn parse(args: &[&str]) -> Result<FillCatalogArgs, clap::Error> {
-        let argv = ["helix-trader", "fill-catalog"].iter().chain(args);
-        Cli::try_parse_from(argv).map(|cli| match cli.command {
+        parse_command("fill-catalog", args).map(|command| match command {
             Command::FillCatalog(args) => args,
+            command => panic!("{command:?}"),
+        })
+    }
+
+    fn parse_backtest(args: &[&str]) -> Result<BacktestArgs, clap::Error> {
+        parse_command("backtest", args).map(|command| match command {
+            Command::Backtest(args) => args,
+            command => panic!("{command:?}"),
         })
     }
 
@@ -185,20 +251,27 @@ mod tests {
         "2024-03-01T12:30:00Z",
     ];
 
+    /// `REQUIRED` and the costs a backtest requires.
+    fn backtest_required() -> Vec<&'static str> {
+        let mut argv = REQUIRED.to_vec();
+        argv.extend(["--commission", "3 EUR", "--balance", "10000 EUR"]);
+        argv
+    }
+
     #[test]
     fn parses_fill_catalog_with_paper_gateway_defaults() {
         let args = parse(&REQUIRED).unwrap();
-        assert_eq!(args.strategy, Strategy::Ema);
-        assert_eq!(args.config, PathBuf::from("ema.toml"));
+        assert_eq!(args.window.strategy, Strategy::Ema);
+        assert_eq!(args.window.config, PathBuf::from("ema.toml"));
         assert_eq!(
-            args.start,
+            args.window.start,
             "2024-01-02T00:00:00Z".parse::<Timestamp>().unwrap()
         );
         assert_eq!(
-            args.end,
+            args.window.end,
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
-        assert_eq!(args.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.window.catalog, PathBuf::from("catalog"));
         assert_eq!(args.host, "127.0.0.1");
         assert_eq!(args.port, 4002);
         assert_eq!(args.client_id, 10);
@@ -218,7 +291,7 @@ mod tests {
             "42",
         ]);
         let args = parse(&argv).unwrap();
-        assert_eq!(args.catalog, PathBuf::from("/data/cat"));
+        assert_eq!(args.window.catalog, PathBuf::from("/data/cat"));
         assert_eq!(args.host, "10.0.0.5");
         assert_eq!(args.port, 7497);
         assert_eq!(args.client_id, 42);
@@ -235,7 +308,46 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_ema_instruments_and_bar_types_from_its_toml_config() {
+    fn parses_a_backtest_with_its_costs() {
+        let args = parse_backtest(&backtest_required()).unwrap();
+        assert_eq!(args.window.strategy, Strategy::Ema);
+        assert_eq!(args.window.config, PathBuf::from("ema.toml"));
+        assert_eq!(
+            args.window.end,
+            "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
+        );
+        assert_eq!(args.window.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.commission, Money::from("3 EUR"));
+        assert_eq!(args.balance, Money::from("10000 EUR"));
+    }
+
+    #[test]
+    fn a_backtest_requires_the_commission_and_the_balance() {
+        assert!(parse_backtest(&REQUIRED).is_err());
+        for flag in ["--commission", "--balance"] {
+            let argv = backtest_required();
+            let at = argv.iter().position(|&arg| arg == flag).unwrap();
+            let argv = [&argv[..at], &argv[at + 2..]].concat();
+            let err = parse_backtest(&argv).unwrap_err().to_string();
+            assert!(err.contains(flag), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_money() {
+        for flag in ["--commission", "--balance"] {
+            for money in ["3", "EUR", "3 XYZ", "three EUR"] {
+                let mut argv = backtest_required();
+                let at = argv.iter().position(|&arg| arg == flag).unwrap();
+                argv[at + 1] = money;
+                let err = parse_backtest(&argv).unwrap_err().to_string();
+                assert!(err.contains(flag), "{money}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn loads_and_validates_the_ema_config_from_toml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ema.toml");
         std::fs::write(
@@ -248,22 +360,15 @@ mod tests {
             "#,
         )
         .unwrap();
-        let (instrument_ids, bar_types) = load_config(Strategy::Ema, &path).unwrap();
+        let config = load_ema_config(&path).unwrap();
         assert_eq!(
-            instrument_ids,
+            config.instrument_ids,
             [
                 InstrumentId::from("ESH4.CME"),
                 InstrumentId::from("ESM4.CME")
             ]
         );
-        let bar_types: Vec<String> = bar_types.iter().map(ToString::to_string).collect();
-        assert_eq!(
-            bar_types,
-            [
-                "ESH4.CME-1-HOUR-LAST-EXTERNAL",
-                "ESM4.CME-1-HOUR-LAST-EXTERNAL"
-            ]
-        );
+        assert_eq!(config.warmup, jiff::SignedDuration::from_hours(720));
     }
 
     #[test]
@@ -280,7 +385,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let err = format!("{:#}", load_config(Strategy::Ema, &path).unwrap_err());
+        let err = format!("{:#}", load_ema_config(&path).unwrap_err());
         assert!(err.contains("no instruments"), "{err}");
     }
 
@@ -288,9 +393,18 @@ mod tests {
     fn rejects_a_start_not_before_the_end() {
         let mut argv = REQUIRED.to_vec();
         argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse(&argv).unwrap().window().unwrap_err().to_string();
+        let err = parse(&argv)
+            .unwrap()
+            .window
+            .window()
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("before"), "{err}");
-        assert!(parse(&REQUIRED).unwrap().window().is_ok());
+        assert!(parse(&REQUIRED).unwrap().window.window().is_ok());
+        let mut argv = backtest_required();
+        argv[4] = "2024-03-01T12:30:00Z";
+        let err = parse_backtest(&argv).unwrap().window.window().unwrap_err();
+        assert!(err.to_string().contains("before"), "{err}");
     }
 
     #[test]
@@ -298,10 +412,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ema.toml");
         std::fs::write(&path, "instrument_ids = []").unwrap();
-        let err = format!("{:#}", load_config(Strategy::Ema, &path).unwrap_err());
+        let err = format!("{:#}", load_ema_config(&path).unwrap_err());
         assert!(err.contains("ema.toml"), "{err}");
         let missing = dir.path().join("missing.toml");
-        let err = format!("{:#}", load_config(Strategy::Ema, &missing).unwrap_err());
+        let err = format!("{:#}", load_ema_config(&missing).unwrap_err());
         assert!(err.contains("missing.toml"), "{err}");
     }
 

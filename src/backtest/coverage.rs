@@ -102,6 +102,7 @@ mod tests {
     use std::path::Path;
 
     use jiff::SignedDuration;
+    use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{
         data::{Bar, BarType},
         instruments::stubs::equity_aapl,
@@ -218,6 +219,7 @@ mod tests {
             warmup: SignedDuration::from_hours(24),
             commission: Money::from("3 USD"),
             balance: Money::from("10000 USD"),
+            logging: LoggerConfig::default(),
         }
     }
 

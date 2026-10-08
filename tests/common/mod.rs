@@ -11,6 +11,7 @@ use helix_trader::{
     strategy::ema::{EmaCross, EmaCrossConfig},
 };
 use jiff::{SignedDuration, Timestamp};
+use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
     data::{Bar, BarType},
     identifiers::{InstrumentId, Symbol},
@@ -109,6 +110,7 @@ pub fn backtest(catalog: &Path, commission: &str) -> Backtest {
         warmup: WARMUP,
         commission: Money::from(commission),
         balance: Money::from("10000 EUR"),
+        logging: LoggerConfig::default(),
     }
 }
 

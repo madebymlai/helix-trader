@@ -1992,6 +1992,7 @@ dependencies = [
  "ibapi",
  "jiff",
  "log",
+ "nautilus-analysis",
  "nautilus-backtest",
  "nautilus-common",
  "nautilus-core",

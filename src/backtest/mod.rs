@@ -6,14 +6,19 @@
 mod costs;
 mod coverage;
 mod node;
+mod report;
 
 use std::{fmt::Debug, path::PathBuf};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_backtest::result::BacktestResult;
-use nautilus_common::{actor::DataActorNative, component::Component};
+use nautilus_common::{
+    actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
+};
 use nautilus_model::{data::BarType, types::Money};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
+
+pub use self::report::report;
 
 /// One backtest: a window of the catalog, the bar types replayed and the
 /// costs. Every field is required.
@@ -34,6 +39,8 @@ pub struct Backtest {
     pub commission: Money,
     /// The starting balance of the account.
     pub balance: Money,
+    /// The Nautilus logger: the node installs it, so nothing else may.
+    pub logging: LoggerConfig,
 }
 
 impl Backtest {

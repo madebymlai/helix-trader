@@ -17,6 +17,7 @@ backtest/
   node.rs     the BacktestRunConfig and the BacktestNode run
   coverage.rs the check that the catalog can serve the run
   costs.rs    fee and fill models of the simulated venue
+  report.rs   report(&BacktestResult) -> String: the results as text
 ```
 
 Dependencies, all pinned at `=0.65.0`:
@@ -38,6 +39,7 @@ pub struct Backtest {
     pub warmup: SignedDuration,    // the strategy's
     pub commission: Money,         // per order
     pub balance: Money,
+    pub logging: LoggerConfig,     // the node installs the logger with it
 }
 
 impl Backtest {
@@ -49,7 +51,8 @@ impl Backtest {
 Only Nautilus types cross it. `run` fails before building the node on no
 bar types, bar types on several venues, a negative commission or warmup,
 `start` after `end`, or a catalog that cannot serve the run (see Coverage
-check).
+check). A relative catalog path is made absolute: the node's DataFusion
+reader finds no object store for `file://catalog/...`.
 
 ## The run
 
@@ -167,8 +170,13 @@ let data_config = BacktestDataConfig::builder()
 | Field | Use |
 |---|---|
 | `catalogs: Vec<DataCatalogConfig>` | serves strategy warmup requests |
+| `logging: LoggerConfig` | the logger the node installs (`Backtest::logging`) |
 
-`logging: LoggerConfig` is left at its default here.
+The node's kernel installs Nautilus's logger from `logging` when it is
+built. Installing one before (`init_logging`, as `fill-catalog` does) would
+not fail, the kernel would reuse it, but its own config would be ignored:
+so the command passes the `NAUTILUS_LOG` config through `Backtest` and
+installs nothing itself.
 
 ## Warmup catalog
 
@@ -256,18 +264,38 @@ snapshots of positions a netting flip closed, while `positions.total` in the
 summary counts only cached positions (one per instrument when netting).
 
 `Max Drawdown`, `CAGR (252 days)`, `Calmar Ratio (252 days)` are not in the
-default set. Compute them from `returns_series` with a `PortfolioAnalyzer`
-(`nautilus_analysis`):
+default set. Each is a `PortfolioStatistic` (`nautilus_analysis`)
+computed from `returns_series`; a `PortfolioAnalyzer` only loops over the
+statistics registered, so `report.rs` calls the one it prints directly:
 
 ```rust
-let mut analyzer = PortfolioAnalyzer::default();
-analyzer.register_statistic(Arc::new(MaxDrawdown::new()));
-analyzer.register_statistic(Arc::new(CAGR::new(None)));
-for (ts, r) in &result.returns_series { analyzer.add_return(*ts, *r); }
-let returns = analyzer.get_performance_stats_returns();   // AHashMap<String, f64>
+let max_drawdown = MaxDrawdown::new().calculate_from_returns(&result.returns_series); // Some(-0.05): 5%
 ```
 
 The engine also logs its statistics at the end of the run.
+
+## The command
+
+```
+helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
+  [--catalog catalog] --commission "3 EUR" --balance "10000 EUR"
+```
+
+`main` loads and validates the strategy's config, builds the `Backtest`
+from its bar types and warmup, runs the strategy and prints `report`:
+`Orders`, `Positions`, then one section per currency of PnL statistics,
+the return statistics with `Max Drawdown`, the general statistics, and the
+final balances (`account.*.balance.*.total` of the summary), names sorted,
+values to six decimals. `--commission` and `--balance` are required
+Nautilus `Money` (`"<amount> <currency>"`), parsed with `Money::from_str`;
+a malformed one fails at argument parsing. A negative commission
+(`--commission="-3 EUR"`) fails before the node is built. The engine log
+goes to stdout before the results, configured by `NAUTILUS_LOG`.
+
+On the fixture catalog of the tests (EMA 5/15, 10 shares, warmup 48h, 3 EUR
+commission) it prints `Orders: 9`, `PnL (total): -58.000000` (the
+fixture's -31 without commission, less 9 × 3 EUR) and a final balance of
+`9942.00 EUR`.
 
 ## Costs
 
@@ -330,7 +358,10 @@ same timestamp, at that bar's close plus (buy) or minus (sell) one tick.
   pure code: the run config from our inputs, the cost models (a negative
   commission is rejected, the commission is charged on the first fill only),
   the coverage check (gaps on the intervals alone, then on a temporary
-  catalog: missing instrument, missing bar type, 1 ns short at either end).
+  catalog: missing instrument, missing bar type, 1 ns short at either end),
+  the report of a hand-built `BacktestResult` (sections, sorted names, max
+  drawdown). The command line is tested in `main.rs`: required flags,
+  malformed `Money`, the window check.
 - Integration tests in `tests/`, one node per file, on a fixture catalog
   (`tests/common`: SXR8.IBIS in EUR, synthetic hourly bars on a wave)
   written with `ParquetDataCatalog::write_to_parquet` and stored up to the
