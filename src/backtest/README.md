@@ -348,6 +348,66 @@ The tick is the instrument's `price_increment`, from IB's minimum tick:
 `0.0001` for SXR8.IBIS (price precision 4) although its trades print in
 whole cents, so on SXR8 one tick of slippage costs next to nothing.
 
+### Fills on BID and ASK bars
+
+Can the matching engine charge the real spread from IB's BID and ASK
+bars? Tested on 2026-10-08 with a throwaway probe (market buy on one
+decision bar, sell on a later one, six orders over 2026-09-01 to 09-03,
+`OrderFilled` prices recorded) over a scratch catalog of SXR8 1-HOUR
+LAST, BID, ASK and MID bars (see the data README). Answer: **not with
+IB's bars as stored**.
+
+How the engine picks the bars it executes on
+(`execution/src/matching_engine/mod.rs`, `process_bar`, around line
+1856):
+
+- Per instrument it keeps one execution bar type
+  (`execution_bar_types`): the first one seen. A bar of another type
+  replaces it if its step (`execution_bar_deltas`) is not longer, else
+  it is ignored. LAST, BID, ASK and MID of one cadence therefore all
+  execute.
+- LAST and MID bars become trade ticks (`process_trade_ticks_from_bar`);
+  on an L1 book a trade tick sets bid and ask to the trade price. BID
+  and ASK bars are held until both of the same `ts_init` arrived, then
+  become quote ticks (`process_quote_ticks_from_bar`).
+- Tick sizes come from the bar volume (`BarTickSizes::from_volume`). A
+  zero-volume quote clears the book (`process_bar_quote_tick`); a
+  zero-volume trade only sets the last price. IB's BID, ASK and MID bars
+  all have volume 0, so they never set a bid or an ask.
+- The backtest engine (`backtest/src/engine.rs`, the replay loop) gives
+  each item to the venue, then to the data engine (the strategy's
+  `on_bar`), then settles the venue: an order sent in `on_bar` fills
+  before the next item, even one with the same timestamp. Equal
+  timestamps replay in the order the streams were added
+  (`BacktestEngine::add_data`: the first stream wins ties).
+
+What the probe got (decision at 2026-09-02 09:00 UTC: LAST close 709.54,
+bid/ask close 709.44/709.48, previous hour 710.22/710.29):
+
+| Replayed (tie order), decision bars | Fills |
+|---|---|
+| LAST, BID, ASK as stored (`Backtest`, or the engine in either order), LAST | the LAST close (± one tick with `OneTickSlippage`): 709.54 |
+| the same with BID and ASK volume set non-zero, LAST | the LAST close: LAST trade ticks override the quotes |
+| BID, ASK as stored, BID or MID | none: `No market for SXR8.IBIS` |
+| BID, ASK with volume, decision on the first of them | the **previous** hour's ask/bid: 710.29 |
+| ASK, BID with volume, decision on BID | this hour's ask/bid close: 709.48 |
+| BID, ASK with volume, then MID as stored, decision on MID | this hour's ask/bid close: 709.48 |
+| MID as stored first, then BID, ASK with volume | the previous hour's ask/bid: 710.29 |
+
+All six fills of each run followed the row. The strategy received its
+own bar type only, every bar in order, whatever else was replayed.
+
+So quote-based fills need LAST out of the replay, a volume put on IB's
+BID and ASK bars (our code, at load or fill time), the strategy deciding
+on MID (or BID) bars added after the quotes, and the engine rather than
+the node to control the tie order. In continuous trading the half spread
+they would charge is about 0.3 bps (data README), against a commission
+of 3 EUR or more per order; a slippage in basis points of the price is
+therefore the choice, at 0.5 bps for SXR8 (the median half spread in
+continuous trading rounded up; the 75th percentile half spread is 0.55
+bps). It would understate the 2.5 bps half spread outside, where the
+strategy no longer trades.
+
 ## Verified on IB data
 
 Paper gateway, 2026-10-08, SXR8.IBIS 1-HOUR-LAST, EMA 10/30 (the

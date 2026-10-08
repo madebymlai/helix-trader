@@ -412,6 +412,37 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
     is stamped at its close, on the hour.
   - IB's minimum tick is `0.0001`, so the instrument has price precision 4
     although trades print in whole cents.
+  - **BID, ASK and MID bars.** IB serves all three for SXR8 through
+    `fill-catalog` (a config whose `bar_spec` has `price_type = "BID"`,
+    `"ASK"` or `"MID"`; the EMA config accepts any price type): 1,440 bars
+    each over 2026-06-01 to 2026-10-03 (paper gateway, 2026-10-08), the
+    same 16 stamps a day as LAST (LAST: 1,434, six hours without a
+    trade). Every BID, ASK and MID bar has **volume 0**, which the
+    matching engine cannot use as is (see the backtest README). The MID
+    close equals (bid close + ask close) / 2 within half a cent in
+    continuous trading. Closes are aligned with LAST: the median gap
+    between the LAST close and the mid close of the same stamp is 0.70
+    bps, against 8 bps one hour off.
+  - **Spread**, ask close − bid close per bar, over the same window (90
+    bars per hour of the day; mid EUR 679-742). Continuous trading means
+    the bars closing 10:00-17:00 Frankfurt time:
+
+    | Bars | n | p10 | p25 | median | p75 | p90 | p99 |
+    |---|---|---|---|---|---|---|---|
+    | continuous trading, EUR | 720 | 0.02 | 0.02 | 0.04 | 0.08 | 0.10 | 0.20 |
+    | continuous trading, bps of mid | 720 | 0.28 | 0.28 | 0.56 | 1.11 | 1.43 | 2.84 |
+    | outside, EUR | 720 | 0.16 | 0.28 | 0.36 | 0.50 | 0.74 | 1.67 |
+    | outside, bps of mid | 720 | 2.19 | 3.92 | 4.99 | 7.11 | 10.45 | 23.82 |
+
+    In continuous trading the mean is 0.054 EUR (0.76 bps), the spread is
+    one cent in 1% of the bars, and every hour has a median of 0.4-0.6 bps except
+    the bar closing 16:00 (1.14 bps, the US open). Outside, the evening
+    bars (closing 18:00-23:00) have a median of 5.0 bps, the 23:00 bar
+    10.3; the pre-opening bars (closing 08:30 and 09:00) have a median of
+    4.6 bps and 54 crossed closes (ask below bid, the opening auction).
+    So half the typical spread in continuous trading, the cost of a
+    market order, is about 0.3 bps (2 cents on a 10-share order of EUR
+    7,000: EUR 0.20).
 - **`CONTFUT`.** IB's own continuous future is no substitute for the
   per-contract bars, even for older history: it is one series with IB's roll
   rule and adjustment, which the Nautilus continuous future (contract bars
