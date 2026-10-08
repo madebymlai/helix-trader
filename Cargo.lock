@@ -1992,8 +1992,10 @@ dependencies = [
  "ibapi",
  "jiff",
  "log",
+ "nautilus-backtest",
  "nautilus-common",
  "nautilus-core",
+ "nautilus-execution",
  "nautilus-indicators",
  "nautilus-interactive-brokers",
  "nautilus-model",
@@ -2616,6 +2618,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus-backtest"
+version = "0.65.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8b542abe359e730d86b57dcaeb04cc8695a3ac784a413a254c0d8ff9dafa7f9"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "bon",
+ "indexmap",
+ "jiff",
+ "log",
+ "nautilus-analysis",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-data",
+ "nautilus-execution",
+ "nautilus-model",
+ "nautilus-persistence",
+ "nautilus-portfolio",
+ "nautilus-risk",
+ "nautilus-system",
+ "nautilus-trading",
+ "parking_lot",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "ustr",
+]
+
+[[package]]
 name = "nautilus-common"
 version = "0.65.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2691,6 +2725,30 @@ dependencies = [
  "pem",
  "rustls",
  "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "nautilus-data"
+version = "0.65.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40d6b9a59fb4667b761971fd11d9519c4b944c7e618288b37cc82a929dd297a9"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "async-trait",
+ "bon",
+ "futures",
+ "indexmap",
+ "jiff",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-model",
+ "nautilus-persistence",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "ustr",
 ]
 
 [[package]]
@@ -2933,6 +2991,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus-risk"
+version = "0.65.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca5953ae52192cf54a8075eb6c685168f7701ba2f21d385abb3318d80844605b"
+dependencies = [
+ "ahash",
+ "bon",
+ "indexmap",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-execution",
+ "nautilus-model",
+ "nautilus-portfolio",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "ustr",
+]
+
+[[package]]
 name = "nautilus-serialization"
 version = "0.65.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,6 +3030,34 @@ dependencies = [
  "thiserror 2.0.21",
  "ustr",
  "uuid",
+]
+
+[[package]]
+name = "nautilus-system"
+version = "0.65.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d405299b91dfff586cbd719ab46a1eb7b0e8118cfb45978996506bf65daaeab6"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bon",
+ "futures",
+ "indexmap",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-data",
+ "nautilus-execution",
+ "nautilus-model",
+ "nautilus-persistence",
+ "nautilus-portfolio",
+ "nautilus-risk",
+ "nautilus-trading",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "ustr",
 ]
 
 [[package]]

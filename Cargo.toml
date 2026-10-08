@@ -11,8 +11,10 @@ bon = "=3.9.3"
 clap = { version = "4", features = ["derive"] }
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
+nautilus-backtest = { version = "=0.65.0", features = ["streaming"] }
 nautilus-common = { version = "=0.65.0", features = ["tracing-bridge"] }
 nautilus-core = "=0.65.0"
+nautilus-execution = "=0.65.0"
 nautilus-indicators = "=0.65.0"
 ibapi = "=3.3.0"
 nautilus-interactive-brokers = { version = "=0.65.0", default-features = false }

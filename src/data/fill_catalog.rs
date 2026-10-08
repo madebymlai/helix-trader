@@ -111,7 +111,7 @@ pub async fn fill_catalog(
     Ok(())
 }
 
-fn to_unix_nanos(ts: Timestamp) -> anyhow::Result<UnixNanos> {
+pub(crate) fn to_unix_nanos(ts: Timestamp) -> anyhow::Result<UnixNanos> {
     let ns = u64::try_from(ts.as_nanosecond())
         .with_context(|| format!("{ts} is outside the range of the catalog"))?;
     Ok(UnixNanos::from(ns))
