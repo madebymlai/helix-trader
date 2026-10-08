@@ -81,12 +81,20 @@ pub fn bars() -> Vec<Bar> {
         .collect()
 }
 
-/// Writes the instrument and the bars to a new temporary catalog.
+/// Writes the instrument and the bars to a new temporary catalog, stored
+/// over `[first_close, end]` as a fill up to `end` stores them.
 pub fn catalog() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
-    catalog.write_to_parquet(&bars(), None, None, None).unwrap();
+    catalog
+        .write_to_parquet(
+            &bars(),
+            Some(first_close().into()),
+            Some(end().into()),
+            None,
+        )
+        .unwrap();
     dir
 }
 
@@ -98,6 +106,7 @@ pub fn backtest(catalog: &Path, commission: &str) -> Backtest {
         bar_types: vec![BarType::from(BAR_TYPE)],
         start: start(),
         end: end(),
+        warmup: WARMUP,
         commission: Money::from(commission),
         balance: Money::from("10000 EUR"),
     }

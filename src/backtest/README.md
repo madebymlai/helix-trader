@@ -15,6 +15,7 @@ Nautilus owns the logger) are in `docs/ARCHITECTURE.md`.
 backtest/
   mod.rs      Backtest: the one public type
   node.rs     the BacktestRunConfig and the BacktestNode run
+  coverage.rs the check that the catalog can serve the run
   costs.rs    fee and fill models of the simulated venue
 ```
 
@@ -34,6 +35,7 @@ pub struct Backtest {
     pub bar_types: Vec<BarType>,   // instruments and venue derive from them
     pub start: Timestamp,
     pub end: Timestamp,
+    pub warmup: SignedDuration,    // the strategy's
     pub commission: Money,         // per order
     pub balance: Money,
 }
@@ -45,8 +47,9 @@ impl Backtest {
 ```
 
 Only Nautilus types cross it. `run` fails before building the node on no
-bar types, bar types on several venues, a negative commission, or `start`
-after `end`.
+bar types, bar types on several venues, a negative commission or warmup,
+`start` after `end`, or a catalog that cannot serve the run (see Coverage
+check).
 
 ## The run
 
@@ -193,6 +196,26 @@ arrive through the replay. What the strategy receives, as the runs showed:
 
 So the catalog must cover the whole warmup window for every bar type.
 
+## Coverage check
+
+Before building the node, `run` checks the catalog (`coverage.rs`) and
+fails on the first miss:
+
+- every instrument of the bar types is stored, else the error names the
+  instrument id;
+- every bar type is covered over `[start − warmup, end]`, else the error
+  names the bar type and its first missing range. A bar type not stored
+  misses the whole range.
+
+Coverage is the bar type's stored intervals (`get_intervals`, inclusive
+nanoseconds; `fill_catalog` records each fill over the window asked for),
+with gaps computed by Nautilus's `missing_intervals`, the function behind
+the data engine's own catalog lookup. Adjacent intervals (`end + 1 ==
+start`, as a resumed fill writes them) and overlapping ones cover as one;
+a 1 ns gap is a gap. An interval ending exactly at `end` covers it. The
+range is checked whole: the warmup request asks for `[start − warmup,
+start]`, the replay reads the run window.
+
 ## Results
 
 `node.run()` returns one `BacktestResult` (`nautilus_backtest::result`) per
@@ -298,17 +321,20 @@ same timestamp, at that bar's close plus (buy) or minus (sell) one tick.
 - **One run per process**, no parameter sweeps.
 - **Costs always explicit.** A fee model always, even a zero one.
 - **Warmup before the start.** Warmup bars must predate the run start, and
-  the catalog must cover the whole warmup window.
+  the catalog must cover the whole warmup window: `run` refuses otherwise.
 - **Seed all randomness**: the fill model and the strategy config.
 
 ## Tests
 
 - Unit tests in a `#[cfg(test)] mod tests` at the bottom of each file, for
   pure code: the run config from our inputs, the cost models (a negative
-  commission is rejected, the commission is charged on the first fill only).
+  commission is rejected, the commission is charged on the first fill only),
+  the coverage check (gaps on the intervals alone, then on a temporary
+  catalog: missing instrument, missing bar type, 1 ns short at either end).
 - Integration tests in `tests/`, one node per file, on a fixture catalog
   (`tests/common`: SXR8.IBIS in EUR, synthetic hourly bars on a wave)
-  written with `ParquetDataCatalog::write_to_parquet`:
+  written with `ParquetDataCatalog::write_to_parquet` and stored up to the
+  run `end`:
   - `backtest_warmup.rs`: a probe strategy receives the warmup bars, then
     every replayed bar; its one market order fills one tick above the close
     and pays the commission once.
@@ -317,3 +343,5 @@ same timestamp, at that bar's close plus (buy) or minus (sell) one tick.
     figures recorded in the test.
   - `backtest_ema_cross_free.rs`: the same run without commission, the
     reference for the commission check.
+  - `backtest_coverage.rs`: a warmup longer than the stored history is
+    refused before the node is built, naming the bar type.

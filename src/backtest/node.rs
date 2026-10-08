@@ -114,6 +114,7 @@ mod tests {
             ],
             start: "2026-07-01T00:00:00Z".parse().unwrap(),
             end: "2026-10-01T00:00:00Z".parse().unwrap(),
+            warmup: jiff::SignedDuration::from_hours(720),
             commission: Money::from("3 EUR"),
             balance: Money::from("10000 EUR"),
         }

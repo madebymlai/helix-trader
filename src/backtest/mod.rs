@@ -4,11 +4,12 @@
 //! Generic over the strategy: any Nautilus strategy runs, none is named here.
 
 mod costs;
+mod coverage;
 mod node;
 
 use std::{fmt::Debug, path::PathBuf};
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_backtest::result::BacktestResult;
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_model::{data::BarType, types::Money};
@@ -26,6 +27,9 @@ pub struct Backtest {
     pub bar_types: Vec<BarType>,
     pub start: Timestamp,
     pub end: Timestamp,
+    /// The strategy's warmup: the catalog must cover the bar types from
+    /// `start - warmup`, so that the warmup request is answered.
+    pub warmup: SignedDuration,
     /// Charged once per order, on its first fill.
     pub commission: Money,
     /// The starting balance of the account.
@@ -39,12 +43,15 @@ impl Backtest {
     /// # Errors
     ///
     /// Returns an error if the inputs are inconsistent (no bar types, several
-    /// venues, a negative commission, `start` not before `end`), or if the
-    /// node fails to build or run.
+    /// venues, a negative commission or warmup, `start` not before `end`),
+    /// if the catalog misses an instrument or part of a bar type over
+    /// `[start - warmup, end]`, or if the node fails to build or run.
     pub fn run<S>(&self, strategy: S) -> anyhow::Result<BacktestResult>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
-        node::run(node::run_config(self)?, strategy)
+        let config = node::run_config(self)?;
+        coverage::check(self)?;
+        node::run(config, strategy)
     }
 }
