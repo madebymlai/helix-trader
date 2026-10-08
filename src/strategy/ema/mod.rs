@@ -1,15 +1,16 @@
 //! EMA crossover: per instrument, long while the fast EMA is above the slow
-//! one, short otherwise. A minimal strategy to drive data, backtest and paper.
+//! one, short otherwise, on the bars inside the session only. A minimal
+//! strategy to drive data, backtest and paper.
 
 mod book;
 mod config;
+mod session;
 
 pub use config::EmaCrossConfig;
+pub use session::Session;
 
 use nautilus_common::actor::DataActor;
-use nautilus_model::{
-    data::Bar, enums::OrderSide, identifiers::InstrumentId, instruments::Instrument,
-};
+use nautilus_model::{data::Bar, enums::OrderSide, instruments::Instrument};
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyCore},
@@ -38,12 +39,14 @@ impl EmaCross {
         })
     }
 
-    /// Submits a market order moving the position to the book's target,
-    /// unless an order for the instrument is still pending.
-    fn rebalance(&mut self, instrument_id: InstrumentId) -> anyhow::Result<()> {
-        let Some(target) = self.book.target(&instrument_id) else {
+    /// Submits a market order moving the position of the bar's instrument
+    /// to the book's target on `bar`, unless an order for the instrument is
+    /// still pending.
+    fn rebalance(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        let Some(target) = self.book.target(bar) else {
             return Ok(());
         };
+        let instrument_id = bar.bar_type.instrument_id();
         let delta = target - self.portfolio().net_position(&instrument_id);
         if delta == Decimal::ZERO {
             return Ok(());
@@ -103,6 +106,6 @@ impl DataActor for EmaCross {
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
         self.book.update(bar);
-        self.rebalance(bar.bar_type.instrument_id())
+        self.rebalance(bar)
     }
 }

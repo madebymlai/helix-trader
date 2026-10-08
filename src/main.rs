@@ -357,6 +357,7 @@ mod tests {
             bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
             trade_size = "1"
             warmup = "720h"
+            session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
             "#,
         )
         .unwrap();
@@ -382,6 +383,7 @@ mod tests {
             bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
             trade_size = "1"
             warmup = "720h"
+            session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
             "#,
         )
         .unwrap();

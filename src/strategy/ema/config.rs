@@ -9,6 +9,8 @@ use nautilus_model::{
 use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
+use super::session::Session;
+
 /// Config of the EMA crossover strategy, loaded from TOML.
 #[derive(Debug, Clone, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +32,8 @@ pub struct EmaCrossConfig {
     pub trade_size: Quantity,
     /// How far back the warmup history starts.
     pub warmup: SignedDuration,
+    /// The hours traded: only bars wholly inside count.
+    pub session: Session,
 }
 
 impl EmaCrossConfig {
@@ -45,7 +49,9 @@ impl EmaCrossConfig {
     /// # Errors
     ///
     /// Returns an error if the config is inconsistent: no instruments,
-    /// several venues, periods out of order, a non-positive size or warmup.
+    /// several venues, a bar spec not aggregated on time, periods out of
+    /// order, a non-positive size or warmup, a session not opening before
+    /// it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.instrument_ids.is_empty(), "no instruments");
         let venue = self.instrument_ids[0].venue;
@@ -53,13 +59,19 @@ impl EmaCrossConfig {
             self.instrument_ids.iter().all(|id| id.venue == venue),
             "instruments span more than one venue"
         );
+        // The session needs the bar's span, so its length.
+        ensure!(
+            self.bar_spec.is_time_aggregated(),
+            "bar spec {} is not aggregated on time",
+            self.bar_spec
+        );
         ensure!(
             self.fast_period > 0 && self.fast_period < self.slow_period,
             "fast period must be positive and below the slow period"
         );
         ensure!(self.trade_size.is_positive(), "trade size must be positive");
         ensure!(self.warmup.is_positive(), "warmup must be positive");
-        Ok(())
+        self.session.validate()
     }
 }
 
@@ -88,6 +100,7 @@ mod tests {
         bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
         trade_size = "1"
         warmup = "720h"
+        session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
     "#;
 
     #[test]
@@ -100,6 +113,41 @@ mod tests {
             config.bar_types()[1].to_string(),
             "ESM4.CME-1-HOUR-LAST-EXTERNAL"
         );
+    }
+
+    #[test]
+    fn loads_the_session() {
+        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
+        let session = config.session;
+        assert_eq!(session.time_zone.iana_name(), Some("America/Chicago"));
+        assert_eq!(session.open, jiff::civil::time(8, 30, 0, 0));
+        assert_eq!(session.close, jiff::civil::time(15, 0, 0, 0));
+    }
+
+    #[test]
+    fn rejects_an_unknown_time_zone_at_load() {
+        let toml = TOML.replace("America/Chicago", "America/Gotham");
+        let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
+        assert!(err.to_string().contains("America/Gotham"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_session_not_opening_before_its_close() {
+        let toml = TOML.replace("open = \"08:30\"", "open = \"15:00\"");
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("session open"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_bar_spec_not_aggregated_on_time() {
+        let toml = TOML.replace(
+            "step = 1, aggregation = \"HOUR\"",
+            "step = 100, aggregation = \"TICK\"",
+        );
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("time"), "{err}");
     }
 
     #[test]

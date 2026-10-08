@@ -8,9 +8,9 @@ use std::path::Path;
 
 use helix_trader::{
     backtest::Backtest,
-    strategy::ema::{EmaCross, EmaCrossConfig},
+    strategy::ema::{EmaCross, EmaCrossConfig, Session},
 };
-use jiff::{SignedDuration, Timestamp};
+use jiff::{SignedDuration, Timestamp, civil::time, tz::TimeZone};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
     data::{Bar, BarType},
@@ -114,8 +114,19 @@ pub fn backtest(catalog: &Path, commission: &str) -> Backtest {
     }
 }
 
+/// The session of the EMA crossover on the fixture: Xetra's continuous
+/// trading, so the bars closing 10:00 to 17:00 Frankfurt time (09:00 to
+/// 16:00 UTC in January) count, eight of the 24 a day.
+pub fn session() -> Session {
+    Session {
+        time_zone: TimeZone::get("Europe/Berlin").unwrap(),
+        open: time(9, 0, 0, 0),
+        close: time(17, 30, 0, 0),
+    }
+}
+
 /// The EMA crossover on the fixture: 5 against 15 bars, 10 shares long or
-/// short.
+/// short, inside the session.
 pub fn ema_cross() -> EmaCross {
     let config = EmaCrossConfig::builder()
         .instrument_ids(vec![InstrumentId::from(INSTRUMENT_ID)])
@@ -124,11 +135,12 @@ pub fn ema_cross() -> EmaCross {
         .slow_period(15)
         .trade_size(Quantity::from(10))
         .warmup(WARMUP)
+        .session(session())
         .build();
     EmaCross::new(config).unwrap()
 }
 
 /// The orders the EMA crossover sends on the fixture.
-pub const EMA_ORDERS: usize = 9;
+pub const EMA_ORDERS: usize = 4;
 /// Its PnL (total) on the fixture without commission, slippage included.
-pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -31.0;
+pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -231.60000000000036;

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use jiff::SignedDuration;
 use nautilus_indicators::{
     average::ema::ExponentialMovingAverage,
     indicator::{Indicator, MovingAverage},
@@ -7,14 +8,17 @@ use nautilus_indicators::{
 use nautilus_model::{data::Bar, identifiers::InstrumentId};
 use rust_decimal::Decimal;
 
-use super::config::EmaCrossConfig;
+use super::{config::EmaCrossConfig, session::Session};
 
 /// Target book of the EMA crossover: long `trade_size` while the fast EMA is
-/// above the slow one, short otherwise.
+/// above the slow one, short otherwise. Only bars wholly inside the session
+/// count: the others neither move the EMAs nor get a target.
 #[derive(Debug)]
 pub(super) struct Book {
     signals: HashMap<InstrumentId, Crossover>,
     trade_size: Decimal,
+    session: Session,
+    bar_length: SignedDuration,
 }
 
 impl Book {
@@ -27,19 +31,29 @@ impl Book {
         Self {
             signals,
             trade_size: config.trade_size.as_decimal(),
+            session: config.session.clone(),
+            bar_length: config.bar_spec.timedelta(),
         }
     }
 
-    /// Feeds a bar of a traded instrument; bars of other instruments are ignored.
+    /// Feeds a bar of a traded instrument inside the session; other bars are
+    /// ignored.
     pub(super) fn update(&mut self, bar: &Bar) {
+        if !self.in_session(bar) {
+            return;
+        }
         if let Some(signal) = self.signals.get_mut(&bar.bar_type.instrument_id()) {
             signal.update(bar);
         }
     }
 
-    /// Signed target position, or `None` until both EMAs are warm.
-    pub(super) fn target(&self, instrument_id: &InstrumentId) -> Option<Decimal> {
-        let signal = self.signals.get(instrument_id)?;
+    /// Signed target position to trade on `bar`, or `None` if the bar is
+    /// outside the session or until both EMAs are warm.
+    pub(super) fn target(&self, bar: &Bar) -> Option<Decimal> {
+        if !self.in_session(bar) {
+            return None;
+        }
+        let signal = self.signals.get(&bar.bar_type.instrument_id())?;
         signal.is_long().map(|long| {
             if long {
                 self.trade_size
@@ -47,6 +61,11 @@ impl Book {
                 -self.trade_size
             }
         })
+    }
+
+    /// Whether the bar, stamped on its close, lies wholly inside the session.
+    fn in_session(&self, bar: &Bar) -> bool {
+        self.session.contains(bar.ts_event.into(), self.bar_length)
     }
 }
 
@@ -77,6 +96,7 @@ impl Crossover {
 
 #[cfg(test)]
 mod tests {
+    use jiff::{SignedDuration, Timestamp};
     use nautilus_model::data::BarType;
 
     use super::*;
@@ -90,13 +110,14 @@ mod tests {
             slow_period = 4
             trade_size = "3"
             warmup = "24h"
+            session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
             "#,
         )
         .unwrap()
     }
 
-    fn bar(close: &str, ts: u64) -> Bar {
-        let bar_type = BarType::from("ESM4.CME-1-HOUR-LAST-EXTERNAL");
+    fn bar_on(instrument: &str, close: &str, ts: Timestamp) -> Bar {
+        let bar_type = BarType::from(format!("{instrument}-1-HOUR-LAST-EXTERNAL").as_str());
         Bar::new(
             bar_type,
             close.into(),
@@ -109,43 +130,91 @@ mod tests {
         )
     }
 
-    fn feed(book: &mut Book, closes: &[&str]) {
+    fn bar(close: &str, ts: Timestamp) -> Bar {
+        bar_on("ESM4.CME", close, ts)
+    }
+
+    /// Hourly bars inside the session on 2026-01-07: the first closes at
+    /// 10:00 Frankfurt time (09:00 UTC in winter), the eighth and last at
+    /// 17:00.
+    fn inside(n: usize) -> Timestamp {
+        assert!(n < 8);
+        let first: Timestamp = "2026-01-07T09:00:00Z".parse().unwrap();
+        first + SignedDuration::from_hours(n as i64)
+    }
+
+    /// Hourly bars after the close the same evening, from 18:00 to 23:00.
+    fn outside(n: usize) -> Timestamp {
+        assert!(n < 6);
+        inside(7) + SignedDuration::from_hours(n as i64 + 1)
+    }
+
+    /// The first bar inside the session the next day.
+    fn next_morning() -> Timestamp {
+        inside(0) + SignedDuration::from_hours(24)
+    }
+
+    fn feed(book: &mut Book, closes: &[&str], at: fn(usize) -> Timestamp) {
         for (i, close) in closes.iter().enumerate() {
-            book.update(&bar(close, i as u64 + 1));
+            book.update(&bar(close, at(i)));
         }
     }
+
+    const UPTREND: [&str; 6] = ["100", "101", "102", "103", "104", "105"];
+    const DOWNTREND: [&str; 6] = ["105", "104", "103", "102", "101", "100"];
+    const CRASH: [&str; 6] = ["90", "80", "70", "60", "50", "40"];
 
     #[test]
     fn no_target_until_warm() {
         let mut book = Book::new(&config());
-        feed(&mut book, &["100", "101", "102"]);
-        assert_eq!(book.target(&InstrumentId::from("ESM4.CME")), None);
+        feed(&mut book, &UPTREND[..3], inside);
+        assert_eq!(book.target(&bar("102", inside(3))), None);
     }
 
     #[test]
     fn long_in_an_uptrend() {
         let mut book = Book::new(&config());
-        feed(&mut book, &["100", "101", "102", "103", "104", "105"]);
-        assert_eq!(
-            book.target(&InstrumentId::from("ESM4.CME")),
-            Some(Decimal::from(3))
-        );
+        feed(&mut book, &UPTREND, inside);
+        assert_eq!(book.target(&bar("105", inside(6))), Some(Decimal::from(3)));
     }
 
     #[test]
     fn short_in_a_downtrend() {
         let mut book = Book::new(&config());
-        feed(&mut book, &["105", "104", "103", "102", "101", "100"]);
-        assert_eq!(
-            book.target(&InstrumentId::from("ESM4.CME")),
-            Some(Decimal::from(-3))
-        );
+        feed(&mut book, &DOWNTREND, inside);
+        assert_eq!(book.target(&bar("100", inside(6))), Some(Decimal::from(-3)));
     }
 
     #[test]
     fn ignores_untraded_instruments() {
         let mut book = Book::new(&config());
-        feed(&mut book, &["100", "101", "102", "103", "104", "105"]);
-        assert_eq!(book.target(&InstrumentId::from("ESH4.CME")), None);
+        feed(&mut book, &UPTREND, inside);
+        assert_eq!(book.target(&bar_on("ESH4.CME", "105", inside(6))), None);
+    }
+
+    #[test]
+    fn bars_outside_the_session_do_not_warm_the_emas() {
+        let mut book = Book::new(&config());
+        feed(&mut book, &UPTREND[..3], inside);
+        feed(&mut book, &UPTREND, outside);
+        assert_eq!(book.target(&bar("105", next_morning())), None);
+    }
+
+    #[test]
+    fn bars_outside_the_session_do_not_move_the_emas() {
+        let mut book = Book::new(&config());
+        feed(&mut book, &UPTREND, inside);
+        feed(&mut book, &CRASH, outside);
+        assert_eq!(
+            book.target(&bar("105", next_morning())),
+            Some(Decimal::from(3))
+        );
+    }
+
+    #[test]
+    fn no_target_on_a_bar_outside_the_session() {
+        let mut book = Book::new(&config());
+        feed(&mut book, &UPTREND, inside);
+        assert_eq!(book.target(&bar("105", outside(0))), None);
     }
 }

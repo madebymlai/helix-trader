@@ -52,6 +52,8 @@ pub struct TrendConfig {
     #[serde(default = "default_warmup")]
     #[builder(default = default_warmup())]
     pub warmup: SignedDuration,
+    /// The hours traded: only bars wholly inside count.
+    pub session: Session,
 }
 ```
 
@@ -59,6 +61,7 @@ pub struct TrendConfig {
 instrument_ids = ["ESH4.CME", "ESM4.CME"]
 bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
 warmup = "720h"
+session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 ```
 
 - `InstrumentId` and `BarType` deserialize from their strings.
@@ -67,8 +70,13 @@ warmup = "720h"
   The enums parse case-insensitively.
 - `SignedDuration` (`jiff`, with its `serde` feature) parses a duration
   string such as `"720h"`.
+- `Session` (`ema/session.rs`) holds a `jiff::tz::TimeZone`, read from its
+  IANA name with `#[serde(with = "jiff::fmt::serde::tz::required")]` (an
+  unknown name fails at load; `TimeZone` has no plain `Deserialize`), and
+  `open` and `close` as `jiff::civil::Time` (`"08:30"`).
 - Loading then validates what serde cannot: at least one instrument, all on
-  one venue, and a bar spec the adapter can serve.
+  one venue, a bar spec the adapter can serve and aggregated on time (the
+  session needs the bar's length), a session opening before it closes.
 
 The config builds the bar types the strategy uses, one per instrument:
 `BarType::new(id, bar_spec, AggregationSource::External)`.
@@ -211,6 +219,15 @@ initialise and models to train. A model is trained by the strategy itself.
   (`timestamp_ns()`, `utc_now()`, timers, alerts); randomness seeded from
   the config. Never the system clock: in backtest it is not simulated time.
 - **No look-ahead.** Decisions use only bars already received.
+- **Trade inside the session.** A bar counts only if its whole span,
+  `[ts_event - bar length, ts_event]`, lies inside `[open, close]` on the
+  local day of its close, in the session's time zone, so daylight saving
+  keeps the local hours. Bars outside are ignored: they do not move the
+  indicators, warmup included, and get no target, so no order. The pure
+  core applies the rule on the bar's timestamp, never the clock, so
+  backtest and live agree. With hourly bars and 09:00-17:30, the bars
+  closing 10:00 to 17:00 count. `Session` lives in the EMA folder until a
+  second strategy needs it.
 - **Log through `log`** macros.
 
 ## Adding a strategy

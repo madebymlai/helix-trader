@@ -292,10 +292,10 @@ a malformed one fails at argument parsing. A negative commission
 (`--commission="-3 EUR"`) fails before the node is built. The engine log
 goes to stdout before the results, configured by `NAUTILUS_LOG`.
 
-On the fixture catalog of the tests (EMA 5/15, 10 shares, warmup 48h, 3 EUR
-commission) it prints `Orders: 9`, `PnL (total): -58.000000` (the
-fixture's -31 without commission, less 9 × 3 EUR) and a final balance of
-`9942.00 EUR`.
+On the fixture catalog of the tests (EMA 5/15, 10 shares, warmup 48h,
+Xetra's session, 3 EUR commission) it prints `Orders: 4`,
+`PnL (total): -243.600000` (the fixture's -231.60 without commission, less
+4 × 3 EUR) and a final balance of `9756.40 EUR`.
 
 ## Costs
 
