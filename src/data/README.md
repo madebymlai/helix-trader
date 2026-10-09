@@ -318,8 +318,11 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   `fill_catalog` refuses it on a first fill, and on a resumed window takes
   it as nothing new.
 - **Duration per request** (`request_duration`), by bar size, within IB's
-  documented maximum duration per bar size (`S` seconds, `D` trading
-  sessions, `Y` years):
+  documented maximum duration per bar size (`S` seconds, `D` whole
+  trading days, `Y` years). 1 MINUTE uses seconds, not `1 D`: `D` counts
+  whole trading days, so a `1 D` request ending in a session's first
+  minute answers that one bar and the walk back stops there; `86400 S`
+  answers the 1,440 bars before the end, across sessions and weekends.
 
   | Bar size | Duration | Requests for a year (about 252 sessions) |
   |---|---|---|
@@ -327,7 +330,7 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   | 5 SECOND | `3600 S` | thousands: short windows only |
   | 15 SECOND | `14400 S` | about 1500: short windows only |
   | 30 SECOND | `28800 S` | about 750: short windows only |
-  | 1 MINUTE | `1 D` | about 252 |
+  | 1 MINUTE | `86400 S` (1,440 bars) | about 165 per bar type |
   | 2 MINUTE | `2 D` | about 126 |
   | 3, 5, 10 MINUTE | `5 D` | about 51 |
   | 15, 20 MINUTE | `10 D` | about 26 |
@@ -342,8 +345,12 @@ history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fe
   year of 1-HOUR bars takes about 13 requests; windows of minute bars
   beyond a few months, or of second bars beyond a few hours, can reach the
   limit. Split such a fill into several runs (each resumes where the last
-  stopped). The durations and pacing rules are from IB's documentation,
-  not tested on the gateway.
+  stopped). Verified on the paper gateway (2026-10-09), SXR8 1-MINUTE
+  LAST, BID and ASK: September and August 2026 back to back, 84 requests
+  in about six minutes, no pacing error and no slowdown (3-4 s per
+  request, 1,440 bars each); each month complete (930 bars a session);
+  about 3.5 minutes per instrument-month for the three types, so about
+  40 minutes per instrument-year.
 - **Timestamps.** IB gives the bar open; the adapter stamps
   `ts_event = ts_init` = open + bar duration, the close. Bars come back
   sorted by `ts_event`. All intervals and roll dates are on the close.

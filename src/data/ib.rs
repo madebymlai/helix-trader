@@ -232,8 +232,10 @@ fn bar_spec(bar_type: &BarType) -> anyhow::Result<String> {
 /// The IB duration of one bar request of `bar_type`: within IB's maximum
 /// duration per bar size, and long enough that a year of 1-HOUR bars takes
 /// about 13 requests, well under IB's pacing limit of 60 requests in ten
-/// minutes. `D` counts trading sessions. Takes bar types `bar_spec`
-/// accepted.
+/// minutes. `D` counts whole trading days: a `1 D` request ending in a
+/// session's first minute answers that one bar, so 1-MINUTE bars use
+/// `86400 S`, the 1,440 bars before the end, across sessions (IB's
+/// documented alternative). Takes bar types `bar_spec` accepted.
 fn request_duration(bar_type: &BarType) -> &'static str {
     let spec = bar_type.spec();
     match (spec.aggregation, spec.step.get()) {
@@ -241,7 +243,7 @@ fn request_duration(bar_type: &BarType) -> &'static str {
         (BarAggregation::Second, 5) => "3600 S",
         (BarAggregation::Second, 15) => "14400 S",
         (BarAggregation::Second, _) => "28800 S",
-        (BarAggregation::Minute, 1) => "1 D",
+        (BarAggregation::Minute, 1) => "86400 S",
         (BarAggregation::Minute, 2) => "2 D",
         (BarAggregation::Minute, 3..=10) => "5 D",
         (BarAggregation::Minute, 15 | 20) => "10 D",
@@ -617,7 +619,7 @@ mod tests {
             ("5-SECOND-BID", "3600 S"),
             ("15-SECOND-LAST", "14400 S"),
             ("30-SECOND-LAST", "28800 S"),
-            ("1-MINUTE-LAST", "1 D"),
+            ("1-MINUTE-LAST", "86400 S"),
             ("2-MINUTE-LAST", "2 D"),
             ("3-MINUTE-LAST", "5 D"),
             ("5-MINUTE-LAST", "5 D"),
