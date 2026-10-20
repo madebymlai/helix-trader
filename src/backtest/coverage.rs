@@ -225,6 +225,7 @@ mod tests {
                 .collect(),
             start: ts("2026-10-02T00:00:00.000000001Z"),
             end: ts("2026-10-31T00:00:00Z"),
+            bar_types: vec![],
             warmup: SignedDuration::from_hours(24),
             commission: Money::from("3 USD"),
             balance: Money::from("10000 USD"),

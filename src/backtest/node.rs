@@ -24,7 +24,7 @@ use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs};
-use crate::data::to_unix_nanos;
+use crate::{data::to_unix_nanos, strategy::warmup};
 
 /// The id of the one run of the node.
 const RUN_ID: &str = "backtest";
@@ -33,9 +33,10 @@ const RUN_ID: &str = "backtest";
 /// venue, which fills orders on the quotes, the instruments' quotes of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them), and the catalog registered in the
-/// engine so that it serves the strategy's warmup requests. The engine starts 1 ns before `start` (see
-/// `Backtest::engine_start`). Build and run errors are raised, not only
-/// logged.
+/// engine so that it serves the strategy's warmup requests, with a cache
+/// holding the warmup bars (`warmup::cache_config`). The engine starts
+/// 1 ns before `start` (see `Backtest::engine_start`). Build and run errors
+/// are raised, not only logged.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     let venue = venue(&backtest.instrument_ids)?;
     // Absolute: the node's DataFusion reader finds no object store for a
@@ -66,7 +67,9 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
                 .build()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
     let engine_config = BacktestEngineConfig::builder()
+        .cache(cache)
         .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
         .logging(backtest.logging.clone())
         .build();
@@ -114,7 +117,7 @@ mod tests {
 
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
-    use nautilus_model::types::Money;
+    use nautilus_model::{data::BarType, types::Money};
 
     use super::*;
 
@@ -127,6 +130,10 @@ mod tests {
             ],
             start: "2026-07-01T00:00:00Z".parse().unwrap(),
             end: "2026-10-01T00:00:00Z".parse().unwrap(),
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL"),
+                BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
+            ],
             warmup: jiff::SignedDuration::from_hours(720),
             commission: Money::from("3 EUR"),
             balance: Money::from("10000 EUR"),
@@ -217,6 +224,14 @@ mod tests {
         let absolute = absolute.to_str().unwrap();
         assert_eq!(config.data()[0].catalog_path(), absolute);
         assert_eq!(config.engine().catalogs[0].path(), absolute);
+    }
+
+    #[test]
+    fn the_cache_holds_the_warmup_of_the_shortest_bars_on_top_of_the_default() {
+        // 720 hours of 1-minute bars: 43,200, and one spanning the start.
+        let config = run_config(&backtest()).unwrap();
+        let cache = config.engine().cache.as_ref().unwrap();
+        assert_eq!(cache.bar_capacity, 10_000 + 43_201);
     }
 
     #[test]

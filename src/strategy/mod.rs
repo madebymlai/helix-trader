@@ -18,7 +18,7 @@ pub mod ema;
 pub mod warmup;
 
 use jiff::SignedDuration;
-use nautilus_model::identifiers::InstrumentId;
+use nautilus_model::{data::BarType, identifiers::InstrumentId};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -26,6 +26,9 @@ use nautilus_model::identifiers::InstrumentId;
 pub struct DataRequirements {
     /// The instruments traded, whose history the catalog stores.
     pub instrument_ids: Vec<InstrumentId>,
+    /// The internal bar types the strategy warms up on: the node sizes its
+    /// cache to hold their warmup (see `warmup::cache_config`).
+    pub bar_types: Vec<BarType>,
     /// How far back before the run the warmup history starts.
     pub warmup: SignedDuration,
 }

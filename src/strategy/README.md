@@ -85,7 +85,7 @@ The config builds the bar types the strategy uses, one per instrument:
 `SXR8.IBIS-1-HOUR-MID-INTERNAL`.
 
 The config also states what the strategy needs from data, as one
-`strategy::DataRequirements`: its instruments and its warmup.
+`strategy::DataRequirements`: its instruments, its bar types and its warmup.
 `fill_catalog`, backtest and live read them from it, never from the
 config's fields:
 
@@ -93,6 +93,7 @@ config's fields:
 pub fn data_requirements(&self) -> DataRequirements {
     DataRequirements {
         instrument_ids: self.instrument_ids.clone(),
+        bar_types: self.bar_types(),
         warmup: self.warmup,
     }
 }
@@ -240,6 +241,15 @@ let bars = warmup::bars(self, quotes);
   arrives in `on_historical_quotes`. `bars` reads that instrument's internal
   bars from the cache (newest first there) and returns them oldest first.
   No strategy names the request params or reads the cache for its warmup.
+- **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
+  bar type (default 10,000) and evicts the oldest beyond it, so a longer
+  warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
+  gives the node its cache config: the default, its bar capacity raised by
+  the most bars the warmup builds of one bar type (warmup over bar length,
+  plus the bar spanning the start), the default left on top as headroom.
+  Past the cache's maximum of 1,000,000 it fails, naming the bar type, the
+  bars needed and the capacity, and the run does not start. The backtest
+  sets it on `BacktestEngineConfig::cache`, live on `LiveNodeConfig::cache`.
 - **Response.** One quotes response per instrument, before the first
   `on_bar`. An `Err` returned from `on_historical_quotes` is logged, not
   propagated: a failed warmup does not stop the run. An unanswered request

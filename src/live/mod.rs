@@ -29,7 +29,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use crate::{
     data::{IbGateway, IbHistory, fill_catalog},
-    strategy::DataRequirements,
+    strategy::{DataRequirements, warmup},
 };
 
 /// One live run: the strategy trades `account` through the IB Gateway or
@@ -58,13 +58,15 @@ impl Live {
     /// # Errors
     ///
     /// Returns an error if the account does not match the port, if the
-    /// catalog cannot be filled (IB unreachable, an instrument IB does not
-    /// know, a catalog starting after `now - warmup`), or if the node fails
-    /// (see `node::run`).
+    /// cache cannot hold the warmup bars of a bar type (see
+    /// `warmup::cache_config`), if the catalog cannot be filled (IB
+    /// unreachable, an instrument IB does not know, a catalog starting after
+    /// `now - warmup`), or if the node fails (see `node::run`).
     pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
+        let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
         let clients = ib::clients(&self.gateway, &self.account, &requirements.instrument_ids)?;
         // The node would install the logger when built, after the fill:
         // install it now with the node's trader and config, and the node
@@ -81,6 +83,7 @@ impl Live {
         node::run(
             &self.catalog,
             self.logging.clone(),
+            cache,
             clients.into_node_clients(),
             &requirements.instrument_ids,
             strategy,
@@ -172,6 +175,7 @@ mod tests {
     fn requirements() -> DataRequirements {
         DataRequirements {
             instrument_ids: instruments().iter().map(Instrument::id).collect(),
+            bar_types: vec![],
             warmup: SignedDuration::from_hours(2),
         }
     }

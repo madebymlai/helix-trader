@@ -12,6 +12,7 @@ use std::{fmt::Debug, path::Path};
 use anyhow::Context;
 use nautilus_common::{
     actor::DataActorNative,
+    cache::CacheConfig,
     component::Component,
     enums::Environment,
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
@@ -40,7 +41,8 @@ pub(super) struct Clients {
 }
 
 /// Builds a live node on `clients`, the default route for data and orders,
-/// with the catalog at `catalog` serving historical requests, adds
+/// with the catalog at `catalog` serving historical requests and `cache`
+/// configuring the cache (sized for the warmup), adds
 /// `strategy` claiming the external orders of `instrument_ids`, and runs it
 /// until SIGINT or SIGTERM.
 ///
@@ -56,6 +58,7 @@ pub(super) struct Clients {
 pub(super) async fn run<S>(
     catalog: &Path,
     logging: LoggerConfig,
+    cache: CacheConfig,
     clients: Clients,
     instrument_ids: &[InstrumentId],
     strategy: S,
@@ -71,6 +74,7 @@ where
         trader_id: trader_id(),
         logging,
         catalogs: vec![DataCatalogConfig::new(catalog.to_string(), None, None)],
+        cache: Some(cache),
         exec_engine: LiveExecutionEngineConfig {
             reconciliation: true,
             open_check_interval_secs: Some(10.0),

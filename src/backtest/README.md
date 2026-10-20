@@ -34,6 +34,7 @@ Dependencies, all pinned at `=0.65.0`:
 pub struct Backtest {
     pub catalog: PathBuf,                // instruments, quotes, warmup
     pub instrument_ids: Vec<InstrumentId>, // quotes replayed; the venue derives from them
+    pub bar_types: Vec<BarType>,   // the strategy's, the cache sized for their warmup
     pub start: Timestamp,
     pub end: Timestamp,
     pub warmup: SignedDuration,    // the strategy's
@@ -50,7 +51,8 @@ impl Backtest {
 
 Only Nautilus types cross it. `run` fails before building the node on no
 instruments, instruments on several venues, a negative commission or warmup,
-`start` after `end`, or a catalog that cannot serve the run (see Coverage
+`start` after `end`, a warmup the cache cannot hold (see the strategy
+README), or a catalog that cannot serve the run (see Coverage
 check). A relative catalog path is made absolute: the node's DataFusion
 reader finds no object store for `file://catalog/...`.
 

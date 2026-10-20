@@ -178,8 +178,8 @@ pub fn catalog(quotes: &[QuoteTick], from: Timestamp, to: Timestamp) -> TempDir 
     dir
 }
 
-/// A backtest of the instrument over `[start, end]` after `warmup`, with
-/// `commission` per order and 10,000 EUR to start.
+/// A backtest of the instrument over `[start, end]` after `warmup` of its
+/// hour MID bars, with `commission` per order and 10,000 EUR to start.
 pub fn backtest(
     catalog: &Path,
     start: Timestamp,
@@ -190,6 +190,7 @@ pub fn backtest(
     Backtest {
         catalog: catalog.to_path_buf(),
         instrument_ids: vec![InstrumentId::from(INSTRUMENT_ID)],
+        bar_types: vec![BarType::from(MID_BAR_TYPE)],
         start,
         end,
         warmup,

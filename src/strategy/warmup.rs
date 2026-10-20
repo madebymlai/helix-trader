@@ -13,13 +13,21 @@
 //! never `on_historical_bars`, and are there when the quotes response
 //! arrives.
 //!
+//! The cache keeps at most `bar_capacity` bars per bar type and evicts the
+//! oldest beyond it, so the node running the strategy takes its cache
+//! config from `cache_config`, which holds the whole warmup.
+//!
 //! A strategy calls `start` from `on_start` and `bars` from
 //! `on_historical_quotes`.
 
 use std::{collections::BTreeSet, fmt::Debug};
 
+use anyhow::{Context, ensure};
 use jiff::SignedDuration;
-use nautilus_common::actor::{DataActor, DataActorNative};
+use nautilus_common::{
+    actor::{DataActor, DataActorNative},
+    cache::CacheConfig,
+};
 use nautilus_core::Params;
 use nautilus_model::{
     data::{Bar, BarType, QuoteTick},
@@ -82,4 +90,53 @@ where
     // The cache holds the newest first.
     bars.sort_by_key(|bar| bar.ts_event);
     bars
+}
+
+/// The cache config of a node whose strategy warms up on `bar_types` over
+/// `warmup`: Nautilus' default, its bar capacity raised by the most bars
+/// the warmup builds of one bar type. The default capacity stays on top as
+/// headroom for the bars built while the warmup is pending.
+///
+/// # Errors
+///
+/// Returns an error if the warmup is negative, if a bar type is not
+/// aggregated on time, or if the capacity a warmup needs is beyond what the
+/// cache allows.
+pub fn cache_config(bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Result<CacheConfig> {
+    let headroom = CacheConfig::default().bar_capacity;
+    let mut longest: Option<(BarType, usize)> = None;
+    for bar_type in bar_types {
+        let needed = warmup_bars(bar_type, warmup)?;
+        if longest.is_none_or(|(_, most)| needed > most) {
+            longest = Some((*bar_type, needed));
+        }
+    }
+    let Some((bar_type, needed)) = longest else {
+        return Ok(CacheConfig::default());
+    };
+    let capacity = headroom.saturating_add(needed);
+    CacheConfig::builder()
+        .bar_capacity(capacity)
+        .build()
+        .with_context(|| {
+            format!(
+                "the warmup of {warmup:#} needs up to {needed} bars of {bar_type}: \
+                 the cache cannot hold {capacity} bars ({headroom} of headroom included)"
+            )
+        })
+}
+
+/// The most bars a warmup of `warmup` builds of `bar_type`: one per bar
+/// length, and one for the bar spanning the warmup start.
+fn warmup_bars(bar_type: &BarType, warmup: SignedDuration) -> anyhow::Result<usize> {
+    let spec = bar_type.spec();
+    ensure!(
+        spec.is_time_aggregated(),
+        "bar type {bar_type} is not aggregated on time: no bar count for its warmup"
+    );
+    let warmup_ns =
+        u128::try_from(warmup.as_nanos()).with_context(|| format!("negative warmup {warmup:#}"))?;
+    let length_ns = spec.timedelta().as_nanos().unsigned_abs();
+    let bars = warmup_ns.div_ceil(length_ns) + 1;
+    usize::try_from(bars).with_context(|| format!("no bar count for a warmup of {warmup:#}"))
 }

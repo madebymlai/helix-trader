@@ -16,7 +16,7 @@ use nautilus_backtest::result::BacktestResult;
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
-use nautilus_model::{identifiers::InstrumentId, types::Money};
+use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 pub use self::report::report;
@@ -32,6 +32,10 @@ pub struct Backtest {
     /// the venue of the run derives from. Strategies get their bars by
     /// having Nautilus build them from these quotes.
     pub instrument_ids: Vec<InstrumentId>,
+    /// The internal bar types the strategy warms up on: the engine's cache
+    /// is sized to hold their warmup bars, which reach the strategy only
+    /// through it.
+    pub bar_types: Vec<BarType>,
     pub start: Timestamp,
     pub end: Timestamp,
     /// The strategy's warmup: the catalog must cover the quotes from
@@ -53,7 +57,8 @@ impl Backtest {
     ///
     /// Returns an error if the inputs are inconsistent (no instruments,
     /// several venues, a negative commission or warmup, `start` not before
-    /// `end`), if the catalog misses an instrument or part of its quotes
+    /// `end`), if the cache cannot hold the warmup bars of a bar type (see
+    /// `warmup::cache_config`), if the catalog misses an instrument or part of its quotes
     /// over `[start - 1 ns - warmup, end]`, or if the node fails to build
     /// or run.
     pub fn run<S>(&self, strategy: S) -> anyhow::Result<BacktestResult>

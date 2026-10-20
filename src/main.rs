@@ -226,6 +226,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
         instrument_ids: requirements.instrument_ids,
+        bar_types: requirements.bar_types,
         start,
         end,
         warmup: requirements.warmup,

@@ -210,6 +210,7 @@ let config = LiveNodeConfig {
     environment: Environment::Live,
     trader_id,
     catalogs: vec![DataCatalogConfig::new("data/catalog".to_string(), None, None)],
+    cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
     ..Default::default()
 };
 let builder = LiveNodeBuilder::from_config(config)?;   // then the same with_* chain
