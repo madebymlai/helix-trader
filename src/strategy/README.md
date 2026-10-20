@@ -279,6 +279,12 @@ let bars = warmup::bars(self, quotes);
   params from `data::rolls`.
 - **Whole book.** On each bar, compute the target for every instrument and
   rebalance towards it. No other strategy shares the account.
+- **Orders.** The EMA strategy decides on each bar's close and sends a
+  market order to reach its target position. Other strategies may use
+  limit or stop orders instead. The backtest checks those against each
+  1-minute quote (see Fills in the backtest README), so a price touched
+  and left within the same minute is missed: simulating them well needs
+  tick quotes.
 - **Time and randomness from Nautilus.** Time from `self.clock()`
   (`timestamp_ns()`, `utc_now()`, timers, alerts); randomness seeded from
   the config. Never the system clock: in backtest it is not simulated time.

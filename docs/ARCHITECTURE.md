@@ -15,6 +15,11 @@ Nautilus does not already provide.
 - **One strategy at a time.** The repo can hold several interchangeable
   strategies, but a process runs one. That strategy computes the whole book
   internally and rebalances itself. No allocator, no sleeves.
+- **Orders.** The EMA strategy decides on each bar's close and sends a
+  market order to reach its target position. Other strategies may use
+  limit or stop orders instead. The backtest checks those against each
+  1-minute quote, so a price touched and left within the same minute is
+  missed: simulating them well needs tick quotes.
 - **One cadence.** A strategy runs on one bar cadence, and that cadence can
   be intraday.
 - **The strategy config is the universe.** Instruments and cadence live in
