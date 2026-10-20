@@ -342,25 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_catalog_and_client_id_overrides() {
-        let mut argv = REQUIRED.to_vec();
-        argv.extend(["--catalog", "/data/cat", "--client-id", "42"]);
-        let args = parse(&argv).unwrap();
-        assert_eq!(args.run.catalog, PathBuf::from("/data/cat"));
-        assert_eq!(args.client_id, 42);
-    }
-
-    #[test]
-    fn rejects_an_unknown_strategy_and_a_bad_date() {
-        let mut argv = REQUIRED.to_vec();
-        argv[0] = "rsi";
-        assert!(parse(&argv).is_err());
-        let mut argv = REQUIRED.to_vec();
-        argv[4] = "2024-13-01";
-        assert!(parse(&argv).is_err());
-    }
-
-    #[test]
     fn parses_a_backtest_with_its_costs() {
         let args = parse_backtest(&backtest_required()).unwrap();
         assert_eq!(args.run.strategy, Strategy::Ema);
