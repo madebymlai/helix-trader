@@ -404,7 +404,9 @@ or `--port`: an IB Gateway or TWS run by hand is not used.
   `nautilus-ib-gateway-live` (4001), image `ghcr.io/gnzsnz/ib-gateway`
   (IBC logs in). `safe_start` reuses a running container and replaces a
   stopped or created one. The container stays up after the command, with
-  restart policy `always`; the next command reuses it.
+  restart policy `always`; the next command reuses it. The adapter creates
+  the container without pulling the image: pull it once beforehand
+  (`docker pull ghcr.io/gnzsnz/ib-gateway:stable`).
 - **Login wait.** `start` waits for the login of a container it creates,
   but returns at once for one still starting, so `IbGateway` polls
   `container_status()` every second until `Ready`, within the adapter's
