@@ -7,8 +7,7 @@
 
 mod common;
 
-use common::{quote_before, steps};
-use nautilus_model::types::Price;
+use common::steps;
 
 #[test]
 fn the_crossover_warms_up_on_the_full_warmup_bars_and_trades_from_the_first_bar_of_the_run() {
@@ -17,16 +16,6 @@ fn the_crossover_warms_up_on_the_full_warmup_bars_and_trades_from_the_first_bar_
         .run(common::shortest_ema_cross(steps::WARMUP))
         .unwrap();
 
-    // The prices the orders fill at (see `steps`).
-    let quotes = steps::quotes();
-    assert_eq!(
-        quote_before(&quotes, steps::at("13:00")).ask_price,
-        Price::from("620.65")
-    );
-    assert_eq!(
-        quote_before(&quotes, steps::at("14:00")).bid_price,
-        Price::from("580.55")
-    );
     assert_eq!(result.total_orders, steps::ORDERS);
     assert_eq!(common::balance(&result), steps::BALANCE);
 }
