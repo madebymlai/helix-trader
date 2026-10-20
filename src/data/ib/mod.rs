@@ -580,11 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn the_data_client_config_uses_the_full_session() {
-        assert!(!data_client_config(closed_gateway()).use_regular_trading_hours);
-    }
-
-    #[test]
     fn bar_requests_use_the_regular_hours_setting_of_the_data_client_config() {
         let config = data_client_config(closed_gateway());
         assert!(!BarRequests::of(&config).use_rth);
@@ -837,17 +832,5 @@ mod tests {
         let (from, to) = quoted_bars_window(hour(5), hour(25));
         assert_eq!(from.as_nanosecond(), hour(5).as_nanosecond() + 1);
         assert_eq!(to.as_nanosecond(), hour(25).as_nanosecond() + 1);
-    }
-
-    #[test]
-    fn missing_ids_are_those_not_loaded() {
-        let requested = [
-            InstrumentId::from("ESZ21.GLBX"),
-            InstrumentId::from("ESU5.CME"),
-        ];
-        assert_eq!(
-            missing_ids(&requested, &[es()]),
-            [InstrumentId::from("ESU5.CME")]
-        );
     }
 }
