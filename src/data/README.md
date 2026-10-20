@@ -1,7 +1,10 @@
 # The data module
 
 `data` is build step 1. It fills the Nautilus Parquet catalog with the
-history of the instruments the strategy trades; backtest reads that catalog.
+instruments the strategy trades and their 1-minute quotes, and nothing else:
+no bars. The strategies' bars are internal, built by the Nautilus data
+engine from the quotes (see the strategy README); backtest reads that
+catalog.
 It adds what Nautilus does not provide: filling the catalog from a
 historical source, and the roll dates.
 
@@ -15,32 +18,34 @@ predecessor `ESH4.CME` and the continuous root `ES.CME`.
 data/
   mod.rs           declares the modules, exposes only what others call
   fill_catalog.rs  source-agnostic: resume, check, sort, write
-  ib.rs            Interactive Brokers history: instruments, bars, quotes
+  ib.rs            Interactive Brokers history: instruments, quotes
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
 No node and no port of our own. A source is an adapter's historical
-client, which returns Nautilus types (`Vec<InstrumentAny>`, `Vec<Bar>`,
-`Vec<QuoteTick>`); `ParquetDataCatalog` is the storage.
+client, which returns Nautilus types (`Vec<InstrumentAny>`,
+`Vec<QuoteTick>`, or bars a source turns into quotes);
+`ParquetDataCatalog` is the storage.
 
 ```
 strategy config ──► fill_catalog ──► ib.rs ──(HistoricalInteractiveBrokersClient)──► IB Gateway
                          └──► ParquetDataCatalog ──► backtest
-rolls ◄── catalog bars of each contract ──► params for the INTERNAL bar type
+rolls ◄── catalog quotes of each contract ──► params for the INTERNAL bar type
 ```
 
 ## Instruments and bar types
 
-Nautilus has no universe type, and neither do we. The strategy config is the
-single source of the instruments and the bar type (see the strategy README).
-`main` reads them from it and passes Nautilus types to `fill_catalog`, backtest and
-live: `Vec<InstrumentId>` and `BarType`. This module never names an
-instrument. The history window is a run argument of `fill-catalog`
-(`--start`, `--end`), not config.
+Nautilus has no universe type, and neither do we. The strategy's data
+requirements are the single source of the instruments (see the strategy
+README). `main` reads them and passes Nautilus types to `fill_catalog`:
+`Vec<InstrumentAny>` loaded from the source by id. This module never
+names an instrument, and takes no bar type: the catalog holds no bars. The
+history window is a run argument of `fill-catalog` (`--start`, `--end`),
+not config.
 
-Two bar types matter: the `EXTERNAL` one per contract (what `fill_catalog` requests
-and the catalog stores) and the `INTERNAL` one per continuous root (what the
-strategy subscribes to).
+Bar types still matter to this module in two places: `ib.rs` makes quotes
+from IB's `EXTERNAL` 1-MINUTE BID and ASK bars, which it never stores, and
+the strategy subscribes to an `INTERNAL` bar type built from the quotes.
 
 ### Bar type format
 
@@ -68,16 +73,16 @@ the checked forms for anything read from config.
 | `MONTH` | divide 12 |
 | `DAY`, `WEEK`, `YEAR` | any non-zero step |
 
-So `60-MINUTE` is rejected: write `1-HOUR`. Valid for Nautilus is not valid
-for the adapter: each adapter serves its own bar sizes (for IB see below),
-and a cadence the adapter cannot serve is rejected before fill_catalog starts.
+So `60-MINUTE` is rejected: write `1-HOUR`.
 
 **Aggregation source**, the last token:
 
 - `EXTERNAL`: bars made by the venue or adapter: what `request_bars`
-  returns, what the catalog stores, what `subscribe_bars` streams.
+  returns and `subscribe_bars` streams. `ib.rs` requests them to make
+  quotes; the catalog does not store them.
 - `INTERNAL`: bars built by the Nautilus data engine from ticks or other
-  bars, as continuous futures are.
+  bars: the strategies' bars, from the stored quotes, and continuous
+  futures.
 
 **Composite** bar types build a target from a finer bar type:
 `ES.CME-1-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL`. The target must be
@@ -111,9 +116,9 @@ catalog and the live broker use. Sources disagree on the venue:
 
 ## fill_catalog.rs
 
-Fills the catalog over one window with the bars of a list of bar types
-and the quotes of the instruments (Nautilus `QuoteTick`s, which the
-backtest fills orders on; see the backtest README). No node: a
+Fills the catalog over one window with the instruments and their quotes
+(Nautilus `QuoteTick`s, which the backtest builds the strategies' bars
+from and fills orders on; see the backtest README). No bars. No node: a
 source's historical client is a plain async call returning Nautilus types,
 the same pattern the Nautilus docs use for every source (a client or loader,
 then `catalog.write_*`). Filling the catalog is its own process run.
@@ -141,58 +146,49 @@ published. Filling the catalog is ours.
 ```rust
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
-    instruments: Vec<InstrumentAny>,           // from the source, before any bars
-    bar_types: &[BarType],
+    instruments: Vec<InstrumentAny>,           // from the source, before any quotes
     start: Timestamp,
     end: Timestamp,
-    fetch_bars: impl AsyncFnMut(BarType, Timestamp, Timestamp) -> anyhow::Result<Vec<Bar>>,
     fetch_quotes: impl AsyncFnMut(InstrumentId, Timestamp, Timestamp) -> anyhow::Result<Vec<QuoteTick>>,
 ) -> anyhow::Result<()>
 ```
 
-`fetch_bars` and `fetch_quotes` are the seam: `ib.rs` supplies them now,
-another source others. No trait until a second source exists. Tests pass
-closures with canned data. A fetch over `(from, to]` returns the items
-whose `ts_init` lies in it; how the source makes them (IB's quotes come
-from bars) is its own business.
-
-**Series.** Bars are stored per bar type, quotes per instrument (one
-series per id of `instruments`; their cadence is the source's, one a minute
-for IB, see the IB quotes below). Both go through one generic algorithm (`fill_series`) over a
-private `Series` trait implemented for `Bar` (key `BarType`) and
-`QuoteTick` (key `InstrumentId`). Bar types run first, then quotes.
+`fetch_quotes` is the seam: `ib.rs` supplies it now, another source
+others. No trait until a second source exists. Tests pass closures with
+canned data. A fetch over `(from, to]` returns the quotes whose `ts_init`
+lies in it; how the source makes them (IB's come from bars) and at what
+cadence (one a minute for IB, see the IB quotes below) is its own
+business.
 
 1. **Instruments.** Write those not yet in the catalog
    (`catalog.instruments(ids)`), so a re-run adds no file.
-2. **Resume.** Per series, one at a time, from the stored range of that
-   series (bars: `get_intervals` with the bar type string, so other bar
-   types of the same instrument do not count; quotes: with the instrument
-   id, under `data/quotes/`, apart from the bars). Steps 2 to 4 say "bar
-   type" and "bar"; for quotes read "instrument" and "quote". A `start`
-   before the stored range is an error naming the series and the range, raised before
-   fetching: extending history backwards is not supported; use a new
-   catalog. Otherwise the resume point is the end of the stored range;
-   request from 1 ns after it to `end`, even when `start` is later, so no
-   hole opens between the stored range and `start`. `start` counts only
-   for a bar type's first fill and for the backwards check. A window
-   already covered (request start at or after `end`) asks the source for
-   nothing and is not an error.
-3. **Check.** Refuse an empty response on a bar type's first fill (no
+2. **Resume.** Per instrument, one at a time, from the stored range of its
+   quotes (`get_intervals` with the instrument id, under `data/quotes/`).
+   A `start` before the stored range is an error naming the instrument and
+   the range, raised before fetching: extending history backwards is not
+   supported; use a new catalog. Otherwise the resume point is the end of
+   the stored range; request from 1 ns after it to `end`, even when
+   `start` is later, so no hole opens between the stored range and
+   `start`. `start` counts only for an instrument's first fill and for the
+   backwards check. A window already covered (request start at or after
+   `end`) asks the source for nothing and is not an error.
+3. **Check.** Refuse an empty response on an instrument's first fill (no
    stored range: a contract with no data is never silently missing) and
-   any bar of another bar type. Once a bar type is stored, an empty
-   response means nothing new (an expired contract, a weekend): nothing
-   is written, no coverage is recorded, no error, and the next bar types
-   run. Drop bars at or before the resume point, sort by `ts_init`, drop
-   duplicate `ts_init`. If nothing is left, nothing is written and that is
-   not an error.
-4. **Write** one bar type per call with `write_to_parquet`, recording the
-   file's interval as the window asked for, not the bars' own span: from
-   the request start (or the oldest bar, if earlier) to `end` (or the
-   newest bar, if later). The stored range then spans the windows already
-   asked for, so a re-run with the same `start` and `end` asks for nothing,
-   even when the bars start after `start` or close before `end`. A response whose bars were
-   all dropped, or an empty one after a resume, records no coverage, so
-   the next run asks for that tail again.
+   any quote of another instrument. Once an instrument's quotes are
+   stored, an empty response means nothing new (an expired contract, a
+   weekend): nothing is written, no coverage is recorded, no error, and
+   the next instruments run. Drop quotes at or before the resume point,
+   sort by `ts_init`, drop duplicate `ts_init`. If nothing is left,
+   nothing is written and that is not an error.
+4. **Write** one instrument's quotes per call with `write_to_parquet`,
+   recording the file's interval as the window asked for, not the quotes'
+   own span: from the request start (or the oldest quote, if earlier) to
+   `end` (or the newest quote, if later). The stored range then spans the
+   windows already asked for, so a re-run with the same `start` and `end`
+   asks for nothing, even when the quotes start after `start` or end
+   before `end`. A response whose quotes were all dropped, or an empty one
+   after a resume, records no coverage, so the next run asks for that tail
+   again.
 
    Coverage is the window asked for, not what the source had. When the
    source has less (IB's history depth), the missing part is never asked
@@ -201,14 +197,15 @@ private `Series` trait implemented for `Bar` (key `BarType`) and
    source has no more.
 
    **Quotes' coverage.** A fill over `[start, end]` records the quotes
-   over `[start, end]` like bars, whatever their stamps. IB's quotes sit
+   over `[start, end]`, whatever their stamps. IB's quotes sit
    1 ns before their bar's close, so the last quote of a window ending on
    a close is at `end − 1 ns`, yet the interval reaches `end`; and since
    the fetch is over `(from, end]` in quote stamps, the quote of the bar
    closing just after `end` (stamped `end` itself) belongs to this fill,
    not the next. The backtest requires quotes over `[start − 1 ns, end]`
    of its run: start the fill (or the earlier fill the catalog resumes
-   from) before the run, as the warmup already requires for bars.
+   from) at least the warmup before the run, as the backtest's coverage
+   check requires.
 
 Any error stops the run. What was written stays valid; a re-run resumes.
 
@@ -219,20 +216,21 @@ Inherent methods of `ParquetDataCatalog` (`nautilus_persistence::backend::parque
 ```rust
 ParquetDataCatalog::new(base_path: &Path, None, None, None, None)   // panics on a bad path
 catalog.write_instruments(instruments: Vec<InstrumentAny>) -> anyhow::Result<Vec<PathBuf>>
-catalog.write_to_parquet(data: &[Bar], start: Option<UnixNanos>, end: Option<UnixNanos>,
+catalog.write_to_parquet(data: &[QuoteTick], start: Option<UnixNanos>, end: Option<UnixNanos>,
                          skip_disjoint_check: Option<bool>) -> anyhow::Result<PathBuf>
-catalog.get_intervals(&NautilusDataType::Bar.into(), Some(bar_type_str))
+catalog.get_intervals(&QuoteTick::catalog_data_type().into(), Some(instrument_id_str))
     -> anyhow::Result<Vec<(u64, u64)>>             // stored [start, end] per file, sorted
 ```
 
 `write_to_parquet` returns an empty path for empty data and writes nothing.
 The trait `CatalogWriter` (`write_data` over `&[Data]`) groups mixed data
-for you; with one bar type per call the inherent method is enough.
+for you; with one instrument's quotes per call the inherent method is
+enough.
 
 Write constraints:
 
 - **Ascending `ts_init`.** Sort before writing; a descent is an error.
-- **One bar type per file.** `write_to_parquet` refuses mixed bar types.
+- **One instrument per file.**
 - **Disjoint intervals.** Each write makes one file named after its
   `[first, last]` `ts_init`. A new interval must not touch an existing one:
   a shared timestamp is an overlap and an error. Appending a later window
@@ -245,23 +243,21 @@ Write constraints:
 Layout on disk:
 
 ```
-{catalog}/data/bars/ESM4.CME-1-HOUR-LAST-EXTERNAL/{start}_{end}.parquet
 {catalog}/data/quotes/ESM4.CME/{start}_{end}.parquet
 {catalog}/data/futures_contract/ESM4.CME/{ts}_{ts}.parquet
 ```
 
+No `data/bars/`: a catalog filled by `fill-catalog` holds these two kinds
+only.
+
 ### Reading back
 
 ```rust
-catalog.bars(ids: Option<Vec<String>>, start: Option<UnixNanos>, end: Option<UnixNanos>)
-    -> anyhow::Result<Vec<Bar>>                      // &mut self; ordered by ts_init
-catalog.quote_ticks(ids, start, end) -> anyhow::Result<Vec<QuoteTick>>   // ids: instrument ids
+catalog.quote_ticks(ids: Option<Vec<String>>, start: Option<UnixNanos>, end: Option<UnixNanos>)
+    -> anyhow::Result<Vec<QuoteTick>>                // &mut self; ids: instrument ids; ordered by ts_init
 catalog.instruments(ids: Option<&[String]>, start, end) -> anyhow::Result<Vec<InstrumentAny>>
 catalog.get_intervals(..)                            // the stored range a re-run resumes from
 ```
-
-For bars an id is a full bar type string or an instrument id (which matches
-all its bar types).
 
 ### Interactive Brokers specifics (history)
 
@@ -282,27 +278,24 @@ client.request_bars(bar_specifications: Vec<&str>, end_date_time: Timestamp,
 Our wrapper, `IbHistory` (exported with `IbGateway` from `data`):
 
 ```rust
-IbHistory::connect(gateway: IbGateway, bar_types: &[BarType], end: Timestamp, now: Timestamp)
-    .await -> anyhow::Result<IbHistory>   // checks cadence and end before connecting
+IbHistory::connect(gateway: IbGateway, end: Timestamp, now: Timestamp)
+    .await -> anyhow::Result<IbHistory>   // checks end before connecting
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
-history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fetch_bars of fill_catalog;
-                                                                       // (start, end], sorted, unique
 history.quotes(instrument_id, start, end)
     .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; (start, end],
                                                // one a minute, sorted
 ```
 
-- **Checked before connecting.** Every bar type must be one IB serves (see
-  bar spec strings below, `EXTERNAL`, priced `LAST`/`BID`/`ASK`/`MID`), and
-  `end` must be at least the longest bar before `now`: IB answers a window
-  ending within one bar of now with the bar still in progress, and
-  `fill_catalog` would store it and resume past it. `main` reads the clock.
+- **Checked before connecting.** `end` must be at least a minute (the
+  quote cadence, see below) before `now`: IB answers a window ending
+  within one bar of now with the bar still in progress, and `fill_catalog`
+  would store its quote and resume past it. `main` reads the clock.
 - **Every instrument or none.** `request_instruments` answers an unknown or
   expired id with nothing and only a warning. `instruments` asks again for
   each missing future as an explicit contract (root symbol, local symbol,
   exchange, `includeExpired: true`), the form that resolved the expired
   `ESU5` on the paper gateway; then it fails naming the ids still missing,
-  before any bar request.
+  before any quote request.
 - **Market data subscription.** Historical bars through the API need the
   Level 1 real-time subscription of the exchange (for ES, "CME Real-Time
   (NP,L1)") with "Market Data API access" enabled, shared with the paper
@@ -321,18 +314,17 @@ history.quotes(instrument_id, start, end)
   out with a fallback precision (5, 0). Call `request_instruments` with the
   config's ids before `request_bars`.
 - **Bar spec strings** are `"{step}-{aggregation}-{price_type}"`, for example
-  `"1-HOUR-LAST"`. The historical client parses SECOND, MINUTE, HOUR, DAY and
-  WEEK only (no MONTH). IB itself serves 1/5/15/30 SECOND;
-  1/2/3/5/10/15/20/30 MINUTE; 1/2/3/4/8 HOUR; 1 DAY; 1 WEEK. `ib.rs`
-  accepts all but WEEK (see "Timestamps"). Anything else fails. Only time
-  bars.
+  `"1-MINUTE-BID"`, the `Display` of `BarSpecification` that the historical
+  client splits on `-`. It parses SECOND, MINUTE, HOUR, DAY and WEEK only
+  (no MONTH). `ib.rs` asks only for the 1-MINUTE BID and ASK bars quotes
+  are made from (`quoted_bar_spec`).
 - **Walking back, not segments.** Given a start, the client splits a
   window into an `N D` segment ending at `end` and a seconds segment
   ending N x 24 h earlier. IB counts `D` in trading sessions, not 24 h, so
   bars between the two segments go missing without an error (paper
   gateway 2026-10-07: ESZ6 1-HOUR over `[10-05T00:00Z, 10-07T18:00Z]` lacked
   10-05 19:00-21:00). The live data client shares that segmentation
-  (`data/convert.rs` in the adapter). `bars` never passes a start: it
+  (`data/convert.rs` in the adapter). `quoted_bars` never passes a start: it
   walks back from `end` (`walk_back`), each request with an explicit
   duration (one segment, `start_date_time: None`) ending at the oldest
   bar so far, so consecutive answers overlap by a bar and leave no hole.
@@ -345,34 +337,21 @@ history.quotes(instrument_id, start, end)
   that cannot be resolved is logged and skipped, so its answer is empty:
   `fill_catalog` refuses it on a first fill, and on a resumed window takes
   it as nothing new.
-- **Duration per request** (`request_duration`), by bar size, within IB's
-  documented maximum duration per bar size (`S` seconds, `D` whole
-  trading days, `Y` years). 1 MINUTE uses seconds, not `1 D`: `D` counts
-  whole trading days, so a `1 D` request ending in a session's first
-  minute answers that one bar and the walk back stops there; `86400 S`
-  answers the 1,440 bars before the end, across sessions and weekends.
-
-  | Bar size | Duration | Requests for a year (about 252 sessions) |
-  |---|---|---|
-  | 1 SECOND | `1800 S` | thousands: short windows only |
-  | 5 SECOND | `3600 S` | thousands: short windows only |
-  | 15 SECOND | `14400 S` | about 1500: short windows only |
-  | 30 SECOND | `28800 S` | about 750: short windows only |
-  | 1 MINUTE | `86400 S` (1,440 bars) | about 165 per bar type |
-  | 2 MINUTE | `2 D` | about 126 |
-  | 3, 5, 10 MINUTE | `5 D` | about 51 |
-  | 15, 20 MINUTE | `10 D` | about 26 |
-  | 30 MINUTE, 1/2/3/4/8 HOUR | `20 D` | about 13 |
-  | 1 DAY | `1 Y` | 1 |
+- **Duration per request** (`QUOTED_BARS_PER_REQUEST`): `86400 S`, within
+  IB's documented maximum duration for 1-MINUTE bars. Seconds, not `1 D`:
+  `D` counts whole trading days, so a `1 D` request ending in a session's
+  first minute answers that one bar and the walk back stops there;
+  `86400 S` answers the 1,440 bars before the end, across sessions and
+  weekends. About 165 requests per price type for a year (about 252
+  sessions).
 
 - **Pacing.** IB allows at most 60 historical requests in any ten minutes,
   no identical request within 15 seconds, and no more than six requests
   for the same contract within two seconds; a violation fails the request
   (IB error 162), which fails the run. Bars over 30 seconds are, per IB,
-  paced softly (throttled rather than refused), small bars strictly. A
-  year of 1-HOUR bars takes about 13 requests; windows of minute bars
-  beyond a few months, or of second bars beyond a few hours, can reach the
-  limit. Split such a fill into several runs (each resumes where the last
+  paced softly (throttled rather than refused), small bars strictly, so
+  the 1-MINUTE bars quotes are made from are throttled at worst. A long
+  fill can still be split into several runs (each resumes where the last
   stopped). Verified on the paper gateway (2026-10-09), SXR8 1-MINUTE
   LAST, BID and ASK: September and August 2026 back to back, 84 requests
   in about six minutes, no pacing error and no slowdown (3-4 s per
@@ -384,8 +363,8 @@ history.quotes(instrument_id, start, end)
   sorted by `ts_event`. All intervals and roll dates are on the close.
   Verified on the paper gateway (2026-10-07): 1-HOUR bars stamp
   `ts_event = ts_init` = the bar close, on the hour. Weekly bars break the
-  rule: the adapter's `bar_close_from_open` returns the open for WEEK, so
-  `ib.rs` refuses WEEK before connecting.
+  rule: the adapter's `bar_close_from_open` returns the open for WEEK;
+  `ib.rs` asks for minute bars only.
 - **Full session, not regular hours.** The data client config built in
   `ib.rs` sets `use_regular_trading_hours: false`, and every bar request
   passes that same setting as `use_rth`. With regular hours on (the adapter
@@ -410,8 +389,8 @@ history.quotes(instrument_id, start, end)
   (expired 10 months earlier) and `ESU5` (12.6 months) resolved; `ESM5`
   (15.5 months), `ESH5`, `ESZ4` and `ESZ3` did not, by id or by contract,
   although IB documents two years. Once loaded that way, `request_bars` by
-  instrument id returns the bars (`ESU5.CME`, precision 2), so `bars`
-  always asks by id; the contract-month form returned them under another id
+  instrument id returns the bars (`ESU5.CME`, precision 2), so
+  `quoted_bars` always asks by id; the contract-month form returned them under another id
   (`ES202509.CME`) at the fallback precision 5. **IB as the source gives
   about one year of expired ES contracts**, and that bounds the backtest;
   for more depth use another source (see "Other sources").
@@ -420,12 +399,14 @@ history.quotes(instrument_id, start, end)
   21:00 UTC). Rolls happen before expiry, so a continuous series never
   uses them; a single-contract backtest through expiry would.
 - **Verified end to end** (paper gateway, 2026-10-07, `fill-catalog` on
-  `ESZ6.CME` and `ESU5.CME`, 1-HOUR-LAST): a fill reads back sorted and
+  `ESZ6.CME` and `ESU5.CME`, 1-HOUR-LAST, when it still stored bars; the
+  resume algorithm is the one quotes use now): a fill reads back sorted and
   unique; a re-run asks for nothing; a window filled in two runs equals the
   same window filled in one (110 bars, identical); bars are stamped on the
   hour, 23 per day over the full session; an end after a contract's expiry
   works.
-- **Xetra ETF (`SXR8.IBIS`).** Verified on the paper gateway (2026-10-08,
+- **Xetra ETF (`SXR8.IBIS`).** Verified on the paper gateway when
+  `fill-catalog` still stored bars (2026-10-08,
   1-HOUR-LAST, 4,078 bars from 2025-10-01 to 2026-10-02; a fresh fill of
   2026-06-01 to 2026-10-01 was identical, and its re-run asked for
   nothing). Unlike ES:
@@ -440,9 +421,8 @@ history.quotes(instrument_id, start, end)
     is stamped at its close, on the hour.
   - IB's minimum tick is `0.0001`, so the instrument has price precision 4
     although trades print in whole cents.
-  - **BID, ASK and MID bars.** IB serves all three for SXR8 through
-    `fill-catalog` (a config whose `bar_spec` has `price_type = "BID"`,
-    `"ASK"` or `"MID"`; the EMA config accepts any price type): 1,440 bars
+  - **BID, ASK and MID bars.** IB serves all three for SXR8 (filled then
+    through `fill-catalog` with a config's `bar_spec` price type): 1,440 bars
     each over 2026-06-01 to 2026-10-03 (paper gateway, 2026-10-08), the
     same 16 stamps a day as LAST (LAST: 1,434, six hours without a
     trade). Every BID, ASK and MID bar has **volume 0**, which the
@@ -473,7 +453,7 @@ history.quotes(instrument_id, start, end)
     7,000: EUR 0.20).
 - **Quotes from BID and ASK bars.** IB has no usable quote history, so
   `quotes` fetches the 1-MINUTE BID and ASK bars of the instrument
-  (`quoted_bar_type`) with the same walk back as `bars`,
+  (`quoted_bar_type`), walking back (`quoted_bars`), never stores them,
   and turns each pair of the same close into one `QuoteTick`
   (`quotes_from_bars`, pure and unit-tested): bid = BID close, ask = ASK
   close, at the bars' price precision (the instrument's, since the
@@ -496,12 +476,12 @@ history.quotes(instrument_id, start, end)
   whatever the strategy's bar size; 1 minute is the finest bar size IB
   paces softly. `fill-catalog` stores the instruments and these quotes
   only, resuming from their stored range: the strategies' bars are
-  internal, built from the quotes (see the strategy README), so it passes
-  `fill_catalog` and the check before connecting no bar types; that check
-  then only requires `end` not after now.
+  internal, built from the quotes (see the strategy README). The check
+  before connecting uses this cadence too: `end` at least a minute before
+  now.
 - **Cost of minute quotes.** Two 1-MINUTE bar types per instrument (BID
   and ASK), 1,440 bars per `86400 S` request: about 28 requests per
-  instrument-month and 330 per instrument-year (see the duration table).
+  instrument-month and 330 per instrument-year.
   Measured below: about 1.8 minutes per instrument-month, so 20-25 minutes
   per instrument-year, with no pacing error (soft throttling only). An
   instrument-month of Xetra quotes is about 20,000 rows (930 minutes a
@@ -523,7 +503,7 @@ history.quotes(instrument_id, start, end)
   (sells) or ask (buys) of the quote stamped 1 ns before the decision
   bar's close, the previous quote 60 s earlier.
 - **`CONTFUT`.** IB's own continuous future is no substitute for the
-  per-contract bars, even for older history: it is one series with IB's roll
+  per-contract quotes, even for older history: it is one series with IB's roll
   rule and adjustment, which the Nautilus continuous future (contract bars
   plus our transitions) cannot use and live cannot trade. The client also
   drops the end date for it and returns a single segment anchored at now.
@@ -532,10 +512,11 @@ history.quotes(instrument_id, start, end)
 ### Other sources
 
 Databento (`nautilus-databento`, not used yet) has the same shape:
-`DatabentoHistoricalClient::get_range_instruments(RangeQueryParams)` and
-`get_range_bars(params, aggregation, timestamp_on_close)`, returning
-`Vec<InstrumentAny>` and `Vec<Bar>`. A `databento.rs` next to `ib.rs` would
-supply its own `fetch_bars`. Its ids are on `GLBX` unless
+`DatabentoHistoricalClient::get_range_instruments(RangeQueryParams)`
+returns `Vec<InstrumentAny>`, and its quote requests take the 1-minute
+`bbo-1m` schema and return `QuoteTick`s (per the Nautilus Databento docs;
+the Rust method is **unverified**). A `databento.rs` next to
+`ib.rs` would supply its own `fetch_quotes`. Its ids are on `GLBX` unless
 `use_exchange_as_venue` is set (see "Instrument ids across sources").
 
 ## rolls.rs
@@ -543,11 +524,12 @@ supply its own `fetch_bars`. Its ids are on `GLBX` unless
 Nautilus stitches contracts into a continuous future but does not find the
 rolls. This module finds them and renders them as the params that
 `subscribe_bars` and `request_bars` take on an `INTERNAL` bar type. Pure
-computation: bars in, values out.
+computation: prices in, values out. Not built yet: continuous futures are
+out of scope for now, and this section predates the quotes-only catalog.
 
-1. **Input:** the catalog's `EXTERNAL` bars of each contract of one root,
-   as `&[Bar]` per `InstrumentId`, read by the caller. A calendar rule also
-   takes the contracts' expiries, as values.
+1. **Input:** the catalog's quotes of each contract of one root, per
+   `InstrumentId`, read by the caller. A calendar rule also takes the
+   contracts' expiries, as values.
 2. **Detect** each roll between consecutive contracts: the
    `transition_time_ns`, and the two contracts' prices at that same moment.
    The rule is ours (for example the first close at which the next
@@ -638,29 +620,28 @@ bar after a roll behaves when the new contract has not ticked yet is
 
 ## Rules
 
-- **The strategy config is the only source** of instruments and bar types;
-  this module receives them as Nautilus types.
+- **The strategy's data requirements are the only source** of
+  instruments; this module receives them as Nautilus types.
 - **Only Nautilus types**: no parallel `Symbol`, `Bar` or `Roll` types
   beyond the params this module returns.
 - **`fill_catalog` writes, nobody else** writes the catalog.
-- **Sort, split, append**: sorted by `ts_init`, one bar type (or one
-  instrument's quotes) per file, resume from the stored range
-  (`get_intervals`).
+- **Sort, split, append**: sorted by `ts_init`, one instrument's quotes
+  per file, resume from the stored range (`get_intervals`).
 - **No node** for filling the catalog: historical clients only.
 - **One source per instrument**, with the ids of the live broker.
-- **Check before writing**: refuse a foreign bar type or instrument, and
-  an empty response on a series' first fill.
-- **Instruments before bars and quotes.**
-- **Quotes, one a minute**: `fill-catalog` stores the instruments and
-  their quotes; `fill_catalog` still takes bar types, which the command
-  no longer passes.
-- **Per-contract bars are the stored truth**: never write an adjusted series;
-  continuous series are built at read time.
+- **Check before writing**: refuse a quote of another instrument, and an
+  empty response on an instrument's first fill.
+- **Instruments before quotes.**
+- **Instruments and quotes only, one quote a minute**: no bars in the
+  catalog; the strategies' bars are built from the quotes.
+- **Per-contract quotes are the stored truth**: never write an adjusted
+  series; continuous series are built at read time.
 - **Rolls are values**: backtest and live pass the same params to the same
   engine call.
 - **No clock and no I/O** in `rolls.rs`: time comes in as
   arguments.
-- **Cadence checked against the adapter** before `fill_catalog` starts.
+- **The cadence is the source's**: no caller passes it; `ib.rs` checks
+  `end` against it before connecting.
 
 ## Tests
 
@@ -668,23 +649,23 @@ bar after a roll behaves when the new contract has not ticked yet is
   - `rolls.rs`: detection on small synthetic series (clean roll, a gap, no
     overlap); params checked as JSON (increasing times, contiguous chain,
     decimal strings, each mode).
-  - `fill_catalog.rs`: on a temp catalog, with a closure for `fetch_bars`:
-    bars written and read back; a re-run requests only after the last bar
-    and writes no duplicate instrument; an empty first response or a
-    foreign bar type is an error, an empty resumed response is not;
-    unsorted and duplicate bars are stored sorted and unique. The same for
-    quotes with a closure for `fetch_quotes` (per instrument, coverage over
-    the window asked for, a foreign instrument refused, a minute-cadence
-    source stored every minute and resumed with only the new minutes), and bars and
-    quotes of one instrument resuming each from their own range. The bar
-    tests' quote source answers a quote at the epoch, so quotes never
-    fail them.
+  - `fill_catalog.rs`: on a temp catalog, with a closure for
+    `fetch_quotes`: only instruments and quotes stored (no other kind of
+    data on disk); quotes written and read back per instrument, sorted and
+    unique; coverage over the window asked for; a re-run requests only
+    after each instrument's stored range and writes no duplicate
+    instrument; a covered window fetched not again; an empty first
+    response or a quote of another instrument is an error, an empty
+    resumed response is not; a failure keeps the instruments filled
+    before it; a start before the stored range refused before fetching;
+    a minute-cadence source stored every minute and resumed with only the
+    new minutes.
   - `ib.rs`: BID and ASK bars to quotes (prices and precision, the 1 ns
     stamp, the nominal size at the bars' size precision, a side without
     the other dropped, a crossed pair dropped and a locked one kept, empty
     input, different precisions an error), the bar window of a quote
-    window and the 1-MINUTE BID and ASK bars quotes are made from; bar type to bar spec string and to request duration; a
-    cadence IB cannot serve is rejected before connecting; the walk back
+    window and the 1-MINUTE BID and ASK bars quotes are made from; an
+    `end` within a minute of now rejected before connecting; the walk back
     over canned answers (no hole at the joins, stops at start, on an empty
     answer and on no progress, trims to `(start, end]`, sorted and
     unique); the data client config and the bar requests use the full
