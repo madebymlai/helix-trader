@@ -121,6 +121,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::backtest::commission_per_order;
 
     fn missing(from: u64, to: u64, stored: &[(u64, u64)]) -> Option<(u64, u64)> {
         first_missing(from, to, stored).map(Into::into)
@@ -226,7 +227,7 @@ mod tests {
             start: ts("2026-10-02T00:00:00.000000001Z"),
             end: ts("2026-10-31T00:00:00Z"),
             warmup: SignedDuration::from_hours(24),
-            commission: Money::from("3 USD"),
+            fee_model: commission_per_order(Money::from("3 USD")).unwrap(),
             balance: Money::from("10000 USD"),
             logging: LoggerConfig::default(),
         }

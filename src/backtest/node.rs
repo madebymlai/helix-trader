@@ -52,7 +52,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![backtest.balance.to_string()])
-        .fee_model(costs::fee_model(backtest.commission)?)
+        .fee_model(backtest.fee_model.clone())
         .fill_model(costs::fill_model()?)
         .bar_execution(false)
         .build()?;
@@ -131,7 +131,7 @@ mod tests {
                 BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
             ],
             warmup: jiff::SignedDuration::from_hours(720),
-            commission: Money::from("3 EUR"),
+            fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),
             logging: LoggerConfig {
                 print_config: true,
@@ -262,15 +262,6 @@ mod tests {
             .push(BarType::from("CSPX.LSEETF-1-HOUR-MID-INTERNAL"));
         let err = run_config(&backtest).unwrap_err();
         assert!(err.to_string().contains("venue"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_negative_commission() {
-        let backtest = Backtest {
-            commission: Money::from("-3 EUR"),
-            ..backtest()
-        };
-        assert!(run_config(&backtest).is_err());
     }
 
     #[test]

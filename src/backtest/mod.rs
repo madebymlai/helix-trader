@@ -16,10 +16,14 @@ use nautilus_backtest::result::BacktestResult;
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
+use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
-pub use self::report::report;
+pub use self::{
+    costs::{commission_per_order, commission_rate},
+    report::report,
+};
 
 /// One backtest: a window of the catalog, the instruments whose quotes are
 /// replayed and the costs. Every field is required.
@@ -39,8 +43,8 @@ pub struct Backtest {
     /// The strategy's warmup: the catalog must cover the quotes from
     /// `start - warmup`, so that the warmup request is answered.
     pub warmup: SignedDuration,
-    /// Charged once per order, on its first fill.
-    pub commission: Money,
+    /// The commission: `commission_per_order` or `commission_rate`.
+    pub fee_model: FeeModelAny,
     /// The starting balance of the account.
     pub balance: Money,
     /// The Nautilus logger: the node installs it, so nothing else may.
@@ -54,7 +58,7 @@ impl Backtest {
     /// # Errors
     ///
     /// Returns an error if the inputs are inconsistent (no instruments,
-    /// several venues, a negative commission or warmup, `start` not before
+    /// several venues, a negative warmup, `start` not before
     /// `end`), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of its quotes
     /// over `[start - 1 ns - warmup, end]`, or if the node fails to build

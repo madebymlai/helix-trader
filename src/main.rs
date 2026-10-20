@@ -209,13 +209,14 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
+    let fee_model = backtest::commission_per_order(args.commission)?;
     let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types: requirements.bar_types,
         start,
         end,
         warmup: requirements.warmup,
-        commission: args.commission,
+        fee_model,
         balance: args.balance,
         logging,
     };

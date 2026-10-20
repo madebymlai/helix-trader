@@ -15,7 +15,7 @@ pub mod recorder;
 use std::path::Path;
 
 use helix_trader::{
-    backtest::Backtest,
+    backtest::{Backtest, commission_per_order},
     strategy::ema::{EmaCross, EmaCrossConfig, Session},
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
@@ -193,7 +193,7 @@ pub fn backtest(
         start,
         end,
         warmup,
-        commission: Money::from(commission),
+        fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),
         logging: LoggerConfig::default(),
     }
