@@ -500,9 +500,9 @@ history.quotes(instrument_id, start, end)
   longest of them.
 - **Cost of minute quotes.** Two 1-MINUTE bar types per instrument (BID
   and ASK), 1,440 bars per `86400 S` request: about 28 requests per
-  instrument-month and 330 per instrument-year (see the duration table),
-  at 3-4 s each, about 2.3 minutes per instrument-month and 27 minutes per
-  instrument-year with no pacing error (soft throttling only). An
+  instrument-month and 330 per instrument-year (see the duration table).
+  Measured below: about 1.8 minutes per instrument-month, so 20-25 minutes
+  per instrument-year, with no pacing error (soft throttling only). An
   instrument-month of Xetra quotes is about 20,000 rows (930 minutes a
   session).
 - **Quotes verified** on the paper gateway (2026-10-08, SXR8.IBIS
@@ -513,6 +513,14 @@ history.quotes(instrument_id, start, end)
   size 1,000,000 at precision 0. Of the 302 LAST bars, the 4 crossed
   hours have no quote. A re-run fetched nothing (no request in the debug
   log) and wrote nothing.
+- **Minute quotes verified** on the paper gateway (2026-10-20, SXR8.IBIS,
+  2026-08-24 to 10-01, 28 sessions, with the 1-HOUR LAST bars): 26,040
+  BID and 26,040 ASK bars (930 a session), no unpaired bar, 99 crossed
+  pairs dropped, 25,941 quotes stored one a minute; the whole fill took
+  2 min 13 s, and a re-run fetched nothing. A backtest over September
+  (EMA 5/15, Xetra's session) filled all 14 market orders at the bid
+  (sells) or ask (buys) of the quote stamped 1 ns before the decision
+  bar's close, the previous quote 60 s earlier.
 - **`CONTFUT`.** IB's own continuous future is no substitute for the
   per-contract bars, even for older history: it is one series with IB's roll
   rule and adjustment, which the Nautilus continuous future (contract bars
