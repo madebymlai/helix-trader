@@ -1,4 +1,4 @@
-//! Command line: one subcommand per process (fill-catalog, backtest, paper), since
+//! Command line: one subcommand per process (fill-catalog, backtest, live), since
 //! Nautilus allows one node per process. Every subcommand takes the strategy
 //! name and its TOML config: the instruments and the warmup come from the
 //! config's data requirements.
@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
     data::{IbGateway, IbHistory, fill_catalog},
+    live::{IbAccount, Live},
     strategy::{
         DataRequirements,
         ema::{EmaCross, EmaCrossConfig},
@@ -39,6 +40,9 @@ enum Command {
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(BacktestArgs),
+    /// Runs the strategy on a live node with Interactive Brokers, after
+    /// filling the catalog up to now; stops on Ctrl-C.
+    Live(LiveArgs),
 }
 
 /// The arguments of a subcommand working on a window of the catalog.
@@ -97,6 +101,30 @@ struct BacktestArgs {
     balance: Money,
 }
 
+#[derive(Debug, Args)]
+struct LiveArgs {
+    /// The strategy to run.
+    strategy: Strategy,
+    /// The strategy's TOML config.
+    #[arg(long)]
+    config: PathBuf,
+    /// The catalog directory, filled up to now at start.
+    #[arg(long, default_value = "catalog")]
+    catalog: PathBuf,
+    /// The IB account traded, for example DU1234567 (paper).
+    #[arg(long)]
+    account: IbAccount,
+    /// IB Gateway or TWS host.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// IB Gateway or TWS port (4002: paper gateway); must match the account.
+    #[arg(long, default_value_t = 4002)]
+    port: u16,
+    /// IB client id of the node, the adapter default.
+    #[arg(long, default_value_t = 1)]
+    client_id: i32,
+}
+
 /// The strategies, by command-line name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Strategy {
@@ -144,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
         Command::Backtest(args) => run_backtest(args),
+        Command::Live(args) => run_live(args).await,
     }
 }
 
@@ -214,6 +243,27 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     };
     print!("{}", backtest::report(&result));
     Ok(())
+}
+
+/// Builds the strategy from its config and runs it live until Ctrl-C.
+async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
+    let live = Live {
+        catalog: args.catalog,
+        gateway: IbGateway {
+            host: args.host,
+            port: args.port,
+            client_id: args.client_id,
+        },
+        account: args.account,
+        logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
+    };
+    match args.strategy {
+        Strategy::Ema => {
+            let config = load_ema_config(&args.config)?;
+            live.run(&config.data_requirements(), EmaCross::new(config)?)
+                .await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +396,33 @@ mod tests {
                 assert!(err.contains(flag), "{money}: {err}");
             }
         }
+    }
+
+    fn parse_live(args: &[&str]) -> Result<LiveArgs, clap::Error> {
+        parse_command("live", args).map(|command| match command {
+            Command::Live(args) => args,
+            command => panic!("{command:?}"),
+        })
+    }
+
+    #[test]
+    fn parses_live_with_the_paper_gateway_and_the_adapter_client_id() {
+        let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
+        assert_eq!(args.strategy, Strategy::Ema);
+        assert_eq!(args.config, PathBuf::from("ema.toml"));
+        assert_eq!(args.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.account, "DU1234567".parse().unwrap());
+        assert_eq!(args.host, "127.0.0.1");
+        assert_eq!(args.port, 4002);
+        assert_eq!(args.client_id, 1);
+    }
+
+    #[test]
+    fn live_requires_a_well_formed_account() {
+        let err = parse_live(&["ema", "--config", "ema.toml"]).unwrap_err();
+        assert!(err.to_string().contains("--account"), "{err}");
+        let err = parse_live(&["ema", "--config", "ema.toml", "--account", "IB-DU1"]).unwrap_err();
+        assert!(err.to_string().contains("--account"), "{err}");
     }
 
     #[test]
