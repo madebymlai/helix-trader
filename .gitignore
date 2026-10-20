@@ -1,3 +1,4 @@
 archive/
 target/
 .claude/worktrees/
+.env
