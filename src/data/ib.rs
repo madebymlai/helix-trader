@@ -1,4 +1,4 @@
-//! Interactive Brokers history: instruments, bars and quotes for
+//! Interactive Brokers history: instruments and quotes for
 //! `fill_catalog`.
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
@@ -34,7 +34,7 @@ pub struct IbGateway {
     pub client_id: i32,
 }
 
-/// A connection to IB for history: instruments, bars and quotes, no node.
+/// A connection to IB for history: instruments and quotes, no node.
 pub struct IbHistory {
     client: HistoricalInteractiveBrokersClient,
     requests: BarRequests,
@@ -58,24 +58,19 @@ impl BarRequests {
 }
 
 impl IbHistory {
-    /// Connects to `gateway`, once IB can serve every bar type of
-    /// `bar_types` over a window ending at `end`: checked before any
-    /// connection attempt.
+    /// Connects to `gateway`, once IB can serve quotes over a window ending
+    /// at `end`: checked before any connection attempt.
     ///
     /// # Errors
     ///
-    /// Returns an error if a bar type is not one IB serves, if `end` is
-    /// within the longest bar of `now`, or if the connection fails.
+    /// Returns an error if `end` is within a minute of `now`, or if the
+    /// connection fails.
     pub async fn connect(
         gateway: IbGateway,
-        bar_types: &[BarType],
         end: Timestamp,
         now: Timestamp,
     ) -> anyhow::Result<Self> {
-        for bar_type in bar_types {
-            bar_spec(bar_type)?;
-        }
-        ensure_bars_closed(bar_types, end, now)?;
+        ensure_quotes_closed(end, now)?;
         let config = data_client_config(gateway);
         let requests = BarRequests::of(&config);
         let address = format!("{}:{}", config.host, config.port);
@@ -115,23 +110,52 @@ impl IbHistory {
         Ok(instruments)
     }
 
-    /// The bars of `bar_type` over `(start, end]`, sorted by `ts_init` and
-    /// unique, with the regular-hours setting of the live data client.
-    /// Walks back from `end` one request at a time, each of the duration
-    /// for the bar size (see `walk_back` and `request_duration`).
+    /// The quotes of `instrument_id` over `(start, end]`, one a minute,
+    /// sorted by `ts_init`. IB has no usable quote history: each is made
+    /// from the 1-MINUTE BID and ASK bars of the same close (see
+    /// `quoted_bar_type`), fetched by `quoted_bars` (see `quotes_from_bars`),
+    /// and stamped 1 ns before it (see `quoted_bars_window`). Logs how many
+    /// bars it dropped.
     ///
     /// # Errors
     ///
-    /// Returns an error if the bar type is not one IB serves, or if any
-    /// request fails or times out.
-    pub async fn bars(
+    /// Returns an error if any request fails or times out, or if a BID and
+    /// an ASK bar differ in precision.
+    pub async fn quotes(
+        &self,
+        instrument_id: InstrumentId,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> anyhow::Result<Vec<QuoteTick>> {
+        let priced = |price_type| quoted_bar_type(instrument_id, price_type);
+        let (from, to) = quoted_bars_window(start, end);
+        let bids = self.quoted_bars(priced(PriceType::Bid), from, to).await?;
+        let asks = self.quoted_bars(priced(PriceType::Ask), from, to).await?;
+        let made = quotes_from_bars(&bids, &asks)?;
+        log::info!(
+            "{instrument_id}: {} quotes from {} BID and {} ASK bars; dropped {} bars \
+             without the other side and {} crossed pairs (ask below bid)",
+            made.quotes.len(),
+            bids.len(),
+            asks.len(),
+            made.unpaired,
+            made.crossed,
+        );
+        Ok(made.quotes)
+    }
+
+    /// The bars of `bar_type`, one of `quoted_bar_type`, over `(start, end]`,
+    /// sorted by `ts_init` and unique, with the regular-hours setting of the
+    /// live data client. Walks back from `end` one request at a time, each
+    /// of `QUOTED_BARS_PER_REQUEST` (see `walk_back`).
+    async fn quoted_bars(
         &self,
         bar_type: BarType,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Bar>> {
-        let spec = bar_spec(&bar_type)?;
-        let duration = request_duration(&bar_type);
+        let spec = bar_type.spec().to_string();
+        let duration = QUOTED_BARS_PER_REQUEST;
         walk_back(start, end, async |cursor| {
             self.client
                 .request_bars(
@@ -149,49 +173,45 @@ impl IbHistory {
         })
         .await
     }
-
-    /// The quotes of `instrument_id` over `(start, end]`, one a minute,
-    /// sorted by `ts_init`. IB has no usable quote history: each is made
-    /// from the 1-MINUTE BID and ASK bars of the same close (see
-    /// `quoted_bar_type`), fetched like `bars` (see `quotes_from_bars`), and
-    /// stamped 1 ns before it (see `quoted_bars_window`). Logs how many bars
-    /// it dropped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any request fails or times out, or if a BID and
-    /// an ASK bar differ in precision.
-    pub async fn quotes(
-        &self,
-        instrument_id: InstrumentId,
-        start: Timestamp,
-        end: Timestamp,
-    ) -> anyhow::Result<Vec<QuoteTick>> {
-        let priced = |price_type| quoted_bar_type(instrument_id, price_type);
-        let (from, to) = quoted_bars_window(start, end);
-        let bids = self.bars(priced(PriceType::Bid), from, to).await?;
-        let asks = self.bars(priced(PriceType::Ask), from, to).await?;
-        let made = quotes_from_bars(&bids, &asks)?;
-        log::info!(
-            "{instrument_id}: {} quotes from {} BID and {} ASK bars; dropped {} bars \
-             without the other side and {} crossed pairs (ask below bid)",
-            made.quotes.len(),
-            bids.len(),
-            asks.len(),
-            made.unpaired,
-            made.crossed,
-        );
-        Ok(made.quotes)
-    }
 }
 
 /// The bars of `instrument_id` priced on `price_type` that quotes are made
-/// from: 1-MINUTE, the finest bars IB paces softly, so a resting order is
-/// checked every minute. The cadence is this source's decision: no caller
-/// passes it.
+/// from (see `quoted_bar_spec`).
 fn quoted_bar_type(instrument_id: InstrumentId, price_type: PriceType) -> BarType {
-    let spec = BarSpecification::new(1, BarAggregation::Minute, price_type);
-    BarType::new(instrument_id, spec, AggregationSource::External)
+    BarType::new(
+        instrument_id,
+        quoted_bar_spec(price_type),
+        AggregationSource::External,
+    )
+}
+
+/// The spec of the bars quotes are made from, priced on `price_type`:
+/// 1-MINUTE, the finest bars IB paces softly, so a resting order is checked
+/// every minute. The cadence is this source's decision: no caller passes
+/// it. Its string (`1-MINUTE-BID`) is IB's bar spec string.
+fn quoted_bar_spec(price_type: PriceType) -> BarSpecification {
+    BarSpecification::new(1, BarAggregation::Minute, price_type)
+}
+
+/// The IB duration of one request of the bars quotes are made from: within
+/// IB's maximum duration for 1-MINUTE bars. `D` counts whole trading days:
+/// a `1 D` request ending in a session's first minute answers that one bar,
+/// so `86400 S`, the 1,440 bars before the end, across sessions (IB's
+/// documented alternative).
+const QUOTED_BARS_PER_REQUEST: &str = "86400 S";
+
+/// Fails if `end` is later than `now` minus the bar quotes are made from.
+///
+/// IB answers a window ending within one bar of now with the bar still in
+/// progress; its quote, stored, would never be replaced.
+fn ensure_quotes_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
+    let latest = now.checked_sub(quoted_bar_spec(PriceType::Bid).timedelta())?;
+    ensure!(
+        end <= latest,
+        "end {end} is within a minute of now: IB would return the minute still in progress; \
+         use an end at or before {latest}"
+    );
+    Ok(())
 }
 
 /// How long before its bars' close a quote is stamped: it then sorts
@@ -326,79 +346,6 @@ fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig 
     }
 }
 
-/// The IB bar spec string of `bar_type`, for example `"1-HOUR-LAST"`.
-///
-/// Only `EXTERNAL` time bars at a size IB serves, priced on last, bid, ask
-/// or mid. The historical client does not parse `MONTH`. `WEEK` is refused
-/// too: the adapter stamps a weekly bar at its open, and the catalog needs
-/// `ts_init` on the close.
-fn bar_spec(bar_type: &BarType) -> anyhow::Result<String> {
-    let spec = bar_type.spec();
-    let step = spec.step.get();
-    let size_served = match spec.aggregation {
-        BarAggregation::Second => matches!(step, 1 | 5 | 15 | 30),
-        BarAggregation::Minute => matches!(step, 1 | 2 | 3 | 5 | 10 | 15 | 20 | 30),
-        BarAggregation::Hour => matches!(step, 1 | 2 | 3 | 4 | 8),
-        BarAggregation::Day => step == 1,
-        _ => false,
-    };
-    let price_served = matches!(
-        spec.price_type,
-        PriceType::Last | PriceType::Bid | PriceType::Ask | PriceType::Mid
-    );
-    ensure!(
-        size_served && price_served && bar_type.aggregation_source() == AggregationSource::External,
-        "IB cannot serve bar type {bar_type}: only EXTERNAL time bars of \
-         1/5/15/30 SECOND, 1/2/3/5/10/15/20/30 MINUTE, 1/2/3/4/8 HOUR or 1 DAY, \
-         priced LAST, BID, ASK or MID (no WEEK: the adapter stamps weekly bars \
-         at the open, not the close)"
-    );
-    Ok(format!("{step}-{}-{}", spec.aggregation, spec.price_type))
-}
-
-/// The IB duration of one bar request of `bar_type`: within IB's maximum
-/// duration per bar size, and long enough that a year of 1-HOUR bars takes
-/// about 13 requests, well under IB's pacing limit of 60 requests in ten
-/// minutes. `D` counts whole trading days: a `1 D` request ending in a
-/// session's first minute answers that one bar, so 1-MINUTE bars use
-/// `86400 S`, the 1,440 bars before the end, across sessions (IB's
-/// documented alternative). Takes bar types `bar_spec` accepted.
-fn request_duration(bar_type: &BarType) -> &'static str {
-    let spec = bar_type.spec();
-    match (spec.aggregation, spec.step.get()) {
-        (BarAggregation::Second, 1) => "1800 S",
-        (BarAggregation::Second, 5) => "3600 S",
-        (BarAggregation::Second, 15) => "14400 S",
-        (BarAggregation::Second, _) => "28800 S",
-        (BarAggregation::Minute, 1) => "86400 S",
-        (BarAggregation::Minute, 2) => "2 D",
-        (BarAggregation::Minute, 3..=10) => "5 D",
-        (BarAggregation::Minute, 15 | 20) => "10 D",
-        (BarAggregation::Minute | BarAggregation::Hour, _) => "20 D",
-        _ => "1 Y",
-    }
-}
-
-/// Fails if `end` is later than `now` minus the longest bar of `bar_types`.
-///
-/// IB answers a window ending within one bar of now with the bar still in
-/// progress; stored, it would never be replaced. Takes bar types `bar_spec`
-/// accepted.
-fn ensure_bars_closed(bar_types: &[BarType], end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
-    let longest = bar_types
-        .iter()
-        .map(|bar_type| bar_type.spec().timedelta())
-        .max()
-        .unwrap_or_default();
-    let latest = now.checked_sub(longest)?;
-    ensure!(
-        end <= latest,
-        "end {end} is within one bar of now: IB would return the bar still in progress; \
-         use an end at or before {latest}"
-    );
-    Ok(())
-}
-
 /// The ids of `requested` missing from `loaded`.
 fn missing_ids(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> Vec<InstrumentId> {
     requested
@@ -464,37 +411,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_rejects_a_bar_type_ib_cannot_serve_before_connecting() {
-        let bar_types = [
-            bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL"),
-            bar_type("ESM4.CME-1-MONTH-LAST-EXTERNAL"),
-        ];
+    async fn connect_rejects_an_end_within_a_minute_of_now_before_connecting() {
         let now = at("2024-06-10T12:00:00Z");
-        let Err(err) = IbHistory::connect(
-            closed_gateway(),
-            &bar_types,
-            at("2024-01-01T00:00:00Z"),
-            now,
-        )
-        .await
-        else {
+        let end = at("2024-06-10T11:59:30Z");
+        let Err(err) = IbHistory::connect(closed_gateway(), end, now).await else {
             panic!("connected");
         };
         assert!(
-            err.to_string()
-                .contains("IB cannot serve bar type ESM4.CME-1-MONTH-LAST-EXTERNAL"),
+            err.to_string().contains("within a minute of now"),
             "{err:#}"
         );
-    }
-
-    #[tokio::test]
-    async fn connect_rejects_an_end_within_one_bar_of_now_before_connecting() {
-        let bar_types = [bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL")];
-        let now = at("2024-06-10T12:00:00Z");
-        let Err(err) = IbHistory::connect(closed_gateway(), &bar_types, now, now).await else {
-            panic!("connected");
-        };
-        assert!(err.to_string().contains("within one bar of now"), "{err:#}");
     }
 
     fn at(s: &str) -> Timestamp {
@@ -658,28 +584,20 @@ mod tests {
     }
 
     #[test]
-    fn accepts_an_end_at_least_the_longest_bar_before_now() {
-        let bar_types = [
-            bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL"),
-            bar_type("ESM4.CME-1-DAY-LAST-EXTERNAL"),
-        ];
+    fn accepts_an_end_at_least_a_minute_before_now() {
         let now = at("2024-06-10T12:00:00Z");
-        ensure_bars_closed(&bar_types, at("2024-06-09T12:00:00Z"), now).unwrap();
-        ensure_bars_closed(&bar_types, at("2024-06-01T00:00:00Z"), now).unwrap();
+        ensure_quotes_closed(at("2024-06-10T11:59:00Z"), now).unwrap();
+        ensure_quotes_closed(at("2024-06-01T00:00:00Z"), now).unwrap();
     }
 
     #[test]
-    fn rejects_an_end_within_the_longest_bar_of_now() {
-        let bar_types = [
-            bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL"),
-            bar_type("ESM4.CME-1-DAY-LAST-EXTERNAL"),
-        ];
+    fn rejects_an_end_within_a_minute_of_now() {
         let now = at("2024-06-10T12:00:00Z");
-        let err = ensure_bars_closed(&bar_types, at("2024-06-09T12:00:01Z"), now)
+        let err = ensure_quotes_closed(at("2024-06-10T11:59:00.000000001Z"), now)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("2024-06-09T12:00:01Z"), "{err}");
-        assert!(err.contains("2024-06-09T12:00:00Z"), "{err}");
+        assert!(err.contains("2024-06-10T11:59:00.000000001Z"), "{err}");
+        assert!(err.contains("2024-06-10T11:59:00Z"), "{err}");
     }
 
     #[test]
@@ -704,85 +622,6 @@ mod tests {
 
     fn bar_type(s: &str) -> BarType {
         s.parse().unwrap()
-    }
-
-    #[test]
-    fn maps_a_bar_type_to_the_ib_bar_spec_string() {
-        let spec = bar_spec(&bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL")).unwrap();
-        assert_eq!(spec, "1-HOUR-LAST");
-    }
-
-    #[test]
-    fn maps_every_bar_size_ib_serves() {
-        for spec in [
-            "1-SECOND-LAST",
-            "5-SECOND-BID",
-            "15-SECOND-ASK",
-            "30-SECOND-MID",
-            "1-MINUTE-LAST",
-            "2-MINUTE-LAST",
-            "3-MINUTE-LAST",
-            "5-MINUTE-LAST",
-            "10-MINUTE-LAST",
-            "15-MINUTE-LAST",
-            "20-MINUTE-LAST",
-            "30-MINUTE-LAST",
-            "1-HOUR-LAST",
-            "2-HOUR-LAST",
-            "3-HOUR-LAST",
-            "4-HOUR-LAST",
-            "8-HOUR-LAST",
-            "1-DAY-LAST",
-        ] {
-            let bt = bar_type(&format!("ESM4.CME-{spec}-EXTERNAL"));
-            assert_eq!(bar_spec(&bt).unwrap(), spec);
-        }
-    }
-
-    #[test]
-    fn the_duration_of_one_request_depends_on_the_bar_size() {
-        for (spec, duration) in [
-            ("1-SECOND-LAST", "1800 S"),
-            ("5-SECOND-BID", "3600 S"),
-            ("15-SECOND-LAST", "14400 S"),
-            ("30-SECOND-LAST", "28800 S"),
-            ("1-MINUTE-LAST", "86400 S"),
-            ("2-MINUTE-LAST", "2 D"),
-            ("3-MINUTE-LAST", "5 D"),
-            ("5-MINUTE-LAST", "5 D"),
-            ("10-MINUTE-LAST", "5 D"),
-            ("15-MINUTE-LAST", "10 D"),
-            ("20-MINUTE-LAST", "10 D"),
-            ("30-MINUTE-LAST", "20 D"),
-            ("1-HOUR-LAST", "20 D"),
-            ("2-HOUR-LAST", "20 D"),
-            ("3-HOUR-LAST", "20 D"),
-            ("4-HOUR-LAST", "20 D"),
-            ("8-HOUR-LAST", "20 D"),
-            ("1-DAY-LAST", "1 Y"),
-        ] {
-            let bt = bar_type(&format!("ESM4.CME-{spec}-EXTERNAL"));
-            assert_eq!(request_duration(&bt), duration, "{spec}");
-        }
-    }
-
-    #[test]
-    fn rejects_a_bar_type_ib_cannot_serve() {
-        for bt in [
-            "ESM4.CME-10-SECOND-LAST-EXTERNAL",
-            "ESM4.CME-4-MINUTE-LAST-EXTERNAL",
-            "ESM4.CME-12-MINUTE-LAST-EXTERNAL",
-            "ESM4.CME-6-HOUR-LAST-EXTERNAL",
-            "ESM4.CME-2-DAY-LAST-EXTERNAL",
-            "ESM4.CME-1-WEEK-LAST-EXTERNAL",
-            "ESM4.CME-1-MONTH-LAST-EXTERNAL",
-            "ESM4.CME-100-TICK-LAST-EXTERNAL",
-            "ESM4.CME-1-HOUR-MARK-EXTERNAL",
-            "ESM4.CME-1-HOUR-LAST-INTERNAL",
-        ] {
-            let err = bar_spec(&bar_type(bt)).unwrap_err();
-            assert!(err.to_string().contains(bt), "{bt}: {err}");
-        }
     }
 
     #[test]
@@ -941,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_are_made_from_one_minute_bid_and_ask_bars_fetched_a_day_per_request() {
+    fn quotes_are_made_from_one_minute_bid_and_ask_bars() {
         let id = InstrumentId::from("SXR8.IBIS");
         for (price_type, expected, spec) in [
             (
@@ -957,8 +796,7 @@ mod tests {
         ] {
             let quoted = quoted_bar_type(id, price_type);
             assert_eq!(quoted, bar_type(expected));
-            assert_eq!(bar_spec(&quoted).unwrap(), spec);
-            assert_eq!(request_duration(&quoted), "86400 S");
+            assert_eq!(quoted.spec().to_string(), spec);
         }
     }
 

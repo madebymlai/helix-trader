@@ -200,7 +200,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         port: args.port,
         client_id: args.client_id,
     };
-    let ib = IbHistory::connect(gateway, &[], end, Timestamp::now()).await?;
+    let ib = IbHistory::connect(gateway, end, Timestamp::now()).await?;
     let instruments = ib.instruments(&requirements.instrument_ids).await?;
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
@@ -209,10 +209,8 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     fill_catalog(
         &mut catalog,
         instruments,
-        &[],
         start,
         end,
-        async |bar_type, from, to| ib.bars(bar_type, from, to).await,
         async |id, from, to| ib.quotes(id, from, to).await,
     )
     .await
