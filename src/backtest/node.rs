@@ -5,6 +5,8 @@
 //! per instrument for its quotes) and the engine
 //! config, then runs it on a `BacktestNode`: `build`, the strategy
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
+//! The engine is kept after the run, so that the report reads the fills
+//! from its cache, then disposed.
 
 use std::{collections::BTreeSet, fmt::Debug};
 
@@ -16,14 +18,14 @@ use nautilus_backtest::{
 };
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_model::{
-    data::NautilusDataType,
+    data::{Data, NautilusDataType},
     enums::{AccountType, BookType, OmsType},
     identifiers::{InstrumentId, Venue},
 };
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
-use super::{Backtest, costs};
+use super::{Backtest, costs, report::Outcome};
 use crate::{data::to_unix_nanos, strategy::warmup};
 
 /// The id of the one run of the node.
@@ -36,7 +38,8 @@ const RUN_ID: &str = "backtest";
 /// engine so that it serves the strategy's warmup requests, with a cache
 /// holding the warmup bars (`warmup::cache_config`). The engine starts
 /// 1 ns before `start` (see `Backtest::engine_start`), which must be before
-/// `end`. Build and run errors are raised, not only logged.
+/// `end`. Build and run errors are raised, not only logged; the engine
+/// outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
@@ -88,12 +91,14 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .start(to_unix_nanos(backtest.engine_start()?)?)
         .end(to_unix_nanos(backtest.end)?)
         .raise_exception(true)
+        .dispose_on_completion(false)
         .build()?)
 }
 
 /// Runs `config` with `strategy` on a new `BacktestNode` and returns its
-/// one result.
-pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<BacktestResult>
+/// one result, with the costs of the fills in the engine's cache, each on
+/// the quotes the run replayed, loaded again as the node loads them.
+pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
@@ -105,7 +110,19 @@ where
     let results = node.run()?;
     let [result] = <[BacktestResult; 1]>::try_from(results)
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;
-    Ok(result)
+    let config = &node.configs()[0];
+    let mut quotes = Vec::new();
+    for data in config.data() {
+        let replayed = BacktestNode::load_data_config(data, config.start(), config.end())?;
+        quotes.extend(replayed.into_iter().filter_map(|data| match data {
+            Data::Quote(quote) => Some(quote),
+            _ => None,
+        }));
+    }
+    let engine = node.get_engine(RUN_ID).context("no engine for the run")?;
+    let outcome = Outcome::new(result, &engine.kernel().cache.borrow(), &quotes);
+    node.dispose();
+    outcome
 }
 
 /// The one venue of `instrument_ids`.
@@ -222,6 +239,7 @@ mod tests {
         assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
         assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
         assert!(config.raise_exception());
+        assert!(!config.dispose_on_completion());
     }
 
     #[test]

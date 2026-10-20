@@ -12,7 +12,6 @@ use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
-use nautilus_backtest::result::BacktestResult;
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
@@ -22,7 +21,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 pub use self::{
     costs::{commission_per_order, commission_rate},
-    report::report,
+    report::{Outcome, report},
 };
 
 /// One backtest: a window of the catalog, the instruments whose quotes are
@@ -53,7 +52,7 @@ pub struct Backtest {
 
 impl Backtest {
     /// Runs `strategy` over the window on a `BacktestNode` and returns the
-    /// Nautilus result.
+    /// Nautilus result with the costs of the run's fills.
     ///
     /// # Errors
     ///
@@ -61,9 +60,9 @@ impl Backtest {
     /// several venues, a negative warmup, `start` not before
     /// `end`), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of its quotes
-    /// over `[start - 1 ns - warmup, end]`, or if the node fails to build
-    /// or run.
-    pub fn run<S>(&self, strategy: S) -> anyhow::Result<BacktestResult>
+    /// over `[start - 1 ns - warmup, end]`, if the node fails to build
+    /// or run, or if a fill has no quote before it.
+    pub fn run<S>(&self, strategy: S) -> anyhow::Result<Outcome>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {

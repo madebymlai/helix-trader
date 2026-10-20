@@ -11,7 +11,8 @@ fn without_commission_the_ema_crossover_pays_only_the_spread() {
     let catalog = wave::catalog();
     let result = wave::backtest(catalog.path(), "0 EUR")
         .run(wave::ema_cross())
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(result.total_orders, wave::EMA_ORDERS);
     assert_eq!(

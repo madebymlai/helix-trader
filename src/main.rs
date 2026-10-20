@@ -253,13 +253,13 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         balance: args.balance,
         logging,
     };
-    let result = match args.run.strategy {
+    let outcome = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
             backtest(config.data_requirements()).run(EmaCross::new(config)?)?
         }
     };
-    print!("{}", backtest::report(&result));
+    print!("{}", backtest::report(&outcome));
     Ok(())
 }
 

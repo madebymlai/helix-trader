@@ -40,7 +40,8 @@ fn bars_outside_the_session_quoted_or_flat_neither_move_the_emas_nor_trade() {
 
     let result = common::backtest(catalog.path(), start, end, warmup, "0 EUR")
         .run(common::shortest_ema_cross(warmup))
-        .unwrap();
+        .unwrap()
+        .result;
 
     // The slow EMA after the warmup is 600.60. 15:00: 590.60 below it,
     // short: sell 10 at 590.55, the EMA going to 593.93. 16:00: 700.60

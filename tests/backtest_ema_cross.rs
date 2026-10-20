@@ -10,7 +10,8 @@ fn the_ema_crossover_trades_on_internal_bars_and_pays_the_commission_per_order()
     let catalog = wave::catalog();
     let result = wave::backtest(catalog.path(), "3 EUR")
         .run(wave::ema_cross())
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(result.total_orders, wave::EMA_ORDERS);
     assert!(result.total_positions > 0);

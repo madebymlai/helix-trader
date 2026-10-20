@@ -14,7 +14,8 @@ fn a_run_starting_on_a_bar_close_trades_on_that_bar_and_its_closing_quote() {
     let catalog = steps::catalog();
     let result = steps::backtest(catalog.path(), steps::at("13:00"))
         .run(common::shortest_ema_cross(steps::WARMUP))
-        .unwrap();
+        .unwrap()
+        .result;
 
     // The same orders and fills as a run from 12:30 (backtest_warmup.rs).
     assert_eq!(result.total_orders, steps::ORDERS);

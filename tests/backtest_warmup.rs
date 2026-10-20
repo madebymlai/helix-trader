@@ -14,7 +14,8 @@ fn the_crossover_warms_up_on_the_full_warmup_bars_and_trades_from_the_first_bar_
     let catalog = steps::catalog();
     let result = steps::backtest(catalog.path(), steps::at("12:30"))
         .run(common::shortest_ema_cross(steps::WARMUP))
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(result.total_orders, steps::ORDERS);
     assert_eq!(common::balance(&result), steps::BALANCE);
