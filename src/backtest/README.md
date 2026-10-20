@@ -653,8 +653,7 @@ last trade.
   catalog: missing instrument, quotes 1 ns short at either end, missing,
   or with a gap), the report of a hand-built `BacktestResult` (sections, sorted names, max
   drawdown). The command line is tested in `main.rs`: required flags,
-  exactly one commission flag, malformed `Money` and rates, negative
-  commissions, the window check.
+  exactly one commission flag, malformed `Money`, the window check.
 - Integration tests in `tests/`, one node per file, run the real EMA
   strategy through `Backtest::run` on a fixture catalog (`tests/common`:
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
