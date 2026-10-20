@@ -20,7 +20,7 @@ use nautilus_interactive_brokers::{
 use nautilus_model::identifiers::InstrumentId;
 
 use super::node::Clients;
-use crate::data::IbGateway;
+use crate::data::{IbGateway, data_client_config};
 
 /// An IB account id as IB shows it, without the client name: `DU1234567`
 /// on a paper account, `U1234567` on a live one.
@@ -65,11 +65,11 @@ pub(super) struct IbClients {
 /// The client configs for `account` on `gateway`, loading `instrument_ids`
 /// at startup.
 ///
-/// The data client takes quotes tick by tick (`batch_quotes: false`; the
-/// adapter falls back to `reqMktData` where IB refuses them), so internal
-/// bars are built from every quote change, and the full session, not
-/// regular hours, as the history in the catalog (see `data_client_config`
-/// in the data module). Data and exec share `gateway`'s client id, hence
+/// The data client is the history's (`data::data_client_config`: the full
+/// session, the symbology and venues of the catalog's instruments), taking
+/// quotes tick by tick (`batch_quotes: false`; the adapter falls back to
+/// `reqMktData` where IB refuses them), so internal bars are built from
+/// every quote change. Data and exec share `gateway`'s client id, hence
 /// one connection.
 ///
 /// # Errors
@@ -108,13 +108,9 @@ pub(super) fn clients(
     };
     Ok(IbClients {
         data: InteractiveBrokersDataClientConfig {
-            host: gateway.host.clone(),
-            port: gateway.port,
-            client_id: gateway.client_id,
-            use_regular_trading_hours: false,
             batch_quotes: false,
             instrument_provider: instrument_provider.clone(),
-            ..Default::default()
+            ..data_client_config(gateway.clone())
         },
         exec: InteractiveBrokersExecutionClientConfig {
             host: gateway.host.clone(),

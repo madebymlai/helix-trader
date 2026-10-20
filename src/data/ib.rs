@@ -347,7 +347,7 @@ async fn walk_back(
 /// like `ESM4.CME`). Never sets
 /// `convert_exchange_to_mic_venue`: it makes the venue of a CME contract
 /// change between processes.
-fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
+pub(crate) fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
     InteractiveBrokersDataClientConfig {
         host: gateway.host,
         port: gateway.port,
