@@ -18,17 +18,20 @@ predecessor `ESH4.CME` and the continuous root `ES.CME`.
 data/
   mod.rs           declares the modules, exposes only what others call
   fill_catalog.rs  source-agnostic: resume, check, sort, write
-  ib.rs            Interactive Brokers history: instruments, quotes
+  ib/
+    mod.rs         Interactive Brokers history: instruments, quotes
+    gateway.rs     the IB account and the Docker gateway, started and logged in
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
-No node and no port of our own. A source is an adapter's historical
+No node and no port of our own. The IB part starts the Docker IB Gateway
+it connects to (see "The gateway" below). A source is an adapter's historical
 client, which returns Nautilus types (`Vec<InstrumentAny>`,
 `Vec<QuoteTick>`, or bars a source turns into quotes);
 `ParquetDataCatalog` is the storage.
 
 ```
-strategy config ──► fill_catalog ──► ib.rs ──(HistoricalInteractiveBrokersClient)──► IB Gateway
+strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
                          └──► ParquetDataCatalog ──► backtest
 rolls ◄── catalog quotes of each contract ──► params for the INTERNAL bar type
 ```
@@ -43,7 +46,7 @@ names an instrument, and takes no bar type: the catalog holds no bars. The
 history window is a run argument of `fill-catalog` (`--start`, `--end`),
 not config.
 
-Bar types still matter to this module in two places: `ib.rs` makes quotes
+Bar types still matter to this module in two places: `ib/` makes quotes
 from IB's `EXTERNAL` 1-MINUTE BID and ASK bars, which it never stores, and
 the strategy subscribes to an `INTERNAL` bar type built from the quotes.
 
@@ -78,7 +81,7 @@ So `60-MINUTE` is rejected: write `1-HOUR`.
 **Aggregation source**, the last token:
 
 - `EXTERNAL`: bars made by the venue or adapter: what `request_bars`
-  returns and `subscribe_bars` streams. `ib.rs` requests them to make
+  returns and `subscribe_bars` streams. `ib/` requests them to make
   quotes; the catalog does not store them.
 - `INTERNAL`: bars built by the Nautilus data engine from ticks or other
   bars: the strategies' bars, from the stored quotes, and continuous
@@ -153,7 +156,7 @@ pub async fn fill_catalog(
 ) -> anyhow::Result<()>
 ```
 
-`fetch_quotes` is the seam: `ib.rs` supplies it now, another source
+`fetch_quotes` is the seam: `ib/` supplies it now, another source
 others. No trait until a second source exists. Tests pass closures with
 canned data. A fetch over `(from, to]` returns the quotes whose `ts_init`
 lies in it; how the source makes them (IB's come from bars) and at what
@@ -261,7 +264,7 @@ catalog.get_intervals(..)                            // the stored range a re-ru
 
 ### Interactive Brokers specifics (history)
 
-`ib.rs` wraps `HistoricalInteractiveBrokersClient`
+`ib/` wraps `HistoricalInteractiveBrokersClient`
 (`nautilus_interactive_brokers::historical`).
 
 ```rust
@@ -275,18 +278,19 @@ client.request_bars(bar_specifications: Vec<&str>, end_date_time: Timestamp,
     use_rth: bool, timeout: u64) .await -> anyhow::Result<Vec<Bar>>
 ```
 
-Our wrapper, `IbHistory` (exported with `IbGateway` from `data`):
+Our wrapper, `IbHistory` (exported with `IbAccount` from `data`):
 
 ```rust
-IbHistory::connect(gateway: IbGateway, end: Timestamp, now: Timestamp)
-    .await -> anyhow::Result<IbHistory>   // checks end before connecting
+IbHistory::connect(client_id: i32, end: Timestamp, now: Timestamp)
+    .await -> anyhow::Result<IbHistory>   // checks end, then starts or reuses
+                                          // the paper gateway, then connects
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
 history.quotes(instrument_id, start, end)
     .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; (start, end],
                                                // one a minute, sorted
 ```
 
-- **Checked before connecting.** `end` must be at least a minute (the
+- **Checked before the gateway starts.** `end` must be at least a minute (the
   quote cadence, see below) before `now`: IB answers a window ending
   within one bar of now with the bar still in progress, and `fill_catalog`
   would store its quote and resume past it. `main` reads the clock.
@@ -308,8 +312,18 @@ history.quotes(instrument_id, start, end)
   command, as a node would (`NAUTILUS_LOG`, `RUST_LOG`).
 - **No node.** `connect` opens the IB socket through the adapter's shared
   client registry and initialises an instrument provider; no message bus,
-  cache or clock. It needs a Tokio runtime and a running IB Gateway or TWS.
-  The config is the data client config of the live README.
+  cache or clock. It needs a Tokio runtime. The config is the data client
+  config of the live README.
+- **The gateway.** `connect` first starts Nautilus' `DockerizedIBGateway`
+  in paper mode, or reuses its running container
+  (`nautilus-ib-gateway-paper`, port 4002), and waits for its login
+  (`ib/gateway.rs`; details in the live README, "Gateway"). History always
+  runs on paper, so it never needs a live login or 2FA. It needs Docker
+  (`DOCKER_HOST` for a socket other than `/var/run/docker.sock`, such as
+  podman's) and the paper login in `TWS_USERNAME` and `TWS_PASSWORD`, which
+  `fill-catalog` also reads from `.env`. The container stays up afterwards;
+  the next command reuses it. It takes port 4002 and logs in as the primary
+  session, so an IB Gateway run by hand on paper must be closed first.
 - **Instruments first.** `request_bars` fails a contract the provider does
   not hold (`Instrument … is missing from the provider`; up to 0.65.0 its
   bars came out at a fallback precision (5, 0)). Call `request_instruments`
@@ -317,7 +331,7 @@ history.quotes(instrument_id, start, end)
 - **Bar spec strings** are `"{step}-{aggregation}-{price_type}"`, for example
   `"1-MINUTE-BID"`, the `Display` of `BarSpecification` that the historical
   client splits on `-`. It parses SECOND, MINUTE, HOUR, DAY and WEEK only
-  (no MONTH). `ib.rs` asks only for the 1-MINUTE BID and ASK bars quotes
+  (no MONTH). `ib/` asks only for the 1-MINUTE BID and ASK bars quotes
   are made from (`quoted_bar_spec`).
 - **Walking back, not segments.** Given a start, the client splits a
   window into an `N D` segment ending at `end` and a seconds segment
@@ -366,9 +380,9 @@ history.quotes(instrument_id, start, end)
   Verified on the paper gateway (2026-10-07): 1-HOUR bars stamp
   `ts_event = ts_init` = the bar close, on the hour. Weekly bars break the
   rule: the adapter's `bar_close_from_open` returns the open for WEEK;
-  `ib.rs` asks for minute bars only.
+  `ib/` asks for minute bars only.
 - **Full session, not regular hours.** The data client config built in
-  `ib.rs` sets `use_regular_trading_hours: false`, and every bar request
+  `ib/` sets `use_regular_trading_hours: false`, and every bar request
   passes that same setting as `use_rth`. With regular hours on (the adapter
   default), IB's first regular-hours bar of a day is partial (13:30-14:00
   UTC for ES) while the adapter stamps every bar at open + bar size, so
@@ -469,7 +483,7 @@ history.quotes(instrument_id, start, end)
   errors: a bar without the other side's bar of the same close, and a
   crossed pair (ask < bid, mostly the pre-opening auction); that minute
   then fills on the previous quote. A locked pair (ask = bid) is kept. Only
-  `ib.rs` knows quotes come from bars; a source with quotes (Databento's
+  `ib/` knows quotes come from bars; a source with quotes (Databento's
   `bbo-1m`) would return `QuoteTick`s directly.
 - **Quote cadence: 1 minute, fixed.** `quotes` has no cadence parameter:
   the cadence is a detail of this source, not of the strategy or the CLI.
@@ -518,7 +532,7 @@ Databento (`nautilus-databento`, not used yet) has the same shape:
 returns `Vec<InstrumentAny>`, and its quote requests take the 1-minute
 `bbo-1m` schema and return `QuoteTick`s (per the Nautilus Databento docs;
 the Rust method is **unverified**). A `databento.rs` next to
-`ib.rs` would supply its own `fetch_quotes`. Its ids are on `GLBX` unless
+`ib/` would supply its own `fetch_quotes`. Its ids are on `GLBX` unless
 `use_exchange_as_venue` is set (see "Instrument ids across sources").
 
 ## rolls.rs
@@ -642,8 +656,8 @@ bar after a roll behaves when the new contract has not ticked yet is
   engine call.
 - **No clock and no I/O** in `rolls.rs`: time comes in as
   arguments.
-- **The cadence is the source's**: no caller passes it; `ib.rs` checks
-  `end` against it before connecting.
+- **The cadence is the source's**: no caller passes it; `ib/` checks
+  `end` against it before starting the gateway.
 
 ## Tests
 
@@ -662,18 +676,23 @@ bar after a roll behaves when the new contract has not ticked yet is
     before it; a start before the stored range refused before fetching;
     a minute-cadence source stored every minute and resumed with only the
     new minutes.
-  - `ib.rs`: BID and ASK bars to quotes (prices and precision, the 1 ns
+  - `ib/`: BID and ASK bars to quotes (prices and precision, the 1 ns
     stamp, the nominal size at the bars' size precision, a side without
     the other dropped, a crossed pair dropped and a locked one kept, empty
     input, different precisions an error), the bar window of a quote
     window and the 1-MINUTE BID and ASK bars quotes are made from; an
-    `end` within a minute of now rejected before connecting; the walk back
+    `end` within a minute of now rejected before the gateway starts; the walk back
     over canned answers (no hole at the joins, stops at start, on an empty
     answer and on no progress, trims to `(start, end]`, sorted and
     unique); the data client config and the bar requests use the full
     session.
+  - `ib/gateway.rs`: account forms and their mode, the container config
+    (the mode, the API open to orders), the login wait on fake statuses
+    (ready at once, ready after a wait, the deadline naming the last
+    status, a vanished container, a failed status).
 - Integration tests in `tests/`, one node per file: a backtest of a
   continuous future over a fixture catalog and roll params, which also
   proves the engine accepts our params.
-- Anything against a real gateway is a manual check: fill a small window of
-  one contract on the paper gateway and read it back.
+- Against the Docker paper gateway, `tests/ib_gateway.rs` (gated by
+  `NAUTILUS_IB_RUN=1`, see the live README, "IB tests"): starting or
+  reusing it, and a day of SXR8.IBIS quotes filled through it.

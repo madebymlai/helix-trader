@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IbGateway, IbHistory, fill_catalog},
+    data::{IbHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
         DataRequirements,
@@ -77,12 +77,6 @@ impl RunArgs {
 struct FillCatalogArgs {
     #[command(flatten)]
     run: RunArgs,
-    /// IB Gateway or TWS host.
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    /// IB Gateway or TWS port (4002: paper gateway).
-    #[arg(long, default_value_t = 4002)]
-    port: u16,
     /// IB client id of this process; not the adapter default 1, so a live
     /// node with the default id can run at the same time.
     #[arg(long, default_value_t = 10)]
@@ -112,14 +106,8 @@ struct LiveArgs {
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
     /// The IB account traded, for example DU1234567 (paper).
-    #[arg(long)]
+    #[arg(long, env = "NAUTILUS_IB_ACCOUNT_ID")]
     account: IbAccount,
-    /// IB Gateway or TWS host.
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    /// IB Gateway or TWS port (4002: paper gateway); must match the account.
-    #[arg(long, default_value_t = 4002)]
-    port: u16,
     /// IB client id of the node, the adapter default.
     #[arg(long, default_value_t = 1)]
     client_id: i32,
@@ -169,6 +157,9 @@ fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<Log
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before parsing, since arguments fall back on the environment; a
+    // variable already set wins over the file.
+    dotenvy::dotenv().ok();
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
         Command::Backtest(args) => run_backtest(args),
@@ -195,12 +186,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         FileWriterConfig::default(),
     )?;
     init_tracing()?;
-    let gateway = IbGateway {
-        host: args.host,
-        port: args.port,
-        client_id: args.client_id,
-    };
-    let ib = IbHistory::connect(gateway, end, Timestamp::now()).await?;
+    let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
     let instruments = ib.instruments(&requirements.instrument_ids()).await?;
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
@@ -247,12 +233,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         catalog: args.catalog,
-        gateway: IbGateway {
-            host: args.host,
-            port: args.port,
-            client_id: args.client_id,
-        },
         account: args.account,
+        client_id: args.client_id,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     match args.strategy {
@@ -309,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_fill_catalog_with_paper_gateway_defaults() {
+    fn parses_fill_catalog_with_its_client_id() {
         let args = parse(&REQUIRED).unwrap();
         assert_eq!(args.run.strategy, Strategy::Ema);
         assert_eq!(args.run.config, PathBuf::from("ema.toml"));
@@ -322,28 +304,15 @@ mod tests {
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
-        assert_eq!(args.host, "127.0.0.1");
-        assert_eq!(args.port, 4002);
         assert_eq!(args.client_id, 10);
     }
 
     #[test]
-    fn parses_catalog_and_gateway_overrides() {
+    fn parses_catalog_and_client_id_overrides() {
         let mut argv = REQUIRED.to_vec();
-        argv.extend([
-            "--catalog",
-            "/data/cat",
-            "--host",
-            "10.0.0.5",
-            "--port",
-            "7497",
-            "--client-id",
-            "42",
-        ]);
+        argv.extend(["--catalog", "/data/cat", "--client-id", "42"]);
         let args = parse(&argv).unwrap();
         assert_eq!(args.run.catalog, PathBuf::from("/data/cat"));
-        assert_eq!(args.host, "10.0.0.5");
-        assert_eq!(args.port, 7497);
         assert_eq!(args.client_id, 42);
     }
 
@@ -404,23 +373,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_live_with_the_paper_gateway_and_the_adapter_client_id() {
+    fn parses_live_with_the_adapter_client_id() {
         let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
         assert_eq!(args.strategy, Strategy::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.account, "DU1234567".parse().unwrap());
-        assert_eq!(args.host, "127.0.0.1");
-        assert_eq!(args.port, 4002);
         assert_eq!(args.client_id, 1);
     }
 
     #[test]
     fn live_requires_a_well_formed_account() {
-        let err = parse_live(&["ema", "--config", "ema.toml"]).unwrap_err();
-        assert!(err.to_string().contains("--account"), "{err}");
         let err = parse_live(&["ema", "--config", "ema.toml", "--account", "IB-DU1"]).unwrap_err();
         assert!(err.to_string().contains("--account"), "{err}");
+    }
+
+    /// Read from the arguments' definition: setting the variable would race
+    /// the other tests, and the developer's environment may have it.
+    #[test]
+    fn the_live_account_falls_back_on_nautilus_ib_account_id() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let live = cli.find_subcommand("live").unwrap();
+        let account = live
+            .get_arguments()
+            .find(|arg| arg.get_id() == "account")
+            .unwrap();
+        assert_eq!(
+            account.get_env(),
+            Some(std::ffi::OsStr::new("NAUTILUS_IB_ACCOUNT_ID"))
+        );
+        assert!(account.is_required_set());
     }
 
     #[test]

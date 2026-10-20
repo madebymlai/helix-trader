@@ -1,4 +1,5 @@
-//! Interactive Brokers history: instruments and quotes for
+//! Interactive Brokers connection and history: the account, the gateway
+//! (see `gateway`), the data client config, and instruments and quotes for
 //! `fill_catalog`.
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
@@ -26,13 +27,9 @@ use nautilus_model::{
     types::Quantity,
 };
 
-/// Where IB Gateway or TWS listens, and the client id of this process.
-#[derive(Debug, Clone)]
-pub struct IbGateway {
-    pub host: String,
-    pub port: u16,
-    pub client_id: i32,
-}
+mod gateway;
+pub use gateway::IbAccount;
+pub(crate) use gateway::IbGateway;
 
 /// A connection to IB for history: instruments and quotes, no node.
 pub struct IbHistory {
@@ -59,20 +56,17 @@ impl BarRequests {
 }
 
 impl IbHistory {
-    /// Connects to `gateway`, once IB can serve quotes over a window ending
-    /// at `end`: checked before any connection attempt.
+    /// Connects with `client_id` to the paper gateway, started or reused
+    /// (see `IbGateway::paper`), once IB can serve quotes over a window
+    /// ending at `end`: checked before the gateway starts.
     ///
     /// # Errors
     ///
-    /// Returns an error if `end` is within a minute of `now`, or if the
-    /// connection fails.
-    pub async fn connect(
-        gateway: IbGateway,
-        end: Timestamp,
-        now: Timestamp,
-    ) -> anyhow::Result<Self> {
+    /// Returns an error if `end` is within a minute of `now`, if the
+    /// gateway does not start and log in, or if the connection fails.
+    pub async fn connect(client_id: i32, end: Timestamp, now: Timestamp) -> anyhow::Result<Self> {
         ensure_quotes_closed(end, now)?;
-        let config = data_client_config(gateway);
+        let config = data_client_config(IbGateway::paper(client_id).await?);
         let requests = BarRequests::of(&config);
         let symbology = Symbology::new(config.instrument_provider.symbology_method);
         let address = format!("{}:{}", config.host, config.port);
@@ -417,8 +411,7 @@ mod tests {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))
     }
 
-    /// Nothing listens there: a connection attempt would fail with a
-    /// connection error, not the error asserted.
+    /// A gateway for the configs; nothing listens there.
     fn closed_gateway() -> IbGateway {
         IbGateway {
             host: "127.0.0.1".to_string(),
@@ -427,11 +420,13 @@ mod tests {
         }
     }
 
+    /// Starting the gateway would fail without credentials or Docker, or
+    /// start a container: the end is checked first.
     #[tokio::test]
-    async fn connect_rejects_an_end_within_a_minute_of_now_before_connecting() {
+    async fn connect_rejects_an_end_within_a_minute_of_now_before_starting_the_gateway() {
         let now = at("2024-06-10T12:00:00Z");
         let end = at("2024-06-10T11:59:30Z");
-        let Err(err) = IbHistory::connect(closed_gateway(), end, now).await else {
+        let Err(err) = IbHistory::connect(1, end, now).await else {
             panic!("connected");
         };
         assert!(

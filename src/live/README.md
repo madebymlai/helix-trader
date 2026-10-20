@@ -12,31 +12,35 @@ logger) are in `docs/ARCHITECTURE.md`.
 ## The command
 
 ```sh
-helix-trader live ema --config ema.toml --account DU1234567 \
-  [--catalog catalog] [--host 127.0.0.1] [--port 4002] [--client-id 1]
+helix-trader live ema --config ema.toml [--account DU1234567] \
+  [--catalog catalog] [--client-id 1]
 ```
 
 Runs one strategy until Ctrl-C (SIGINT) or SIGTERM. `--account` is the bare
-IB account id; a paper account (`D...`) on a live port (4001, 7496), or a
-live one on a paper port (4002, 7497), is refused before anything connects.
-A client id that is a multiple of 1000 is refused too. The default client
-id is the adapter's, 1, so `fill-catalog` (10) can run at the same time.
-`NAUTILUS_LOG` configures the logger as for the other commands.
+IB account id, else `NAUTILUS_IB_ACCOUNT_ID`; its mode (paper for `D...`)
+picks the gateway (see "Gateway"). A client id that is a multiple of 1000
+is refused before any gateway starts. The default client id is the
+adapter's, 1, so `fill-catalog` (10) can run at the same time.
+`NAUTILUS_LOG` configures the logger as for the other commands. The
+command reads `.env` at start (see `.env.example`); a variable already set
+wins.
 
-No `fill-catalog` run is needed first. In code: `live::Live { catalog,
-gateway, account, logging }.run(&requirements, strategy)`, generic over the
-strategy like `Backtest::run`.
+No `fill-catalog` run is needed first, nor a gateway: the command starts
+it. In code: `live::Live { catalog, account, client_id, logging
+}.run(&requirements, strategy)`, generic over the strategy like
+`Backtest::run`.
 
 ### Start sequence
 
-1. Check the account against the port and build the IB client configs.
-2. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
-   and the `tracing` bridge: the fill logs before the node exists, and the
-   node reuses that logger when built.
+1. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
+   and the `tracing` bridge: the gateway and the fill log before the node
+   exists, and the node reuses that logger when built.
+2. Check the client id, start or reuse the Docker gateway of the account's
+   mode, wait for its login, and build the IB client configs on it.
 3. Fill the catalog for the strategy's data requirements, with the same
    `IbHistory` and `fill_catalog` as `fill-catalog`: instruments, then each
    instrument's quotes over `[now - warmup, now - 1 minute]`, resuming after
-   what the catalog holds. IB history refuses an end within a minute of now
+   what the catalog holds, through the paper gateway (started or reused). IB history refuses an end within a minute of now
    (the minute still in progress). The history connection closes here, so
    the node can connect with the same client id.
 4. Build the node with the catalog in `LiveNodeConfig::catalogs`, IB data
@@ -98,7 +102,8 @@ false`, as the history in the catalog does.
 live/
   mod.rs    `Live`: the start sequence (catalog filling, logger), the entry point
   node.rs   builds and runs the LiveNode, broker-agnostic
-  ib.rs     Interactive Brokers client factories and configs
+  ib.rs     Interactive Brokers client factories and configs, on the
+            gateway `data`'s IB part starts
 ```
 
 Another broker is another file next to `ib.rs` returning the same shape: a
@@ -281,8 +286,8 @@ logs written through `tracing` into the same output.
 ## Interactive Brokers specifics (live)
 
 `nautilus_interactive_brokers::{config, factories}`; Cargo:
-`nautilus-interactive-brokers = "=0.66.0"`. The default `execution` feature
-is enough; `gateway` adds a Docker-managed gateway.
+`nautilus-interactive-brokers = "=0.66.0"`, features `execution` and
+`gateway` (the Docker-managed gateway, through `bollard`).
 
 ```rust
 InteractiveBrokersDataClientFactory::new()       // name() == "IB"
@@ -308,7 +313,7 @@ Both configs implement `ClientConfig` and `Default`; build them with
 | `instrument_provider` | default provider config |
 | `batch_quotes` | `true` (`reqMktData`); set `false` (see "IB quote subscription") |
 
-The history side (`data/ib.rs`) uses the same config type for its
+The history side (`data/ib/`) uses the same config type for its
 historical client. `use_regular_trading_hours` must equal the `use_rth` of
 the history requests, or backtest and live bars differ. History uses the
 full session (`use_regular_trading_hours: false`), so the live data client
@@ -328,18 +333,13 @@ above, `account_id: Option<String>`, timeouts, `instrument_provider`.
 - Data and exec with the same `(host, port, client_id)` share one
   connection. A second process needs its own `client_id`.
 
-### Paper or live: the port
+### Paper or live: the account
 
-Only the port switches the mode. The adapter default is the paper gateway.
-
-| Application | Paper | Live |
-| --- | --- | --- |
-| IB Gateway | 4002 (default) | 4001 |
-| TWS | 7497 | 7496 |
-
-The node stays `Environment::Live` either way. Port and `account_id` come
-from the command line or the environment; reject a paper port with a live
-account (or the reverse) at startup.
+The account's mode picks the gateway: a paper account (`D...`) the paper
+container, on port 4002, any other the live one, on 4001 (the adapter's
+ports by `TradingMode`). The node stays `Environment::Live` either way. The
+account comes from `--account`, else `NAUTILUS_IB_ACCOUNT_ID`, as the
+adapter's `node_exec_tester` reads it.
 
 ### Account id and the client name
 
@@ -394,24 +394,58 @@ same symbology and venue; the venue rules (never
 
 ### Gateway
 
-Run IB Gateway or TWS with the socket API enabled, or enable the `gateway`
-feature and use `DockerizedIBGateway` (needs Docker and the credentials in
-the environment). Its `read_only_api` defaults to `true`; set it to `false`
-for trading. Since 0.66.0 its login check reads only the container's log
-since the container started (`gateway/dockerized.rs`), so a restarted
-container is not taken as logged in from an earlier session's log.
+`live` and `fill-catalog` start the gateway themselves, with Nautilus'
+`DockerizedIBGateway` (`data/ib/gateway.rs`), as Nautilus documents it:
+started before the clients, which take its `host` and `port`. The data
+client config's `dockerized_gateway` is reserved and rejected. No `--host`
+or `--port`: an IB Gateway or TWS run by hand is not used.
+
+- **One container per mode**, `nautilus-ib-gateway-paper` (port 4002) or
+  `nautilus-ib-gateway-live` (4001), image `ghcr.io/gnzsnz/ib-gateway`
+  (IBC logs in). `safe_start` reuses a running container and replaces a
+  stopped or created one. The container stays up after the command, with
+  restart policy `always`; the next command reuses it.
+- **Login wait.** `start` waits for the login of a container it creates,
+  but returns at once for one still starting, so `IbGateway` polls
+  `container_status()` every second until `Ready`, within the adapter's
+  start timeout (300 s). Since 0.66.0 `Ready` comes from the log since the
+  container's last start, so a restarted container is not taken as logged
+  in from an earlier session's log.
+- **Credentials**: `TWS_USERNAME` and `TWS_PASSWORD`, read by the adapter
+  from the environment (or `.env`); they never enter our configs or logs.
+  `DOCKER_HOST` points the adapter's Docker client (bollard) at a socket
+  other than `/var/run/docker.sock`, such as the user's podman socket.
+- **History always on paper**: the catalog fill uses the paper container
+  even for a live account, so it never needs a live login. A paper `live`
+  thus uses one container for both.
+- **`read_only_api: false`** on every container: the paper container
+  `fill-catalog` starts also serves a paper `live`, whose orders a
+  read-only API would block (below).
+- **Live account**: the login needs the 2FA approved in IBKR Mobile within
+  the start timeout.
+- **Other sessions**: the container logs in with
+  `EXISTING_SESSION_DETECTED_ACTION=primary`, ending any other session of
+  the same IB user (an IB Gateway or TWS run by hand); and it takes the
+  mode's port, so a gateway run by hand on 4002 or 4001 must be closed.
+- **Two commands starting the same container at the same moment** can race
+  in the adapter (one sees the other's container just created and replaces
+  it): start the second once the first is logged in.
+- **Gateway restart**: the node does not run a full reconciliation again
+  after the container restarts; only the periodic open-order and position
+  checks run.
 
 A gateway with the API in read-only mode (IB Gateway: Configure, Settings,
 API, Settings, "Read-Only API") blocks more than orders: the execution
 client's first request (the next valid order id) fails with IB error 321
 "The API interface is currently in Read-Only mode", the client never
 connects, and the node aborts its startup after the connection timeout
-("Engine readiness timed out"). Seen on the paper gateway; uncheck the box
-before running `live`.
+("Engine readiness timed out"). Seen on a paper gateway run by hand; the
+containers we start have it off.
 
 ### IB rules
 
-- **Mode by port.** Paper and live differ only in `port` and `account_id`.
+- **Mode by account.** The account's mode picks the container, hence the
+  port.
 - **Always set `account_id`.**
 - **Default routing** for both clients.
 - **Same symbology** in provider, bar types and catalog.
@@ -419,12 +453,23 @@ before running `live`.
 
 ### IB tests
 
-- Unit tests for the pure construction in `ib.rs`: configs from CLI values,
-  port to mode, account id forms, rejecting a paper port with a live account.
-- Against a real gateway, by hand, not in CI: run against the paper port
-  with a paper account, watch reconciliation at startup and a clean stop on
-  Ctrl-C. The IB crate's `node_data_tester` and `node_exec_tester` examples
-  (`--features examples`) are the reference programs.
+- Unit tests for the pure construction in `ib.rs` (configs on a gateway,
+  the client id refused before any gateway starts) and in
+  `data/ib/gateway.rs` (account forms and mode, the container config, the
+  login wait on fake statuses).
+- End to end, `tests/ib_gateway.rs`, against the Docker paper container:
+  history starting or reusing it, `fill_catalog` through it, and `Live`
+  on a paper account, stopped by SIGINT, with a session that holds no bar
+  so the strategy never trades. Gated as the IB crate's `node_data_tester`
+  and `node_exec_tester` examples are: each test returns at once, saying it
+  was skipped, unless `NAUTILUS_IB_RUN=1` is set in the shell (not in
+  `.env`); anything placing orders would also need
+  `NAUTILUS_IB_LIVE_ORDERS=1` (none does). The account comes from
+  `NAUTILUS_IB_ACCOUNT_ID` and must be a paper one. Run:
+
+  ```sh
+  NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
+  ```
 
 ## Rules
 

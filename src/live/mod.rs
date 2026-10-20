@@ -7,7 +7,7 @@
 mod ib;
 mod node;
 
-pub use ib::IbAccount;
+pub use crate::data::IbAccount;
 
 use std::{
     fmt::Debug,
@@ -28,23 +28,23 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use crate::{
-    data::{IbGateway, IbHistory, fill_catalog},
+    data::{IbHistory, fill_catalog},
     strategy::{DataRequirements, warmup},
 };
 
-/// One live run: the strategy trades `account` through the IB Gateway or
-/// TWS at `gateway`, on bars the node builds from IB's quotes, warmed up
-/// from the catalog.
+/// One live run: the strategy trades `account` through IB with
+/// `client_id`, on bars the node builds from IB's quotes, warmed up from
+/// the catalog.
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The catalog directory: the start fills it up to now, and the node
     /// serves the warmup from it.
     pub catalog: PathBuf,
-    /// The gateway, for the history the start fills the catalog with and
-    /// for the node's clients, one after the other with the same client id.
-    pub gateway: IbGateway,
-    /// The account traded; its kind (paper or live) must match the port.
+    /// The account traded.
     pub account: IbAccount,
+    /// The IB client id, for the history the start fills the catalog with
+    /// and for the node's clients, one after the other.
+    pub client_id: i32,
     /// The Nautilus logger, installed for the start and kept by the node.
     pub logging: LoggerConfig,
 }
@@ -57,9 +57,9 @@ impl Live {
     ///
     /// # Errors
     ///
-    /// Returns an error if the account does not match the port, if the
-    /// cache cannot hold the warmup bars of a bar type (see
-    /// `warmup::cache_config`), if the catalog cannot be filled (IB
+    /// Returns an error if the cache cannot hold the warmup bars of a bar
+    /// type (see `warmup::cache_config`), if IB's clients cannot be set up
+    /// (see `ib::clients`), if the catalog cannot be filled (IB
     /// unreachable, an instrument IB does not know, a catalog starting after
     /// `now - warmup`), or if the node fails (see `node::run`).
     pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
@@ -68,7 +68,6 @@ impl Live {
     {
         let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
         let instrument_ids = requirements.instrument_ids();
-        let clients = ib::clients(&self.gateway, &self.account, &instrument_ids)?;
         // The node would install the logger when built, after the fill:
         // install it now with the node's trader and config, and the node
         // keeps it. The adapter's `tracing` output joins it.
@@ -80,6 +79,7 @@ impl Live {
             file_config,
         )?;
         init_tracing()?;
+        let clients = ib::clients(&self.account, self.client_id, &instrument_ids).await?;
         self.fill_catalog(requirements).await?;
         node::run(
             &self.catalog,
@@ -97,7 +97,7 @@ impl Live {
     async fn fill_catalog(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         let now = Timestamp::now();
         let end = IbHistory::latest_end(now)?;
-        let ib = IbHistory::connect(self.gateway.clone(), end, now).await?;
+        let ib = IbHistory::connect(self.client_id, end, now).await?;
         fill_catalog_to_now(
             &self.catalog,
             requirements,

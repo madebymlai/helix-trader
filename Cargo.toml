@@ -8,7 +8,8 @@ publish = false
 [dependencies]
 anyhow = "1"
 bon = "=3.9.3"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
 nautilus-analysis = "=0.66.0"
@@ -19,7 +20,7 @@ nautilus-execution = "=0.66.0"
 nautilus-indicators = "=0.66.0"
 nautilus-live = { version = "=0.66.0", features = ["streaming"] }
 ibapi = "=5.0.0"
-nautilus-interactive-brokers = { version = "=0.66.0", default-features = false, features = ["execution"] }
+nautilus-interactive-brokers = { version = "=0.66.0", default-features = false, features = ["execution", "gateway"] }
 nautilus-model = "=0.66.0"
 nautilus-persistence = "=0.66.0"
 nautilus-serialization = { version = "=0.66.0", features = ["arrow"] }
@@ -33,3 +34,4 @@ toml = "1"
 [dev-dependencies]
 nautilus-model = { version = "=0.66.0", features = ["test-support"] }
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

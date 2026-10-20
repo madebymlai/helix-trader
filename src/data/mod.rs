@@ -7,6 +7,6 @@ mod fill_catalog;
 pub use fill_catalog::fill_catalog;
 pub(crate) use fill_catalog::to_unix_nanos;
 mod ib;
-pub(crate) use ib::data_client_config;
-pub use ib::{IbGateway, IbHistory};
+pub use ib::{IbAccount, IbHistory};
+pub(crate) use ib::{IbGateway, data_client_config};
 mod rolls;
