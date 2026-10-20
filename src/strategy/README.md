@@ -311,3 +311,4 @@ let bars = warmup::bars(self, quotes);
   oldest bar, the bar at the run start and the session each change the
   orders and the final balance. What the EMA cannot show, every price of
   the bars and stop orders, a recording strategy in `tests/common` checks.
+  The cache size of the warmup, `warmup::cache_config`, is unit tested.

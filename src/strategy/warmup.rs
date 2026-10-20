@@ -140,3 +140,40 @@ fn warmup_bars(bar_type: &BarType, warmup: SignedDuration) -> anyhow::Result<usi
     let bars = warmup_ns.div_ceil(length_ns) + 1;
     usize::try_from(bars).with_context(|| format!("no bar count for a warmup of {warmup:#}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+    #[test]
+    fn no_bar_types_keep_the_default_cache() {
+        assert_eq!(cache_config(&[], DAY).unwrap(), CacheConfig::default());
+    }
+
+    #[test]
+    fn a_negative_warmup_is_an_error() {
+        let bar_types = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
+        let err = cache_config(&bar_types, -DAY).unwrap_err().to_string();
+        assert!(err.contains("negative warmup"), "{err}");
+    }
+
+    #[test]
+    fn a_bar_type_not_aggregated_on_time_is_an_error() {
+        let bar_types = [BarType::from("SXR8.IBIS-100-TICK-MID-INTERNAL")];
+        let err = cache_config(&bar_types, DAY).unwrap_err().to_string();
+        assert!(err.contains("SXR8.IBIS-100-TICK-MID-INTERNAL"), "{err}");
+    }
+
+    #[test]
+    fn the_cache_holds_the_warmup_of_the_shortest_bars_on_top_of_the_default() {
+        let bar_types = [
+            BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL"),
+            BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
+        ];
+        // 720 hours of 1-minute bars: 43,200, and one spanning the start.
+        let cache = cache_config(&bar_types, SignedDuration::from_hours(720)).unwrap();
+        assert_eq!(cache.bar_capacity, 10_000 + 43_201);
+    }
+}

@@ -203,14 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_holds_the_warmup_of_the_shortest_bars_on_top_of_the_default() {
-        // 720 hours of 1-minute bars: 43,200, and one spanning the start.
-        let config = run_config(&backtest()).unwrap();
-        let cache = config.engine().cache.as_ref().unwrap();
-        assert_eq!(cache.bar_capacity, 10_000 + 43_201);
-    }
-
-    #[test]
     fn the_node_installs_the_logger_as_configured() {
         let config = run_config(&backtest()).unwrap();
         assert!(config.engine().logging.print_config);
