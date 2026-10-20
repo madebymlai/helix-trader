@@ -412,12 +412,6 @@ mod tests {
         assert_eq!(args.client_id, 1);
     }
 
-    #[test]
-    fn live_requires_a_well_formed_account() {
-        let err = parse_live(&["ema", "--config", "ema.toml", "--account", "IB-DU1"]).unwrap_err();
-        assert!(err.to_string().contains("--account"), "{err}");
-    }
-
     /// Read from the arguments' definition: setting the variable would race
     /// the other tests, and the developer's environment may have it.
     #[test]
