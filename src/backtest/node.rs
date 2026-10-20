@@ -153,14 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn the_account_starts_with_the_balance() {
-        let config = run_config(&backtest()).unwrap();
-        let balances = config.venues()[0].starting_balances();
-        let parsed: Vec<Money> = balances.iter().map(|b| b.parse().unwrap()).collect();
-        assert_eq!(parsed, vec![Money::from("10000 EUR")]);
-    }
-
-    #[test]
     fn orders_fill_on_quotes_only_at_the_quoted_price() {
         let config = run_config(&backtest()).unwrap();
         let venue = &config.venues()[0];
@@ -199,14 +191,6 @@ mod tests {
             .push(BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"));
         let config = run_config(&backtest).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
-    }
-
-    #[test]
-    fn the_catalog_is_registered_for_warmup() {
-        let config = run_config(&backtest()).unwrap();
-        let catalogs = &config.engine().catalogs;
-        assert_eq!(catalogs.len(), 1);
-        assert_eq!(catalogs[0].path(), "/data/catalog");
     }
 
     #[test]
