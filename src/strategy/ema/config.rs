@@ -39,12 +39,11 @@ pub struct EmaCrossConfig {
 }
 
 impl EmaCrossConfig {
-    /// The instruments, the bars and the warmup the strategy needs from
-    /// data.
+    /// The bars, hence the instruments, and the warmup the strategy needs
+    /// from data.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         DataRequirements {
-            instrument_ids: self.instrument_ids.clone(),
             bar_types: self.bar_types(),
             warmup: self.warmup,
         }
@@ -143,10 +142,6 @@ mod tests {
         assert_eq!(
             config.data_requirements(),
             DataRequirements {
-                instrument_ids: vec![
-                    InstrumentId::from("ESH4.CME"),
-                    InstrumentId::from("ESM4.CME")
-                ],
                 bar_types: vec![
                     BarType::from("ESH4.CME-1-HOUR-MID-INTERNAL"),
                     BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL")

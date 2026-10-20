@@ -201,7 +201,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         client_id: args.client_id,
     };
     let ib = IbHistory::connect(gateway, end, Timestamp::now()).await?;
-    let instruments = ib.instruments(&requirements.instrument_ids).await?;
+    let instruments = ib.instruments(&requirements.instrument_ids()).await?;
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
@@ -225,7 +225,6 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
-        instrument_ids: requirements.instrument_ids,
         bar_types: requirements.bar_types,
         start,
         end,

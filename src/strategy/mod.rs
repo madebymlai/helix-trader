@@ -24,11 +24,50 @@ use nautilus_model::{data::BarType, identifiers::InstrumentId};
 /// catalog, backtesting and going live all read it from here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
-    /// The instruments traded, whose history the catalog stores.
-    pub instrument_ids: Vec<InstrumentId>,
-    /// The internal bar types the strategy warms up on: the node sizes its
-    /// cache to hold their warmup (see `warmup::cache_config`).
+    /// The internal bar types the strategy trades and warms up on: their
+    /// instruments are those traded (see `instrument_ids`), and the node
+    /// sizes its cache to hold their warmup (see `warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// How far back before the run the warmup history starts.
     pub warmup: SignedDuration,
+}
+
+impl DataRequirements {
+    /// The instruments traded, whose history the catalog stores: those of
+    /// the bar types, each once, in the order of the bar types.
+    #[must_use]
+    pub fn instrument_ids(&self) -> Vec<InstrumentId> {
+        let mut ids: Vec<InstrumentId> = Vec::new();
+        for bar_type in &self.bar_types {
+            let id = bar_type.instrument_id();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_instruments_are_those_of_the_bar_types_each_once_in_order() {
+        let requirements = DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("SXR8.IBIS-1-DAY-MID-INTERNAL"),
+            ],
+            warmup: SignedDuration::from_hours(720),
+        };
+        assert_eq!(
+            requirements.instrument_ids(),
+            [
+                InstrumentId::from("SXR8.IBIS"),
+                InstrumentId::from("EUNL.IBIS")
+            ]
+        );
+    }
 }

@@ -6,7 +6,7 @@
 //! config, then runs it on a `BacktestNode`: `build`, the strategy
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 
-use std::fmt::Debug;
+use std::{collections::BTreeSet, fmt::Debug};
 
 use anyhow::{Context, anyhow, ensure};
 use nautilus_backtest::{
@@ -38,7 +38,7 @@ const RUN_ID: &str = "backtest";
 /// 1 ns before `start` (see `Backtest::engine_start`). Build and run errors
 /// are raised, not only logged.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
-    let venue = venue(&backtest.instrument_ids)?;
+    let venue = venue(&backtest.instruments())?;
     // Absolute: the node's DataFusion reader finds no object store for a
     // relative path ("file://catalog/...").
     let catalog = std::path::absolute(&backtest.catalog)?;
@@ -102,7 +102,7 @@ where
 }
 
 /// The one venue of `instrument_ids`.
-fn venue(instrument_ids: &[InstrumentId]) -> anyhow::Result<Venue> {
+fn venue(instrument_ids: &BTreeSet<InstrumentId>) -> anyhow::Result<Venue> {
     let first = instrument_ids.first().context("no instruments")?;
     ensure!(
         instrument_ids.iter().all(|id| id.venue == first.venue),
@@ -124,10 +124,6 @@ mod tests {
     fn backtest() -> Backtest {
         Backtest {
             catalog: PathBuf::from("/data/catalog"),
-            instrument_ids: vec![
-                InstrumentId::from("SXR8.IBIS"),
-                InstrumentId::from("EUNL.IBIS"),
-            ],
             start: "2026-07-01T00:00:00Z".parse().unwrap(),
             end: "2026-10-01T00:00:00Z".parse().unwrap(),
             bar_types: vec![
@@ -196,11 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn an_instrument_given_twice_has_its_quotes_loaded_once() {
+    fn an_instrument_of_two_bar_types_has_its_quotes_loaded_once() {
         let mut backtest = backtest();
         backtest
-            .instrument_ids
-            .push(InstrumentId::from("SXR8.IBIS"));
+            .bar_types
+            .push(BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"));
         let config = run_config(&backtest).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
@@ -252,7 +248,7 @@ mod tests {
     #[test]
     fn rejects_no_instruments() {
         let backtest = Backtest {
-            instrument_ids: vec![],
+            bar_types: vec![],
             ..backtest()
         };
         assert!(run_config(&backtest).is_err());
@@ -262,8 +258,8 @@ mod tests {
     fn rejects_instruments_on_two_venues() {
         let mut backtest = backtest();
         backtest
-            .instrument_ids
-            .push(InstrumentId::from("CSPX.LSEETF"));
+            .bar_types
+            .push(BarType::from("CSPX.LSEETF-1-HOUR-MID-INTERNAL"));
         let err = run_config(&backtest).unwrap_err();
         assert!(err.to_string().contains("venue"), "{err}");
     }

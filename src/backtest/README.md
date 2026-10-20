@@ -33,8 +33,8 @@ Dependencies, all pinned at `=0.65.0`:
 ```rust
 pub struct Backtest {
     pub catalog: PathBuf,                // instruments, quotes, warmup
-    pub instrument_ids: Vec<InstrumentId>, // quotes replayed; the venue derives from them
-    pub bar_types: Vec<BarType>,   // the strategy's, the cache sized for their warmup
+    pub bar_types: Vec<BarType>,   // the strategy's: their instruments' quotes replayed,
+                                   // the venue derived from them, the cache sized for their warmup
     pub start: Timestamp,
     pub end: Timestamp,
     pub warmup: SignedDuration,    // the strategy's

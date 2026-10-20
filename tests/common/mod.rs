@@ -189,7 +189,6 @@ pub fn backtest(
 ) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
-        instrument_ids: vec![InstrumentId::from(INSTRUMENT_ID)],
         bar_types: vec![BarType::from(MID_BAR_TYPE)],
         start,
         end,

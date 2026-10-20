@@ -28,13 +28,11 @@ pub struct Backtest {
     /// The catalog directory: instruments and quotes are read from it, and
     /// it serves the strategy's warmup requests.
     pub catalog: PathBuf,
-    /// The instruments whose quotes are replayed, all on one venue, which
-    /// the venue of the run derives from. Strategies get their bars by
-    /// having Nautilus build them from these quotes.
-    pub instrument_ids: Vec<InstrumentId>,
-    /// The internal bar types the strategy warms up on: the engine's cache
-    /// is sized to hold their warmup bars, which reach the strategy only
-    /// through it.
+    /// The internal bar types the strategy trades and warms up on. Their
+    /// instruments, all on one venue, which the venue of the run derives
+    /// from, are those whose quotes are replayed: Nautilus builds the bars
+    /// from these quotes. The engine's cache is sized to hold their warmup
+    /// bars, which reach the strategy only through it.
     pub bar_types: Vec<BarType>,
     pub start: Timestamp,
     pub end: Timestamp,
@@ -81,8 +79,8 @@ impl Backtest {
             .with_context(|| format!("no engine start before {}", self.start))
     }
 
-    /// The instruments, each once.
+    /// The instruments of the bar types, each once.
     fn instruments(&self) -> BTreeSet<InstrumentId> {
-        self.instrument_ids.iter().copied().collect()
+        self.bar_types.iter().map(BarType::instrument_id).collect()
     }
 }

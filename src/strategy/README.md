@@ -85,14 +85,14 @@ The config builds the bar types the strategy uses, one per instrument:
 `SXR8.IBIS-1-HOUR-MID-INTERNAL`.
 
 The config also states what the strategy needs from data, as one
-`strategy::DataRequirements`: its instruments, its bar types and its warmup.
+`strategy::DataRequirements`: its bar types and its warmup; its
+instruments derive from the bar types (`DataRequirements::instrument_ids`).
 `fill_catalog`, backtest and live read them from it, never from the
 config's fields:
 
 ```rust
 pub fn data_requirements(&self) -> DataRequirements {
     DataRequirements {
-        instrument_ids: self.instrument_ids.clone(),
         bar_types: self.bar_types(),
         warmup: self.warmup,
     }

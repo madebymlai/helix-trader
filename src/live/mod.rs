@@ -67,7 +67,8 @@ impl Live {
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
         let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
-        let clients = ib::clients(&self.gateway, &self.account, &requirements.instrument_ids)?;
+        let instrument_ids = requirements.instrument_ids();
+        let clients = ib::clients(&self.gateway, &self.account, &instrument_ids)?;
         // The node would install the logger when built, after the fill:
         // install it now with the node's trader and config, and the node
         // keeps it. The adapter's `tracing` output joins it.
@@ -85,7 +86,7 @@ impl Live {
             self.logging.clone(),
             cache,
             clients.into_node_clients(),
-            &requirements.instrument_ids,
+            &instrument_ids,
             strategy,
         )
         .await
@@ -124,7 +125,7 @@ async fn fill_catalog_to_now(
     let start = now
         .checked_sub(requirements.warmup)
         .with_context(|| format!("no warmup start {} before {now}", requirements.warmup))?;
-    let instruments = fetch_instruments(&requirements.instrument_ids).await?;
+    let instruments = fetch_instruments(&requirements.instrument_ids()).await?;
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
@@ -143,7 +144,7 @@ mod tests {
     use jiff::{SignedDuration, Timestamp};
     use nautilus_core::UnixNanos;
     use nautilus_model::{
-        data::QuoteTick,
+        data::{BarType, QuoteTick},
         identifiers::InstrumentId,
         instruments::{
             Instrument, InstrumentAny,
@@ -165,8 +166,12 @@ mod tests {
 
     fn requirements() -> DataRequirements {
         DataRequirements {
-            instrument_ids: instruments().iter().map(Instrument::id).collect(),
-            bar_types: vec![],
+            bar_types: instruments()
+                .iter()
+                .map(|instrument| {
+                    BarType::from(format!("{}-1-HOUR-MID-INTERNAL", instrument.id()).as_str())
+                })
+                .collect(),
             warmup: SignedDuration::from_hours(2),
         }
     }
@@ -222,7 +227,7 @@ mod tests {
         let catalog_dir = dir.path().join("catalog");
         let now = at("2026-10-20T10:30:00Z");
         let (asked_instruments, asked_quotes) = fill(&catalog_dir, now).await;
-        let ids = requirements().instrument_ids;
+        let ids = requirements().instrument_ids();
         assert_eq!(asked_instruments, ids);
         let (from, to) = (at("2026-10-20T08:30:00Z"), at("2026-10-20T10:29:00Z"));
         assert_eq!(asked_quotes, [(ids[0], from, to), (ids[1], from, to)]);
@@ -241,7 +246,7 @@ mod tests {
         fill(dir.path(), first).await;
         let now = at("2026-10-20T11:00:00Z");
         let (_, asked_quotes) = fill(dir.path(), now).await;
-        let ids = requirements().instrument_ids;
+        let ids = requirements().instrument_ids();
         let resume = at("2026-10-20T10:29:00.000000001Z");
         let to = at("2026-10-20T10:59:00Z");
         assert_eq!(asked_quotes, [(ids[0], resume, to), (ids[1], resume, to)]);

@@ -115,7 +115,7 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{
-        data::QuoteTick,
+        data::{BarType, QuoteTick},
         instruments::stubs::equity_aapl,
         types::{Money, Price, Quantity},
     };
@@ -213,19 +213,18 @@ mod tests {
             .unwrap();
     }
 
-    /// A backtest of `instruments` over October 2026 after one day of
+    /// A backtest on the hour bars of `instruments` over October 2026 after one day of
     /// warmup, starting 1 ns after midnight, so that the engine starts at
     /// midnight on 2 October and the warmup at midnight on 1 October.
     fn backtest(dir: &Path, instruments: &[&str]) -> Backtest {
         Backtest {
             catalog: dir.to_path_buf(),
-            instrument_ids: instruments
+            bar_types: instruments
                 .iter()
-                .map(|&id| InstrumentId::from(id))
+                .map(|&id| BarType::from(format!("{id}-1-HOUR-MID-INTERNAL").as_str()))
                 .collect(),
             start: ts("2026-10-02T00:00:00.000000001Z"),
             end: ts("2026-10-31T00:00:00Z"),
-            bar_types: vec![],
             warmup: SignedDuration::from_hours(24),
             commission: Money::from("3 USD"),
             balance: Money::from("10000 USD"),
