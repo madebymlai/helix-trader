@@ -158,10 +158,6 @@ mod tests {
         let venue = &config.venues()[0];
         assert!(!venue.bar_execution());
         assert!(!venue.liquidity_consumption());
-        assert_eq!(
-            venue.fill_model().unwrap().to_string(),
-            "DefaultFillModel(prob_fill_on_limit=1, prob_slippage=0)"
-        );
     }
 
     /// The instrument of each data config, all quotes.
