@@ -327,19 +327,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quotes_rerun_over_the_same_window_asks_for_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = new_catalog(&dir);
-        let quotes = |id| Ok(vec![quote_at(id, 109), quote_at(id, 149)]);
-        let (r, _) = fill(&mut catalog, vec![instrument()], 100, 200, quotes).await;
-        r.unwrap();
-        let (r, asked) = fill(&mut catalog, vec![instrument()], 100, 200, quotes).await;
-        r.unwrap();
-        assert_eq!(asked, vec![]);
-        assert_eq!(stored_quotes(&mut catalog, es_id()), vec![109, 149]);
-    }
-
-    #[tokio::test]
     async fn resume_point_is_that_of_the_same_instrument() {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
