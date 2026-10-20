@@ -16,7 +16,7 @@ use std::{
 };
 
 use anyhow::Context;
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_common::{
     actor::DataActorNative,
     component::Component,
@@ -95,7 +95,8 @@ impl Live {
     /// and disconnects before the node connects with the same client id.
     async fn fill_catalog(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         let now = Timestamp::now();
-        let ib = IbHistory::connect(self.gateway.clone(), fill_end(now)?, now).await?;
+        let end = IbHistory::latest_end(now)?;
+        let ib = IbHistory::connect(self.gateway.clone(), end, now).await?;
         fill_catalog_to_now(
             &self.catalog,
             requirements,
@@ -107,21 +108,11 @@ impl Live {
     }
 }
 
-/// How long before now the catalog filling at start ends: IB history
-/// refuses an end within a minute of now, the minute its quotes are made
-/// from still being in progress (`IbHistory::connect`). The node asks IB
-/// for the quotes since.
-const FILL_LAG: SignedDuration = SignedDuration::from_mins(1);
-
-/// The end of the catalog filling at start, `FILL_LAG` before `now`.
-fn fill_end(now: Timestamp) -> anyhow::Result<Timestamp> {
-    Ok(now.checked_sub(FILL_LAG)?)
-}
-
 /// Fills the catalog in `catalog_dir`, created if missing, with the
 /// instruments of `requirements`, fetched through `fetch_instruments`, and
-/// with their quotes over `[now - warmup, fill_end(now)]`, fetched one
-/// instrument at a time through `fetch_quotes`. A stored series resumes
+/// with their quotes over `[now - warmup, IbHistory::latest_end(now)]`,
+/// fetched one instrument at a time through `fetch_quotes`; the node asks
+/// IB for the quotes since. A stored series resumes
 /// after its end (see `data::fill_catalog`).
 async fn fill_catalog_to_now(
     catalog_dir: &Path,
@@ -141,7 +132,7 @@ async fn fill_catalog_to_now(
         &mut catalog,
         instruments,
         start,
-        fill_end(now)?,
+        IbHistory::latest_end(now)?,
         fetch_quotes,
     )
     .await

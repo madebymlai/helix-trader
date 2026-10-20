@@ -80,6 +80,17 @@ impl IbHistory {
         Ok(Self { client, requests })
     }
 
+    /// The latest end of a window IB can serve quotes over at `now`: one
+    /// bar of those quotes are made from before `now`, the bar still in
+    /// progress until then (see `quoted_bar_spec`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if that end is out of range.
+    pub fn latest_end(now: Timestamp) -> anyhow::Result<Timestamp> {
+        Ok(now.checked_sub(quoted_bar_spec(PriceType::Bid).timedelta())?)
+    }
+
     /// The instruments of `ids`, as IB defines them. A future IB does not
     /// resolve by id (an expired one) is asked for again as an explicit
     /// contract with `includeExpired`.
@@ -200,12 +211,12 @@ fn quoted_bar_spec(price_type: PriceType) -> BarSpecification {
 /// documented alternative).
 const QUOTED_BARS_PER_REQUEST: &str = "86400 S";
 
-/// Fails if `end` is later than `now` minus the bar quotes are made from.
+/// Fails if `end` is later than `IbHistory::latest_end(now)`.
 ///
 /// IB answers a window ending within one bar of now with the bar still in
 /// progress; its quote, stored, would never be replaced.
 fn ensure_quotes_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
-    let latest = now.checked_sub(quoted_bar_spec(PriceType::Bid).timedelta())?;
+    let latest = IbHistory::latest_end(now)?;
     ensure!(
         end <= latest,
         "end {end} is within a minute of now: IB would return the minute still in progress; \
@@ -581,6 +592,15 @@ mod tests {
             ..config
         };
         assert!(BarRequests::of(&regular).use_rth);
+    }
+
+    #[test]
+    fn the_latest_end_is_a_minute_before_now() {
+        let now = at("2024-06-10T12:00:00Z");
+        assert_eq!(
+            IbHistory::latest_end(now).unwrap(),
+            at("2024-06-10T11:59:00Z")
+        );
     }
 
     #[test]
