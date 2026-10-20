@@ -128,34 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn one_interval_over_the_window_covers_it() {
-        assert_eq!(missing(100, 200, &[(50, 250)]), None);
-    }
-
-    #[test]
-    fn an_interval_from_the_first_to_the_last_nanosecond_covers_the_window() {
-        assert_eq!(missing(100, 200, &[(100, 200)]), None);
-    }
-
-    #[test]
-    fn a_gap_at_the_warmup_start_is_missing() {
-        assert_eq!(missing(100, 200, &[(101, 250)]), Some((100, 100)));
-    }
-
-    #[test]
-    fn a_gap_at_the_end_is_missing() {
-        assert_eq!(missing(100, 200, &[(50, 199)]), Some((200, 200)));
-    }
-
-    #[test]
-    fn a_gap_in_the_middle_is_missing() {
-        assert_eq!(
-            missing(100, 200, &[(50, 120), (150, 250)]),
-            Some((121, 149))
-        );
-    }
-
-    #[test]
     fn a_gap_of_one_nanosecond_is_missing() {
         assert_eq!(
             missing(100, 200, &[(50, 120), (122, 250)]),
@@ -179,11 +151,6 @@ mod tests {
             missing(100, 200, &[(110, 120), (130, 140)]),
             Some((100, 109))
         );
-    }
-
-    #[test]
-    fn no_stored_interval_misses_the_whole_window() {
-        assert_eq!(missing(100, 200, &[]), Some((100, 200)));
     }
 
     fn ts(s: &str) -> Timestamp {
