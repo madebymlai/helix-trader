@@ -674,7 +674,9 @@ last trade.
     a run starting exactly on an hour's close: the one-quote oldest bar
     dropped, the bar at the start traded on its closing quote),
     `backtest_session.rs` (bars outside the session, quoted or flat for
-    want of quotes overnight, neither move the EMAs nor trade).
+    want of quotes overnight, neither move the EMAs nor trade),
+    `backtest_commission_rate.rs` (the orders of a run without commission,
+    each fill charged the rate on its value).
   - `backtest_coverage.rs`: a warmup longer than the stored quotes, or a
     catalog without quotes, is refused before the node is built, naming
     the instrument's quotes and the missing interval.
