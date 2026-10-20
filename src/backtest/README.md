@@ -359,8 +359,9 @@ Verified in "Fills on quotes" below, and by the integration tests.
 Known limits:
 
 - **Resting orders** (stop, limit) are checked once per quote, every
-  minute, never against the bars: a stop the minute crosses and leaves
-  fills only if a minute's closing quote crosses it.
+  minute, never against the bars: a stop fills on the first minute quote
+  crossing it (`backtest_stop.rs`), but one the price crosses and leaves
+  within a minute fills only if a minute's closing quote crosses it.
 - **Missing quotes.** A minute without a quote fills on the last earlier
   one, silently, stale by the gap (overnight, at the open); with no quote
   yet in the run the order is rejected (`No market`). The coverage check
@@ -653,7 +654,18 @@ last trade.
     catalog without quotes, is refused before the node is built, naming
     the instrument's quotes and the missing interval.
 
-  The EMA reads bar closes only: the opens, highs and lows of the bars,
-  and the completeness of the bar spanning the warmup end, which differ
-  only there, are left to Nautilus (verified with a throwaway node before
-  this design: see the strategy README).
+  The EMA reads bar closes only, so the bars' opens, highs and lows, and
+  stops, are tested with a recording strategy (`tests/common/recorder.rs`)
+  that warms up through `strategy::warmup` like a real one, records every
+  bar it gets and can rest a sell stop:
+  - `backtest_bars.rs` and `backtest_bars_on_close.rs` (noise, a mid of
+    its own every minute; runs from 12:30 and from 13:00): every warmup and
+    replayed bar has the open, high, low and close worked out from its
+    hour's minute quotes, the partial oldest bar left out, and the bar
+    spanning the warmup end comes once, complete, as the first replayed
+    bar. With `update_subscriptions` off both fail: that bar comes out
+    holding only the replayed half hour, or one quote on a run starting on
+    its close.
+  - `backtest_stop.rs` (a fall of 0.50 a minute): a sell stop rested on
+    the 13:00 bar fills at the bid of the first minute quote at or below
+    it, 13:39:59.999999999, not at the next bar.

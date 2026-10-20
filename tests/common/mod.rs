@@ -2,12 +2,15 @@
 //! SXR8.IBIS in EUR, and its 1-minute quotes only, and the EMA crossover
 //! trading it on hourly MID bars Nautilus builds from those quotes.
 //!
-//! Two kinds of quotes: a wave, so that a fast and a slow EMA cross several
-//! times over days; and steps, a level per hour bar chosen by the test, so
+//! Kinds of quotes: a wave, so that a fast and a slow EMA cross several
+//! times over days; steps, a level per hour bar chosen by the test, so
 //! that a run with the shortest crossover trades at hours worked out by
-//! hand.
+//! hand; noise, for the recording strategy of `recorder.rs` to check every
+//! price of the bars; a fall, for its stop.
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
+
+pub mod recorder;
 
 use std::path::Path;
 
@@ -19,7 +22,7 @@ use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::ti
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarSpecification, QuoteTick},
+    data::{Bar, BarSpecification, BarType, QuoteTick},
     enums::{BarAggregation, PriceType},
     identifiers::{InstrumentId, Symbol},
     instruments::{InstrumentAny, stubs::equity_aapl},
@@ -29,6 +32,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use tempfile::TempDir;
 
 pub const INSTRUMENT_ID: &str = "SXR8.IBIS";
+pub const MID_BAR_TYPE: &str = "SXR8.IBIS-1-HOUR-MID-INTERNAL";
 
 const MINUTE: SignedDuration = SignedDuration::from_mins(1);
 const NANOSECOND: SignedDuration = SignedDuration::from_nanos(1);
@@ -92,6 +96,42 @@ fn bar_close(close: Timestamp) -> Timestamp {
         .smallest(Unit::Hour)
         .mode(RoundMode::Ceil);
     close.round(hour).unwrap()
+}
+
+/// A bar's close time and its open, high, low and close.
+pub type Ohlc = (Timestamp, Price, Price, Price, Price);
+
+pub fn ohlc(bar: &Bar) -> Ohlc {
+    (bar.ts_event.into(), bar.open, bar.high, bar.low, bar.close)
+}
+
+/// The hour MID bars of `quotes` stamped at or after `from`, worked out
+/// here from the quotes alone: each bar holds the quotes of its hour,
+/// `(close − 1 h, close]` less the 1 ns stamp; the oldest bar, which lacks
+/// the quotes before `from`, is left out.
+pub fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
+    let mut bars: Vec<Ohlc> = vec![];
+    for quote in quotes {
+        let stamp: Timestamp = quote.ts_event.into();
+        if stamp < from {
+            continue;
+        }
+        let mid = Price::new(
+            (quote.bid_price.as_f64() + quote.ask_price.as_f64()) / 2.0,
+            2,
+        );
+        let close = bar_close(stamp + NANOSECOND);
+        match bars.last_mut() {
+            Some(bar) if bar.0 == close => {
+                bar.2 = bar.2.max(mid);
+                bar.3 = bar.3.min(mid);
+                bar.4 = mid;
+            }
+            _ => bars.push((close, mid, mid, mid, mid)),
+        }
+    }
+    bars.remove(0);
+    bars
 }
 
 /// Stepped quotes over `(from, to]`: the minute `m` (1 to 60) of the hour
@@ -308,5 +348,77 @@ pub mod steps {
     /// A backtest of the steps without commission, from `start`.
     pub fn backtest(catalog: &Path, start: Timestamp) -> Backtest {
         super::backtest(catalog, start, end(), WARMUP, "0 EUR")
+    }
+}
+
+/// Noise on Wednesday 7 January 2026: a quote a minute from 06:00 to 15:00
+/// UTC, its mid 600 plus 0.01 times `37 k mod 101` for the k-th minute, so
+/// that every hour bar has its own open, high, low and close.
+pub mod noise {
+    use super::*;
+
+    pub const WARMUP: SignedDuration = SignedDuration::from_hours(4);
+
+    /// `hh:mm` UTC on the day of the noise.
+    pub fn at(hh_mm: &str) -> Timestamp {
+        ts(&format!("2026-01-07T{hh_mm}:00Z"))
+    }
+
+    pub fn quotes() -> Vec<QuoteTick> {
+        minute_quotes(at("06:00"), at("15:00"), |close| {
+            let k = close.duration_since(at("06:00")).as_mins();
+            Some(600.0 + 0.01 * ((37 * k) % 101) as f64)
+        })
+    }
+
+    pub fn catalog() -> TempDir {
+        super::catalog(&quotes(), at("06:00"), at("15:00"))
+    }
+
+    pub fn backtest(catalog: &Path, start: Timestamp) -> Backtest {
+        super::backtest(catalog, start, at("15:00"), WARMUP, "0 EUR")
+    }
+
+    /// The bars a run from `start` should get, warmup and replay: those
+    /// from the warmup start, 1 ns before `start` less the warmup.
+    pub fn expected_bars(start: Timestamp) -> Vec<Ohlc> {
+        hour_bars(&quotes(), start - NANOSECOND - WARMUP)
+    }
+
+    /// A recorder of the MID bars after the warmup, without orders.
+    pub fn recorder() -> (
+        recorder::Recorder,
+        std::rc::Rc<std::cell::RefCell<recorder::Record>>,
+    ) {
+        recorder::Recorder::new(BarType::from(MID_BAR_TYPE), WARMUP, None)
+    }
+}
+
+/// A fall on Wednesday 7 January 2026: a mid of 620 a minute from 10:00
+/// UTC to 13:00, then 0.50 lower each minute: 619.50 at 13:01, 600.00 at
+/// 13:40, 590.00 from 14:00 to 15:00.
+pub mod fall {
+    use super::*;
+
+    pub const WARMUP: SignedDuration = SignedDuration::from_hours(2);
+
+    /// `hh:mm` UTC on the day of the fall.
+    pub fn at(hh_mm: &str) -> Timestamp {
+        ts(&format!("2026-01-07T{hh_mm}:00Z"))
+    }
+
+    pub fn quotes() -> Vec<QuoteTick> {
+        minute_quotes(at("10:00"), at("15:00"), |close| {
+            let since = close.duration_since(at("13:00")).as_mins();
+            Some(620.0 - 0.5 * since.clamp(0, 60) as f64)
+        })
+    }
+
+    pub fn catalog() -> TempDir {
+        super::catalog(&quotes(), at("10:00"), at("15:00"))
+    }
+
+    pub fn backtest(catalog: &Path) -> Backtest {
+        super::backtest(catalog, at("12:30"), at("15:00"), WARMUP, "0 EUR")
     }
 }

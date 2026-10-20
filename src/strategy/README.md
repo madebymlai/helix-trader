@@ -232,10 +232,9 @@ let bars = warmup::bars(self, quotes);
   (without it that bar comes out partial, or as a one-quote bar when the
   run starts on a bar's close); `skip_first_non_full_bar = true`, so that
   the oldest bar, missing the quotes before `now - warmup`, is dropped.
-  Then it subscribes to the bar types. The boundary bar, with and without
-  `update_subscriptions`, was checked on a throwaway node (Nautilus
-  0.65.0) before this design: it differs in open, high and low only, which
-  the EMA does not read, so the integration tests cannot see it.
+  Then it subscribes to the bar types. `backtest_bars.rs` and
+  `backtest_bars_on_close.rs` fail without `update_subscriptions` or
+  `skip_first_non_full_bar`.
 - **What `bars` does.** The bars a request builds go to the cache only,
   never to `on_historical_bars`; they are there when the quotes response
   arrives in `on_historical_quotes`. `bars` reads that instrument's internal
@@ -300,4 +299,5 @@ let bars = warmup::bars(self, quotes);
   file (one node per process). The warmup module is tested through them:
   the fixture's prices are chosen so that the warmup bars, the partial
   oldest bar, the bar at the run start and the session each change the
-  orders and the final balance.
+  orders and the final balance. What the EMA cannot show, every price of
+  the bars and stop orders, a recording strategy in `tests/common` checks.
