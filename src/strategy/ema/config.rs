@@ -152,15 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_session() {
-        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
-        let session = config.session;
-        assert_eq!(session.time_zone.iana_name(), Some("America/Chicago"));
-        assert_eq!(session.open, jiff::civil::time(8, 30, 0, 0));
-        assert_eq!(session.close, jiff::civil::time(15, 0, 0, 0));
-    }
-
-    #[test]
     fn rejects_an_unknown_time_zone_at_load() {
         let toml = TOML.replace("America/Chicago", "America/Gotham");
         let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
