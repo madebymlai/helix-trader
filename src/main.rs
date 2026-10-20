@@ -24,8 +24,10 @@ use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::UUID4;
+use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{identifiers::TraderId, types::Money};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rust_decimal::Decimal;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -39,7 +41,7 @@ enum Command {
     /// Fills the Nautilus catalog with the strategy's history from Interactive Brokers.
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
-    Backtest(BacktestArgs),
+    Backtest(Box<BacktestArgs>),
     /// Runs the strategy on a live node with Interactive Brokers, after
     /// filling the catalog up to now; stops on Ctrl-C.
     Live(LiveArgs),
@@ -87,12 +89,33 @@ struct FillCatalogArgs {
 struct BacktestArgs {
     #[command(flatten)]
     run: RunArgs,
-    /// Commission charged once per order, for example "3 EUR".
-    #[arg(long, value_parser = parse_money)]
-    commission: Money,
+    #[command(flatten)]
+    commission: CommissionArgs,
     /// Starting balance of the account, for example "10000 EUR".
     #[arg(long, value_parser = parse_money)]
     balance: Money,
+}
+
+/// The commission of a backtest: exactly one of the flags.
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct CommissionArgs {
+    /// Commission charged once per order, for example "3 EUR".
+    #[arg(long, value_parser = parse_commission)]
+    commission: Option<FeeModelAny>,
+    /// Commission rate on the value of each fill, with no minimum, for
+    /// example 0.0005 (0.05%).
+    #[arg(long, value_parser = parse_commission_rate)]
+    commission_rate: Option<FeeModelAny>,
+}
+
+impl CommissionArgs {
+    /// The fee model of the one flag given.
+    fn fee_model(self) -> FeeModelAny {
+        self.commission
+            .or(self.commission_rate)
+            .expect("clap requires one commission flag")
+    }
 }
 
 #[derive(Debug, Args)]
@@ -136,6 +159,16 @@ fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
 }
 
+/// A commission per order: an amount and a currency code, not negative.
+fn parse_commission(s: &str) -> anyhow::Result<FeeModelAny> {
+    backtest::commission_per_order(parse_money(s).map_err(anyhow::Error::msg)?)
+}
+
+/// A commission rate: a decimal, not negative.
+fn parse_commission_rate(s: &str) -> anyhow::Result<FeeModelAny> {
+    backtest::commission_rate(s.parse::<Decimal>()?)
+}
+
 /// Reads the EMA crossover config from `path` and validates it.
 fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
     let read = || -> anyhow::Result<EmaCrossConfig> {
@@ -162,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
-        Command::Backtest(args) => run_backtest(args),
+        Command::Backtest(args) => run_backtest(*args),
         Command::Live(args) => run_live(args).await,
     }
 }
@@ -209,7 +242,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
-    let fee_model = backtest::commission_per_order(args.commission)?;
+    let fee_model = args.commission.fee_model();
     let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types: requirements.bar_types,
@@ -249,7 +282,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::identifiers::InstrumentId;
+    use nautilus_model::{fees::MakerTakerFeeRates, identifiers::InstrumentId};
 
     use super::*;
 
@@ -269,7 +302,7 @@ mod tests {
 
     fn parse_backtest(args: &[&str]) -> Result<BacktestArgs, clap::Error> {
         parse_command("backtest", args).map(|command| match command {
-            Command::Backtest(args) => args,
+            Command::Backtest(args) => *args,
             command => panic!("{command:?}"),
         })
     }
@@ -337,8 +370,29 @@ mod tests {
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
-        assert_eq!(args.commission, Money::from("3 EUR"));
+        assert!(matches!(args.commission.fee_model(), FeeModelAny::Fixed(_)));
         assert_eq!(args.balance, Money::from("10000 EUR"));
+    }
+
+    /// `REQUIRED`, the balance and `commission`.
+    fn backtest_with(commission: &[&'static str]) -> Vec<&'static str> {
+        let mut argv = REQUIRED.to_vec();
+        argv.extend(["--balance", "10000 EUR"]);
+        argv.extend(commission);
+        argv
+    }
+
+    #[test]
+    fn parses_a_commission_rate_charged_maker_and_taker_alike() {
+        let args = parse_backtest(&backtest_with(&["--commission-rate", "0.0005"])).unwrap();
+        let FeeModelAny::MakerTaker(model) = args.commission.fee_model() else {
+            panic!("not a rate")
+        };
+        let rate = Decimal::new(5, 4);
+        assert_eq!(
+            model.schedule().default,
+            MakerTakerFeeRates::new(rate, rate)
+        );
     }
 
     #[test]
@@ -350,6 +404,38 @@ mod tests {
             let argv = [&argv[..at], &argv[at + 2..]].concat();
             let err = parse_backtest(&argv).unwrap_err().to_string();
             assert!(err.contains(flag), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_backtest_takes_either_the_commission_or_its_rate_not_both() {
+        let both = backtest_with(&["--commission", "3 EUR", "--commission-rate", "0.0005"]);
+        let err = parse_backtest(&both).unwrap_err().to_string();
+        assert!(err.contains("cannot be used with"), "{err}");
+        let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
+        assert!(err.contains("--commission-rate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_negative_commission_or_rate() {
+        for (arg, flag) in [
+            ("--commission=-3 EUR", "'--commission <"),
+            ("--commission-rate=-0.0005", "'--commission-rate <"),
+        ] {
+            let err = parse_backtest(&backtest_with(&[arg]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(flag), "{arg}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_malformed_rate() {
+        for rate in ["", "0.05%", "five"] {
+            let err = parse_backtest(&backtest_with(&["--commission-rate", rate]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("--commission-rate"), "{rate}: {err}");
         }
     }
 
