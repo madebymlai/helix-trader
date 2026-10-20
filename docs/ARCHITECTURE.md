@@ -28,7 +28,7 @@ Nautilus does not already provide.
 
 ## Version
 
-NautilusTrader `2.0.0rc6`: the `nautilus-*` crates at `=0.65.0`, pinned
+NautilusTrader `2.0.0rc7`: the `nautilus-*` crates at `=0.66.0`, pinned
 exactly. Upgrades are deliberate: one change, release notes read, full test
 suite green.
 

@@ -2,7 +2,7 @@
 name = "helix-trader"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 publish = false
 
 [dependencies]
@@ -11,19 +11,19 @@ bon = "=3.9.3"
 clap = { version = "4", features = ["derive"] }
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
-nautilus-analysis = "=0.65.0"
-nautilus-backtest = { version = "=0.65.0", features = ["streaming"] }
-nautilus-common = { version = "=0.65.0", features = ["tracing-bridge"] }
-nautilus-core = "=0.65.0"
-nautilus-execution = "=0.65.0"
-nautilus-indicators = "=0.65.0"
-nautilus-live = { version = "=0.65.0", features = ["streaming"] }
-ibapi = "=3.3.0"
-nautilus-interactive-brokers = { version = "=0.65.0", default-features = false, features = ["execution"] }
-nautilus-model = "=0.65.0"
-nautilus-persistence = "=0.65.0"
-nautilus-serialization = { version = "=0.65.0", features = ["arrow"] }
-nautilus-trading = "=0.65.0"
+nautilus-analysis = "=0.66.0"
+nautilus-backtest = { version = "=0.66.0", features = ["streaming"] }
+nautilus-common = { version = "=0.66.0", features = ["tracing-bridge"] }
+nautilus-core = "=0.66.0"
+nautilus-execution = "=0.66.0"
+nautilus-indicators = "=0.66.0"
+nautilus-live = { version = "=0.66.0", features = ["streaming"] }
+ibapi = "=5.0.0"
+nautilus-interactive-brokers = { version = "=0.66.0", default-features = false, features = ["execution"] }
+nautilus-model = "=0.66.0"
+nautilus-persistence = "=0.66.0"
+nautilus-serialization = { version = "=0.66.0", features = ["arrow"] }
+nautilus-trading = "=0.66.0"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,5 +31,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "1"
 
 [dev-dependencies]
-nautilus-model = { version = "=0.65.0", features = ["test-support"] }
+nautilus-model = { version = "=0.66.0", features = ["test-support"] }
 tempfile = "3"

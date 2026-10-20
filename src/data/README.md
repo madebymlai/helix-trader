@@ -8,7 +8,7 @@ catalog.
 It adds what Nautilus does not provide: filling the catalog from a
 historical source, and the roll dates.
 
-APIs are those of the `nautilus-*` crates at `0.65.0`; **unverified** marks
+APIs are those of the `nautilus-*` crates at `0.66.0`; **unverified** marks
 what the sources did not confirm. Examples use the future `ESM4.CME`, its
 predecessor `ESH4.CME` and the continuous root `ES.CME`.
 
@@ -310,9 +310,10 @@ history.quotes(instrument_id, start, end)
   client registry and initialises an instrument provider; no message bus,
   cache or clock. It needs a Tokio runtime and a running IB Gateway or TWS.
   The config is the data client config of the live README.
-- **Instruments first.** Bars of a contract the provider does not hold come
-  out with a fallback precision (5, 0). Call `request_instruments` with the
-  config's ids before `request_bars`.
+- **Instruments first.** `request_bars` fails a contract the provider does
+  not hold (`Instrument … is missing from the provider`; up to 0.65.0 its
+  bars came out at a fallback precision (5, 0)). Call `request_instruments`
+  with the config's ids before `request_bars`.
 - **Bar spec strings** are `"{step}-{aggregation}-{price_type}"`, for example
   `"1-MINUTE-BID"`, the `Display` of `BarSpecification` that the historical
   client splits on `-`. It parses SECOND, MINUTE, HOUR, DAY and WEEK only
@@ -324,7 +325,8 @@ history.quotes(instrument_id, start, end)
   bars between the two segments go missing without an error (paper
   gateway 2026-10-07: ESZ6 1-HOUR over `[10-05T00:00Z, 10-07T18:00Z]` lacked
   10-05 19:00-21:00). The live data client shares that segmentation
-  (`data/convert.rs` in the adapter). `quoted_bars` never passes a start: it
+  (`data/convert.rs` in the adapter; unchanged in 0.66.0,
+  nautechsystems/nautilus_trader#5384 is open). `quoted_bars` never passes a start: it
   walks back from `end` (`walk_back`), each request with an explicit
   duration (one segment, `start_date_time: None`) ending at the oldest
   bar so far, so consecutive answers overlap by a bar and leave no hole.
@@ -391,7 +393,7 @@ history.quotes(instrument_id, start, end)
   although IB documents two years. Once loaded that way, `request_bars` by
   instrument id returns the bars (`ESU5.CME`, precision 2), so
   `quoted_bars` always asks by id; the contract-month form returned them under another id
-  (`ES202509.CME`) at the fallback precision 5. **IB as the source gives
+  (`ES202509.CME`) at the fallback precision 5 (0.65.0). **IB as the source gives
   about one year of expired ES contracts**, and that bounds the backtest;
   for more depth use another source (see "Other sources").
 - **After expiry.** IB keeps answering with flat, zero-volume bars after a

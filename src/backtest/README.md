@@ -5,7 +5,7 @@ step 2. It describes the run as a Nautilus `BacktestRunConfig` and runs it on
 a `BacktestNode`, the plain Nautilus API, and adds nothing the node already
 does. One run per process; there are no parameter sweeps.
 
-APIs are those of the `nautilus-*` crates at `0.65.0`; *unverified* marks
+APIs are those of the `nautilus-*` crates at `0.66.0`; *unverified* marks
 what the sources did not confirm. Process-wide rules (one node per process,
 Nautilus owns the logger) are in `docs/ARCHITECTURE.md`.
 
@@ -20,7 +20,7 @@ backtest/
   report.rs   report(&BacktestResult) -> String: the results as text
 ```
 
-Dependencies, all pinned at `=0.65.0`:
+Dependencies, all pinned at `=0.66.0`:
 
 - `nautilus-backtest` with the `streaming` feature, which enables the
   `node` module and catalog registration.

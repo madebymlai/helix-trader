@@ -5,7 +5,7 @@ a paper then a real account (build step 3). It adds no trading logic: it
 fills the catalog up to now, then wires broker clients, the strategy and the
 node. Filling the catalog needs no node (see the data README).
 
-APIs are those of the `nautilus-*` crates at `0.65.0`; open points are under
+APIs are those of the `nautilus-*` crates at `0.66.0`; open points are under
 "Unverified". Process-wide rules (one node per process, Nautilus owns the
 logger) are in `docs/ARCHITECTURE.md`.
 
@@ -75,11 +75,11 @@ them as `Box<dyn DataClientFactory>` and friends and never names a broker.
 ## Cargo
 
 ```toml
-nautilus-live = { version = "=0.65.0", features = ["streaming"] }
-nautilus-common = "=0.65.0"
-nautilus-system = "=0.65.0"
-nautilus-persistence = "=0.65.0"
-nautilus-trading = "=0.65.0"
+nautilus-live = { version = "=0.66.0", features = ["streaming"] }
+nautilus-common = "=0.66.0"
+nautilus-system = "=0.66.0"
+nautilus-persistence = "=0.66.0"
+nautilus-trading = "=0.66.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -248,7 +248,7 @@ logs written through `tracing` into the same output.
 ## Interactive Brokers specifics (live)
 
 `nautilus_interactive_brokers::{config, factories}`; Cargo:
-`nautilus-interactive-brokers = "=0.65.0"`. The default `execution` feature
+`nautilus-interactive-brokers = "=0.66.0"`. The default `execution` feature
 is enough; `gateway` adds a Docker-managed gateway.
 
 ```rust
@@ -364,7 +364,9 @@ same symbology and venue; the venue rules (never
 Run IB Gateway or TWS with the socket API enabled, or enable the `gateway`
 feature and use `DockerizedIBGateway` (needs Docker and the credentials in
 the environment). Its `read_only_api` defaults to `true`; set it to `false`
-for trading.
+for trading. Since 0.66.0 its login check reads only the container's log
+since the container started (`gateway/dockerized.rs`), so a restarted
+container is not taken as logged in from an earlier session's log.
 
 A gateway with the API in read-only mode (IB Gateway: Configure, Settings,
 API, Settings, "Read-Only API") blocks more than orders: the execution

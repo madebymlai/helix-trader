@@ -15,7 +15,7 @@ use ibapi::contracts::{Contract, Symbol};
 use jiff::Timestamp;
 use nautilus_core::{UnixNanos, nanos::DurationNanos};
 use nautilus_interactive_brokers::{
-    common::parse::instrument_id_to_ib_contract, config::InteractiveBrokersDataClientConfig,
+    common::symbology::Symbology, config::InteractiveBrokersDataClientConfig,
     historical::HistoricalInteractiveBrokersClient,
 };
 use nautilus_model::{
@@ -38,6 +38,7 @@ pub struct IbGateway {
 pub struct IbHistory {
     client: HistoricalInteractiveBrokersClient,
     requests: BarRequests,
+    symbology: Symbology,
 }
 
 /// The settings every bar request passes, taken from the data client
@@ -73,11 +74,16 @@ impl IbHistory {
         ensure_quotes_closed(end, now)?;
         let config = data_client_config(gateway);
         let requests = BarRequests::of(&config);
+        let symbology = Symbology::new(config.instrument_provider.symbology_method);
         let address = format!("{}:{}", config.host, config.port);
         let client = HistoricalInteractiveBrokersClient::connect(config)
             .await
             .with_context(|| format!("connecting to IB at {address}"))?;
-        Ok(Self { client, requests })
+        Ok(Self {
+            client,
+            requests,
+            symbology,
+        })
     }
 
     /// The latest end of a window IB can serve quotes over at `now`: one
@@ -107,7 +113,7 @@ impl IbHistory {
             .context("requesting instruments from IB")?;
         let expired: Vec<Contract> = missing_ids(ids, &instruments)
             .into_iter()
-            .filter_map(expired_future_contract)
+            .filter_map(|id| expired_future_contract(self.symbology, id))
             .collect();
         if !expired.is_empty() {
             instruments.extend(
@@ -368,10 +374,10 @@ fn missing_ids(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> Vec<Inst
 
 /// The IB contract of the future `id` with `includeExpired`, the form IB
 /// resolves an expired future by; `None` if `id` is not a future. IB also
-/// needs the root symbol (`ES` of `ESU5`), which the adapter's conversion
+/// needs the root symbol (`ES` of `ESU5`), which `Symbology::contract`
 /// leaves empty.
-fn expired_future_contract(id: InstrumentId) -> Option<Contract> {
-    let mut contract = instrument_id_to_ib_contract(id, None).ok()?;
+fn expired_future_contract(symbology: Symbology, id: InstrumentId) -> Option<Contract> {
+    let mut contract = symbology.contract(id, None).ok()?;
     let root = future_root(&contract.local_symbol)?;
     contract.symbol = Symbol(root.to_string());
     contract.include_expired = true;
@@ -644,9 +650,18 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn symbology() -> Symbology {
+        Symbology::new(
+            data_client_config(closed_gateway())
+                .instrument_provider
+                .symbology_method,
+        )
+    }
+
     #[test]
     fn an_expired_future_is_asked_for_as_an_explicit_contract() {
-        let contract = expired_future_contract(InstrumentId::from("ESU5.CME")).unwrap();
+        let contract =
+            expired_future_contract(symbology(), InstrumentId::from("ESU5.CME")).unwrap();
         assert_eq!(contract.security_type, SecurityType::Future);
         assert_eq!(contract.symbol.to_string(), "ES");
         assert_eq!(contract.local_symbol, "ESU5");
@@ -657,10 +672,12 @@ mod tests {
 
     #[test]
     fn only_futures_are_asked_for_as_expired_contracts() {
-        assert!(expired_future_contract(InstrumentId::from("AAPL.SMART")).is_none());
-        assert!(expired_future_contract(InstrumentId::from("EUR/USD.IDEALPRO")).is_none());
+        assert!(expired_future_contract(symbology(), InstrumentId::from("AAPL.SMART")).is_none());
+        assert!(
+            expired_future_contract(symbology(), InstrumentId::from("EUR/USD.IDEALPRO")).is_none()
+        );
         // A stock whose symbol reads like a future.
-        assert!(expired_future_contract(InstrumentId::from("ABCZ5.SMART")).is_none());
+        assert!(expired_future_contract(symbology(), InstrumentId::from("ABCZ5.SMART")).is_none());
     }
 
     #[test]
