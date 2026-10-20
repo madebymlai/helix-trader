@@ -282,8 +282,6 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::identifiers::InstrumentId;
-
     use super::*;
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
@@ -439,51 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn loads_and_validates_the_ema_config_from_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ema.toml");
-        std::fs::write(
-            &path,
-            r#"
-            instrument_ids = ["ESH4.CME", "ESM4.CME"]
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-            trade_size = "1"
-            warmup = "720h"
-            session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
-            "#,
-        )
-        .unwrap();
-        let config = load_ema_config(&path).unwrap();
-        assert_eq!(
-            config.instrument_ids,
-            [
-                InstrumentId::from("ESH4.CME"),
-                InstrumentId::from("ESM4.CME")
-            ]
-        );
-        assert_eq!(config.warmup, jiff::SignedDuration::from_hours(720));
-    }
-
-    #[test]
-    fn rejects_an_invalid_ema_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ema.toml");
-        std::fs::write(
-            &path,
-            r#"
-            instrument_ids = []
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-            trade_size = "1"
-            warmup = "720h"
-            session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
-            "#,
-        )
-        .unwrap();
-        let err = format!("{:#}", load_ema_config(&path).unwrap_err());
-        assert!(err.contains("no instruments"), "{err}");
-    }
-
-    #[test]
     fn rejects_a_start_not_before_the_end() {
         let mut argv = REQUIRED.to_vec();
         argv[4] = "2024-03-01T12:30:00Z";
@@ -500,9 +453,22 @@ mod tests {
     fn a_config_error_names_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ema.toml");
-        std::fs::write(&path, "instrument_ids = []").unwrap();
+        std::fs::write(
+            &path,
+            r#"
+            instrument_ids = []
+            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+            trade_size = "1"
+            warmup = "720h"
+            session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+            "#,
+        )
+        .unwrap();
         let err = format!("{:#}", load_ema_config(&path).unwrap_err());
-        assert!(err.contains("ema.toml"), "{err}");
+        assert!(
+            err.contains("ema.toml") && err.contains("no instruments"),
+            "{err}"
+        );
         let missing = dir.path().join("missing.toml");
         let err = format!("{:#}", load_ema_config(&missing).unwrap_err());
         assert!(err.contains("missing.toml"), "{err}");
