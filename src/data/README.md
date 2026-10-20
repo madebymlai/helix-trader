@@ -494,10 +494,11 @@ history.quotes(instrument_id, start, end)
   One quote a minute lets the backtest fill a market order on the quote of
   the minute closing with its bar and check resting orders every minute,
   whatever the strategy's bar size; 1 minute is the finest bar size IB
-  paces softly. `fill-catalog` stores the strategy's bars and these quotes,
-  each resuming from its own stored range. The check before connecting
-  covers the strategy's bar types; the minute bars close within the
-  longest of them.
+  paces softly. `fill-catalog` stores the instruments and these quotes
+  only, resuming from their stored range: the strategies' bars are
+  internal, built from the quotes (see the strategy README), so it passes
+  `fill_catalog` and the check before connecting no bar types; that check
+  then only requires `end` not after now.
 - **Cost of minute quotes.** Two 1-MINUTE bar types per instrument (BID
   and ASK), 1,440 bars per `86400 S` request: about 28 requests per
   instrument-month and 330 per instrument-year (see the duration table).
@@ -650,8 +651,9 @@ bar after a roll behaves when the new contract has not ticked yet is
 - **Check before writing**: refuse a foreign bar type or instrument, and
   an empty response on a series' first fill.
 - **Instruments before bars and quotes.**
-- **Quotes with the bars**: `fill-catalog` always stores both; quotes one
-  a minute, whatever the bars' cadence.
+- **Quotes, one a minute**: `fill-catalog` stores the instruments and
+  their quotes; `fill_catalog` still takes bar types, which the command
+  no longer passes.
 - **Per-contract bars are the stored truth**: never write an adjusted series;
   continuous series are built at read time.
 - **Rolls are values**: backtest and live pass the same params to the same

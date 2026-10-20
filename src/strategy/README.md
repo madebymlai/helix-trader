@@ -26,8 +26,8 @@ The folder exposes only the config and the constructor.
 ## Config
 
 The strategy config is the single source of what the strategy trades: the
-instruments and the bar type. Nautilus has no universe type; `fill_catalog`,
-backtest and live get the instruments and bar type from this config,
+instruments and the bar spec. Nautilus has no universe type; `fill_catalog`,
+backtest and live get the instruments and the warmup from this config,
 through `main`, as Nautilus types.
 
 It is a plain struct holding the Nautilus `StrategyConfig` plus every
@@ -46,7 +46,8 @@ pub struct TrendConfig {
     pub base: StrategyConfig,
     /// The contracts traded and stored in the catalog.
     pub instrument_ids: Vec<InstrumentId>,
-    /// The cadence: one bar type per instrument, all at the same spec.
+    /// The bars: one internal bar type per instrument, all at the same
+    /// spec, built from the quotes.
     pub bar_spec: BarSpecification,
     /// How far back the warmup history starts.
     #[serde(default = "default_warmup")]
@@ -59,7 +60,7 @@ pub struct TrendConfig {
 
 ```toml
 instrument_ids = ["ESH4.CME", "ESM4.CME"]
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
 warmup = "720h"
 session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 ```
@@ -75,11 +76,13 @@ session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
   unknown name fails at load; `TimeZone` has no plain `Deserialize`), and
   `open` and `close` as `jiff::civil::Time` (`"08:30"`).
 - Loading then validates what serde cannot: at least one instrument, all on
-  one venue, a bar spec the adapter can serve and aggregated on time (the
-  session needs the bar's length), a session opening before it closes.
+  one venue, a bar spec aggregated on time (the session needs the bar's
+  length) and priced `BID`, `ASK` or `MID` (bars built from quotes; `LAST`
+  fails at load), a session opening before it closes.
 
 The config builds the bar types the strategy uses, one per instrument:
-`BarType::new(id, bar_spec, AggregationSource::External)`.
+`BarType::new(id, bar_spec, AggregationSource::Internal)`, such as
+`SXR8.IBIS-1-HOUR-MID-INTERNAL`.
 
 The config also states what the strategy needs from data, as one
 `strategy::DataRequirements`: its instruments and its warmup.
@@ -124,16 +127,12 @@ nautilus_strategy!(Trend);
 
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let start = self.clock().utc_now().checked_sub(self.config.warmup)?;
-        for bar_type in self.config.bar_types() {
-            self.request_bars(bar_type, Some(start), None, None, None, None)?;
-            self.subscribe_bars(bar_type, None, None);
-        }
-        Ok(())
+        let (bar_types, warmup) = (self.config.bar_types(), self.config.warmup);
+        warmup::start(self, &bar_types, warmup)
     }
 
-    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        self.book.warm_up(bars);
+    fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
+        self.book.warm_up(&warmup::bars(self, quotes));
         Ok(())
     }
 
@@ -186,6 +185,26 @@ All decisions live in pure modules: features, models, the target book. They
 take bars and state and return values, do no I/O and know no engine, so
 unit tests cover them without running Nautilus.
 
+## Bars built from quotes
+
+Strategies trade on bars Nautilus builds from quotes: internally aggregated
+time bars priced `BID`, `ASK` or `MID`, such as
+`SXR8.IBIS-1-HOUR-MID-INTERNAL`. Subscribing to one makes the data engine
+aggregate the instrument's quotes into it, the replayed quotes in a backtest
+and the broker's quotes live, so the same bar definition runs in both.
+
+- **Closes.** A bar closes at the end of its period and is stamped there
+  (`ts_event`); it holds the quotes stamped in `(open, close]`.
+- **Hours without quotes.** The data engine's default
+  `time_bars_build_with_no_updates` stays on: an hour without any quote
+  still yields a bar, flat at the previous close, with zero volume. The
+  session ignores those outside trading hours like any other bar.
+- **Volume.** Quote-built bars sum the quoted sizes, not traded volume:
+  nothing reads it.
+- **Fidelity.** In a backtest the bars come from 1-minute quotes, so their
+  high and low can be slightly narrower than live bars built from every
+  quote; opens and closes match.
+
 ## Warmup and training
 
 This is the single description of warmup; the backtest and live READMEs only
@@ -194,27 +213,48 @@ say how to register the catalog that serves it.
 Warmup is the history a strategy needs before it trades: indicators to
 initialise and models to train. A model is trained by the strategy itself.
 
-- **Request.** In `on_start`:
-  `request_bars(bar_type, start, end, limit, client_id, params) ->
-  anyhow::Result<UUID4>`. `start` and `end` are `Option<jiff::Timestamp>`
-  and must not be after the clock's now; `limit` is
-  `Option<NonZeroUsize>`. Composite bar types are rejected.
-- **Response.** The bars arrive in one batch in
-  `on_historical_bars(&mut self, bars: &[Bar])`, before the first `on_bar`.
-  An `Err` returned from it is logged, not propagated: a failed warmup does
-  not stop the run, so the strategy must notice it. An empty response
-  still calls it, with an empty slice; an unanswered request never does.
-  Do not trade until warmup has actually arrived.
+The warmup of bars built from quotes is the module `strategy::warmup`, the
+one place that knows Nautilus' protocol for it. A strategy makes two calls:
+
+```rust
+// In on_start: requests the warmup and subscribes to the bars.
+warmup::start(self, &bar_types, self.config.warmup)?;
+
+// In on_historical_quotes: the warmup bars of that instrument, oldest first.
+let bars = warmup::bars(self, quotes);
+```
+
+- **What `start` does.** Per instrument it requests the historical quotes
+  from `now - warmup` (`request_quotes`) with three params: `bar_types`, the
+  internal bar types to aggregate them into; `update_subscriptions = true`,
+  so that the aggregator goes on with the live quotes and the bar spanning
+  the warmup end and the run start comes out once, complete, in `on_bar`
+  (without it that bar comes out partial, or as a one-quote bar when the
+  run starts on a bar's close); `skip_first_non_full_bar = true`, so that
+  the oldest bar, missing the quotes before `now - warmup`, is dropped.
+  Then it subscribes to the bar types. The boundary bar, with and without
+  `update_subscriptions`, was checked on a throwaway node (Nautilus
+  0.65.0) before this design: it differs in open, high and low only, which
+  the EMA does not read, so the integration tests cannot see it.
+- **What `bars` does.** The bars a request builds go to the cache only,
+  never to `on_historical_bars`; they are there when the quotes response
+  arrives in `on_historical_quotes`. `bars` reads that instrument's internal
+  bars from the cache (newest first there) and returns them oldest first.
+  No strategy names the request params or reads the cache for its warmup.
+- **Response.** One quotes response per instrument, before the first
+  `on_bar`. An `Err` returned from `on_historical_quotes` is logged, not
+  propagated: a failed warmup does not stop the run. An unanswered request
+  never calls it. Do not trade until warmup has actually arrived.
 - **Who answers.** The data engine serves the request from a registered
   catalog and asks the data client only for the intervals the catalog lacks.
   In backtest the client answers nothing, so the catalog must be registered
   and cover the whole window, or no response comes (see the backtest
   README). In live it can be a catalog, the adapter, or both (see the live
   README).
-- **Bound it with `start`.** `self.clock().utc_now()` is the simulated time
-  in backtest. Do not rely on `limit`: the catalog path ignores it, so with
-  `start: None` the response holds every bar since the epoch. Do not assume
-  the slice length either.
+- **Bound by `start`.** `self.clock().utc_now()` is the simulated time in
+  backtest; `warmup::start` bounds the request with `now - warmup`.
+- **`request_bars` does not aggregate.** On an internal bar type it does
+  not build bars from quotes; only `request_quotes` with `bar_types` does.
 - **Retrain** on a rolling window of the bars received in `on_bar`, every N
   bars as the config says.
 - **No model files.** The model lives only in memory, so backtest and live
@@ -222,9 +262,10 @@ initialise and models to train. A model is trained by the strategy itself.
 
 ## Rules
 
-- **The config is the universe.** Instruments and bar type are config
+- **The config is the universe.** Instruments and bar spec are config
   values, never constants in code.
-- **One cadence.** One bar type per instrument, all at the same cadence. For
+- **One cadence.** One internal bar type per instrument, all at the same
+  spec, built from quotes and warmed up through `strategy::warmup`. For
   continuous futures, subscribe to the `INTERNAL` bar type with the roll
   params from `data::rolls`.
 - **Whole book.** On each bar, compute the target for every instrument and
@@ -254,5 +295,9 @@ initialise and models to train. A model is trained by the strategy itself.
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
   each file.
-- Wiring: one integration test file per strategy in `tests/`, running it
-  through a `BacktestNode` on a small fixture catalog.
+- Wiring: integration tests in `tests/` run the real strategy through
+  `Backtest::run` on a small fixture catalog of 1-minute quotes, one run per
+  file (one node per process). The warmup module is tested through them:
+  the fixture's prices are chosen so that the warmup bars, the partial
+  oldest bar, the bar at the run start and the session each change the
+  orders and the final balance.
