@@ -137,6 +137,20 @@ The quote stamped `start − 1 ns` is in both the warmup and the replay: the
 bar spanning them counts it twice in its volume, which nothing reads; its
 prices are right.
 
+**Why not Nautilus' build delay.** Nautilus documents
+`DataEngineConfig::time_bars_build_delay` for data stamped on a bar
+boundary (Concepts › Backtesting › Bar execution, "Internal bar
+aggregation timing"). A probe on 0.66.0 with quotes stamped at the close
+and a 1 µs delay passed for a run starting off the hour but failed for one
+starting on a bar close: the warmup lost its first full bar
+(`skip_first_non_full_bar` drops it once the delay shifts the first
+close), and when the warmup request's aggregator moved to the engine clock
+it restarted its timer at `start`, merging the bar closing at `start` into
+the next one, so the order decided on it went an hour late. The delay also
+stamps every bar 1 µs after its close, which the session would read as
+past the close, and loses the bar closing at `end`. Stamping the quote
+1 ns early has none of these effects.
+
 ### Venue
 
 `BacktestVenueConfig`, `bon` builder:

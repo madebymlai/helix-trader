@@ -477,7 +477,8 @@ history.quotes(instrument_id, start, end)
   size precision (IB gives none; that size never limits an order);
   `ts_event = ts_init` = close − 1 ns, so the quote sorts before a bar of
   the same close and an order decided on that bar fills on its quote (see
-  the backtest README, "Fills on quotes"). The quotes over `(start, end]`
+  the backtest README, "Fills on quotes"; "The engine start" says why not
+  Nautilus' bar build delay instead). The quotes over `(start, end]`
   are thus those of the bars closing over `(start + 1 ns, end + 1 ns]`
   (`quoted_bars_window`). Dropped, counted and logged at `INFO`, not
   errors: a bar without the other side's bar of the same close, and a
