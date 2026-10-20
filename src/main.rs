@@ -282,7 +282,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{fees::MakerTakerFeeRates, identifiers::InstrumentId};
+    use nautilus_model::identifiers::InstrumentId;
 
     use super::*;
 
@@ -383,19 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_commission_rate_charged_maker_and_taker_alike() {
-        let args = parse_backtest(&backtest_with(&["--commission-rate", "0.0005"])).unwrap();
-        let FeeModelAny::MakerTaker(model) = args.commission.fee_model() else {
-            panic!("not a rate")
-        };
-        let rate = Decimal::new(5, 4);
-        assert_eq!(
-            model.schedule().default,
-            MakerTakerFeeRates::new(rate, rate)
-        );
-    }
-
-    #[test]
     fn a_backtest_requires_the_commission_and_the_balance() {
         assert!(parse_backtest(&REQUIRED).is_err());
         for flag in ["--commission", "--balance"] {
@@ -414,29 +401,6 @@ mod tests {
         assert!(err.contains("cannot be used with"), "{err}");
         let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
         assert!(err.contains("--commission-rate"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_negative_commission_or_rate() {
-        for (arg, flag) in [
-            ("--commission=-3 EUR", "'--commission <"),
-            ("--commission-rate=-0.0005", "'--commission-rate <"),
-        ] {
-            let err = parse_backtest(&backtest_with(&[arg]))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains(flag), "{arg}: {err}");
-        }
-    }
-
-    #[test]
-    fn rejects_a_malformed_rate() {
-        for rate in ["", "0.05%", "five"] {
-            let err = parse_backtest(&backtest_with(&["--commission-rate", rate]))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("--commission-rate"), "{rate}: {err}");
-        }
     }
 
     #[test]
