@@ -48,8 +48,41 @@ strategy like `Backtest::run`.
 
 The strategy's warmup request (`strategy::warmup`) is then served by the
 catalog; the data engine sends IB only the interval the catalog misses,
-from the fill's end to now, as historical BID_ASK ticks, and aggregates the
-merged response into the internal bars.
+from the fill's end to now, as historical BID_ASK ticks. Only the catalog
+part reaches the internal bars: the IB ticks are dropped (see "Known
+limits").
+
+### Known limits
+
+Both are Nautilus bugs, present in `0.65.0` and `0.66.0`; there is no
+documented way around them, so the code keeps the documented usage.
+
+- **The IB part of the warmup is lost.** The adapter stamps historical
+  BID_ASK ticks with `ts_init` = the time it received them
+  (`nautilus-interactive-brokers` `data/core.rs`, `request_quotes`), and the
+  data engine trims each response to `[start, end]` on `ts_init`
+  (`DataResponse::trim_to_bounds`). The IB leg's `end` is the time the
+  request was sent, so every tick falls after it and is dropped. The
+  strategy's warmup therefore ends at the fill's end, a minute or so before
+  the start, and the first live bar opens on the last catalog quote: its
+  open and high or low can be stale, and its volume counts that quote's
+  nominal size. The bars after it are right. Upstream:
+  [nautilus_trader#5394](https://github.com/nautechsystems/nautilus_trader/issues/5394).
+- **A live start can panic during the warmup.** `warmup::start` requests
+  the quotes with `update_subscriptions` and then subscribes to the bars, as
+  the Nautilus docs show. A live quote that arrives before the warmup
+  response is passed to the aggregator while it is still in historical
+  mode, moves its clock to now, and the response's older quotes then fail
+  `VirtualClock::advance_time`'s "time must be non-decreasing" check: the
+  node exits with code 101. It depends on timing, so it is more likely when
+  IB history is slow or the instrument ticks fast; starting again usually
+  works. Upstream:
+  [nautilus_trader#5393](https://github.com/nautechsystems/nautilus_trader/issues/5393).
+
+`0.65.0` also stops paging historical ticks after one page when a request
+has both a start and an end (IB anchors on the start); the gap sent to IB
+here is about a minute, well below one page, and `0.66.0` pages from the
+end only.
 
 ### IB quote subscription
 
