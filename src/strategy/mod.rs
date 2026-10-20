@@ -12,3 +12,16 @@
 //! engine.
 
 pub mod ema;
+
+use jiff::SignedDuration;
+use nautilus_model::identifiers::InstrumentId;
+
+/// What a strategy needs from data, stated by its config: filling the
+/// catalog, backtesting and going live all read it from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataRequirements {
+    /// The instruments traded, whose history the catalog stores.
+    pub instrument_ids: Vec<InstrumentId>,
+    /// How far back before the run the warmup history starts.
+    pub warmup: SignedDuration,
+}

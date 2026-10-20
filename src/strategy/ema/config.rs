@@ -10,6 +10,7 @@ use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
 use super::session::Session;
+use crate::strategy::DataRequirements;
 
 /// Config of the EMA crossover strategy, loaded from TOML.
 #[derive(Debug, Clone, Deserialize, bon::Builder)]
@@ -37,6 +38,15 @@ pub struct EmaCrossConfig {
 }
 
 impl EmaCrossConfig {
+    /// The instruments and the warmup the strategy needs from data.
+    #[must_use]
+    pub fn data_requirements(&self) -> DataRequirements {
+        DataRequirements {
+            instrument_ids: self.instrument_ids.clone(),
+            warmup: self.warmup,
+        }
+    }
+
     /// One external bar type per instrument.
     #[must_use]
     pub fn bar_types(&self) -> Vec<BarType> {
@@ -112,6 +122,21 @@ mod tests {
         assert_eq!(
             config.bar_types()[1].to_string(),
             "ESM4.CME-1-HOUR-LAST-EXTERNAL"
+        );
+    }
+
+    #[test]
+    fn states_its_data_requirements() {
+        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
+        assert_eq!(
+            config.data_requirements(),
+            DataRequirements {
+                instrument_ids: vec![
+                    InstrumentId::from("ESH4.CME"),
+                    InstrumentId::from("ESM4.CME")
+                ],
+                warmup: SignedDuration::from_hours(720),
+            }
         );
     }
 

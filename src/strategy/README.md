@@ -81,6 +81,20 @@ session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 The config builds the bar types the strategy uses, one per instrument:
 `BarType::new(id, bar_spec, AggregationSource::External)`.
 
+The config also states what the strategy needs from data, as one
+`strategy::DataRequirements`: its instruments and its warmup.
+`fill_catalog`, backtest and live read them from it, never from the
+config's fields:
+
+```rust
+pub fn data_requirements(&self) -> DataRequirements {
+    DataRequirements {
+        instrument_ids: self.instrument_ids.clone(),
+        warmup: self.warmup,
+    }
+}
+```
+
 ## Wiring
 
 `mod.rs` connects the strategy to Nautilus and decides nothing itself: a

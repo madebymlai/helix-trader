@@ -1,6 +1,7 @@
 //! Command line: one subcommand per process (fill-catalog, backtest, paper), since
 //! Nautilus allows one node per process. Every subcommand takes the strategy
-//! name and its TOML config, the single source of instruments and bar types.
+//! name and its TOML config, the single source of instruments and bar types:
+//! the instruments and the warmup come from the config's data requirements.
 
 use std::{
     fs,
@@ -12,7 +13,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
     data::{IbGateway, IbHistory, fill_catalog},
-    strategy::ema::{EmaCross, EmaCrossConfig},
+    strategy::{
+        DataRequirements,
+        ema::{EmaCross, EmaCrossConfig},
+    },
 };
 use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use nautilus_common::logging::{
@@ -148,11 +152,14 @@ async fn main() -> anyhow::Result<()> {
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // Quotes come at the strategy's bar cadence for now.
-    let (instrument_ids, bar_types, quote_spec) = match args.run.strategy {
+    let (requirements, bar_types, quote_spec) = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            let bar_types = config.bar_types();
-            (config.instrument_ids, bar_types, config.bar_spec)
+            (
+                config.data_requirements(),
+                config.bar_types(),
+                config.bar_spec,
+            )
         }
     };
     // No node runs in this process, so no node installs Nautilus' logger:
@@ -172,7 +179,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         client_id: args.client_id,
     };
     let ib = IbHistory::connect(gateway, &bar_types, end, Timestamp::now()).await?;
-    let instruments = ib.instruments(&instrument_ids).await?;
+    let instruments = ib.instruments(&requirements.instrument_ids).await?;
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
@@ -196,12 +203,12 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
-    let backtest = |bar_types, warmup| Backtest {
+    let backtest = |bar_types, requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types,
         start,
         end,
-        warmup,
+        warmup: requirements.warmup,
         commission: args.commission,
         balance: args.balance,
         logging,
@@ -209,7 +216,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let result = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            backtest(config.bar_types(), config.warmup).run(EmaCross::new(config)?)?
+            backtest(config.bar_types(), config.data_requirements()).run(EmaCross::new(config)?)?
         }
     };
     print!("{}", backtest::report(&result));
