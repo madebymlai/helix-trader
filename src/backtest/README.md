@@ -38,7 +38,7 @@ pub struct Backtest {
     pub start: Timestamp,
     pub end: Timestamp,
     pub warmup: SignedDuration,    // the strategy's
-    pub commission: Money,         // per order
+    pub fee_model: FeeModelAny,    // commission_per_order or commission_rate
     pub balance: Money,
     pub logging: LoggerConfig,     // the node installs the logger with it
 }
@@ -49,8 +49,10 @@ impl Backtest {
 }
 ```
 
-Only Nautilus types cross it. `run` fails before building the node on no
-instruments, instruments on several venues, a negative commission or warmup,
+Only Nautilus types cross it; `commission_per_order(Money)` and
+`commission_rate(Decimal)` build its fee model (see Costs). `run` fails
+before building the node on no instruments, instruments on several venues,
+a negative warmup,
 `start` after `end`, a warmup the cache cannot hold (see the strategy
 README), or a catalog that cannot serve the run (see Coverage
 check). A relative catalog path is made absolute: the node's DataFusion
@@ -283,7 +285,8 @@ Default statistics:
 PnL is net of commissions: a position's realized PnL subtracts the
 commission of each fill in its settlement currency, the open position's
 included. The result has no commission figure of its own; with a fixed fee
-per order it is `total_orders × commission`. `total_positions` counts the
+per order it is `total_orders × commission`, with a rate the rate times
+the value traded. `total_positions` counts the
 snapshots of positions a netting flip closed, while `positions.total` in the
 summary counts only cached positions (one per instrument when netting).
 
@@ -302,7 +305,8 @@ The engine also logs its statistics at the end of the run.
 
 ```
 helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
-  [--catalog catalog] --commission "3 EUR" --balance "10000 EUR"
+  [--catalog catalog] (--commission "3 EUR" | --commission-rate 0.0005) \
+  --balance "10000 EUR"
 ```
 
 `main` loads and validates the strategy's config, builds the `Backtest`
@@ -311,10 +315,13 @@ prints `report`:
 `Orders`, `Positions`, then one section per currency of PnL statistics,
 the return statistics with `Max Drawdown`, the general statistics, and the
 final balances (`account.*.balance.*.total` of the summary), names sorted,
-values to six decimals. `--commission` and `--balance` are required
-Nautilus `Money` (`"<amount> <currency>"`), parsed with `Money::from_str`;
-a malformed one fails at argument parsing. A negative commission
-(`--commission="-3 EUR"`) fails before the node is built. The engine log
+values to six decimals. `--balance` and `--commission` are Nautilus
+`Money` (`"<amount> <currency>"`), parsed with `Money::from_str`;
+`--commission-rate` is a `Decimal` (0.0005 is 0.05%). `--balance` is
+required, and exactly one of `--commission` and `--commission-rate`. Each
+commission flag is turned into the fee model at argument parsing, so a
+malformed or negative one (`--commission="-3 EUR"`,
+`--commission-rate=-0.0005`) fails there. The engine log
 goes to stdout before the results, configured by `NAUTILUS_LOG`.
 
 On the wave of the tests (EMA 5/15 on 1-HOUR-MID internal bars, 10
@@ -325,10 +332,17 @@ commission, less 4 × 3 EUR) and a final balance of `9754.00 EUR`.
 ## Costs
 
 `costs.rs` builds the two models the venue config takes
-(`nautilus_execution::models`):
+(`nautilus_execution::models`): the fee model, from the command's
+commission flag, one of
 
 ```rust
-let fee = FeeModelAny::Fixed(FixedFeeModel::new(commission, Some(true))?);
+let fee = FeeModelAny::Fixed(FixedFeeModel::new(commission, Some(true))?); // commission_per_order
+let fee = FeeModelAny::MakerTaker(MakerTakerFeeModel::new(rate, rate));    // commission_rate
+```
+
+and the fill model:
+
+```rust
 let fill = FillModelAny::Default(DefaultFillModel::new(1.0, 0.0, Some(FILL_SEED))?);
 ```
 
@@ -338,13 +352,20 @@ let fill = FillModelAny::Default(DefaultFillModel::new(1.0, 0.0, Some(FILL_SEED)
 |---|---|---|
 | `Fixed` | `FixedFeeModel::new(Money, Option<bool>)` | flat per order, on its first fill only by default (`Some(true)`); `Err` if negative. Ours |
 | `PerContract` | `PerContractFeeModel::new(Money)` | per contract; `Err` if negative |
-| `MakerTaker` | `MakerTakerFeeModel::new(maker, taker)`, `::zero()` | notional rate by liquidity side |
+| `MakerTaker` | `MakerTakerFeeModel::new(maker, taker)`, `::zero()` | notional rate by liquidity side, on every fill; a negative rate is a rebate. Ours, the same rate on both sides (IB does not distinguish), negative rejected |
 
 The other variants are for options. A fixed fee matches IB Fixed pricing on
 Xetra below EUR 6,000 an order, where the EUR 3 minimum always applies.
 Above it the fee understates IB's: a strategy that flips from short to long
 sends twice its trade size, so EMA with `trade_size = 5` on SXR8 (EUR
 590-745) sends orders of EUR 5,900-7,300 (see "Verified on IB data").
+There a rate of 0.0005 (IB's 0.05%) matches instead. A rate has no
+minimum: IB's EUR 3 an order cannot be expressed on a `BacktestNode` until
+Nautilus adds one
+([nautilus_trader#5398](https://github.com/nautechsystems/nautilus_trader/issues/5398)),
+so a rate understates IB's fee on orders below EUR 6,000. Pick
+`--commission "3 EUR"` or `--commission-rate 0.0005` according to which
+side of EUR 6,000 the strategy's orders fall.
 
 ### Fills
 
@@ -626,12 +647,14 @@ last trade.
 
 - Unit tests in a `#[cfg(test)] mod tests` at the bottom of each file, for
   pure code: the run config from our inputs, the cost models (a negative
-  commission is rejected, the commission is charged on the first fill only),
+  commission or rate is rejected, a fixed commission is charged on the first
+  fill only, a rate on the value of every fill, maker and taker alike),
   the coverage check (gaps on the intervals alone, then on a temporary
   catalog: missing instrument, quotes 1 ns short at either end, missing,
   or with a gap), the report of a hand-built `BacktestResult` (sections, sorted names, max
   drawdown). The command line is tested in `main.rs`: required flags,
-  malformed `Money`, the window check.
+  exactly one commission flag, malformed `Money` and rates, negative
+  commissions, the window check.
 - Integration tests in `tests/`, one node per file, run the real EMA
   strategy through `Backtest::run` on a fixture catalog (`tests/common`:
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
