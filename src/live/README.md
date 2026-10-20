@@ -66,8 +66,8 @@ documented way around them, so the code keeps the documented usage.
   strategy's warmup therefore ends at the fill's end, a minute or so before
   the start, and the first live bar opens on the last catalog quote: its
   open and high or low can be stale, and its volume counts that quote's
-  nominal size. The bars after it are right. Upstream: <ISSUE-LINK
-  historical quote ts_init>.
+  nominal size. The bars after it are right. Upstream:
+  [nautilus_trader#5394](https://github.com/nautechsystems/nautilus_trader/issues/5394).
 - **A live start can panic during the warmup.** `warmup::start` requests
   the quotes with `update_subscriptions` and then subscribes to the bars, as
   the Nautilus docs show. A live quote that arrives before the warmup
@@ -76,7 +76,8 @@ documented way around them, so the code keeps the documented usage.
   `VirtualClock::advance_time`'s "time must be non-decreasing" check: the
   node exits with code 101. It depends on timing, so it is more likely when
   IB history is slow or the instrument ticks fast; starting again usually
-  works. Upstream: <ISSUE-LINK live quote before warmup response>.
+  works. Upstream:
+  [nautilus_trader#5393](https://github.com/nautechsystems/nautilus_trader/issues/5393).
 
 `0.65.0` also stops paging historical ticks after one page when a request
 has both a start and an end (IB anchors on the start); the gap sent to IB
