@@ -663,8 +663,8 @@ last trade.
   1-HOUR-MID internal bars. Two kinds of quotes:
   - a wave over days, on which the EMA 5/15 crosses several times:
     `backtest_ema_cross.rs` checks that its PnL is lower by `orders ×
-    commission` than in `backtest_ema_cross_free.rs`, and the figures
-    recorded, those of the earlier fixture of external hour bars;
+    commission` than in `backtest_ema_cross_free.rs`, and its final
+    balance;
   - steps, a level per hour chosen so that the shortest crossover (1/2)
     trades at hours worked out by hand, and so that what is tested changes
     the orders and the final balance: `backtest_warmup.rs` (a run off an
