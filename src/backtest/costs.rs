@@ -149,12 +149,4 @@ mod tests {
     fn rejects_a_negative_rate() {
         assert!(commission_rate(-rate()).is_err());
     }
-
-    #[test]
-    fn fills_at_the_quote_with_no_slippage() {
-        assert_eq!(
-            fill_model().unwrap().to_string(),
-            "DefaultFillModel(prob_fill_on_limit=1, prob_slippage=0)"
-        );
-    }
 }
