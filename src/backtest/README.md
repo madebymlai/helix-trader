@@ -353,22 +353,22 @@ sends twice its trade size, so EMA with `trade_size = 5` on SXR8 (EUR
 The venue fills on quotes. With `bar_execution` off, the instruments'
 `QuoteTick`s alone set the L1 book; bars reach the strategy only. A market
 buy fills at the ask, a sell at the bid, of the last quote replayed before
-the order: a bar's quote is stamped 1 ns before its close (data README), so
-an order sent in `on_bar` fills, in full and stamped at the bar's close, on
-the quote of the hour it was decided on. The fill model is `Default` with
+the order: the catalog holds a quote a minute, stamped 1 ns before the
+minute's close (data README), so an order sent in `on_bar` fills, in full
+and stamped at the bar's close, on the quote of the bar's last minute. The fill model is `Default` with
 `(1.0, 0.0, FILL_SEED)`: nothing on top of the quote, so the spread is the
 cost, and no slippage constant to guess. Verified in "Fills on quotes"
 below, and by the probe of the integration tests.
 
 Known limits:
 
-- **Resting orders** (stop, limit) are checked once per quote, hourly for
-  now, never against the bars: a stop the hour crosses and leaves fills
-  only if a quote crosses it. Finer quotes fix it when a strategy needs it.
-- **Missing quotes.** An hour without a quote fills on the last earlier
-  one, silently, up to an hour or more stale; with no quote yet in the run
-  the order is rejected (`No market`). The coverage check sees ranges, not
-  single hours.
+- **Resting orders** (stop, limit) are checked once per quote, every
+  minute, never against the bars: a stop the minute crosses and leaves
+  fills only if a minute's closing quote crosses it.
+- **Missing quotes.** A minute without a quote fills on the last earlier
+  one, silently, stale by the gap (overnight, at the open); with no quote
+  yet in the run the order is rejected (`No market`). The coverage check
+  sees ranges, not single minutes.
 - **Nominal sizes.** Quote sizes are stated, not observed (IB gives none):
   no depth, so large orders on illiquid instruments look too easy.
 

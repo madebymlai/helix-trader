@@ -150,28 +150,24 @@ impl IbHistory {
         .await
     }
 
-    /// The quotes of `instrument_id` over `(start, end]`, one per bar of
-    /// `spec`'s cadence (its price type is ignored), sorted by `ts_init`.
-    /// IB has no usable quote history: each is made from the BID and ASK
-    /// bars of the same close, fetched like `bars` (see `quotes_from_bars`),
-    /// and stamped 1 ns before it (see `quoted_bars_window`). Logs how many
-    /// bars it dropped.
+    /// The quotes of `instrument_id` over `(start, end]`, one a minute,
+    /// sorted by `ts_init`. IB has no usable quote history: each is made
+    /// from the 1-MINUTE BID and ASK bars of the same close (see
+    /// `quoted_bar_type`), fetched like `bars` (see `quotes_from_bars`), and
+    /// stamped 1 ns before it (see `quoted_bars_window`). Logs how many bars
+    /// it dropped.
     ///
     /// # Errors
     ///
-    /// Returns an error if the cadence is not one IB serves, if any request
-    /// fails or times out, or if a BID and an ASK bar differ in precision.
+    /// Returns an error if any request fails or times out, or if a BID and
+    /// an ASK bar differ in precision.
     pub async fn quotes(
         &self,
         instrument_id: InstrumentId,
-        spec: BarSpecification,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<QuoteTick>> {
-        let priced = |price_type| {
-            let spec = BarSpecification { price_type, ..spec };
-            BarType::new(instrument_id, spec, AggregationSource::External)
-        };
+        let priced = |price_type| quoted_bar_type(instrument_id, price_type);
         let (from, to) = quoted_bars_window(start, end);
         let bids = self.bars(priced(PriceType::Bid), from, to).await?;
         let asks = self.bars(priced(PriceType::Ask), from, to).await?;
@@ -187,6 +183,15 @@ impl IbHistory {
         );
         Ok(made.quotes)
     }
+}
+
+/// The bars of `instrument_id` priced on `price_type` that quotes are made
+/// from: 1-MINUTE, the finest bars IB paces softly, so a resting order is
+/// checked every minute. The cadence is this source's decision: no caller
+/// passes it.
+fn quoted_bar_type(instrument_id: InstrumentId, price_type: PriceType) -> BarType {
+    let spec = BarSpecification::new(1, BarAggregation::Minute, price_type);
+    BarType::new(instrument_id, spec, AggregationSource::External)
 }
 
 /// How long before its bars' close a quote is stamped: it then sorts
@@ -933,6 +938,28 @@ mod tests {
         let err =
             quotes_from_bars(&[bid(HOUR_NS, "709.44")], &[ask(HOUR_NS, "709.4800")]).unwrap_err();
         assert!(format!("{err:#}").contains("precision"), "{err:#}");
+    }
+
+    #[test]
+    fn quotes_are_made_from_one_minute_bid_and_ask_bars_fetched_a_day_per_request() {
+        let id = InstrumentId::from("SXR8.IBIS");
+        for (price_type, expected, spec) in [
+            (
+                PriceType::Bid,
+                "SXR8.IBIS-1-MINUTE-BID-EXTERNAL",
+                "1-MINUTE-BID",
+            ),
+            (
+                PriceType::Ask,
+                "SXR8.IBIS-1-MINUTE-ASK-EXTERNAL",
+                "1-MINUTE-ASK",
+            ),
+        ] {
+            let quoted = quoted_bar_type(id, price_type);
+            assert_eq!(quoted, bar_type(expected));
+            assert_eq!(bar_spec(&quoted).unwrap(), spec);
+            assert_eq!(request_duration(&quoted), "86400 S");
+        }
     }
 
     #[test]

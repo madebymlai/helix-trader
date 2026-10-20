@@ -898,6 +898,45 @@ mod tests {
         assert_eq!(asked, vec![]);
     }
 
+    const MINUTE_NS: u64 = 60_000_000_000;
+
+    /// A source of one quote a minute, as IB's are made: the quotes of
+    /// `id` stamped 1 ns before each minute's close over `(from, to]`.
+    fn minute_quotes(id: InstrumentId, from: u64, to: u64) -> Vec<QuoteTick> {
+        (from / MINUTE_NS + 1..=to / MINUTE_NS + 1)
+            .map(|minute| quote_at(id, minute * MINUTE_NS - 1))
+            .filter(|quote| (from + 1..=to).contains(&quote.ts_init.as_u64()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn minute_quotes_are_stored_every_minute_and_a_longer_window_fetches_only_the_new_minutes()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let hour = 60 * MINUTE_NS;
+        let mut asked = Vec::new();
+        for end in [hour, 2 * hour, 2 * hour] {
+            fill_catalog(
+                &mut catalog,
+                vec![instrument()],
+                &[],
+                ns(0),
+                ns(end),
+                async |bt, _, _| bail!("asked for the bars of {bt}"),
+                async |id, from, to| {
+                    asked.push((as_ns(from), as_ns(to)));
+                    Ok(minute_quotes(id, as_ns(from), as_ns(to)))
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(asked, vec![(0, hour), (hour + 1, 2 * hour)]);
+        let every_minute: Vec<u64> = (1..=120).map(|m| m * MINUTE_NS - 1).collect();
+        assert_eq!(stored_quotes(&mut catalog, es_id()), every_minute);
+    }
+
     #[tokio::test]
     async fn bars_and_quotes_of_an_instrument_resume_each_from_their_own_range() {
         let dir = tempfile::tempdir().unwrap();

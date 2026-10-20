@@ -157,8 +157,8 @@ whose `ts_init` lies in it; how the source makes them (IB's quotes come
 from bars) is its own business.
 
 **Series.** Bars are stored per bar type, quotes per instrument (one
-series per id of `instruments`; their cadence is the source's, see the IB
-quotes below). Both go through one generic algorithm (`fill_series`) over a
+series per id of `instruments`; their cadence is the source's, one a minute
+for IB, see the IB quotes below). Both go through one generic algorithm (`fill_series`) over a
 private `Series` trait implemented for `Bar` (key `BarType`) and
 `QuoteTick` (key `InstrumentId`). Bar types run first, then quotes.
 
@@ -287,8 +287,9 @@ IbHistory::connect(gateway: IbGateway, bar_types: &[BarType], end: Timestamp, no
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
 history.bars(bar_type, start, end).await -> anyhow::Result<Vec<Bar>>   // the fetch_bars of fill_catalog;
                                                                        // (start, end], sorted, unique
-history.quotes(instrument_id, spec: BarSpecification, start, end)
-    .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; (start, end], sorted
+history.quotes(instrument_id, start, end)
+    .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; (start, end],
+                                               // one a minute, sorted
 ```
 
 - **Checked before connecting.** Every bar type must be one IB serves (see
@@ -471,8 +472,8 @@ history.quotes(instrument_id, spec: BarSpecification, start, end)
     market order, is about 0.3 bps (2 cents on a 10-share order of EUR
     7,000: EUR 0.20).
 - **Quotes from BID and ASK bars.** IB has no usable quote history, so
-  `quotes` fetches the BID and ASK bars of the instrument at the cadence
-  of `spec` (its price type is ignored) with the same walk back as `bars`,
+  `quotes` fetches the 1-MINUTE BID and ASK bars of the instrument
+  (`quoted_bar_type`) with the same walk back as `bars`,
   and turns each pair of the same close into one `QuoteTick`
   (`quotes_from_bars`, pure and unit-tested): bid = BID close, ask = ASK
   close, at the bars' price precision (the instrument's, since the
@@ -484,16 +485,26 @@ history.quotes(instrument_id, spec: BarSpecification, start, end)
   are thus those of the bars closing over `(start + 1 ns, end + 1 ns]`
   (`quoted_bars_window`). Dropped, counted and logged at `INFO`, not
   errors: a bar without the other side's bar of the same close, and a
-  crossed pair (ask < bid, mostly the pre-opening auction); the hour then
-  fills on the previous quote. A locked pair (ask = bid) is kept. Only
+  crossed pair (ask < bid, mostly the pre-opening auction); that minute
+  then fills on the previous quote. A locked pair (ask = bid) is kept. Only
   `ib.rs` knows quotes come from bars; a source with quotes (Databento's
   `bbo-1m`) would return `QuoteTick`s directly.
-- **Quote cadence.** `quotes` takes it as a parameter; `main` passes the
-  strategy's bar spec (no flag), so `fill-catalog` always stores the bars
-  and the quotes of the config's instruments. Finer quotes later are
-  another spec, not a redesign. The cadence check before connecting
-  covers BID and ASK at the strategy's cadence, since IB serves the same
-  sizes for every price type.
+- **Quote cadence: 1 minute, fixed.** `quotes` has no cadence parameter:
+  the cadence is a detail of this source, not of the strategy or the CLI.
+  One quote a minute lets the backtest fill a market order on the quote of
+  the minute closing with its bar and check resting orders every minute,
+  whatever the strategy's bar size; 1 minute is the finest bar size IB
+  paces softly. `fill-catalog` stores the strategy's bars and these quotes,
+  each resuming from its own stored range. The check before connecting
+  covers the strategy's bar types; the minute bars close within the
+  longest of them.
+- **Cost of minute quotes.** Two 1-MINUTE bar types per instrument (BID
+  and ASK), 1,440 bars per `86400 S` request: about 28 requests per
+  instrument-month and 330 per instrument-year (see the duration table),
+  at 3-4 s each, about 2.3 minutes per instrument-month and 27 minutes per
+  instrument-year with no pacing error (soft throttling only). An
+  instrument-month of Xetra quotes is about 20,000 rows (930 minutes a
+  session).
 - **Quotes verified** on the paper gateway (2026-10-08, SXR8.IBIS
   1-HOUR, 2026-09-01 to 09-26): 304 BID and 304 ASK bars, no unpaired
   bar, 4 crossed pairs dropped (bid above ask by 0.16-3.48 EUR), 300
@@ -631,7 +642,8 @@ bar after a roll behaves when the new contract has not ticked yet is
 - **Check before writing**: refuse a foreign bar type or instrument, and
   an empty response on a series' first fill.
 - **Instruments before bars and quotes.**
-- **Quotes with the bars**: `fill-catalog` always stores both.
+- **Quotes with the bars**: `fill-catalog` always stores both; quotes one
+  a minute, whatever the bars' cadence.
 - **Per-contract bars are the stored truth**: never write an adjusted series;
   continuous series are built at read time.
 - **Rolls are values**: backtest and live pass the same params to the same
@@ -652,15 +664,16 @@ bar after a roll behaves when the new contract has not ticked yet is
     foreign bar type is an error, an empty resumed response is not;
     unsorted and duplicate bars are stored sorted and unique. The same for
     quotes with a closure for `fetch_quotes` (per instrument, coverage over
-    the window asked for, a foreign instrument refused), and bars and
+    the window asked for, a foreign instrument refused, a minute-cadence
+    source stored every minute and resumed with only the new minutes), and bars and
     quotes of one instrument resuming each from their own range. The bar
     tests' quote source answers a quote at the epoch, so quotes never
     fail them.
   - `ib.rs`: BID and ASK bars to quotes (prices and precision, the 1 ns
     stamp, the nominal size at the bars' size precision, a side without
     the other dropped, a crossed pair dropped and a locked one kept, empty
-    input, different precisions an error) and the bar window of a quote
-    window; bar type to bar spec string and to request duration; a
+    input, different precisions an error), the bar window of a quote
+    window and the 1-MINUTE BID and ASK bars quotes are made from; bar type to bar spec string and to request duration; a
     cadence IB cannot serve is rejected before connecting; the walk back
     over canned answers (no hole at the joins, stops at start, on an empty
     answer and on no progress, trims to `(start, end]`, sorted and
