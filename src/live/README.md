@@ -2,18 +2,68 @@
 
 The `live` module builds and runs a Nautilus `LiveNode` for the strategy, on
 a paper then a real account (build step 3). It adds no trading logic: it
-wires broker clients, the strategy and the node. Filling the catalog needs
-no node (see the data README).
+fills the catalog up to now, then wires broker clients, the strategy and the
+node. Filling the catalog needs no node (see the data README).
 
 APIs are those of the `nautilus-*` crates at `0.65.0`; open points are under
 "Unverified". Process-wide rules (one node per process, Nautilus owns the
 logger) are in `docs/ARCHITECTURE.md`.
 
+## The command
+
+```sh
+helix-trader live ema --config ema.toml --account DU1234567 \
+  [--catalog catalog] [--host 127.0.0.1] [--port 4002] [--client-id 1]
+```
+
+Runs one strategy until Ctrl-C (SIGINT) or SIGTERM. `--account` is the bare
+IB account id; a paper account (`D...`) on a live port (4001, 7496), or a
+live one on a paper port (4002, 7497), is refused before anything connects.
+A client id that is a multiple of 1000 is refused too. The default client
+id is the adapter's, 1, so `fill-catalog` (10) can run at the same time.
+`NAUTILUS_LOG` configures the logger as for the other commands.
+
+No `fill-catalog` run is needed first. In code: `live::Live { catalog,
+gateway, account, logging }.run(&requirements, strategy)`, generic over the
+strategy like `Backtest::run`.
+
+### Start sequence
+
+1. Check the account against the port and build the IB client configs.
+2. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
+   and the `tracing` bridge: the fill logs before the node exists, and the
+   node reuses that logger when built.
+3. Fill the catalog for the strategy's data requirements, with the same
+   `IbHistory` and `fill_catalog` as `fill-catalog`: instruments, then each
+   instrument's quotes over `[now - warmup, now - 1 minute]`, resuming after
+   what the catalog holds. IB history refuses an end within a minute of now
+   (the minute still in progress). The history connection closes here, so
+   the node can connect with the same client id.
+4. Build the node with the catalog in `LiveNodeConfig::catalogs`, IB data
+   and exec clients routed by default, reconciliation on, open-order and
+   position checks every 10 and 30 s (as the adapter's `node_exec_tester`),
+   and a 5 s post-stop delay.
+5. Add the strategy and claim the external orders of its instruments (the
+   ones its config does not claim already), then `run()`.
+
+The strategy's warmup request (`strategy::warmup`) is then served by the
+catalog; the data engine sends IB only the interval the catalog misses,
+from the fill's end to now, as historical BID_ASK ticks, and aggregates the
+merged response into the internal bars.
+
+### IB quote subscription
+
+The data client sets `batch_quotes: false`: quotes are subscribed tick by
+tick (`reqTickByTickData` BID_ASK); the adapter falls back to `reqMktData`
+where IB refuses, and always uses it for BAG spreads. Internal bars are then
+built from every quote change. It also sets `use_regular_trading_hours:
+false`, as the history in the catalog does.
+
 ## Layout
 
 ```
 live/
-  mod.rs    declares the submodules, exposes the entry points
+  mod.rs    `Live`: the start sequence (catalog filling, logger), the entry point
   node.rs   builds and runs the LiveNode, broker-agnostic
   ib.rs     Interactive Brokers client factories and configs
 ```
@@ -222,6 +272,7 @@ Both configs implement `ClientConfig` and `Default`; build them with
 | `request_timeout` (s) | `60` |
 | `connection_timeout` (s) | `300` |
 | `instrument_provider` | default provider config |
+| `batch_quotes` | `true` (`reqMktData`); set `false` (see "IB quote subscription") |
 
 The history side (`data/ib.rs`) uses the same config type for its
 historical client. `use_regular_trading_hours` must equal the `use_rth` of
@@ -311,9 +362,16 @@ same symbology and venue; the venue rules (never
 
 Run IB Gateway or TWS with the socket API enabled, or enable the `gateway`
 feature and use `DockerizedIBGateway` (needs Docker and the credentials in
-the environment). Its `read_only_api` defaults to `true`; whether that
-blocks orders is unverified, so set it to `false` for trading and check on
-paper.
+the environment). Its `read_only_api` defaults to `true`; set it to `false`
+for trading.
+
+A gateway with the API in read-only mode (IB Gateway: Configure, Settings,
+API, Settings, "Read-Only API") blocks more than orders: the execution
+client's first request (the next valid order id) fails with IB error 321
+"The API interface is currently in Read-Only mode", the client never
+connects, and the node aborts its startup after the connection timeout
+("Engine readiness timed out"). Seen on the paper gateway; uncheck the box
+before running `live`.
 
 ### IB rules
 

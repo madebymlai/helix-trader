@@ -16,7 +16,7 @@ use std::{
 };
 
 use anyhow::Context;
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative,
     component::Component,
@@ -92,7 +92,7 @@ impl Live {
     /// and disconnects before the node connects with the same client id.
     async fn fill_catalog(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         let now = Timestamp::now();
-        let ib = IbHistory::connect(self.gateway.clone(), &[], now, now).await?;
+        let ib = IbHistory::connect(self.gateway.clone(), fill_end(now)?, now).await?;
         fill_catalog_to_now(
             &self.catalog,
             requirements,
@@ -104,11 +104,22 @@ impl Live {
     }
 }
 
+/// How long before now the catalog filling at start ends: IB history
+/// refuses an end within a minute of now, the minute its quotes are made
+/// from still being in progress (`IbHistory::connect`). The node asks IB
+/// for the quotes since.
+const FILL_LAG: SignedDuration = SignedDuration::from_mins(1);
+
+/// The end of the catalog filling at start, `FILL_LAG` before `now`.
+fn fill_end(now: Timestamp) -> anyhow::Result<Timestamp> {
+    Ok(now.checked_sub(FILL_LAG)?)
+}
+
 /// Fills the catalog in `catalog_dir`, created if missing, with the
 /// instruments of `requirements`, fetched through `fetch_instruments`, and
-/// with their quotes over `[now - warmup, now]`, fetched one instrument at a
-/// time through `fetch_quotes`. A stored series resumes after its end (see
-/// `data::fill_catalog`).
+/// with their quotes over `[now - warmup, fill_end(now)]`, fetched one
+/// instrument at a time through `fetch_quotes`. A stored series resumes
+/// after its end (see `data::fill_catalog`).
 async fn fill_catalog_to_now(
     catalog_dir: &Path,
     requirements: &DataRequirements,
@@ -126,10 +137,8 @@ async fn fill_catalog_to_now(
     fill_catalog(
         &mut catalog,
         instruments,
-        &[],
         start,
-        now,
-        async |bar_type, _, _| anyhow::bail!("no bars are filled, yet asked for {bar_type}"),
+        fill_end(now)?,
         fetch_quotes,
     )
     .await
@@ -213,21 +222,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_start_fills_a_new_catalog_over_the_warmup_up_to_now() {
+    async fn the_start_fills_a_new_catalog_over_the_warmup_up_to_a_minute_ago() {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join("catalog");
         let now = at("2026-10-20T10:30:00Z");
         let (asked_instruments, asked_quotes) = fill(&catalog_dir, now).await;
         let ids = requirements().instrument_ids;
         assert_eq!(asked_instruments, ids);
-        let from = at("2026-10-20T08:30:00Z");
-        assert_eq!(asked_quotes, [(ids[0], from, now), (ids[1], from, now)]);
+        let (from, to) = (at("2026-10-20T08:30:00Z"), at("2026-10-20T10:29:00Z"));
+        assert_eq!(asked_quotes, [(ids[0], from, to), (ids[1], from, to)]);
         let mut catalog = ParquetDataCatalog::new(&catalog_dir, None, None, None, None);
         assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 2);
         let stored = catalog
             .quote_ticks(Some(vec![ids[0].to_string()]), None, None)
             .unwrap();
-        assert_eq!(stored, [quote(ids[0], now)]);
+        assert_eq!(stored, [quote(ids[0], to)]);
     }
 
     #[tokio::test]
@@ -238,7 +247,8 @@ mod tests {
         let now = at("2026-10-20T11:00:00Z");
         let (_, asked_quotes) = fill(dir.path(), now).await;
         let ids = requirements().instrument_ids;
-        let resume = first + SignedDuration::from_nanos(1);
-        assert_eq!(asked_quotes, [(ids[0], resume, now), (ids[1], resume, now)]);
+        let resume = at("2026-10-20T10:29:00.000000001Z");
+        let to = at("2026-10-20T10:59:00Z");
+        assert_eq!(asked_quotes, [(ids[0], resume, to), (ids[1], resume, to)]);
     }
 }
