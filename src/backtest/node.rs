@@ -35,9 +35,16 @@ const RUN_ID: &str = "backtest";
 /// the strategy's bars from them), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
 /// holding the warmup bars (`warmup::cache_config`). The engine starts
-/// 1 ns before `start` (see `Backtest::engine_start`). Build and run errors
-/// are raised, not only logged.
+/// 1 ns before `start` (see `Backtest::engine_start`), which must be before
+/// `end`. Build and run errors are raised, not only logged.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+    // Nautilus only checks the engine start against the end, which lets a
+    // run starting on its end through.
+    let (start, end) = (backtest.start, backtest.end);
+    ensure!(
+        start < end,
+        "backtest start {start} must be before its end {end}"
+    );
     let venue = venue(&backtest.instruments())?;
     // Absolute: the node's DataFusion reader finds no object store for a
     // relative path ("file://catalog/...").

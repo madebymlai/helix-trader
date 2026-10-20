@@ -22,14 +22,20 @@ fn a_negative_warmup_is_refused() {
 }
 
 #[test]
-fn a_start_after_the_end_is_refused() {
+fn a_start_on_or_after_the_end_is_refused() {
     let catalog = steps::catalog();
-    let backtest = steps::backtest(catalog.path(), steps::at("16:00"));
+    for start in [steps::end(), steps::at("16:00")] {
+        let backtest = steps::backtest(catalog.path(), start);
 
-    let err = backtest
-        .run(common::shortest_ema_cross(steps::WARMUP))
-        .unwrap_err();
+        let err = backtest
+            .run(common::shortest_ema_cross(steps::WARMUP))
+            .unwrap_err();
 
-    let err = format!("{err:#}");
-    assert!(err.contains("start"), "{err}");
+        let err = format!("{err:#}");
+        let message = format!(
+            "backtest start {start} must be before its end {}",
+            steps::end()
+        );
+        assert!(err.contains(&message), "{err}");
+    }
 }

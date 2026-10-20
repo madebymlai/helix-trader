@@ -679,8 +679,8 @@ last trade.
   - `backtest_coverage.rs`: a warmup longer than the stored quotes, or a
     catalog without quotes, is refused before the node is built, naming
     the instrument's quotes and the missing interval.
-  - `backtest_inputs.rs`: a negative warmup, or a start after the end, is
-    refused before the node is built.
+  - `backtest_inputs.rs`: a negative warmup, or a start on or after the
+    end, is refused before the node is built.
 
   The EMA reads bar closes only, so the bars' opens, highs and lows, and
   stops, are tested with a recording strategy (`tests/common/recorder.rs`)
