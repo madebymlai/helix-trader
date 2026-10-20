@@ -1,35 +1,32 @@
-//! A probe strategy over the fixture catalog: what it receives and in which
-//! order, and what its orders fill at and cost. One node per process, so
-//! one run per file.
+//! The warmup of the EMA crossover on internal bars, run starting off an
+//! hour: the bars built from the warmup quotes, but the partial oldest one,
+//! warm the EMAs before the run; the bar spanning the warmup end and the
+//! run start comes once, complete, in the run; the orders fill on the quote
+//! 1 ns before the bar's close, buys at the ask, sells at the bid. One node
+//! per process, so one run per file.
 
 mod common;
 
-use common::probe::{Probe, fixture_events};
-use nautilus_model::{enums::OrderSide, types::Money};
+use common::{quote_before, steps};
+use nautilus_model::types::Price;
 
 #[test]
-fn warmup_arrives_before_the_bars_and_market_orders_fill_on_the_decision_hours_quote() {
-    let catalog = common::catalog();
-    let (probe, record) = Probe::new();
-
-    let result = common::backtest(catalog.path(), "3 EUR")
-        .run(probe)
+fn the_crossover_warms_up_on_the_full_warmup_bars_and_trades_from_the_first_bar_of_the_run() {
+    let catalog = steps::catalog();
+    let result = steps::backtest(catalog.path(), steps::at("12:30"))
+        .run(common::shortest_ema_cross(steps::WARMUP))
         .unwrap();
 
-    let record = record.borrow();
-    assert_eq!(record.events, fixture_events());
-
-    // The buy on the first replayed bar fills at that hour's ask, the sell
-    // on the second at that hour's bid, each paying the commission once.
-    let before = usize::try_from(common::BARS_BEFORE_START).unwrap();
-    let quotes = common::quotes();
-    let commission = Some(Money::from("3 EUR"));
+    // The prices the orders fill at (see `steps`).
+    let quotes = steps::quotes();
     assert_eq!(
-        record.fills,
-        vec![
-            (OrderSide::Buy, quotes[before].ask_price, commission),
-            (OrderSide::Sell, quotes[before + 1].bid_price, commission),
-        ]
+        quote_before(&quotes, steps::at("13:00")).ask_price,
+        Price::from("620.65")
     );
-    assert_eq!(result.total_orders, 2);
+    assert_eq!(
+        quote_before(&quotes, steps::at("14:00")).bid_price,
+        Price::from("580.55")
+    );
+    assert_eq!(result.total_orders, steps::ORDERS);
+    assert_eq!(common::balance(&result), steps::BALANCE);
 }

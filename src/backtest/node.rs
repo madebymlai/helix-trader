@@ -2,7 +2,7 @@
 //!
 //! Builds a Nautilus `BacktestRunConfig` (`nautilus_backtest::config`): the
 //! venue (`BacktestVenueConfig`), the catalog data (`BacktestDataConfig`, one
-//! for the bars and one per instrument for its quotes) and the engine
+//! per instrument for its quotes) and the engine
 //! config, then runs it on a `BacktestNode`: `build`, the strategy
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 
@@ -16,9 +16,9 @@ use nautilus_backtest::{
 };
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_model::{
-    data::{BarType, NautilusDataType},
+    data::NautilusDataType,
     enums::{AccountType, BookType, OmsType},
-    identifiers::Venue,
+    identifiers::{InstrumentId, Venue},
 };
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
@@ -29,15 +29,15 @@ use crate::data::to_unix_nanos;
 /// The id of the one run of the node.
 const RUN_ID: &str = "backtest";
 
-/// The run config of `backtest`: one venue named after the bar types'
-/// venue, which fills orders on the quotes alone (bars reach the strategy
-/// only), the bars and the instruments' quotes of the window from the
-/// catalog, and the catalog registered in the engine so that it serves the
-/// strategy's warmup requests. The engine starts 1 ns before `start` (see
+/// The run config of `backtest`: one venue named after the instruments'
+/// venue, which fills orders on the quotes, the instruments' quotes of the
+/// window from the catalog (the only data replayed: the data engine builds
+/// the strategy's bars from them), and the catalog registered in the
+/// engine so that it serves the strategy's warmup requests. The engine starts 1 ns before `start` (see
 /// `Backtest::engine_start`). Build and run errors are raised, not only
 /// logged.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
-    let venue = venue(&backtest.bar_types)?;
+    let venue = venue(&backtest.instrument_ids)?;
     // Absolute: the node's DataFusion reader finds no object store for a
     // relative path ("file://catalog/...").
     let catalog = std::path::absolute(&backtest.catalog)?;
@@ -55,21 +55,17 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .fill_model(costs::fill_model()?)
         .bar_execution(false)
         .build()?;
-    let bars = BacktestDataConfig::builder()
-        .data_type(NautilusDataType::Bar)
-        .catalog_path(catalog.clone())
-        .bar_types(backtest.bar_types.iter().map(ToString::to_string).collect())
-        .build()?;
-    let mut data = vec![bars];
-    for instrument_id in backtest.instrument_ids() {
-        data.push(
+    let data = backtest
+        .instruments()
+        .into_iter()
+        .map(|instrument_id| {
             BacktestDataConfig::builder()
                 .data_type(NautilusDataType::QuoteTick)
                 .catalog_path(catalog.clone())
                 .instrument_id(instrument_id)
-                .build()?,
-        );
-    }
+                .build()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let engine_config = BacktestEngineConfig::builder()
         .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
         .logging(backtest.logging.clone())
@@ -102,15 +98,14 @@ where
     Ok(result)
 }
 
-/// The one venue of `bar_types`.
-fn venue(bar_types: &[BarType]) -> anyhow::Result<Venue> {
-    let first = bar_types.first().context("no bar types")?;
-    let venue = first.instrument_id().venue;
+/// The one venue of `instrument_ids`.
+fn venue(instrument_ids: &[InstrumentId]) -> anyhow::Result<Venue> {
+    let first = instrument_ids.first().context("no instruments")?;
     ensure!(
-        bar_types.iter().all(|bt| bt.instrument_id().venue == venue),
-        "bar types span more than one venue"
+        instrument_ids.iter().all(|id| id.venue == first.venue),
+        "instruments span more than one venue"
     );
-    Ok(venue)
+    Ok(first.venue)
 }
 
 #[cfg(test)]
@@ -126,9 +121,9 @@ mod tests {
     fn backtest() -> Backtest {
         Backtest {
             catalog: PathBuf::from("/data/catalog"),
-            bar_types: vec![
-                BarType::from("SXR8.IBIS-1-HOUR-LAST-EXTERNAL"),
-                BarType::from("EUNL.IBIS-1-HOUR-LAST-EXTERNAL"),
+            instrument_ids: vec![
+                InstrumentId::from("SXR8.IBIS"),
+                InstrumentId::from("EUNL.IBIS"),
             ],
             start: "2026-07-01T00:00:00Z".parse().unwrap(),
             end: "2026-10-01T00:00:00Z".parse().unwrap(),
@@ -143,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn one_netting_margin_venue_named_after_the_bar_types() {
+    fn one_netting_margin_venue_named_after_the_instruments() {
         let config = run_config(&backtest()).unwrap();
         let [venue] = config.venues() else {
             panic!("{:?}", config.venues())
@@ -174,24 +169,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_bars_of_every_bar_type_come_from_the_catalog() {
-        let config = run_config(&backtest()).unwrap();
-        let data = &config.data()[0];
-        assert_eq!(data.data_type(), &NautilusDataType::Bar);
-        assert_eq!(data.catalog_path(), "/data/catalog");
-        assert_eq!(
-            data.bar_types().unwrap(),
-            [
-                "SXR8.IBIS-1-HOUR-LAST-EXTERNAL",
-                "EUNL.IBIS-1-HOUR-LAST-EXTERNAL"
-            ]
-        );
-    }
-
-    /// The instrument of each quote data config, after the bars' one.
+    /// The instrument of each data config, all quotes.
     fn quoted(config: &BacktestRunConfig) -> Vec<String> {
-        config.data()[1..]
+        config
+            .data()
             .iter()
             .map(|data| {
                 assert_eq!(data.data_type(), &NautilusDataType::QuoteTick);
@@ -202,17 +183,17 @@ mod tests {
     }
 
     #[test]
-    fn the_quotes_of_every_instrument_come_from_the_catalog() {
+    fn only_the_quotes_of_every_instrument_come_from_the_catalog() {
         let config = run_config(&backtest()).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
     #[test]
-    fn an_instrument_of_several_bar_types_has_its_quotes_loaded_once() {
+    fn an_instrument_given_twice_has_its_quotes_loaded_once() {
         let mut backtest = backtest();
         backtest
-            .bar_types
-            .push(BarType::from("SXR8.IBIS-1-DAY-LAST-EXTERNAL"));
+            .instrument_ids
+            .push(InstrumentId::from("SXR8.IBIS"));
         let config = run_config(&backtest).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
@@ -254,20 +235,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_no_bar_types() {
+    fn rejects_no_instruments() {
         let backtest = Backtest {
-            bar_types: vec![],
+            instrument_ids: vec![],
             ..backtest()
         };
         assert!(run_config(&backtest).is_err());
     }
 
     #[test]
-    fn rejects_bar_types_on_two_venues() {
+    fn rejects_instruments_on_two_venues() {
         let mut backtest = backtest();
         backtest
-            .bar_types
-            .push(BarType::from("CSPX.LSEETF-1-HOUR-LAST-EXTERNAL"));
+            .instrument_ids
+            .push(InstrumentId::from("CSPX.LSEETF"));
         let err = run_config(&backtest).unwrap_err();
         assert!(err.to_string().contains("venue"), "{err}");
     }

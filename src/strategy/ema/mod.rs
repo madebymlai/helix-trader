@@ -1,6 +1,7 @@
 //! EMA crossover: per instrument, long while the fast EMA is above the slow
 //! one, short otherwise, on the bars inside the session only. A minimal
-//! strategy to drive data, backtest and paper.
+//! strategy to drive data, backtest and paper. Its bars are built by
+//! Nautilus from the quotes, and warmed up through `strategy::warmup`.
 
 mod book;
 mod config;
@@ -10,7 +11,11 @@ pub use config::EmaCrossConfig;
 pub use session::Session;
 
 use nautilus_common::actor::DataActor;
-use nautilus_model::{data::Bar, enums::OrderSide, instruments::Instrument};
+use nautilus_model::{
+    data::{Bar, QuoteTick},
+    enums::OrderSide,
+    instruments::Instrument,
+};
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyCore},
@@ -18,6 +23,7 @@ use nautilus_trading::{
 use rust_decimal::Decimal;
 
 use self::book::Book;
+use crate::strategy::warmup;
 
 #[derive(Debug)]
 pub struct EmaCross {
@@ -89,17 +95,13 @@ nautilus_strategy!(EmaCross);
 
 impl DataActor for EmaCross {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let start = self.clock().utc_now().checked_sub(self.config.warmup)?;
-        for bar_type in self.config.bar_types() {
-            self.request_bars(bar_type, Some(start), None, None, None, None)?;
-            self.subscribe_bars(bar_type, None, None);
-        }
-        Ok(())
+        let (bar_types, warmup) = (self.config.bar_types(), self.config.warmup);
+        warmup::start(self, &bar_types, warmup)
     }
 
-    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        for bar in bars {
-            self.book.update(bar);
+    fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
+        for bar in warmup::bars(self, quotes) {
+            self.book.update(&bar);
         }
         Ok(())
     }

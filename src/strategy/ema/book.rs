@@ -105,7 +105,7 @@ mod tests {
         toml::from_str(
             r#"
             instrument_ids = ["ESM4.CME"]
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
             fast_period = 2
             slow_period = 4
             trade_size = "3"
@@ -117,7 +117,7 @@ mod tests {
     }
 
     fn bar_on(instrument: &str, close: &str, ts: Timestamp) -> Bar {
-        let bar_type = BarType::from(format!("{instrument}-1-HOUR-LAST-EXTERNAL").as_str());
+        let bar_type = BarType::from(format!("{instrument}-1-HOUR-MID-INTERNAL").as_str());
         Bar::new(
             bar_type,
             close.into(),

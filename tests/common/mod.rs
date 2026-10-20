@@ -1,11 +1,13 @@
 //! The fixture of the backtest tests: a temporary catalog holding one ETF,
-//! SXR8.IBIS in EUR, synthetic hourly bars whose closes follow a wave, so
-//! that a fast and a slow EMA cross several times, and one quote per bar
-//! around its close.
+//! SXR8.IBIS in EUR, and its 1-minute quotes only, and the EMA crossover
+//! trading it on hourly MID bars Nautilus builds from those quotes.
+//!
+//! Two kinds of quotes: a wave, so that a fast and a slow EMA cross several
+//! times over days; and steps, a level per hour bar chosen by the test, so
+//! that a run with the shortest crossover trades at hours worked out by
+//! hand.
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
-
-pub mod probe;
 
 use std::path::Path;
 
@@ -13,11 +15,12 @@ use helix_trader::{
     backtest::Backtest,
     strategy::ema::{EmaCross, EmaCrossConfig, Session},
 };
-use jiff::{SignedDuration, Timestamp, civil::time, tz::TimeZone};
+use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{Bar, BarType, QuoteTick},
+    data::{BarSpecification, QuoteTick},
+    enums::{BarAggregation, PriceType},
     identifiers::{InstrumentId, Symbol},
     instruments::{InstrumentAny, stubs::equity_aapl},
     types::{Currency, Money, Price, Quantity},
@@ -26,31 +29,12 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use tempfile::TempDir;
 
 pub const INSTRUMENT_ID: &str = "SXR8.IBIS";
-pub const BAR_TYPE: &str = "SXR8.IBIS-1-HOUR-LAST-EXTERNAL";
-/// The bars stored before the run start.
-pub const BARS_BEFORE_START: i64 = 72;
-/// The bars replayed in the run.
-pub const BARS_IN_RUN: i64 = 120;
-/// The warmup the strategies ask for: the last 48 bars before the start.
-pub const WARMUP: SignedDuration = SignedDuration::from_hours(48);
 
-/// The first stored bar closes here.
-fn first_close() -> Timestamp {
-    "2026-01-05T00:00:00Z".parse().unwrap()
-}
+const MINUTE: SignedDuration = SignedDuration::from_mins(1);
+const NANOSECOND: SignedDuration = SignedDuration::from_nanos(1);
 
-fn hours(n: i64) -> SignedDuration {
-    SignedDuration::from_hours(n)
-}
-
-/// Half an hour after the last bar before the run, so no bar sits on the
-/// boundary between warmup and replay.
-pub fn start() -> Timestamp {
-    first_close() + hours(BARS_BEFORE_START - 1) + SignedDuration::from_mins(30)
-}
-
-pub fn end() -> Timestamp {
-    first_close() + hours(BARS_BEFORE_START + BARS_IN_RUN)
+pub fn ts(s: &str) -> Timestamp {
+    s.parse().unwrap()
 }
 
 pub fn instrument() -> InstrumentAny {
@@ -62,104 +46,121 @@ pub fn instrument() -> InstrumentAny {
     InstrumentAny::Equity(equity)
 }
 
-/// Every stored bar, oldest first: closes on a wave of 30 bars around 600
-/// EUR, each bar stamped on its close.
-pub fn bars() -> Vec<Bar> {
-    let bar_type = BarType::from(BAR_TYPE);
-    let close = |i: i64| 600.0 + 5.0 * (std::f64::consts::TAU * i as f64 / 30.0).sin();
-    (0..BARS_BEFORE_START + BARS_IN_RUN)
-        .map(|i| {
-            let (open, close) = (close(i - 1), close(i));
-            let ts = (first_close() + hours(i)).into();
-            let price = |p: f64| Price::new(p, 2);
-            Bar::new(
-                bar_type,
-                price(open),
-                price(open.max(close) + 0.1),
-                price(open.min(close) - 0.1),
-                price(close),
-                Quantity::from(1000),
-                ts,
-                ts,
-            )
-        })
-        .collect()
-}
-
 /// Half the spread of every quote.
 pub fn half_spread() -> Price {
     Price::from("0.05")
 }
 
-/// One quote per bar, oldest first: the close less (bid) and plus (ask)
-/// the half spread, sizes 1,000,000, stamped 1 ns before the bar's close.
-pub fn quotes() -> Vec<QuoteTick> {
+/// The quote of the minute closing at `close`: `mid` less (bid) and plus
+/// (ask) the half spread, sizes 1,000,000, stamped 1 ns before the close.
+pub fn quote(close: Timestamp, mid: f64) -> QuoteTick {
     let size = Quantity::from(1_000_000);
-    bars()
-        .iter()
-        .map(|bar| {
-            let ts = UnixNanos::from(bar.ts_event.as_u64() - 1);
-            QuoteTick::new(
-                bar.bar_type.instrument_id(),
-                bar.close - half_spread(),
-                bar.close + half_spread(),
-                size,
-                size,
-                ts,
-                ts,
-            )
-        })
-        .collect()
+    let mid = Price::new(mid, 2);
+    let ts: UnixNanos = (close - NANOSECOND).into();
+    QuoteTick::new(
+        InstrumentId::from(INSTRUMENT_ID),
+        mid - half_spread(),
+        mid + half_spread(),
+        size,
+        size,
+        ts,
+        ts,
+    )
 }
 
-/// Writes the instrument and the bars to a new temporary catalog, stored
-/// over `[first_close, end]` as a fill up to `end` stores them, but no
-/// quotes.
+/// One quote per minute closing in `(from, to]`, at the mid `mid` gives
+/// for the minute's close; none for a minute it gives `None` for.
+pub fn minute_quotes(
+    from: Timestamp,
+    to: Timestamp,
+    mid: impl Fn(Timestamp) -> Option<f64>,
+) -> Vec<QuoteTick> {
+    let mut quotes = vec![];
+    let mut close = from + MINUTE;
+    while close <= to {
+        if let Some(mid) = mid(close) {
+            quotes.push(quote(close, mid));
+        }
+        close += MINUTE;
+    }
+    quotes
+}
+
+/// The close of the hour bar holding the minute closing at `close`.
+fn bar_close(close: Timestamp) -> Timestamp {
+    let hour = TimestampRound::new()
+        .smallest(Unit::Hour)
+        .mode(RoundMode::Ceil);
+    close.round(hour).unwrap()
+}
+
+/// Stepped quotes over `(from, to]`: the minute `m` (1 to 60) of the hour
+/// bar closing at `c` quotes the mid `level(c) + 0.01 m`, or nothing if
+/// `level(c)` is `None`. So that bar closes at its level + 0.60, and each
+/// quote differs from its neighbours.
+pub fn stepped_quotes(
+    from: Timestamp,
+    to: Timestamp,
+    level: impl Fn(Timestamp) -> Option<f64>,
+) -> Vec<QuoteTick> {
+    minute_quotes(from, to, |close| {
+        let bar = bar_close(close);
+        let minute = 60 - bar.duration_since(close).as_mins();
+        level(bar).map(|level| level + 0.01 * minute as f64)
+    })
+}
+
+/// The quote among `quotes` stamped 1 ns before `close`.
+pub fn quote_before(quotes: &[QuoteTick], close: Timestamp) -> QuoteTick {
+    let ts: UnixNanos = (close - NANOSECOND).into();
+    *quotes
+        .iter()
+        .find(|quote| quote.ts_event == ts)
+        .unwrap_or_else(|| panic!("no quote 1 ns before {close}"))
+}
+
+/// A new temporary catalog holding the instrument and no quotes.
 pub fn catalog_without_quotes() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
-    catalog
-        .write_to_parquet(
-            &bars(),
-            Some(first_close().into()),
-            Some(end().into()),
-            None,
-        )
-        .unwrap();
     dir
 }
 
-/// The catalog without quotes, plus the quotes stored from the first one
-/// to `end`.
-pub fn catalog() -> TempDir {
+/// A new temporary catalog holding the instrument and `quotes`, stored
+/// over `[from, to]` as a fill over that window stores them.
+pub fn catalog(quotes: &[QuoteTick], from: Timestamp, to: Timestamp) -> TempDir {
     let dir = catalog_without_quotes();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-    let quotes = quotes();
     catalog
-        .write_to_parquet(&quotes, Some(quotes[0].ts_init), Some(end().into()), None)
+        .write_to_parquet(quotes, Some(from.into()), Some(to.into()), None)
         .unwrap();
     dir
 }
 
-/// A backtest of the fixture over the run window, with `commission` per
-/// order and 10,000 EUR to start.
-pub fn backtest(catalog: &Path, commission: &str) -> Backtest {
+/// A backtest of the instrument over `[start, end]` after `warmup`, with
+/// `commission` per order and 10,000 EUR to start.
+pub fn backtest(
+    catalog: &Path,
+    start: Timestamp,
+    end: Timestamp,
+    warmup: SignedDuration,
+    commission: &str,
+) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
-        bar_types: vec![BarType::from(BAR_TYPE)],
-        start: start(),
-        end: end(),
-        warmup: WARMUP,
+        instrument_ids: vec![InstrumentId::from(INSTRUMENT_ID)],
+        start,
+        end,
+        warmup,
         commission: Money::from(commission),
         balance: Money::from("10000 EUR"),
         logging: LoggerConfig::default(),
     }
 }
 
-/// The session of the EMA crossover on the fixture: Xetra's continuous
-/// trading, so the bars closing 10:00 to 17:00 Frankfurt time (09:00 to
-/// 16:00 UTC in January) count, eight of the 24 a day.
+/// Xetra's continuous trading: the hour bars closing 10:00 to 17:00
+/// Frankfurt time (09:00 to 16:00 UTC in January) count, eight a day.
 pub fn session() -> Session {
     Session {
         time_zone: TimeZone::get("Europe/Berlin").unwrap(),
@@ -168,23 +169,144 @@ pub fn session() -> Session {
     }
 }
 
-/// The EMA crossover on the fixture: 5 against 15 bars, 10 shares long or
-/// short, inside the session.
-pub fn ema_cross() -> EmaCross {
+/// The EMA crossover on 1-hour MID bars of the instrument: `fast` against
+/// `slow` bars, 10 shares long or short, inside the session, after
+/// `warmup`.
+pub fn ema_cross(fast: usize, slow: usize, warmup: SignedDuration) -> EmaCross {
     let config = EmaCrossConfig::builder()
         .instrument_ids(vec![InstrumentId::from(INSTRUMENT_ID)])
-        .bar_spec(BarType::from(BAR_TYPE).spec())
-        .fast_period(5)
-        .slow_period(15)
+        .bar_spec(BarSpecification::new(
+            1,
+            BarAggregation::Hour,
+            PriceType::Mid,
+        ))
+        .fast_period(fast)
+        .slow_period(slow)
         .trade_size(Quantity::from(10))
-        .warmup(WARMUP)
+        .warmup(warmup)
         .session(session())
         .build();
     EmaCross::new(config).unwrap()
 }
 
-/// The orders the EMA crossover sends on the fixture.
-pub const EMA_ORDERS: usize = 4;
-/// Its PnL (total) on the fixture without commission: the spread paid
-/// included.
-pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -234.0;
+/// The shortest crossover, 1 against 2 bars: once two bars inside the
+/// session are in, it is long while a bar closes above the slow EMA of
+/// the bars before it, short otherwise.
+pub fn shortest_ema_cross(warmup: SignedDuration) -> EmaCross {
+    ema_cross(1, 2, warmup)
+}
+
+/// The final EUR balance of the account.
+pub fn balance(result: &nautilus_backtest::result::BacktestResult) -> String {
+    result.summary["account.IBIS.balance.EUR.total"].clone()
+}
+
+/// The wave: a mid of 600 EUR plus 5 EUR of sine over 30 hours, quoted
+/// every minute for 192 hours from Monday 5 January 2026; the run starts
+/// half an hour after the 71st hour and ends with the quotes, after 48
+/// hours of warmup.
+pub mod wave {
+    use super::*;
+
+    pub const WARMUP: SignedDuration = SignedDuration::from_hours(48);
+
+    /// The orders the EMA crossover sends on the wave.
+    pub const EMA_ORDERS: usize = 4;
+    /// Its PnL (total) without commission: the spread paid included.
+    ///
+    /// The orders and the PnL are those of the earlier fixture, which
+    /// stored the wave as external hour bars, one quote per bar: the
+    /// internal bars close on the same mids, at the same hours, and the
+    /// orders fill on the same quotes.
+    pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -234.0;
+
+    fn first() -> Timestamp {
+        ts("2026-01-05T00:00:00Z")
+    }
+
+    pub fn start() -> Timestamp {
+        first() + SignedDuration::from_mins(71 * 60 + 30)
+    }
+
+    pub fn end() -> Timestamp {
+        first() + SignedDuration::from_hours(192)
+    }
+
+    pub fn quotes() -> Vec<QuoteTick> {
+        minute_quotes(first(), end(), |close| {
+            let hours = close.duration_since(first()).as_secs_f64() / 3600.0;
+            let mid = 600.0 + 5.0 * (std::f64::consts::TAU * hours / 30.0).sin();
+            Some((mid * 100.0).round() / 100.0)
+        })
+    }
+
+    /// The instrument and the wave, stored from its start to its end.
+    pub fn catalog() -> TempDir {
+        super::catalog(&quotes(), first(), end())
+    }
+
+    pub fn backtest(catalog: &Path, commission: &str) -> Backtest {
+        super::backtest(catalog, start(), end(), WARMUP, commission)
+    }
+
+    /// The EMA crossover on the wave: 5 against 15 bars.
+    pub fn ema_cross() -> EmaCross {
+        super::ema_cross(5, 15, WARMUP)
+    }
+}
+
+/// Steps on Wednesday 7 January 2026, all hours inside the session: the
+/// hour bars close at 700.60 (11:00 UTC), 600.60 (12:00), 620.60 (13:00)
+/// and 580.60 (14:00 and 15:00), quoted from 10:00 to 15:00. With two
+/// hours of warmup and a run from 12:30 or 13:00, the oldest warmup bar,
+/// closing at 11:00, is partial and the shortest crossover sees:
+///
+/// - 12:00 and 13:00: 620.60 above 600.60, long: it buys 10 at the ask of
+///   the quote closing 13:00, 620.65;
+/// - 14:00: 580.60 below the slow EMA of 610.60, short: it sells 20 at the
+///   bid of the quote closing 14:00, 580.55.
+///
+/// The 10 shares bought and sold lose 40.10 each: the balance ends at
+/// 9599.00 EUR, after 2 orders. Had the partial bar counted, the slow EMA
+/// would be 650.60 at 13:00: one sell, no buy; without the warmup, the
+/// crossover would still be cold at 13:00: one sell, at 14:00.
+pub mod steps {
+    use super::*;
+
+    pub const WARMUP: SignedDuration = SignedDuration::from_hours(2);
+    pub const ORDERS: usize = 2;
+    pub const BALANCE: &str = "9599.00 EUR";
+
+    /// `hh:mm` UTC on the day of the steps.
+    pub fn at(hh_mm: &str) -> Timestamp {
+        ts(&format!("2026-01-07T{hh_mm}:00Z"))
+    }
+
+    pub fn end() -> Timestamp {
+        at("15:00")
+    }
+
+    pub fn quotes() -> Vec<QuoteTick> {
+        stepped_quotes(at("10:00"), end(), |close| {
+            Some(if close <= at("11:00") {
+                700.0
+            } else if close == at("12:00") {
+                600.0
+            } else if close == at("13:00") {
+                620.0
+            } else {
+                580.0
+            })
+        })
+    }
+
+    /// The instrument and the steps, stored from 10:00 to the end.
+    pub fn catalog() -> TempDir {
+        super::catalog(&quotes(), at("10:00"), end())
+    }
+
+    /// A backtest of the steps without commission, from `start`.
+    pub fn backtest(catalog: &Path, start: Timestamp) -> Backtest {
+        super::backtest(catalog, start, end(), WARMUP, "0 EUR")
+    }
+}

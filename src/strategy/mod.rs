@@ -10,8 +10,12 @@
 //! (`on_start`, `on_bar`) and placing orders with `submit_order`. `book.rs`
 //! is the pure core that turns bars into the target book, tested without an
 //! engine.
+//!
+//! Strategies trade on bars Nautilus builds from quotes; `warmup` asks for
+//! their history and hands it back, so that no strategy knows how.
 
 pub mod ema;
+pub mod warmup;
 
 use jiff::SignedDuration;
 use nautilus_model::identifiers::InstrumentId;

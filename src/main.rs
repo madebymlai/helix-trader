@@ -1,7 +1,7 @@
 //! Command line: one subcommand per process (fill-catalog, backtest, paper), since
 //! Nautilus allows one node per process. Every subcommand takes the strategy
-//! name and its TOML config, the single source of instruments and bar types:
-//! the instruments and the warmup come from the config's data requirements.
+//! name and its TOML config: the instruments and the warmup come from the
+//! config's data requirements.
 
 use std::{
     fs,
@@ -44,7 +44,7 @@ enum Command {
 /// The arguments of a subcommand working on a window of the catalog.
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// The strategy whose instruments and bar types are used.
+    /// The strategy whose instruments and warmup are used.
     strategy: Strategy,
     /// The strategy's TOML config.
     #[arg(long)]
@@ -148,14 +148,12 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Checks everything that needs no gateway, then connects to IB, fetches
-/// the instruments and fills the catalog with their bars and quotes.
+/// the instruments and fills the catalog with their quotes. No bars: the
+/// strategies' bars are built from the quotes.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
-    let (requirements, bar_types) = match args.run.strategy {
-        Strategy::Ema => {
-            let config = load_ema_config(&args.run.config)?;
-            (config.data_requirements(), config.bar_types())
-        }
+    let requirements = match args.run.strategy {
+        Strategy::Ema => load_ema_config(&args.run.config)?.data_requirements(),
     };
     // No node runs in this process, so no node installs Nautilus' logger:
     // install it here, as a node would, so the `log` output of this crate and
@@ -173,7 +171,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         port: args.port,
         client_id: args.client_id,
     };
-    let ib = IbHistory::connect(gateway, &bar_types, end, Timestamp::now()).await?;
+    let ib = IbHistory::connect(gateway, &[], end, Timestamp::now()).await?;
     let instruments = ib.instruments(&requirements.instrument_ids).await?;
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
@@ -182,7 +180,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     fill_catalog(
         &mut catalog,
         instruments,
-        &bar_types,
+        &[],
         start,
         end,
         async |bar_type, from, to| ib.bars(bar_type, from, to).await,
@@ -198,9 +196,9 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
-    let backtest = |bar_types, requirements: DataRequirements| Backtest {
+    let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
-        bar_types,
+        instrument_ids: requirements.instrument_ids,
         start,
         end,
         warmup: requirements.warmup,
@@ -211,7 +209,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let result = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            backtest(config.bar_types(), config.data_requirements()).run(EmaCross::new(config)?)?
+            backtest(config.data_requirements()).run(EmaCross::new(config)?)?
         }
     };
     print!("{}", backtest::report(&result));
@@ -358,7 +356,7 @@ mod tests {
             &path,
             r#"
             instrument_ids = ["ESH4.CME", "ESM4.CME"]
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
             trade_size = "1"
             warmup = "720h"
             session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
@@ -384,7 +382,7 @@ mod tests {
             &path,
             r#"
             instrument_ids = []
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
             trade_size = "1"
             warmup = "720h"
             session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }

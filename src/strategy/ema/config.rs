@@ -2,7 +2,7 @@ use anyhow::ensure;
 use jiff::SignedDuration;
 use nautilus_model::{
     data::{BarSpecification, BarType},
-    enums::AggregationSource,
+    enums::{AggregationSource, PriceType},
     identifiers::{InstrumentId, StrategyId},
     types::Quantity,
 };
@@ -21,7 +21,8 @@ pub struct EmaCrossConfig {
     pub base: StrategyConfig,
     /// The contracts traded and stored in the catalog.
     pub instrument_ids: Vec<InstrumentId>,
-    /// The cadence, the same for every instrument.
+    /// The bars, the same for every instrument: time bars Nautilus builds
+    /// from the quotes, so priced BID, ASK or MID.
     pub bar_spec: BarSpecification,
     #[serde(default = "default_fast_period")]
     #[builder(default = default_fast_period())]
@@ -47,19 +48,20 @@ impl EmaCrossConfig {
         }
     }
 
-    /// One external bar type per instrument.
+    /// One internal bar type per instrument.
     #[must_use]
     pub fn bar_types(&self) -> Vec<BarType> {
         self.instrument_ids
             .iter()
-            .map(|id| BarType::new(*id, self.bar_spec, AggregationSource::External))
+            .map(|id| BarType::new(*id, self.bar_spec, AggregationSource::Internal))
             .collect()
     }
 
     /// # Errors
     ///
     /// Returns an error if the config is inconsistent: no instruments,
-    /// several venues, a bar spec not aggregated on time, periods out of
+    /// several venues, a bar spec not aggregated on time or not priced on
+    /// the quotes (BID, ASK or MID), periods out of
     /// order, a non-positive size or warmup, a session not opening before
     /// it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -73,6 +75,14 @@ impl EmaCrossConfig {
         ensure!(
             self.bar_spec.is_time_aggregated(),
             "bar spec {} is not aggregated on time",
+            self.bar_spec
+        );
+        ensure!(
+            matches!(
+                self.bar_spec.price_type,
+                PriceType::Bid | PriceType::Ask | PriceType::Mid
+            ),
+            "bar spec {} is not priced BID, ASK or MID: its bars are built from quotes",
             self.bar_spec
         );
         ensure!(
@@ -107,7 +117,7 @@ mod tests {
 
     const TOML: &str = r#"
         instrument_ids = ["ESH4.CME", "ESM4.CME"]
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+        bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
         trade_size = "1"
         warmup = "720h"
         session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
@@ -121,7 +131,7 @@ mod tests {
         assert_eq!(config.slow_period, 30);
         assert_eq!(
             config.bar_types()[1].to_string(),
-            "ESM4.CME-1-HOUR-LAST-EXTERNAL"
+            "ESM4.CME-1-HOUR-MID-INTERNAL"
         );
     }
 
@@ -173,6 +183,23 @@ mod tests {
         let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("time"), "{err}");
+    }
+
+    #[test]
+    fn accepts_bars_of_bid_and_ask_quotes() {
+        for price_type in ["BID", "ASK"] {
+            let toml = TOML.replace("\"MID\"", &format!("\"{price_type}\""));
+            let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+            config.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_bars_of_last_prices_which_quotes_do_not_build() {
+        let toml = TOML.replace("\"MID\"", "\"LAST\"");
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("LAST"), "{err}");
     }
 
     #[test]

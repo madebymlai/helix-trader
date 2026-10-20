@@ -1,28 +1,22 @@
-//! A run starting exactly on a bar's close. The engine starts 1 ns earlier,
-//! so that bar's quote, stamped 1 ns before it, is replayed and the order
-//! sent on the bar fills on it; the bar arrives once, in the replay, not
-//! also in the warmup. One node per process, so one run per file.
+//! A run starting exactly on a bar's close. The warmup then starts 1 ns
+//! before an hour's close too: its oldest bar holds one quote and is
+//! dropped. The engine starts 1 ns before the run, so the quote closing the
+//! first bar of the run is replayed: that bar comes once, in the run, and
+//! the order sent on it fills on that quote. One node per process, so one
+//! run per file.
 
 mod common;
 
-use common::probe::{Probe, fixture_events};
-use nautilus_model::enums::OrderSide;
+use common::steps;
 
 #[test]
-fn a_run_starting_on_a_bar_close_fills_the_first_order_on_that_bars_quote() {
-    let catalog = common::catalog();
-    let (probe, record) = Probe::new();
-    let before = usize::try_from(common::BARS_BEFORE_START).unwrap();
-    let mut backtest = common::backtest(catalog.path(), "3 EUR");
-    backtest.start = common::bars()[before].ts_event.into();
+fn a_run_starting_on_a_bar_close_trades_on_that_bar_and_its_closing_quote() {
+    let catalog = steps::catalog();
+    let result = steps::backtest(catalog.path(), steps::at("13:00"))
+        .run(common::shortest_ema_cross(steps::WARMUP))
+        .unwrap();
 
-    backtest.run(probe).unwrap();
-
-    let record = record.borrow();
-    assert_eq!(record.events, fixture_events());
-    let (side, price, _) = record.fills[0];
-    assert_eq!(
-        (side, price),
-        (OrderSide::Buy, common::quotes()[before].ask_price)
-    );
+    // The same orders and fills as a run from 12:30 (backtest_warmup.rs).
+    assert_eq!(result.total_orders, steps::ORDERS);
+    assert_eq!(common::balance(&result), steps::BALANCE);
 }
