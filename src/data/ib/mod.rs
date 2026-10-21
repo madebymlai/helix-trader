@@ -318,21 +318,21 @@ async fn walk_back(
     end: Timestamp,
     mut fetch: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<Bar>>,
 ) -> anyhow::Result<Vec<Bar>> {
-    let nanos = |bar: &Bar| i128::from(bar.ts_init.as_u64());
+    let stamp = |bar: &Bar| Timestamp::from(bar.ts_init);
     let mut bars = Vec::new();
     let mut cursor = end;
     loop {
         let answer = fetch(cursor).await?;
-        let Some(oldest) = answer.iter().map(nanos).min() else {
+        let Some(oldest) = answer.iter().map(stamp).min() else {
             break;
         };
         bars.extend(answer);
-        if oldest <= start.as_nanosecond() || oldest >= cursor.as_nanosecond() {
+        if oldest <= start || oldest >= cursor {
             break;
         }
-        cursor = Timestamp::from_nanosecond(oldest)?;
+        cursor = oldest;
     }
-    bars.retain(|bar| start.as_nanosecond() < nanos(bar) && nanos(bar) <= end.as_nanosecond());
+    bars.retain(|bar| start < stamp(bar) && stamp(bar) <= end);
     bars.sort_by_key(|bar| bar.ts_init);
     bars.dedup_by_key(|bar| bar.ts_init);
     Ok(bars)
