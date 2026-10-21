@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, bail};
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::QuoteTick,
@@ -90,7 +90,7 @@ pub async fn fill_catalog(
         }
         let resume_point = intervals.last().map(|&(_, last)| UnixNanos::from(last));
         let from = match resume_point {
-            Some(last) => just_after(last)?,
+            Some(last) => just_after(last),
             None => start,
         };
         if from >= end {
@@ -125,10 +125,10 @@ pub async fn fill_catalog(
     Ok(())
 }
 
-/// The first nanosecond after `last`.
-fn just_after(last: UnixNanos) -> anyhow::Result<Timestamp> {
-    Timestamp::from_nanosecond(i128::from(last.as_u64()) + 1)
-        .with_context(|| format!("no timestamp after {last}"))
+/// The first nanosecond after `last`; jiff reaches past any `UnixNanos`,
+/// so even `u64::MAX` has one.
+fn just_after(last: UnixNanos) -> Timestamp {
+    Timestamp::from(last) + SignedDuration::from_nanos(1)
 }
 
 #[cfg(test)]
