@@ -691,6 +691,78 @@ session (09-01 08:00 UTC), so the EMAs were warm from the start. It prints
 gave 14 orders and `9935.60 EUR`: the mid of the closing quote is not the
 last trade.
 
+With costs and the session, 2026-10-21: the run above again, on what
+the backtest now does. The catalog of SXR8.IBIS 1-minute quotes was
+filled from the paper gateway over the warmup and the window (194,609
+quotes, 973 crossed pairs and 8 one-sided bars dropped, 21 minutes), EMA
+10/30 on `1-HOUR-MID` bars, `trade_size = 5`, `warmup = "720h"`, Xetra's
+session (Europe/Berlin 09:00-17:30):
+
+```toml
+instrument_ids = ["SXR8.IBIS"]
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+trade_size = "5"
+warmup = "720h"
+session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
+```
+
+```
+helix-trader fill-catalog ema --config sxr8.toml --catalog sxr8-cat \
+  --start 2025-12-01 --end 2026-10-01
+helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
+  --start 2026-01-01 --end 2026-10-01 --commission-rate 0.0005 --balance "10000 EUR"
+```
+
+| | Before (LAST bars, 3 EUR) | `--commission-rate 0.0005` | `--commission "3 EUR"` |
+|---|---|---|---|
+| Orders (filled) | 113 (113) | 86 (78) | 86 (78) |
+| PnL (total) | -525.70 | -635.58 | -613.50 |
+| Commission | 339.00 | 256.08 | 234.00 |
+| Spread | about 0 (one tick, 0.0001) | 35.15 | 35.15 |
+| Cost per trade | 3.00 | 3.73 | 3.45 |
+| Gross PnL | -186.70 | -344.35 | -344.35 |
+| Final balance | 9474.30 EUR | 9364.42 EUR | 9386.50 EUR |
+
+Both runs have the same fills; only the commission differs. Before, the
+strategy traded every bar of the day, in the session or not, on LAST
+closes; now it trades in the session only, on the mid of the closing
+quote, and pays the spread. Checked against the stored quotes, outside
+Nautilus:
+
+- **Trade count.** EMA 10/30 recomputed on the mids of the quotes closing
+  each hour (SMA seed, as Nautilus' EMA), the session's bars only, warmup
+  from 2025-12-01 23:59:59.999999999, an hour without a quote flat at the
+  previous close (as Nautilus builds it), gives the same 86 orders: 78
+  match the fills in hour, side and size (one of 5, then 77 flips of 10),
+  and 8 were rejected (`No market for SXR8.IBIS`) on New Year's Day, 10:00
+  to 17:00 Frankfurt time, before the replay held any quote.
+- **Session.** No order on a bar outside 09:00-17:30 Frankfurt time; all
+  78 fills are on bars closing 10:00 to 17:00. But see the weekends below.
+- **Fills.** All 78 at the ask (buy) or the bid (sell) of the last quote
+  at or before the decision bar's close; for 73 that quote is the one
+  stamped 1 ns before the close. Half the spread a fill paid: median 0.32
+  bps, at most 5.06.
+- **Commission.** Each fill's commission is 0.05% of its value to the cent
+  (`--commission-rate`), or 3.00 EUR (`--commission`). Values run from EUR
+  3,146 (the first order, 5 shares) to 7,280: only that first order is
+  below EUR 6,000, where IB charges its EUR 3 minimum instead of 1.57, so
+  the rate understates IB by 1.43 on it (IB Fixed would charge 257.49 in
+  all, 1.41 more than the run). The flat 3 EUR understates IB by 23.49.
+- **Report.** Spread recomputed on the fills: 35.15 EUR, as reported;
+  gross PnL = PnL (total) + commission + spread in both runs.
+
+**Weekends and holidays.** The session rule knows hours, not days, and
+Nautilus builds a bar for every hour, flat at the previous close when no
+quote came. So the 8 bars of 10:00-17:00 on Saturdays, Sundays and
+exchange holidays count as session bars: they move the EMAs towards the
+last close and can trade. 5 of the 78 fills are on Saturdays (24 January,
+31 January, 7 February, 15 August, 12 September), filled on Friday
+evening's last quote, 11 to 18 hours stale, and paid 14.20 of the 35.15
+EUR of spread; the 8 rejected orders are New Year's Day's. Recomputed
+counting only hours with a quote, the strategy would have sent 57 orders,
+not 86. The internal-bars September run above has the same flat weekend
+bars. Whether a live node builds them too is not verified.
+
 ## Rules
 
 - **The plain Nautilus API.** A run is a `BacktestRunConfig` on a
