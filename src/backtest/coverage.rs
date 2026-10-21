@@ -27,7 +27,6 @@ use nautilus_persistence::{
 };
 
 use super::Backtest;
-use crate::data::to_unix_nanos;
 
 /// Fails unless the catalog of `backtest` stores every instrument and
 /// covers its quotes over `[engine start − warmup, end]`, the engine
@@ -79,8 +78,8 @@ fn ensure_quoted(
         )
         .with_context(|| format!("reading the stored range of the quotes of {instrument_id}"))?;
     let gap = first_missing(
-        to_unix_nanos(from)?.as_u64(),
-        to_unix_nanos(to)?.as_u64(),
+        UnixNanos::from(from).as_u64(),
+        UnixNanos::from(to).as_u64(),
         &intervals,
     );
     if let Some(gap) = gap {
@@ -158,7 +157,7 @@ mod tests {
     }
 
     fn ns(s: &str) -> UnixNanos {
-        to_unix_nanos(ts(s)).unwrap()
+        UnixNanos::from(ts(s))
     }
 
     /// The quotes of AAPL.XNAS from the warmup start to the end.

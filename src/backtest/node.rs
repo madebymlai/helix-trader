@@ -17,6 +17,7 @@ use nautilus_backtest::{
     result::BacktestResult,
 };
 use nautilus_common::{actor::DataActorNative, component::Component};
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Data, NautilusDataType},
     enums::{AccountType, BookType, OmsType},
@@ -26,7 +27,7 @@ use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
-use crate::{data::to_unix_nanos, strategy::warmup};
+use crate::strategy::warmup;
 
 /// The id of the one run of the node.
 const RUN_ID: &str = "backtest";
@@ -91,8 +92,8 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .venues(vec![venue_config])
         .data(data)
         .engine(engine_config)
-        .start(to_unix_nanos(backtest.engine_start()?)?)
-        .end(to_unix_nanos(backtest.end)?)
+        .start(UnixNanos::from(backtest.engine_start()?))
+        .end(UnixNanos::from(backtest.end))
         .raise_exception(true)
         .dispose_on_completion(false)
         .build()?)
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn runs_from_one_nanosecond_before_the_start_to_the_end_and_raises_errors() {
         let config = run_config(&backtest()).unwrap();
-        let ns = |ts: &str| to_unix_nanos(ts.parse::<Timestamp>().unwrap()).unwrap();
+        let ns = |ts: &str| UnixNanos::from(ts.parse::<Timestamp>().unwrap());
         assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
         assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
         assert!(config.raise_exception());

@@ -23,8 +23,6 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::HasCatalogDataType,
 };
 
-use super::to_unix_nanos;
-
 /// Fills `catalog` with `instruments`, then over `[start, end]` with the
 /// quotes of each instrument, fetched one instrument at a time through
 /// `fetch_quotes`.
@@ -71,8 +69,8 @@ pub async fn fill_catalog(
     catalog
         .write_instruments(new)
         .context("writing instruments")?;
-    let start_ns = to_unix_nanos(start)?;
-    let end_ns = to_unix_nanos(end)?;
+    let start_ns = UnixNanos::from(start);
+    let end_ns = UnixNanos::from(end);
     for id in instrument_ids {
         let intervals = catalog
             .get_intervals(
@@ -118,7 +116,7 @@ pub async fn fill_catalog(
         let (Some(oldest), Some(newest)) = (quotes.first(), quotes.last()) else {
             continue;
         };
-        let covered_from = to_unix_nanos(from)?.min(oldest.ts_init);
+        let covered_from = UnixNanos::from(from).min(oldest.ts_init);
         let covered_to = end_ns.max(newest.ts_init);
         catalog
             .write_to_parquet(&quotes, Some(covered_from), Some(covered_to), None)
