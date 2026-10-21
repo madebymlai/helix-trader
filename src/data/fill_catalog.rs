@@ -23,6 +23,8 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::HasCatalogDataType,
 };
 
+use super::to_unix_nanos;
+
 /// Fills `catalog` with `instruments`, then over `[start, end]` with the
 /// quotes of each instrument, fetched one instrument at a time through
 /// `fetch_quotes`.
@@ -123,12 +125,6 @@ pub async fn fill_catalog(
             .with_context(|| format!("writing the quotes of {id}"))?;
     }
     Ok(())
-}
-
-pub(crate) fn to_unix_nanos(ts: Timestamp) -> anyhow::Result<UnixNanos> {
-    let ns = u64::try_from(ts.as_nanosecond())
-        .with_context(|| format!("{ts} is outside the range of the catalog"))?;
-    Ok(UnixNanos::from(ns))
 }
 
 /// The first nanosecond after `last`.
