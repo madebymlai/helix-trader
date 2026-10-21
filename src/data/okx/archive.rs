@@ -51,7 +51,7 @@ struct BookLine {
     bids: Vec<OrderBookEntry>,
 }
 
-/// The quotes of `instrument` in `(after, through]` from a day file of the
+/// The quotes of `instrument` in `[from, through]` from a day file of the
 /// archive (`.tar.gz` of one `.data` file), read as a stream.
 ///
 /// # Errors
@@ -61,7 +61,7 @@ struct BookLine {
 pub(super) fn quotes_from_archive(
     archive: impl Read,
     instrument: &InstrumentAny,
-    after: UnixNanos,
+    from: UnixNanos,
     through: UnixNanos,
 ) -> anyhow::Result<BookQuotes> {
     let mut archive = tar::Archive::new(GzDecoder::new(archive));
@@ -74,18 +74,18 @@ pub(super) fn quotes_from_archive(
     if !name.ends_with(".data") {
         bail!("the archive holds {name}, not an order-book .data file");
     }
-    quotes_from_book(BufReader::new(entry), instrument, after, through)
+    quotes_from_book(BufReader::new(entry), instrument, from, through)
         .with_context(|| format!("reading {name}"))
 }
 
-/// The quotes of `instrument` in `(after, through]` from the lines of a
+/// The quotes of `instrument` in `[from, through]` from the lines of a
 /// day of the archive, starting with a snapshot.
 ///
 /// Replays every line from the start (the book needs the snapshot), and
 /// stops after `through`. Each quote is the book's top (best bid and ask,
 /// with their sizes) after a line, stamped with the line's exchange time
 /// (`ts_event = ts_init`), at the instrument's precisions. The first line
-/// after `after` gives a quote, then only a line that changes the top. A
+/// at or after `from` gives a quote, then only a line that changes the top. A
 /// crossed top (ask below bid) or a one-sided one is dropped and counted; a
 /// locked one (ask = bid) is kept. A line with no level changes nothing.
 ///
@@ -96,7 +96,7 @@ pub(super) fn quotes_from_archive(
 pub(super) fn quotes_from_book(
     lines: impl BufRead,
     instrument: &InstrumentAny,
-    after: UnixNanos,
+    from: UnixNanos,
     through: UnixNanos,
 ) -> anyhow::Result<BookQuotes> {
     let id = instrument.id();
@@ -117,7 +117,7 @@ pub(super) fn quotes_from_book(
         }
         apply_line(&mut book, line, instrument, ts)
             .with_context(|| format!("applying line {number}"))?;
-        if ts <= after {
+        if ts < from {
             continue;
         }
         let Some(top) = book_top(&book) else {
@@ -206,11 +206,11 @@ mod tests {
     const SAMPLE: &[u8] =
         include_bytes!("testdata/BTC-USDT-SWAP-L2orderbook-400lv-2026-10-19-sample.tar.gz");
 
-    fn sample_quotes(after: u64, through: u64) -> BookQuotes {
+    fn sample_quotes(from: u64, through: u64) -> BookQuotes {
         quotes_from_archive(
             SAMPLE,
             &btc_instrument(),
-            UnixNanos::from(after),
+            UnixNanos::from(from),
             UnixNanos::from(through),
         )
         .unwrap()
@@ -295,8 +295,8 @@ mod tests {
     }
 
     #[test]
-    fn only_quotes_after_after_and_up_to_through_are_given_the_first_one_whatever_the_change() {
-        let made = sample_quotes(1_792_368_000_998 * MS, u64::MAX);
+    fn only_quotes_from_from_up_to_through_are_given_the_first_one_whatever_the_change() {
+        let made = sample_quotes(1_792_368_000_998 * MS + 1, u64::MAX);
         assert_eq!(made.quotes.len(), 81);
         assert_eq!(
             row(&made.quotes[0]),
@@ -305,6 +305,16 @@ mod tests {
         let made = sample_quotes(0, 1_792_368_000_028 * MS);
         assert_eq!(made.quotes.len(), 3);
         assert_eq!(made.quotes[2].ts_init.as_u64(), 1_792_368_000_028 * MS);
+    }
+
+    #[test]
+    fn a_line_stamped_at_from_gives_the_first_quote() {
+        let made = sample_quotes(1_792_368_001_008 * MS, u64::MAX);
+        assert_eq!(made.quotes.len(), 81);
+        assert_eq!(
+            row(&made.quotes[0]),
+            r(1_792_368_001_008, "82063.5", "76.14", "82063.6", "1790.69")
+        );
     }
 
     fn lines(text: &str) -> BookQuotes {

@@ -164,10 +164,11 @@ pub async fn fill_catalog(
 
 `fetch_quotes` is the seam: `ib/` supplies one over the whole window,
 `okx/` one per UTC day (see "OKX specifics"). Tests pass closures with
-canned data. A fetch over `(from, to]` returns the quotes whose `ts_init`
-lies in it; how the source makes them (IB's come from bars) and at what
-cadence (one a minute for IB, see the IB quotes below) is its own
-business.
+canned data. A fetch over `[from, to]` returns the quotes whose `ts_init`
+lies in it, the closed interval stored (Nautilus' catalog intervals are
+closed, the next contiguous when it starts 1 ns after the end); how the
+source makes them (IB's come from bars) and at what cadence (one a minute
+for IB, see the IB quotes below) is its own business.
 
 1. **Instruments.** Write those not yet in the catalog
    (`catalog.instruments(ids)`), so a re-run adds no file.
@@ -297,7 +298,7 @@ IbHistory::connect(client_id: i32, end: Timestamp, now: Timestamp)
                                           // the paper gateway, then connects
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
 history.quotes(instrument_id, start, end)
-    .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; (start, end],
+    .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; [start, end],
                                                // one a minute, sorted
 ```
 
@@ -489,8 +490,8 @@ history.quotes(instrument_id, start, end)
   `ts_event = ts_init` = close − 1 ns, so the quote sorts before a bar of
   the same close and an order decided on that bar fills on its quote (see
   the backtest README, "Fills on quotes"; "The engine start" says why not
-  Nautilus' bar build delay instead). The quotes over `(start, end]`
-  are thus those of the bars closing over `(start + 1 ns, end + 1 ns]`
+  Nautilus' bar build delay instead). The quotes over `[start, end]`
+  are thus those of the bars closing over `[start + 1 ns, end + 1 ns]`
   (`quoted_bars_window`). Dropped, counted and logged at `INFO`, not
   errors: a bar without the other side's bar of the same close, and a
   crossed pair (ask < bid, mostly the pre-opening auction); that minute

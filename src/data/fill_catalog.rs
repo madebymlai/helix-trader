@@ -36,10 +36,11 @@ use nautilus_persistence::{
 /// an error, raised before fetching: extending history backwards is not
 /// supported.
 ///
-/// A fetch over `(from, to]` returns the quotes with `ts_init` in it. Any
-/// error stops the run; instruments filled before it stay stored. An empty
-/// response on an instrument's first fill, or a quote of another
-/// instrument, is an error. Once an instrument's quotes are stored, an
+/// A fetch over `[from, to]` returns the quotes with `ts_init` in it: the
+/// closed interval stored, as all of Nautilus' catalog intervals (the next
+/// is contiguous when it starts 1 ns after the end). Any error stops the
+/// run; instruments filled before it stay stored. An empty response on an
+/// instrument's first fill, or a quote of another instrument, is an error. Once an instrument's quotes are stored, an
 /// empty response, or one of only already stored quotes, means nothing
 /// new: nothing is written and the next instruments run. Quotes are stored
 /// sorted by `ts_init`, duplicates dropped.
@@ -546,14 +547,45 @@ mod tests {
         assert_eq!(asked, vec![]);
     }
 
+    #[tokio::test]
+    async fn a_quote_at_the_window_start_is_stored_on_first_fill_and_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let mut asked = Vec::new();
+        for end in [200, 300] {
+            fill_catalog(
+                &mut catalog,
+                vec![instrument()],
+                ns(100),
+                ns(end),
+                async |id, from, to| {
+                    let (from, to) = (as_ns(from), as_ns(to));
+                    asked.push((from, to));
+                    Ok([100, 150, 201, 250]
+                        .into_iter()
+                        .filter(|ts| (from..=to).contains(ts))
+                        .map(|ts| quote_at(id, ts))
+                        .collect())
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(asked, vec![(100, 200), (201, 300)]);
+        assert_eq!(
+            stored_quotes(&mut catalog, es_id()),
+            vec![100, 150, 201, 250]
+        );
+    }
+
     const MINUTE_NS: u64 = 60_000_000_000;
 
     /// A source of one quote a minute, as IB's are made: the quotes of
-    /// `id` stamped 1 ns before each minute's close over `(from, to]`.
+    /// `id` stamped 1 ns before each minute's close over `[from, to]`.
     fn minute_quotes(id: InstrumentId, from: u64, to: u64) -> Vec<QuoteTick> {
         (from / MINUTE_NS + 1..=to / MINUTE_NS + 1)
             .map(|minute| quote_at(id, minute * MINUTE_NS - 1))
-            .filter(|quote| (from + 1..=to).contains(&quote.ts_init.as_u64()))
+            .filter(|quote| (from..=to).contains(&quote.ts_init.as_u64()))
             .collect()
     }
 

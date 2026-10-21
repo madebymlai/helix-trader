@@ -168,7 +168,7 @@ impl OkxHistory {
         instrument_with_margins(raw, &tiers, get_atomic_clock_realtime().get_time_ns())
     }
 
-    /// The quotes of `instrument` over `(from, to]`, a window within one
+    /// The quotes of `instrument` over `[from, to]`, a window within one
     /// UTC day, from that day's archive file; `None` if the archive has no
     /// file for it. Logs the download's progress and the day's counts.
     async fn day_quotes(
@@ -181,7 +181,7 @@ impl OkxHistory {
         let day = utc_date(from);
         ensure!(
             to <= day_start(day.tomorrow()?)?,
-            "the window ({from}, {to}] of {id} spans more than the UTC day {day}"
+            "the window [{from}, {to}] of {id} spans more than the UTC day {day}"
         );
         let Some(file) = self.day_file(id, day).await? else {
             log::warn!("{id}: OKX's archive has no order-book file for {day}");
@@ -197,11 +197,11 @@ impl OkxHistory {
             .await
             .with_context(|| format!("downloading {}", file.filename))?;
         let instrument = instrument.clone();
-        let (after, through) = (UnixNanos::from(from), UnixNanos::from(to));
+        let (from, through) = (UnixNanos::from(from), UnixNanos::from(to));
         let made = tokio::task::spawn_blocking(move || {
             use std::io::{Seek, SeekFrom};
             download.seek(SeekFrom::Start(0))?;
-            archive::quotes_from_archive(download, &instrument, after, through)
+            archive::quotes_from_archive(download, &instrument, from, through)
         })
         .await
         .context("reading the archive file")?
@@ -570,7 +570,7 @@ pub(super) mod tests {
     }
 
     /// An OKX-shaped day source: the quote of `instrument` at noon of the
-    /// window's UTC day, if within `(from, to]`; `None` (no file) for the
+    /// window's UTC day, if within `[from, to]`; `None` (no file) for the
     /// days in `unpublished`. Records the windows asked for.
     fn day_source<'a>(
         asked: &'a mut Vec<(Timestamp, Timestamp)>,
@@ -597,7 +597,7 @@ pub(super) mod tests {
                 noon,
                 noon,
             );
-            let inside = from < Timestamp::from(noon) && Timestamp::from(noon) <= to;
+            let inside = from <= Timestamp::from(noon) && Timestamp::from(noon) <= to;
             Ok(Some(if inside { vec![quote] } else { vec![] }))
         }
     }

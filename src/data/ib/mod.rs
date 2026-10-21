@@ -121,7 +121,7 @@ impl IbHistory {
         Ok(instruments)
     }
 
-    /// The quotes of `instrument_id` over `(start, end]`, one a minute,
+    /// The quotes of `instrument_id` over `[start, end]`, one a minute,
     /// sorted by `ts_init`. IB has no usable quote history: each is made
     /// from the 1-MINUTE BID and ASK bars of the same close (see
     /// `quoted_bar_type`), fetched by `quoted_bars` (see `quotes_from_bars`),
@@ -231,12 +231,12 @@ fn ensure_quotes_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
 /// close quote is the last of its bar, so no look-ahead.
 const QUOTE_LEAD: DurationNanos = DurationNanos::new(1);
 
-/// The window of the bars whose quotes fall in `(start, end]`: those
-/// closing over `(start, end]` shifted by `QUOTE_LEAD`, so a quote stamped
-/// at `end` is fetched and one at `start` is not.
+/// The window of the bars whose quotes fall in `[start, end]`, for
+/// `walk_back`'s `(start, end]`: those closing over `[start, end]` shifted
+/// by `QUOTE_LEAD`, so quotes stamped at `start` and at `end` are fetched.
 fn quoted_bars_window(start: Timestamp, end: Timestamp) -> (Timestamp, Timestamp) {
     let lead = Duration::from_nanos(QUOTE_LEAD.as_u64());
-    (start + lead, end + lead)
+    (start + lead - Duration::from_nanos(1), end + lead)
 }
 
 /// The nominal size of both sides of a quote made from bars: IB gives
@@ -828,9 +828,11 @@ mod tests {
     }
 
     #[test]
-    fn the_bars_of_quotes_over_a_window_close_one_nanosecond_later() {
+    fn the_bars_of_quotes_over_a_window_close_one_nanosecond_after_its_bounds() {
+        // `walk_back` keeps the bars closing after `from`: the first closes
+        // 1 ns after `start`, its quote stamped at `start`.
         let (from, to) = quoted_bars_window(hour(5), hour(25));
-        assert_eq!(from.as_nanosecond(), hour(5).as_nanosecond() + 1);
+        assert_eq!(from.as_nanosecond(), hour(5).as_nanosecond());
         assert_eq!(to.as_nanosecond(), hour(25).as_nanosecond() + 1);
     }
 }
