@@ -180,7 +180,7 @@ impl OkxHistory {
         let id = instrument.id();
         let day = utc_date(from);
         ensure!(
-            to <= day_start(day.tomorrow()?)?,
+            to <= day_last_nanosecond(day)?,
             "the window [{from}, {to}] of {id} spans more than the UTC day {day}"
         );
         let Some(file) = self.day_file(id, day).await? else {
@@ -285,7 +285,12 @@ fn ensure_in_archive(start: Timestamp) -> anyhow::Result<()> {
 /// Fills `catalog` with `instruments` and their quotes over `[start, end]`,
 /// one instrument and one UTC day at a time: `fill_catalog` over
 /// `[start, the day's end]`, so at most one day of quotes is in memory and
-/// each call resumes where the catalog stopped. `day_quotes` answers a
+/// each call resumes where the catalog stopped. A day ends 1 ns before the
+/// next midnight, whose lines are in the next day's file: closed and
+/// contiguous, as Nautilus' catalog files of one UTC day
+/// (`…T00-00-00-000000000Z_…T23-59-59-999999999Z.parquet`), and as its data
+/// engine asks a venue for each missing closed interval. A day starting at
+/// `end` is left to the next run. `day_quotes` answers a
 /// window within one UTC day, `None` if the archive has no file for that
 /// day. An instrument starts on the day it resumes in and stops at the
 /// first day the archive has no file for (not published yet).
@@ -317,7 +322,7 @@ async fn fill_by_day(
         });
         let mut day = utc_date(begin);
         while day_start(day)? < end {
-            let day_end = day_start(day.tomorrow()?)?.min(end);
+            let day_end = day_last_nanosecond(day)?.min(end);
             let mut published = true;
             fill_catalog(
                 catalog,
@@ -387,6 +392,11 @@ fn utc_date(ts: Timestamp) -> Date {
 /// Midnight UTC at the start of `day`.
 fn day_start(day: Date) -> anyhow::Result<Timestamp> {
     Ok(day.to_zoned(TimeZone::UTC)?.timestamp())
+}
+
+/// The last nanosecond of `day` (UTC), 1 ns before the next midnight.
+fn day_last_nanosecond(day: Date) -> anyhow::Result<Timestamp> {
+    Ok(day_start(day.tomorrow()?)? - SignedDuration::from_nanos(1))
 }
 
 /// The archive API's answer listing the files of a request.
@@ -611,10 +621,6 @@ pub(super) mod tests {
             .collect()
     }
 
-    fn just_after(ts: &str) -> Timestamp {
-        at(ts) + SignedDuration::from_nanos(1)
-    }
-
     #[tokio::test]
     async fn a_window_is_filled_one_utc_day_per_fetch_each_resuming_after_the_last() {
         let dir = tempfile::tempdir().unwrap();
@@ -632,15 +638,15 @@ pub(super) mod tests {
         assert_eq!(
             asked,
             [
-                (at("2026-10-17T06:00:00Z"), at("2026-10-18T00:00:00Z")),
                 (
-                    just_after("2026-10-18T00:00:00Z"),
-                    at("2026-10-19T00:00:00Z")
+                    at("2026-10-17T06:00:00Z"),
+                    at("2026-10-17T23:59:59.999999999Z")
                 ),
                 (
-                    just_after("2026-10-19T00:00:00Z"),
-                    at("2026-10-19T18:00:00Z")
+                    at("2026-10-18T00:00:00Z"),
+                    at("2026-10-18T23:59:59.999999999Z")
                 ),
+                (at("2026-10-19T00:00:00Z"), at("2026-10-19T18:00:00Z")),
             ]
         );
         assert_eq!(
@@ -652,6 +658,67 @@ pub(super) mod tests {
             ]
         );
         assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_line_at_midnight_is_stored_from_the_file_of_the_day_it_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let mut asked = Vec::new();
+        fill_by_day(
+            &mut catalog,
+            vec![btc_instrument()],
+            at("2026-10-18T00:00:00Z"),
+            at("2026-10-20T00:00:00Z"),
+            async |instrument: &InstrumentAny, from: Timestamp, to: Timestamp| {
+                asked.push((from, to));
+                // The file of a day holds its lines from its midnight on.
+                let midnight = day_start(utc_date(from))?;
+                let quote_at = |ts: Timestamp| {
+                    let ts = UnixNanos::from(ts);
+                    QuoteTick::new(
+                        instrument.id(),
+                        instrument.make_price(100_000.0),
+                        instrument.make_price(100_000.1),
+                        instrument.make_qty(1.0, None),
+                        instrument.make_qty(2.0, None),
+                        ts,
+                        ts,
+                    )
+                };
+                Ok(Some(
+                    [midnight, midnight + SignedDuration::from_hours(12)]
+                        .into_iter()
+                        .filter(|ts| from <= *ts && *ts <= to)
+                        .map(quote_at)
+                        .collect(),
+                ))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            asked,
+            [
+                (
+                    at("2026-10-18T00:00:00Z"),
+                    at("2026-10-18T23:59:59.999999999Z")
+                ),
+                (
+                    at("2026-10-19T00:00:00Z"),
+                    at("2026-10-19T23:59:59.999999999Z")
+                ),
+            ]
+        );
+        assert_eq!(
+            stored_noons(&mut catalog),
+            [
+                at("2026-10-18T00:00:00Z"),
+                at("2026-10-18T12:00:00Z"),
+                at("2026-10-19T00:00:00Z"),
+                at("2026-10-19T12:00:00Z"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -686,12 +753,12 @@ pub(super) mod tests {
             asked,
             [
                 (
-                    just_after("2026-10-18T00:00:00Z"),
-                    at("2026-10-19T00:00:00Z")
+                    at("2026-10-18T00:00:00Z"),
+                    at("2026-10-18T23:59:59.999999999Z")
                 ),
                 (
-                    just_after("2026-10-19T00:00:00Z"),
-                    at("2026-10-20T00:00:00Z")
+                    at("2026-10-19T00:00:00Z"),
+                    at("2026-10-19T23:59:59.999999999Z")
                 ),
             ]
         );
@@ -727,12 +794,12 @@ pub(super) mod tests {
             asked,
             [
                 (
-                    just_after("2026-10-18T00:00:00Z"),
-                    at("2026-10-19T00:00:00Z")
+                    at("2026-10-18T00:00:00Z"),
+                    at("2026-10-18T23:59:59.999999999Z")
                 ),
                 (
-                    just_after("2026-10-19T00:00:00Z"),
-                    at("2026-10-20T00:00:00Z")
+                    at("2026-10-19T00:00:00Z"),
+                    at("2026-10-19T23:59:59.999999999Z")
                 ),
             ]
         );

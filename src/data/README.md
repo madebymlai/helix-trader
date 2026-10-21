@@ -563,10 +563,16 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   initial and maintenance margin of OKX's first position tier, cross
   margin (`get_position_tiers`; BTC: 1% and 0.4%).
 - **One UTC day at a time.** `fill` calls `fill_catalog` once per UTC day
-  and per instrument, over `[start, end of that day]`. Each call resumes
-  where the catalog stopped, so only one day of quotes is in memory and a
-  stopped run picks up at its last stored day. An instrument starts on the
-  day it resumes in.
+  and per instrument, over `[start, end of that day]`, the day ending 1 ns
+  before the next midnight: a line stamped at midnight is in the next
+  day's file and opens the next window. Closed and contiguous, as
+  Nautilus' catalog files of one UTC day
+  (`2024-01-01T00-00-00-000000000Z_2024-01-01T23-59-59-999999999Z.parquet`,
+  as its Tardis loader writes them) and as its data engine asks a venue
+  for each missing closed interval. Each call resumes where the catalog
+  stopped, so only one day of quotes is in memory and a stopped run picks
+  up at its last stored day. An instrument starts on the day it resumes
+  in; a day starting at `end` is left to the next run.
 - **The archive.** For each day, `GET /api/v5/public/market-data-history`
   (module 4, the 400-level order book; 5 requests per 2 s) names the day's
   file; it is downloaded from `static.okx.com` into a temporary file
@@ -770,13 +776,14 @@ bar after a roll behaves when the new contract has not ticked yet is
     session.
   - `okx/`: the sample of a real archive file to quotes (count, first
     and last against a plain replay, precisions, exchange time, a window
-    after a resume point), and on small hand-made lines: a change below
+    from a resume point, a line at its start), and on small hand-made lines: a change below
     the top gives no quote, a snapshot resets the book, crossed and
     one-sided tops dropped and counted, a locked one kept, a bad line
     named; the real BTC instrument and tier to a `CryptoPerpetual` with
     its margins; the archive listing; the fill one UTC day per call with a
-    fake day source (resume, a day not published, a later start, a failed
-    day keeping the days before, no file on the first day); a start before
+    fake day source (resume, the line at midnight, a day not published, a
+    later start, a failed day keeping the days before, no file on the
+    first day); a start before
     the archive refused.
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
