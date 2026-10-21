@@ -11,13 +11,13 @@ use rust_decimal::Decimal;
 use super::{config::EmaCrossConfig, session::Session};
 
 /// Target book of the EMA crossover: long `trade_size` while the fast EMA is
-/// above the slow one, short otherwise. Only bars wholly inside the session
-/// count: the others neither move the EMAs nor get a target.
+/// above the slow one, short otherwise. With a session, only bars wholly
+/// inside it count: the others neither move the EMAs nor get a target.
 #[derive(Debug)]
 pub(super) struct Book {
     signals: HashMap<InstrumentId, Crossover>,
     trade_size: Decimal,
-    session: Session,
+    session: Option<Session>,
     bar_length: SignedDuration,
 }
 
@@ -63,9 +63,12 @@ impl Book {
         })
     }
 
-    /// Whether the bar, stamped on its close, lies wholly inside the session.
+    /// Whether the bar, stamped on its close, lies wholly inside the
+    /// session; every bar does without one.
     fn in_session(&self, bar: &Bar) -> bool {
-        self.session.contains(bar.ts_event.into(), self.bar_length)
+        self.session
+            .as_ref()
+            .is_none_or(|session| session.contains(bar.ts_event.into(), self.bar_length))
     }
 }
 

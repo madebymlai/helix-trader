@@ -34,8 +34,10 @@ pub struct EmaCrossConfig {
     pub trade_size: Quantity,
     /// How far back the warmup history starts.
     pub warmup: SignedDuration,
-    /// The hours traded: only bars wholly inside count.
-    pub session: Session,
+    /// The hours traded: only bars wholly inside count. Without one, as on
+    /// a market open around the clock, every bar counts.
+    #[serde(default)]
+    pub session: Option<Session>,
 }
 
 impl EmaCrossConfig {
@@ -63,8 +65,8 @@ impl EmaCrossConfig {
     /// Returns an error if the config is inconsistent: no instruments,
     /// several venues, a bar spec not aggregated on time or not priced on
     /// the quotes (BID, ASK or MID), periods out of
-    /// order, a non-positive size or warmup, a session not opening before
-    /// it closes.
+    /// order, a non-positive size or warmup, a session, if any, not opening
+    /// before it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.instrument_ids.is_empty(), "no instruments");
         let venue = self.instrument_ids[0].venue;
@@ -92,7 +94,7 @@ impl EmaCrossConfig {
         );
         ensure!(self.trade_size.is_positive(), "trade size must be positive");
         ensure!(self.warmup.is_positive(), "warmup must be positive");
-        self.session.validate()
+        self.session.as_ref().map_or(Ok(()), Session::validate)
     }
 }
 
@@ -149,6 +151,17 @@ mod tests {
                 warmup: SignedDuration::from_hours(720),
             }
         );
+    }
+
+    #[test]
+    fn loads_without_a_session() {
+        let toml = TOML.replace(
+            "session = { time_zone = \"America/Chicago\", open = \"08:30\", close = \"15:00\" }",
+            "",
+        );
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        assert!(config.session.is_none());
     }
 
     #[test]

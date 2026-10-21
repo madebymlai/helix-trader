@@ -1,7 +1,7 @@
 //! EMA crossover: per instrument, long while the fast EMA is above the slow
-//! one, short otherwise, on the bars inside the session only. A minimal
-//! strategy to drive data, backtest and paper. Its bars are built by
-//! Nautilus from the quotes, and warmed up through `strategy::warmup`.
+//! one, short otherwise, on the bars inside its session, if it has one. A
+//! minimal strategy to drive data, backtest and paper. Its bars are built
+//! by Nautilus from the quotes, and warmed up through `strategy::warmup`.
 
 mod book;
 mod config;
