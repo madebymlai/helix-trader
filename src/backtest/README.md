@@ -360,7 +360,7 @@ Per currency, `report` prints a `Costs` section after the PnL statistics:
 | Figure | |
 |---|---|
 | `Commission` | the sum of the fills' commissions |
-| `Spread` | for each fill, the distance between its price and the quote's mid, times its quantity (and the instrument's multiplier): the half spread paid, in the price's currency |
+| `Spread` | for each fill, the distance between its price and the quote's mid (Nautilus' `extract_price(PriceType::Mid)`, as for MID bars), times its quantity (and the instrument's multiplier): the half spread paid, in the price's currency |
 | `Cost per trade` | (commission + spread) / number of fills |
 | `Gross PnL` | `PnL (total)` + commission + spread: the PnL before costs |
 

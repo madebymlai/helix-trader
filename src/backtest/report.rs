@@ -15,8 +15,12 @@ use nautilus_analysis::{statistic::PortfolioStatistic, statistics::max_drawdown:
 use nautilus_backtest::result::BacktestResult;
 use nautilus_common::cache::Cache;
 use nautilus_model::{
-    data::QuoteTick, enums::OrderSide, events::OrderEventAny, identifiers::InstrumentId,
-    instruments::Instrument, orders::Order,
+    data::QuoteTick,
+    enums::{OrderSide, PriceType},
+    events::OrderEventAny,
+    identifiers::InstrumentId,
+    instruments::Instrument,
+    orders::Order,
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -80,8 +84,7 @@ impl Outcome {
                     .with_context(|| {
                         format!("no quote of {id} before its fill at {}", fill.ts_event)
                     })?;
-                let mid =
-                    (quote.bid_price.as_decimal() + quote.ask_price.as_decimal()) / Decimal::TWO;
+                let mid = quote.extract_price(PriceType::Mid)?.as_decimal();
                 let price = fill.last_px.as_decimal();
                 let paid = if fill.order_side == OrderSide::Buy {
                     price - mid
