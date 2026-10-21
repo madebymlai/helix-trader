@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IbHistory, fill_catalog},
+    data::{IbHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
         DataRequirements,
@@ -25,7 +25,10 @@ use nautilus_common::logging::{
 };
 use nautilus_core::UUID4;
 use nautilus_execution::models::fee::FeeModelAny;
-use nautilus_model::{identifiers::TraderId, types::Money};
+use nautilus_model::{
+    identifiers::{InstrumentId, TraderId},
+    types::Money,
+};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -38,7 +41,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fills the Nautilus catalog with the strategy's history from Interactive Brokers.
+    /// Fills the Nautilus catalog with the strategy's history from OKX's
+    /// archive (OKX instruments) or Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
@@ -200,9 +204,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Checks everything that needs no gateway, then connects to IB, fetches
-/// the instruments and fills the catalog with their quotes. No bars: the
-/// strategies' bars are built from the quotes.
+/// Checks everything that needs no gateway, then fills the catalog with the
+/// instruments and their quotes from each instrument's source: OKX's
+/// archive for OKX instruments, IB (connected only if needed) for the
+/// others. No bars: the strategies' bars are built from the quotes.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -219,20 +224,34 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         FileWriterConfig::default(),
     )?;
     init_tracing()?;
-    let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
-    let instruments = ib.instruments(&requirements.instrument_ids()).await?;
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    fill_catalog(
-        &mut catalog,
-        instruments,
-        start,
-        end,
-        async |id, from, to| ib.quotes(id, from, to).await,
-    )
-    .await
+    // The source of an instrument is its venue's: OKX's archive for OKX,
+    // IB for every other venue.
+    let (okx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
+        .instrument_ids()
+        .into_iter()
+        .partition(|&id| OkxHistory::serves(id));
+    if !okx_ids.is_empty() {
+        OkxHistory::new()?
+            .fill(&mut catalog, &okx_ids, start, end)
+            .await?;
+    }
+    if !ib_ids.is_empty() {
+        let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
+        let instruments = ib.instruments(&ib_ids).await?;
+        fill_catalog(
+            &mut catalog,
+            instruments,
+            start,
+            end,
+            async |id, from, to| ib.quotes(id, from, to).await,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Builds the strategy from its config, runs it over the window of the

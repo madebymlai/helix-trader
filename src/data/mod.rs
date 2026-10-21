@@ -8,4 +8,6 @@ pub use fill_catalog::fill_catalog;
 mod ib;
 pub use ib::{IbAccount, IbHistory};
 pub(crate) use ib::{IbGateway, data_client_config};
+mod okx;
+pub use okx::OkxHistory;
 mod rolls;
