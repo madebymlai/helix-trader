@@ -2,3 +2,4 @@ archive/
 target/
 .claude/worktrees/
 .env
+/catalog/
