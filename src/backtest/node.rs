@@ -10,7 +10,7 @@
 
 use std::{collections::BTreeSet, fmt::Debug};
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::{Context, anyhow, bail, ensure};
 use nautilus_backtest::{
     config::{BacktestDataConfig, BacktestEngineConfig, BacktestRunConfig, BacktestVenueConfig},
     node::BacktestNode,
@@ -19,9 +19,12 @@ use nautilus_backtest::{
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
+    accounts::margin_model::{MarginModelAny, StandardMarginModel},
     data::{Data, NautilusDataType},
     enums::{AccountType, BookType, OmsType},
     identifiers::{InstrumentId, Venue},
+    instruments::{Instrument, InstrumentAny},
+    types::Currency,
 };
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
@@ -33,7 +36,10 @@ use crate::strategy::warmup;
 const RUN_ID: &str = "backtest";
 
 /// The run config of `backtest`: one venue named after the instruments'
-/// venue, which fills orders on the quotes, the instruments' quotes of the
+/// venue, accounting as they settle (see `base_currency`), with margins
+/// the instruments' rates of the notional (Nautilus'
+/// `StandardMarginModel`, leverage ignored), which fills orders on the
+/// quotes, the instruments' quotes of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
@@ -41,9 +47,14 @@ const RUN_ID: &str = "backtest";
 /// building no bar for an hour without quotes
 /// (`warmup::data_engine_config`). The engine starts
 /// 1 ns before `start` (see `Backtest::engine_start`), which must be before
-/// `end`. Build and run errors are raised, not only logged; the engine
-/// outlives the run (see `run`).
-pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+/// `end`. `stored` gives the stored instruments, the venue's: it is called
+/// once the inputs are checked, so that an inconsistent input is reported
+/// before anything the catalog lacks. Build and run errors are raised, not
+/// only logged; the engine outlives the run (see `run`).
+pub(super) fn run_config(
+    backtest: &Backtest,
+    stored: impl FnOnce() -> anyhow::Result<Vec<InstrumentAny>>,
+) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
     let (start, end) = (backtest.start, backtest.end);
@@ -59,16 +70,6 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .to_str()
         .with_context(|| format!("catalog path {} is not UTF-8", catalog.display()))?
         .to_string();
-    let venue_config = BacktestVenueConfig::builder()
-        .name(venue.as_str())
-        .oms_type(OmsType::Netting)
-        .account_type(AccountType::Margin)
-        .book_type(BookType::L1_MBP)
-        .starting_balances(vec![backtest.balance.to_string()])
-        .fee_model(backtest.fee_model.clone())
-        .fill_model(costs::fill_model()?)
-        .bar_execution(false)
-        .build()?;
     let data = backtest
         .instruments()
         .into_iter()
@@ -87,6 +88,26 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
         .logging(backtest.logging.clone())
         .build();
+    let base_currency = base_currency(&stored()?)?;
+    if let Some(base) = base_currency {
+        ensure!(
+            backtest.balance.currency == base,
+            "the balance {} is not in {base}, the currency {venue} settles in",
+            backtest.balance
+        );
+    }
+    let venue_config = BacktestVenueConfig::builder()
+        .name(venue.as_str())
+        .oms_type(OmsType::Netting)
+        .account_type(AccountType::Margin)
+        .book_type(BookType::L1_MBP)
+        .starting_balances(vec![backtest.balance.to_string()])
+        .maybe_base_currency(base_currency)
+        .margin_model(MarginModelAny::Standard(StandardMarginModel))
+        .fee_model(backtest.fee_model.clone())
+        .fill_model(costs::fill_model()?)
+        .bar_execution(false)
+        .build()?;
     Ok(BacktestRunConfig::builder()
         .id(RUN_ID.to_string())
         .venues(vec![venue_config])
@@ -129,6 +150,28 @@ where
     outcome
 }
 
+/// The base currency of a venue trading `instruments`: the currency they
+/// settle in when all are perpetual swaps (OKX's settle in USDT), whose
+/// account margins and pays in it; `None` otherwise, a multi-currency
+/// account, as for IB's instruments.
+fn base_currency(instruments: &[InstrumentAny]) -> anyhow::Result<Option<Currency>> {
+    let perpetuals = instruments
+        .iter()
+        .all(|instrument| matches!(instrument, InstrumentAny::CryptoPerpetual(_)));
+    let Some(first) = instruments.first().filter(|_| perpetuals) else {
+        return Ok(None);
+    };
+    let currency = first.settlement_currency();
+    if let Some(other) = instruments
+        .iter()
+        .map(Instrument::settlement_currency)
+        .find(|other| *other != currency)
+    {
+        bail!("the perpetual swaps settle in more than one currency: {currency}, {other}");
+    }
+    Ok(Some(currency))
+}
+
 /// The one venue of `instrument_ids`.
 fn venue(instrument_ids: &BTreeSet<InstrumentId>) -> anyhow::Result<Venue> {
     let first = instrument_ids.first().context("no instruments")?;
@@ -145,7 +188,11 @@ mod tests {
 
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
-    use nautilus_model::{data::BarType, types::Money};
+    use nautilus_model::{
+        data::BarType,
+        instruments::stubs::{crypto_perpetual_ethusdt, equity_aapl},
+        types::Money,
+    };
 
     use super::*;
 
@@ -168,9 +215,38 @@ mod tests {
         }
     }
 
+    /// The run config of `backtest` on IB's instruments: an equity in EUR
+    /// per instrument, without margins as IB's adapter defines them.
+    fn config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+        let equities: Vec<InstrumentAny> = backtest
+            .instruments()
+            .into_iter()
+            .map(|id| {
+                let mut equity = equity_aapl();
+                equity.id = id;
+                equity.currency = Currency::EUR();
+                InstrumentAny::Equity(equity)
+            })
+            .collect();
+        run_config(backtest, || Ok(equities))
+    }
+
+    /// A backtest of an OKX swap, ETH-USDT-SWAP.OKX, with `balance`, and
+    /// the swap: a perpetual settled in USDT.
+    fn okx(balance: &str) -> (Backtest, InstrumentAny) {
+        let mut swap = crypto_perpetual_ethusdt();
+        swap.id = InstrumentId::from("ETH-USDT-SWAP.OKX");
+        let backtest = Backtest {
+            bar_types: vec![BarType::from("ETH-USDT-SWAP.OKX-1-MINUTE-MID-INTERNAL")],
+            balance: Money::from(balance),
+            ..backtest()
+        };
+        (backtest, InstrumentAny::CryptoPerpetual(swap))
+    }
+
     #[test]
     fn one_netting_margin_venue_named_after_the_instruments() {
-        let config = run_config(&backtest()).unwrap();
+        let config = config(&backtest()).unwrap();
         let [venue] = config.venues() else {
             panic!("{:?}", config.venues())
         };
@@ -178,11 +254,53 @@ mod tests {
         assert_eq!(venue.oms_type(), OmsType::Netting);
         assert_eq!(venue.account_type(), AccountType::Margin);
         assert_eq!(venue.book_type(), BookType::L1_MBP);
+        assert_eq!(venue.base_currency(), None);
+    }
+
+    #[test]
+    fn margins_are_the_instruments_rates_of_the_notional_whatever_the_leverage() {
+        let config = config(&backtest()).unwrap();
+        let margin_model = config.venues()[0].margin_model();
+        assert!(
+            matches!(margin_model, Some(MarginModelAny::Standard(_))),
+            "{margin_model:?}"
+        );
+    }
+
+    #[test]
+    fn perpetual_swaps_make_a_netting_margin_venue_in_their_settlement_currency() {
+        let (backtest, swap) = okx("10000 USDT");
+        let config = run_config(&backtest, || Ok(vec![swap])).unwrap();
+        let [venue] = config.venues() else {
+            panic!("{:?}", config.venues())
+        };
+        assert_eq!(venue.name(), "OKX");
+        assert_eq!(venue.oms_type(), OmsType::Netting);
+        assert_eq!(venue.account_type(), AccountType::Margin);
+        assert_eq!(venue.base_currency(), Some(Currency::USDT()));
+    }
+
+    #[test]
+    fn a_balance_not_in_the_settlement_currency_of_the_swaps_is_rejected() {
+        let (backtest, swap) = okx("10000 USD");
+        let err = run_config(&backtest, || Ok(vec![swap])).unwrap_err();
+        assert!(err.to_string().contains("not in USDT"), "{err}");
+    }
+
+    #[test]
+    fn swaps_settled_in_two_currencies_are_rejected() {
+        let (backtest, usdt) = okx("10000 USDT");
+        let mut usdc = crypto_perpetual_ethusdt();
+        usdc.id = InstrumentId::from("ETH-USDC-SWAP.OKX");
+        usdc.settlement_currency = Currency::USDC();
+        let swaps = vec![usdt, InstrumentAny::CryptoPerpetual(usdc)];
+        let err = run_config(&backtest, || Ok(swaps)).unwrap_err();
+        assert!(err.to_string().contains("more than one currency"), "{err}");
     }
 
     #[test]
     fn orders_fill_on_quotes_only_at_the_quoted_price() {
-        let config = run_config(&backtest()).unwrap();
+        let config = config(&backtest()).unwrap();
         let venue = &config.venues()[0];
         assert!(!venue.bar_execution());
         assert!(!venue.liquidity_consumption());
@@ -203,7 +321,7 @@ mod tests {
 
     #[test]
     fn only_the_quotes_of_every_instrument_come_from_the_catalog() {
-        let config = run_config(&backtest()).unwrap();
+        let config = config(&backtest()).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
@@ -213,7 +331,7 @@ mod tests {
         backtest
             .bar_types
             .push(BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"));
-        let config = run_config(&backtest).unwrap();
+        let config = config(&backtest).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
@@ -223,7 +341,7 @@ mod tests {
             catalog: PathBuf::from("catalog"),
             ..backtest()
         };
-        let config = run_config(&backtest).unwrap();
+        let config = config(&backtest).unwrap();
         let absolute = std::env::current_dir().unwrap().join("catalog");
         let absolute = absolute.to_str().unwrap();
         assert_eq!(config.data()[0].catalog_path(), absolute);
@@ -232,13 +350,13 @@ mod tests {
 
     #[test]
     fn the_node_installs_the_logger_as_configured() {
-        let config = run_config(&backtest()).unwrap();
+        let config = config(&backtest()).unwrap();
         assert!(config.engine().logging.print_config);
     }
 
     #[test]
     fn runs_from_one_nanosecond_before_the_start_to_the_end_and_raises_errors() {
-        let config = run_config(&backtest()).unwrap();
+        let config = config(&backtest()).unwrap();
         let ns = |ts: &str| UnixNanos::from(ts.parse::<Timestamp>().unwrap());
         assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
         assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
@@ -252,7 +370,7 @@ mod tests {
             bar_types: vec![],
             ..backtest()
         };
-        assert!(run_config(&backtest).is_err());
+        assert!(config(&backtest).is_err());
     }
 
     #[test]
@@ -261,7 +379,7 @@ mod tests {
         backtest
             .bar_types
             .push(BarType::from("CSPX.LSEETF-1-HOUR-MID-INTERNAL"));
-        let err = run_config(&backtest).unwrap_err();
+        let err = config(&backtest).unwrap_err();
         assert!(err.to_string().contains("venue"), "{err}");
     }
 
@@ -273,6 +391,6 @@ mod tests {
             end: b.start,
             ..b
         };
-        assert!(run_config(&backtest).is_err());
+        assert!(config(&backtest).is_err());
     }
 }

@@ -26,11 +26,11 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use super::Backtest;
 
-/// Fails unless the catalog of `backtest` stores every instrument and
-/// covers its quotes over `[engine start − warmup, end]`, the engine
-/// starting 1 ns before `start`; the error names the instrument, and for
-/// quotes the first missing range.
-pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
+/// The stored instruments of `backtest`; fails unless the catalog stores
+/// every instrument and covers its quotes over `[engine start − warmup,
+/// end]`, the engine starting 1 ns before `start`. The error names the
+/// instrument, and for quotes the first missing range.
+pub(super) fn check(backtest: &Backtest) -> anyhow::Result<Vec<InstrumentAny>> {
     ensure!(
         !backtest.warmup.is_negative(),
         "warmup {:#} is negative",
@@ -43,12 +43,10 @@ pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
     let catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let ids = backtest.instruments();
     let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
-    let stored: BTreeSet<InstrumentId> = catalog
+    let instruments = catalog
         .instruments(Some(&names), None, None)
-        .context("reading the stored instruments")?
-        .iter()
-        .map(InstrumentAny::id)
-        .collect();
+        .context("reading the stored instruments")?;
+    let stored: BTreeSet<InstrumentId> = instruments.iter().map(InstrumentAny::id).collect();
     if let Some(id) = ids.difference(&stored).next() {
         bail!(
             "instrument {id} is not stored in the catalog {}",
@@ -58,7 +56,7 @@ pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
     for id in &ids {
         ensure_quoted(&catalog, *id, warmup_start, backtest.end)?;
     }
-    Ok(())
+    Ok(instruments)
 }
 
 /// Fails unless `catalog` covers the quotes of `instrument_id` over
@@ -169,7 +167,9 @@ mod tests {
     fn quotes_from_the_warmup_start_to_the_end_pass() {
         let dir = tempfile::tempdir().unwrap();
         catalog(dir.path(), QUOTED);
-        check(&backtest(dir.path(), &[AAPL])).unwrap();
+        let stored = check(&backtest(dir.path(), &[AAPL])).unwrap();
+        let ids: Vec<String> = stored.iter().map(|i| i.id().to_string()).collect();
+        assert_eq!(ids, [AAPL]);
     }
 
     #[test]
