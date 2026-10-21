@@ -152,7 +152,7 @@ mod tests {
     }
 
     fn ns(ns: u64) -> Timestamp {
-        Timestamp::from_nanosecond(ns.into()).unwrap()
+        Timestamp::from(UnixNanos::from(ns))
     }
 
     fn as_ns(ts: Timestamp) -> u64 {

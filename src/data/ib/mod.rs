@@ -443,7 +443,7 @@ mod tests {
 
     /// The hour `h` after the epoch.
     fn hour(h: u64) -> Timestamp {
-        Timestamp::from_nanosecond(i128::from(h * HOUR_NS)).unwrap()
+        Timestamp::from(UnixNanos::from(h * HOUR_NS))
     }
 
     /// A 1-HOUR bar of ESM4 closing at hour `h`.
@@ -475,7 +475,7 @@ mod tests {
             let mut answer: Vec<Bar> = held
                 .clone()
                 .map(hourly)
-                .filter(|bar| i128::from(bar.ts_init.as_u64()) <= cursor.as_nanosecond())
+                .filter(|bar| Timestamp::from(bar.ts_init) <= cursor)
                 .collect();
             answer.drain(..answer.len().saturating_sub(per_answer));
             Ok(answer)
