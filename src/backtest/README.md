@@ -691,12 +691,13 @@ session (09-01 08:00 UTC), so the EMAs were warm from the start. It prints
 gave 14 orders and `9935.60 EUR`: the mid of the closing quote is not the
 last trade.
 
-With costs and the session, 2026-10-21: the run above again, on what
-the backtest now does. The catalog of SXR8.IBIS 1-minute quotes was
-filled from the paper gateway over the warmup and the window (194,609
-quotes, 973 crossed pairs and 8 one-sided bars dropped, 21 minutes), EMA
-10/30 on `1-HOUR-MID` bars, `trade_size = 5`, `warmup = "720h"`, Xetra's
-session (Europe/Berlin 09:00-17:30):
+With costs and the session, 2026-10-21: the same window again, now with
+the commission, fills on quotes and Xetra's session. The catalog of
+SXR8.IBIS 1-minute quotes was filled from the paper gateway over the
+warmup and the window (194,609 quotes, 973 crossed pairs and 8 one-sided
+bars dropped, 21 minutes), EMA 10/30 on `1-HOUR-MID` bars,
+`trade_size = 5`, `warmup = "720h"`, Xetra's session (Europe/Berlin
+09:00-17:30):
 
 ```toml
 instrument_ids = ["SXR8.IBIS"]
@@ -715,53 +716,58 @@ helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
 
 | | Before (LAST bars, 3 EUR) | `--commission-rate 0.0005` | `--commission "3 EUR"` |
 |---|---|---|---|
-| Orders (filled) | 113 (113) | 86 (78) | 86 (78) |
-| PnL (total) | -525.70 | -635.58 | -613.50 |
-| Commission | 339.00 | 256.08 | 234.00 |
-| Spread | about 0 (one tick, 0.0001) | 35.15 | 35.15 |
-| Cost per trade | 3.00 | 3.73 | 3.45 |
-| Gross PnL | -186.70 | -344.35 | -344.35 |
-| Final balance | 9474.30 EUR | 9364.42 EUR | 9386.50 EUR |
+| Orders (filled) | 113 (113) | 57 (57) | 57 (57) |
+| PnL (total) | -525.70 | -223.40 | -203.70 |
+| Commission | 339.00 | 190.70 | 171.00 |
+| Spread | about 0 (one tick, 0.0001) | 16.05 | 16.05 |
+| Cost per trade | 3.00 | 3.63 | 3.28 |
+| Gross PnL | -186.70 | -16.65 | -16.65 |
+| Final balance | 9474.30 EUR | 9776.60 EUR | 9796.30 EUR |
 
-Both runs have the same fills; only the commission differs. Before, the
-strategy traded every bar of the day, in the session or not, on LAST
-closes; now it trades in the session only, on the mid of the closing
+Both new runs have the same fills; only the commission differs. Before,
+the strategy traded every bar of the day, in the session or not, on LAST
+closes. Now it trades in the session only, on the mid of the closing
 quote, and pays the spread. Checked against the stored quotes, outside
 Nautilus:
 
-- **Trade count.** EMA 10/30 recomputed on the mids of the quotes closing
-  each hour (SMA seed, as Nautilus' EMA), the session's bars only, warmup
-  from 2025-12-01 23:59:59.999999999, an hour without a quote flat at the
-  previous close (as Nautilus builds it), gives the same 86 orders: 78
-  match the fills in hour, side and size (one of 5, then 77 flips of 10),
-  and 8 were rejected (`No market for SXR8.IBIS`) on New Year's Day, 10:00
-  to 17:00 Frankfurt time, before the replay held any quote.
-- **Session.** No order on a bar outside 09:00-17:30 Frankfurt time; all
-  78 fills are on bars closing 10:00 to 17:00. But see the weekends below.
-- **Fills.** All 78 at the ask (buy) or the bid (sell) of the last quote
-  at or before the decision bar's close; for 73 that quote is the one
-  stamped 1 ns before the close. Half the spread a fill paid: median 0.32
-  bps, at most 5.06.
+- **Trade count.** EMA 10/30 recomputed by hand:
+  1. Take the mid of the last quote of each hour.
+  2. Keep only the hours that have a quote and close inside the session.
+  3. Seed each EMA with the average of its first 10 or 30 bars, as
+     Nautilus does.
+  4. Warm up from 2025-12-01 23:59:59.999999999.
+
+  This gives the same 57 orders, all filled, none rejected. They match
+  the fills in hour, side and size: one of 5 shares, then 56 flips of 10.
+- **Session.** Every fill is on a bar closing 10:00 to 17:00 Frankfurt
+  time, Monday to Friday. No fill on the weekdays the exchange was closed
+  (no quote all day): 1 January, 3 and 6 April, 1 May.
+- **Fills.** All 57 at the ask (buy) or the bid (sell) of the quote
+  stamped 1 ns before the decision bar's close. Half the spread a fill
+  paid: median 0.32 bps, at most 1.27.
 - **Commission.** Each fill's commission is 0.05% of its value to the cent
   (`--commission-rate`), or 3.00 EUR (`--commission`). Values run from EUR
-  3,146 (the first order, 5 shares) to 7,280: only that first order is
-  below EUR 6,000, where IB charges its EUR 3 minimum instead of 1.57, so
-  the rate understates IB by 1.43 on it (IB Fixed would charge 257.49 in
-  all, 1.41 more than the run). The flat 3 EUR understates IB by 23.49.
-- **Report.** Spread recomputed on the fills: 35.15 EUR, as reported;
-  gross PnL = PnL (total) + commission + spread in both runs.
+  3,146 (the first order, 5 shares) to 7,306. Only that first order is
+  below EUR 6,000, where IB charges its EUR 3 minimum instead of 1.57: the
+  rate understates IB by 1.43 on it. IB Fixed would charge 192.11 in all,
+  1.41 more than the rate run and 21.11 more than the flat 3 EUR.
+- **Report.** Spread recomputed on the fills: 16.05 EUR, as reported.
+  Gross PnL = PnL (total) + commission + spread, in both runs.
 
-**Weekends and holidays.** The session rule knows hours, not days, and
-Nautilus builds a bar for every hour, flat at the previous close when no
-quote came. So the 8 bars of 10:00-17:00 on Saturdays, Sundays and
-exchange holidays count as session bars: they move the EMAs towards the
-last close and can trade. 5 of the 78 fills are on Saturdays (24 January,
-31 January, 7 February, 15 August, 12 September), filled on Friday
-evening's last quote, 11 to 18 hours stale, and paid 14.20 of the 35.15
-EUR of spread; the 8 rejected orders are New Year's Day's. Recomputed
-counting only hours with a quote, the strategy would have sent 57 orders,
-not 86. The internal-bars September run above has the same flat weekend
-bars. Whether a live node builds them too is not verified.
+**Weekends and holidays, found and fixed.** The first run of this check
+traded on days the exchange was closed. The session checks the time of
+day only, and Nautilus built a bar for every hour, flat at the last close
+when no quote came. So the 10:00-17:00 bars of Saturdays, Sundays and
+holidays counted as session bars. With the rate, that run sent 86 orders:
+78 filled, 5 of them on Saturdays at Friday's last quote (11 to 18 hours
+old), and 8 rejected on New Year's Day. It ended at 9364.42 EUR (PnL
+-635.58, commission 256.08, spread 35.15). Now an hour without any quote
+builds no bar, in the backtest and live alike (see the strategy README,
+"Hours without quotes"): 57 orders, the figures above. The September run
+on internal bars above had one such fill too (Saturday 5 September, on a
+quote 13 hours old). Re-run on this catalog with the fix: 16 orders, none
+on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
+9970.00.
 
 ## Rules
 
