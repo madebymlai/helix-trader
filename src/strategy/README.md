@@ -53,8 +53,10 @@ pub struct TrendConfig {
     #[serde(default = "default_warmup")]
     #[builder(default = default_warmup())]
     pub warmup: SignedDuration,
-    /// The hours traded: only bars wholly inside count.
-    pub session: Session,
+    /// The hours traded: only bars wholly inside count. Without one, as on
+    /// a market open around the clock, every bar counts.
+    #[serde(default)]
+    pub session: Option<Session>,
 }
 ```
 
@@ -74,11 +76,14 @@ session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 - `Session` (`ema/session.rs`) holds a `jiff::tz::TimeZone`, read from its
   IANA name with `#[serde(with = "jiff::fmt::serde::tz::required")]` (an
   unknown name fails at load; `TimeZone` has no plain `Deserialize`), and
-  `open` and `close` as `jiff::civil::Time` (`"08:30"`).
+  `open` and `close` as `jiff::civil::Time` (`"08:30"`). The `session`
+  line is optional: a config without it trades every bar, as a 24/7
+  market such as crypto needs (no `open`/`close` pair expresses the whole
+  day, since `00:00`-`23:59` still drops the bar closing at midnight).
 - Loading then validates what serde cannot: at least one instrument, all on
   one venue, a bar spec aggregated on time (the session needs the bar's
   length) and priced `BID`, `ASK` or `MID` (bars built from quotes; `LAST`
-  fails at load), a session opening before it closes.
+  fails at load), a session, if any, opening before it closes.
 
 The config builds the bar types the strategy uses, one per instrument:
 `BarType::new(id, bar_spec, AggregationSource::Internal)`, such as
@@ -302,8 +307,12 @@ let bars = warmup::bars(self, quotes);
   indicators, warmup included, and get no target, so no order. The pure
   core applies the rule on the bar's timestamp, never the clock, so
   backtest and live agree. With hourly bars and 09:00-17:30, the bars
-  closing 10:00 to 17:00 count. `Session` lives in the EMA folder until a
-  second strategy needs it.
+  closing 10:00 to 17:00 count. Without a session every bar counts, the
+  one spanning midnight included: Nautilus has no session concept of its
+  own, and venues trading around the clock simply apply no filter. Closures
+  and maintenance windows still yield no bar, since an hour without quotes
+  builds none (see Hours without quotes). `Session` lives in the EMA
+  folder until a second strategy needs it.
 - **Log through `log`** macros.
 
 ## Adding a strategy

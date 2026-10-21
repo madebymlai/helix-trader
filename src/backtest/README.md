@@ -830,6 +830,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     dropped, the bar at the start traded on its closing quote),
     `backtest_session.rs` (bars outside the session neither move the EMAs
     nor trade; overnight, without quotes, there are no bars),
+    `backtest_without_session.rs` (without a session every bar counts,
+    the one spanning midnight included),
     `backtest_commission_rate.rs` (the orders of a run without commission,
     each fill charged the rate on its value, and the report's costs: the
     half spread of each fill, the gross PnL).
