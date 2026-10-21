@@ -5,26 +5,24 @@
 //! (see the README), so a run on missing data would go on silently with
 //! cold indicators; without quotes, orders find no market and no bar is
 //! built. Every instrument must be stored, and its quotes covered over
-//! `[engine start − warmup, end]` by their stored intervals
-//! (`ParquetDataCatalog::get_intervals`, inclusive nanoseconds); the engine
-//! starts 1 ns before the run start. The gaps come from Nautilus's
-//! `missing_intervals`, which the data engine's own catalog lookup for the
-//! warmup goes through: adjacent (`end + 1 == start`) and overlapping
+//! `[engine start − warmup, end]` by their stored intervals (inclusive
+//! nanoseconds); the engine starts 1 ns before the run start. The gaps come
+//! from `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
+//! through the same `missing_intervals` as the data engine's own catalog
+//! lookup for the warmup: adjacent (`end + 1 == start`) and overlapping
 //! intervals cover as one, a 1 ns gap is a gap.
 
 use std::collections::BTreeSet;
 
 use anyhow::{Context, bail, ensure};
 use jiff::Timestamp;
-use nautilus_core::{ClosedInterval, UnixNanos};
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::NautilusDataType,
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
-use nautilus_persistence::{
-    backend::parquet::catalog::ParquetDataCatalog, common::coverage::missing_intervals,
-};
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use super::Backtest;
 
@@ -71,36 +69,23 @@ fn ensure_quoted(
     from: Timestamp,
     to: Timestamp,
 ) -> anyhow::Result<()> {
-    let intervals = catalog
-        .get_intervals(
+    let missing = catalog
+        .get_missing_intervals_for_request(
+            UnixNanos::from(from).as_u64(),
+            UnixNanos::from(to).as_u64(),
             &NautilusDataType::QuoteTick.into(),
             Some(&instrument_id.to_string()),
         )
         .with_context(|| format!("reading the stored range of the quotes of {instrument_id}"))?;
-    let gap = first_missing(
-        UnixNanos::from(from).as_u64(),
-        UnixNanos::from(to).as_u64(),
-        &intervals,
-    );
-    if let Some(gap) = gap {
+    if let Some(&(start, end)) = missing.first() {
         bail!(
             "the catalog does not cover the quotes of {instrument_id} over [{from}, {to}] \
              (the warmup and the run): [{}, {}] is missing",
-            timestamp(gap.start),
-            timestamp(gap.end),
+            timestamp(start),
+            timestamp(end),
         );
     }
     Ok(())
-}
-
-/// The first part of `[from, to]` (inclusive nanoseconds) that `stored`
-/// does not cover, if any.
-fn first_missing(from: u64, to: u64, stored: &[(u64, u64)]) -> Option<ClosedInterval> {
-    let stored: Vec<ClosedInterval> = stored
-        .iter()
-        .filter_map(|&(start, end)| ClosedInterval::new(start, end))
-        .collect();
-    missing_intervals(from, to, &stored).into_iter().next()
 }
 
 fn timestamp(ns: u64) -> Timestamp {
@@ -121,36 +106,6 @@ mod tests {
 
     use super::*;
     use crate::backtest::commission_per_order;
-
-    fn missing(from: u64, to: u64, stored: &[(u64, u64)]) -> Option<(u64, u64)> {
-        first_missing(from, to, stored).map(Into::into)
-    }
-
-    #[test]
-    fn a_gap_of_one_nanosecond_is_missing() {
-        assert_eq!(
-            missing(100, 200, &[(50, 120), (122, 250)]),
-            Some((121, 121))
-        );
-    }
-
-    #[test]
-    fn adjacent_intervals_cover_as_one() {
-        assert_eq!(missing(100, 200, &[(50, 120), (121, 250)]), None);
-    }
-
-    #[test]
-    fn overlapping_intervals_cover_as_one() {
-        assert_eq!(missing(100, 200, &[(130, 250), (50, 160)]), None);
-    }
-
-    #[test]
-    fn of_several_gaps_the_first_is_named() {
-        assert_eq!(
-            missing(100, 200, &[(110, 120), (130, 140)]),
-            Some((100, 109))
-        );
-    }
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()

@@ -270,12 +270,12 @@ fails on the first miss:
   (`the quotes of SXR8.IBIS`) and the first missing range.
 
 Quotes not stored miss the whole range. Coverage is the stored intervals
-of the instrument's `QuoteTick`s (`get_intervals`,
-inclusive nanoseconds; `fill_catalog` records each fill over the window
-asked for), with gaps computed by Nautilus's `missing_intervals`, the
-function behind the data engine's own catalog lookup. Adjacent intervals
-(`end + 1 == start`, as a resumed fill writes them) and overlapping ones
-cover as one; a 1 ns gap is a gap. An interval ending exactly at `end`
+of the instrument's `QuoteTick`s (inclusive nanoseconds; `fill_catalog`
+records each fill over the window asked for), with gaps computed by the
+catalog's `get_missing_intervals_for_request`, which goes through the
+`missing_intervals` behind the data engine's own catalog lookup.
+Adjacent intervals (`end + 1 == start`, as a resumed fill writes them)
+and overlapping ones cover as one; a 1 ns gap is a gap. An interval ending exactly at `end`
 covers it. The ranges start at the engine start (see The run config) and
 are checked whole: the warmup request asks for `[start − 1 ns − warmup,
 start − 1 ns]`, the replay reads the engine's window. Coverage is of
