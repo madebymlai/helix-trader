@@ -182,7 +182,7 @@ mod tests {
 
     /// A quote of `id` stamped `ts`.
     fn quote(id: InstrumentId, ts: Timestamp) -> QuoteTick {
-        let ts = UnixNanos::from(u64::try_from(ts.as_nanosecond()).unwrap());
+        let ts = UnixNanos::from(ts);
         QuoteTick::new(
             id,
             Price::from("100.00"),
