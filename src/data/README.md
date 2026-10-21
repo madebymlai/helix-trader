@@ -166,7 +166,8 @@ business.
 1. **Instruments.** Write those not yet in the catalog
    (`catalog.instruments(ids)`), so a re-run adds no file.
 2. **Resume.** Per instrument, one at a time, from the stored range of its
-   quotes (`get_intervals` with the instrument id, under `data/quotes/`).
+   quotes (`query_first_timestamp` and `query_last_timestamp` with the
+   instrument id, under `data/quotes/`).
    A `start` before the stored range is an error naming the instrument and
    the range, raised before fetching: extending history backwards is not
    supported; use a new catalog. Otherwise the resume point is the end of
@@ -223,6 +224,10 @@ catalog.write_to_parquet(data: &[QuoteTick], start: Option<UnixNanos>, end: Opti
                          skip_disjoint_check: Option<bool>) -> anyhow::Result<PathBuf>
 catalog.get_intervals(&QuoteTick::catalog_data_type().into(), Some(instrument_id_str))
     -> anyhow::Result<Vec<(u64, u64)>>             // stored [start, end] per file, sorted
+catalog.query_first_timestamp(&data_type, Some(instrument_id_str))
+    -> anyhow::Result<Option<u64>>                 // start of the first of those intervals
+catalog.query_last_timestamp(&data_type, Some(instrument_id_str))
+    -> anyhow::Result<Option<u64>>                 // end of the last of those intervals
 ```
 
 `write_to_parquet` returns an empty path for empty data and writes nothing.
@@ -259,7 +264,7 @@ only.
 catalog.quote_ticks(ids: Option<Vec<String>>, start: Option<UnixNanos>, end: Option<UnixNanos>)
     -> anyhow::Result<Vec<QuoteTick>>                // &mut self; ids: instrument ids; ordered by ts_init
 catalog.instruments(ids: Option<&[String]>, start, end) -> anyhow::Result<Vec<InstrumentAny>>
-catalog.get_intervals(..)                            // the stored range a re-run resumes from
+catalog.query_last_timestamp(..)                     // the stored end a re-run resumes from
 ```
 
 ### Interactive Brokers specifics (history)
@@ -643,7 +648,8 @@ bar after a roll behaves when the new contract has not ticked yet is
   beyond the params this module returns.
 - **`fill_catalog` writes, nobody else** writes the catalog.
 - **Sort, split, append**: sorted by `ts_init`, one instrument's quotes
-  per file, resume from the stored range (`get_intervals`).
+  per file, resume from the stored range (`query_first_timestamp`,
+  `query_last_timestamp`).
 - **No node** for filling the catalog: historical clients only.
 - **One source per instrument**, with the ids of the live broker.
 - **Check before writing**: refuse a quote of another instrument, and an

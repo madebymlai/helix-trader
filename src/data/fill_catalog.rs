@@ -4,10 +4,10 @@
 //! Source-agnostic, no node: the quotes come from a fetch function the
 //! caller passes, backed by an adapter's historical client (`ib.rs`). Per
 //! instrument it resumes after its stored range of quotes
-//! (`get_intervals`), checks the response, sorts it by `ts_init` and writes
-//! it with `write_instruments` and `write_to_parquet` on a
-//! `ParquetDataCatalog` (`nautilus_persistence`). Nautilus does not persist
-//! requested data on its own.
+//! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
+//! sorts it by `ts_init` and writes it with `write_instruments` and
+//! `write_to_parquet` on a `ParquetDataCatalog` (`nautilus_persistence`).
+//! Nautilus does not persist requested data on its own.
 
 use std::collections::HashSet;
 
@@ -71,14 +71,17 @@ pub async fn fill_catalog(
         .context("writing instruments")?;
     let start_ns = UnixNanos::from(start);
     let end_ns = UnixNanos::from(end);
+    let quotes_type = QuoteTick::catalog_data_type().into();
     for id in instrument_ids {
-        let intervals = catalog
-            .get_intervals(
-                &QuoteTick::catalog_data_type().into(),
-                Some(&id.to_string()),
-            )
-            .with_context(|| format!("reading the stored range of the quotes of {id}"))?;
-        if let (Some(&(first, _)), Some(&(_, last))) = (intervals.first(), intervals.last())
+        let identifier = id.to_string();
+        let reading = || format!("reading the stored range of the quotes of {id}");
+        let first = catalog
+            .query_first_timestamp(&quotes_type, Some(&identifier))
+            .with_context(reading)?;
+        let last = catalog
+            .query_last_timestamp(&quotes_type, Some(&identifier))
+            .with_context(reading)?;
+        if let (Some(first), Some(last)) = (first, last)
             && start_ns < UnixNanos::from(first)
         {
             bail!(
@@ -88,7 +91,7 @@ pub async fn fill_catalog(
                 UnixNanos::from(last),
             );
         }
-        let resume_point = intervals.last().map(|&(_, last)| UnixNanos::from(last));
+        let resume_point = last.map(UnixNanos::from);
         let from = match resume_point {
             Some(last) => just_after(last),
             None => start,
