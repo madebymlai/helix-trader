@@ -210,9 +210,14 @@ pub fn session() -> Session {
 }
 
 /// The EMA crossover on 1-hour MID bars of the instrument: `fast` against
-/// `slow` bars, 10 shares long or short, inside the session, after
+/// `slow` bars, 10 shares long or short, inside `session` if given, after
 /// `warmup`.
-pub fn ema_cross(fast: usize, slow: usize, warmup: SignedDuration) -> EmaCross {
+pub fn ema_cross(
+    fast: usize,
+    slow: usize,
+    warmup: SignedDuration,
+    session: Option<Session>,
+) -> EmaCross {
     let config = EmaCrossConfig::builder()
         .instrument_ids(vec![InstrumentId::from(INSTRUMENT_ID)])
         .bar_spec(BarSpecification::new(
@@ -224,7 +229,7 @@ pub fn ema_cross(fast: usize, slow: usize, warmup: SignedDuration) -> EmaCross {
         .slow_period(slow)
         .trade_size(Quantity::from(10))
         .warmup(warmup)
-        .session(session())
+        .maybe_session(session)
         .build();
     EmaCross::new(config).unwrap()
 }
@@ -233,7 +238,7 @@ pub fn ema_cross(fast: usize, slow: usize, warmup: SignedDuration) -> EmaCross {
 /// session are in, it is long while a bar closes above the slow EMA of
 /// the bars before it, short otherwise.
 pub fn shortest_ema_cross(warmup: SignedDuration) -> EmaCross {
-    ema_cross(1, 2, warmup)
+    ema_cross(1, 2, warmup, Some(session()))
 }
 
 /// The final EUR balance of the account.
@@ -291,7 +296,7 @@ pub mod wave {
 
     /// The EMA crossover on the wave: 5 against 15 bars.
     pub fn ema_cross() -> EmaCross {
-        super::ema_cross(5, 15, WARMUP)
+        super::ema_cross(5, 15, WARMUP, Some(session()))
     }
 }
 
