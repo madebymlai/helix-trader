@@ -10,6 +10,7 @@ anyhow = "1"
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
+flate2 = "1"
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
 nautilus-analysis = "=0.66.0"
@@ -23,16 +24,21 @@ nautilus-live = { version = "=0.66.0", features = ["streaming"] }
 ibapi = "=5.0.0"
 nautilus-interactive-brokers = { version = "=0.66.0", default-features = false, features = ["execution", "gateway"] }
 nautilus-model = "=0.66.0"
+nautilus-network = "=0.66.0"
+# Keep Nautilus' 64-bit prices: the crate's default turns on 128-bit prices
+# (high-precision) for the whole build.
+nautilus-okx = { version = "=0.66.0", default-features = false }
 nautilus-persistence = "=0.66.0"
 nautilus-serialization = { version = "=0.66.0", features = ["arrow"] }
 nautilus-trading = "=0.66.0"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tar = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "1"
 
 [dev-dependencies]
 nautilus-model = { version = "=0.66.0", features = ["test-support"] }
-tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
