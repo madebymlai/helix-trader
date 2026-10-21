@@ -54,15 +54,21 @@ pub struct Outcome {
 }
 ```
 
-Only Nautilus types go in, and the Nautilus result comes out inside
-`Outcome`; `commission_per_order(Money)` and `commission_rate(Decimal)`
-build its fee model (see Costs). `run` fails
-before building the node on no instruments, instruments on several venues,
-a negative warmup,
-`start` after `end`, a warmup the cache cannot hold (see the strategy
-README), or a catalog that cannot serve the run (see Coverage
-check). A relative catalog path is made absolute: the node's DataFusion
-reader finds no object store for `file://catalog/...`.
+The fields of `Backtest` are Nautilus types; we add no types of our own.
+`run` returns `Outcome`: Nautilus' `BacktestResult` plus the costs of the
+fills. `commission_per_order(Money)` and `commission_rate(Decimal)` build
+the fee model (see Costs).
+
+`run` fails before building the node when:
+
+- there are no instruments, or they are on more than one venue;
+- the warmup is negative;
+- `start` is not before `end`;
+- the cache cannot hold the warmup (see the strategy README);
+- the catalog cannot serve the run (see Coverage check).
+
+A relative catalog path is made absolute: with a relative one, the node's
+DataFusion reader finds no object store for `file://catalog/...`.
 
 The run replays the instruments' quotes and nothing else: the strategy's
 bars are internal bars the data engine builds from those quotes (see the
@@ -100,10 +106,10 @@ pub fn dispose(&mut self);
   'static`, so `node.rs` is generic over the strategy and never names one.
 - One run config per node: `new` rejects more ("kernel MessageBus is a
   thread-local singleton"). One node per process.
-- With the default `dispose_on_completion = true` the node disposes the
-  engine at the end of `run`, its cache included. We set it `false`, as
-  Nautilus documents for post-run inspection, read the fills from the
-  engine's cache, then call `dispose`.
+- By default (`dispose_on_completion = true`) the node throws the engine
+  away at the end of `run`, cache included. We set it `false`, as Nautilus
+  documents for reading the results after a run. Then we read the fills
+  from the engine's cache and call `dispose` ourselves.
 
 ## The run config
 
@@ -308,13 +314,16 @@ Default statistics:
   `account.{venue}.balance.{currency}.total` (also `.free`, `.locked`), for
   example `"9942.00 EUR"`.
 
-PnL is net of commissions: a position's realized PnL subtracts the
-commission of each fill in its settlement currency, the open position's
-included. `PnL (total)` is the change of the account balance, realized
-only. The result has no figure of the costs (see Costs in the report
-below). `total_positions` counts the
-snapshots of positions a netting flip closed, while `positions.total` in the
-summary counts only cached positions (one per instrument when netting).
+PnL is after commissions: each position's realized PnL subtracts the
+commission of its fills, the still open position's included. `PnL (total)`
+is how much the account balance changed; it counts realized PnL only. The
+result does not show the costs; the report adds them (see Costs in the
+report below).
+
+`total_positions` also counts the positions a flip closed (netting keeps
+one position per instrument and snapshots the closed one).
+`positions.total` in the summary counts only the positions in the cache:
+one per instrument when netting.
 
 `Max Drawdown`, `CAGR (252 days)`, `Calmar Ratio (252 days)` are not in the
 default set. Each is a `PortfolioStatistic` (`nautilus_analysis`)
@@ -329,35 +338,37 @@ The engine also logs its statistics at the end of the run.
 
 ### Costs in the report
 
-The result holds no costs, so `run` returns an `Outcome`: the result and
-the costs of the fills, which `report.rs` works out once the run is over:
+The result has no costs, so `run` returns an `Outcome`: the result plus
+the costs of the fills. `report.rs` works them out after the run, from
+two inputs:
 
-- **Fills.** Every `OrderFilled` among the events of the orders in the
-  engine's cache (`cache.orders(..)`, `order.events()`), with its
-  `last_px`, `last_qty`, `currency` (the price's) and `commission`.
-  Nautilus documents reading the cache after the run with
+- **Fills.** Every `OrderFilled` event of the orders in the engine's cache
+  (`cache.orders(..)`, then `order.events()`). From each it takes the
+  price (`last_px`), the quantity (`last_qty`), the price's currency and
+  the commission. Nautilus documents reading the cache after the run with
   `dispose_on_completion` off (Concepts › Reports; the v2 migration notes
   on post-run inspection).
-- **Quotes.** The replayed quotes are gone from the engine (the node
-  clears its data after the run, and the cache keeps the last
-  `tick_capacity` only), so `node.rs` loads them again with
-  `BacktestNode::load_data_config(data, start, end)`, the loader the run
-  used, over the engine's window. Each fill is matched with the last quote
-  of its instrument stamped at or before it: the quote it filled on (see
-  Fills).
+- **Quotes.** After the run the engine no longer has the replayed quotes:
+  the node clears its data, and the cache keeps only the last
+  `tick_capacity` quotes. So `node.rs` loads them again with
+  `BacktestNode::load_data_config(data, start, end)`, the same loader and
+  window the run used. Each fill gets the last quote of its instrument
+  stamped at or before it: the quote it filled on (see Fills).
 
 Per currency, `report` prints a `Costs` section after the PnL statistics:
 
 | Figure | |
 |---|---|
 | `Commission` | the sum of the fills' commissions |
-| `Spread` | per fill, its value at its price less its value at the quote's mid for a buy, the reverse for a sell (times the instrument's multiplier): the half spread paid, in the price's currency |
-| `Cost per trade` | commission and spread over the fills (Nautilus' trades) |
-| `Gross PnL` | `PnL (total)` plus commission and spread: the PnL before costs |
+| `Spread` | for each fill, the distance between its price and the quote's mid, times its quantity (and the instrument's multiplier): the half spread paid, in the price's currency |
+| `Cost per trade` | (commission + spread) / number of fills |
+| `Gross PnL` | `PnL (total)` + commission + spread: the PnL before costs |
 
-`PnL (total)` is realized only, so a position still open at the end has
-paid the spread to open it but not realized it: the gross PnL holds that
-half spread too (the size of the open position times half a spread).
+`PnL (total)` counts realized PnL only. A position still open at the end
+has paid the half spread to open it, but that loss is not realized yet. The
+gross PnL adds it back anyway, so it is too high by that amount: the
+open position's size times half the spread.
+
 An inverse instrument is refused: its value is not linear in the price.
 
 ## The command
@@ -370,11 +381,16 @@ helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 
 
 `main` loads and validates the strategy's config, builds the `Backtest`
 from its data requirements (instruments and warmup), runs the strategy and
-prints `report`:
-`Orders`, `Positions`, then one section per currency of PnL statistics,
-one per currency of costs, the return statistics with `Max Drawdown`, the general statistics, and the
-final balances (`account.*.balance.*.total` of the summary), names sorted,
-values to six decimals. `--balance` and `--commission` are Nautilus
+prints `report`, in this order:
+
+1. `Orders` and `Positions`;
+2. the PnL statistics, one section per currency;
+3. the costs, one section per currency;
+4. the return statistics, with `Max Drawdown`;
+5. the general statistics;
+6. the final balances (`account.*.balance.*.total` of the summary).
+
+Names are sorted, values printed to six decimals. `--balance` and `--commission` are Nautilus
 `Money` (`"<amount> <currency>"`), parsed with `Money::from_str`;
 `--commission-rate` is a `Decimal` (0.0005 is 0.05%). `--balance` is
 required, and exactly one of `--commission` and `--commission-rate`. Each
@@ -789,8 +805,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   the coverage check (gaps on the intervals alone, then on a temporary
   catalog: missing instrument, quotes 1 ns short at either end, missing,
   or with a gap), the report of a hand-built `Outcome` (sections, sorted
-  names, max drawdown, the costs and the gross PnL). The command line is tested in `main.rs`: required flags,
-  exactly one commission flag, malformed `Money`, the window check.
+  names, max drawdown, the costs and the gross PnL). The command line is
+  tested in `main.rs`: required flags, exactly one commission flag,
+  malformed `Money`, the window check.
 - Integration tests in `tests/`, one node per file, run the real EMA
   strategy through `Backtest::run` on a fixture catalog (`tests/common`:
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
