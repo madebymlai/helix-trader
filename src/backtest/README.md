@@ -390,14 +390,16 @@ prints `report`, in this order:
 5. the general statistics;
 6. the final balances (`account.*.balance.*.total` of the summary).
 
-Names are sorted, values printed to six decimals. `--balance` and `--commission` are Nautilus
-`Money` (`"<amount> <currency>"`), parsed with `Money::from_str`;
-`--commission-rate` is a `Decimal` (0.0005 is 0.05%). `--balance` is
-required, and exactly one of `--commission` and `--commission-rate`. Each
-commission flag is turned into the fee model at argument parsing, so a
-malformed or negative one (`--commission="-3 EUR"`,
-`--commission-rate=-0.0005`) fails there. The engine log
-goes to stdout before the results, configured by `NAUTILUS_LOG`.
+Names are sorted, values printed to six decimals.
+
+`--balance` and `--commission` are Nautilus `Money` (`"<amount>
+<currency>"`), parsed with `Money::from_str`; `--commission-rate` is a
+`Decimal` (0.0005 is 0.05%). `--balance` is required, and exactly one of
+`--commission` and `--commission-rate`. Each commission flag is turned
+into the fee model at argument parsing, so a malformed or negative one
+(`--commission="-3 EUR"`, `--commission-rate=-0.0005`) fails there. The
+engine log goes to stdout before the results, configured by
+`NAUTILUS_LOG`.
 
 On the wave of the tests (EMA 5/15 on 1-HOUR-MID internal bars, 10
 shares, warmup 48h, Xetra's session, 3 EUR commission) it prints
