@@ -2054,6 +2054,7 @@ dependencies = [
  "nautilus-backtest",
  "nautilus-common",
  "nautilus-core",
+ "nautilus-data",
  "nautilus-execution",
  "nautilus-indicators",
  "nautilus-interactive-brokers",

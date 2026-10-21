@@ -16,6 +16,7 @@ nautilus-analysis = "=0.66.0"
 nautilus-backtest = { version = "=0.66.0", features = ["streaming"] }
 nautilus-common = { version = "=0.66.0", features = ["tracing-bridge"] }
 nautilus-core = "=0.66.0"
+nautilus-data = "=0.66.0"
 nautilus-execution = "=0.66.0"
 nautilus-indicators = "=0.66.0"
 nautilus-live = { version = "=0.66.0", features = ["streaming"] }

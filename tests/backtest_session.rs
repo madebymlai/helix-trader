@@ -1,5 +1,5 @@
-//! The session on internal bars: the bars outside it, quoted or flat for
-//! want of quotes overnight, neither move the EMAs nor trade. One node per
+//! The session on internal bars: the bars outside it neither move the EMAs
+//! nor trade; overnight, without quotes, there are no bars at all. One node per
 //! process, so one run per file.
 
 mod common;
@@ -12,7 +12,7 @@ use jiff::{SignedDuration, Timestamp};
 ///
 /// - Wednesday 7 January 2026, 10:00 to 14:00 (the warmup): 600.60;
 ///   15:00: 590.60; 16:00: 700.60; 17:00, out of the session: 500.60;
-/// - overnight, out of the session: flat bars at 500.60, no quotes;
+/// - overnight, out of the session: no quotes, so no bars;
 /// - Thursday 08:00, out of the session: 500.60; 09:00: 650.60.
 fn level(close: Timestamp) -> Option<f64> {
     let (wednesday, thursday) = ("2026-01-07T", "2026-01-08T");
@@ -29,7 +29,7 @@ fn level(close: Timestamp) -> Option<f64> {
 }
 
 #[test]
-fn bars_outside_the_session_quoted_or_flat_neither_move_the_emas_nor_trade() {
+fn bars_outside_the_session_neither_move_the_emas_nor_trade() {
     let (from, start, end) = (
         ts("2026-01-07T08:00:00Z"),
         ts("2026-01-07T14:30:00Z"),
@@ -48,7 +48,7 @@ fn bars_outside_the_session_quoted_or_flat_neither_move_the_emas_nor_trade() {
     // above, long: buy 20 at 700.65, the EMA going to 665.04. Thursday
     // 09:00: 650.60 below, short: sell 20 at 650.55. The 10 shares sold
     // short lose 110.10 each, the 10 bought 50.10. Had the bars outside the
-    // session counted, the slow EMA would be near 500.60 on Thursday 09:00:
+    // session counted, the slow EMA would be 518.87 on Thursday 09:00:
     // still long, no third order.
     assert_eq!(result.total_orders, 3);
     assert_eq!(common::balance(&result), "8398.00 EUR");

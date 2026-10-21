@@ -115,7 +115,7 @@ validates and returns a `Result`.
 | `id: String` | the run id, used by `get_engine_mut` |
 | `venues: Vec<BacktestVenueConfig>` | the simulated venue |
 | `data: Vec<BacktestDataConfig>` | what to load from the catalog |
-| `engine: BacktestEngineConfig` | logging, warmup catalog |
+| `engine: BacktestEngineConfig` | logging, warmup catalog, cache and data engine from `strategy::warmup` |
 | `start`, `end: Option<UnixNanos>` | the engine's window: `start − 1 ns` to `end` (see below) |
 | `chunk_size: Option<usize>` | stream the data in chunks instead of loading it all |
 | `raise_exception` | default `false`: set it `true` (see below) |
@@ -803,8 +803,8 @@ bars. Whether a live node builds them too is not verified.
     1 ns before the bar's close), `backtest_start_on_close.rs` (the same on
     a run starting exactly on an hour's close: the one-quote oldest bar
     dropped, the bar at the start traded on its closing quote),
-    `backtest_session.rs` (bars outside the session, quoted or flat for
-    want of quotes overnight, neither move the EMAs nor trade),
+    `backtest_session.rs` (bars outside the session neither move the EMAs
+    nor trade; overnight, without quotes, there are no bars),
     `backtest_commission_rate.rs` (the orders of a run without commission,
     each fill charged the rate on its value, and the report's costs: the
     half spread of each fill, the gross PnL).
@@ -829,3 +829,6 @@ bars. Whether a live node builds them too is not verified.
   - `backtest_stop.rs` (a fall of 0.50 a minute): a sell stop rested on
     the 13:00 bar fills at the bid of the first minute quote at or below
     it, 13:39:59.999999999, not at the next bar.
+  - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
+    in one hour of the warmup and one of the replay): neither hour yields
+    a bar; every other bar is as worked out from its hour's quotes.

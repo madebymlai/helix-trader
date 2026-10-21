@@ -249,6 +249,7 @@ let config = LiveNodeConfig {
     trader_id,
     catalogs: vec![DataCatalogConfig::new("data/catalog".to_string(), None, None)],
     cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
+    data_engine: warmup::live_data_engine_config(), // no bar for an hour without quotes
     ..Default::default()
 };
 let builder = LiveNodeBuilder::from_config(config)?;   // then the same with_* chain

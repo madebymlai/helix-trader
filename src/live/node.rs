@@ -26,6 +26,8 @@ use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
+use crate::strategy::warmup;
+
 /// The trader of the node, also on the log lines written before the node
 /// exists.
 pub(super) fn trader_id() -> TraderId {
@@ -95,7 +97,9 @@ where
 }
 
 /// The config of the live node: the trader, `logging`, `cache`, the catalog
-/// at `catalog` and the execution engine's reconciliation and checks.
+/// at `catalog`, the data engine of the strategy's bars
+/// (`warmup::live_data_engine_config`) and the execution engine's
+/// reconciliation and checks.
 fn config(
     catalog: &Path,
     logging: LoggerConfig,
@@ -113,6 +117,7 @@ fn config(
         logging,
         catalogs: vec![DataCatalogConfig::new(catalog.to_string(), None, None)],
         cache: Some(cache),
+        data_engine: warmup::live_data_engine_config(),
         exec_engine: LiveExecutionEngineConfig {
             reconciliation: true,
             open_check_interval_secs: Some(10.0),
@@ -138,6 +143,17 @@ mod tests {
     #[test]
     fn the_catalog_is_registered_for_warmup() {
         assert_eq!(catalog_of(&PathBuf::from("/data/catalog")), "/data/catalog");
+    }
+
+    #[test]
+    fn an_hour_without_quotes_yields_no_bar_as_in_a_backtest() {
+        let config = config(
+            &PathBuf::from("/data/catalog"),
+            LoggerConfig::default(),
+            CacheConfig::default(),
+        )
+        .unwrap();
+        assert!(!config.data_engine.time_bars_build_with_no_updates);
     }
 
     #[test]

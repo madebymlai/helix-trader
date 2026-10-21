@@ -196,10 +196,15 @@ and the broker's quotes live, so the same bar definition runs in both.
 
 - **Closes.** A bar closes at the end of its period and is stamped there
   (`ts_event`); it holds the quotes stamped in `(open, close]`.
-- **Hours without quotes.** The data engine's default
-  `time_bars_build_with_no_updates` stays on: an hour without any quote
-  still yields a bar, flat at the previous close, with zero volume. The
-  session ignores those outside trading hours like any other bar.
+- **Hours without quotes.** An hour with no quote at all yields no bar.
+  IB quotes all through the trading day, even for illiquid instruments, so
+  such an hour means the market is closed: a night, a weekend, a holiday.
+  Nautilus' default (`time_bars_build_with_no_updates = true`) would build
+  a bar flat at the last close; the session checks the time of day only,
+  so on a Saturday it would trade on Friday's last quote. The backtest and
+  the live node take their data engine config from `strategy::warmup`
+  (`data_engine_config`, `live_data_engine_config`), which turns the flag
+  off; the warmup bars follow the same rule.
 - **Volume.** Quote-built bars sum the quoted sizes, not traded volume:
   nothing reads it.
 - **Fidelity.** In a backtest the bars come from 1-minute quotes, so their

@@ -36,7 +36,9 @@ const RUN_ID: &str = "backtest";
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
-/// holding the warmup bars (`warmup::cache_config`). The engine starts
+/// holding the warmup bars (`warmup::cache_config`) and a data engine
+/// building no bar for an hour without quotes
+/// (`warmup::data_engine_config`). The engine starts
 /// 1 ns before `start` (see `Backtest::engine_start`), which must be before
 /// `end`. Build and run errors are raised, not only logged; the engine
 /// outlives the run (see `run`).
@@ -80,6 +82,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
     let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
     let engine_config = BacktestEngineConfig::builder()
         .cache(cache)
+        .data_engine(warmup::data_engine_config())
         .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
         .logging(backtest.logging.clone())
         .build();

@@ -17,6 +17,14 @@
 //! oldest beyond it, so the node running the strategy takes its cache
 //! config from `cache_config`, which holds the whole warmup.
 //!
+//! An hour with no quote at all means the market is closed (a night, a
+//! weekend, a holiday): the data engine builds no bar for it, in the
+//! warmup as after it. Nautilus' default builds one, flat at the last
+//! close, which a session on the time of day alone would trade on. So the
+//! node running the strategy takes its data engine config from
+//! `data_engine_config` (backtest) or `live_data_engine_config` (live),
+//! which turn `time_bars_build_with_no_updates` off.
+//!
 //! A strategy calls `start` from `on_start` and `bars` from
 //! `on_historical_quotes`.
 
@@ -29,6 +37,8 @@ use nautilus_common::{
     cache::CacheConfig,
 };
 use nautilus_core::Params;
+use nautilus_data::engine::config::DataEngineConfig;
+use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
     data::{Bar, BarType, QuoteTick},
     enums::AggregationSource,
@@ -124,6 +134,29 @@ pub fn cache_config(bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Re
                  the cache cannot hold {capacity} bars ({headroom} of headroom included)"
             )
         })
+}
+
+/// Whether the data engine builds a bar for a period without any quote.
+const BUILD_BARS_WITHOUT_QUOTES: bool = false;
+
+/// The data engine config of a backtest running a strategy: Nautilus'
+/// default, without bars for periods without quotes.
+#[must_use]
+pub fn data_engine_config() -> DataEngineConfig {
+    DataEngineConfig {
+        time_bars_build_with_no_updates: BUILD_BARS_WITHOUT_QUOTES,
+        ..DataEngineConfig::default()
+    }
+}
+
+/// The data engine config of a live node running a strategy: Nautilus'
+/// default, without bars for periods without quotes.
+#[must_use]
+pub fn live_data_engine_config() -> LiveDataEngineConfig {
+    LiveDataEngineConfig {
+        time_bars_build_with_no_updates: BUILD_BARS_WITHOUT_QUOTES,
+        ..LiveDataEngineConfig::default()
+    }
 }
 
 /// The most bars a warmup of `warmup` builds of `bar_type`: one per bar
