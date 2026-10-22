@@ -270,7 +270,8 @@ let bars = warmup::bars(self, quotes);
   In backtest the client answers nothing, so the catalog must be registered
   and cover the whole window, or no response comes (see the backtest
   README). In live it can be a catalog, the adapter, or both (see the live
-  README).
+  README). OKX serves no quote history, so a live run with OKX instruments
+  refuses to start until live quotes are recorded into the catalog.
 - **Bound by `start`.** `self.clock().utc_now()` is the simulated time in
   backtest; `warmup::start` bounds the request with `now - warmup`.
 - **`request_bars` does not aggregate.** On an internal bar type it does

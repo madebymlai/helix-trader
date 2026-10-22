@@ -353,21 +353,21 @@ fn instrument_from(raw: &OKXInstrument, ts_init: UnixNanos) -> anyhow::Result<In
 }
 
 /// An OKX swap (`BTC-USDT-SWAP.OKX`) or future
-/// (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API and archive by its
-/// instrument type and family.
+/// (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API and archive, and
+/// in the live clients' configs, by its instrument type and family.
 #[derive(Debug, Clone, Copy)]
-struct Contract {
+pub(crate) struct Contract {
     id: InstrumentId,
     /// `Swap` or `Futures`, from the symbol (the adapter's
     /// `okx_instrument_type_from_symbol`).
-    inst_type: OKXInstrumentType,
+    pub(crate) inst_type: OKXInstrumentType,
     /// The symbol without its last part: `BTC-USDT`, `BTC-USD_UM_XPERP`.
-    family: &'static str,
+    pub(crate) family: &'static str,
 }
 
 impl Contract {
     /// The contract of `id`; an error if it is not an OKX swap or future.
-    fn of(id: InstrumentId) -> anyhow::Result<Self> {
+    pub(crate) fn of(id: InstrumentId) -> anyhow::Result<Self> {
         ensure!(OkxHistory::serves(id), "{id} is not on {}", *OKX_VENUE);
         let symbol = id.symbol.inner().as_str();
         let inst_type = okx_instrument_type_from_symbol(symbol);

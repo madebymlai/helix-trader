@@ -2,8 +2,10 @@
 
 The `live` module builds and runs a Nautilus `LiveNode` for the strategy, on
 a paper then a real account (build step 3). It adds no trading logic: it
-fills the catalog up to now, then wires broker clients, the strategy and the
-node. Filling the catalog needs no node (see the data README).
+sets up the clients of the instruments' venues, fills the catalog up to now
+for the IB ones, then wires the clients, the strategy and the node. OKX
+instruments go to OKX's clients, all others to IB's; a strategy trading
+both gets both. Filling the catalog needs no node (see the data README).
 
 APIs are those of the `nautilus-*` crates at `0.66.0`; open points are under
 "Unverified". Process-wide rules (one node per process, Nautilus owns the
@@ -13,12 +15,16 @@ logger) are in `docs/ARCHITECTURE.md`.
 
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
-  [--catalog catalog] [--client-id 1]
+  [--catalog catalog] [--client-id 1] [--leverage 1]
 ```
 
 Runs one strategy until Ctrl-C (SIGINT) or SIGTERM. `--account` is the bare
-IB account id, else `NAUTILUS_IB_ACCOUNT_ID`; its mode (paper for `D...`)
-picks the gateway (see "Gateway"). A client id that is a multiple of 1000
+IB account id, else `NAUTILUS_IB_ACCOUNT_ID`, needed only for IB
+instruments; its mode (paper for `D...`) picks the gateway (see "Gateway").
+`--leverage` (default 1) is the leverage the run expects, as in a backtest;
+it is a check only: OKX applies the leverage set on the account, and the
+start refuses an OKX instrument at another one (see "OKX specifics"). IB
+does not check it. A client id that is a multiple of 1000
 is refused before any gateway starts. The default client id is the
 adapter's, 1, so `fill-catalog` (10) can run at the same time.
 `NAUTILUS_LOG` configures the logger as for the other commands. The
@@ -26,7 +32,7 @@ command reads `.env` at start (see `.env.example`); a variable already set
 wins.
 
 No `fill-catalog` run is needed first, nor a gateway: the command starts
-it. In code: `live::Live { catalog, account, client_id, logging
+it. In code: `live::Live { catalog, account, client_id, leverage, logging
 }.run(&requirements, strategy)`, generic over the strategy like
 `Backtest::run`.
 
@@ -35,22 +41,28 @@ it. In code: `live::Live { catalog, account, client_id, logging
 1. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
    and the `tracing` bridge: the gateway and the fill log before the node
    exists, and the node reuses that logger when built.
-2. Check the client id, start or reuse the Docker gateway of the account's
-   mode, wait for its login, and build the IB client configs on it.
-3. Fill the catalog for the strategy's data requirements, with the same
+2. OKX instruments, if any: check the credentials are set, build the OKX
+   client configs, check the account (net position mode, each
+   instrument's leverage equal to `--leverage`), then refuse to start: no
+   recent OKX quotes to warm up on yet (see "OKX specifics").
+3. IB instruments, if any: check the client id, start or reuse the Docker
+   gateway of the account's mode, wait for its login, and build the IB
+   client configs on it.
+4. Fill the catalog for the IB instruments' data requirements, with the same
    `IbHistory` and `fill_catalog` as `fill-catalog`: instruments, then each
    instrument's quotes over `[now - warmup, now - 1 minute]`, resuming after
    what the catalog holds, through the paper gateway (started or reused). IB history refuses an end within a minute of now
    (the minute still in progress). The history connection closes here, so
    the node can connect with the same client id.
-4. Build the node with the catalog in `LiveNodeConfig::catalogs`, IB data
-   and exec clients routed by default, reconciliation on, open-order and
+5. Build the node with the catalog in `LiveNodeConfig::catalogs`, the
+   clients of each venue (IB's routed by default, OKX's routed by Nautilus
+   as the only clients of venue OKX), reconciliation on, open-order and
    position checks every 10 and 30 s (as the adapter's `node_exec_tester`),
    and a 5 s post-stop delay.
-5. Add the strategy and claim the external orders of its instruments (the
+6. Add the strategy and claim the external orders of its instruments (the
    ones its config does not claim already), then `run()`.
 
-The strategy's warmup request (`strategy::warmup`) is then served by the
+The strategy's warmup request of an IB instrument (`strategy::warmup`) is then served by the
 catalog; the data engine sends IB only the interval the catalog misses,
 from the fill's end to now, as historical BID_ASK ticks. Only the catalog
 part reaches the internal bars: the IB ticks are dropped (see "Known
@@ -100,15 +112,18 @@ false`, as the history in the catalog does.
 
 ```
 live/
-  mod.rs    `Live`: the start sequence (catalog filling, logger), the entry point
+  mod.rs    `Live`: the start sequence (clients by venue, catalog filling,
+            logger), the entry point
   node.rs   builds and runs the LiveNode, broker-agnostic
   ib.rs     Interactive Brokers client factories and configs, on the
             gateway `data`'s IB part starts
+  okx.rs    OKX client factories and configs, and the account checks
 ```
 
 Another broker is another file next to `ib.rs` returning the same shape: a
-data factory and config, an optional exec factory and config. `node.rs` takes
-them as `Box<dyn DataClientFactory>` and friends and never names a broker.
+data factory and config, an exec factory and config, and their routing.
+`node.rs` takes a list of them as `Box<dyn DataClientFactory>` and friends
+and never names a broker.
 
 ## Cargo
 
@@ -474,6 +489,125 @@ containers we start have it off.
   NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
   ```
 
+## OKX specifics (live)
+
+`nautilus_okx::{config, factories}`, with `default-features = false`
+(64-bit prices).
+
+```rust
+OKXDataClientFactory::new()       // name() == "OKX"
+OKXExecutionClientFactory::new()  // name() == "OKX"
+```
+
+### Environment
+
+- **Demo, EEA region.** Both configs set `environment: OKXEnvironment::Demo`
+  and `region: OKXRegion::Eea`: REST on `eea.okx.com` with the
+  `x-simulated-trading: 1` header, WebSockets on `wseeapap.okx.com`. An
+  account opened on my.okx.com is an EEA one, and in the EEA a retail
+  account trades X-Perps, not the global USDT swaps. A key only works in
+  its own region and environment: the demo key is refused by the real
+  account (code 50101) and by `www.okx.com` (50119). The real account is
+  `OKXEnvironment::Live` in `live/okx.rs`; nothing else changes.
+- **Instruments.** The configs load the instrument types and families of
+  the traded ids (`BTC-USD_UM_XPERP-310328.OKX`: `FUTURES`, family
+  `BTC-USD_UM_XPERP`). The demo lists other contracts than the real
+  account: on 2026-10-22 its BTC X-Perp was `BTC-USD_UM_XPERP-310328` (max
+  leverage 10), the real one `BTC-USD_UM_XPERP-310404`.
+- **Quotes** come tick by tick: the adapter subscribes to `bbo-tbt`, every
+  change of the best bid or ask. No setting.
+- **Cross margin**: the exec config sets `margin_mode:
+  Some(OKXMarginMode::Cross)` (the adapter's default, `None`, sends
+  isolated orders).
+- **Account id**: the default `OKX-001`. The factory picks `Margin` and
+  `Netting` for swaps and futures.
+
+### Setting up the account
+
+1. Create an API key on my.okx.com under Demo Trading, with trade
+   permission, and put it in `.env` as `OKX_API_KEY`, `OKX_API_SECRET`,
+   `OKX_API_PASSPHRASE` (the names the adapter reads; see `.env.example`).
+   The start checks they are set; the adapter reads them, never our code.
+2. Position mode: one-way (net). The start reads it through the adapter
+   (`get_account_configuration`) and refuses long/short mode. Change it by
+   hand, with no open position or order.
+3. Leverage: set it by hand on each instrument, in cross margin, to the
+   `--leverage` of the run. The adapter neither sets nor reads it, so the
+   start reads it with our signed `GET /api/v5/account/leverage-info`
+   (signed by the adapter's `Credential`) and refuses another value,
+   naming both. Neither check changes the account.
+4. Strategy config: OKX refuses client order ids with hyphens, so set
+   `use_hyphens_in_client_order_ids = false` in the strategy's `[base]`
+   (Nautilus' OKX docs):
+
+   ```toml
+   [base]
+   strategy_id = "EMA_CROSS-001"
+   order_id_tag = "001"
+   use_hyphens_in_client_order_ids = false
+   ```
+
+### Warmup: OKX live refuses to start for now
+
+OKX instruments warm up as IB's do: bars built from quotes, the warmup
+requested with `request_quotes` and served from the catalog. But there are
+no recent OKX quotes to serve it:
+
+- OKX serves no quote history. The OKX data client does not implement
+  `request_quotes`; Nautilus' default logs that and never answers, so the
+  warmup would wait forever.
+- OKX's archive is two to three days behind, so `fill-catalog` cannot
+  bring the catalog up to now.
+
+So a run with any OKX instrument stops at the start, after the account
+checks and before the node is built, with "OKX live needs recorded
+quotes, not available yet". Recording OKX's live quotes into the catalog
+will fill that gap and lift the refusal.
+
+### Known limits
+
+- **X-Perps get no quotes and cannot be traded in `0.66.0`.** The adapter
+  takes any symbol with an underscore for a spread
+  (`common::parse::is_okx_spread_symbol` is `symbol.contains('_')`), and
+  every X-Perp symbol has one (`BTC-USD_UM_XPERP-310328`). So the quote
+  subscription goes to the spread channel `sprd-bbo-tbt`, which OKX
+  refuses (`60018 ... sprdId:BTC-USD_UM_XPERP-310328 doesn't exist`), and
+  orders, cancels and order queries would take the spread routes
+  (`place_spread_order`). Seen on the demo on 2026-10-22, in a run built
+  before the refusal above: the node started, reconciled and stopped
+  cleanly, but no quote and no bar arrived. Upstream:
+  [nautilus_trader#5337](https://github.com/nautechsystems/nautilus_trader/issues/5337),
+  fixed on `develop` after `0.66.0` (commit `4d032a3e8d`), not yet
+  released. No workaround here: X-Perps need the next release. Swaps
+  (`BTC-USDT-SWAP`) are not affected.
+- **nautilus_trader#5393** (the warmup panic, see "Known limits" above)
+  will apply to OKX as to IB once its warmup is requested; not checked on
+  OKX, since no OKX run gets that far yet.
+
+### OKX rules
+
+- **Demo until switched**: `ENVIRONMENT` in `live/okx.rs`.
+- **Net mode, leverage by hand**: the start checks both and changes
+  neither.
+- **No hyphens** in the strategy's client order ids.
+
+### OKX tests
+
+- Unit tests in `okx.rs`: the configs (demo and EEA endpoints, cross
+  margin, credentials left to the environment, instrument types and
+  families), net mode refused otherwise, the leverage check, the parsing
+  of OKX's leverage answer, and the refusal for lack of recorded quotes.
+- End to end, `tests/okx_demo.rs`: `Live` on the demo's BTC X-Perp passes
+  the account checks against the real demo account, then is refused for
+  lack of recorded quotes; it only reads the account. Gated: it is skipped
+  unless `NAUTILUS_OKX_RUN=1` is set in the shell. The account's X-Perp
+  leverage goes in `NAUTILUS_OKX_LEVERAGE` (1 if unset); a wrong one fails
+  the test with the leverage message:
+
+  ```sh
+  NAUTILUS_OKX_RUN=1 NAUTILUS_OKX_LEVERAGE=3 cargo test --test okx_demo -- --nocapture
+  ```
+
 ## Rules
 
 - **Everything before `run()`**: clients, the strategy, claims.
@@ -482,6 +616,8 @@ containers we start have it off.
 - **Owned run mode**: Nautilus handles signals; code stops through
   `handle().stop()`.
 - **One broker per file**; `node.rs` stays broker-agnostic.
+- **Clients by venue**: OKX instruments to OKX's clients, the others to
+  IB's; mixed venues get both, routed by Nautilus.
 - **No secrets in code or git**: credentials come from the environment.
 
 ## Tests
