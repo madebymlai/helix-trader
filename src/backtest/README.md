@@ -754,13 +754,9 @@ directory (data README).
   The engine starts 1 ns before `start`, so a run starting on the hour
   replays the minute closing then: its first hour bar holds that minute
   alone.
-- **No warmup yet.** The warmup requests quotes (strategy README), which
-  an OKX catalog has none of: the request is never answered (the backtest
-  client has no handler for it) and the strategy got no bar at all (0
-  orders over a week; why the subscription stays silent is not
-  established). Until the warmup requests the source bars, the EMA does not run
-  on OKX; the runs below used a build whose warmup skips composite bar
-  types, so the EMA started cold and traded after 30 hours.
+- **Warmup.** The warmup of a composite bar type requests its minute bars
+  (strategy README), which the catalog serves: the catalog must hold them
+  from `start - warmup`, as for quotes.
 
 ### Fills on candles
 
@@ -791,16 +787,16 @@ L1 book the venue already uses.
   happens (below).
 
 **Verified on OKX data**, 2026-10-22: scratch catalogs filled from OKX's
-archive for archive days 2026-10-13 to 10-21 (`--start 2026-10-13 --end
-2026-10-21`), EMA 10/30 on the composite hour bars, no session, 0.01 BTC
-a trade:
+archive for archive days 2026-10-11 to 10-21 (`--start 2026-10-11 --end
+2026-10-21`), EMA 10/30 on the composite hour bars warmed up over 48
+hours, no session, 0.01 BTC a trade:
 
 ```toml
 instrument_ids = ["BTC-USDT-SWAP.OKX"]     # or BTC-USD_UM_XPERP-310404.OKX
 bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
 composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
 trade_size = "1"                           # "100" on the X-Perp
-warmup = "1h"
+warmup = "48h"
 ```
 
 ```
@@ -810,23 +806,28 @@ helix-trader backtest ema --config swap.toml --catalog okx-cat \
 
 | | Swap | X-Perp |
 |---|---|---|
-| Orders (fills) | 8 (8) | 8 (10) |
-| PnL (total) | -65.06 USDT | -64.86 USD |
-| Commission | 6.15 USDT | 6.14 USD |
+| Orders (fills) | 9 (9) | 9 (11) |
+| PnL (total) | -58.06 USDT | -58.10 USD |
+| Commission | 6.98 USDT | 6.98 USD |
 | Spread | n/a | n/a |
-| Gross PnL | -58.91 USDT | -58.72 USD |
-| Max drawdown | 0.68% | 0.67% |
-| Final balance | 9934.94 USDT | 9935.14 USD |
-| Run time | 0.1 s | 0.1 s |
+| Gross PnL | -51.08 USDT | -51.12 USD |
+| Max drawdown | 0.66% | 0.66% |
+| Final balance | 9941.94 USDT | 9941.90 USD |
 
-Funding not included. Checked against the stored minute bars, outside
-Nautilus:
+Warm from the start: the first order fills at 2026-10-14 00:00, on the
+first hour bar of the run. Before the warmup served composite bar types,
+the same window started cold and gave 8 orders, -65.06 USDT and -64.86
+USD.
+
+Funding not included. Two X-Perp buys of 200 contracts met thin minutes:
+10 and 18 contracts filled at the close, the rest (190, 182) one tick
+higher. Checked against the stored minute bars, outside Nautilus, on the
+cold runs (same fills code):
 
 - **Fills.** Every swap fill, and every X-Perp order's first fill, at the
   close of the minute closing at the fill's time (the hour's close).
-- **Thin minutes.** Two X-Perp buys of 200 contracts met minutes whose
-  close leg held 8 and 17 contracts: those filled at the close, the rest
-  (192, 183) one tick higher.
+- **Thin minutes.** As above: 8 and 17 contracts at the close, the rest
+  one tick higher.
 - **Commission.** 0.05% of each fill's value, to the eighth decimal on
   the swap, to the cent on the X-Perp.
 

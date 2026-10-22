@@ -21,13 +21,11 @@ use nautilus_common::{
 };
 use nautilus_live::{
     builder::LiveNodeBuilder,
-    config::{LiveExecutionEngineConfig, LiveNodeConfig, RoutingConfig},
+    config::{LiveDataEngineConfig, LiveExecutionEngineConfig, LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-
-use crate::strategy::warmup;
 
 /// The trader of the node, also on the log lines written before the node
 /// exists.
@@ -46,8 +44,9 @@ pub(super) struct Clients {
 }
 
 /// Builds a live node on the clients of each adapter in `clients`, routed
-/// as each says, with the catalog at `catalog` serving historical requests
-/// and `cache` configuring the cache (sized for the warmup), adds
+/// as each says, with the catalog at `catalog` serving historical requests,
+/// `cache` configuring the cache (sized for the warmup) and `data_engine`
+/// the data engine (see `warmup::live_data_engine_config`), adds
 /// `strategy` claiming the external orders of `instrument_ids`, and runs it
 /// until SIGINT or SIGTERM.
 ///
@@ -65,6 +64,7 @@ pub(super) async fn run<S>(
     catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
+    data_engine: LiveDataEngineConfig,
     clients: Vec<Clients>,
     instrument_ids: &[InstrumentId],
     strategy: S,
@@ -72,7 +72,7 @@ pub(super) async fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let config = config(catalog, logging, cache)?;
+    let config = config(catalog, logging, cache, data_engine)?;
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
         .with_delay_post_stop_secs(5);
@@ -108,13 +108,13 @@ where
 }
 
 /// The config of the live node: the trader, `logging`, `cache`, the catalog
-/// at `catalog`, the data engine of the strategy's bars
-/// (`warmup::live_data_engine_config`) and the execution engine's
-/// reconciliation and checks.
+/// at `catalog`, `data_engine` and the execution engine's reconciliation
+/// and checks.
 fn config(
     catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
+    data_engine: LiveDataEngineConfig,
 ) -> anyhow::Result<LiveNodeConfig> {
     // Absolute: the node's DataFusion reader finds no object store for a
     // relative path ("file://catalog/...").
@@ -128,7 +128,7 @@ fn config(
         logging,
         catalogs: vec![DataCatalogConfig::new(catalog.to_string(), None, None)],
         cache: Some(cache),
-        data_engine: warmup::live_data_engine_config(),
+        data_engine,
         exec_engine: LiveExecutionEngineConfig {
             reconciliation: true,
             open_check_interval_secs: Some(10.0),
@@ -146,7 +146,13 @@ mod tests {
     use super::*;
 
     fn catalog_of(catalog: &Path) -> String {
-        let config = config(catalog, LoggerConfig::default(), CacheConfig::default()).unwrap();
+        let config = config(
+            catalog,
+            LoggerConfig::default(),
+            CacheConfig::default(),
+            LiveDataEngineConfig::default(),
+        )
+        .unwrap();
         assert_eq!(config.catalogs.len(), 1);
         config.catalogs[0].path().to_string()
     }
@@ -154,17 +160,6 @@ mod tests {
     #[test]
     fn the_catalog_is_registered_for_warmup() {
         assert_eq!(catalog_of(&PathBuf::from("/data/catalog")), "/data/catalog");
-    }
-
-    #[test]
-    fn an_hour_without_quotes_yields_no_bar_as_in_a_backtest() {
-        let config = config(
-            &PathBuf::from("/data/catalog"),
-            LoggerConfig::default(),
-            CacheConfig::default(),
-        )
-        .unwrap();
-        assert!(!config.data_engine.time_bars_build_with_no_updates);
     }
 
     #[test]

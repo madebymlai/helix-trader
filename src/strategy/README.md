@@ -99,9 +99,8 @@ composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" 
 ```
 
 gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
-bars of OKX's 1-minute candles, any price type (the source's). The
-warmup does not serve composite bar types yet: it requests quotes, which
-OKX has none of (see the backtest README, "OKX on candles").
+bars of OKX's 1-minute candles, any price type (the source's), warmed up
+on those candles (see "Warmup and training").
 
 The config also states what the strategy needs from data, as one
 `strategy::DataRequirements`: its bar types and its warmup; its
@@ -153,6 +152,11 @@ impl DataActor for Trend {
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
         self.book.warm_up(&warmup::bars(self, quotes));
+        Ok(())
+    }
+
+    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
+        self.book.warm_up(&warmup::bars(self, bars));
         Ok(())
     }
 
@@ -231,6 +235,16 @@ and the broker's quotes live, so the same bar definition runs in both.
   high and low can be slightly narrower than live bars built from every
   quote; opens and closes match.
 
+Bars of a composite bar type are built the same way from source bars
+instead of quotes (OKX's candles; backtest README, "OKX on candles"). Live,
+a venue sends a source bar only once it has closed: OKX's confirmed
+1-minute candles arrived 0.3 to 1.5 s after their close on 2026-10-22. So
+the live node builds time bars 5 s after their close when the strategy
+has a composite bar type (`warmup::live_data_engine_config`, Nautilus'
+`time_bars_build_delay`); otherwise the last minute would land in the
+next bar. Such a live bar is stamped 5 s after its close, its backtest
+twin on the close. Bars built from quotes keep no delay.
+
 ## Warmup and training
 
 This is the single description of warmup; the backtest and live READMEs only
@@ -239,33 +253,43 @@ say how to register the catalog that serves it.
 Warmup is the history a strategy needs before it trades: indicators to
 initialise and models to train. A model is trained by the strategy itself.
 
-The warmup of bars built from quotes is the module `strategy::warmup`, the
-one place that knows Nautilus' protocol for it. A strategy makes two calls:
+The warmup of the bars Nautilus builds is the module `strategy::warmup`,
+the one place that knows Nautilus' protocol for it. A strategy makes two
+calls:
 
 ```rust
 // In on_start: requests the warmup and subscribes to the bars.
 warmup::start(self, &bar_types, self.config.warmup)?;
 
-// In on_historical_quotes: the warmup bars of that instrument, oldest first.
+// In on_historical_quotes and on_historical_bars: the warmup bars of the
+// response's instrument, oldest first.
 let bars = warmup::bars(self, quotes);
 ```
 
-- **What `start` does.** Per instrument it requests the historical quotes
-  from `now - warmup` (`request_quotes`) with three params: `bar_types`, the
-  internal bar types to aggregate them into; `update_subscriptions = true`,
-  so that the aggregator goes on with the live quotes and the bar spanning
-  the warmup end and the run start comes out once, complete, in `on_bar`
-  (without it that bar comes out partial, or as a one-quote bar when the
-  run starts on a bar's close); `skip_first_non_full_bar = true`, so that
-  the oldest bar, missing the quotes before `now - warmup`, is dropped.
-  Then it subscribes to the bar types. `backtest_bars.rs` and
-  `backtest_bars_on_close.rs` fail without `update_subscriptions` or
-  `skip_first_non_full_bar`.
-- **What `bars` does.** The bars a request builds go to the cache only,
-  never to `on_historical_bars`; they are there when the quotes response
-  arrives in `on_historical_quotes`. `bars` reads that instrument's internal
-  bars from the cache (newest first there) and returns them oldest first.
-  No strategy names the request params or reads the cache for its warmup.
+- **What `start` requests.** Chosen from the bar type alone, never the
+  venue. A composite bar type is built from its source bars: `start`
+  requests those (`request_bars` of `BarType::composite`, such as
+  `BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL`), and the response comes to
+  `on_historical_bars`. Any other bar type is built from quotes: `start`
+  requests the instrument's quotes (`request_quotes`), and the response
+  comes to `on_historical_quotes`. Source bars that are themselves
+  internal are refused (nothing stores them to request).
+- **The params.** Each request runs from `now - warmup` with three params:
+  `bar_types`, the internal bar types to aggregate the response into
+  (Nautilus' `request_bars` refuses a composite bar type and points to this
+  param); `update_subscriptions = true`, so that the aggregator goes on
+  with the live data and the bar spanning the warmup end and the run start
+  comes out once, complete, in `on_bar` (without it that bar comes out
+  partial, or as a one-update bar when the run starts on a bar's close);
+  `skip_first_non_full_bar = true`, so that the oldest bar, missing the
+  data before `now - warmup`, is dropped. Then it subscribes to the bar
+  types. `backtest_bars.rs`, `backtest_bars_on_close.rs` and
+  `backtest_composite_warmup.rs` pin this.
+- **What `bars` does.** The bars a request builds go to the cache only;
+  they are there when the response arrives. `bars` reads the internal
+  bars of the response's instrument from the cache (newest first there)
+  and returns them oldest first. No strategy names the request params or
+  reads the cache for its warmup.
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
   warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
@@ -275,21 +299,23 @@ let bars = warmup::bars(self, quotes);
   Past the cache's maximum of 1,000,000 it fails, naming the bar type, the
   bars needed and the capacity, and the run does not start. The backtest
   sets it on `BacktestEngineConfig::cache`, live on `LiveNodeConfig::cache`.
-- **Response.** One quotes response per instrument, before the first
-  `on_bar`. An `Err` returned from `on_historical_quotes` is logged, not
-  propagated: a failed warmup does not stop the run. An unanswered request
-  never calls it. Do not trade until warmup has actually arrived.
+- **Response.** One response per request, usually before the first
+  `on_bar`. An `Err` returned from `on_historical_quotes` or
+  `on_historical_bars` is logged, not propagated: a failed warmup does not
+  stop the run. An unanswered request never calls it. Do not trade until
+  warmup has actually arrived.
 - **Who answers.** The data engine serves the request from a registered
   catalog and asks the data client only for the intervals the catalog lacks.
   In backtest the client answers nothing, so the catalog must be registered
   and cover the whole window, or no response comes (see the backtest
   README). In live it can be a catalog, the adapter, or both (see the live
-  README). OKX serves no quote history, so a live run with OKX instruments
-  refuses to start until live quotes are recorded into the catalog.
+  README). OKX's adapter serves its candles up to now; it serves no quote
+  history, so on OKX only composite bar types get a warmup.
 - **Bound by `start`.** `self.clock().utc_now()` is the simulated time in
   backtest; `warmup::start` bounds the request with `now - warmup`.
-- **`request_bars` does not aggregate.** On an internal bar type it does
-  not build bars from quotes; only `request_quotes` with `bar_types` does.
+- **`request_bars` of an internal bar type does not aggregate.** It does
+  not build bars from quotes; only a request of their source with
+  `bar_types` does.
 - **Retrain** on a rolling window of the bars received in `on_bar`, every N
   bars as the config says.
 - **No model files.** The model lives only in memory, so backtest and live
