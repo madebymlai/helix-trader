@@ -1,18 +1,20 @@
 //! OKX history: the instruments of OKX swaps and X-Perps, their 1-minute
-//! candles and the funding of the swaps, filled into the catalog one
-//! archive month, or day, at a time.
+//! candles and their funding, filled into the catalog one archive month, or
+//! day, at a time, then, for funding, from OKX's API.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
 //! `OKXRawHttpClient` and `parse_instrument_any`, with margins of 1 (see
-//! `instrument_from`). Candles and funding come from OKX's archive (see
-//! `archive`): one file per swap, or per futures family, and month or day,
-//! the months and days of the archive being those of UTC+8. Candles are
-//! stored as the bars of the instrument's `1-MINUTE-LAST-EXTERNAL` bar
-//! type, the source of the composite bar types strategies trade OKX on; a
-//! swap's funding as its `FundingRateUpdate`s, which a backtest's venue
-//! settles. The archive serves the funding of swaps only, in monthly files.
-//! The archive API, the download and the conversion are ours, to be removed
-//! if Nautilus gains an equivalent.
+//! `instrument_from`). Candles and a swap's funding come from OKX's archive
+//! (see `archive`): one file per swap, or per futures family, and month or
+//! day, the months and days of the archive being those of UTC+8. Candles
+//! are stored as the bars of the instrument's `1-MINUTE-LAST-EXTERNAL` bar
+//! type, the source of the composite bar types strategies trade OKX on;
+//! funding as the instrument's `FundingRateUpdate`s, which a backtest's
+//! venue settles. The archive serves the funding of swaps only, in monthly
+//! files; the funding after its last month, and an X-Perp's, comes from
+//! the adapter's `OKXHttpClient::request_funding_rates` (see
+//! `fill_funding_from_api`). The archive API, the download and the
+//! conversion are ours, to be removed if Nautilus gains an equivalent.
 
 use std::{collections::HashMap, io::Cursor, time::Duration};
 
@@ -24,7 +26,7 @@ use jiff::{
 };
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    data::{BarSpecification, BarType, Data, NautilusDataType},
+    data::{BarSpecification, BarType, Data, FundingRateUpdate, NautilusDataType},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
@@ -37,7 +39,10 @@ use nautilus_okx::{
         models::OKXInstrument,
         parse::{is_xperp_rule_type, okx_instrument_type_from_symbol, parse_instrument_any},
     },
-    http::{client::OKXRawHttpClient, query::GetInstrumentsParams},
+    http::{
+        client::{OKXHttpClient, OKXRawHttpClient},
+        query::GetInstrumentsParams,
+    },
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
@@ -81,6 +86,8 @@ const LISTED_PERIODS: i32 = 10;
 #[derive(Debug)]
 pub struct OkxHistory {
     client: OKXRawHttpClient,
+    /// Nautilus' client of OKX's API, for its parsed funding history.
+    funding: OKXHttpClient,
     archive: HttpClient,
 }
 
@@ -93,6 +100,8 @@ impl OkxHistory {
     pub fn new() -> anyhow::Result<Self> {
         let client = OKXRawHttpClient::new(None, 60, 3, 1000, 10_000, OKXEnvironment::Live, None)
             .context("building the OKX HTTP client")?;
+        let funding = OKXHttpClient::new(None, 60, 3, 1000, 10_000, OKXEnvironment::Live, None)
+            .context("building the OKX funding client")?;
         let quota = Quota::with_period(ARCHIVE_REQUEST_PERIOD)
             .context("the archive request period is zero")?;
         let archive = HttpClient::builder()
@@ -100,7 +109,11 @@ impl OkxHistory {
             .timeout_secs(ARCHIVE_REQUEST_TIMEOUT_SECS)
             .build()
             .context("building the OKX archive client")?;
-        Ok(Self { client, archive })
+        Ok(Self {
+            client,
+            funding,
+            archive,
+        })
     }
 
     /// Whether `id` is OKX's, so its history comes from here.
@@ -111,14 +124,16 @@ impl OkxHistory {
 
     /// Fills `catalog` over `[start, end]` with `series`, each the bars of
     /// the `1-MINUTE-LAST-EXTERNAL` bar type of an OKX swap or X-Perp, with
-    /// the funding of each swap and their instruments, one archive month,
-    /// or day, at a time (see `fill_from_archive`).
+    /// their instruments, one archive month, or day, at a time (see
+    /// `fill_from_archive`), and the funding of each: a swap's from the
+    /// archive's months, then from OKX's API, an X-Perp's from the API only
+    /// (see `fill_funding_from_api`).
     ///
     /// # Errors
     ///
     /// Returns an error if a series is not such bars, checked before any
-    /// request, or as `fill_from_archive`: no funding file for the month of
-    /// `start` is an error.
+    /// request, or as `fill_from_archive` (no funding file for the month of
+    /// a swap's `start` is an error) and `fill_funding_from_api`.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
@@ -150,22 +165,33 @@ impl OkxHistory {
                 },
             )
             .await?;
-            if contract.inst_type != OKXInstrumentType::Swap {
-                continue;
+            if contract.inst_type == OKXInstrumentType::Swap {
+                fill_from_archive(
+                    catalog,
+                    &instrument,
+                    ArchiveModule::Funding,
+                    (NautilusDataType::FundingRateUpdate, id.to_string()),
+                    start,
+                    end,
+                    async |period, first, last| {
+                        self.files(contract, ArchiveModule::Funding, period, first, last)
+                            .await
+                    },
+                    async |file: &ArchiveFile, from, to| {
+                        self.file_funding(id, file, from, to).await
+                    },
+                )
+                .await?;
             }
-            fill_from_archive(
-                catalog,
-                &instrument,
-                ArchiveModule::Funding,
-                (NautilusDataType::FundingRateUpdate, id.to_string()),
-                start,
-                end,
-                async |period, first, last| {
-                    self.files(contract, ArchiveModule::Funding, period, first, last)
-                        .await
-                },
-                async |file: &ArchiveFile, from, to| self.file_funding(id, file, from, to).await,
-            )
+            fill_funding_from_api(catalog, &instrument, start, end, async |before| {
+                let funding = self
+                    .funding
+                    .request_funding_rates(id, None, Some(before), None)
+                    .await
+                    .with_context(|| format!("requesting the funding of {id} before {before}"))?;
+                log::info!("{id}: {} funding rates before {before}", funding.len());
+                Ok(funding)
+            })
             .await?;
         }
         Ok(())
@@ -446,6 +472,91 @@ async fn fill_from_archive(
     Ok(())
 }
 
+/// Fills `catalog` with `instrument` and its funding at times in `[start,
+/// end]` from OKX's API, resuming 1 ns after the stored funding.
+/// `request(before)` answers the funding at times before `before`, as
+/// Nautilus' `request_funding_rates` with `before` as its end (OKX's
+/// `after`, exclusive, in milliseconds): up to a page of OKX's newest, oldest
+/// first, the oldest without an interval, which Nautilus takes from the time
+/// before it. Pages go backwards from `end`, each ending 1 ms after the
+/// oldest time of the one before, so that this time comes again with its
+/// interval, until a page reaches before the window's first instant or holds
+/// only that time (OKX keeps about 3 months). Only updates with an interval
+/// are stored, over the window's first instant, or, if OKX's history does
+/// not reach it, its first update with an interval, to the newest update:
+/// funding not published yet is not covered.
+///
+/// # Errors
+///
+/// Returns an error if a request fails, if there is no funding on a first
+/// fill (an empty first response, as `fill_catalog`, naming the series), or
+/// if OKX's history no longer reaches the stored end, which would leave a
+/// hole.
+async fn fill_funding_from_api(
+    catalog: &mut ParquetDataCatalog,
+    instrument: &InstrumentAny,
+    start: Timestamp,
+    end: Timestamp,
+    mut request: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<FundingRateUpdate>>,
+) -> anyhow::Result<()> {
+    let id = instrument.id();
+    let series = [(NautilusDataType::FundingRateUpdate, id.to_string())];
+    let last = catalog
+        .query_last_timestamp(&series[0].0.clone().into(), Some(&series[0].1))
+        .with_context(|| format!("reading the stored range of the funding of {id}"))?;
+    let begin = last.map_or(start, |last| {
+        Timestamp::from(UnixNanos::from(last)) + SignedDuration::from_nanos(1)
+    });
+    let millisecond = SignedDuration::from_millis(1);
+    let in_window = |update: &FundingRateUpdate| {
+        let time = Timestamp::from(update.ts_event);
+        update.interval.is_some() && begin <= time && time <= end
+    };
+    let mut funding = Vec::new();
+    let mut before = end + millisecond;
+    let reached = loop {
+        let page = request(before).await?;
+        let Some(oldest) = page.first() else {
+            break false;
+        };
+        let oldest = Timestamp::from(oldest.ts_event);
+        funding.extend(page.iter().copied().filter(in_window));
+        if oldest < begin {
+            break true;
+        }
+        if page.len() == 1 {
+            break false;
+        }
+        before = oldest + millisecond;
+    };
+    ensure!(
+        reached || last.is_none(),
+        "OKX's funding history of {id} no longer reaches {begin}, 1 ns after the stored \
+         funding: filling it would leave a hole; use a new catalog"
+    );
+    let times = || {
+        funding
+            .iter()
+            .map(|update| Timestamp::from(update.ts_event))
+    };
+    let from = if reached {
+        begin
+    } else {
+        times().min().unwrap_or(begin)
+    };
+    let to = times().max().unwrap_or(end);
+    let mut funding: Vec<Data> = funding.into_iter().map(Data::FundingRate).collect();
+    fill_catalog(
+        catalog,
+        vec![instrument.clone()],
+        &series,
+        from,
+        to,
+        async |_, _, _, _| Ok(std::mem::take(&mut funding)),
+    )
+    .await
+}
+
 /// The instrument of `raw`, an OKX swap or X-Perp (a future whose rule
 /// type is `xperp`), through the adapter's `parse_instrument_any`, with
 /// initial and maintenance margins of 1; a dated future is refused. OKX
@@ -722,6 +833,13 @@ impl ArchiveListing {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+    };
+
     use jiff::civil::date;
 
     use nautilus_model::data::{Bar, FundingRateUpdate};
@@ -1701,5 +1819,275 @@ pub(super) mod tests {
         .to_string();
         assert!(err.contains(&format!("funding_rates of {BTC}")), "{err}");
         assert!(stored_funding(&mut catalog).is_empty());
+    }
+
+    /// OKX's funding history of the X-Perp as its API answered it on
+    /// 2026-10-23 with `limit=8`: its 8 funding times from 2026-10-20T08:00Z
+    /// to 2026-10-22T16:00Z, newest first.
+    const XPERP_FUNDING: &str =
+        include_str!("testdata/BTC-USD_UM_XPERP-310404-funding-rate-history.json");
+
+    /// A local OKX answering the funding history requests of Nautilus'
+    /// client from `XPERP_FUNDING`, as OKX pages it: the newest `page`
+    /// funding times before the request's `after`, newest first. Gives the
+    /// client and the `after` of each request, in milliseconds.
+    fn okx_funding(page: usize) -> (OKXHttpClient, Arc<Mutex<Vec<u64>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let afters = asked.clone();
+        thread::spawn(move || {
+            let recorded: serde_json::Value = serde_json::from_str(XPERP_FUNDING).unwrap();
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut head = String::new();
+                for line in BufReader::new(&stream).lines() {
+                    let line = line.unwrap();
+                    if line.is_empty() {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let after: u64 = head
+                    .split(['?', '&', ' '])
+                    .find_map(|param| param.strip_prefix("after="))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                afters.lock().unwrap().push(after);
+                let data: Vec<_> = recorded["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|row| {
+                        row["fundingTime"].as_str().unwrap().parse::<u64>().unwrap() < after
+                    })
+                    .take(page)
+                    .collect();
+                let body = serde_json::json!({"code": "0", "msg": "", "data": data}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = OKXHttpClient::new(Some(url), 5, 0, 1, 1, OKXEnvironment::Live, None).unwrap();
+        (client, asked)
+    }
+
+    const XPERP: &str = "BTC-USD_UM_XPERP-310404.OKX";
+
+    async fn fill_xperp_funding(
+        catalog: &mut ParquetDataCatalog,
+        client: &OKXHttpClient,
+        start: &str,
+        end: &str,
+    ) -> anyhow::Result<()> {
+        fill_funding_from_api(
+            catalog,
+            &xperp_instrument(),
+            at(start),
+            at(end),
+            async |before| {
+                client
+                    .request_funding_rates(xperp(), None, Some(before), None)
+                    .await
+            },
+        )
+        .await
+    }
+
+    fn stored_xperp_funding(catalog: &mut ParquetDataCatalog) -> Vec<FundingRateUpdate> {
+        catalog
+            .funding_rates(Some(vec![XPERP.to_string()]), None, None)
+            .unwrap()
+    }
+
+    fn ms(s: &str) -> u64 {
+        at(s).as_millisecond().try_into().unwrap()
+    }
+
+    /// The stored intervals of the X-Perp's funding.
+    fn xperp_intervals(catalog: &ParquetDataCatalog) -> Vec<(u64, u64)> {
+        catalog
+            .get_intervals(&NautilusDataType::FundingRateUpdate.into(), Some(XPERP))
+            .unwrap()
+    }
+
+    fn ns(s: &str) -> u64 {
+        UnixNanos::from(at(s)).as_u64()
+    }
+
+    #[tokio::test]
+    async fn api_funding_is_paged_back_to_the_window_start_each_update_with_its_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (client, asked) = okx_funding(3);
+        fill_xperp_funding(
+            &mut catalog,
+            &client,
+            "2026-10-21T00:00:00Z",
+            "2026-10-23T00:00:00Z",
+        )
+        .await
+        .unwrap();
+        // Each page ends 1 ms after the oldest time of the one before, until
+        // one reaches before the start.
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [
+                ms("2026-10-23T00:00:00.001Z"),
+                ms("2026-10-22T00:00:00.001Z"),
+                ms("2026-10-21T08:00:00.001Z"),
+            ]
+        );
+        let stored = stored_xperp_funding(&mut catalog);
+        let times: Vec<_> = stored
+            .iter()
+            .map(|update| Timestamp::from(update.ts_event))
+            .collect();
+        assert_eq!(
+            times,
+            [
+                "2026-10-21T00:00:00Z",
+                "2026-10-21T08:00:00Z",
+                "2026-10-21T16:00:00Z",
+                "2026-10-22T00:00:00Z",
+                "2026-10-22T08:00:00Z",
+                "2026-10-22T16:00:00Z",
+            ]
+            .map(at)
+        );
+        // As Nautilus parses them: the rate, the interval from the time
+        // before, `ts_init` the funding time, no next funding time.
+        for update in &stored {
+            assert_eq!(update.instrument_id, xperp());
+            assert_eq!(update.interval, Some(480));
+            assert_eq!(update.ts_init, update.ts_event);
+            assert_eq!(update.next_funding_ns, None);
+        }
+        assert_eq!(stored[0].rate.to_string(), "0.0001");
+        assert_eq!(stored[5].rate.to_string(), "0.0001453767332828");
+        // Covered from the start to the newest funding time.
+        assert_eq!(
+            xperp_intervals(&catalog),
+            [(ns("2026-10-21T00:00:00Z"), ns("2026-10-22T16:00:00Z"))]
+        );
+        assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn api_funding_goes_back_as_far_as_okx_keeps_it_with_an_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (client, asked) = okx_funding(3);
+        fill_xperp_funding(
+            &mut catalog,
+            &client,
+            "2026-10-01T00:00:00Z",
+            "2026-10-23T00:00:00Z",
+        )
+        .await
+        .unwrap();
+        // The last page holds only the oldest time OKX keeps.
+        assert_eq!(asked.lock().unwrap().len(), 5);
+        assert_eq!(
+            asked.lock().unwrap().last(),
+            Some(&ms("2026-10-20T08:00:00.001Z"))
+        );
+        // That time has no interval, so the funding starts after it.
+        let stored = stored_xperp_funding(&mut catalog);
+        assert_eq!(stored.len(), 7);
+        assert_eq!(
+            xperp_intervals(&catalog),
+            [(ns("2026-10-20T16:00:00Z"), ns("2026-10-22T16:00:00Z"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_api_funding_fill_resumes_after_the_stored_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (client, _) = okx_funding(3);
+        let start = "2026-10-21T00:00:00Z";
+        fill_xperp_funding(&mut catalog, &client, start, "2026-10-21T12:00:00Z")
+            .await
+            .unwrap();
+        let (client, asked) = okx_funding(3);
+        fill_xperp_funding(&mut catalog, &client, start, "2026-10-23T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [
+                ms("2026-10-23T00:00:00.001Z"),
+                ms("2026-10-22T00:00:00.001Z"),
+            ]
+        );
+        assert_eq!(
+            xperp_intervals(&catalog),
+            [
+                (ns("2026-10-21T00:00:00Z"), ns("2026-10-21T08:00:00Z")),
+                (
+                    ns("2026-10-21T08:00:00.000000001Z"),
+                    ns("2026-10-22T16:00:00Z")
+                ),
+            ]
+        );
+        // As one uninterrupted fill.
+        let dir = tempfile::tempdir().unwrap();
+        let mut whole = new_catalog(&dir);
+        let (client, _) = okx_funding(3);
+        fill_xperp_funding(&mut whole, &client, start, "2026-10-23T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_xperp_funding(&mut catalog),
+            stored_xperp_funding(&mut whole)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_api_funding_fill_no_longer_reaching_the_stored_end_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let ts = UnixNanos::from(at("2026-10-19T00:00:00Z"));
+        let stored = FundingRateUpdate::new(xperp(), Decimal::new(1, 4), Some(480), None, ts, ts);
+        catalog
+            .write_to_parquet(&[stored], None, None, None)
+            .unwrap();
+        let (client, _) = okx_funding(3);
+        let err = fill_xperp_funding(
+            &mut catalog,
+            &client,
+            "2026-10-19T00:00:00Z",
+            "2026-10-23T00:00:00Z",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(XPERP), "{err}");
+        assert!(err.contains("hole"), "{err}");
+        assert_eq!(stored_xperp_funding(&mut catalog).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_api_funding_on_a_first_fill_is_an_error_naming_the_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (client, _) = okx_funding(3);
+        let err = fill_xperp_funding(
+            &mut catalog,
+            &client,
+            "2026-10-01T00:00:00Z",
+            "2026-10-20T00:00:00Z",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&format!("funding_rates of {XPERP}")), "{err}");
     }
 }
