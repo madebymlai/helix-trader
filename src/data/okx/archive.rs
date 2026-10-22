@@ -1,9 +1,10 @@
 //! OKX's order-book archive turned into quotes: one day's `.tar.gz` file
-//! holds one JSON-lines file, a full snapshot of the book every 15 minutes
-//! and the changed levels in between. Each line becomes an `OKXBookMsg`,
-//! the adapter's `parse_book_msg` makes its `OrderBookDeltas`, and a
-//! Nautilus `OrderBook` replays them; a quote is the book's top whenever it
-//! changes. To be removed if Nautilus gains a loader for this archive.
+//! holds one JSON-lines file per contract (one for a swap, one per contract
+//! of a futures chain), named after it: a full snapshot of the book every
+//! 15 minutes and the changed levels in between. Each line becomes an
+//! `OKXBookMsg`, the adapter's `parse_book_msg` makes its
+//! `OrderBookDeltas`, and a Nautilus `OrderBook` replays them; a quote is
+//! the book's top whenever it changes. To be removed if Nautilus gains a loader for this archive.
 
 use std::io::{BufRead, BufReader, Read};
 
@@ -37,11 +38,14 @@ pub(super) struct BookQuotes {
     pub one_sided: usize,
 }
 
-/// One line of the archive: the fields of an `OKXBookMsg` except the
-/// sequence numbers and checksum, which the archive does not carry. Levels
-/// are `[price, size, order count]`; a size of `0` deletes the level.
+/// One line of the archive: its contract and the fields of an `OKXBookMsg`
+/// except the sequence numbers and checksum, which the archive does not
+/// carry. Levels are `[price, size, order count]`; a size of `0` deletes
+/// the level.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BookLine {
+    inst_id: String,
     action: OKXBookAction,
     #[serde(deserialize_with = "deserialize_string_to_u64")]
     ts: u64,
@@ -52,30 +56,31 @@ struct BookLine {
 }
 
 /// The quotes of `instrument` in `[from, through]` from a day file of the
-/// archive (`.tar.gz` of one `.data` file), read as a stream.
+/// archive (`.tar.gz` of `.data` files), read as a stream: its contract's
+/// file, `<symbol>-L2orderbook-….data`; the others are skipped.
 ///
 /// # Errors
 ///
-/// Returns an error if the file is not one such archive, or as
-/// `quotes_from_book`.
+/// Returns an error if the file is not one such archive or holds no file
+/// of the contract, or as `quotes_from_book`.
 pub(super) fn quotes_from_archive(
     archive: impl Read,
     instrument: &InstrumentAny,
     from: UnixNanos,
     through: UnixNanos,
 ) -> anyhow::Result<BookQuotes> {
+    let id = instrument.id();
+    let prefix = format!("{}-L2orderbook-", id.symbol);
     let mut archive = tar::Archive::new(GzDecoder::new(archive));
-    let mut entries = archive.entries().context("reading the archive")?;
-    let entry = entries
-        .next()
-        .context("the archive is empty")?
-        .context("reading the archive")?;
-    let name = entry.path()?.display().to_string();
-    if !name.ends_with(".data") {
-        bail!("the archive holds {name}, not an order-book .data file");
+    for entry in archive.entries().context("reading the archive")? {
+        let entry = entry.context("reading the archive")?;
+        let name = entry.path()?.display().to_string();
+        if name.starts_with(&prefix) && name.ends_with(".data") {
+            return quotes_from_book(BufReader::new(entry), instrument, from, through)
+                .with_context(|| format!("reading {name}"));
+        }
     }
-    quotes_from_book(BufReader::new(entry), instrument, from, through)
-        .with_context(|| format!("reading {name}"))
+    bail!("the archive holds no order-book file of {id} ({prefix}….data)")
 }
 
 /// The quotes of `instrument` in `[from, through]` from the lines of a
@@ -91,8 +96,9 @@ pub(super) fn quotes_from_archive(
 ///
 /// # Errors
 ///
-/// Returns an error naming the line if it cannot be read or parsed, or if
-/// its levels do not fit the instrument's precisions.
+/// Returns an error naming the line if it cannot be read or parsed, if it
+/// is of another contract, or if its levels do not fit the instrument's
+/// precisions.
 pub(super) fn quotes_from_book(
     lines: impl BufRead,
     instrument: &InstrumentAny,
@@ -111,6 +117,9 @@ pub(super) fn quotes_from_book(
         let number = index + 1;
         let line: BookLine =
             serde_json::from_str(&line?).with_context(|| format!("parsing line {number}"))?;
+        if line.inst_id != id.symbol.as_str() {
+            bail!("line {number} is of {}, not of {id}", line.inst_id);
+        }
         let ts = parse_millisecond_timestamp(line.ts);
         if ts > through {
             break;
@@ -198,7 +207,7 @@ fn book_top(book: &OrderBook) -> Option<Top> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::okx::tests::btc_instrument;
+    use crate::data::okx::tests::{btc_instrument, xperp_instrument};
 
     /// A sample of the archive file of BTC-USDT-SWAP for 2026-10-19 UTC:
     /// lines 1-200 (from the day's first snapshot) and 75,005-75,060 (the
@@ -414,6 +423,122 @@ mod tests {
     fn a_line_without_levels_changes_nothing() {
         let text = [SNAPSHOT.to_string(), update(1001, "", "")].join("\n");
         assert_eq!(lines(&text).quotes.len(), 1);
+    }
+
+    /// A sample of the X-Perp chain's archive file for 2026-10-19 UTC:
+    /// lines 1-200 (from the day's first snapshot) and 25,521-25,560 (the
+    /// snapshot of 00:15 and what follows) of its one contract,
+    /// BTC-USD_UM_XPERP-310404, unchanged, under the file's own name.
+    const XPERP_SAMPLE: &[u8] = include_bytes!(
+        "testdata/BTC-USD_UM_XPERP-futureschain-L2orderbook-400lv-2026-10-19-sample.tar.gz"
+    );
+
+    #[test]
+    fn the_x_perp_sample_gives_one_quote_per_change_of_its_contracts_top() {
+        let made = quotes_from_archive(
+            XPERP_SAMPLE,
+            &xperp_instrument(),
+            UnixNanos::default(),
+            UnixNanos::from(u64::MAX),
+        )
+        .unwrap();
+        assert_eq!(made.quotes.len(), 145);
+        assert_eq!((made.crossed, made.one_sided), (0, 0));
+        let all = rows(&made.quotes);
+        assert_eq!(
+            all[..3],
+            [
+                r(1_792_368_000_004, "82057.1", "4236", "82057.2", "8979"),
+                r(1_792_368_000_014, "82057.1", "1", "82057.2", "16950"),
+                r(1_792_368_000_164, "82046.7", "6152", "82046.8", "6753"),
+            ]
+        );
+        assert_eq!(
+            all[142..],
+            [
+                r(1_792_368_901_344, "82094.7", "6721", "82094.8", "1572"),
+                r(1_792_368_901_354, "82094.7", "6734", "82094.8", "1572"),
+                r(1_792_368_901_374, "82094.7", "6734", "82094.8", "1420"),
+            ]
+        );
+        assert_eq!(
+            made.quotes[0].instrument_id,
+            nautilus_model::identifiers::InstrumentId::from("BTC-USD_UM_XPERP-310404.OKX")
+        );
+    }
+
+    /// A `.tar.gz` holding `files` (name, lines) in order, as a chain's
+    /// archive file holds one file per contract.
+    fn chain(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (name, lines) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(lines.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, lines.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn of_a_chain_only_the_file_of_the_instruments_contract_is_read() {
+        let other = SNAPSHOT
+            .replace("BTC-USDT-SWAP", "BTC-USDT-261030")
+            .replace("100.1", "200.1");
+        let archive = chain(&[
+            ("BTC-USDT-261030-L2orderbook-400lv-2026-10-19.data", &other),
+            ("BTC-USDT-SWAP-L2orderbook-400lv-2026-10-19.data", SNAPSHOT),
+        ]);
+        let made = quotes_from_archive(
+            archive.as_slice(),
+            &btc_instrument(),
+            UnixNanos::default(),
+            UnixNanos::from(u64::MAX),
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&made.quotes),
+            [r(1000, "100.0", "1.00", "100.1", "2.00")]
+        );
+    }
+
+    #[test]
+    fn a_chain_without_the_instruments_contract_is_an_error_naming_it() {
+        let other = SNAPSHOT.replace("BTC-USDT-SWAP", "BTC-USDT-261030");
+        let archive = chain(&[("BTC-USDT-261030-L2orderbook-400lv-2026-10-19.data", &other)]);
+        let err = quotes_from_archive(
+            archive.as_slice(),
+            &btc_instrument(),
+            UnixNanos::default(),
+            UnixNanos::from(u64::MAX),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("BTC-USDT-SWAP.OKX"), "{err:#}");
+    }
+
+    #[test]
+    fn a_line_of_another_contract_is_an_error_naming_it() {
+        let other =
+            update(1001, r#"["100.2","5","1"]"#, "").replace("BTC-USDT-SWAP", "BTC-USDT-261030");
+        let text = [SNAPSHOT, &other].join("\n");
+        let err = quotes_from_book(
+            text.as_bytes(),
+            &btc_instrument(),
+            UnixNanos::default(),
+            UnixNanos::from(u64::MAX),
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("line 2") && err.contains("BTC-USDT-261030"),
+            "{err}"
+        );
     }
 
     #[test]

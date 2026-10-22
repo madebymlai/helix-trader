@@ -25,7 +25,7 @@ data/
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one day at a time
     archive.rs     an order-book day file -> quotes
-    testdata/      a sample of a real archive file, a real instrument and tier
+    testdata/      samples of real archive files, real instruments and tiers
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
@@ -547,8 +547,9 @@ instrument is in it.
 
 ### OKX specifics (history)
 
-`okx/` serves OKX swaps (`BTC-USDT-SWAP.OKX`). It uses OKX's public
-endpoints only, with no key.
+`okx/` serves OKX swaps (`BTC-USDT-SWAP.OKX`) and X-Perps
+(`BTC-USD_UM_XPERP-310404.OKX`, the contracts an EEA account trades). It
+uses OKX's public endpoints only, with no key.
 
 ```rust
 OkxHistory::new() -> anyhow::Result<OkxHistory>
@@ -556,12 +557,24 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
     .await -> anyhow::Result<()>        // instruments, then quotes day by day
 ```
 
-- **Instruments.** `OKXRawHttpClient::get_instruments` (`/public/instruments`)
-  gives OKX's definition; `parse_instrument_any` turns it into a Nautilus
-  `CryptoPerpetual` (contract value as the multiplier, tick and lot sizes
-  as increments). The adapter leaves the margins at 0, so `okx/` passes the
-  initial and maintenance margin of OKX's first position tier, cross
-  margin (`get_position_tiers`; BTC: 1% and 0.4%).
+- **Instruments.** The symbol gives the type (Nautilus'
+  `okx_instrument_type_from_symbol`: `…-SWAP` a swap, `…-310404` a
+  future) and the family (the symbol without its last part: `BTC-USDT`,
+  `BTC-USD_UM_XPERP`). `OKXRawHttpClient::get_instruments`
+  (`/public/instruments`) gives OKX's definition; `parse_instrument_any`
+  turns a swap into a `CryptoPerpetual` and a future into a
+  `CryptoFuture` (contract value as the multiplier, tick and lot sizes as
+  increments). The adapter leaves the margins at 0, so `okx/` passes them,
+  from OKX's first position tier, cross margin (`get_position_tiers`):
+  - a swap takes the tier's initial and maintenance margins (BTC: 1% and
+    0.4%);
+  - an X-Perp (rule type `xperp`) takes the tier's maintenance margin
+    (BTC: 0.65%) and an initial margin of 10%, 1 / 10x: OKX Europe caps
+    retail accounts at 10x, below the tier's 50x;
+  - a dated future is refused.
+- **X-Perps.** A `CryptoFuture` expiring in 2031, linear, settled in USD
+  (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole
+  contracts, tick 0.1. Funding is not filled (out of scope, as for swaps).
 - **One UTC day at a time.** `fill` calls `fill_catalog` once per UTC day
   and per instrument, over `[start, end of that day]`, the day ending 1 ns
   before the next midnight: a line stamped at midnight is in the next
@@ -574,9 +587,17 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   up at its last stored day. An instrument starts on the day it resumes
   in; a day starting at `end` is left to the next run.
 - **The archive.** For each day, `GET /api/v5/public/market-data-history`
-  (module 4, the 400-level order book; 5 requests per 2 s) names the day's
-  file; it is downloaded from `static.okx.com` into a temporary file
-  (about 375 MB for BTC), read as a stream and deleted. Days are UTC.
+  (module 4, the 400-level order book; 5 requests per 2 s; `instType`
+  `SWAP` or `FUTURES`, the family) names the day's file; it is downloaded
+  from `static.okx.com` into a temporary file, read as a stream and
+  deleted. Days are UTC. A swap has its own file
+  (`BTC-USDT-SWAP-L2orderbook-400lv-<day>.tar.gz`, about 375 MB for BTC);
+  a future is in its family's chain file
+  (`BTC-USD_UM_XPERP-futureschain-L2orderbook-400lv-<day>.tar.gz`, 20-60 MB
+  for BTC), which holds one `.data` file per contract of the family, named
+  after it. The reader takes the contract's file and skips the others; a
+  line naming another contract is an error. The X-Perp archive starts in
+  April 2026.
 - **Quotes from the book.** Each line of the file (a snapshot every 15
   minutes, changed levels in between) becomes the adapter's `OKXBookMsg`,
   `parse_book_msg` makes its deltas, and a Nautilus `OrderBook` (L2)
@@ -611,6 +632,11 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   and reading the file takes 20-30 s. A re-run over the same window asked
   for nothing; extending to 10-21 filled 10-19 and stopped at 10-20, not
   yet published.
+- **Verified on X-Perps** (2026-10-22, BTC-USD_UM_XPERP-310404.OKX,
+  2026-10-18 to 10-20): chain files of 30, 39 and 47 MB gave 606,439,
+  884,471 and 1,070,913 quotes (0 crossed, 0 one-sided), 5-9 MB a day in
+  the catalog, the three days in 68 s. The 10-19 count equals a plain
+  replay of the file outside Nautilus.
 
 ### Other sources
 
@@ -774,17 +800,20 @@ bar after a roll behaves when the new contract has not ticked yet is
     answer and on no progress, trims to `(start, end]`, sorted and
     unique); the data client config and the bar requests use the full
     session.
-  - `okx/`: the sample of a real archive file to quotes (count, first
-    and last against a plain replay, precisions, exchange time, a window
-    from a resume point, a line at its start), and on small hand-made lines: a change below
-    the top gives no quote, a snapshot resets the book, crossed and
-    one-sided tops dropped and counted, a locked one kept, a bad line
-    named; the real BTC instrument and tier to a `CryptoPerpetual` with
-    its margins; the archive listing; the fill one UTC day per call with a
-    fake day source (resume, the line at midnight, a day not published, a
-    later start, a failed day keeping the days before, no file on the
-    first day); a start before
-    the archive refused.
+  - `okx/`: the samples of a real swap file and a real X-Perp chain file
+    to quotes (count, first and last against a plain replay, precisions,
+    exchange time, a window from a resume point, a line at its start), and
+    on small hand-made lines: a change below the top gives no quote, a
+    snapshot resets the book, crossed and one-sided tops dropped and
+    counted, a locked one kept, a bad line named, a line of another
+    contract named; of a chain only the contract's file read, a chain
+    without it an error; the real BTC swap and X-Perp with their tiers to
+    a `CryptoPerpetual` and a `CryptoFuture` with their margins, a dated
+    future refused; the type and family of a symbol; the archive listing
+    of a swap and of a chain; the fill one UTC day per call with a fake
+    day source (resume, the line at midnight, a day not published, a later
+    start, a failed day keeping the days before, no file on the first
+    day); a start before the archive refused.
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last

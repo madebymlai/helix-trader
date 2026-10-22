@@ -750,6 +750,65 @@ outside Nautilus:
   currency gave the same report and the same fill, margin and balance
   events, line for line.
 
+## OKX X-Perps
+
+An X-Perp (`BTC-USD_UM_XPERP-310404.OKX`), the contract an EEA account
+trades instead of a swap, backtests through the same code as a swap. The
+catalog holds a `CryptoFuture` (data README, "OKX specifics").
+
+- **Venue.** The same as for a swap. The balance is in USD
+  (`--balance "10000 USD"`), the currency the X-Perps settle in.
+- **Two decimals.** Nautilus' USD has two decimals, so each fill's value,
+  commission and PnL is rounded to the cent (half to even), half a cent
+  at most each.
+- **Margins.** 10% for orders (10x, OKX Europe's retail cap) and OKX's
+  first tier for the open position (BTC: 0.65%).
+- **Contract size.** 0.0001 BTC a contract, whole contracts: 100
+  contracts are the 0.01 BTC of one BTC-USDT-SWAP contract.
+- **Listing and expiry.** Nautilus rejects orders on a future before its
+  listing (BTC: 2026-03-30) or after its expiry (2031-04-04).
+- **Funding is not charged.** X-Perps pay funding as swaps do; it is
+  out of scope here too.
+
+**Verified next to BTC-USDT-SWAP**, 2026-10-22: scratch catalogs filled
+from OKX's archive for 2026-10-18 to 10-20 UTC, EMA 10/30 on
+`1-MINUTE-MID` bars, `warmup = "1h"`, no session, `--commission-rate
+0.0005`, `--start 2026-10-18T01:00:30Z --end 2026-10-20T23:59:00Z`, 0.01
+BTC a trade (`trade_size = "100"` on the X-Perp, `"1.00"` on the swap):
+
+| | X-Perp | Swap |
+|---|---|---|
+| Quotes (3 days) | 2,561,823 | 7,391,834 |
+| Catalog | 21 MB | 78 MB |
+| Orders (filled) | 159 (159) | 159 (159) |
+| Fills | 171 | 159 |
+| PnL (total) | -137.29 USD | -139.31 USDT |
+| Commission | 129.93 USD | 129.89 USDT |
+| Spread | 0.18 USD | 0.16 USDT |
+| Gross PnL | -7.18 USD | -9.26 USDT |
+| Max drawdown | 1.38% | 1.39% |
+| Final balance | 9862.71 USD | 9860.69 USDT |
+| Run time | 18 s | 22 s |
+
+Funding not included. Checked against the stored quotes, outside
+Nautilus:
+
+- **Similar trades.** 120 of the 159 orders came at the same minute and
+  side on both; there the X-Perp filled a median 24 USD below the swap
+  (3-44), USD against USDT.
+- **Fills.** Every order's first fill at the ask (buys) or the bid
+  (sells) of the last quote at or before it; every spread one tick (0.1).
+- **Thinner book.** The X-Perp's best bid or ask holds a median 0.6 BTC
+  (swap 8.6 BTC), under 0.02 BTC 5% of the time (swap 0.4%). So 12 of
+  the 159 X-Perp orders, 0.02 BTC when flipping, took the top size and
+  filled the rest one tick worse (Nautilus' fill without
+  `liquidity_consumption`, see Fills): 12 fills more.
+- **Commission.** 0.05% of each fill's value, to the cent on the X-Perp
+  (rounded twice: value, then commission), to the eighth decimal on the
+  swap.
+- **Margin.** The long left open locks 5.40 USD on the X-Perp (0.65% of
+  830.00) and 3.32 USDT on the swap (0.4% of 829.62).
+
 ## Verified on IB data
 
 Paper gateway, 2026-10-08, SXR8.IBIS 1-HOUR-LAST, EMA 10/30 (the
@@ -959,3 +1018,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     close, the buy at the ask and the sell at the bid of the latest quote,
     0.05% on each fill's value, the short left open locking 0.4% of its
     value, and the report's costs.
+  - `backtest_okx_xperp.rs`: the same quotes and orders on
+    BTC-USD_UM_XPERP-310404.OKX, a `CryptoFuture` of 0.0001 BTC a contract
+    settled in USD, with 10% initial and 0.65% maintenance margins: 200
+    contracts bought and 300 sold, the same bars and fills, the
+    commission, PnL and margin in USD at two decimals, and the report's
+    costs.
