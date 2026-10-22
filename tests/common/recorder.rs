@@ -1,8 +1,9 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
 //! strategy does, records every bar it gets, warmup and replayed, and
-//! every fill, and can rest a sell stop on its first replayed bar. For the
-//! tests that need what the EMA crossover cannot show: the bars' open,
-//! high and low, and stop orders.
+//! every fill, and can rest a sell stop on its first replayed bar or send
+//! market orders of its choosing on the first replayed bars. For the tests
+//! that need what the EMA crossover cannot show: the bars' open, high and
+//! low, stop orders, and fills of a given side and size.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -40,6 +41,8 @@ pub struct Recorder {
     warmup: SignedDuration,
     /// The trigger of the sell stop of 10 shares sent on the first bar.
     stop: Option<Price>,
+    /// The market order sent on each of the first replayed bars, in order.
+    market: Vec<(OrderSide, Quantity)>,
     record: Rc<RefCell<Record>>,
 }
 
@@ -61,9 +64,21 @@ impl Recorder {
             bar_type,
             warmup,
             stop,
+            market: vec![],
             record: Rc::clone(&record),
         };
         (recorder, record)
+    }
+
+    /// A recorder of `bar_type` after `warmup` sending the market order
+    /// `market[i]` on the `i`-th replayed bar, and the record it fills.
+    pub fn trading(
+        bar_type: BarType,
+        warmup: SignedDuration,
+        market: Vec<(OrderSide, Quantity)>,
+    ) -> (Self, Rc<RefCell<Record>>) {
+        let (recorder, record) = Self::new(bar_type, warmup, None);
+        (Self { market, ..recorder }, record)
     }
 }
 
@@ -89,8 +104,24 @@ impl DataActor for Recorder {
     }
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        let first = self.record.borrow().bars.is_empty();
+        let index = self.record.borrow().bars.len();
+        let first = index == 0;
         self.record.borrow_mut().bars.push(*bar);
+        if let Some(&(side, quantity)) = self.market.get(index) {
+            let order = self.order().market(
+                bar.bar_type.instrument_id(),
+                side,
+                quantity,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            self.submit_order(order, None, None, None)?;
+        }
         let Some(trigger) = self.stop.filter(|_| first) else {
             return Ok(());
         };

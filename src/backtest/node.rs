@@ -19,6 +19,7 @@ use nautilus_backtest::{
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
+    accounts::margin_model::{MarginModelAny, StandardMarginModel},
     data::{Data, NautilusDataType},
     enums::{AccountType, BookType, OmsType},
     identifiers::{InstrumentId, Venue},
@@ -33,7 +34,9 @@ use crate::strategy::warmup;
 const RUN_ID: &str = "backtest";
 
 /// The run config of `backtest`: one venue named after the instruments'
-/// venue, which fills orders on the quotes, the instruments' quotes of the
+/// venue, with margins the instruments' rates of the notional (Nautilus'
+/// `StandardMarginModel`, leverage ignored), which fills orders on the
+/// quotes, the instruments' quotes of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
@@ -65,6 +68,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![backtest.balance.to_string()])
+        .margin_model(MarginModelAny::Standard(StandardMarginModel))
         .fee_model(backtest.fee_model.clone())
         .fill_model(costs::fill_model()?)
         .bar_execution(false)
@@ -178,6 +182,16 @@ mod tests {
         assert_eq!(venue.oms_type(), OmsType::Netting);
         assert_eq!(venue.account_type(), AccountType::Margin);
         assert_eq!(venue.book_type(), BookType::L1_MBP);
+    }
+
+    #[test]
+    fn margins_are_the_instruments_rates_of_the_notional_whatever_the_leverage() {
+        let config = run_config(&backtest()).unwrap();
+        let margin_model = config.venues()[0].margin_model();
+        assert!(
+            matches!(margin_model, Some(MarginModelAny::Standard(_))),
+            "{margin_model:?}"
+        );
     }
 
     #[test]
