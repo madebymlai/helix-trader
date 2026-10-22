@@ -1,6 +1,7 @@
-//! OKX's candle archive turned into bars: one day's `.zip` holds one CSV of
-//! the confirmed 1-minute candles of a swap, or of every contract of a
-//! futures chain, one row per candle, stamped at the minute's open.
+//! OKX's candle archive turned into bars: a month's or a day's `.zip` holds
+//! one CSV of the confirmed 1-minute candles of a swap, or of every contract
+//! of a futures chain, one row per candle, stamped at the minute's open. A
+//! month's file holds the same rows as its days' files.
 //!
 //! Each row becomes the adapter's `OKXCandlestick` and the adapter's
 //! `parse_candlestick` makes its bar, at the instrument's precisions, so
@@ -60,9 +61,9 @@ impl CandleRow {
 }
 
 /// The bars of `bar_type`, a 1-minute bar type of `instrument`, whose
-/// `ts_init` (close) is in `[from, through]`, from a day file of the
-/// archive: the rows of its contract; those of other contracts of a chain
-/// are skipped.
+/// `ts_init` (close) is in `[from, through]`, from a month or day file of
+/// the archive: the rows of its contract; those of other contracts of a
+/// chain are skipped.
 ///
 /// # Errors
 ///
@@ -129,6 +130,14 @@ mod tests {
         include_bytes!("testdata/BTC-USDT-SWAP-candlesticks-2026-10-19-sample.zip");
     const XPERP_DAY: &[u8] =
         include_bytes!("testdata/BTC-USD_UM_XPERP-futureschain-candlesticks-2026-10-19-sample.zip");
+    /// The first and last hours of 2026-09, from the month's file and from
+    /// the files of its first and last days.
+    const SWAP_MONTH: &[u8] =
+        include_bytes!("testdata/BTC-USDT-SWAP-candlesticks-2026-09-sample.zip");
+    const SWAP_FIRST_DAY: &[u8] =
+        include_bytes!("testdata/BTC-USDT-SWAP-candlesticks-2026-09-01-sample.zip");
+    const SWAP_LAST_DAY: &[u8] =
+        include_bytes!("testdata/BTC-USDT-SWAP-candlesticks-2026-09-30-sample.zip");
 
     fn ns(s: &str) -> UnixNanos {
         UnixNanos::from(s.parse::<Timestamp>().unwrap())
@@ -167,6 +176,24 @@ mod tests {
         let last = bars[61];
         assert_eq!(last.ts_event, ns("2026-10-19T15:59:00Z"));
         assert_eq!(last.ts_init, ns("2026-10-19T16:00:00Z"));
+    }
+
+    #[test]
+    fn a_months_file_makes_the_bars_of_its_days_files() {
+        let btc = btc_instrument();
+        let month = read(SWAP_MONTH, &btc).unwrap();
+        let mut days = read(SWAP_FIRST_DAY, &btc).unwrap();
+        days.extend(read(SWAP_LAST_DAY, &btc).unwrap());
+        assert_eq!(month.len(), 120);
+        assert_eq!(month, days);
+    }
+
+    #[test]
+    fn a_months_file_holds_the_minutes_opening_in_its_month_of_utc_plus_8() {
+        let bars = read(SWAP_MONTH, &btc_instrument()).unwrap();
+        assert_eq!(bars[0].ts_event, ns("2026-08-31T16:00:00Z"));
+        assert_eq!(bars[119].ts_event, ns("2026-09-30T15:59:00Z"));
+        assert_eq!(bars[119].ts_init, ns("2026-09-30T16:00:00Z"));
     }
 
     #[test]
