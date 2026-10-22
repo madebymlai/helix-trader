@@ -124,16 +124,13 @@ impl OkxHistory {
 
     /// Fills `catalog` over `[start, end]` with `series`, each the bars of
     /// the `1-MINUTE-LAST-EXTERNAL` bar type of an OKX swap or X-Perp, with
-    /// their instruments, one archive month, or day, at a time (see
-    /// `fill_from_archive`), and the funding of each: a swap's from the
-    /// archive's months, then from OKX's API, an X-Perp's from the API only
-    /// (see `fill_funding_from_api`).
+    /// their instruments and the funding of each, the funding before the
+    /// bars (see `fill_series`).
     ///
     /// # Errors
     ///
     /// Returns an error if a series is not such bars, checked before any
-    /// request, or as `fill_from_archive` (no funding file for the month of
-    /// a swap's `start` is an error) and `fill_funding_from_api`.
+    /// request, or as `fill_series`.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
@@ -149,49 +146,33 @@ impl OkxHistory {
             let id = bar_type.instrument_id();
             let contract = Contract::of(id)?;
             let instrument = self.instrument(id).await?;
-            fill_from_archive(
+            fill_series(
                 catalog,
                 &instrument,
-                ArchiveModule::Candles,
-                (NautilusDataType::Bar, bar_type.to_string()),
+                bar_type,
                 start,
                 end,
-                async |period, first, last| {
-                    self.files(contract, ArchiveModule::Candles, period, first, last)
-                        .await
+                async |module, period, first, last| {
+                    self.files(contract, module, period, first, last).await
                 },
-                async |file: &ArchiveFile, from, to| {
-                    self.file_bars(&instrument, bar_type, file, from, to).await
+                async |module, file: &ArchiveFile, from, to| match module {
+                    ArchiveModule::Candles => {
+                        self.file_bars(&instrument, bar_type, file, from, to).await
+                    }
+                    ArchiveModule::Funding => self.file_funding(id, file, from, to).await,
+                },
+                async |before| {
+                    let funding = self
+                        .funding
+                        .request_funding_rates(id, None, Some(before), None)
+                        .await
+                        .with_context(|| {
+                            format!("requesting the funding of {id} before {before}")
+                        })?;
+                    log::info!("{id}: {} funding rates before {before}", funding.len());
+                    Ok(funding)
                 },
             )
-            .await?;
-            if contract.inst_type == OKXInstrumentType::Swap {
-                fill_from_archive(
-                    catalog,
-                    &instrument,
-                    ArchiveModule::Funding,
-                    (NautilusDataType::FundingRateUpdate, id.to_string()),
-                    start,
-                    end,
-                    async |period, first, last| {
-                        self.files(contract, ArchiveModule::Funding, period, first, last)
-                            .await
-                    },
-                    async |file: &ArchiveFile, from, to| {
-                        self.file_funding(id, file, from, to).await
-                    },
-                )
-                .await?;
-            }
-            fill_funding_from_api(catalog, &instrument, start, end, async |before| {
-                let funding = self
-                    .funding
-                    .request_funding_rates(id, None, Some(before), None)
-                    .await
-                    .with_context(|| format!("requesting the funding of {id} before {before}"))?;
-                log::info!("{id}: {} funding rates before {before}", funding.len());
-                Ok(funding)
-            })
             .await?;
         }
         Ok(())
@@ -373,6 +354,78 @@ fn candle_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Re
     Ok(bar_type)
 }
 
+/// Fills `catalog` over `[start, end]` with `instrument`, its funding and
+/// the bars of `bar_type`, its minute candles. The funding comes first, a
+/// swap's from the archive's months (see `fill_from_archive`) then from
+/// OKX's API, an X-Perp's from the API only (see `fill_funding_from_api`),
+/// so that a failed funding fill stores no new bars and a backtest over
+/// them is refused for want of funding; then the bars, from the archive.
+/// `list_files` and `file_data` serve the archive's files of a module (as
+/// `fill_from_archive`'s), `request_funding` the API's funding (as
+/// `fill_funding_from_api`'s `request`).
+///
+/// # Errors
+///
+/// As `fill_from_archive` (no funding file for the month of a swap's
+/// `start` is an error) and `fill_funding_from_api`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the series, its window and its three sources"
+)]
+async fn fill_series(
+    catalog: &mut ParquetDataCatalog,
+    instrument: &InstrumentAny,
+    bar_type: BarType,
+    start: Timestamp,
+    end: Timestamp,
+    mut list_files: impl AsyncFnMut(
+        ArchiveModule,
+        ArchivePeriod,
+        Date,
+        Date,
+    ) -> anyhow::Result<HashMap<Date, ArchiveFile>>,
+    mut file_data: impl AsyncFnMut(
+        ArchiveModule,
+        &ArchiveFile,
+        Timestamp,
+        Timestamp,
+    ) -> anyhow::Result<Vec<Data>>,
+    request_funding: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<FundingRateUpdate>>,
+) -> anyhow::Result<()> {
+    let id = instrument.id();
+    if Contract::of(id)?.inst_type == OKXInstrumentType::Swap {
+        fill_from_archive(
+            catalog,
+            instrument,
+            ArchiveModule::Funding,
+            (NautilusDataType::FundingRateUpdate, id.to_string()),
+            start,
+            end,
+            async |period, first, last| {
+                list_files(ArchiveModule::Funding, period, first, last).await
+            },
+            async |file: &ArchiveFile, from, to| {
+                file_data(ArchiveModule::Funding, file, from, to).await
+            },
+        )
+        .await?;
+    }
+    fill_funding_from_api(catalog, instrument, start, end, request_funding).await?;
+    fill_from_archive(
+        catalog,
+        instrument,
+        ArchiveModule::Candles,
+        (NautilusDataType::Bar, bar_type.to_string()),
+        start,
+        end,
+        async |period, first, last| list_files(ArchiveModule::Candles, period, first, last).await,
+        async |file: &ArchiveFile, from, to| {
+            file_data(ArchiveModule::Candles, file, from, to).await
+        },
+    )
+    .await
+}
+
 /// Fills `catalog` with `instrument` and `series`, the items of `module`
 /// of the instrument, over `[start, end]`, one archive month, or day, at a
 /// time: `fill_catalog` over `[start, the period's end]`, so each call
@@ -473,7 +526,8 @@ async fn fill_from_archive(
 }
 
 /// Fills `catalog` with `instrument` and its funding at times in `[start,
-/// end]` from OKX's API, resuming 1 ns after the stored funding.
+/// end]` from OKX's API, resuming 1 ns after the stored funding; a window
+/// the stored funding already covers asks for nothing.
 /// `request(before)` answers the funding at times before `before`, as
 /// Nautilus' `request_funding_rates` with `before` as its end (OKX's
 /// `after`, exclusive, in milliseconds): up to a page of OKX's newest, oldest
@@ -507,6 +561,10 @@ async fn fill_funding_from_api(
     let begin = last.map_or(start, |last| {
         Timestamp::from(UnixNanos::from(last)) + SignedDuration::from_nanos(1)
     });
+    // A covered window asks for nothing, as `fill_catalog`.
+    if begin > end {
+        return Ok(());
+    }
     let millisecond = SignedDuration::from_millis(1);
     let in_window = |update: &FundingRateUpdate| {
         let time = Timestamp::from(update.ts_event);
@@ -2089,5 +2147,166 @@ pub(super) mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains(&format!("funding_rates of {XPERP}")), "{err}");
+    }
+
+    /// Fills `instrument`'s minute bars and funding over `[start, end]` with
+    /// a fake archive whose funding months run to `funding_months` and
+    /// candle days to 2026-10-21, and `request_funding` as OKX's API.
+    /// Records the module of each listing asked for.
+    async fn fill_series_of(
+        catalog: &mut ParquetDataCatalog,
+        instrument: &InstrumentAny,
+        start: &str,
+        end: &str,
+        funding_months: Date,
+        modules: &mut Vec<ArchiveModule>,
+        request_funding: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<FundingRateUpdate>>,
+    ) -> anyhow::Result<()> {
+        let (mut listed, mut funding_asked, mut bars_asked) = (Vec::new(), Vec::new(), Vec::new());
+        let mut funding_files = archive_files(&mut listed, funding_months, date(2026, 10, 21));
+        let mut candles_listed = Vec::new();
+        let mut candle_files =
+            archive_files(&mut candles_listed, date(2026, 9, 1), date(2026, 10, 21));
+        let mut file_funding = file_funding(&mut funding_asked);
+        let mut file_bars = file_bars(&mut bars_asked);
+        let bar_type = BarType::from(format!("{}-1-MINUTE-LAST-EXTERNAL", instrument.id()));
+        fill_series(
+            catalog,
+            instrument,
+            bar_type,
+            at(start),
+            at(end),
+            async |module, period, first, last| {
+                modules.push(module);
+                match module {
+                    Funding => funding_files(period, first, last).await,
+                    Candles => candle_files(period, first, last).await,
+                }
+            },
+            async |module, file: &ArchiveFile, from, to| match module {
+                Funding => file_funding(file, from, to).await,
+                Candles => {
+                    let bars = file_bars(file, from, to).await?;
+                    Ok(bars.into_iter().map(Data::Bar).collect())
+                }
+            },
+            request_funding,
+        )
+        .await
+    }
+
+    fn bar_intervals(catalog: &ParquetDataCatalog, instrument: &InstrumentAny) -> Vec<(u64, u64)> {
+        let bar_type = format!("{}-1-MINUTE-LAST-EXTERNAL", instrument.id());
+        catalog
+            .get_intervals(&NautilusDataType::Bar.into(), Some(&bar_type))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_funding_is_filled_before_the_bars_and_a_failed_one_stores_no_bars() {
+        // A swap: its funding from the archive's months, then the API, then
+        // its bars.
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let mut modules = Vec::new();
+        let mut requests = 0;
+        fill_series_of(
+            &mut catalog,
+            &btc_instrument(),
+            "2026-09-02T00:00:00Z",
+            "2026-09-03T00:00:00Z",
+            date(2026, 9, 1),
+            &mut modules,
+            async |_| {
+                requests += 1;
+                Ok(Vec::new())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(modules, [Funding, Candles]);
+        assert_eq!(requests, 0);
+        assert!(!stored_funding(&mut catalog).is_empty());
+        assert!(!bar_intervals(&catalog, &btc_instrument()).is_empty());
+        // A swap starting in a month the archive has not published: no
+        // funding, so no bars.
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let mut modules = Vec::new();
+        let err = fill_series_of(
+            &mut catalog,
+            &btc_instrument(),
+            "2026-10-02T00:00:00Z",
+            "2026-10-03T00:00:00Z",
+            date(2026, 9, 1),
+            &mut modules,
+            async |_| Ok(Vec::new()),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&format!("funding_rates of {BTC}")), "{err}");
+        assert_eq!(modules, [Funding]);
+        assert!(bar_intervals(&catalog, &btc_instrument()).is_empty());
+        // An X-Perp over a window older than OKX's funding history: no
+        // funding, so no bars.
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let mut modules = Vec::new();
+        let (client, _) = okx_funding(3);
+        let err = fill_series_of(
+            &mut catalog,
+            &xperp_instrument(),
+            "2026-09-02T00:00:00Z",
+            "2026-09-03T00:00:00Z",
+            date(2026, 9, 1),
+            &mut modules,
+            async |before| {
+                client
+                    .request_funding_rates(xperp(), None, Some(before), None)
+                    .await
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&format!("funding_rates of {XPERP}")), "{err}");
+        assert!(modules.is_empty());
+        assert!(bar_intervals(&catalog, &xperp_instrument()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_funding_is_not_asked_for_a_window_the_stored_funding_covers() {
+        // The archive's months cover the swap's funding up to `end`, older
+        // than OKX's API keeps.
+        let (start, end) = ("2026-07-10T06:00:00Z", "2026-08-15T00:00:00Z");
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (mut listed, mut asked) = (Vec::new(), Vec::new());
+        fill_funding(
+            &mut catalog,
+            start,
+            end,
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
+            file_funding(&mut asked),
+        )
+        .await
+        .unwrap();
+        let stored = stored_funding(&mut catalog);
+        let mut requests = 0;
+        fill_funding_from_api(
+            &mut catalog,
+            &btc_instrument(),
+            at(start),
+            at(end),
+            async |_| {
+                requests += 1;
+                Ok(Vec::new())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(requests, 0);
+        assert_eq!(stored_funding(&mut catalog), stored);
     }
 }
