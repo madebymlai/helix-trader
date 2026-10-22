@@ -25,7 +25,7 @@ data/
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one day at a time
     archive.rs     an order-book day file -> quotes
-    testdata/      samples of real archive files, real instruments and tiers
+    testdata/      samples of real archive files and real instruments
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
@@ -564,14 +564,18 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   (`/public/instruments`) gives OKX's definition; `parse_instrument_any`
   turns a swap into a `CryptoPerpetual` and a future into a
   `CryptoFuture` (contract value as the multiplier, tick and lot sizes as
-  increments). The adapter leaves the margins at 0, so `okx/` passes them,
-  from OKX's first position tier, cross margin (`get_position_tiers`):
-  - a swap takes the tier's initial and maintenance margins (BTC: 1% and
-    0.4%);
-  - an X-Perp (rule type `xperp`) takes the tier's maintenance margin
-    (BTC: 0.65%) and an initial margin of 10%, 1 / 10x: OKX Europe caps
-    retail accounts at 10x, below the tier's 50x;
-  - a dated future is refused.
+  increments). A dated future is refused.
+- **Margins of 1.** The adapter leaves the margins at 0, which would lock
+  nothing; `okx/` stores 1 for both. OKX locks the position's value
+  divided by the leverage, and the leverage is the account's choice, not
+  the instrument's: the backtest takes it as `--leverage` and Nautilus
+  divides the value by it, times the instrument's margin (see the backtest
+  README, "Leverage"). OKX's own maintenance rates (BTC X-Perp: 0.65%)
+  only decide liquidation, which the backtest does not simulate, so they
+  are not stored. A catalog filled before this keeps OKX's old rates
+  (`fill` never rewrites a stored instrument), which the backtest would
+  read as multipliers: delete its OKX instrument directories and fill
+  again.
 - **X-Perps.** A `CryptoFuture` expiring in 2031, linear, settled in USD
   (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole
   contracts, tick 0.1. Funding is not filled (out of scope, as for swaps).
@@ -807,8 +811,8 @@ bar after a roll behaves when the new contract has not ticked yet is
     snapshot resets the book, crossed and one-sided tops dropped and
     counted, a locked one kept, a bad line named, a line of another
     contract named; of a chain only the contract's file read, a chain
-    without it an error; the real BTC swap and X-Perp with their tiers to
-    a `CryptoPerpetual` and a `CryptoFuture` with their margins, a dated
+    without it an error; the real BTC swap and X-Perp to a
+    `CryptoPerpetual` and a `CryptoFuture` with margins of 1, a dated
     future refused; the type and family of a symbol; the archive listing
     of a swap and of a chain; the fill one UTC day per call with a fake
     day source (resume, the line at midnight, a day not published, a later

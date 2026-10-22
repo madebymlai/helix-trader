@@ -19,7 +19,6 @@ use nautilus_backtest::{
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    accounts::margin_model::{MarginModelAny, StandardMarginModel},
     data::{Data, NautilusDataType},
     enums::{AccountType, BookType, OmsType},
     identifiers::{InstrumentId, Venue},
@@ -34,9 +33,9 @@ use crate::strategy::warmup;
 const RUN_ID: &str = "backtest";
 
 /// The run config of `backtest`: one venue named after the instruments'
-/// venue, with margins the instruments' rates of the notional (Nautilus'
-/// `StandardMarginModel`, leverage ignored), which fills orders on the
-/// quotes, the instruments' quotes of the
+/// venue, at the run's leverage with Nautilus' default margin model (the
+/// notional / leverage times the instrument's margin), which fills orders
+/// on the quotes, the instruments' quotes of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
@@ -68,7 +67,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![backtest.balance.to_string()])
-        .margin_model(MarginModelAny::Standard(StandardMarginModel))
+        .default_leverage(backtest.leverage)
         .fee_model(backtest.fee_model.clone())
         .fill_model(costs::fill_model()?)
         .bar_execution(false)
@@ -150,6 +149,7 @@ mod tests {
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{data::BarType, types::Money};
+    use rust_decimal::Decimal;
 
     use super::*;
 
@@ -165,6 +165,7 @@ mod tests {
             warmup: jiff::SignedDuration::from_hours(720),
             fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),
+            leverage: Decimal::ONE,
             logging: LoggerConfig {
                 print_config: true,
                 ..LoggerConfig::default()
@@ -185,13 +186,27 @@ mod tests {
     }
 
     #[test]
-    fn margins_are_the_instruments_rates_of_the_notional_whatever_the_leverage() {
-        let config = run_config(&backtest()).unwrap();
-        let margin_model = config.venues()[0].margin_model();
-        assert!(
-            matches!(margin_model, Some(MarginModelAny::Standard(_))),
-            "{margin_model:?}"
-        );
+    fn margins_follow_nautilus_default_model_at_the_leverage_of_the_run() {
+        let backtest = Backtest {
+            leverage: Decimal::TEN,
+            ..backtest()
+        };
+        let config = run_config(&backtest).unwrap();
+        let venue = &config.venues()[0];
+        assert!(venue.margin_model().is_none(), "{:?}", venue.margin_model());
+        assert_eq!(venue.default_leverage(), Some(Decimal::TEN));
+    }
+
+    #[test]
+    fn rejects_a_leverage_not_positive() {
+        for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
+            let backtest = Backtest {
+                leverage,
+                ..backtest()
+            };
+            let err = run_config(&backtest).unwrap_err();
+            assert!(err.to_string().contains("default_leverage"), "{err}");
+        }
     }
 
     #[test]

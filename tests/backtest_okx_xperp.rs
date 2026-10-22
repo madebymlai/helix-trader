@@ -1,13 +1,12 @@
 //! An OKX X-Perp on tick quotes: BTC-USD_UM_XPERP-310404.OKX, a
 //! `CryptoFuture` of 0.0001 BTC a contract settled in USD, expiring in
-//! 2031, with the margins `fill-catalog` gives it (10% initial, 0.65%
-//! maintenance), and several quotes a minute at their exchange times, one
-//! exactly on a minute. A recorder on 1-MINUTE-MID internal bars buys on
-//! the first replayed bar and flips short on the second: the bars, the
-//! fills at the ask and the bid of the latest quote, the commission rate
-//! on each fill's value and the margin of the open short, all in USD, on
-//! the same simulated venue as a swap. One node per process, so one run
-//! per file.
+//! 2031, with the margins of 1 `fill-catalog` gives it, and several quotes
+//! a minute at their exchange times, one exactly on a minute. A recorder on
+//! 1-MINUTE-MID internal bars buys on the first replayed bar and flips
+//! short on the second: the bars, the fills at the ask and the bid of the
+//! latest quote, the commission rate on each fill's value and, at 10x, the
+//! open short locking a tenth of its value, all in USD, on the same
+//! simulated venue as a swap. One node per process, so one run per file.
 
 mod common;
 
@@ -42,8 +41,7 @@ fn at(time: &str) -> Timestamp {
 /// BTC-USD_UM_XPERP-310404 as Nautilus' OKX adapter parses OKX's
 /// definition: underlying `BTC-USD`, quoted and settled in USD, price tick
 /// 0.1, lot 1 contract, 0.0001 BTC a contract, listed on 2026-03-30 and
-/// expiring on 2031-04-04, with an initial margin of 10% (10x) and the
-/// first tier's maintenance margin, 0.65%.
+/// expiring on 2031-04-04, with initial and maintenance margins of 1.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoFuture(
         CryptoFuture::builder()
@@ -62,8 +60,8 @@ fn instrument() -> InstrumentAny {
             .multiplier(Quantity::from("0.0001"))
             .lot_size(Quantity::from("1"))
             .min_quantity(Quantity::from("1"))
-            .margin_init(Decimal::new(1, 1))
-            .margin_maint(Decimal::new(65, 4))
+            .margin_init(Decimal::ONE)
+            .margin_maint(Decimal::ONE)
             .ts_event(UnixNanos::default())
             .ts_init(UnixNanos::default())
             .build()
@@ -149,6 +147,8 @@ fn an_okx_x_perp_trades_on_its_tick_quotes_with_margin_and_commission_in_usd() {
         // OKX's taker fee, 0.05%.
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USD"),
+        // OKX Europe's cap for retail accounts.
+        leverage: Decimal::TEN,
         logging: LoggerConfig::default(),
     };
     let (recorder, record) = Recorder::trading(
@@ -205,13 +205,13 @@ fn an_okx_x_perp_trades_on_its_tick_quotes_with_margin_and_commission_in_usd() {
     // to even. A contract is 0.0001 BTC: the buy of 200 is worth 2,000.02
     // USD (2,000.024), the sell of 300 3,000.15, charged 0.05%: 1.00 and
     // 1.50 USD. The 200 contracts held long gain 3.8 USD a BTC: 0.08 USD
-    // (0.076). The 100 contracts left short lock their maintenance margin,
-    // 0.65% of their 1,000.05 USD at entry: 6.50 USD.
+    // (0.076). At 10x the 100 contracts left short lock a tenth of their
+    // 1,000.05 USD at entry: 100.005, 100.00 USD.
     let result = &outcome.result;
     let summary = |key: &str| result.summary[&format!("account.OKX.{key}")].clone();
     assert_eq!(summary("type"), "MARGIN");
     assert_eq!(summary("balance.USD.total"), "9997.58 USD");
-    assert_eq!(summary("balance.USD.locked"), "6.50 USD");
+    assert_eq!(summary("balance.USD.locked"), "100.00 USD");
 
     // The half spread paid: 0.1 on the buy's 200 contracts, 0.2 on the
     // sell's 300, times 0.0001 BTC: 0.008 USD, unrounded (ours). Realized

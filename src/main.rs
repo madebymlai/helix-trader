@@ -98,6 +98,10 @@ struct BacktestArgs {
     /// Starting balance of the account, for example "10000 EUR".
     #[arg(long, value_parser = parse_money)]
     balance: Money,
+    /// The account's leverage, for example 10: a position locks its value
+    /// divided by it, times the instrument's margin. 1 is no leverage.
+    #[arg(long, default_value = "1")]
+    leverage: Decimal,
 }
 
 /// The commission of a backtest: exactly one of the flags.
@@ -270,6 +274,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         warmup: requirements.warmup,
         fee_model,
         balance: args.balance,
+        leverage: args.leverage,
         logging,
     };
     let outcome = match args.run.strategy {
@@ -412,6 +417,21 @@ mod tests {
                 assert!(err.contains(flag), "{money}: {err}");
             }
         }
+    }
+
+    #[test]
+    fn a_backtest_is_unleveraged_unless_given_a_leverage() {
+        assert_eq!(
+            parse_backtest(&backtest_required()).unwrap().leverage,
+            Decimal::ONE
+        );
+        let mut argv = backtest_required();
+        argv.extend(["--leverage", "10"]);
+        assert_eq!(parse_backtest(&argv).unwrap().leverage, Decimal::TEN);
+        let mut argv = backtest_required();
+        argv.extend(["--leverage", "ten"]);
+        let err = parse_backtest(&argv).unwrap_err().to_string();
+        assert!(err.contains("--leverage"), "{err}");
     }
 
     fn parse_live(args: &[&str]) -> Result<LiveArgs, clap::Error> {

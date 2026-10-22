@@ -29,6 +29,7 @@ use nautilus_model::{
     types::{Currency, Money, Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rust_decimal::Decimal;
 use tempfile::TempDir;
 
 pub const INSTRUMENT_ID: &str = "SXR8.IBIS";
@@ -195,6 +196,7 @@ pub fn backtest(
         warmup,
         fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),
+        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
     }
 }

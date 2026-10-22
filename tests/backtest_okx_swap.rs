@@ -1,11 +1,12 @@
 //! An OKX swap on tick quotes: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` of
-//! 0.01 BTC a contract settled in USDT, with OKX's first-tier margins, and
-//! several quotes a minute at their exchange times, one exactly on a
-//! minute. A recorder on 1-MINUTE-MID internal bars buys on the first
-//! replayed bar and flips short on the second: the bars' open, high, low
-//! and close, the fills at the ask and the bid of the latest quote, the
-//! commission rate on each fill's value and the margin of the open short
-//! on the simulated OKX venue. One node per process, so one run per file.
+//! 0.01 BTC a contract settled in USDT, with the margins of 1 `fill-catalog`
+//! gives it, and several quotes a minute at their exchange times, one
+//! exactly on a minute. A recorder on 1-MINUTE-MID internal bars buys on
+//! the first replayed bar and flips short on the second: the bars' open,
+//! high, low and close, the fills at the ask and the bid of the latest
+//! quote, the commission rate on each fill's value and, without leverage,
+//! the open short locking its whole value on the simulated OKX venue. One
+//! node per process, so one run per file.
 
 mod common;
 
@@ -38,7 +39,7 @@ fn at(time: &str) -> Timestamp {
 }
 
 /// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts,
-/// 0.01 BTC a contract, initial and maintenance margins of 1% and 0.4%.
+/// 0.01 BTC a contract, with initial and maintenance margins of 1.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -55,8 +56,8 @@ fn instrument() -> InstrumentAny {
             .multiplier(Quantity::from("0.01"))
             .lot_size(Quantity::from("0.01"))
             .min_quantity(Quantity::from("0.01"))
-            .margin_init(Decimal::new(1, 2))
-            .margin_maint(Decimal::new(4, 3))
+            .margin_init(Decimal::ONE)
+            .margin_maint(Decimal::ONE)
             .ts_event(UnixNanos::default())
             .ts_init(UnixNanos::default())
             .build()
@@ -142,6 +143,7 @@ fn an_okx_swap_trades_on_its_tick_quotes_with_margin_and_commission() {
         // OKX's taker fee, 0.05%.
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USDT"),
+        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
     };
     let (recorder, record) = Recorder::trading(
@@ -196,13 +198,13 @@ fn an_okx_swap_trades_on_its_tick_quotes_with_margin_and_commission() {
 
     // A contract is 0.01 BTC: the buy is worth 2,000.024 USDT, the sell
     // 3,000.15, charged 0.05%: 1.000012 and 1.500075 USDT. The 2 contracts
-    // held long gain 3.8 USDT a BTC: 0.076 USDT. The short contract left
-    // open locks its maintenance margin, 0.4% of its 1,000.05 USDT at entry.
+    // held long gain 3.8 USDT a BTC: 0.076 USDT. Without leverage the short
+    // contract left open locks its value at entry, 1,000.05 USDT.
     let result = &outcome.result;
     let summary = |key: &str| result.summary[&format!("account.OKX.{key}")].clone();
     assert_eq!(summary("type"), "MARGIN");
     assert_eq!(summary("balance.USDT.total"), "9997.57591300 USDT");
-    assert_eq!(summary("balance.USDT.locked"), "4.00020000 USDT");
+    assert_eq!(summary("balance.USDT.locked"), "1000.05000000 USDT");
 
     // The half spread paid: 0.1 on the buy's 2 contracts, 0.2 on the sell's
     // 3, times 0.01 BTC: 0.008 USDT.

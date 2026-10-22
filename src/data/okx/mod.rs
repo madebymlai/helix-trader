@@ -2,8 +2,8 @@
 //! filled into the catalog one UTC day at a time.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
-//! `OKXRawHttpClient` and `parse_instrument_any`, with margins from OKX's
-//! first position tier (see `instrument_with_margins`). OKX has no quote
+//! `OKXRawHttpClient` and `parse_instrument_any`, with margins of 1 (see
+//! `instrument_from`). OKX has no quote
 //! history, so quotes are rebuilt from OKX's order-book archive (see
 //! `archive`): one file per swap, or per futures family, and UTC day,
 //! downloaded to a temporary file and read as a stream. The archive API,
@@ -28,15 +28,11 @@ use nautilus_network::{http::HttpClient, ratelimiter::quota::Quota};
 use nautilus_okx::{
     common::{
         consts::OKX_VENUE,
-        enums::{OKXEnvironment, OKXInstrumentType, OKXTradeMode},
+        enums::{OKXEnvironment, OKXInstrumentType},
         models::OKXInstrument,
         parse::{is_xperp_rule_type, okx_instrument_type_from_symbol, parse_instrument_any},
     },
-    http::{
-        client::OKXRawHttpClient,
-        models::OKXPositionTier,
-        query::{GetInstrumentsParams, GetPositionTiersParams},
-    },
+    http::{client::OKXRawHttpClient, query::GetInstrumentsParams},
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::HasCatalogDataType,
@@ -73,10 +69,6 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
 /// How often a download logs its progress.
 const PROGRESS_BYTES: u64 = 100 * 1024 * 1024;
-
-/// The leverage X-Perps are margined at: OKX Europe's cap for retail
-/// accounts, below the 50x of OKX's first tier.
-const XPERP_LEVERAGE: u32 = 10;
 
 /// A connection to OKX's public API and archive, for history.
 #[derive(Debug)]
@@ -142,9 +134,8 @@ impl OkxHistory {
         .await
     }
 
-    /// The instrument of `id`, an OKX swap or X-Perp, with its margins
-    /// (see `instrument_with_margins`) from OKX's first position tier
-    /// (cross margin).
+    /// The instrument of `id`, an OKX swap or X-Perp (see
+    /// `instrument_from`).
     async fn instrument(&self, id: InstrumentId) -> anyhow::Result<InstrumentAny> {
         let contract = Contract::of(id)?;
         let raw = self
@@ -159,18 +150,7 @@ impl OkxHistory {
         let [raw] = raw.as_slice() else {
             bail!("OKX returned {} instruments for {id}, not one", raw.len());
         };
-        let tiers = self
-            .client
-            .get_position_tiers(GetPositionTiersParams {
-                inst_type: contract.inst_type,
-                td_mode: OKXTradeMode::Cross,
-                inst_family: Some(contract.family.to_string()),
-                tier: Some("1".to_string()),
-                ..Default::default()
-            })
-            .await
-            .with_context(|| format!("requesting the position tiers of {id} from OKX"))?;
-        instrument_with_margins(raw, &tiers, get_atomic_clock_realtime().get_time_ns())
+        instrument_from(raw, get_atomic_clock_realtime().get_time_ns())
     }
 
     /// The quotes of `instrument` over `[from, to]`, a window within one
@@ -352,43 +332,23 @@ async fn fill_by_day(
     Ok(())
 }
 
-/// The instrument of `raw` with its initial and maintenance margins,
-/// through the adapter's `parse_instrument_any`, which leaves them at 0
-/// otherwise. A swap takes both from the first of `tiers` (`imr`, `mmr`).
-/// An X-Perp (a future whose rule type is `xperp`) takes its maintenance
-/// margin from there and an initial margin of 1 / `XPERP_LEVERAGE`; a
-/// dated future is refused.
-fn instrument_with_margins(
-    raw: &OKXInstrument,
-    tiers: &[OKXPositionTier],
-    ts_init: UnixNanos,
-) -> anyhow::Result<InstrumentAny> {
+/// The instrument of `raw`, an OKX swap or X-Perp (a future whose rule
+/// type is `xperp`), through the adapter's `parse_instrument_any`, with
+/// initial and maintenance margins of 1; a dated future is refused. OKX
+/// locks notional / leverage on a position, which is Nautilus' default
+/// margin model (notional / leverage x the instrument's margin) with
+/// margins of 1 and the account's leverage. The adapter would leave them at
+/// 0, which locks nothing.
+fn instrument_from(raw: &OKXInstrument, ts_init: UnixNanos) -> anyhow::Result<InstrumentAny> {
     let id = raw.inst_id;
-    let tier = tiers
-        .iter()
-        .find(|tier| tier.tier == "1")
-        .with_context(|| format!("OKX returned no first position tier for {id}"))?;
-    let rate = |value: &str, name: &str| {
-        value
-            .parse::<Decimal>()
-            .with_context(|| format!("the {name} {value:?} of the first tier of {id}"))
-    };
-    let imr = if raw.inst_type == OKXInstrumentType::Futures {
+    if raw.inst_type == OKXInstrumentType::Futures {
         ensure!(
             is_xperp_rule_type(&raw.rule_type),
             "{id} is a dated future (rule type {:?}); of OKX's futures only X-Perps are served",
             raw.rule_type
         );
-        Decimal::ONE / Decimal::from(XPERP_LEVERAGE)
-    } else {
-        rate(&tier.imr, "imr")?
-    };
-    let mmr = rate(&tier.mmr, "mmr")?;
-    ensure!(
-        imr > Decimal::ZERO && mmr > Decimal::ZERO,
-        "the first tier of {id} has margins {imr} and {mmr}, not both positive"
-    );
-    parse_instrument_any(raw, Some(imr), Some(mmr), ts_init)?
+    }
+    parse_instrument_any(raw, Some(Decimal::ONE), Some(Decimal::ONE), ts_init)?
         .with_context(|| format!("{id} is not an instrument Nautilus supports"))
 }
 
@@ -525,41 +485,30 @@ pub(super) mod tests {
     use super::*;
 
     const INSTRUMENT: &str = include_str!("testdata/BTC-USDT-SWAP-instrument.json");
-    const TIERS: &str = include_str!("testdata/BTC-USDT-position-tiers.json");
 
     fn raw_instrument() -> OKXInstrument {
         serde_json::from_str(INSTRUMENT).unwrap()
     }
 
-    fn tiers() -> Vec<OKXPositionTier> {
-        serde_json::from_str(TIERS).unwrap()
-    }
-
-    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21,
-    /// with its first tier's margins.
+    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21.
     pub(in crate::data::okx) fn btc_instrument() -> InstrumentAny {
-        instrument_with_margins(&raw_instrument(), &tiers(), UnixNanos::default()).unwrap()
+        instrument_from(&raw_instrument(), UnixNanos::default()).unwrap()
     }
 
     const XPERP_INSTRUMENT: &str = include_str!("testdata/BTC-USD_UM_XPERP-310404-instrument.json");
-    const XPERP_TIERS: &str = include_str!("testdata/BTC-USD_UM_XPERP-position-tiers.json");
 
     fn raw_xperp() -> OKXInstrument {
         serde_json::from_str(XPERP_INSTRUMENT).unwrap()
     }
 
-    fn xperp_tiers() -> Vec<OKXPositionTier> {
-        serde_json::from_str(XPERP_TIERS).unwrap()
-    }
-
     /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on
-    /// 2026-10-22, with its margins.
+    /// 2026-10-22.
     pub(in crate::data::okx) fn xperp_instrument() -> InstrumentAny {
-        instrument_with_margins(&raw_xperp(), &xperp_tiers(), UnixNanos::default()).unwrap()
+        instrument_from(&raw_xperp(), UnixNanos::default()).unwrap()
     }
 
     #[test]
-    fn an_okx_swap_is_a_crypto_perpetual_with_its_contract_value_increments_and_tier_one_margins() {
+    fn an_okx_swap_is_a_crypto_perpetual_with_its_contract_value_increments_and_margins_of_one() {
         let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
             panic!("not a CryptoPerpetual");
         };
@@ -568,27 +517,15 @@ pub(super) mod tests {
         assert_eq!(btc.price_increment.to_string(), "0.1");
         assert_eq!(btc.size_increment.to_string(), "0.01");
         assert_eq!((btc.price_precision, btc.size_precision), (1, 2));
-        assert_eq!(btc.margin_init, Decimal::new(1, 2));
-        assert_eq!(btc.margin_maint, Decimal::new(4, 3));
+        assert_eq!(
+            (btc.margin_init, btc.margin_maint),
+            (Decimal::ONE, Decimal::ONE)
+        );
         assert_eq!(btc.settlement_currency.code.as_str(), "USDT");
     }
 
     #[test]
-    fn an_instrument_without_a_first_tier_or_with_a_zero_margin_is_an_error() {
-        let err = instrument_with_margins(&raw_instrument(), &[], UnixNanos::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("first position tier"), "{err}");
-        let mut zero = tiers();
-        zero[0].mmr = "0".to_string();
-        let err = instrument_with_margins(&raw_instrument(), &zero, UnixNanos::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not both positive"), "{err}");
-    }
-
-    #[test]
-    fn an_okx_x_perp_is_a_crypto_future_margined_at_ten_times_with_its_tier_one_maintenance() {
+    fn an_okx_x_perp_is_a_crypto_future_with_margins_of_one() {
         let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
             panic!("not a CryptoFuture");
         };
@@ -597,8 +534,10 @@ pub(super) mod tests {
         assert_eq!(btc.price_increment.to_string(), "0.1");
         assert_eq!(btc.size_increment.to_string(), "1");
         assert_eq!((btc.price_precision, btc.size_precision), (1, 0));
-        assert_eq!(btc.margin_init, Decimal::new(1, 1));
-        assert_eq!(btc.margin_maint, Decimal::new(65, 4));
+        assert_eq!(
+            (btc.margin_init, btc.margin_maint),
+            (Decimal::ONE, Decimal::ONE)
+        );
         assert_eq!(btc.settlement_currency.code.as_str(), "USD");
         assert_eq!(btc.quote_currency.code.as_str(), "USD");
         assert!(!btc.is_inverse);
@@ -616,7 +555,7 @@ pub(super) mod tests {
     fn a_dated_future_is_refused() {
         let mut dated = raw_xperp();
         dated.rule_type = "normal".to_string();
-        let err = instrument_with_margins(&dated, &xperp_tiers(), UnixNanos::default())
+        let err = instrument_from(&dated, UnixNanos::default())
             .unwrap_err()
             .to_string();
         assert!(err.contains("X-Perp"), "{err}");
