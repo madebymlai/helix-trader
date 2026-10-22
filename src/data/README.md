@@ -632,6 +632,11 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   and reading the file takes 20-30 s. A re-run over the same window asked
   for nothing; extending to 10-21 filled 10-19 and stopped at 10-20, not
   yet published.
+- **Verified on X-Perps** (2026-10-22, BTC-USD_UM_XPERP-310404.OKX,
+  2026-10-18 to 10-20): chain files of 30, 39 and 47 MB gave 606,439,
+  884,471 and 1,070,913 quotes (0 crossed, 0 one-sided), 5-9 MB a day in
+  the catalog, the three days in 68 s. The 10-19 count equals a plain
+  replay of the file outside Nautilus.
 
 ### Other sources
 
