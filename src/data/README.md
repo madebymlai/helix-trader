@@ -2,7 +2,7 @@
 
 `data` is build step 1. It fills the Nautilus Parquet catalog with the
 instruments the strategy trades and the data their bars are built from,
-and nothing else. The strategies' bars are internal, built by the
+and the funding of OKX swaps, which backtests settle, and nothing else. The strategies' bars are internal, built by the
 Nautilus data engine (see the strategy README): from quotes (one a minute
 from IB), or, for a composite bar type, from its source bars (OKX's
 1-minute candles). Backtest reads that catalog.
@@ -25,7 +25,7 @@ data/
     gateway.rs     the IB account and the Docker gateway, started and logged in
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
-    archive.rs     a candle month or day file -> bars
+    archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
     testdata/      samples of real archive files and real instruments
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
@@ -580,7 +580,8 @@ uses OKX's public endpoints only, with no key.
 ```rust
 OkxHistory::new() -> anyhow::Result<OkxHistory>
 history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
-    .await -> anyhow::Result<()>        // per series: its instrument, then bars month by month, then day by day
+    .await -> anyhow::Result<()>        // per series: its instrument, then bars month by month, then day by day,
+                                        // then a swap's funding month by month
 ```
 
 - **Instruments.** The symbol gives the type (Nautilus'
@@ -601,7 +602,8 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   are not stored.
 - **X-Perps.** A `CryptoFuture` expiring in 2031, linear, settled in USD
   (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole
-  contracts, tick 0.1. Funding is not filled (out of scope, as for swaps).
+  contracts, tick 0.1. Their funding is not filled: the archive holds the
+  funding of swaps only.
 - **The archive.** `GET /api/v5/public/market-data-history` (module 2,
   1-minute candles; `instType` `SWAP` or `FUTURES`, the family;
   `dateAggrType` `monthly` or `daily`; 5 requests per 2 s, kept to one
@@ -653,6 +655,26 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   of the next month (2026-09's on 2026-10-01) and a day's about two days
   after it ends; a later day with no file stops the series without
   recording it, and the next run asks for it again.
+- **Funding of swaps.** After a swap's bars, `fill` stores its
+  `FundingRateUpdate`s (series `FundingRateUpdate`, keyed by the
+  instrument id) from the archive's module 3 (`dateAggrType` `monthly`
+  only; `BTC-USDT-SWAP-fundingrates-<month>.zip`, a CSV of
+  `instrument_name,funding_rate,funding_time`, one row per funding time,
+  from the month's start in UTC+8 to before its end: 2026-09 runs from
+  2026-08-31T16:00Z to 2026-09-30T08:00Z). Each row becomes the adapter's
+  `OKXFundingRateHistory` and its `parse_funding_rate` makes the update,
+  as Nautilus' OKX client does from the API: the rate, `ts_event` =
+  `ts_init` = the funding time, the interval the minutes since the row
+  before (the first row of a file takes the next row's, its row before
+  being in the month before), no `next_funding_ns`. The archive's
+  `funding_rate` equals the API's `fundingRate` and `realizedRate`
+  (checked 2026-10-23). Windows are the month's funding times, `[month
+  start, month end − 1 ns]`, contiguous; the fill resumes after the stored
+  end and stops at the first month not published, so the funding ends
+  with the last complete month while the bars go on day by day. No file
+  for the first month is an error naming the series. The backtest then
+  needs the funding over its whole window (see the backtest README, "OKX
+  on candles").
 - **Catalogs filled before candles.** A catalog filled when `okx/` stored
   quotes rebuilt from the order book must be filled again, fresh, into a
   new directory: its quotes are no longer filled or extended, and nothing
@@ -862,7 +884,15 @@ bar after a roll behaves when the new contract has not ticked yet is
     listings; a failed day keeping the days before and the next run
     resuming from the month's file published since, as one uninterrupted
     fill; a start on a day's end; a day not published; no file on the
-    first day).
+    first day). Funding: the sample of a real month file (its first two
+    days) to updates at the funding times with an 8-hour interval, the
+    first row's from the row after; a window's updates; intervals from
+    the rows' times; rows out of order, alone, or of no row of the swap an
+    error; the listing of funding months, an X-Perp's funding refused; the
+    fill with a fake archive (monthly files only, windows `[month start,
+    month end − 1 ns]`, a stop at the first month not published, resumed
+    after the stored end as one uninterrupted fill, no file for the first
+    month an error naming the series).
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last

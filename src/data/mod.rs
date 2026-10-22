@@ -1,6 +1,6 @@
-//! Market data: the traded instruments and the series their strategy bars
-//! are built from (quotes, or the source bars of a composite bar type) in
-//! the Nautilus catalog.
+//! Market data: the traded instruments, the series their strategy bars are
+//! built from (quotes, or the source bars of a composite bar type) and the
+//! funding of OKX swaps, in the Nautilus catalog.
 //!
 //! Build step 1. Backtest reads what this module writes. The instruments
 //! come from the strategy's data requirements.
