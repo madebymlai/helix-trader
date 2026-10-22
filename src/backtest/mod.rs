@@ -21,6 +21,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
     types::Money,
 };
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
@@ -34,9 +35,9 @@ use crate::strategy::catalog_series;
 /// is replayed and the costs. Every field is required.
 #[derive(Debug, Clone)]
 pub struct Backtest {
-    /// The catalog directory: instruments and the series the bars are
-    /// built from are read from it, and it serves the strategy's warmup
-    /// requests.
+    /// The catalog directory: instruments, the series the bars are built
+    /// from and the instruments' funding are read from it, and it serves
+    /// the strategy's warmup requests.
     pub catalog: PathBuf,
     /// The internal bar types the strategy trades and warms up on. Their
     /// instruments are all on one venue, which the venue of the run derives
@@ -101,9 +102,91 @@ impl Backtest {
         self.bar_types.iter().map(BarType::instrument_id).collect()
     }
 
-    /// The catalog series the bars are built from (see
-    /// `strategy::catalog_series`).
-    fn series(&self) -> Vec<(NautilusDataType, String)> {
-        catalog_series(&self.bar_types)
+    /// The catalog series the run replays: those the bars are built from
+    /// (see `strategy::catalog_series`), then the funding of each traded
+    /// instrument whose catalog stores funding, keyed by its id, which the
+    /// venue settles on open positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored funding cannot be read.
+    fn series(&self) -> anyhow::Result<Vec<(NautilusDataType, String)>> {
+        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+        let mut series = catalog_series(&self.bar_types);
+        for id in self.instruments() {
+            let funding = (NautilusDataType::FundingRateUpdate, id.to_string());
+            let stored = catalog
+                .query_last_timestamp(&funding.0.clone().into(), Some(&funding.1))
+                .with_context(|| format!("reading the stored funding of {id}"))?;
+            if stored.is_some() {
+                series.push(funding);
+            }
+        }
+        Ok(series)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::SignedDuration;
+    use nautilus_common::logging::logger::LoggerConfig;
+    use nautilus_core::UnixNanos;
+    use nautilus_model::{data::FundingRateUpdate, types::Money};
+
+    use super::*;
+
+    const SWAP: &str = "BTC-USDT-SWAP.OKX";
+    const XPERP: &str = "BTC-USD_UM_XPERP-310404.OKX";
+
+    /// A backtest on the composite hour bars of `instruments`.
+    fn backtest(catalog: &std::path::Path, instruments: &[&str]) -> Backtest {
+        Backtest {
+            catalog: catalog.to_path_buf(),
+            bar_types: instruments
+                .iter()
+                .map(|id| {
+                    BarType::from(format!("{id}-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL").as_str())
+                })
+                .collect(),
+            start: "2026-09-01T00:00:00Z".parse().unwrap(),
+            end: "2026-09-30T00:00:00Z".parse().unwrap(),
+            warmup: SignedDuration::ZERO,
+            fee_model: commission_rate(Decimal::ZERO).unwrap(),
+            balance: Money::from("10000 USDT"),
+            leverage: Decimal::ONE,
+            logging: LoggerConfig::default(),
+        }
+    }
+
+    #[test]
+    fn the_funding_a_catalog_stores_of_a_traded_instrument_is_replayed_and_none_without() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let ts = UnixNanos::from(1_788_192_000_000_000_000);
+        let funding = FundingRateUpdate::new(
+            InstrumentId::from(SWAP),
+            Decimal::new(1, 4),
+            Some(480),
+            None,
+            ts,
+            ts,
+        );
+        catalog
+            .write_to_parquet(&[funding], None, None, None)
+            .unwrap();
+        let backtest = backtest(dir.path(), &[XPERP, SWAP]);
+        let mut expected = catalog_series(&backtest.bar_types);
+        expected.push((NautilusDataType::FundingRateUpdate, SWAP.to_string()));
+        assert_eq!(backtest.series().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_catalog_without_funding_replays_the_series_the_bars_are_built_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = backtest(dir.path(), &[XPERP, SWAP]);
+        assert_eq!(
+            backtest.series().unwrap(),
+            catalog_series(&backtest.bar_types)
+        );
     }
 }

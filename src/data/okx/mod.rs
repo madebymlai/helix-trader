@@ -1,15 +1,18 @@
-//! OKX history: the instruments of OKX swaps and X-Perps and their 1-minute
-//! candles, filled into the catalog one archive month, or day, at a time.
+//! OKX history: the instruments of OKX swaps and X-Perps, their 1-minute
+//! candles and the funding of the swaps, filled into the catalog one
+//! archive month, or day, at a time.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
 //! `OKXRawHttpClient` and `parse_instrument_any`, with margins of 1 (see
-//! `instrument_from`). Candles come from OKX's archive (see `archive`):
-//! one file per swap, or per futures family, and month or day, the months
-//! and days of the archive being those of UTC+8. They are stored as the
-//! bars of the instrument's `1-MINUTE-LAST-EXTERNAL` bar type, the source
-//! of the composite bar types strategies trade OKX on. The archive API, the
-//! download and the conversion are ours, to be removed if Nautilus gains an
-//! equivalent.
+//! `instrument_from`). Candles and funding come from OKX's archive (see
+//! `archive`): one file per swap, or per futures family, and month or day,
+//! the months and days of the archive being those of UTC+8. Candles are
+//! stored as the bars of the instrument's `1-MINUTE-LAST-EXTERNAL` bar
+//! type, the source of the composite bar types strategies trade OKX on; a
+//! swap's funding as its `FundingRateUpdate`s, which a backtest's venue
+//! settles. The archive serves the funding of swaps only, in monthly files.
+//! The archive API, the download and the conversion are ours, to be removed
+//! if Nautilus gains an equivalent.
 
 use std::{collections::HashMap, io::Cursor, time::Duration};
 
@@ -21,7 +24,7 @@ use jiff::{
 };
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
+    data::{BarSpecification, BarType, Data, NautilusDataType},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
@@ -49,9 +52,6 @@ const ARCHIVE_API: &str = "https://www.okx.com/api/v5/public/market-data-history
 
 /// Where the archive's files are served from; any other URL is refused.
 const ARCHIVE_FILES: &str = "https://static.okx.com/";
-
-/// The archive module of the 1-minute candles.
-const CANDLE_MODULE: &str = "2";
 
 /// The archive API's limit, 5 requests per 2 seconds, kept as one listing
 /// every 600 ms with no burst (every 400 ms still got HTTP 429 now and
@@ -110,14 +110,15 @@ impl OkxHistory {
     }
 
     /// Fills `catalog` over `[start, end]` with `series`, each the bars of
-    /// the `1-MINUTE-LAST-EXTERNAL` bar type of an OKX swap or X-Perp, and
-    /// their instruments, one archive month, or day, at a time (see
-    /// `fill_from_archive`).
+    /// the `1-MINUTE-LAST-EXTERNAL` bar type of an OKX swap or X-Perp, with
+    /// the funding of each swap and their instruments, one archive month,
+    /// or day, at a time (see `fill_from_archive`).
     ///
     /// # Errors
     ///
     /// Returns an error if a series is not such bars, checked before any
-    /// request, or as `fill_from_archive`.
+    /// request, or as `fill_from_archive`: no funding file for the month of
+    /// `start` is an error.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
@@ -136,13 +137,34 @@ impl OkxHistory {
             fill_from_archive(
                 catalog,
                 &instrument,
-                bar_type,
+                ArchiveModule::Candles,
+                (NautilusDataType::Bar, bar_type.to_string()),
                 start,
                 end,
-                async |period, first, last| self.candle_files(contract, period, first, last).await,
+                async |period, first, last| {
+                    self.files(contract, ArchiveModule::Candles, period, first, last)
+                        .await
+                },
                 async |file: &ArchiveFile, from, to| {
                     self.file_bars(&instrument, bar_type, file, from, to).await
                 },
+            )
+            .await?;
+            if contract.inst_type != OKXInstrumentType::Swap {
+                continue;
+            }
+            fill_from_archive(
+                catalog,
+                &instrument,
+                ArchiveModule::Funding,
+                (NautilusDataType::FundingRateUpdate, id.to_string()),
+                start,
+                end,
+                async |period, first, last| {
+                    self.files(contract, ArchiveModule::Funding, period, first, last)
+                        .await
+                },
+                async |file: &ArchiveFile, from, to| self.file_funding(id, file, from, to).await,
             )
             .await?;
         }
@@ -177,7 +199,7 @@ impl OkxHistory {
         file: &ArchiveFile,
         from: Timestamp,
         to: Timestamp,
-    ) -> anyhow::Result<Vec<Bar>> {
+    ) -> anyhow::Result<Vec<Data>> {
         let body = self
             .download(&file.url)
             .await
@@ -196,15 +218,44 @@ impl OkxHistory {
             bars.len(),
             file.filename
         );
-        Ok(bars)
+        Ok(bars.into_iter().map(Data::Bar).collect())
     }
 
-    /// The archive's candle files of `contract` for the months, or days,
-    /// from `first` to `last`, at most `LISTED_PERIODS` of them, keyed by
-    /// their first day; one listing request.
-    async fn candle_files(
+    /// The funding of the swap `id` at times in `[from, to]`, from `file`.
+    /// Logs the file and count.
+    async fn file_funding(
+        &self,
+        id: InstrumentId,
+        file: &ArchiveFile,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> anyhow::Result<Vec<Data>> {
+        let body = self
+            .download(&file.url)
+            .await
+            .with_context(|| format!("downloading {}", file.filename))?;
+        let funding = archive::funding_from_archive(
+            Cursor::new(body),
+            id,
+            UnixNanos::from(from),
+            UnixNanos::from(to),
+        )
+        .with_context(|| format!("reading {}", file.filename))?;
+        log::info!(
+            "{id}: {} funding rates from {}",
+            funding.len(),
+            file.filename
+        );
+        Ok(funding.into_iter().map(Data::FundingRate).collect())
+    }
+
+    /// The archive's files of `module` of `contract` for the months, or
+    /// days, from `first` to `last`, at most `LISTED_PERIODS` of them, keyed
+    /// by their first day; one listing request.
+    async fn files(
         &self,
         contract: Contract,
+        module: ArchiveModule,
         period: ArchivePeriod,
         first: Date,
         last: Date,
@@ -213,7 +264,7 @@ impl OkxHistory {
         let first_ms = day_start(first)?.as_millisecond().to_string();
         let last_ms = day_start(last)?.as_millisecond().to_string();
         let params: HashMap<String, Vec<String>> = [
-            ("module", CANDLE_MODULE),
+            ("module", module.code()),
             ("instType", contract.archive_type()),
             ("instFamilyList", contract.family),
             ("dateAggrType", period.date_aggr_type()),
@@ -225,8 +276,9 @@ impl OkxHistory {
         .collect();
         let asked = || {
             format!(
-                "the {} files of {id} from {first} to {last}",
-                period.date_aggr_type()
+                "the {} {} files of {id} from {first} to {last}",
+                period.date_aggr_type(),
+                module.name()
             )
         };
         let response = self
@@ -248,7 +300,7 @@ impl OkxHistory {
         );
         let listing: ArchiveListing = serde_json::from_slice(&response.body)
             .with_context(|| format!("parsing OKX's archive listing of {}", asked()))?;
-        listing.candle_files(contract)
+        listing.files(contract, module)
     }
 
     /// The bytes of `url`, a file of the archive.
@@ -295,63 +347,76 @@ fn candle_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Re
     Ok(bar_type)
 }
 
-/// Fills `catalog` with `instrument` and the bars of `bar_type` over
-/// `[start, end]`, one archive month, or day, at a time: `fill_catalog`
-/// over `[start, the period's end]`, so each call resumes where the catalog
-/// stopped. A period's file holds the minutes opening in it, so the bars
-/// closing in `(its start, its end]` (UTC+8 midnights): its window ends on
-/// the close of its last minute, and the next starts 1 ns after it,
-/// contiguous and closed as Nautilus' catalog intervals. The first window
-/// starts with the day of `start`, which the files cover whole (a `start`
-/// on a day's end would otherwise make a window of one instant, which
-/// `fill_catalog` takes as covered). A period starting at `end` is left to
-/// the next run.
+/// Fills `catalog` with `instrument` and `series`, the items of `module`
+/// of the instrument, over `[start, end]`, one archive month, or day, at a
+/// time: `fill_catalog` over `[start, the period's end]`, so each call
+/// resumes where the catalog stopped. A period's file holds the minutes
+/// opening in it, so the bars closing in `(its start, its end]` (UTC+8
+/// midnights), and the funding at times in `[its start, its end)`: its
+/// window ends on the last instant it holds, and the next starts 1 ns after
+/// it, contiguous and closed as Nautilus' catalog intervals. The first
+/// window starts with the day of `start`, which the files cover whole (a
+/// `start` on a day's end would otherwise make a window of one instant,
+/// which `fill_catalog` takes as covered). A period starting at `end` is
+/// left to the next run. Windows are worked out on closes, a funding time
+/// being taken as the close 1 ns after it (`ArchiveModule::lead`).
 ///
 /// From the month it resumes in, the fill reads monthly files, listed
-/// `LISTED_PERIODS` months per `candle_files` call, up to the first month
-/// without one (OKX publishes a month's file after it ends); from there on
-/// daily files, listed `LISTED_PERIODS` days per call, up to the first day
-/// without one (not published yet), where it stops. `candle_files` answers
+/// `LISTED_PERIODS` months per `list_files` call, up to the first month
+/// without one (OKX publishes a month's file after it ends); from there on,
+/// for candles, daily files, listed `LISTED_PERIODS` days per call, up to
+/// the first day without one (not published yet). It stops at the first
+/// period without a file it has no shorter files for. `list_files` answers
 /// the files of the months, or days, from its first to its last date, keyed
-/// by their first day; `file_bars` the bars of a file closing in a window
-/// within its period.
+/// by their first day; `file_data` the items of a file in a window within
+/// its period.
 ///
 /// # Errors
 ///
-/// As `fill_catalog`: no file on the first day is an empty first
+/// As `fill_catalog`: no file for the first period is an empty first
 /// response, an error naming the series.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the series, its window and its two sources"
+)]
 async fn fill_from_archive(
     catalog: &mut ParquetDataCatalog,
     instrument: &InstrumentAny,
-    bar_type: BarType,
+    module: ArchiveModule,
+    series: (NautilusDataType, String),
     start: Timestamp,
     end: Timestamp,
-    mut candle_files: impl AsyncFnMut(
+    mut list_files: impl AsyncFnMut(
         ArchivePeriod,
         Date,
         Date,
     ) -> anyhow::Result<HashMap<Date, ArchiveFile>>,
-    mut file_bars: impl AsyncFnMut(&ArchiveFile, Timestamp, Timestamp) -> anyhow::Result<Vec<Bar>>,
+    mut file_data: impl AsyncFnMut(&ArchiveFile, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
-    let series = [(NautilusDataType::Bar, bar_type.to_string())];
-    let start = day_start(archive_day(start)?)? + SignedDuration::from_nanos(1);
+    let (data_type, identifier) = series.clone();
+    let named = format!("{} {identifier}", module.name());
+    let series = [series];
+    // Closes from here on.
+    let lead = module.lead();
+    let end = end + lead;
+    let start = day_start(archive_day(start + lead)?)? + SignedDuration::from_nanos(1);
     let last = catalog
-        .query_last_timestamp(&NautilusDataType::Bar.into(), Some(&series[0].1))
-        .with_context(|| format!("reading the stored range of the bars of {bar_type}"))?;
+        .query_last_timestamp(&data_type.into(), Some(&identifier))
+        .with_context(|| format!("reading the stored range of the {named}"))?;
     // `fill_catalog` resumes 1 ns after the stored end.
     let begin = last.map_or(start, |last| {
-        Timestamp::from(UnixNanos::from(last)) + SignedDuration::from_nanos(1)
+        Timestamp::from(UnixNanos::from(last)) + SignedDuration::from_nanos(1) + lead
     });
     let mut period = ArchivePeriod::Month;
     let mut first = period.of(begin)?;
     'listings: while day_start(first)? < end {
         let last_listed = period.last_listed(first)?.min(period.of(end)?);
-        let files = candle_files(period, first, last_listed).await?;
+        let files = list_files(period, first, last_listed).await?;
         let mut date = first;
         while date <= last_listed {
             let file = files.get(&date);
-            if file.is_none() && period == ArchivePeriod::Month {
-                log::info!("{bar_type}: no monthly file for {date}, reading daily files");
+            if file.is_none() && period == ArchivePeriod::Month && module.has_daily_files() {
+                log::info!("{named}: no monthly file for {date}, reading daily files");
                 period = ArchivePeriod::Day;
                 first = archive_day(begin)?.max(date);
                 continue 'listings;
@@ -360,19 +425,18 @@ async fn fill_from_archive(
                 catalog,
                 vec![instrument.clone()],
                 &series,
-                start,
-                period.end(date)?.min(end),
+                start - lead,
+                period.end(date)?.min(end) - lead,
                 async |_, _, from, to| {
                     let Some(file) = file else {
                         return Ok(Vec::new());
                     };
-                    let bars = file_bars(file, from, to).await?;
-                    Ok(bars.into_iter().map(Data::Bar).collect())
+                    file_data(file, from, to).await
                 },
             )
             .await?;
             if file.is_none() {
-                log::info!("{bar_type}: stopping at {date}, which OKX has not published");
+                log::info!("{named}: stopping at {date}, which OKX has not published");
                 return Ok(());
             }
             date = period.next(date)?;
@@ -448,15 +512,64 @@ impl Contract {
         }
     }
 
-    /// The start of the name of the contract's candle file in the
-    /// archive's listing: a swap's own file, or the file of its family's
-    /// futures chain, which holds the rows of every contract (see
-    /// `archive`).
-    fn listed_prefix(self) -> String {
-        if self.inst_type == OKXInstrumentType::Swap {
-            format!("{}-candlesticks-", self.id.symbol)
-        } else {
-            format!("{}-futureschain-candlesticks-", self.family)
+    /// The start of the name of the contract's file of `module` in the
+    /// archive's listing: a swap's own file, or for candles the file of a
+    /// future's family's futures chain, which holds the rows of every
+    /// contract (see `archive`). An error for the funding of a future, which
+    /// the archive does not hold (its funding module refuses `FUTURES`).
+    fn listed_prefix(self, module: ArchiveModule) -> anyhow::Result<String> {
+        let swap = self.inst_type == OKXInstrumentType::Swap;
+        Ok(match module {
+            ArchiveModule::Candles if swap => format!("{}-candlesticks-", self.id.symbol),
+            ArchiveModule::Candles => format!("{}-futureschain-candlesticks-", self.family),
+            ArchiveModule::Funding if swap => format!("{}-fundingrates-", self.id.symbol),
+            ArchiveModule::Funding => {
+                bail!(
+                    "OKX's archive holds the funding of swaps only, not of {}",
+                    self.id
+                )
+            }
+        })
+    }
+}
+
+/// A module of OKX's archive: what its files hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveModule {
+    /// 1-minute candles, in monthly and daily files.
+    Candles,
+    /// The funding of swaps, in monthly files only.
+    Funding,
+}
+
+impl ArchiveModule {
+    /// The archive API's `module`.
+    fn code(self) -> &'static str {
+        match self {
+            Self::Candles => "2",
+            Self::Funding => "3",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Candles => "candle",
+            Self::Funding => "funding",
+        }
+    }
+
+    fn has_daily_files(self) -> bool {
+        self == Self::Candles
+    }
+
+    /// How much earlier than a bar closing at the same point of its period
+    /// an item is stamped: 1 ns for funding, since a period's file holds
+    /// the bars closing in `(its start, its end]` and the funding at times
+    /// in `[its start, its end)`.
+    fn lead(self) -> SignedDuration {
+        match self {
+            Self::Candles => SignedDuration::ZERO,
+            Self::Funding => SignedDuration::from_nanos(1),
         }
     }
 }
@@ -562,18 +675,23 @@ struct ArchiveFile {
 }
 
 impl ArchiveListing {
-    /// The candle files of `contract` in this listing, keyed by the first
-    /// day of their period; an error if OKX refused the request or listed
-    /// two files for one period.
-    fn candle_files(self, contract: Contract) -> anyhow::Result<HashMap<Date, ArchiveFile>> {
+    /// The files of `module` of `contract` in this listing, keyed by the
+    /// first day of their period; an error if OKX refused the request,
+    /// listed two files for one period, or does not hold `module` for
+    /// `contract` (see `Contract::listed_prefix`).
+    fn files(
+        self,
+        contract: Contract,
+        module: ArchiveModule,
+    ) -> anyhow::Result<HashMap<Date, ArchiveFile>> {
         let id = contract.id;
+        let prefix = contract.listed_prefix(module)?;
         ensure!(
             self.code == "0",
             "OKX's archive refused the request: code {}, {}",
             self.code,
             self.msg
         );
-        let prefix = contract.listed_prefix();
         let mut files = HashMap::new();
         for file in self
             .data
@@ -591,8 +709,9 @@ impl ArchiveListing {
                 .date();
             if let Some(other) = files.insert(first, file) {
                 bail!(
-                    "OKX's archive lists more than one candle file of {id} for {first}, one \
+                    "OKX's archive lists more than one {} file of {id} for {first}, one \
                      being {}",
+                    module.name(),
                     other.filename
                 );
             }
@@ -605,7 +724,10 @@ impl ArchiveListing {
 pub(super) mod tests {
     use jiff::civil::date;
 
+    use nautilus_model::data::{Bar, FundingRateUpdate};
+
     use super::{
+        ArchiveModule::{Candles, Funding},
         ArchivePeriod::{Day, Month},
         *,
     };
@@ -776,7 +898,7 @@ pub(super) mod tests {
     #[test]
     fn the_listing_of_a_day_gives_the_candle_file_of_the_instrument_keyed_by_its_day() {
         let files = listing(BTC_FILE)
-            .candle_files(Contract::of(btc()).unwrap())
+            .files(Contract::of(btc()).unwrap(), Candles)
             .unwrap();
         assert_eq!(files.len(), 1);
         let file = &files[&date(2026, 10, 19)];
@@ -792,7 +914,9 @@ pub(super) mod tests {
     #[test]
     fn the_listing_of_months_keys_each_file_by_its_month_of_utc_plus_8() {
         let listing: ArchiveListing = serde_json::from_str(BTC_MONTHS).unwrap();
-        let files = listing.candle_files(Contract::of(btc()).unwrap()).unwrap();
+        let files = listing
+            .files(Contract::of(btc()).unwrap(), Candles)
+            .unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(
             files[&date(2026, 9, 1)].filename,
@@ -810,14 +934,14 @@ pub(super) mod tests {
     #[test]
     fn the_listing_of_a_day_gives_the_chain_file_of_a_future() {
         let xperp = Contract::of(xperp()).unwrap();
-        let files = listing(XPERP_FILE).candle_files(xperp).unwrap();
+        let files = listing(XPERP_FILE).files(xperp, Candles).unwrap();
         assert_eq!(
             files[&date(2026, 10, 19)].filename,
             "BTC-USD_UM_XPERP-futureschain-candlesticks-2026-10-19.zip"
         );
         let other = XPERP_FILE.replace("BTC-USD_UM_XPERP", "ETH-USD_UM_XPERP");
-        assert!(listing(&other).candle_files(xperp).unwrap().is_empty());
-        assert!(listing(BTC_FILE).candle_files(xperp).unwrap().is_empty());
+        assert!(listing(&other).files(xperp, Candles).unwrap().is_empty());
+        assert!(listing(BTC_FILE).files(xperp, Candles).unwrap().is_empty());
     }
 
     #[test]
@@ -828,14 +952,14 @@ pub(super) mod tests {
         .unwrap();
         assert!(
             empty
-                .candle_files(Contract::of(btc()).unwrap())
+                .files(Contract::of(btc()).unwrap(), Candles)
                 .unwrap()
                 .is_empty()
         );
         let other = BTC_FILE.replace("BTC-USDT-SWAP", "BTC-USDT-250101");
         assert!(
             listing(&other)
-                .candle_files(Contract::of(btc()).unwrap())
+                .files(Contract::of(btc()).unwrap(), Candles)
                 .unwrap()
                 .is_empty()
         );
@@ -848,16 +972,50 @@ pub(super) mod tests {
         )
         .unwrap();
         let err = refused
-            .candle_files(Contract::of(btc()).unwrap())
+            .files(Contract::of(btc()).unwrap(), Candles)
             .unwrap_err()
             .to_string();
         assert!(err.contains("50077"), "{err}");
         let twice = listing(&format!("{BTC_FILE},{BTC_FILE}"));
         let err = twice
-            .candle_files(Contract::of(btc()).unwrap())
+            .files(Contract::of(btc()).unwrap(), Candles)
             .unwrap_err()
             .to_string();
         assert!(err.contains("2026-10-19"), "{err}");
+    }
+
+    /// Two of the files OKX's archive listed on 2026-10-23 for the funding
+    /// of BTC-USDT swaps over the months 2025-12 to 2026-09.
+    const BTC_FUNDING_MONTHS: &str = r#"{"code":"0","data":[{"dateAggrType":"monthly","details":[{"ccy":"","dateRangeEnd":"1788192000000","dateRangeStart":"1764518400000","groupDetails":[{"dateTs":"1788192000000","filename":"BTC-USDT-SWAP-fundingrates-2026-09.zip","sizeMB":"0","url":"https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/202609/BTC-USDT-SWAP-fundingrates-2026-09.zip?v=1001"},{"dateTs":"1785513600000","filename":"BTC-USDT-SWAP-fundingrates-2026-08.zip","sizeMB":"0","url":"https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/202608/BTC-USDT-SWAP-fundingrates-2026-08.zip?v=1001"}],"groupSizeMB":"0","instFamily":"BTC-USDT","instId":"","instType":"SWAP"}],"totalSizeMB":"0","ts":"1792710400893"}],"msg":""}"#;
+
+    #[test]
+    fn the_listing_of_funding_months_keys_each_file_by_its_month_of_utc_plus_8() {
+        let listing: ArchiveListing = serde_json::from_str(BTC_FUNDING_MONTHS).unwrap();
+        let files = listing
+            .files(Contract::of(btc()).unwrap(), Funding)
+            .unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[&date(2026, 9, 1)].filename,
+            "BTC-USDT-SWAP-fundingrates-2026-09.zip"
+        );
+        // Funding files are not candle files.
+        let listing: ArchiveListing = serde_json::from_str(BTC_FUNDING_MONTHS).unwrap();
+        assert!(
+            listing
+                .files(Contract::of(btc()).unwrap(), Candles)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_archive_holds_no_funding_of_an_x_perp() {
+        let err = listing(XPERP_FILE)
+            .files(Contract::of(xperp()).unwrap(), Funding)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("swaps only"), "{err}");
     }
 
     fn at(s: &str) -> Timestamp {
@@ -961,7 +1119,7 @@ pub(super) mod tests {
     /// An OKX-shaped archive's listings: the monthly files of the months up
     /// to the one starting on `months`, the daily files of the days up to
     /// `days`. Records the listings asked for.
-    fn candle_files(
+    fn archive_files(
         listed: &mut Vec<(ArchivePeriod, Date, Date)>,
         months: Date,
         days: Date,
@@ -1031,14 +1189,19 @@ pub(super) mod tests {
         ) -> anyhow::Result<HashMap<Date, ArchiveFile>>,
         file_bars: impl AsyncFnMut(&ArchiveFile, Timestamp, Timestamp) -> anyhow::Result<Vec<Bar>>,
     ) -> anyhow::Result<()> {
+        let mut file_bars = file_bars;
         fill_from_archive(
             catalog,
             &btc_instrument(),
-            BarType::from(BTC_MINUTES),
+            Candles,
+            (NautilusDataType::Bar, BTC_MINUTES.to_string()),
             at(start),
             at(end),
             candle_files,
-            file_bars,
+            async |file: &ArchiveFile, from: Timestamp, to: Timestamp| {
+                let bars = file_bars(file, from, to).await?;
+                Ok(bars.into_iter().map(Data::Bar).collect())
+            },
         )
         .await
     }
@@ -1057,7 +1220,7 @@ pub(super) mod tests {
             &mut catalog,
             "2026-07-10T06:00:00Z",
             "2026-10-03T18:00:00Z",
-            candle_files(&mut listed, date(2026, 8, 1), date(2026, 10, 2)),
+            archive_files(&mut listed, date(2026, 8, 1), date(2026, 10, 2)),
             file_bars(&mut asked),
         )
         .await
@@ -1119,7 +1282,7 @@ pub(super) mod tests {
             &mut catalog,
             "2024-10-23T00:00:00Z",
             "2026-10-23T00:00:00Z",
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
             file_bars(&mut asked),
         )
         .await
@@ -1153,7 +1316,7 @@ pub(super) mod tests {
             &mut catalog,
             start,
             end,
-            candle_files(&mut listed, date(2026, 8, 1), date(2026, 10, 4)),
+            archive_files(&mut listed, date(2026, 8, 1), date(2026, 10, 4)),
             async |file: &ArchiveFile, from: Timestamp, to: Timestamp| {
                 if file.filename == "2026-09-15" {
                     bail!("download failed");
@@ -1174,7 +1337,7 @@ pub(super) mod tests {
             &mut catalog,
             start,
             end,
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 4)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 4)),
             file_bars(&mut asked),
         )
         .await
@@ -1204,7 +1367,7 @@ pub(super) mod tests {
             &mut whole,
             start,
             end,
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 4)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 4)),
             file_bars(&mut asked),
         )
         .await
@@ -1222,7 +1385,7 @@ pub(super) mod tests {
             &mut catalog,
             "2026-10-18T16:00:00Z",
             "2026-10-19T16:00:00Z",
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 19)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 19)),
             async |file: &ArchiveFile, from: Timestamp, to: Timestamp| {
                 asked.push((file.filename.clone(), from, to));
                 // A day's file holds the bars closing after its start up to
@@ -1284,7 +1447,7 @@ pub(super) mod tests {
             &mut catalog,
             start,
             end,
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 17)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 17)),
             file_bars(&mut asked),
         )
         .await
@@ -1296,7 +1459,7 @@ pub(super) mod tests {
             &mut catalog,
             start,
             end,
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 19)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 19)),
             file_bars(&mut asked),
         )
         .await
@@ -1328,12 +1491,215 @@ pub(super) mod tests {
             &mut catalog,
             "2026-10-16T16:00:00.000000001Z",
             "2026-10-17T16:00:00Z",
-            candle_files(&mut listed, date(2026, 9, 1), date(2026, 10, 16)),
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 16)),
             file_bars(&mut asked),
         )
         .await
         .unwrap_err()
         .to_string();
         assert!(err.contains(BTC_MINUTES), "{err}");
+    }
+
+    const BTC: &str = "BTC-USDT-SWAP.OKX";
+
+    /// The funding of an OKX-shaped month file at times in `[from, to]`:
+    /// one at each 00:00, 08:00 and 16:00 UTC. Records the file and window
+    /// asked for.
+    fn file_funding(
+        asked: &mut Vec<(String, Timestamp, Timestamp)>,
+    ) -> impl AsyncFnMut(&ArchiveFile, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>> {
+        async move |file: &ArchiveFile, from: Timestamp, to: Timestamp| {
+            asked.push((file.filename.clone(), from, to));
+            let eight_hours = SignedDuration::from_hours(8);
+            let mut time = Timestamp::from_second(from.as_second().div_euclid(28_800) * 28_800)?;
+            let mut funding = Vec::new();
+            while time <= to {
+                if from <= time {
+                    let ts = UnixNanos::from(time);
+                    funding.push(Data::FundingRate(FundingRateUpdate::new(
+                        btc(),
+                        Decimal::new(1, 4),
+                        Some(480),
+                        None,
+                        ts,
+                        ts,
+                    )));
+                }
+                time += eight_hours;
+            }
+            Ok(funding)
+        }
+    }
+
+    async fn fill_funding(
+        catalog: &mut ParquetDataCatalog,
+        start: &str,
+        end: &str,
+        list_files: impl AsyncFnMut(
+            ArchivePeriod,
+            Date,
+            Date,
+        ) -> anyhow::Result<HashMap<Date, ArchiveFile>>,
+        file_data: impl AsyncFnMut(&ArchiveFile, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
+    ) -> anyhow::Result<()> {
+        fill_from_archive(
+            catalog,
+            &btc_instrument(),
+            Funding,
+            (NautilusDataType::FundingRateUpdate, BTC.to_string()),
+            at(start),
+            at(end),
+            list_files,
+            file_data,
+        )
+        .await
+    }
+
+    fn stored_funding(catalog: &mut ParquetDataCatalog) -> Vec<Timestamp> {
+        catalog
+            .funding_rates(Some(vec![BTC.to_string()]), None, None)
+            .unwrap()
+            .iter()
+            .map(|update| Timestamp::from(update.ts_init))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn funding_comes_from_monthly_files_up_to_the_last_published_month() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (mut listed, mut asked) = (Vec::new(), Vec::new());
+        // 2026-10 not published yet.
+        fill_funding(
+            &mut catalog,
+            "2026-07-10T06:00:00Z",
+            "2026-10-23T00:00:00Z",
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
+            file_funding(&mut asked),
+        )
+        .await
+        .unwrap();
+        // No daily files.
+        assert_eq!(listed, [(Month, date(2026, 7, 1), date(2026, 10, 1))]);
+        // A month's file holds the funding from its start, midnight in
+        // UTC+8, to before its end; the first window starts with the archive
+        // day of the start.
+        assert_eq!(
+            asked,
+            [
+                (
+                    "2026-07".to_string(),
+                    at("2026-07-09T16:00:00Z"),
+                    at("2026-07-31T15:59:59.999999999Z")
+                ),
+                (
+                    "2026-08".to_string(),
+                    at("2026-07-31T16:00:00Z"),
+                    at("2026-08-31T15:59:59.999999999Z")
+                ),
+                (
+                    "2026-09".to_string(),
+                    at("2026-08-31T16:00:00Z"),
+                    at("2026-09-30T15:59:59.999999999Z")
+                ),
+            ]
+        );
+        let stored = stored_funding(&mut catalog);
+        assert_eq!(stored.len(), 3 * (22 + 31 + 30));
+        assert_eq!(stored[0], at("2026-07-09T16:00:00Z"));
+        assert_eq!(stored.last().unwrap(), &at("2026-09-30T08:00:00Z"));
+        // Covered up to the end of the last month published, as a backtest's
+        // coverage check reads it.
+        let ns = |s: &str| UnixNanos::from(at(s)).as_u64();
+        let missing = |to: &str| {
+            catalog
+                .get_missing_intervals_for_request(
+                    ns("2026-07-09T16:00:00Z"),
+                    ns(to),
+                    &NautilusDataType::FundingRateUpdate.into(),
+                    Some(BTC),
+                )
+                .unwrap()
+        };
+        assert!(missing("2026-09-30T15:59:59.999999999Z").is_empty());
+        assert_eq!(
+            missing("2026-09-30T16:00:00Z"),
+            [(ns("2026-09-30T16:00:00Z"), ns("2026-09-30T16:00:00Z"))]
+        );
+        assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_funding_fill_resumes_after_the_stored_end_with_a_month_published_since() {
+        let (start, end) = ("2026-07-10T06:00:00Z", "2026-10-23T00:00:00Z");
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (mut listed, mut asked) = (Vec::new(), Vec::new());
+        fill_funding(
+            &mut catalog,
+            start,
+            end,
+            archive_files(&mut listed, date(2026, 8, 1), date(2026, 10, 21)),
+            file_funding(&mut asked),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_funding(&mut catalog).last().unwrap(),
+            &at("2026-08-31T08:00:00Z")
+        );
+        // 2026-09 is published since.
+        let (mut listed, mut asked) = (Vec::new(), Vec::new());
+        fill_funding(
+            &mut catalog,
+            start,
+            end,
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
+            file_funding(&mut asked),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed, [(Month, date(2026, 9, 1), date(2026, 10, 1))]);
+        assert_eq!(
+            asked,
+            [(
+                "2026-09".to_string(),
+                at("2026-08-31T16:00:00Z"),
+                at("2026-09-30T15:59:59.999999999Z")
+            )]
+        );
+        // As one uninterrupted fill.
+        let dir = tempfile::tempdir().unwrap();
+        let mut whole = new_catalog(&dir);
+        let (mut listed, mut asked) = (Vec::new(), Vec::new());
+        fill_funding(
+            &mut whole,
+            start,
+            end,
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
+            file_funding(&mut asked),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored_funding(&mut catalog), stored_funding(&mut whole));
+    }
+
+    #[tokio::test]
+    async fn no_funding_file_for_the_first_month_is_an_error_naming_the_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (mut listed, mut asked) = (Vec::new(), Vec::new());
+        let err = fill_funding(
+            &mut catalog,
+            "2026-10-02T00:00:00Z",
+            "2026-10-23T00:00:00Z",
+            archive_files(&mut listed, date(2026, 9, 1), date(2026, 10, 21)),
+            file_funding(&mut asked),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&format!("funding_rates of {BTC}")), "{err}");
+        assert!(stored_funding(&mut catalog).is_empty());
     }
 }

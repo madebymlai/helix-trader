@@ -73,13 +73,15 @@ the fee model (see Costs).
 A relative catalog path is made absolute: with a relative one, the node's
 DataFusion reader finds no object store for `file://catalog/...`.
 
-The run replays the series the strategy's bars are built from and nothing
-else (`strategy::catalog_series`, see the data README): the quotes of
-their instruments, or the source bars of a composite bar type
+The run replays the series the strategy's bars are built from
+(`strategy::catalog_series`, see the data README): the quotes of their
+instruments, or the source bars of a composite bar type
 (`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
 `...-1-MINUTE-LAST-EXTERNAL`). The data engine builds the strategy's
 internal bars from them (see the strategy README), and orders fill on them
-(see Fills).
+(see Fills). It also replays the funding of each instrument whose catalog
+stores funding (`Backtest::series`; see OKX on candles, "Funding"), and
+nothing else.
 
 ## The run
 
@@ -314,8 +316,8 @@ fails on the first miss:
 - every instrument is stored, else the error names the instrument id;
 - every series is covered over `[start − 1 ns − warmup, end]`, the
   warmup and the run, else the error names the series (`the quotes of
-  SXR8.IBIS`, `the bars of SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`) and the
-  first missing range.
+  SXR8.IBIS`, `the bars of SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, `the
+  funding_rates of BTC-USDT-SWAP.OKX`) and the first missing range.
 
 A series not stored misses the whole range. Coverage is the stored
 intervals of the series, by data type and identifier (inclusive
@@ -744,9 +746,25 @@ directory (data README).
   its listing (2026-03-30) or after its expiry (2031-04-04).
 - **Commission.** `--commission-rate 0.0005` is OKX's taker fee, 0.05% of
   each fill's value (contracts × contract size × price), no minimum.
-- **Funding is not charged.** OKX settles funding on open swap and X-Perp
-  positions (BTC every 8 hours, about 0.01% of the position each time);
-  the backtest charges none.
+- **Funding.** OKX settles funding on open swap and X-Perp positions
+  (BTC every 8 hours, 00:00, 08:00 and 16:00 UTC, about 0.01% of the
+  position each time). A swap's catalog stores its funding rates (data
+  README), so the run replays them by instrument id and Nautilus'
+  simulated venue settles them: an update whose `ts_event` is on its
+  interval's boundary makes one `FundingSettlement` at that time on the
+  open position, rate × the position's value at the settlement price, paid
+  by a long and received by a short when the rate is positive, the reverse
+  when negative. With no mark price in the catalog the price is the mid of
+  the book, which the bars set to the last trade: the close of the minute
+  ending at the funding time (OKX uses its mark price; the difference is
+  negligible). The settlement adjusts the position's realized PnL and the
+  balance, so the report's PnL and final balance include it; we add no
+  code of our own. The stored funding must cover the whole window, as the
+  bars: it ends with the last complete UTC+8 month, so a run reaching into
+  the current month is refused naming `the funding_rates of …` and the
+  missing range. X-Perps' funding is not filled yet: their runs charge
+  none. `backtest_okx_swap_funding.rs` checks a long paying and receiving
+  at two funding times.
 - **Hour bars.** A minute bar is stamped at its open (`ts_event`) and
   replayed at its close (`ts_init`), so the hour bar closing 10:00 holds
   the minutes opening 09:00 to 09:59 and is built at 10:00, after its last
@@ -819,7 +837,26 @@ first hour bar of the run. Before the warmup served composite bar types,
 the same window started cold and gave 8 orders, -65.06 USDT and -64.86
 USD.
 
-Funding not included. Two X-Perp buys of 200 contracts met thin minutes:
+Funding not included (filled before funding was stored).
+
+**Verified with funding**, 2026-10-23: a scratch catalog filled for
+BTC-USDT-SWAP.OKX with `--start 2026-06-01 --end 2026-10-01` (candles to
+2026-10-01T00:00Z, funding 2026-06 to 2026-09 from 4 monthly files, 366
+rates), the same EMA config, `--start 2026-06-03 --end
+2026-09-30T15:00:00Z`: 104 orders, 359 funding settlements (every
+00:00, 08:00 and 16:00 UTC of the window, a position being always open),
+-0.716571 USDT in all (+5.94 received, -6.65 paid). The same run on the
+catalog without its funding: the same 104 orders, a final balance of
+10064.36 USDT, 0.71657135 more than with funding (10063.65), and PnL
+(total) 64.36 against 63.65. The first settlement, 2026-06-03 00:00 on a short of 1
+contract opened that minute, is 0.01 BTC × 66,722.6 (the close of the
+minute ending 00:00) × 0.0000865678874748 (the archive's rate) = +0.05776035
+USDT, as Nautilus settled it. A position opened or flipped on an hour bar
+closing at a funding time pays that time's funding: the fill and the
+settlement share the timestamp and Nautilus settles after the fill, while
+on OKX an order sent after the 00:00 close comes after the settlement.
+
+Two X-Perp buys of 200 contracts met thin minutes:
 10 and 18 contracts filled at the close, the rest (190, 182) one tick
 higher. Checked against the stored minute bars, outside Nautilus, on the
 cold runs (same fills code):
@@ -980,7 +1017,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   fill only, a rate on the value of every fill, maker and taker alike),
   the coverage check (gaps on the intervals alone, then on a temporary
   catalog: missing instrument, quotes 1 ns short at either end, missing,
-  or with a gap, the source bars of a composite bar type), the data
+  or with a gap, the source bars of a composite bar type, stored funding
+  short of the window), the run's series (the stored funding of a traded
+  instrument added, none without), the data
   configs (quotes by instrument, a composite bar type's source bars by
   bar type), the report of a hand-built `Outcome` (sections, sorted
   names, max drawdown, the costs and the gross PnL), the venue at the
@@ -1050,6 +1089,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     shows in a high or a low), the fills at the close of the hour's last
     minute, 0.05% on each fill's value, at 1x the short left open locking
     its whole value at entry, and `Spread: n/a` in the report's costs.
+  - `backtest_okx_swap_funding.rs`: the same swap held long across two
+    funding times with stored funding: a Nautilus funding settlement at
+    each, -0.2 USDT at +0.01% on 2,000 USDT, +0.404 at -0.02% on 2,020, in
+    the final balance; and a window the stored funding does not cover,
+    refused naming it and the missing range.
   - `backtest_okx_xperp.rs`: the same bars and orders on
     BTC-USD_UM_XPERP-310404.OKX, a `CryptoFuture` of 0.0001 BTC a contract
     settled in USD, with margins of 1: 200 contracts bought and 300 sold,
