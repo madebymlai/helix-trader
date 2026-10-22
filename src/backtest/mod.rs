@@ -18,6 +18,7 @@ use nautilus_common::{
 use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
+use rust_decimal::Decimal;
 
 pub use self::{
     costs::{commission_per_order, commission_rate},
@@ -46,6 +47,10 @@ pub struct Backtest {
     pub fee_model: FeeModelAny,
     /// The starting balance of the account.
     pub balance: Money,
+    /// The account's leverage on every instrument, positive: a position
+    /// locks its value / leverage times the instrument's margin (Nautilus'
+    /// default margin model). 1 is no leverage.
+    pub leverage: Decimal,
     /// The Nautilus logger: the node installs it, so nothing else may.
     pub logging: LoggerConfig,
 }
@@ -58,7 +63,7 @@ impl Backtest {
     ///
     /// Returns an error if the inputs are inconsistent (no instruments,
     /// several venues, a negative warmup, `start` not before
-    /// `end`), if the cache cannot hold the warmup bars of a bar type (see
+    /// `end`, a leverage not positive), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of its quotes
     /// over `[start - 1 ns - warmup, end]`, if the node fails to build
     /// or run, or if a fill has no quote before it.

@@ -270,6 +270,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         warmup: requirements.warmup,
         fee_model,
         balance: args.balance,
+        leverage: Decimal::ONE,
         logging,
     };
     let outcome = match args.run.strategy {

@@ -103,6 +103,7 @@ mod tests {
         instruments::stubs::equity_aapl,
         types::{Money, Price, Quantity},
     };
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::backtest::commission_per_order;
@@ -150,6 +151,7 @@ mod tests {
             warmup: SignedDuration::from_hours(24),
             fee_model: commission_per_order(Money::from("3 USD")).unwrap(),
             balance: Money::from("10000 USD"),
+            leverage: Decimal::ONE,
             logging: LoggerConfig::default(),
         }
     }
