@@ -1,0 +1,16 @@
+[
+  {
+    "baseMaxLoan": "",
+    "imr": "0.02",
+    "instFamily": "BTC-USD_UM_XPERP",
+    "instId": "",
+    "maxLever": "50",
+    "maxSz": "45000",
+    "minSz": "0",
+    "mmr": "0.0065",
+    "optMgnFactor": "0",
+    "quoteMaxLoan": "",
+    "tier": "1",
+    "uly": "BTC-USD"
+  }
+]

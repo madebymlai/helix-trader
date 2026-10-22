@@ -1,13 +1,14 @@
-//! OKX history: the instruments of OKX swaps and their quotes, filled into
-//! the catalog one UTC day at a time.
+//! OKX history: the instruments of OKX swaps and X-Perps and their quotes,
+//! filled into the catalog one UTC day at a time.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
-//! `OKXRawHttpClient` and `parse_instrument_any`, with the margins of
-//! OKX's first position tier. OKX has no quote history, so quotes are
-//! rebuilt from OKX's order-book archive (see `archive`): one file per
-//! instrument and UTC day, downloaded to a temporary file and read as a
-//! stream. The archive API, the download and the conversion are ours, to be
-//! removed if Nautilus gains an equivalent.
+//! `OKXRawHttpClient` and `parse_instrument_any`, with margins from OKX's
+//! first position tier (see `instrument_with_margins`). OKX has no quote
+//! history, so quotes are rebuilt from OKX's order-book archive (see
+//! `archive`): one file per swap, or per futures family, and UTC day,
+//! downloaded to a temporary file and read as a stream. The archive API,
+//! the download and the conversion are ours, to be removed if Nautilus
+//! gains an equivalent.
 
 use std::{collections::HashMap, fs::File, io::Write, num::NonZeroU32, time::Duration};
 
@@ -29,7 +30,7 @@ use nautilus_okx::{
         consts::OKX_VENUE,
         enums::{OKXEnvironment, OKXInstrumentType, OKXTradeMode},
         models::OKXInstrument,
-        parse::parse_instrument_any,
+        parse::{is_xperp_rule_type, okx_instrument_type_from_symbol, parse_instrument_any},
     },
     http::{
         client::OKXRawHttpClient,
@@ -73,6 +74,10 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 /// How often a download logs its progress.
 const PROGRESS_BYTES: u64 = 100 * 1024 * 1024;
 
+/// The leverage X-Perps are margined at: OKX Europe's cap for retail
+/// accounts, below the 50x of OKX's first tier.
+const XPERP_LEVERAGE: u32 = 10;
+
 /// A connection to OKX's public API and archive, for history.
 #[derive(Debug)]
 pub struct OkxHistory {
@@ -106,15 +111,15 @@ impl OkxHistory {
         id.venue == *OKX_VENUE
     }
 
-    /// Fills `catalog` with the instruments of `ids`, OKX swaps, and their
-    /// quotes over `[start, end]`, one UTC day at a time (see
+    /// Fills `catalog` with the instruments of `ids`, OKX swaps or X-Perps,
+    /// and their quotes over `[start, end]`, one UTC day at a time (see
     /// `fill_by_day`).
     ///
     /// # Errors
     ///
     /// Returns an error if `start` is before the archive's first day,
-    /// checked before any request, if an id is not an OKX swap, or as
-    /// `fill_by_day`.
+    /// checked before any request, if an id is not an OKX swap or X-Perp,
+    /// or as `fill_by_day`.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
@@ -137,16 +142,16 @@ impl OkxHistory {
         .await
     }
 
-    /// The instrument of `id`, an OKX swap, with the initial and
-    /// maintenance margins of OKX's first position tier (cross margin).
+    /// The instrument of `id`, an OKX swap or X-Perp, with its margins
+    /// (see `instrument_with_margins`) from OKX's first position tier
+    /// (cross margin).
     async fn instrument(&self, id: InstrumentId) -> anyhow::Result<InstrumentAny> {
-        let family = swap_family(id)?;
-        let symbol = id.symbol.to_string();
+        let contract = Contract::of(id)?;
         let raw = self
             .client
             .get_instruments(GetInstrumentsParams {
-                inst_type: OKXInstrumentType::Swap,
-                inst_id: Some(symbol.clone()),
+                inst_type: contract.inst_type,
+                inst_id: Some(id.symbol.to_string()),
                 ..Default::default()
             })
             .await
@@ -157,9 +162,9 @@ impl OkxHistory {
         let tiers = self
             .client
             .get_position_tiers(GetPositionTiersParams {
-                inst_type: OKXInstrumentType::Swap,
+                inst_type: contract.inst_type,
                 td_mode: OKXTradeMode::Cross,
-                inst_family: Some(family.to_string()),
+                inst_family: Some(contract.family.to_string()),
                 tier: Some("1".to_string()),
                 ..Default::default()
             })
@@ -183,7 +188,7 @@ impl OkxHistory {
             to <= day_last_nanosecond(day)?,
             "the window [{from}, {to}] of {id} spans more than the UTC day {day}"
         );
-        let Some(file) = self.day_file(id, day).await? else {
+        let Some(file) = self.day_file(Contract::of(id)?, day).await? else {
             log::warn!("{id}: OKX's archive has no order-book file for {day}");
             return Ok(None);
         };
@@ -215,13 +220,14 @@ impl OkxHistory {
         Ok(Some(made.quotes))
     }
 
-    /// The archive's order-book file of `id` for `day`, if any.
-    async fn day_file(&self, id: InstrumentId, day: Date) -> anyhow::Result<Option<ArchiveFile>> {
+    /// The archive's order-book file of `contract` for `day`, if any.
+    async fn day_file(&self, contract: Contract, day: Date) -> anyhow::Result<Option<ArchiveFile>> {
+        let id = contract.id;
         let day_ms = day_start(day)?.as_millisecond().to_string();
         let params: HashMap<String, Vec<String>> = [
             ("module", ORDER_BOOK_MODULE),
-            ("instType", "SWAP"),
-            ("instFamilyList", swap_family(id)?),
+            ("instType", contract.archive_type()),
+            ("instFamilyList", contract.family),
             ("dateAggrType", "daily"),
             ("begin", &day_ms),
             ("end", &day_ms),
@@ -247,7 +253,7 @@ impl OkxHistory {
         );
         let listing: ArchiveListing = serde_json::from_slice(&response.body)
             .with_context(|| format!("parsing OKX's archive listing for {day}"))?;
-        listing.order_book_file(id)
+        listing.order_book_file(contract)
     }
 
     /// Streams `url`, a file of the archive, into `file`, logging the
@@ -346,9 +352,12 @@ async fn fill_by_day(
     Ok(())
 }
 
-/// The instrument of `raw` with the initial and maintenance margins
-/// (`imr`, `mmr`) of the first of `tiers`, through the adapter's
-/// `parse_instrument_any`, which leaves them at 0 otherwise.
+/// The instrument of `raw` with its initial and maintenance margins,
+/// through the adapter's `parse_instrument_any`, which leaves them at 0
+/// otherwise. A swap takes both from the first of `tiers` (`imr`, `mmr`).
+/// An X-Perp (a future whose rule type is `xperp`) takes its maintenance
+/// margin from there and an initial margin of 1 / `XPERP_LEVERAGE`; a
+/// dated future is refused.
 fn instrument_with_margins(
     raw: &OKXInstrument,
     tiers: &[OKXPositionTier],
@@ -364,7 +373,17 @@ fn instrument_with_margins(
             .parse::<Decimal>()
             .with_context(|| format!("the {name} {value:?} of the first tier of {id}"))
     };
-    let (imr, mmr) = (rate(&tier.imr, "imr")?, rate(&tier.mmr, "mmr")?);
+    let imr = if raw.inst_type == OKXInstrumentType::Futures {
+        ensure!(
+            is_xperp_rule_type(&raw.rule_type),
+            "{id} is a dated future (rule type {:?}); of OKX's futures only X-Perps are served",
+            raw.rule_type
+        );
+        Decimal::ONE / Decimal::from(XPERP_LEVERAGE)
+    } else {
+        rate(&tier.imr, "imr")?
+    };
+    let mmr = rate(&tier.mmr, "mmr")?;
     ensure!(
         imr > Decimal::ZERO && mmr > Decimal::ZERO,
         "the first tier of {id} has margins {imr} and {mmr}, not both positive"
@@ -373,15 +392,62 @@ fn instrument_with_margins(
         .with_context(|| format!("{id} is not an instrument Nautilus supports"))
 }
 
-/// The instrument family of the OKX swap `id` (`BTC-USDT` of
-/// `BTC-USDT-SWAP.OKX`), the archive's and the tiers' key.
-fn swap_family(id: InstrumentId) -> anyhow::Result<&'static str> {
-    ensure!(OkxHistory::serves(id), "{id} is not on {}", *OKX_VENUE);
-    id.symbol
-        .inner()
-        .as_str()
-        .strip_suffix("-SWAP")
-        .with_context(|| format!("{id} is not an OKX swap (SYMBOL-SWAP.OKX)"))
+/// An OKX swap (`BTC-USDT-SWAP.OKX`) or future
+/// (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API and archive by its
+/// instrument type and family.
+#[derive(Debug, Clone, Copy)]
+struct Contract {
+    id: InstrumentId,
+    /// `Swap` or `Futures`, from the symbol (the adapter's
+    /// `okx_instrument_type_from_symbol`).
+    inst_type: OKXInstrumentType,
+    /// The symbol without its last part: `BTC-USDT`, `BTC-USD_UM_XPERP`.
+    family: &'static str,
+}
+
+impl Contract {
+    /// The contract of `id`; an error if it is not an OKX swap or future.
+    fn of(id: InstrumentId) -> anyhow::Result<Self> {
+        ensure!(OkxHistory::serves(id), "{id} is not on {}", *OKX_VENUE);
+        let symbol = id.symbol.inner().as_str();
+        let inst_type = okx_instrument_type_from_symbol(symbol);
+        ensure!(
+            matches!(
+                inst_type,
+                OKXInstrumentType::Swap | OKXInstrumentType::Futures
+            ),
+            "{id} is not an OKX swap (BTC-USDT-SWAP.OKX) or X-Perp \
+             (BTC-USD_UM_XPERP-310404.OKX)"
+        );
+        let (family, _) = symbol
+            .rsplit_once('-')
+            .with_context(|| format!("{id} has no instrument family"))?;
+        Ok(Self {
+            id,
+            inst_type,
+            family,
+        })
+    }
+
+    /// The archive's name of the instrument type.
+    fn archive_type(self) -> &'static str {
+        if self.inst_type == OKXInstrumentType::Swap {
+            "SWAP"
+        } else {
+            "FUTURES"
+        }
+    }
+
+    /// The start of the name of the contract's order-book file in the
+    /// archive's listing: a swap's own file, or the file of its family's
+    /// futures chain, which holds one file per contract (see `archive`).
+    fn listed_prefix(self) -> String {
+        if self.inst_type == OKXInstrumentType::Swap {
+            format!("{}-L2orderbook-", self.id.symbol)
+        } else {
+            format!("{}-futureschain-L2orderbook-", self.family)
+        }
+    }
 }
 
 /// The UTC date of `ts`.
@@ -428,16 +494,17 @@ struct ArchiveFile {
 }
 
 impl ArchiveListing {
-    /// The order-book file of `id` in this listing, if any; an error if
-    /// OKX refused the request or listed it twice.
-    fn order_book_file(self, id: InstrumentId) -> anyhow::Result<Option<ArchiveFile>> {
+    /// The order-book file of `contract` in this listing, if any; an
+    /// error if OKX refused the request or listed it twice.
+    fn order_book_file(self, contract: Contract) -> anyhow::Result<Option<ArchiveFile>> {
+        let id = contract.id;
         ensure!(
             self.code == "0",
             "OKX's archive refused the request: code {}, {}",
             self.code,
             self.msg
         );
-        let prefix = format!("{}-L2orderbook-", id.symbol);
+        let prefix = contract.listed_prefix();
         let mut files = self
             .data
             .into_iter()
@@ -474,6 +541,23 @@ pub(super) mod tests {
         instrument_with_margins(&raw_instrument(), &tiers(), UnixNanos::default()).unwrap()
     }
 
+    const XPERP_INSTRUMENT: &str = include_str!("testdata/BTC-USD_UM_XPERP-310404-instrument.json");
+    const XPERP_TIERS: &str = include_str!("testdata/BTC-USD_UM_XPERP-position-tiers.json");
+
+    fn raw_xperp() -> OKXInstrument {
+        serde_json::from_str(XPERP_INSTRUMENT).unwrap()
+    }
+
+    fn xperp_tiers() -> Vec<OKXPositionTier> {
+        serde_json::from_str(XPERP_TIERS).unwrap()
+    }
+
+    /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on
+    /// 2026-10-22, with its margins.
+    pub(in crate::data::okx) fn xperp_instrument() -> InstrumentAny {
+        instrument_with_margins(&raw_xperp(), &xperp_tiers(), UnixNanos::default()).unwrap()
+    }
+
     #[test]
     fn an_okx_swap_is_a_crypto_perpetual_with_its_contract_value_increments_and_tier_one_margins() {
         let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
@@ -504,6 +588,41 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn an_okx_x_perp_is_a_crypto_future_margined_at_ten_times_with_its_tier_one_maintenance() {
+        let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
+            panic!("not a CryptoFuture");
+        };
+        assert_eq!(btc.id, InstrumentId::from("BTC-USD_UM_XPERP-310404.OKX"));
+        assert_eq!(btc.multiplier.to_string(), "0.0001");
+        assert_eq!(btc.price_increment.to_string(), "0.1");
+        assert_eq!(btc.size_increment.to_string(), "1");
+        assert_eq!((btc.price_precision, btc.size_precision), (1, 0));
+        assert_eq!(btc.margin_init, Decimal::new(1, 1));
+        assert_eq!(btc.margin_maint, Decimal::new(65, 4));
+        assert_eq!(btc.settlement_currency.code.as_str(), "USD");
+        assert_eq!(btc.quote_currency.code.as_str(), "USD");
+        assert!(!btc.is_inverse);
+        assert_eq!(
+            Timestamp::from(btc.expiration_ns),
+            at("2031-04-04T08:00:00Z")
+        );
+        assert_eq!(
+            Timestamp::from(btc.activation_ns),
+            at("2026-03-30T04:30:00.428Z")
+        );
+    }
+
+    #[test]
+    fn a_dated_future_is_refused() {
+        let mut dated = raw_xperp();
+        dated.rule_type = "normal".to_string();
+        let err = instrument_with_margins(&dated, &xperp_tiers(), UnixNanos::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("X-Perp"), "{err}");
+    }
+
+    #[test]
     fn okx_serves_the_instruments_of_its_venue_only() {
         assert!(OkxHistory::serves(btc()));
         for id in ["ESZ6.CME", "SXR8.IBIS", "BTC-USDT-SWAP.BINANCE"] {
@@ -512,11 +631,23 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_family_of_an_okx_swap_keys_the_archive() {
-        let family = swap_family(InstrumentId::from("BTC-USDT-SWAP.OKX")).unwrap();
-        assert_eq!(family, "BTC-USDT");
-        for id in ["BTC-USDT.OKX", "BTC-USDT-SWAP.BINANCE"] {
-            assert!(swap_family(InstrumentId::from(id)).is_err(), "{id}");
+    fn the_type_and_family_of_an_okx_swap_or_future_key_the_api_and_the_archive() {
+        let swap = Contract::of(btc()).unwrap();
+        assert_eq!(
+            (swap.inst_type, swap.family),
+            (OKXInstrumentType::Swap, "BTC-USDT")
+        );
+        let future = Contract::of(xperp()).unwrap();
+        assert_eq!(
+            (future.inst_type, future.family),
+            (OKXInstrumentType::Futures, "BTC-USD_UM_XPERP")
+        );
+        for id in [
+            "BTC-USDT.OKX",
+            "BTC-USD-261225-100000-C.OKX",
+            "BTC-USDT-SWAP.BINANCE",
+        ] {
+            assert!(Contract::of(InstrumentId::from(id)).is_err(), "{id}");
         }
     }
 
@@ -533,9 +664,16 @@ pub(super) mod tests {
         InstrumentId::from("BTC-USDT-SWAP.OKX")
     }
 
+    fn xperp() -> InstrumentId {
+        InstrumentId::from("BTC-USD_UM_XPERP-310404.OKX")
+    }
+
     #[test]
     fn the_listing_of_a_day_gives_the_order_book_file_of_the_instrument() {
-        let file = listing(BTC_FILE).order_book_file(btc()).unwrap().unwrap();
+        let file = listing(BTC_FILE)
+            .order_book_file(Contract::of(btc()).unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             file.filename,
             "BTC-USDT-SWAP-L2orderbook-400lv-2026-10-19.tar.gz"
@@ -544,25 +682,51 @@ pub(super) mod tests {
         assert!(file.url.starts_with(ARCHIVE_FILES));
     }
 
+    const XPERP_FILE: &str = r#"{"dateTs":"1792368000000","filename":"BTC-USD_UM_XPERP-futureschain-L2orderbook-400lv-2026-10-19.tar.gz","sizeMB":"38.54","url":"https://static.okx.com/cdn/okx/match/orderbook/pro/L2/400lv/daily/20261019/BTC-USD_UM_XPERP-futureschain-L2orderbook-400lv-2026-10-19.tar.gz"}"#;
+
+    #[test]
+    fn the_listing_of_a_day_gives_the_chain_file_of_a_future() {
+        let xperp = Contract::of(xperp()).unwrap();
+        let file = listing(XPERP_FILE).order_book_file(xperp).unwrap().unwrap();
+        assert_eq!(
+            file.filename,
+            "BTC-USD_UM_XPERP-futureschain-L2orderbook-400lv-2026-10-19.tar.gz"
+        );
+        let other = XPERP_FILE.replace("BTC-USD_UM_XPERP", "ETH-USD_UM_XPERP");
+        assert_eq!(listing(&other).order_book_file(xperp).unwrap(), None);
+        assert_eq!(listing(BTC_FILE).order_book_file(xperp).unwrap(), None);
+    }
+
     #[test]
     fn a_day_not_published_lists_no_file() {
         let empty: ArchiveListing = serde_json::from_str(
             r#"{"code":"0","data":[{"dateAggrType":"daily","details":[],"totalSizeMB":"0","ts":"1792616059979"}],"msg":""}"#,
         )
         .unwrap();
-        assert_eq!(empty.order_book_file(btc()).unwrap(), None);
+        assert_eq!(
+            empty.order_book_file(Contract::of(btc()).unwrap()).unwrap(),
+            None
+        );
         let other = BTC_FILE.replace("BTC-USDT-SWAP", "BTC-USDT-250101");
-        assert_eq!(listing(&other).order_book_file(btc()).unwrap(), None);
+        assert_eq!(
+            listing(&other)
+                .order_book_file(Contract::of(btc()).unwrap())
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
     fn a_refused_request_or_a_file_listed_twice_is_an_error() {
         let refused: ArchiveListing =
             serde_json::from_str(r#"{"code":"50076","msg":"range too wide","data":[]}"#).unwrap();
-        let err = refused.order_book_file(btc()).unwrap_err().to_string();
+        let err = refused
+            .order_book_file(Contract::of(btc()).unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("50076"), "{err}");
         let twice = listing(&format!("{BTC_FILE},{BTC_FILE}"));
-        assert!(twice.order_book_file(btc()).is_err());
+        assert!(twice.order_book_file(Contract::of(btc()).unwrap()).is_err());
     }
 
     #[test]
