@@ -20,7 +20,7 @@ use jiff::{
 };
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    data::QuoteTick,
+    data::{Data, NautilusDataType, QuoteTick},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
@@ -299,6 +299,7 @@ async fn fill_by_day(
     let quotes_type = QuoteTick::catalog_data_type().into();
     for instrument in instruments {
         let id = instrument.id();
+        let series = [(NautilusDataType::QuoteTick, id.to_string())];
         let last = catalog
             .query_last_timestamp(&quotes_type, Some(&id.to_string()))
             .with_context(|| format!("reading the stored range of the quotes of {id}"))?;
@@ -313,12 +314,13 @@ async fn fill_by_day(
             fill_catalog(
                 catalog,
                 vec![instrument.clone()],
+                &series,
                 start,
                 day_end,
-                async |_, from, to| {
+                async |_, _, from, to| {
                     let quotes = day_quotes(&instrument, from, to).await?;
                     published = quotes.is_some();
-                    Ok(quotes.unwrap_or_default())
+                    Ok(quotes.into_iter().flatten().map(Data::Quote).collect())
                 },
             )
             .await?;

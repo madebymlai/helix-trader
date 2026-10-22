@@ -15,7 +15,7 @@ use helix_trader::{
     data::{IbHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
-        DataRequirements,
+        DataRequirements, catalog_series,
         ema::{EmaCross, EmaCrossConfig},
     },
 };
@@ -216,9 +216,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Checks everything that needs no gateway, then fills the catalog with the
-/// instruments and their quotes from each instrument's source: OKX's
-/// archive for OKX instruments, IB (connected only if needed) for the
-/// others. No bars: the strategies' bars are built from the quotes.
+/// instruments and the series their bars are built from (see
+/// `strategy::catalog_series`) from each instrument's source: OKX's
+/// archive for OKX instruments (their quotes), IB (connected only if
+/// needed) for the others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -253,12 +254,14 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
         let instruments = ib.instruments(&ib_ids).await?;
+        let series = catalog_series(&requirements.of_instruments(&ib_ids).bar_types);
         fill_catalog(
             &mut catalog,
             instruments,
+            &series,
             start,
             end,
-            async |id, from, to| ib.quotes(id, from, to).await,
+            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
         )
         .await?;
     }

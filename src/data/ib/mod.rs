@@ -1,6 +1,7 @@
 //! Interactive Brokers connection and history: the account, the gateway
 //! (see `gateway`), the data client config, and instruments and quotes for
-//! `fill_catalog`.
+//! `fill_catalog`, which asks for series of any data type: IB serves
+//! quotes only (see `IbHistory::data`).
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
@@ -9,7 +10,7 @@
 //! usable quote history, so quotes are made here from BID and ASK bars.
 //! Another source is another file next to this one.
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use anyhow::{Context, ensure};
 use ibapi::contracts::{Contract, Symbol};
@@ -20,7 +21,7 @@ use nautilus_interactive_brokers::{
     historical::HistoricalInteractiveBrokersClient,
 };
 use nautilus_model::{
-    data::{Bar, BarSpecification, BarType, QuoteTick},
+    data::{Bar, BarSpecification, BarType, Data, NautilusDataType, QuoteTick},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
@@ -121,6 +122,26 @@ impl IbHistory {
         Ok(instruments)
     }
 
+    /// The series of `data_type` and `identifier` over `[start, end]`, for
+    /// `fill_catalog`: the quotes of the instrument `identifier` names (see
+    /// `quotes`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data_type` is not quotes, which is all IB
+    /// serves, if `identifier` is not an instrument id, or as `quotes`.
+    pub async fn data(
+        &self,
+        data_type: &NautilusDataType,
+        identifier: &str,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> anyhow::Result<Vec<Data>> {
+        let instrument_id = quoted_instrument(data_type, identifier)?;
+        let quotes = self.quotes(instrument_id, start, end).await?;
+        Ok(quotes.into_iter().map(Data::Quote).collect())
+    }
+
     /// The quotes of `instrument_id` over `[start, end]`, one a minute,
     /// sorted by `ts_init`. IB has no usable quote history: each is made
     /// from the 1-MINUTE BID and ASK bars of the same close (see
@@ -184,6 +205,19 @@ impl IbHistory {
         })
         .await
     }
+}
+
+/// The instrument of the series of `data_type` and `identifier`, which
+/// must be quotes: all IB serves.
+fn quoted_instrument(
+    data_type: &NautilusDataType,
+    identifier: &str,
+) -> anyhow::Result<InstrumentId> {
+    ensure!(
+        *data_type == NautilusDataType::QuoteTick,
+        "IB's history serves quotes, not {data_type} ({identifier})"
+    );
+    Ok(InstrumentId::from_str(identifier)?)
 }
 
 /// The bars of `instrument_id` priced on `price_type` that quotes are made
@@ -588,6 +622,18 @@ mod tests {
             ..config
         };
         assert!(BarRequests::of(&regular).use_rth);
+    }
+
+    #[test]
+    fn ib_serves_the_quotes_of_an_instrument_and_nothing_else() {
+        let quotes = NautilusDataType::QuoteTick;
+        assert_eq!(
+            quoted_instrument(&quotes, "SXR8.IBIS").unwrap(),
+            InstrumentId::from("SXR8.IBIS")
+        );
+        let bars = "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL";
+        let err = quoted_instrument(&NautilusDataType::Bar, bars).unwrap_err();
+        assert!(err.to_string().contains(bars), "{err}");
     }
 
     #[test]

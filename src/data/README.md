@@ -1,11 +1,11 @@
 # The data module
 
 `data` is build step 1. It fills the Nautilus Parquet catalog with the
-instruments the strategy trades and their quotes (one a minute from IB,
-every change of the best bid or ask from OKX), and nothing else:
-no bars. The strategies' bars are internal, built by the Nautilus data
-engine from the quotes (see the strategy README); backtest reads that
-catalog.
+instruments the strategy trades and the data their bars are built from,
+and nothing else. The strategies' bars are internal, built by the
+Nautilus data engine (see the strategy README): from quotes (one a minute
+from IB, every change of the best bid or ask from OKX), or, for a
+composite bar type, from its source bars. Backtest reads that catalog.
 It adds what Nautilus does not provide: filling the catalog from a
 historical source, and the roll dates.
 
@@ -18,7 +18,7 @@ predecessor `ESH4.CME` and the continuous root `ES.CME`.
 ```
 data/
   mod.rs           declares the modules, exposes only what others call
-  fill_catalog.rs  source-agnostic: resume, check, sort, write
+  fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write
   ib/
     mod.rs         Interactive Brokers history: instruments, quotes
     gateway.rs     the IB account and the Docker gateway, started and logged in
@@ -31,8 +31,8 @@ data/
 
 No node and no port of our own. The IB part starts the Docker IB Gateway
 it connects to (see "The gateway" below). A source is an adapter's historical
-client, which returns Nautilus types (`Vec<InstrumentAny>`,
-`Vec<QuoteTick>`, or bars a source turns into quotes);
+client, which returns Nautilus types (`Vec<InstrumentAny>`, and the data
+of a series as `Vec<Data>`: IB's quotes, made from bars);
 `ParquetDataCatalog` is the storage.
 
 ```
@@ -47,14 +47,25 @@ rolls ◄── catalog quotes of each contract ──► params for the INTERNA
 Nautilus has no universe type, and neither do we. The strategy's data
 requirements are the single source of the instruments (see the strategy
 README). `main` reads them and passes Nautilus types to `fill_catalog`:
-`Vec<InstrumentAny>` loaded from the source by id. This module never
-names an instrument, and takes no bar type: the catalog holds no bars. The
-history window is a run argument of `fill-catalog` (`--start`, `--end`),
-not config.
+`Vec<InstrumentAny>` loaded from the source by id, and the series the
+strategy's bar types are built from (`strategy::catalog_series`). This
+module never names an instrument. The history window is a run argument of
+`fill-catalog` (`--start`, `--end`), not config.
 
-Bar types still matter to this module in two places: `ib/` makes quotes
-from IB's `EXTERNAL` 1-MINUTE BID and ASK bars, which it never stores, and
-the strategy subscribes to an `INTERNAL` bar type built from the quotes.
+A series is a Nautilus data type and its catalog identifier, as the
+catalog keys it:
+
+| Strategy bar type | Series stored |
+|---|---|
+| `SXR8.IBIS-1-HOUR-MID-INTERNAL` | quotes of `SXR8.IBIS` |
+| `X.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `X.OKX-1-MINUTE-LAST-EXTERNAL` |
+| `X.OKX-1-MINUTE-LAST-EXTERNAL` | bars of that bar type |
+| `X.OKX-1-HOUR-LAST-INTERNAL` | trades of `X.OKX` (no source serves them yet) |
+
+The rule is the data engine's: a composite bar type is built from its
+source bars, an internal one priced LAST from trades, any other from
+quotes. `ib/` serves quotes only, made from IB's `EXTERNAL` 1-MINUTE BID
+and ASK bars, which it never stores.
 
 ### Bar type format
 
@@ -88,10 +99,11 @@ So `60-MINUTE` is rejected: write `1-HOUR`.
 
 - `EXTERNAL`: bars made by the venue or adapter: what `request_bars`
   returns and `subscribe_bars` streams. `ib/` requests them to make
-  quotes; the catalog does not store them.
+  quotes and does not store them; the source bars of a composite bar type
+  are stored as they are.
 - `INTERNAL`: bars built by the Nautilus data engine from ticks or other
-  bars: the strategies' bars, from the stored quotes, and continuous
-  futures.
+  bars: the strategies' bars, from the stored quotes or source bars, and
+  continuous futures.
 
 **Composite** bar types build a target from a finer bar type:
 `ES.CME-1-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL`. The target must be
@@ -125,9 +137,10 @@ catalog and the live broker use. Sources disagree on the venue:
 
 ## fill_catalog.rs
 
-Fills the catalog over one window with the instruments and their quotes
-(Nautilus `QuoteTick`s, which the backtest builds the strategies' bars
-from and fills orders on; see the backtest README). No bars. No node: a
+Fills the catalog over one window with the instruments and the series
+their bars are built from (Nautilus `Data`: quotes, or bars for a
+composite bar type; the backtest builds the strategies' bars from them and
+fills orders on them, see the backtest README). No node: a
 source's historical client is a plain async call returning Nautilus types,
 the same pattern the Nautilus docs use for every source (a client or loader,
 then `catalog.write_*`). Filling the catalog is its own process run.
@@ -155,20 +168,25 @@ published. Filling the catalog is ours.
 ```rust
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
-    instruments: Vec<InstrumentAny>,           // from the source, before any quotes
+    instruments: Vec<InstrumentAny>,           // from the source, before any data
+    series: &[(NautilusDataType, String)],     // data type, catalog identifier
     start: Timestamp,
     end: Timestamp,
-    fetch_quotes: impl AsyncFnMut(InstrumentId, Timestamp, Timestamp) -> anyhow::Result<Vec<QuoteTick>>,
+    fetch: impl AsyncFnMut(&NautilusDataType, &str, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()>
 ```
 
-`fetch_quotes` is the seam: `ib/` supplies one over the whole window,
-`okx/` one per UTC day (see "OKX specifics"). Tests pass closures with
-canned data. A fetch over `[from, to]` returns the quotes whose `ts_init`
-lies in it, the closed interval stored (Nautilus' catalog intervals are
-closed, the next contiguous when it starts 1 ns after the end); how the
-source makes them (IB's come from bars) and at what cadence (one a minute
-for IB, see the IB quotes below) is its own business.
+`fetch` is the seam: `ib/` supplies `IbHistory::data` over the whole
+window, `okx/` one per UTC day (see "OKX specifics"). Tests pass closures
+with canned data. A fetch over `[from, to]` returns the items of the
+series whose `ts_init` lies in it, the closed interval stored (Nautilus'
+catalog intervals are closed, the next contiguous when it starts 1 ns
+after the end); how the source makes them (IB's quotes come from bars) and
+at what cadence (one a minute for IB, see the IB quotes below) is its own
+business. A source refuses a data type it does not serve.
+
+The steps below say quotes and instruments; bars go the same way, keyed
+by their bar type instead of the instrument id.
 
 1. **Instruments.** Write those not yet in the catalog
    (`catalog.instruments(ids)`), so a re-run adds no file.
@@ -191,7 +209,7 @@ for IB, see the IB quotes below) is its own business.
    the next instruments run. Drop quotes at or before the resume point,
    sort by `ts_init`, drop duplicate `ts_init`. If nothing is left,
    nothing is written and that is not an error.
-4. **Write** one instrument's quotes per call with `write_to_parquet`,
+4. **Write** one series per call with `write_data_enum`,
    recording the file's interval as the window asked for, not the quotes'
    own span: from the request start (or the oldest quote, if earlier) to
    `end` (or the newest quote, if later). The stored range then spans the
@@ -227,25 +245,25 @@ Inherent methods of `ParquetDataCatalog` (`nautilus_persistence::backend::parque
 ```rust
 ParquetDataCatalog::new(base_path: &Path, None, None, None, None)   // panics on a bad path
 catalog.write_instruments(instruments: Vec<InstrumentAny>) -> anyhow::Result<Vec<PathBuf>>
-catalog.write_to_parquet(data: &[QuoteTick], start: Option<UnixNanos>, end: Option<UnixNanos>,
-                         skip_disjoint_check: Option<bool>) -> anyhow::Result<PathBuf>
-catalog.get_intervals(&QuoteTick::catalog_data_type().into(), Some(instrument_id_str))
+catalog.write_data_enum(data: &[Data], start: Option<UnixNanos>, end: Option<UnixNanos>,
+                        skip_disjoint_check: Option<bool>) -> anyhow::Result<()>
+catalog.get_intervals(&NautilusDataType::QuoteTick.into(), Some(identifier))
     -> anyhow::Result<Vec<(u64, u64)>>             // stored [start, end] per file, sorted
-catalog.query_first_timestamp(&data_type, Some(instrument_id_str))
+catalog.query_first_timestamp(&data_type, Some(identifier))
     -> anyhow::Result<Option<u64>>                 // start of the first of those intervals
-catalog.query_last_timestamp(&data_type, Some(instrument_id_str))
+catalog.query_last_timestamp(&data_type, Some(identifier))
     -> anyhow::Result<Option<u64>>                 // end of the last of those intervals
 ```
 
-`write_to_parquet` returns an empty path for empty data and writes nothing.
-The trait `CatalogWriter` (`write_data` over `&[Data]`) groups mixed data
-for you; with one instrument's quotes per call the inherent method is
-enough.
+`write_data_enum` groups `Data` by type, then by identifier (the bar type
+of a bar, the instrument id of anything else), and writes each group with
+`write_to_parquet` over the given interval: for quotes, the same file as
+writing them directly.
 
 Write constraints:
 
 - **Ascending `ts_init`.** Sort before writing; a descent is an error.
-- **One instrument per file.**
+- **One series per file.**
 - **Disjoint intervals.** Each write makes one file named after its
   `[first, last]` `ts_init`. A new interval must not touch an existing one:
   a shared timestamp is an overlap and an error. Appending a later window
@@ -259,11 +277,9 @@ Layout on disk:
 
 ```
 {catalog}/data/quotes/ESM4.CME/{start}_{end}.parquet
+{catalog}/data/bars/{bar type}/{start}_{end}.parquet      // composite bar types' sources only
 {catalog}/data/futures_contract/ESM4.CME/{ts}_{ts}.parquet
 ```
-
-No `data/bars/`: a catalog filled by `fill-catalog` holds these two kinds
-only.
 
 ### Reading back
 
@@ -297,9 +313,11 @@ IbHistory::connect(client_id: i32, end: Timestamp, now: Timestamp)
     .await -> anyhow::Result<IbHistory>   // checks end, then starts or reuses
                                           // the paper gateway, then connects
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
+history.data(&data_type, identifier, start, end)
+    .await -> anyhow::Result<Vec<Data>>        // the fetch of fill_catalog: quotes only,
+                                               // any other data type is an error
 history.quotes(instrument_id, start, end)
-    .await -> anyhow::Result<Vec<QuoteTick>>   // the fetch_quotes of fill_catalog; [start, end],
-                                               // one a minute, sorted
+    .await -> anyhow::Result<Vec<QuoteTick>>   // [start, end], one a minute, sorted
 ```
 
 - **Checked before the gateway starts.** `end` must be at least a minute (the
@@ -649,7 +667,7 @@ Databento (`nautilus-databento`, not used yet) has the same shape:
 returns `Vec<InstrumentAny>`, and its quote requests take the 1-minute
 `bbo-1m` schema and return `QuoteTick`s (per the Nautilus Databento docs;
 the Rust method is **unverified**). A `databento.rs` next to
-`ib/` would supply its own `fetch_quotes`. Its ids are on `GLBX` unless
+`ib/` would supply its own `fetch`. Its ids are on `GLBX` unless
 `use_exchange_as_venue` is set (see "Instrument ids across sources").
 
 ## rolls.rs
@@ -763,11 +781,11 @@ bar after a roll behaves when the new contract has not ticked yet is
   `query_last_timestamp`).
 - **No node** for filling the catalog: historical clients only.
 - **One source per instrument**, with the ids of the live broker.
-- **Check before writing**: refuse a quote of another instrument, and an
-  empty response on an instrument's first fill.
-- **Instruments before quotes.**
-- **Instruments and quotes only**: no bars in the catalog; the
-  strategies' bars are built from the quotes.
+- **Check before writing**: refuse data of another series, and an
+  empty response on a series' first fill.
+- **Instruments before data.**
+- **Instruments and the series the strategies' bars are built from**:
+  quotes, or a composite bar type's source bars; nothing else.
 - **Per-contract quotes are the stored truth**: never write an adjusted
   series; continuous series are built at read time.
 - **Rolls are values**: backtest and live pass the same params to the same
@@ -783,9 +801,12 @@ bar after a roll behaves when the new contract has not ticked yet is
   - `rolls.rs`: detection on small synthetic series (clean roll, a gap, no
     overlap); params checked as JSON (increasing times, contiguous chain,
     decimal strings, each mode).
-  - `fill_catalog.rs`: on a temp catalog, with a closure for
-    `fetch_quotes`: only instruments and quotes stored (no other kind of
-    data on disk); quotes written and read back per instrument, sorted and
+  - `fill_catalog.rs`: on a temp catalog, with a closure for `fetch`:
+    only instruments and quotes stored (no other kind of data on disk);
+    quote files byte for byte those `write_to_parquet` makes; bars stored
+    under their bar type and resumed after their range; data of another
+    series (a quote, another bar type) or an empty first response for bars
+    an error; quotes written and read back per instrument, sorted and
     unique; coverage over the window asked for; a re-run requests only
     after each instrument's stored range and writes no duplicate
     instrument; a covered window fetched not again; an empty first
@@ -803,7 +824,7 @@ bar after a roll behaves when the new contract has not ticked yet is
     over canned answers (no hole at the joins, stops at start, on an empty
     answer and on no progress, trims to `(start, end]`, sorted and
     unique); the data client config and the bar requests use the full
-    session.
+    session; a series other than quotes refused.
   - `okx/`: the samples of a real swap file and a real X-Perp chain file
     to quotes (count, first and last against a plain replay, precisions,
     exchange time, a window from a resume point, a line at its start), and

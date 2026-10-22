@@ -1,5 +1,6 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
-//! strategy does, records every bar it gets, warmup and replayed, and
+//! strategy does, or only subscribes to its bars, records every bar it
+//! gets, warmup and replayed, and
 //! every fill, and can rest a sell stop on its first replayed bar or send
 //! market orders of its choosing on the first replayed bars. For the tests
 //! that need what the EMA crossover cannot show: the bars' open, high and
@@ -38,7 +39,9 @@ pub struct Record {
 pub struct Recorder {
     core: StrategyCore,
     bar_type: BarType,
-    warmup: SignedDuration,
+    /// The warmup through `strategy::warmup`; without one, it only
+    /// subscribes to the bars.
+    warmup: Option<SignedDuration>,
     /// The trigger of the sell stop of 10 shares sent on the first bar.
     stop: Option<Price>,
     /// The market order sent on each of the first replayed bars, in order.
@@ -62,12 +65,25 @@ impl Recorder {
                 ..Default::default()
             }),
             bar_type,
-            warmup,
+            warmup: Some(warmup),
             stop,
             market: vec![],
             record: Rc::clone(&record),
         };
         (recorder, record)
+    }
+
+    /// A recorder of `bar_type` from the run start, with no warmup request,
+    /// and the record it fills.
+    pub fn without_warmup(bar_type: BarType) -> (Self, Rc<RefCell<Record>>) {
+        let (recorder, record) = Self::new(bar_type, SignedDuration::ZERO, None);
+        (
+            Self {
+                warmup: None,
+                ..recorder
+            },
+            record,
+        )
     }
 
     /// A recorder of `bar_type` after `warmup` sending the market order
@@ -93,7 +109,11 @@ nautilus_strategy!(Recorder, {
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let (bar_types, warmup) = ([self.bar_type], self.warmup);
+        let Some(warmup) = self.warmup else {
+            self.subscribe_bars(self.bar_type, None, None);
+            return Ok(());
+        };
+        let bar_types = [self.bar_type];
         warmup::start(self, &bar_types, warmup)
     }
 

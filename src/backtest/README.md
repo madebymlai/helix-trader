@@ -32,8 +32,8 @@ Dependencies, all pinned at `=0.66.0`:
 
 ```rust
 pub struct Backtest {
-    pub catalog: PathBuf,                // instruments, quotes, warmup
-    pub bar_types: Vec<BarType>,   // the strategy's: their instruments' quotes replayed,
+    pub catalog: PathBuf,                // instruments, the series replayed, warmup
+    pub bar_types: Vec<BarType>,   // the strategy's: the series they are built from replayed,
                                    // the venue derived from them, the cache sized for their warmup
     pub start: Timestamp,
     pub end: Timestamp,
@@ -72,9 +72,13 @@ the fee model (see Costs).
 A relative catalog path is made absolute: with a relative one, the node's
 DataFusion reader finds no object store for `file://catalog/...`.
 
-The run replays the instruments' quotes and nothing else: the strategy's
-bars are internal bars the data engine builds from those quotes (see the
-strategy README), and orders fill on them (see Fills).
+The run replays the series the strategy's bars are built from and nothing
+else (`strategy::catalog_series`, see the data README): the quotes of
+their instruments, or the source bars of a composite bar type
+(`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
+`...-1-MINUTE-LAST-EXTERNAL`). The data engine builds the strategy's
+internal bars from them (see the strategy README), and orders fill on them
+(see Fills).
 
 ## The run
 
@@ -226,18 +230,26 @@ balance is denied, and leverage can change the fills of large orders.
 ### Data
 
 `BacktestDataConfig`, `bon` builder, one per data stream; ours are one per
-instrument for its quotes, and no bars:
+series, keyed as the catalog keys it:
 
 ```rust
-let quotes = BacktestDataConfig::builder()          // per instrument
+let quotes = BacktestDataConfig::builder()          // quotes: by instrument
     .data_type(NautilusDataType::QuoteTick)
     .catalog_path(catalog_path.clone())
     .instrument_id(instrument_id)
     .build()?;
+let bars = BacktestDataConfig::builder()            // bars: by bar type
+    .data_type(NautilusDataType::Bar)
+    .catalog_path(catalog_path.clone())
+    .bar_types(vec!["SXR8.IBIS-1-MINUTE-LAST-EXTERNAL".to_string()])
+    .build()?;
 ```
 
-- The quotes feed both the venue (fills) and the data engine, which
+- The series feed both the venue (fills) and the data engine, which
   aggregates them into the internal bars the strategy subscribed to.
+- Set `bar_types` for bars: without it, or with `bar_spec`, the node
+  reads every bar type, or builds `{instrument}-{spec}-EXTERNAL`
+  (`BacktestDataConfig::query_identifiers`).
 - The node queries the catalog over the engine's window only (the
   intersection with `start_time`, `end_time` if set): quotes before it are
   not loaded. Indicators warm up from the strategy's request, not the
@@ -277,8 +289,8 @@ start; later bars are built from the replay. The warmup asks for quotes
 (`strategy::warmup`), which the data engine aggregates into the
 strategy's bars before answering. What the strategy receives:
 
-- **Catalog covers the window** (the stored intervals of the instrument's
-  quotes span `[start − 1 ns − warmup, start − 1 ns]`): one
+- **Catalog covers the window** (the stored intervals of the series
+  span `[start − 1 ns − warmup, start − 1 ns]`): one
   `on_historical_quotes` per instrument before the first `on_bar`, the
   warmup bars in the cache, the partial oldest one dropped. The bar
   spanning the warmup end and the run start comes once, complete, in
@@ -289,8 +301,9 @@ strategy's bars before answering. What the strategy receives:
   not even with the stored part). The run would go on with cold
   indicators.
 
-So the catalog must cover the whole warmup window with every instrument's
-quotes.
+So the catalog must cover the whole warmup window with every series.
+The warmup request of a composite bar type is not handled yet: the
+strategy warmup asks for quotes only (see the strategy README).
 
 ## Coverage check
 
@@ -298,12 +311,14 @@ Before building the node, `run` checks the catalog (`coverage.rs`) and
 fails on the first miss:
 
 - every instrument is stored, else the error names the instrument id;
-- every instrument's quotes are covered over `[start − 1 ns − warmup,
-  end]`, the warmup and the run, else the error names the instrument
-  (`the quotes of SXR8.IBIS`) and the first missing range.
+- every series is covered over `[start − 1 ns − warmup, end]`, the
+  warmup and the run, else the error names the series (`the quotes of
+  SXR8.IBIS`, `the bars of SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`) and the
+  first missing range.
 
-Quotes not stored miss the whole range. Coverage is the stored intervals
-of the instrument's `QuoteTick`s (inclusive nanoseconds; `fill_catalog`
+A series not stored misses the whole range. Coverage is the stored
+intervals of the series, by data type and identifier (inclusive
+nanoseconds; `fill_catalog`
 records each fill over the window asked for), with gaps computed by the
 catalog's `get_missing_intervals_for_request`, which goes through the
 `missing_intervals` behind the data engine's own catalog lookup.
@@ -483,7 +498,10 @@ side of EUR 6,000 the strategy's orders fall.
 
 The venue fills on quotes. The instruments' `QuoteTick`s alone set the
 L1 book: `bar_execution` is on (Nautilus' default), but the matching
-engine skips `INTERNAL` bars and the catalog stores no `EXTERNAL` ones. A market buy fills at the ask, a sell
+engine skips `INTERNAL` bars, and the catalog stores `EXTERNAL` ones only
+for a composite bar type, whose run fills on those bars instead (not
+verified with orders yet; the report's spread needs quotes, see Costs in
+the report). A market buy fills at the ask, a sell
 at the bid, of the last quote replayed before the order: the catalog holds
 a quote a minute, stamped 1 ns before the minute's close (data README), so
 an order sent in `on_bar` fills, in full and stamped at the bar's close, on
@@ -988,7 +1006,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   `BacktestNode`; no engine wrapper.
 - **One run per process**, no parameter sweeps.
 - **Costs always explicit.** A fee model always, even a zero one.
-- **Warmup before the start.** Warmup quotes must predate the run start,
+- **Warmup before the start.** Warmup data must predate the run start,
   and the catalog must cover the whole warmup window: `run` refuses
   otherwise.
 - **Seed all randomness**: the fill model and the strategy config.
@@ -1001,7 +1019,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   fill only, a rate on the value of every fill, maker and taker alike),
   the coverage check (gaps on the intervals alone, then on a temporary
   catalog: missing instrument, quotes 1 ns short at either end, missing,
-  or with a gap), the report of a hand-built `Outcome` (sections, sorted
+  or with a gap, the source bars of a composite bar type), the data
+  configs (quotes by instrument, a composite bar type's source bars by
+  bar type), the report of a hand-built `Outcome` (sections, sorted
   names, max drawdown, the costs and the gross PnL), the venue at the
   run's leverage with no margin model of ours, a leverage not positive
   refused. The command line is tested in `main.rs`: required flags,
@@ -1056,6 +1076,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
     in one hour of the warmup and one of the replay): neither hour yields
     a bar; every other bar is as worked out from its hour's quotes.
+  - `backtest_composite_bars.rs`: `fill_catalog` stores the external
+    minute bars a fake source returns for a composite
+    `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, and a recorder
+    without warmup gets hour bars with the open, high, low and close of
+    their minute bars.
   - `backtest_okx_swap.rs`: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` with
     margins of 1, several quotes a minute at their own times, one exactly
     on a minute. A recorder on 1-MINUTE-MID bars buys 2 contracts on the

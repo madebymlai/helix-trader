@@ -28,7 +28,7 @@ use nautilus_common::{
 };
 use nautilus_core::UUID4;
 use nautilus_model::{
-    data::{BarType, QuoteTick},
+    data::{Data, NautilusDataType},
     identifiers::InstrumentId,
     instruments::InstrumentAny,
 };
@@ -38,7 +38,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IbHistory, OkxHistory, fill_catalog},
-    strategy::{DataRequirements, warmup},
+    strategy::{DataRequirements, catalog_series, warmup},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
@@ -116,7 +116,7 @@ impl Live {
             )?;
             let ib = ib::clients(account, self.client_id, &ib_ids).await?;
             clients.push(ib.into_node_clients());
-            self.fill_catalog(&of_instruments(requirements, &ib_ids))
+            self.fill_catalog(&requirements.of_instruments(&ib_ids))
                 .await?;
         }
         node::run(
@@ -141,40 +141,25 @@ impl Live {
             requirements,
             now,
             async |ids: &[InstrumentId]| ib.instruments(ids).await,
-            async |id, from, to| ib.quotes(id, from, to).await,
+            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
         )
         .await
     }
 }
 
-/// The requirements of `requirements` on `instrument_ids` alone.
-fn of_instruments(
-    requirements: &DataRequirements,
-    instrument_ids: &[InstrumentId],
-) -> DataRequirements {
-    DataRequirements {
-        bar_types: requirements
-            .bar_types
-            .iter()
-            .filter(|bar_type| instrument_ids.contains(&bar_type.instrument_id()))
-            .copied()
-            .collect::<Vec<BarType>>(),
-        warmup: requirements.warmup,
-    }
-}
-
 /// Fills the catalog in `catalog_dir`, created if missing, with the
 /// instruments of `requirements`, fetched through `fetch_instruments`, and
-/// with their quotes over `[now - warmup, IbHistory::latest_end(now)]`,
-/// fetched one instrument at a time through `fetch_quotes`; the node asks
-/// IB for the quotes since. A stored series resumes
+/// with the series their bars are built from (see
+/// `strategy::catalog_series`) over `[now - warmup,
+/// IbHistory::latest_end(now)]`, fetched one series at a time through
+/// `fetch`; the node asks IB for the data since. A stored series resumes
 /// after its end (see `data::fill_catalog`).
 async fn fill_catalog_to_now(
     catalog_dir: &Path,
     requirements: &DataRequirements,
     now: Timestamp,
     fetch_instruments: impl AsyncFnOnce(&[InstrumentId]) -> anyhow::Result<Vec<InstrumentAny>>,
-    fetch_quotes: impl AsyncFnMut(InstrumentId, Timestamp, Timestamp) -> anyhow::Result<Vec<QuoteTick>>,
+    fetch: impl AsyncFnMut(&NautilusDataType, &str, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
     let start = now
         .checked_sub(requirements.warmup)
@@ -186,9 +171,10 @@ async fn fill_catalog_to_now(
     fill_catalog(
         &mut catalog,
         instruments,
+        &catalog_series(&requirements.bar_types),
         start,
         IbHistory::latest_end(now)?,
-        fetch_quotes,
+        fetch,
     )
     .await
 }
@@ -265,9 +251,11 @@ mod tests {
                 asked_instruments.extend_from_slice(ids);
                 Ok(instruments())
             },
-            async |id, from, to| {
+            async |data_type, identifier, from, to| {
+                assert_eq!(*data_type, NautilusDataType::QuoteTick);
+                let id = InstrumentId::from(identifier);
                 asked_quotes.push((id, from, to));
-                Ok(vec![quote(id, to)])
+                Ok(vec![Data::Quote(quote(id, to))])
             },
         )
         .await

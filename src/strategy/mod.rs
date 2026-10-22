@@ -12,13 +12,18 @@
 //! engine.
 //!
 //! Strategies trade on bars Nautilus builds from quotes; `warmup` asks for
-//! their history and hands it back, so that no strategy knows how.
+//! their history and hands it back, so that no strategy knows how. The
+//! catalog stores what their bars are built from (see `catalog_series`).
 
 pub mod ema;
 pub mod warmup;
 
 use jiff::SignedDuration;
-use nautilus_model::{data::BarType, identifiers::InstrumentId};
+use nautilus_model::{
+    data::{BarType, NautilusDataType},
+    enums::PriceType,
+    identifiers::InstrumentId,
+};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -46,6 +51,56 @@ impl DataRequirements {
         }
         ids
     }
+
+    /// These requirements on `instrument_ids` alone: their bar types.
+    #[must_use]
+    pub fn of_instruments(&self, instrument_ids: &[InstrumentId]) -> Self {
+        Self {
+            bar_types: self
+                .bar_types
+                .iter()
+                .filter(|bar_type| instrument_ids.contains(&bar_type.instrument_id()))
+                .copied()
+                .collect(),
+            warmup: self.warmup,
+        }
+    }
+}
+
+/// The catalog series the bars of `bar_types` are built from, as Nautilus'
+/// data engine builds them: a series is a Nautilus data type and its
+/// catalog identifier, the instrument id for ticks and the bar type for
+/// bars. External bars are their own series; a composite bar type is built
+/// from its source bars (`BarType::composite`), and internal bars from the
+/// trades of their instrument if priced LAST, from its quotes otherwise.
+/// Each series comes once, sorted by instrument, then identifier.
+#[must_use]
+pub fn catalog_series(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
+    let mut series: Vec<(InstrumentId, NautilusDataType, String)> = Vec::new();
+    for bar_type in bar_types {
+        let source = if bar_type.is_composite() {
+            bar_type.composite()
+        } else {
+            *bar_type
+        };
+        let instrument_id = source.instrument_id();
+        let (data_type, identifier) = if source.is_externally_aggregated() {
+            (NautilusDataType::Bar, source.to_string())
+        } else if source.spec().price_type == PriceType::Last {
+            (NautilusDataType::TradeTick, instrument_id.to_string())
+        } else {
+            (NautilusDataType::QuoteTick, instrument_id.to_string())
+        };
+        let entry = (instrument_id, data_type, identifier);
+        if !series.contains(&entry) {
+            series.push(entry);
+        }
+    }
+    series.sort_by(|(a, _, a_id), (b, _, b_id)| (a, a_id).cmp(&(b, b_id)));
+    series
+        .into_iter()
+        .map(|(_, data_type, identifier)| (data_type, identifier))
+        .collect()
 }
 
 #[cfg(test)]
@@ -67,6 +122,97 @@ mod tests {
             [
                 InstrumentId::from("SXR8.IBIS"),
                 InstrumentId::from("EUNL.IBIS")
+            ]
+        );
+    }
+
+    #[test]
+    fn requirements_on_some_instruments_keep_their_bar_types_and_the_warmup() {
+        let requirements = DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
+            ],
+            warmup: SignedDuration::from_hours(720),
+        };
+        let okx = requirements.of_instruments(&[InstrumentId::from("BTC-USDT-SWAP.OKX")]);
+        assert_eq!(
+            okx,
+            DataRequirements {
+                bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
+                warmup: SignedDuration::from_hours(720),
+            }
+        );
+    }
+
+    /// The series of each bar type, as `(data type, identifier)` strings.
+    fn series_of(bar_types: &[&str]) -> Vec<(NautilusDataType, String)> {
+        let bar_types: Vec<BarType> = bar_types.iter().map(|&s| BarType::from(s)).collect();
+        catalog_series(&bar_types)
+    }
+
+    #[test]
+    fn bars_built_from_quotes_need_the_quotes_of_their_instrument() {
+        assert_eq!(
+            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]),
+            [(NautilusDataType::QuoteTick, "SXR8.IBIS".to_string())]
+        );
+    }
+
+    #[test]
+    fn bars_built_from_trades_need_the_trades_of_their_instrument() {
+        assert_eq!(
+            series_of(&["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL"]),
+            [(NautilusDataType::TradeTick, "BTC-USDT-SWAP.OKX".to_string())]
+        );
+    }
+
+    #[test]
+    fn composite_bars_need_their_source_bars() {
+        assert_eq!(
+            series_of(&["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"]),
+            [(
+                NautilusDataType::Bar,
+                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn composite_bars_of_internal_source_bars_need_what_those_are_built_from() {
+        assert_eq!(
+            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-INTERNAL"]),
+            [(NautilusDataType::QuoteTick, "SXR8.IBIS".to_string())]
+        );
+    }
+
+    #[test]
+    fn external_bars_are_their_own_series() {
+        assert_eq!(
+            series_of(&["BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"]),
+            [(
+                NautilusDataType::Bar,
+                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn each_series_comes_once_in_the_order_of_its_instrument() {
+        assert_eq!(
+            series_of(&[
+                "SXR8.IBIS-1-MINUTE-MID-INTERNAL",
+                "EUNL.IBIS-1-HOUR-MID-INTERNAL",
+                "SXR8.IBIS-1-HOUR-BID-INTERNAL",
+                "EUNL.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            ]),
+            [
+                (NautilusDataType::QuoteTick, "EUNL.IBIS".to_string()),
+                (
+                    NautilusDataType::Bar,
+                    "EUNL.IBIS-1-MINUTE-LAST-EXTERNAL".to_string()
+                ),
+                (NautilusDataType::QuoteTick, "SXR8.IBIS".to_string()),
             ]
         );
     }
