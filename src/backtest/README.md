@@ -5,7 +5,8 @@ step 2. It describes the run as a Nautilus `BacktestRunConfig` and runs it on
 a `BacktestNode`, the plain Nautilus API, and adds nothing the node already
 does. One run per process; there are no parameter sweeps.
 
-APIs are those of the `nautilus-*` crates at `0.66.0`; *unverified* marks
+APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
+`develop` commit in `docs/ARCHITECTURE.md` (Version). *Unverified* marks
 what the sources did not confirm. Process-wide rules (one node per process,
 Nautilus owns the logger) are in `docs/ARCHITECTURE.md`.
 
@@ -20,7 +21,7 @@ backtest/
   report.rs   Outcome, the result and the costs; report(&Outcome) -> String
 ```
 
-Dependencies, all pinned at `=0.66.0`:
+Dependencies, all pinned to the same `develop` commit:
 
 - `nautilus-backtest` with the `streaming` feature, which enables the
   `node` module and catalog registration.
@@ -32,8 +33,8 @@ Dependencies, all pinned at `=0.66.0`:
 
 ```rust
 pub struct Backtest {
-    pub catalog: PathBuf,                // instruments, quotes, warmup
-    pub bar_types: Vec<BarType>,   // the strategy's: their instruments' quotes replayed,
+    pub catalog: PathBuf,                // instruments, the series replayed, warmup
+    pub bar_types: Vec<BarType>,   // the strategy's: the series they are built from replayed,
                                    // the venue derived from them, the cache sized for their warmup
     pub start: Timestamp,
     pub end: Timestamp,
@@ -72,9 +73,13 @@ the fee model (see Costs).
 A relative catalog path is made absolute: with a relative one, the node's
 DataFusion reader finds no object store for `file://catalog/...`.
 
-The run replays the instruments' quotes and nothing else: the strategy's
-bars are internal bars the data engine builds from those quotes (see the
-strategy README), and orders fill on them (see Fills).
+The run replays the series the strategy's bars are built from and nothing
+else (`strategy::catalog_series`, see the data README): the quotes of
+their instruments, or the source bars of a composite bar type
+(`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
+`...-1-MINUTE-LAST-EXTERNAL`). The data engine builds the strategy's
+internal bars from them (see the strategy README), and orders fill on them
+(see Fills).
 
 ## The run
 
@@ -185,14 +190,14 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | `default_leverage: Option<Decimal>` | the run's leverage, `--leverage` (see Leverage) |
 | `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
-| `bar_execution` | left at Nautilus' default, `true`: only `EXTERNAL` bars drive fills, and the catalog holds none, so quotes alone move the book |
+| `bar_execution` | left at Nautilus' default, `true`: only `EXTERNAL` bars drive fills: OKX's minute candles; an IB catalog holds none, so quotes alone move its book |
+| `bar_adaptive_high_low_ordering` | left at Nautilus' default, `false`: a bar replays open, high, low, close (see Fills on candles) |
 
 Flags worth knowing: `liquidity_consumption` (default `false`, left off:
-every order sees the full quote size), `bar_adaptive_high_low_ordering`
-(bar execution only), `use_reduce_only` (`true`), `allow_cash_borrowing`
+every order sees the full quote or bar size), `use_reduce_only` (`true`), `allow_cash_borrowing`
 (`false`). Left unset: `margin_model` (Nautilus' default, see Leverage),
 `liquidation_enabled` (`false`), `latency_model`, `leverages`,
-`base_currency` (see OKX swaps).
+`base_currency` (see OKX on candles).
 
 ### Leverage
 
@@ -226,18 +231,26 @@ balance is denied, and leverage can change the fills of large orders.
 ### Data
 
 `BacktestDataConfig`, `bon` builder, one per data stream; ours are one per
-instrument for its quotes, and no bars:
+series, keyed as the catalog keys it:
 
 ```rust
-let quotes = BacktestDataConfig::builder()          // per instrument
+let quotes = BacktestDataConfig::builder()          // quotes: by instrument
     .data_type(NautilusDataType::QuoteTick)
     .catalog_path(catalog_path.clone())
     .instrument_id(instrument_id)
     .build()?;
+let bars = BacktestDataConfig::builder()            // bars: by bar type
+    .data_type(NautilusDataType::Bar)
+    .catalog_path(catalog_path.clone())
+    .bar_types(vec!["SXR8.IBIS-1-MINUTE-LAST-EXTERNAL".to_string()])
+    .build()?;
 ```
 
-- The quotes feed both the venue (fills) and the data engine, which
+- The series feed both the venue (fills) and the data engine, which
   aggregates them into the internal bars the strategy subscribed to.
+- Set `bar_types` for bars: without it, or with `bar_spec`, the node
+  reads every bar type, or builds `{instrument}-{spec}-EXTERNAL`
+  (`BacktestDataConfig::query_identifiers`).
 - The node queries the catalog over the engine's window only (the
   intersection with `start_time`, `end_time` if set): quotes before it are
   not loaded. Indicators warm up from the strategy's request, not the
@@ -273,13 +286,15 @@ DataCatalogConfig::new(path: String, fs_protocol: Option<String>,
 
 The request window is clamped to simulated now, which is the engine start
 (`start − 1 ns`) when `on_start` runs, so warmup data must predate the run
-start; later bars are built from the replay. The warmup asks for quotes
-(`strategy::warmup`), which the data engine aggregates into the
-strategy's bars before answering. What the strategy receives:
+start; later bars are built from the replay. The warmup asks for quotes,
+or for the source bars of a composite bar type (`strategy::warmup`), which
+the data engine aggregates into the strategy's bars before answering. What
+the strategy receives:
 
-- **Catalog covers the window** (the stored intervals of the instrument's
-  quotes span `[start − 1 ns − warmup, start − 1 ns]`): one
-  `on_historical_quotes` per instrument before the first `on_bar`, the
+- **Catalog covers the window** (the stored intervals of the series
+  span `[start − 1 ns − warmup, start − 1 ns]`): one
+  `on_historical_quotes` (`on_historical_bars` for source bars) per
+  instrument before the first `on_bar`, the
   warmup bars in the cache, the partial oldest one dropped. The bar
   spanning the warmup end and the run start comes once, complete, in
   `on_bar`.
@@ -289,8 +304,7 @@ strategy's bars before answering. What the strategy receives:
   not even with the stored part). The run would go on with cold
   indicators.
 
-So the catalog must cover the whole warmup window with every instrument's
-quotes.
+So the catalog must cover the whole warmup window with every series.
 
 ## Coverage check
 
@@ -298,12 +312,14 @@ Before building the node, `run` checks the catalog (`coverage.rs`) and
 fails on the first miss:
 
 - every instrument is stored, else the error names the instrument id;
-- every instrument's quotes are covered over `[start − 1 ns − warmup,
-  end]`, the warmup and the run, else the error names the instrument
-  (`the quotes of SXR8.IBIS`) and the first missing range.
+- every series is covered over `[start − 1 ns − warmup, end]`, the
+  warmup and the run, else the error names the series (`the quotes of
+  SXR8.IBIS`, `the bars of SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`) and the
+  first missing range.
 
-Quotes not stored miss the whole range. Coverage is the stored intervals
-of the instrument's `QuoteTick`s (inclusive nanoseconds; `fill_catalog`
+A series not stored misses the whole range. Coverage is the stored
+intervals of the series, by data type and identifier (inclusive
+nanoseconds; `fill_catalog`
 records each fill over the window asked for), with gaps computed by the
 catalog's `get_missing_intervals_for_request`, which goes through the
 `missing_intervals` behind the data engine's own catalog lookup.
@@ -387,6 +403,13 @@ two inputs:
   `BacktestNode::load_data_config(data, start, end)`, the same loader and
   window the run used. Each fill gets the last quote of its instrument
   stamped at or before it: the quote it filled on (see Fills).
+
+A run on bars alone (OKX's candles) replays no quote: its fills have no
+spread to measure, and `report` prints `Spread: n/a (no quotes)`, with
+the cost per trade and the gross PnL on the commission alone. The rule is
+by data, not by venue: a fill of an instrument the run replayed no quote
+of has no spread; a fill of one with quotes and none before it is an
+error.
 
 Per currency, `report` prints a `Costs` section after the PnL statistics:
 
@@ -481,9 +504,11 @@ side of EUR 6,000 the strategy's orders fall.
 
 ### Fills
 
-The venue fills on quotes. The instruments' `QuoteTick`s alone set the
+An IB run fills on quotes. The instruments' `QuoteTick`s alone set the
 L1 book: `bar_execution` is on (Nautilus' default), but the matching
-engine skips `INTERNAL` bars and the catalog stores no `EXTERNAL` ones. A market buy fills at the ask, a sell
+engine skips `INTERNAL` bars, and the catalog stores `EXTERNAL` ones only
+for a composite bar type, whose run fills on those bars instead (OKX, see
+Fills on candles). A market buy fills at the ask, a sell
 at the bid, of the last quote replayed before the order: the catalog holds
 a quote a minute, stamped 1 ns before the minute's close (data README), so
 an order sent in `on_bar` fills, in full and stamped at the bar's close, on
@@ -694,163 +719,117 @@ buy limit and the sell stop at 710.00 were not filled although the next
 hour's LAST low was 702.01, its closing quote 715.50/715.54; with
 `bar_execution` on both filled at 710.00.
 
-## OKX swaps
+## OKX on candles
 
-An OKX swap (`BTC-USDT-SWAP.OKX`) backtests through the same code as IB's
-instruments. The catalog holds a `CryptoPerpetual` and a quote for every
-change of OKX's best bid or ask (data README, "OKX specifics"); the run
-replays those quotes and nothing else.
+An OKX swap (`BTC-USDT-SWAP.OKX`) or X-Perp (`BTC-USD_UM_XPERP-310404.OKX`,
+the contract an EEA account trades) backtests through the same code as
+IB's instruments, on its 1-minute candles. The catalog holds a
+`CryptoPerpetual` or a `CryptoFuture` and the bars of
+`…-1-MINUTE-LAST-EXTERNAL` (data README, "OKX specifics"). The strategy
+trades a composite bar type built from them, such as
+`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (strategy
+README), and the run replays the minute bars and nothing else. A catalog
+filled before candles, with OKX quotes, must be filled again into a new
+directory (data README).
 
 - **Venue.** Named `OKX` after the instruments' venue, with the same
-  config as for IB: margin account, netting, L1 book, the fee and fill
-  models above. The balance is in USDT (`--balance "10000 USDT"`), the
-  currency the swaps settle in.
-- **No base currency.** `base_currency` is left unset, as for IB. The
-  same run with `USDT` as base currency gave the same fills, commissions,
-  margin, balances and PnL to the last digit, on the test fixture and on
-  a real day (see below): a margin account books PnL and commissions in
-  the instrument's settlement currency either way. Only the summary's
-  `account.OKX.base_currency` differs (`USDT` or `None`).
+  config as for IB. The balance is in the settlement currency: USDT for a
+  swap (`--balance "10000 USDT"`), USD for an X-Perp (Nautilus' USD, two
+  decimals: each fill's value, commission and PnL rounded to the cent).
+  `base_currency` is left unset, as for IB.
 - **Margins.** A position locks its value / `--leverage` (see Leverage).
-- **Bars.** Internal bars built from the tick quotes, so a 1-minute bar
-  has its real open, high, low and close (mids). A quote stamped exactly
-  on a minute belongs to the bar closing then.
-- **Fills.** A market buy fills at the ask, a sell at the bid, of the
-  latest quote at or before the order, as for IB (see Fills). OKX quotes
-  carry real sizes, but `liquidity_consumption` is off, and the rest of an
-  order beyond the top size fills one tick worse.
+  OKX Europe caps retail accounts at 10x.
+- **Contracts.** BTC-USDT-SWAP: 0.01 BTC a contract, lots of 0.01. The
+  X-Perp: 0.0001 BTC, whole contracts; Nautilus rejects its orders before
+  its listing (2026-03-30) or after its expiry (2031-04-04).
 - **Commission.** `--commission-rate 0.0005` is OKX's taker fee, 0.05% of
-  each fill's value (contracts × 0.01 BTC × price), no minimum.
-- **Funding is not charged.** OKX settles funding on open swap positions
-  (BTC every 8 hours, about 0.01% of the position each time); the backtest
-  charges none. The EMA strategy is always long or short, so it crosses
-  every settlement: its OKX results leave out that cost.
-- **A run starting on a bar's close** cannot trade that bar. Tick quotes
-  are stamped when they happened, so the last quote before the start
-  comes before the engine start (1 ns earlier) and is not replayed: the
-  order sent on that bar finds no quote and is rejected (`No market`).
-  IB's minute quotes, stamped 1 ns before the close, do not have this.
-  Start off a bar's close, or count one order less.
+  each fill's value (contracts × contract size × price), no minimum.
+- **Funding is not charged.** OKX settles funding on open swap and X-Perp
+  positions (BTC every 8 hours, about 0.01% of the position each time);
+  the backtest charges none.
+- **Hour bars.** A minute bar is stamped at its open (`ts_event`) and
+  replayed at its close (`ts_init`), so the hour bar closing 10:00 holds
+  the minutes opening 09:00 to 09:59 and is built at 10:00, after its last
+  minute closed: nothing of 10:00-10:01 is in it (`backtest_okx_swap.rs`).
+  The engine starts 1 ns before `start`, so a run starting on the hour
+  replays the minute closing then: its first hour bar holds that minute
+  alone.
+- **Warmup.** The warmup of a composite bar type requests its minute bars
+  (strategy README), which the catalog serves: the catalog must hold them
+  from `start - warmup`, as for quotes.
 
-**Verified on OKX data**, 2026-10-22: a scratch catalog of BTC-USDT-SWAP
-filled from OKX's archive for 2026-10-17 to 10-19 (6,173,698 quotes, see
-the data README), EMA 10/30 on `1-MINUTE-MID` bars, 1 contract (0.01 BTC,
-about 815 USDT), `warmup = "1h"`, no session:
+### Fills on candles
+
+The minute bars drive the venue: Nautilus' bar execution (Concepts ›
+Backtesting › Bar execution), on since it is Nautilus' default, on the
+L1 book the venue already uses.
+
+- **Four trades a minute.** Each minute bar becomes trades at its open,
+  high, low and close, a quarter of its volume each, and resting orders
+  are matched after each. An order sent in `on_bar` arrives after the
+  minute's close and fills, as a market order, at that close: the last
+  price, no spread, stamped at the hour's close.
+- **Order of high and low: open, high, low, close.** Nautilus' default
+  (`bar_adaptive_high_low_ordering` off). The adaptive order visits the
+  extreme nearer the open first; Nautilus calls it a heuristic with no
+  general accuracy rate, and it only decides which of a stop and a target
+  inside one minute fills first, which the EMA's market orders never
+  meet. So the default stays.
+- **Fill model unchanged.** `DefaultFillModel(1.0, 0.0, FILL_SEED)`: no
+  slippage. LAST bars carry no bid or ask, so the run pays no spread, and
+  the report prints `Spread: n/a (no quotes)` (see Costs in the report).
+  On BTC the book is one tick (0.1) wide nearly all the time: the
+  quote-based runs this replaced paid 0.16 USDT of spread over 157 fills,
+  against 128 USDT of commission.
+- **Size.** `liquidity_consumption` is off, but an order fills at most a
+  quarter of the minute's volume at the close, and the rest one tick
+  worse. On the X-Perp, whose minutes can trade few contracts, that
+  happens (below).
+
+**Verified on OKX data**, 2026-10-22: scratch catalogs filled from OKX's
+archive for archive days 2026-10-11 to 10-21 (`--start 2026-10-11 --end
+2026-10-21`), EMA 10/30 on the composite hour bars warmed up over 48
+hours, no session, 0.01 BTC a trade:
 
 ```toml
-instrument_ids = ["BTC-USDT-SWAP.OKX"]
-bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" }
-trade_size = "1.00"
-warmup = "1h"
+instrument_ids = ["BTC-USDT-SWAP.OKX"]     # or BTC-USD_UM_XPERP-310404.OKX
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
+trade_size = "1"                           # "100" on the X-Perp
+warmup = "48h"
 ```
 
 ```
-helix-trader backtest ema --config ema.toml --catalog okx-cat \
-  --start 2026-10-17T01:30:00Z --end 2026-10-19T23:59:00Z \
-  --commission-rate 0.0005 --balance "10000 USDT"
+helix-trader backtest ema --config swap.toml --catalog okx-cat \
+  --start 2026-10-14 --end 2026-10-21 --commission-rate 0.0005 --balance "10000 USDT"
 ```
 
-It ran in about 40 s and printed:
-
-| | |
-|---|---|
-| Orders (filled) | 158 (157) |
-| PnL (total) | -141.05 USDT |
-| Commission | 128.01 USDT |
-| Spread | 0.16 USDT |
-| Gross PnL | -12.89 USDT |
-| Max drawdown | 1.41% |
-| Final balance | 9858.95 USDT |
-
-Funding not included (see above). Checked against the stored quotes,
-outside Nautilus:
-
-- **Fills.** All 157 at the ask (buys) or the bid (sells) of the last
-  quote at or before the fill. Almost every one paid half of a 0.1 USDT
-  spread: the BTC book is one tick wide nearly all the time.
-- **Commission.** Each fill's commission is 0.05% of its value
-  (contracts × 0.01 × price) to the eighth decimal: 128.01 USDT on
-  orders of 815-1,658 USDT. The commission is ten times the loss before
-  costs: on this data a strategy flipping every few minutes pays mostly
-  fees.
-- **Margin.** The short left open at the end locked 3.28 USDT, 0.4% of
-  its value at entry: the margins of then, OKX's first tier, before the
-  leverage flag.
-- **The first order** (the bar closing at the 01:30 start) was rejected
-  `No market` (see above); the other 157 filled.
-- **No base currency.** The same run with `USDT` as the venue's base
-  currency gave the same report and the same fill, margin and balance
-  events, line for line.
-
-## OKX X-Perps
-
-An X-Perp (`BTC-USD_UM_XPERP-310404.OKX`), the contract an EEA account
-trades instead of a swap, backtests through the same code as a swap. The
-catalog holds a `CryptoFuture` (data README, "OKX specifics").
-
-- **Venue.** The same as for a swap. The balance is in USD
-  (`--balance "10000 USD"`), the currency the X-Perps settle in.
-- **Two decimals.** Nautilus' USD has two decimals, so each fill's value,
-  commission and PnL is rounded to the cent (half to even), half a cent
-  at most each.
-- **Margins.** As for a swap: value / `--leverage`. OKX Europe caps
-  retail accounts at 10x, so `--leverage 10` is the most an EEA account
-  gets.
-- **Contract size.** 0.0001 BTC a contract, whole contracts: 100
-  contracts are the 0.01 BTC of one BTC-USDT-SWAP contract.
-- **Listing and expiry.** Nautilus rejects orders on a future before its
-  listing (BTC: 2026-03-30) or after its expiry (2031-04-04).
-- **Funding is not charged.** X-Perps pay funding as swaps do; it is
-  out of scope here too.
-
-**Verified next to BTC-USDT-SWAP**, 2026-10-22: scratch catalogs filled
-from OKX's archive for 2026-10-18 to 10-20 UTC, EMA 10/30 on
-`1-MINUTE-MID` bars, `warmup = "1h"`, no session, `--commission-rate
-0.0005`, `--start 2026-10-18T01:00:30Z --end 2026-10-20T23:59:00Z`, 0.01
-BTC a trade (`trade_size = "100"` on the X-Perp, `"1.00"` on the swap):
-
-| | X-Perp | Swap |
+| | Swap | X-Perp |
 |---|---|---|
-| Quotes (3 days) | 2,561,823 | 7,391,834 |
-| Catalog | 21 MB | 78 MB |
-| Orders (filled) | 159 (159) | 159 (159) |
-| Fills | 171 | 159 |
-| PnL (total) | -137.29 USD | -139.31 USDT |
-| Commission | 129.93 USD | 129.89 USDT |
-| Spread | 0.18 USD | 0.16 USDT |
-| Gross PnL | -7.18 USD | -9.26 USDT |
-| Max drawdown | 1.38% | 1.39% |
-| Final balance | 9862.71 USD | 9860.69 USDT |
-| Run time | 18 s | 22 s |
+| Orders (fills) | 9 (9) | 9 (11) |
+| PnL (total) | -58.06 USDT | -58.10 USD |
+| Commission | 6.98 USDT | 6.98 USD |
+| Spread | n/a | n/a |
+| Gross PnL | -51.08 USDT | -51.12 USD |
+| Max drawdown | 0.66% | 0.66% |
+| Final balance | 9941.94 USDT | 9941.90 USD |
 
-Funding not included. Checked against the stored quotes, outside
-Nautilus:
+Warm from the start: the first order fills at 2026-10-14 00:00, on the
+first hour bar of the run. Before the warmup served composite bar types,
+the same window started cold and gave 8 orders, -65.06 USDT and -64.86
+USD.
 
-- **Similar trades.** 120 of the 159 orders came at the same minute and
-  side on both; there the X-Perp filled a median 24 USD below the swap
-  (3-44), USD against USDT.
-- **Fills.** Every order's first fill at the ask (buys) or the bid
-  (sells) of the last quote at or before it; every spread one tick (0.1).
-- **Thinner book.** The X-Perp's best bid or ask holds a median 0.6 BTC
-  (swap 8.6 BTC), under 0.02 BTC 5% of the time (swap 0.4%). So 12 of
-  the 159 X-Perp orders, 0.02 BTC when flipping, took the top size and
-  filled the rest one tick worse (Nautilus' fill without
-  `liquidity_consumption`, see Fills): 12 fills more.
-- **Commission.** 0.05% of each fill's value, to the cent on the X-Perp
-  (rounded twice: value, then commission), to the eighth decimal on the
-  swap.
-- **Margin.** The long left open locked 5.40 USD on the X-Perp (0.65% of
-  830.00) and 3.32 USDT on the swap (0.4% of 829.62): the margins of
-  then, before the leverage flag.
+Funding not included. Two X-Perp buys of 200 contracts met thin minutes:
+10 and 18 contracts filled at the close, the rest (190, 182) one tick
+higher. Checked against the stored minute bars, outside Nautilus, on the
+cold runs (same fills code):
 
-**Re-run with `--leverage 10`**, 2026-10-22: the X-Perp days filled again
-(the same quote counts) and the same command with `--leverage 10`, next
-to the code before the flag (fixed margins) on its own fill of the same
-days. The 171 fills are the same, event for event (price, quantity,
-commission, time), and so is the report, to the last digit: the figures
-above (PnL -137.29 USD, final balance 9862.71 USD). Only the margin differs:
-the long left open locks 83.00 USD, 830.00 / 10. Without `--leverage`
-(1x) the fills are the same again and it locks 830.00 USD.
+- **Fills.** Every swap fill, and every X-Perp order's first fill, at the
+  close of the minute closing at the fill's time (the hour's close).
+- **Thin minutes.** As above: 8 and 17 contracts at the close, the rest
+  one tick higher.
+- **Commission.** 0.05% of each fill's value, to the eighth decimal on
+  the swap, to the cent on the X-Perp.
 
 ## Verified on IB data
 
@@ -988,7 +967,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   `BacktestNode`; no engine wrapper.
 - **One run per process**, no parameter sweeps.
 - **Costs always explicit.** A fee model always, even a zero one.
-- **Warmup before the start.** Warmup quotes must predate the run start,
+- **Warmup before the start.** Warmup data must predate the run start,
   and the catalog must cover the whole warmup window: `run` refuses
   otherwise.
 - **Seed all randomness**: the fill model and the strategy config.
@@ -1001,7 +980,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   fill only, a rate on the value of every fill, maker and taker alike),
   the coverage check (gaps on the intervals alone, then on a temporary
   catalog: missing instrument, quotes 1 ns short at either end, missing,
-  or with a gap), the report of a hand-built `Outcome` (sections, sorted
+  or with a gap, the source bars of a composite bar type), the data
+  configs (quotes by instrument, a composite bar type's source bars by
+  bar type), the report of a hand-built `Outcome` (sections, sorted
   names, max drawdown, the costs and the gross PnL), the venue at the
   run's leverage with no margin model of ours, a leverage not positive
   refused. The command line is tested in `main.rs`: required flags,
@@ -1056,16 +1037,21 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
     in one hour of the warmup and one of the replay): neither hour yields
     a bar; every other bar is as worked out from its hour's quotes.
+  - `backtest_composite_bars.rs`: `fill_catalog` stores the external
+    minute bars a fake source returns for a composite
+    `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, and a recorder
+    without warmup gets hour bars with the open, high, low and close of
+    their minute bars.
   - `backtest_okx_swap.rs`: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` with
-    margins of 1, several quotes a minute at their own times, one exactly
-    on a minute. A recorder on 1-MINUTE-MID bars buys 2 contracts on the
-    first bar and sells 3 on the second: every bar's open, high, low and
-    close, the buy at the ask and the sell at the bid of the latest quote,
-    0.05% on each fill's value, at 1x the short left open locking its
-    whole value at entry, and the report's costs.
-  - `backtest_okx_xperp.rs`: the same quotes and orders on
+    margins of 1, on minute bars stamped as `fill-catalog` stores OKX's
+    candles (open, close). A recorder without warmup on the composite hour
+    bars buys 2 contracts on the first and sells 3 on the second: each
+    hour bar holds the minutes opening in its hour (a minute moved by one
+    shows in a high or a low), the fills at the close of the hour's last
+    minute, 0.05% on each fill's value, at 1x the short left open locking
+    its whole value at entry, and `Spread: n/a` in the report's costs.
+  - `backtest_okx_xperp.rs`: the same bars and orders on
     BTC-USD_UM_XPERP-310404.OKX, a `CryptoFuture` of 0.0001 BTC a contract
     settled in USD, with margins of 1: 200 contracts bought and 300 sold,
-    the same bars and fills, the commission and PnL in USD at two
-    decimals, at 10x the short left open locking a tenth of its value,
-    and the report's costs.
+    the commission and PnL in USD at two decimals, at 10x the short left
+    open locking a tenth of its value.

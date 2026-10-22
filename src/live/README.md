@@ -7,7 +7,8 @@ for the IB ones, then wires the clients, the strategy and the node. OKX
 instruments go to OKX's clients, all others to IB's; a strategy trading
 both gets both. Filling the catalog needs no node (see the data README).
 
-APIs are those of the `nautilus-*` crates at `0.66.0`; open points are under
+APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
+`develop` commit in `docs/ARCHITECTURE.md` (Version). Open points are under
 "Unverified". Process-wide rules (one node per process, Nautilus owns the
 logger) are in `docs/ARCHITECTURE.md`.
 
@@ -44,8 +45,8 @@ it. In code: `live::Live { catalog, account, client_id, leverage, logging
 2. OKX instruments, if any: read `OKX_ENVIRONMENT` (`demo` or `live`),
    build the OKX client configs on it, check the credentials are set,
    check the account (net position mode, each instrument's leverage equal
-   to `--leverage`), then refuse to start: no recent OKX quotes to warm up
-   on yet (see "OKX specifics").
+   to `--leverage`). Nothing is filled: OKX's data client serves the warmup
+   (see "OKX specifics").
 3. IB instruments, if any: check the client id, start or reuse the Docker
    gateway of the account's mode, wait for its login, and build the IB
    client configs on it.
@@ -71,7 +72,8 @@ limits").
 
 ### Known limits
 
-Both are Nautilus bugs, present in `0.65.0` and `0.66.0`; there is no
+Both are Nautilus bugs, present in `0.65.0`, `0.66.0` and the pinned
+`develop` commit; there is no
 documented way around them, so the code keeps the documented usage.
 
 - **The IB part of the warmup is lost.** The adapter stamps historical
@@ -129,11 +131,11 @@ and never names a broker.
 ## Cargo
 
 ```toml
-nautilus-live = { version = "=0.66.0", features = ["streaming"] }
-nautilus-common = "=0.66.0"
-nautilus-system = "=0.66.0"
-nautilus-persistence = "=0.66.0"
-nautilus-trading = "=0.66.0"
+nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["streaming"] }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-system = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -265,13 +267,15 @@ let config = LiveNodeConfig {
     trader_id,
     catalogs: vec![DataCatalogConfig::new("data/catalog".to_string(), None, None)],
     cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
-    data_engine: warmup::live_data_engine_config(), // no bar for an hour without quotes
+    data_engine: warmup::live_data_engine_config(&bar_types), // see the strategy README
     ..Default::default()
 };
 let builder = LiveNodeBuilder::from_config(config)?;   // then the same with_* chain
 ```
 
 Point it at the catalog `fill_catalog` wrote. Catalog names must be unique.
+The directory must exist: the start creates it, empty for a run on OKX
+alone.
 
 ### Recording live data
 
@@ -303,8 +307,8 @@ logs written through `tracing` into the same output.
 ## Interactive Brokers specifics (live)
 
 `nautilus_interactive_brokers::{config, factories}`; Cargo:
-`nautilus-interactive-brokers = "=0.66.0"`, features `execution` and
-`gateway` (the Docker-managed gateway, through `bollard`).
+`nautilus-interactive-brokers`, pinned as the others, features `execution`
+and `gateway` (the Docker-managed gateway, through `bollard`).
 
 ```rust
 InteractiveBrokersDataClientFactory::new()       // name() == "IB"
@@ -517,8 +521,6 @@ OKXExecutionClientFactory::new()  // name() == "OKX"
   `BTC-USD_UM_XPERP`). The demo lists other contracts than the real
   account: on 2026-10-22 its BTC X-Perp was `BTC-USD_UM_XPERP-310328` (max
   leverage 10), the real one `BTC-USD_UM_XPERP-310404`.
-- **Quotes** come tick by tick: the adapter subscribes to `bbo-tbt`, every
-  change of the best bid or ask. No setting.
 - **Cross margin**: the exec config sets `margin_mode:
   Some(OKXMarginMode::Cross)` (the adapter's default, `None`, sends
   isolated orders).
@@ -551,42 +553,45 @@ OKXExecutionClientFactory::new()  // name() == "OKX"
    use_hyphens_in_client_order_ids = false
    ```
 
-### Warmup: OKX live refuses to start for now
+### Warmup and bars
 
-OKX instruments warm up as IB's do: bars built from quotes, the warmup
-requested with `request_quotes` and served from the catalog. But there are
-no recent OKX quotes to serve it:
+OKX instruments trade on bars of OKX's 1-minute candles, a composite bar
+type such as `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`
+(strategy README). The warmup requests the candles (`request_bars` of
+`…-1-MINUTE-LAST-EXTERNAL`); with nothing in the catalog the data engine
+sends the whole window to the OKX data client, which pages OKX's REST
+candles up to now (`/market/candles`, then `/market/history-candles`),
+each stamped `ts_init` = its close, as the archive's. The live minute
+bars come from the business WebSocket's candle channel, confirmed candles
+only. The live node builds the hour bars 5 s after the hour (strategy
+README, "Bars built from quotes"). Bars built from quotes get no warmup
+on OKX: its data client does not implement `request_quotes`.
 
-- OKX serves no quote history. The OKX data client does not implement
-  `request_quotes`; Nautilus' default logs that and never answers, so the
-  warmup would wait forever.
-- OKX's archive is two to three days behind, so `fill-catalog` cannot
-  bring the catalog up to now.
-
-So a run with any OKX instrument stops at the start, after the account
-checks and before the node is built, with "OKX live needs recorded
-quotes, not available yet". Recording OKX's live quotes into the catalog
-will fill that gap and lift the refusal.
+Run on the demo, 2026-10-22, 17:08 to 18:03 UTC, `warmup = "3h"`,
+`--leverage 3` (both accounts' leverage): BTC-USDT-SWAP and the X-Perp
+BTC-USD_UM_XPERP-310328 each got 179 minute bars in about 0.14 s, then a
+candle every minute, 0.3 to 1.5 s after its close. The minute closing
+18:00 arrived at 18:00:01.4 (swap) and 18:00:00.7 (X-Perp), and the hour
+bar was built at 18:00:05. No order (the EMAs were not warm); clean stop
+on SIGINT.
 
 ### Known limits
 
-- **X-Perps get no quotes and cannot be traded in `0.66.0`.** The adapter
-  takes any symbol with an underscore for a spread
-  (`common::parse::is_okx_spread_symbol` is `symbol.contains('_')`), and
-  every X-Perp symbol has one (`BTC-USD_UM_XPERP-310328`). So the quote
-  subscription goes to the spread channel `sprd-bbo-tbt`, which OKX
-  refuses (`60018 ... sprdId:BTC-USD_UM_XPERP-310328 doesn't exist`), and
-  orders, cancels and order queries would take the spread routes
-  (`place_spread_order`). Seen on the demo on 2026-10-22, in a run built
-  before the refusal above: the node started, reconciled and stopped
-  cleanly, but no quote and no bar arrived. Upstream:
-  [nautilus_trader#5337](https://github.com/nautechsystems/nautilus_trader/issues/5337),
-  fixed on `develop` after `0.66.0` (commit `4d032a3e8d`), not yet
-  released. No workaround here: X-Perps need the next release. Swaps
-  (`BTC-USDT-SWAP`) are not affected.
+- **X-Perps in `0.66.0`.** The adapter took any symbol with an
+  underscore for a spread, so an X-Perp's quotes and orders took OKX's
+  spread routes, which refuse it. Fixed upstream
+  ([nautilus_trader#5337](https://github.com/nautechsystems/nautilus_trader/issues/5337),
+  commit `4d032a3e8d`), in the pinned commit. The candle path never had
+  the check; the demo run above got the X-Perp's candles. Orders on the
+  X-Perp are not yet run.
 - **nautilus_trader#5393** (the warmup panic, see "Known limits" above)
-  will apply to OKX as to IB once its warmup is requested; not checked on
-  OKX, since no OKX run gets that far yet.
+  applies to OKX as to IB: a live candle arriving before the warmup
+  response panics the node. OKX answers a 3-hour warmup in well under a
+  second, and a candle arrives once a minute; a long warmup (720 hours is
+  about 430 history pages, at OKX's 20 requests per 2 s) makes it likely.
+- **Warmup beyond about 833 hours is cut short silently.** The adapter's
+  `request_bars` stops after 500 pages of 100 1-minute candles
+  (`MAX_PAGES_SOFT`, `nautilus-okx` `http/client.rs`) without an error.
 
 ### OKX rules
 
@@ -599,17 +604,15 @@ will fill that gap and lift the refusal.
 
 - Unit tests in `okx.rs`: the configs (demo and EEA endpoints, cross
   margin, credentials left to the environment, instrument types and
-  families), net mode refused otherwise, the leverage check, the parsing
-  of OKX's leverage answer, and the refusal for lack of recorded quotes.
-- End to end, `tests/okx_demo.rs`: `Live` on the demo's BTC X-Perp passes
-  the account checks against the real demo account, then is refused for
-  lack of recorded quotes; it only reads the account. Gated: it is skipped
-  unless `NAUTILUS_OKX_RUN=1` is set in the shell. The account's X-Perp
-  leverage goes in `NAUTILUS_OKX_LEVERAGE` (1 if unset); a wrong one fails
-  the test with the leverage message:
+  families), net mode refused otherwise, the leverage check and the parsing
+  of OKX's leverage answer.
+- End to end, `tests/okx_demo.rs`: `Live` on the demo's BTC X-Perp checks
+  the real demo account, then is refused at a leverage of 1000, which no
+  account has, before any node is built; it only reads the account.
+  Gated: it is skipped unless `NAUTILUS_OKX_RUN=1` is set in the shell:
 
   ```sh
-  NAUTILUS_OKX_RUN=1 NAUTILUS_OKX_LEVERAGE=3 cargo test --test okx_demo -- --nocapture
+  NAUTILUS_OKX_RUN=1 cargo test --test okx_demo -- --nocapture
   ```
 
 ## Rules

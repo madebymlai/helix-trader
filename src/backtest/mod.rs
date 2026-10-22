@@ -16,7 +16,11 @@ use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
 use nautilus_execution::models::fee::FeeModelAny;
-use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
+use nautilus_model::{
+    data::{BarType, NautilusDataType},
+    identifiers::InstrumentId,
+    types::Money,
+};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
@@ -24,23 +28,27 @@ pub use self::{
     costs::{commission_per_order, commission_rate},
     report::{Outcome, report},
 };
+use crate::strategy::catalog_series;
 
-/// One backtest: a window of the catalog, the instruments whose quotes are
-/// replayed and the costs. Every field is required.
+/// One backtest: a window of the catalog, the bar types whose source data
+/// is replayed and the costs. Every field is required.
 #[derive(Debug, Clone)]
 pub struct Backtest {
-    /// The catalog directory: instruments and quotes are read from it, and
-    /// it serves the strategy's warmup requests.
+    /// The catalog directory: instruments and the series the bars are
+    /// built from are read from it, and it serves the strategy's warmup
+    /// requests.
     pub catalog: PathBuf,
     /// The internal bar types the strategy trades and warms up on. Their
-    /// instruments, all on one venue, which the venue of the run derives
-    /// from, are those whose quotes are replayed: Nautilus builds the bars
-    /// from these quotes. The engine's cache is sized to hold their warmup
-    /// bars, which reach the strategy only through it.
+    /// instruments are all on one venue, which the venue of the run derives
+    /// from. The series Nautilus builds the bars from (see
+    /// `strategy::catalog_series`: the quotes of their instrument, or the
+    /// source bars of a composite bar type) are those replayed. The
+    /// engine's cache is sized to hold their warmup bars, which reach the
+    /// strategy only through it.
     pub bar_types: Vec<BarType>,
     pub start: Timestamp,
     pub end: Timestamp,
-    /// The strategy's warmup: the catalog must cover the quotes from
+    /// The strategy's warmup: the catalog must cover the series from
     /// `start - warmup`, so that the warmup request is answered.
     pub warmup: SignedDuration,
     /// The commission: `commission_per_order` or `commission_rate`.
@@ -64,9 +72,10 @@ impl Backtest {
     /// Returns an error if the inputs are inconsistent (no instruments,
     /// several venues, a negative warmup, `start` not before
     /// `end`, a leverage not positive), if the cache cannot hold the warmup bars of a bar type (see
-    /// `warmup::cache_config`), if the catalog misses an instrument or part of its quotes
+    /// `warmup::cache_config`), if the catalog misses an instrument or part of a series
     /// over `[start - 1 ns - warmup, end]`, if the node fails to build
-    /// or run, or if a fill has no quote before it.
+    /// or run, or if a fill of an instrument with quotes has none before
+    /// it.
     pub fn run<S>(&self, strategy: S) -> anyhow::Result<Outcome>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -90,5 +99,11 @@ impl Backtest {
     /// The instruments of the bar types, each once.
     fn instruments(&self) -> BTreeSet<InstrumentId> {
         self.bar_types.iter().map(BarType::instrument_id).collect()
+    }
+
+    /// The catalog series the bars are built from (see
+    /// `strategy::catalog_series`).
+    fn series(&self) -> Vec<(NautilusDataType, String)> {
+        catalog_series(&self.bar_types)
     }
 }

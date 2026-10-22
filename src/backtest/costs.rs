@@ -3,8 +3,9 @@
 //! Builds the Nautilus `FeeModelAny` and `FillModelAny`
 //! (`nautilus_execution`) that `BacktestVenueConfig` takes: a commission
 //! either fixed per order (`FixedFeeModel`) or a rate on the trade value
-//! (`MakerTakerFeeModel`), and fills at the quote with no slippage of their
-//! own (`DefaultFillModel`): the spread is the cost.
+//! (`MakerTakerFeeModel`), and fills at the market with no slippage of
+//! their own (`DefaultFillModel`): at the quote, so the spread is the cost,
+//! or, on bars, at the bar's prices.
 
 use anyhow::ensure;
 use nautilus_execution::models::{
@@ -45,7 +46,8 @@ pub fn commission_rate(rate: Decimal) -> anyhow::Result<FeeModelAny> {
 }
 
 /// Market orders fill at the quote (a buy at the ask, a sell at the bid),
-/// with no slippage; limit orders always fill when touched.
+/// or on bars at the last price, with no slippage; limit orders always
+/// fill when touched.
 pub(super) fn fill_model() -> anyhow::Result<FillModelAny> {
     Ok(FillModelAny::Default(DefaultFillModel::new(
         1.0,

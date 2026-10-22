@@ -15,7 +15,7 @@ use helix_trader::{
     data::{IbHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
-        DataRequirements,
+        DataRequirements, catalog_series,
         ema::{EmaCross, EmaCrossConfig},
     },
 };
@@ -46,9 +46,8 @@ enum Command {
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node with Interactive Brokers, after
-    /// filling the catalog up to now; stops on Ctrl-C. OKX instruments are
-    /// refused until recorded quotes can warm them up.
+    /// Runs the strategy on a live node with Interactive Brokers (after
+    /// filling the catalog up to now) or OKX; stops on Ctrl-C.
     Live(LiveArgs),
 }
 
@@ -216,9 +215,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Checks everything that needs no gateway, then fills the catalog with the
-/// instruments and their quotes from each instrument's source: OKX's
-/// archive for OKX instruments, IB (connected only if needed) for the
-/// others. No bars: the strategies' bars are built from the quotes.
+/// instruments and the series their bars are built from (see
+/// `strategy::catalog_series`) from each instrument's source: OKX's
+/// archive for OKX instruments (their 1-minute candles), IB (connected
+/// only if needed) for the others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -246,19 +246,22 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .into_iter()
         .partition(|&id| OkxHistory::serves(id));
     if !okx_ids.is_empty() {
+        let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
         OkxHistory::new()?
-            .fill(&mut catalog, &okx_ids, start, end)
+            .fill(&mut catalog, &series, start, end)
             .await?;
     }
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
         let instruments = ib.instruments(&ib_ids).await?;
+        let series = catalog_series(&requirements.of_instruments(&ib_ids).bar_types);
         fill_catalog(
             &mut catalog,
             instruments,
+            &series,
             start,
             end,
-            async |id, from, to| ib.quotes(id, from, to).await,
+            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
         )
         .await?;
     }

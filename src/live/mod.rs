@@ -4,8 +4,8 @@
 //! those of the instruments' venues: OKX's for OKX instruments (`okx.rs`),
 //! IB's for the others (`ib.rs`), both if the instruments span both. The
 //! start brings the catalog up to now for the IB instruments, and the node
-//! serves their warmup from it. OKX instruments have no recent quotes to
-//! warm up on yet, so a run with any refuses to start (see `okx.rs`).
+//! serves their warmup from it. OKX's data client serves the warmup of the
+//! OKX instruments, OKX's candles up to now (see `okx.rs`).
 
 mod ib;
 mod node;
@@ -28,7 +28,7 @@ use nautilus_common::{
 };
 use nautilus_core::UUID4;
 use nautilus_model::{
-    data::{BarType, QuoteTick},
+    data::{Data, NautilusDataType},
     identifiers::InstrumentId,
     instruments::InstrumentAny,
 };
@@ -38,17 +38,18 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IbHistory, OkxHistory, fill_catalog},
-    strategy::{DataRequirements, warmup},
+    strategy::{DataRequirements, catalog_series, warmup},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
 /// through IB with `client_id`, and its OKX instruments on the OKX
-/// environment `OKX_ENVIRONMENT` names at `leverage`; on bars the node builds from the venues' quotes, warmed up
-/// from the catalog.
+/// environment `OKX_ENVIRONMENT` names at `leverage`; on bars the node
+/// builds, warmed up from the catalog and the venues.
 #[derive(Debug, Clone)]
 pub struct Live {
-    /// The catalog directory: the start fills it up to now, and the node
-    /// serves the warmup from it.
+    /// The catalog directory: the start fills it up to now with the IB
+    /// history, and the node serves the warmup from it, asking the
+    /// venues for what it misses.
     pub catalog: PathBuf,
     /// The IB account traded; needed only if the strategy trades IB
     /// instruments.
@@ -76,8 +77,6 @@ impl Live {
     /// Returns an error if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if OKX's clients cannot be set up
     /// or the OKX account does not suit the run (see `okx::clients`), if
-    /// the strategy trades any OKX instrument, which has no quotes to warm
-    /// up on yet (see `okx::ensure_quote_history`), if
     /// the strategy trades IB instruments and no account is given, if IB's
     /// clients cannot be set up (see `ib::clients`), if the catalog cannot
     /// be filled (IB unreachable, an instrument IB does not know, a catalog
@@ -88,6 +87,7 @@ impl Live {
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
         let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
+        let data_engine = warmup::live_data_engine_config(&requirements.bar_types);
         let instrument_ids = requirements.instrument_ids();
         // The node would install the logger when built, after the fill:
         // install it now with the node's trader and config, and the node
@@ -106,7 +106,6 @@ impl Live {
         let mut clients = Vec::new();
         if !okx_ids.is_empty() {
             let okx = okx::clients(&okx_ids, self.leverage).await?;
-            okx::ensure_quote_history(&okx_ids)?;
             clients.push(okx.into_node_clients());
         }
         if !ib_ids.is_empty() {
@@ -116,13 +115,17 @@ impl Live {
             )?;
             let ib = ib::clients(account, self.client_id, &ib_ids).await?;
             clients.push(ib.into_node_clients());
-            self.fill_catalog(&of_instruments(requirements, &ib_ids))
+            self.fill_catalog(&requirements.of_instruments(&ib_ids))
                 .await?;
         }
+        // The node opens the catalog, which a run on OKX alone never fills.
+        fs::create_dir_all(&self.catalog)
+            .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         node::run(
             &self.catalog,
             self.logging.clone(),
             cache,
+            data_engine,
             clients,
             &instrument_ids,
             strategy,
@@ -141,40 +144,25 @@ impl Live {
             requirements,
             now,
             async |ids: &[InstrumentId]| ib.instruments(ids).await,
-            async |id, from, to| ib.quotes(id, from, to).await,
+            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
         )
         .await
     }
 }
 
-/// The requirements of `requirements` on `instrument_ids` alone.
-fn of_instruments(
-    requirements: &DataRequirements,
-    instrument_ids: &[InstrumentId],
-) -> DataRequirements {
-    DataRequirements {
-        bar_types: requirements
-            .bar_types
-            .iter()
-            .filter(|bar_type| instrument_ids.contains(&bar_type.instrument_id()))
-            .copied()
-            .collect::<Vec<BarType>>(),
-        warmup: requirements.warmup,
-    }
-}
-
 /// Fills the catalog in `catalog_dir`, created if missing, with the
 /// instruments of `requirements`, fetched through `fetch_instruments`, and
-/// with their quotes over `[now - warmup, IbHistory::latest_end(now)]`,
-/// fetched one instrument at a time through `fetch_quotes`; the node asks
-/// IB for the quotes since. A stored series resumes
+/// with the series their bars are built from (see
+/// `strategy::catalog_series`) over `[now - warmup,
+/// IbHistory::latest_end(now)]`, fetched one series at a time through
+/// `fetch`; the node asks IB for the data since. A stored series resumes
 /// after its end (see `data::fill_catalog`).
 async fn fill_catalog_to_now(
     catalog_dir: &Path,
     requirements: &DataRequirements,
     now: Timestamp,
     fetch_instruments: impl AsyncFnOnce(&[InstrumentId]) -> anyhow::Result<Vec<InstrumentAny>>,
-    fetch_quotes: impl AsyncFnMut(InstrumentId, Timestamp, Timestamp) -> anyhow::Result<Vec<QuoteTick>>,
+    fetch: impl AsyncFnMut(&NautilusDataType, &str, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
     let start = now
         .checked_sub(requirements.warmup)
@@ -186,9 +174,10 @@ async fn fill_catalog_to_now(
     fill_catalog(
         &mut catalog,
         instruments,
+        &catalog_series(&requirements.bar_types),
         start,
         IbHistory::latest_end(now)?,
-        fetch_quotes,
+        fetch,
     )
     .await
 }
@@ -265,9 +254,11 @@ mod tests {
                 asked_instruments.extend_from_slice(ids);
                 Ok(instruments())
             },
-            async |id, from, to| {
+            async |data_type, identifier, from, to| {
+                assert_eq!(*data_type, NautilusDataType::QuoteTick);
+                let id = InstrumentId::from(identifier);
                 asked_quotes.push((id, from, to));
-                Ok(vec![quote(id, to)])
+                Ok(vec![Data::Quote(quote(id, to))])
             },
         )
         .await

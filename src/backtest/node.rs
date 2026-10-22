@@ -2,13 +2,13 @@
 //!
 //! Builds a Nautilus `BacktestRunConfig` (`nautilus_backtest::config`): the
 //! venue (`BacktestVenueConfig`), the catalog data (`BacktestDataConfig`, one
-//! per instrument for its quotes) and the engine
+//! per series the bars are built from) and the engine
 //! config, then runs it on a `BacktestNode`: `build`, the strategy
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 //! The engine is kept after the run, so that the report reads the fills
 //! from its cache, then disposed.
 
-use std::{collections::BTreeSet, fmt::Debug};
+use std::{collections::BTreeSet, fmt::Debug, str::FromStr};
 
 use anyhow::{Context, anyhow, ensure};
 use nautilus_backtest::{
@@ -35,9 +35,9 @@ const RUN_ID: &str = "backtest";
 /// The run config of `backtest`: one venue named after the instruments'
 /// venue, at the run's leverage with Nautilus' default margin model (the
 /// notional / leverage times the instrument's margin), which fills orders
-/// on the quotes, the instruments' quotes of the
-/// window from the catalog (the only data replayed: the data engine builds
-/// the strategy's bars from them), and the catalog registered in the
+/// on the replayed data, the series of the window from the catalog (the
+/// only data replayed: the data engine builds the strategy's bars from
+/// them; see `data_config`), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
 /// holding the warmup bars (`warmup::cache_config`) and a data engine
 /// building no bar for an hour without quotes
@@ -72,16 +72,10 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .fill_model(costs::fill_model()?)
         .build()?;
     let data = backtest
-        .instruments()
+        .series()
         .into_iter()
-        .map(|instrument_id| {
-            BacktestDataConfig::builder()
-                .data_type(NautilusDataType::QuoteTick)
-                .catalog_path(catalog.clone())
-                .instrument_id(instrument_id)
-                .build()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(data_type, identifier)| data_config(&catalog, data_type, &identifier))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
     let engine_config = BacktestEngineConfig::builder()
         .cache(cache)
@@ -101,9 +95,31 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .build()?)
 }
 
+/// The `BacktestDataConfig` loading the series of `data_type` and
+/// `identifier` from `catalog`: bars by their bar type, any other data by
+/// its instrument id, as the catalog keys them.
+fn data_config(
+    catalog: &str,
+    data_type: NautilusDataType,
+    identifier: &str,
+) -> anyhow::Result<BacktestDataConfig> {
+    let builder = BacktestDataConfig::builder()
+        .catalog_path(catalog.to_string())
+        .data_type(data_type.clone());
+    let config = if data_type == NautilusDataType::Bar {
+        builder.bar_types(vec![identifier.to_string()]).build()
+    } else {
+        builder
+            .instrument_id(InstrumentId::from_str(identifier)?)
+            .build()
+    };
+    Ok(config?)
+}
+
 /// Runs `config` with `strategy` on a new `BacktestNode` and returns its
 /// one result, with the costs of the fills in the engine's cache, each on
-/// the quotes the run replayed, loaded again as the node loads them.
+/// the quotes the run replayed, if any, loaded again as the node loads
+/// them.
 pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -213,6 +229,8 @@ mod tests {
         let config = run_config(&backtest()).unwrap();
         let venue = &config.venues()[0];
         assert!(venue.bar_execution());
+        // Nautilus' default: external bars replay open, high, low, close.
+        assert!(!venue.bar_adaptive_high_low_ordering());
         assert!(!venue.liquidity_consumption());
     }
 
@@ -243,6 +261,26 @@ mod tests {
             .push(BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"));
         let config = run_config(&backtest).unwrap();
         assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
+    }
+
+    #[test]
+    fn a_composite_bar_type_has_its_source_bars_loaded_by_bar_type() {
+        let backtest = Backtest {
+            bar_types: vec![BarType::from(
+                "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..backtest()
+        };
+        let config = run_config(&backtest).unwrap();
+        let [data] = config.data() else {
+            panic!("{:?}", config.data())
+        };
+        assert_eq!(data.data_type(), &NautilusDataType::Bar);
+        assert_eq!(
+            data.query_identifiers().unwrap(),
+            ["SXR8.IBIS-1-MINUTE-LAST-EXTERNAL"]
+        );
+        assert_eq!(data.instrument_id(), None);
     }
 
     #[test]
