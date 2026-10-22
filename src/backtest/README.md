@@ -658,6 +658,98 @@ buy limit and the sell stop at 710.00 were not filled although the next
 hour's LAST low was 702.01, its closing quote 715.50/715.54; with
 `bar_execution` on both filled at 710.00.
 
+## OKX swaps
+
+An OKX swap (`BTC-USDT-SWAP.OKX`) backtests through the same code as IB's
+instruments. The catalog holds a `CryptoPerpetual` and a quote for every
+change of OKX's best bid or ask (data README, "OKX specifics"); the run
+replays those quotes and nothing else.
+
+- **Venue.** Named `OKX` after the instruments' venue, with the same
+  config as for IB: margin account, netting, L1 book, the fee and fill
+  models above. The balance is in USDT (`--balance "10000 USDT"`), the
+  currency the swaps settle in.
+- **No base currency.** `base_currency` is left unset, as for IB. The
+  same run with `USDT` as base currency gave the same fills, commissions,
+  margin, balances and PnL to the last digit, on the test fixture and on
+  a real day (see below): a margin account books PnL and commissions in
+  the instrument's settlement currency either way. Only the summary's
+  `account.OKX.base_currency` differs (`USDT` or `None`).
+- **Margins.** `StandardMarginModel`: the margin is the notional times the
+  instrument's own rates, OKX's first tier (BTC: 1% for orders, 0.4% for
+  the open position), whatever the leverage. Nautilus' default model
+  divides by the account leverage (10 by default), which would lock a
+  tenth of OKX's figure. IB's instruments have rates of 0, so their runs
+  lock nothing either way.
+- **Bars.** Internal bars built from the tick quotes, so a 1-minute bar
+  has its real open, high, low and close (mids). A quote stamped exactly
+  on a minute belongs to the bar closing then.
+- **Fills.** A market buy fills at the ask, a sell at the bid, of the
+  latest quote at or before the order, as for IB (see Fills). OKX quotes
+  carry real sizes, but `liquidity_consumption` is off, and the rest of an
+  order beyond the top size fills one tick worse.
+- **Commission.** `--commission-rate 0.0005` is OKX's taker fee, 0.05% of
+  each fill's value (contracts × 0.01 BTC × price), no minimum.
+- **Funding is not charged.** OKX settles funding on open swap positions
+  (BTC every 8 hours, about 0.01% of the position each time); the backtest
+  charges none. The EMA strategy is always long or short, so it crosses
+  every settlement: its OKX results leave out that cost.
+- **A run starting on a bar's close** cannot trade that bar. Tick quotes
+  are stamped when they happened, so the last quote before the start
+  comes before the engine start (1 ns earlier) and is not replayed: the
+  order sent on that bar finds no quote and is rejected (`No market`).
+  IB's minute quotes, stamped 1 ns before the close, do not have this.
+  Start off a bar's close, or count one order less.
+
+**Verified on OKX data**, 2026-10-22: a scratch catalog of BTC-USDT-SWAP
+filled from OKX's archive for 2026-10-17 to 10-19 (6,173,698 quotes, see
+the data README), EMA 10/30 on `1-MINUTE-MID` bars, 1 contract (0.01 BTC,
+about 815 USDT), `warmup = "1h"`, no session:
+
+```toml
+instrument_ids = ["BTC-USDT-SWAP.OKX"]
+bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" }
+trade_size = "1.00"
+warmup = "1h"
+```
+
+```
+helix-trader backtest ema --config ema.toml --catalog okx-cat \
+  --start 2026-10-17T01:30:00Z --end 2026-10-19T23:59:00Z \
+  --commission-rate 0.0005 --balance "10000 USDT"
+```
+
+It ran in about 40 s and printed:
+
+| | |
+|---|---|
+| Orders (filled) | 158 (157) |
+| PnL (total) | -141.05 USDT |
+| Commission | 128.01 USDT |
+| Spread | 0.16 USDT |
+| Gross PnL | -12.89 USDT |
+| Max drawdown | 1.41% |
+| Final balance | 9858.95 USDT |
+
+Funding not included (see above). Checked against the stored quotes,
+outside Nautilus:
+
+- **Fills.** All 157 at the ask (buys) or the bid (sells) of the last
+  quote at or before the fill. Almost every one paid half of a 0.1 USDT
+  spread: the BTC book is one tick wide nearly all the time.
+- **Commission.** Each fill's commission is 0.05% of its value
+  (contracts × 0.01 × price) to the eighth decimal: 128.01 USDT on
+  orders of 815-1,658 USDT. The commission is ten times the loss before
+  costs: on this data a strategy flipping every few minutes pays mostly
+  fees.
+- **Margin.** The short left open at the end locks 3.28 USDT, 0.4% of its
+  value at entry.
+- **The first order** (the bar closing at the 01:30 start) was rejected
+  `No market` (see above); the other 157 filled.
+- **No base currency.** The same run with `USDT` as the venue's base
+  currency gave the same report and the same fill, margin and balance
+  events, line for line.
+
 ## Verified on IB data
 
 Paper gateway, 2026-10-08, SXR8.IBIS 1-HOUR-LAST, EMA 10/30 (the
@@ -845,7 +937,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   The EMA reads bar closes only, so the bars' opens, highs and lows, and
   stops, are tested with a recording strategy (`tests/common/recorder.rs`)
   that warms up through `strategy::warmup` like a real one, records every
-  bar it gets and can rest a sell stop:
+  bar it gets and can rest a sell stop or send market orders:
   - `backtest_bars.rs` and `backtest_bars_on_close.rs` (noise, a mid of
     its own every minute; runs from 12:30 and from 13:00): every warmup and
     replayed bar has the open, high, low and close worked out from its
@@ -860,3 +952,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
     in one hour of the warmup and one of the replay): neither hour yields
     a bar; every other bar is as worked out from its hour's quotes.
+  - `backtest_okx_swap.rs`: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` with
+    OKX's margins, several quotes a minute at their own times, one exactly
+    on a minute. A recorder on 1-MINUTE-MID bars buys 2 contracts on the
+    first bar and sells 3 on the second: every bar's open, high, low and
+    close, the buy at the ask and the sell at the bid of the latest quote,
+    0.05% on each fill's value, the short left open locking 0.4% of its
+    value, and the report's costs.
