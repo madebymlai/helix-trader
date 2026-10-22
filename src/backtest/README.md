@@ -215,8 +215,13 @@ Liquidation is off (`liquidation_enabled` defaults to `false`). So OKX's
 own maintenance rate (BTC X-Perp: 0.65%), which only decides when OKX
 liquidates, is not modelled: a run never closes a position for lack of
 margin. On the X-Perp run below, leverage changed only the margin
-locked, not the fills or the PnL. Whether Nautilus refuses an order whose
-margin exceeds the free balance is *unverified*.
+locked, not the fills or the PnL.
+
+The risk engine denies an order whose initial margin exceeds the free
+balance (`InitialMarginExceedsFreeBalance`, `nautilus-risk`
+`engine/mod.rs` `check_margin_balance`); orders that only reduce a
+position are exempt. So at 1x an OKX order worth more than the free
+balance is denied, and leverage can change the fills of large orders.
 
 ### Data
 

@@ -572,7 +572,10 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   divides the value by it, times the instrument's margin (see the backtest
   README, "Leverage"). OKX's own maintenance rates (BTC X-Perp: 0.65%)
   only decide liquidation, which the backtest does not simulate, so they
-  are not stored.
+  are not stored. A catalog filled before this keeps OKX's old rates
+  (`fill` never rewrites a stored instrument), which the backtest would
+  read as multipliers: delete its OKX instrument directories and fill
+  again.
 - **X-Perps.** A `CryptoFuture` expiring in 2031, linear, settled in USD
   (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole
   contracts, tick 0.1. Funding is not filled (out of scope, as for swaps).
