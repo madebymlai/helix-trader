@@ -41,10 +41,11 @@ it. In code: `live::Live { catalog, account, client_id, leverage, logging
 1. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
    and the `tracing` bridge: the gateway and the fill log before the node
    exists, and the node reuses that logger when built.
-2. OKX instruments, if any: check the credentials are set, build the OKX
-   client configs, check the account (net position mode, each
-   instrument's leverage equal to `--leverage`), then refuse to start: no
-   recent OKX quotes to warm up on yet (see "OKX specifics").
+2. OKX instruments, if any: read `OKX_ENVIRONMENT` (`demo` or `live`),
+   build the OKX client configs on it, check the credentials are set,
+   check the account (net position mode, each instrument's leverage equal
+   to `--leverage`), then refuse to start: no recent OKX quotes to warm up
+   on yet (see "OKX specifics").
 3. IB instruments, if any: check the client id, start or reuse the Docker
    gateway of the account's mode, wait for its login, and build the IB
    client configs on it.
@@ -501,14 +502,16 @@ OKXExecutionClientFactory::new()  // name() == "OKX"
 
 ### Environment
 
-- **Demo, EEA region.** Both configs set `environment: OKXEnvironment::Demo`
-  and `region: OKXRegion::Eea`: REST on `eea.okx.com` with the
+- **Environment from `.env`, EEA region.** Both configs take `environment`
+  from `OKX_ENVIRONMENT` (`demo` or `live`, required) and set `region:
+  OKXRegion::Eea`. On demo: REST on `eea.okx.com` with the
   `x-simulated-trading: 1` header, WebSockets on `wseeapap.okx.com`. An
   account opened on my.okx.com is an EEA one, and in the EEA a retail
   account trades X-Perps, not the global USDT swaps. A key only works in
   its own region and environment: the demo key is refused by the real
-  account (code 50101) and by `www.okx.com` (50119). The real account is
-  `OKXEnvironment::Live` in `live/okx.rs`; nothing else changes.
+  account (code 50101) and by `www.okx.com` (50119). So a demo key needs
+  `OKX_ENVIRONMENT=demo` and a real key `live`: OKX refuses a key in the
+  other environment with 50101.
 - **Instruments.** The configs load the instrument types and families of
   the traded ids (`BTC-USD_UM_XPERP-310328.OKX`: `FUTURES`, family
   `BTC-USD_UM_XPERP`). The demo lists other contracts than the real
@@ -526,8 +529,9 @@ OKXExecutionClientFactory::new()  // name() == "OKX"
 
 1. Create an API key on my.okx.com under Demo Trading, with trade
    permission, and put it in `.env` as `OKX_API_KEY`, `OKX_API_SECRET`,
-   `OKX_API_PASSPHRASE` (the names the adapter reads; see `.env.example`).
-   The start checks they are set; the adapter reads them, never our code.
+   `OKX_API_PASSPHRASE` (the names the adapter reads; see `.env.example`),
+   with `OKX_ENVIRONMENT=demo`. The start checks they are set; the adapter
+   reads them, never our code.
 2. Position mode: one-way (net). The start reads it through the adapter
    (`get_account_configuration`) and refuses long/short mode. Change it by
    hand, with no open position or order.
