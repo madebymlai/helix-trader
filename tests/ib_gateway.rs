@@ -31,7 +31,7 @@ use helix_trader::{
 };
 use jiff::{Timestamp, ToSpan};
 use nautilus_common::logging::logger::LoggerConfig;
-use nautilus_model::identifiers::InstrumentId;
+use nautilus_model::{data::NautilusDataType, identifiers::InstrumentId};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 use tokio::sync::Mutex;
@@ -104,9 +104,10 @@ async fn fill_catalog_stores_quotes_through_the_paper_gateway() {
     fill_catalog(
         &mut catalog,
         instruments,
+        &[(NautilusDataType::QuoteTick, sxr8().to_string())],
         start,
         end,
-        async |id, from, to| ib.quotes(id, from, to).await,
+        async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
     )
     .await
     .unwrap();

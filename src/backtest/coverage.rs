@@ -3,9 +3,10 @@
 //!
 //! A warmup window the catalog does not fully cover gets no answer at all
 //! (see the README), so a run on missing data would go on silently with
-//! cold indicators; without quotes, orders find no market and no bar is
-//! built. Every instrument must be stored, and its quotes covered over
-//! `[engine start − warmup, end]` by their stored intervals (inclusive
+//! cold indicators; without its data, orders find no market and no bar is
+//! built. Every instrument must be stored, and each series the bars are
+//! built from (see `strategy::catalog_series`) covered over
+//! `[engine start − warmup, end]` by its stored intervals (inclusive
 //! nanoseconds); the engine starts 1 ns before the run start. The gaps come
 //! from `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
 //! through the same `missing_intervals` as the data engine's own catalog
@@ -22,14 +23,16 @@ use nautilus_model::{
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
+};
 
 use super::Backtest;
 
 /// Fails unless the catalog of `backtest` stores every instrument and
-/// covers its quotes over `[engine start − warmup, end]`, the engine
-/// starting 1 ns before `start`; the error names the instrument, and for
-/// quotes the first missing range.
+/// covers each series over `[engine start − warmup, end]`, the engine
+/// starting 1 ns before `start`; the error names the instrument, or the
+/// series and its first missing range.
 pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
     ensure!(
         !backtest.warmup.is_negative(),
@@ -55,31 +58,39 @@ pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
             backtest.catalog.display()
         );
     }
-    for id in &ids {
-        ensure_quoted(&catalog, *id, warmup_start, backtest.end)?;
+    for (data_type, identifier) in backtest.series() {
+        ensure_covered(
+            &catalog,
+            &data_type,
+            &identifier,
+            warmup_start,
+            backtest.end,
+        )?;
     }
     Ok(())
 }
 
-/// Fails unless `catalog` covers the quotes of `instrument_id` over
-/// `[from, to]`; the error names the first missing range.
-fn ensure_quoted(
+/// Fails unless `catalog` covers the series of `data_type` and `identifier`
+/// over `[from, to]`; the error names the first missing range.
+fn ensure_covered(
     catalog: &ParquetDataCatalog,
-    instrument_id: InstrumentId,
+    data_type: &NautilusDataType,
+    identifier: &str,
     from: Timestamp,
     to: Timestamp,
 ) -> anyhow::Result<()> {
+    let named = format!("the {} of {identifier}", data_path_prefix(data_type));
     let missing = catalog
         .get_missing_intervals_for_request(
             UnixNanos::from(from).as_u64(),
             UnixNanos::from(to).as_u64(),
-            &NautilusDataType::QuoteTick.into(),
-            Some(&instrument_id.to_string()),
+            &data_type.clone().into(),
+            Some(identifier),
         )
-        .with_context(|| format!("reading the stored range of the quotes of {instrument_id}"))?;
+        .with_context(|| format!("reading the stored range of {named}"))?;
     if let Some(&(start, end)) = missing.first() {
         bail!(
-            "the catalog does not cover the quotes of {instrument_id} over [{from}, {to}] \
+            "the catalog does not cover {named} over [{from}, {to}] \
              (the warmup and the run): [{}, {}] is missing",
             timestamp(start),
             timestamp(end),
@@ -99,7 +110,7 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{
-        data::{BarType, QuoteTick},
+        data::{Bar, BarType, QuoteTick},
         instruments::stubs::equity_aapl,
         types::{Money, Price, Quantity},
     };
@@ -236,5 +247,68 @@ mod tests {
         };
         let err = check(&backtest).unwrap_err();
         assert!(err.to_string().contains("warmup"), "{err}");
+    }
+
+    const MINUTE_BARS: &str = "AAPL.XNAS-1-MINUTE-LAST-EXTERNAL";
+
+    /// A backtest of AAPL.XNAS on hour bars built from its external minute
+    /// bars, over the window of `backtest`.
+    fn composite_backtest(dir: &Path) -> Backtest {
+        Backtest {
+            bar_types: vec![BarType::from(
+                "AAPL.XNAS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..backtest(dir, &[AAPL])
+        }
+    }
+
+    /// A catalog holding AAPL.XNAS and one minute bar stored over each
+    /// window of `bars`.
+    fn bar_catalog(dir: &Path, bars: &[(&str, &str)]) {
+        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        for &(from, to) in bars {
+            let p = Price::from("100.00");
+            let bar = Bar::new(
+                BarType::from(MINUTE_BARS),
+                p,
+                p,
+                p,
+                p,
+                Quantity::from(1),
+                ns(from),
+                ns(from),
+            );
+            catalog
+                .write_to_parquet(&[bar], Some(ns(from)), Some(ns(to)), None)
+                .unwrap();
+        }
+        catalog
+            .write_instruments(vec![InstrumentAny::Equity(equity_aapl())])
+            .unwrap();
+    }
+
+    #[test]
+    fn composite_bars_need_their_source_bars_from_the_warmup_start_to_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        bar_catalog(dir.path(), QUOTED);
+        check(&composite_backtest(dir.path())).unwrap();
+    }
+
+    #[test]
+    fn missing_source_bars_are_named_with_their_range_and_quotes_are_not_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        bar_catalog(
+            dir.path(),
+            &[("2026-10-01T00:00:00Z", "2026-10-30T00:00:00Z")],
+        );
+        let err = check(&composite_backtest(dir.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("bars of {MINUTE_BARS}")), "{err}");
+        assert!(!err.contains("quotes"), "{err}");
+        assert!(
+            err.contains("[2026-10-30T00:00:00.000000001Z, 2026-10-31T00:00:00Z] is missing"),
+            "{err}"
+        );
     }
 }
