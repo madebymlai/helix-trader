@@ -40,6 +40,7 @@ pub struct Backtest {
     pub warmup: SignedDuration,    // the strategy's
     pub fee_model: FeeModelAny,    // commission_per_order or commission_rate
     pub balance: Money,
+    pub leverage: Decimal,         // the account's; 1 is none (see Leverage)
     pub logging: LoggerConfig,     // the node installs the logger with it
 }
 
@@ -64,6 +65,7 @@ the fee model (see Costs).
 - there are no instruments, or they are on more than one venue;
 - the warmup is negative;
 - `start` is not before `end`;
+- the leverage is not positive (Nautilus' check);
 - the cache cannot hold the warmup (see the strategy README);
 - the catalog cannot serve the run (see Coverage check).
 
@@ -180,7 +182,7 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | `account_type` | `AccountType::Margin` (the EMA strategy goes short) |
 | `book_type` | `BookType::L1_MBP` (`new` rejects deeper books without book data) |
 | `starting_balances: Vec<String>` | the balance, `Money::to_string()`, for example `"10000.00 EUR"` |
-| `margin_model: Option<MarginModelAny>` | `Standard(StandardMarginModel)`: margin = notional × the instrument's `margin_init` (orders) or `margin_maint` (positions), leverage ignored (see OKX swaps) |
+| `default_leverage: Option<Decimal>` | the run's leverage, `--leverage` (see Leverage) |
 | `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
 | `bar_execution` | `false`: only quotes move the book |
@@ -188,8 +190,33 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 Flags worth knowing: `liquidity_consumption` (default `false`, left off:
 every order sees the full quote size), `bar_adaptive_high_low_ordering`
 (bar execution only), `use_reduce_only` (`true`), `allow_cash_borrowing`
-(`false`). Optional: `latency_model`, `default_leverage`, `leverages`,
-`base_currency` (left unset: see OKX swaps).
+(`false`). Left unset: `margin_model` (Nautilus' default, see Leverage),
+`liquidation_enabled` (`false`), `latency_model`, `leverages`,
+`base_currency` (see OKX swaps).
+
+### Leverage
+
+Leverage is the account's choice, so it is a flag of the run, not part of
+the instrument. The venue gets it as `default_leverage`, for every
+instrument; without it Nautilus would use 10.
+
+The margin model is Nautilus' default for margin accounts,
+`LeveragedMarginModel` (Concepts › Accounting, "Margin models"):
+
+- an order locks notional / leverage × the instrument's `margin_init`;
+- an open position locks notional / leverage × `margin_maint`, its value
+  at entry.
+
+OKX instruments are stored with both margins at 1 (data README), so a
+position locks notional / leverage, as on OKX. IB's instruments have
+margins of 0 and lock nothing at any leverage.
+
+Liquidation is off (`liquidation_enabled` defaults to `false`). So OKX's
+own maintenance rate (BTC X-Perp: 0.65%), which only decides when OKX
+liquidates, is not modelled: a run never closes a position for lack of
+margin. On the X-Perp run below, leverage changed only the margin
+locked, not the fills or the PnL. Whether Nautilus refuses an order whose
+margin exceeds the free balance is *unverified*.
 
 ### Data
 
@@ -377,7 +404,7 @@ An inverse instrument is refused: its value is not linear in the price.
 ```
 helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
   [--catalog catalog] (--commission "3 EUR" | --commission-rate 0.0005) \
-  --balance "10000 EUR"
+  --balance "10000 EUR" [--leverage 10]
 ```
 
 `main` loads and validates the strategy's config, builds the `Backtest`
@@ -398,7 +425,9 @@ Names are sorted, values printed to six decimals.
 `Decimal` (0.0005 is 0.05%). `--balance` is required, and exactly one of
 `--commission` and `--commission-rate`. Each commission flag is turned
 into the fee model at argument parsing, so a malformed or negative one
-(`--commission="-3 EUR"`, `--commission-rate=-0.0005`) fails there. The
+(`--commission="-3 EUR"`, `--commission-rate=-0.0005`) fails there.
+`--leverage` is a `Decimal`, 1 (no leverage) if not given; Nautilus
+refuses one that is not positive before the run. The
 engine log goes to stdout before the results, configured by
 `NAUTILUS_LOG`.
 
@@ -675,12 +704,7 @@ replays those quotes and nothing else.
   a real day (see below): a margin account books PnL and commissions in
   the instrument's settlement currency either way. Only the summary's
   `account.OKX.base_currency` differs (`USDT` or `None`).
-- **Margins.** `StandardMarginModel`: the margin is the notional times the
-  instrument's own rates, OKX's first tier (BTC: 1% for orders, 0.4% for
-  the open position), whatever the leverage. Nautilus' default model
-  divides by the account leverage (10 by default), which would lock a
-  tenth of OKX's figure. IB's instruments have rates of 0, so their runs
-  lock nothing either way.
+- **Margins.** A position locks its value / `--leverage` (see Leverage).
 - **Bars.** Internal bars built from the tick quotes, so a 1-minute bar
   has its real open, high, low and close (mids). A quote stamped exactly
   on a minute belongs to the bar closing then.
@@ -742,8 +766,9 @@ outside Nautilus:
   orders of 815-1,658 USDT. The commission is ten times the loss before
   costs: on this data a strategy flipping every few minutes pays mostly
   fees.
-- **Margin.** The short left open at the end locks 3.28 USDT, 0.4% of its
-  value at entry.
+- **Margin.** The short left open at the end locked 3.28 USDT, 0.4% of
+  its value at entry: the margins of then, OKX's first tier, before the
+  leverage flag.
 - **The first order** (the bar closing at the 01:30 start) was rejected
   `No market` (see above); the other 157 filled.
 - **No base currency.** The same run with `USDT` as the venue's base
@@ -761,8 +786,9 @@ catalog holds a `CryptoFuture` (data README, "OKX specifics").
 - **Two decimals.** Nautilus' USD has two decimals, so each fill's value,
   commission and PnL is rounded to the cent (half to even), half a cent
   at most each.
-- **Margins.** 10% for orders (10x, OKX Europe's retail cap) and OKX's
-  first tier for the open position (BTC: 0.65%).
+- **Margins.** As for a swap: value / `--leverage`. OKX Europe caps
+  retail accounts at 10x, so `--leverage 10` is the most an EEA account
+  gets.
 - **Contract size.** 0.0001 BTC a contract, whole contracts: 100
   contracts are the 0.01 BTC of one BTC-USDT-SWAP contract.
 - **Listing and expiry.** Nautilus rejects orders on a future before its
@@ -806,8 +832,18 @@ Nautilus:
 - **Commission.** 0.05% of each fill's value, to the cent on the X-Perp
   (rounded twice: value, then commission), to the eighth decimal on the
   swap.
-- **Margin.** The long left open locks 5.40 USD on the X-Perp (0.65% of
-  830.00) and 3.32 USDT on the swap (0.4% of 829.62).
+- **Margin.** The long left open locked 5.40 USD on the X-Perp (0.65% of
+  830.00) and 3.32 USDT on the swap (0.4% of 829.62): the margins of
+  then, before the leverage flag.
+
+**Re-run with `--leverage 10`**, 2026-10-22: the X-Perp days filled again
+(the same quote counts) and the same command with `--leverage 10`, next
+to the code before the flag (fixed margins) on its own fill of the same
+days. The 171 fills are the same, event for event (price, quantity,
+commission, time), and so is the report, to the last digit: the figures
+above (PnL -137.29 USD, final balance 9862.71 USD). Only the margin differs:
+the long left open locks 83.00 USD, 830.00 / 10. Without `--leverage`
+(1x) the fills are the same again and it locks 830.00 USD.
 
 ## Verified on IB data
 
@@ -959,9 +995,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   the coverage check (gaps on the intervals alone, then on a temporary
   catalog: missing instrument, quotes 1 ns short at either end, missing,
   or with a gap), the report of a hand-built `Outcome` (sections, sorted
-  names, max drawdown, the costs and the gross PnL). The command line is
-  tested in `main.rs`: required flags, exactly one commission flag,
-  malformed `Money`, the window check.
+  names, max drawdown, the costs and the gross PnL), the venue at the
+  run's leverage with no margin model of ours, a leverage not positive
+  refused. The command line is tested in `main.rs`: required flags,
+  exactly one commission flag, malformed `Money`, the window check,
+  `--leverage` 1 unless given.
 - Integration tests in `tests/`, one node per file, run the real EMA
   strategy through `Backtest::run` on a fixture catalog (`tests/common`:
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
@@ -1012,15 +1050,15 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     in one hour of the warmup and one of the replay): neither hour yields
     a bar; every other bar is as worked out from its hour's quotes.
   - `backtest_okx_swap.rs`: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` with
-    OKX's margins, several quotes a minute at their own times, one exactly
+    margins of 1, several quotes a minute at their own times, one exactly
     on a minute. A recorder on 1-MINUTE-MID bars buys 2 contracts on the
     first bar and sells 3 on the second: every bar's open, high, low and
     close, the buy at the ask and the sell at the bid of the latest quote,
-    0.05% on each fill's value, the short left open locking 0.4% of its
-    value, and the report's costs.
+    0.05% on each fill's value, at 1x the short left open locking its
+    whole value at entry, and the report's costs.
   - `backtest_okx_xperp.rs`: the same quotes and orders on
     BTC-USD_UM_XPERP-310404.OKX, a `CryptoFuture` of 0.0001 BTC a contract
-    settled in USD, with 10% initial and 0.65% maintenance margins: 200
-    contracts bought and 300 sold, the same bars and fills, the
-    commission, PnL and margin in USD at two decimals, and the report's
-    costs.
+    settled in USD, with margins of 1: 200 contracts bought and 300 sold,
+    the same bars and fills, the commission and PnL in USD at two
+    decimals, at 10x the short left open locking a tenth of its value,
+    and the report's costs.
