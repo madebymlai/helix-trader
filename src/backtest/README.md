@@ -286,13 +286,15 @@ DataCatalogConfig::new(path: String, fs_protocol: Option<String>,
 
 The request window is clamped to simulated now, which is the engine start
 (`start − 1 ns`) when `on_start` runs, so warmup data must predate the run
-start; later bars are built from the replay. The warmup asks for quotes
-(`strategy::warmup`), which the data engine aggregates into the
-strategy's bars before answering. What the strategy receives:
+start; later bars are built from the replay. The warmup asks for quotes,
+or for the source bars of a composite bar type (`strategy::warmup`), which
+the data engine aggregates into the strategy's bars before answering. What
+the strategy receives:
 
 - **Catalog covers the window** (the stored intervals of the series
   span `[start − 1 ns − warmup, start − 1 ns]`): one
-  `on_historical_quotes` per instrument before the first `on_bar`, the
+  `on_historical_quotes` (`on_historical_bars` for source bars) per
+  instrument before the first `on_bar`, the
   warmup bars in the cache, the partial oldest one dropped. The bar
   spanning the warmup end and the run start comes once, complete, in
   `on_bar`.
@@ -303,8 +305,6 @@ strategy's bars before answering. What the strategy receives:
   indicators.
 
 So the catalog must cover the whole warmup window with every series.
-The warmup request of a composite bar type is not handled yet: the
-strategy warmup asks for quotes only (see the strategy README).
 
 ## Coverage check
 

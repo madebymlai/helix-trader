@@ -84,7 +84,7 @@ impl EmaCrossConfig {
     /// Returns an error if the config is inconsistent: no instruments,
     /// several venues, a bar spec not aggregated on time or, built from
     /// quotes, not priced on them (BID, ASK or MID), invalid composite
-    /// source bars, periods out of
+    /// source bars, a session together with composite bars, periods out of
     /// order, a non-positive size or warmup, a session, if any, not opening
     /// before it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -121,6 +121,12 @@ impl EmaCrossConfig {
             )
             .with_context(|| format!("invalid composite source bars {source:?}"))?;
         }
+        // Live, composite bars arrive after their close, so a session would
+        // drop its last bar there but not in a backtest.
+        ensure!(
+            self.session.is_none() || self.composite.is_none(),
+            "a session cannot be combined with composite bars"
+        );
         ensure!(self.trade_size.is_positive(), "trade size must be positive");
         ensure!(self.warmup.is_positive(), "warmup must be positive");
         self.session.as_ref().map_or(Ok(()), Session::validate)
@@ -275,6 +281,19 @@ mod tests {
         let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("composite"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_session_with_composite_bars() {
+        let toml = format!(
+            "{COMPOSITE_TOML}\nsession = {{ time_zone = \"UTC\", open = \"08:00\", close = \"16:00\" }}"
+        );
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("session") && err.contains("composite"),
+            "{err}"
+        );
     }
 
     #[test]
