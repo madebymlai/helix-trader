@@ -70,7 +70,6 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .default_leverage(backtest.leverage)
         .fee_model(backtest.fee_model.clone())
         .fill_model(costs::fill_model()?)
-        .bar_execution(false)
         .build()?;
     let data = backtest
         .instruments()
@@ -213,7 +212,7 @@ mod tests {
     fn orders_fill_on_quotes_only_at_the_quoted_price() {
         let config = run_config(&backtest()).unwrap();
         let venue = &config.venues()[0];
-        assert!(!venue.bar_execution());
+        assert!(venue.bar_execution());
         assert!(!venue.liquidity_consumption());
     }
 
