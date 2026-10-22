@@ -1,5 +1,5 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
-//! strategy does, records every bar it gets, warmup and replayed, and
+//! strategy does, on live bars if told to (`warmup::WarmUp`), records every bar it gets, warmup and replayed, and
 //! every fill, and can rest a sell stop on its first replayed bar or send
 //! market orders of its choosing on the first replayed bars. For the tests
 //! that need what the EMA crossover cannot show: the bars' open, high and
@@ -7,7 +7,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use helix_trader::strategy::warmup;
+use helix_trader::strategy::warmup::{self, WarmUp};
 use jiff::SignedDuration;
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
@@ -15,7 +15,7 @@ use nautilus_model::{
     data::{Bar, BarType, QuoteTick},
     enums::OrderSide,
     events::OrderFilled,
-    identifiers::StrategyId,
+    identifiers::{InstrumentId, StrategyId},
     types::{Price, Quantity},
 };
 use nautilus_trading::{
@@ -43,6 +43,8 @@ pub struct Recorder {
     stop: Option<Price>,
     /// The market order sent on each of the first replayed bars, in order.
     market: Vec<(OrderSide, Quantity)>,
+    /// The instruments warmed up on live bars.
+    live_bars: Vec<InstrumentId>,
     record: Rc<RefCell<Record>>,
 }
 
@@ -65,6 +67,7 @@ impl Recorder {
             warmup,
             stop,
             market: vec![],
+            live_bars: vec![],
             record: Rc::clone(&record),
         };
         (recorder, record)
@@ -82,6 +85,12 @@ impl Recorder {
     }
 }
 
+impl WarmUp for Recorder {
+    fn warm_up_on_live_bars(&mut self, instrument_ids: &[InstrumentId]) {
+        self.live_bars = instrument_ids.to_vec();
+    }
+}
+
 nautilus_strategy!(Recorder, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
         self.record
@@ -94,7 +103,8 @@ nautilus_strategy!(Recorder, {
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let (bar_types, warmup) = ([self.bar_type], self.warmup);
-        warmup::start(self, &bar_types, warmup)
+        let live_bars = self.live_bars.clone();
+        warmup::start(self, &bar_types, warmup, &live_bars)
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {

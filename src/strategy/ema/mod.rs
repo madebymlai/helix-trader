@@ -1,7 +1,8 @@
 //! EMA crossover: per instrument, long while the fast EMA is above the slow
 //! one, short otherwise, on the bars inside its session, if it has one. A
 //! minimal strategy to drive data, backtest and paper. Its bars are built
-//! by Nautilus from the quotes, and warmed up through `strategy::warmup`.
+//! by Nautilus from the quotes, and warmed up through `strategy::warmup`,
+//! on live bars for the instruments a run says have no history.
 
 mod book;
 mod config;
@@ -14,6 +15,7 @@ use nautilus_common::actor::DataActor;
 use nautilus_model::{
     data::{Bar, QuoteTick},
     enums::OrderSide,
+    identifiers::InstrumentId,
     instruments::Instrument,
 };
 use nautilus_trading::{
@@ -23,13 +25,15 @@ use nautilus_trading::{
 use rust_decimal::Decimal;
 
 use self::book::Book;
-use crate::strategy::warmup;
+use crate::strategy::warmup::{self, WarmUp};
 
 #[derive(Debug)]
 pub struct EmaCross {
     core: StrategyCore,
     config: EmaCrossConfig,
     book: Book,
+    /// The instruments warmed up on live bars, none unless a run says so.
+    live_bars: Vec<InstrumentId>,
 }
 
 impl EmaCross {
@@ -42,6 +46,7 @@ impl EmaCross {
             core: StrategyCore::new_checked(config.base.clone())?,
             book: Book::new(&config),
             config,
+            live_bars: vec![],
         })
     }
 
@@ -93,10 +98,17 @@ impl EmaCross {
 
 nautilus_strategy!(EmaCross);
 
+impl WarmUp for EmaCross {
+    fn warm_up_on_live_bars(&mut self, instrument_ids: &[InstrumentId]) {
+        self.live_bars = instrument_ids.to_vec();
+    }
+}
+
 impl DataActor for EmaCross {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let (bar_types, warmup) = (self.config.bar_types(), self.config.warmup);
-        warmup::start(self, &bar_types, warmup)
+        let live_bars = self.live_bars.clone();
+        warmup::start(self, &bar_types, warmup, &live_bars)
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
