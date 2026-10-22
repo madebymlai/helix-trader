@@ -7,7 +7,7 @@ mod book;
 mod config;
 mod session;
 
-pub use config::EmaCrossConfig;
+pub use config::{CompositeSource, EmaCrossConfig};
 pub use session::Session;
 
 use nautilus_common::actor::DataActor;

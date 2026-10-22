@@ -96,6 +96,17 @@ impl Recorder {
         let (recorder, record) = Self::new(bar_type, warmup, None);
         (Self { market, ..recorder }, record)
     }
+
+    /// A recorder of `bar_type` from the run start, with no warmup request,
+    /// sending the market order `market[i]` on the `i`-th bar, and the
+    /// record it fills.
+    pub fn trading_without_warmup(
+        bar_type: BarType,
+        market: Vec<(OrderSide, Quantity)>,
+    ) -> (Self, Rc<RefCell<Record>>) {
+        let (recorder, record) = Self::without_warmup(bar_type);
+        (Self { market, ..recorder }, record)
+    }
 }
 
 nautilus_strategy!(Recorder, {
