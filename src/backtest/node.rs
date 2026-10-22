@@ -2,7 +2,7 @@
 //!
 //! Builds a Nautilus `BacktestRunConfig` (`nautilus_backtest::config`): the
 //! venue (`BacktestVenueConfig`), the catalog data (`BacktestDataConfig`, one
-//! per series the bars are built from) and the engine
+//! per series the run replays) and the engine
 //! config, then runs it on a `BacktestNode`: `build`, the strategy
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 //! The engine is kept after the run, so that the report reads the fills
@@ -35,9 +35,10 @@ const RUN_ID: &str = "backtest";
 /// The run config of `backtest`: one venue named after the instruments'
 /// venue, at the run's leverage with Nautilus' default margin model (the
 /// notional / leverage times the instrument's margin), which fills orders
-/// on the replayed data, the series of the window from the catalog (the
-/// only data replayed: the data engine builds the strategy's bars from
-/// them; see `data_config`), and the catalog registered in the
+/// on the replayed data and settles funding, the series of the window from
+/// the catalog (the only data replayed: the data engine builds the
+/// strategy's bars from them, the venue settles the funding; see
+/// `Backtest::series` and `data_config`), and the catalog registered in the
 /// engine so that it serves the strategy's warmup requests, with a cache
 /// holding the warmup bars (`warmup::cache_config`) and a data engine
 /// building no bar for an hour without quotes
@@ -72,7 +73,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .fill_model(costs::fill_model()?)
         .build()?;
     let data = backtest
-        .series()
+        .series()?
         .into_iter()
         .map(|(data_type, identifier)| data_config(&catalog, data_type, &identifier))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -159,7 +160,7 @@ fn venue(instrument_ids: &BTreeSet<InstrumentId>) -> anyhow::Result<Venue> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
@@ -168,9 +169,10 @@ mod tests {
 
     use super::*;
 
-    fn backtest() -> Backtest {
+    /// A backtest on the catalog `catalog`.
+    fn backtest(catalog: &Path) -> Backtest {
         Backtest {
-            catalog: PathBuf::from("/data/catalog"),
+            catalog: catalog.to_path_buf(),
             start: "2026-07-01T00:00:00Z".parse().unwrap(),
             end: "2026-10-01T00:00:00Z".parse().unwrap(),
             bar_types: vec![
@@ -190,7 +192,8 @@ mod tests {
 
     #[test]
     fn one_netting_margin_venue_named_after_the_instruments() {
-        let config = run_config(&backtest()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
         let [venue] = config.venues() else {
             panic!("{:?}", config.venues())
         };
@@ -202,9 +205,10 @@ mod tests {
 
     #[test]
     fn margins_follow_nautilus_default_model_at_the_leverage_of_the_run() {
+        let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             leverage: Decimal::TEN,
-            ..backtest()
+            ..backtest(dir.path())
         };
         let config = run_config(&backtest).unwrap();
         let venue = &config.venues()[0];
@@ -214,10 +218,11 @@ mod tests {
 
     #[test]
     fn rejects_a_leverage_not_positive() {
+        let dir = tempfile::tempdir().unwrap();
         for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
             let backtest = Backtest {
                 leverage,
-                ..backtest()
+                ..backtest(dir.path())
             };
             let err = run_config(&backtest).unwrap_err();
             assert!(err.to_string().contains("default_leverage"), "{err}");
@@ -226,7 +231,8 @@ mod tests {
 
     #[test]
     fn orders_fill_on_quotes_only_at_the_quoted_price() {
-        let config = run_config(&backtest()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
         let venue = &config.venues()[0];
         assert!(venue.bar_execution());
         // Nautilus' default: external bars replay open, high, low, close.
@@ -234,14 +240,14 @@ mod tests {
         assert!(!venue.liquidity_consumption());
     }
 
-    /// The instrument of each data config, all quotes.
-    fn quoted(config: &BacktestRunConfig) -> Vec<String> {
+    /// The instrument of each data config, all quotes from `catalog`.
+    fn quoted(config: &BacktestRunConfig, catalog: &Path) -> Vec<String> {
         config
             .data()
             .iter()
             .map(|data| {
                 assert_eq!(data.data_type(), &NautilusDataType::QuoteTick);
-                assert_eq!(data.catalog_path(), "/data/catalog");
+                assert_eq!(data.catalog_path(), catalog.to_str().unwrap());
                 data.instrument_id().unwrap().to_string()
             })
             .collect()
@@ -249,27 +255,30 @@ mod tests {
 
     #[test]
     fn only_the_quotes_of_every_instrument_come_from_the_catalog() {
-        let config = run_config(&backtest()).unwrap();
-        assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
     #[test]
     fn an_instrument_of_two_bar_types_has_its_quotes_loaded_once() {
-        let mut backtest = backtest();
+        let dir = tempfile::tempdir().unwrap();
+        let mut backtest = backtest(dir.path());
         backtest
             .bar_types
             .push(BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"));
         let config = run_config(&backtest).unwrap();
-        assert_eq!(quoted(&config), ["EUNL.IBIS", "SXR8.IBIS"]);
+        assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
     #[test]
     fn a_composite_bar_type_has_its_source_bars_loaded_by_bar_type() {
+        let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             bar_types: vec![BarType::from(
                 "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
             )],
-            ..backtest()
+            ..backtest(dir.path())
         };
         let config = run_config(&backtest).unwrap();
         let [data] = config.data() else {
@@ -285,9 +294,10 @@ mod tests {
 
     #[test]
     fn a_relative_catalog_is_made_absolute() {
+        let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             catalog: PathBuf::from("catalog"),
-            ..backtest()
+            ..backtest(dir.path())
         };
         let config = run_config(&backtest).unwrap();
         let absolute = std::env::current_dir().unwrap().join("catalog");
@@ -298,13 +308,15 @@ mod tests {
 
     #[test]
     fn the_node_installs_the_logger_as_configured() {
-        let config = run_config(&backtest()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
         assert!(config.engine().logging.print_config);
     }
 
     #[test]
     fn runs_from_one_nanosecond_before_the_start_to_the_end_and_raises_errors() {
-        let config = run_config(&backtest()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
         let ns = |ts: &str| UnixNanos::from(ts.parse::<Timestamp>().unwrap());
         assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
         assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
@@ -314,16 +326,18 @@ mod tests {
 
     #[test]
     fn rejects_no_instruments() {
+        let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             bar_types: vec![],
-            ..backtest()
+            ..backtest(dir.path())
         };
         assert!(run_config(&backtest).is_err());
     }
 
     #[test]
     fn rejects_instruments_on_two_venues() {
-        let mut backtest = backtest();
+        let dir = tempfile::tempdir().unwrap();
+        let mut backtest = backtest(dir.path());
         backtest
             .bar_types
             .push(BarType::from("CSPX.LSEETF-1-HOUR-MID-INTERNAL"));
@@ -333,7 +347,8 @@ mod tests {
 
     #[test]
     fn rejects_a_start_after_the_end() {
-        let b = backtest();
+        let dir = tempfile::tempdir().unwrap();
+        let b = backtest(dir.path());
         let backtest = Backtest {
             start: b.end,
             end: b.start,

@@ -1,10 +1,11 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
 //! strategy does, or only subscribes to its bars, records every bar it
-//! gets, warmup and replayed, and
-//! every fill, and can rest a sell stop on its first replayed bar or send
-//! market orders of its choosing on the first replayed bars. For the tests
-//! that need what the EMA crossover cannot show: the bars' open, high and
-//! low, stop orders, and fills of a given side and size.
+//! gets, warmup and replayed, every fill, and on stop the adjustments of
+//! its positions (funding), and can rest a sell stop on its first replayed
+//! bar or send market orders of its choosing on the first replayed bars.
+//! For the tests that need what the EMA crossover cannot show: the bars'
+//! open, high and low, stop orders, fills of a given side and size, and
+//! funding.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -15,7 +16,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, QuoteTick},
     enums::OrderSide,
-    events::OrderFilled,
+    events::{OrderFilled, PositionAdjusted},
     identifiers::StrategyId,
     types::{Price, Quantity},
 };
@@ -33,6 +34,8 @@ pub struct Record {
     pub bars: Vec<Bar>,
     /// Side, price and time of every fill.
     pub fills: Vec<(OrderSide, Price, UnixNanos)>,
+    /// The adjustments of its positions in the cache when it stops.
+    pub adjustments: Vec<PositionAdjusted>,
 }
 
 #[derive(Debug)]
@@ -126,6 +129,16 @@ impl DataActor for Recorder {
         };
         let bar_types = [self.bar_type];
         warmup::start(self, &bar_types, warmup)
+    }
+
+    fn on_stop(&mut self) -> anyhow::Result<()> {
+        let positions = self.cache().positions(None, None, None, None, None);
+        self.record.borrow_mut().adjustments.extend(
+            positions
+                .into_iter()
+                .flat_map(|position| position.adjustments),
+        );
+        Ok(())
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {

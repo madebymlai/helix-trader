@@ -4,8 +4,9 @@
 //! A warmup window the catalog does not fully cover gets no answer at all
 //! (see the README), so a run on missing data would go on silently with
 //! cold indicators; without its data, orders find no market and no bar is
-//! built. Every instrument must be stored, and each series the bars are
-//! built from (see `strategy::catalog_series`) covered over
+//! built. Every instrument must be stored, and each series the run replays
+//! (see `Backtest::series`: those the bars are built from and the stored
+//! funding of the instruments) covered over
 //! `[engine start − warmup, end]` by its stored intervals (inclusive
 //! nanoseconds); the engine starts 1 ns before the run start. The gaps come
 //! from `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
@@ -58,7 +59,7 @@ pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
             backtest.catalog.display()
         );
     }
-    for (data_type, identifier) in backtest.series() {
+    for (data_type, identifier) in backtest.series()? {
         ensure_covered(
             &catalog,
             &data_type,
@@ -110,7 +111,7 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{
-        data::{Bar, BarType, QuoteTick},
+        data::{Bar, BarType, FundingRateUpdate, QuoteTick},
         instruments::stubs::equity_aapl,
         types::{Money, Price, Quantity},
     };
@@ -308,6 +309,49 @@ mod tests {
         assert!(!err.contains("quotes"), "{err}");
         assert!(
             err.contains("[2026-10-30T00:00:00.000000001Z, 2026-10-31T00:00:00Z] is missing"),
+            "{err}"
+        );
+    }
+
+    /// Stores one funding rate of AAPL.XNAS over `[from, to]`.
+    fn store_funding(dir: &Path, from: &str, to: &str) {
+        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        let funding = FundingRateUpdate::new(
+            equity_aapl().id,
+            Decimal::new(1, 4),
+            Some(480),
+            None,
+            ns(from),
+            ns(from),
+        );
+        catalog
+            .write_to_parquet(&[funding], Some(ns(from)), Some(ns(to)), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn stored_funding_covering_the_window_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        catalog(dir.path(), QUOTED);
+        store_funding(dir.path(), "2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
+        check(&backtest(dir.path(), &[AAPL])).unwrap();
+    }
+
+    #[test]
+    fn stored_funding_short_of_the_window_is_named_with_its_missing_range() {
+        let dir = tempfile::tempdir().unwrap();
+        catalog(dir.path(), QUOTED);
+        store_funding(
+            dir.path(),
+            "2026-10-01T00:00:00Z",
+            "2026-10-30T15:59:59.999999999Z",
+        );
+        let err = check(&backtest(dir.path(), &[AAPL]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("funding_rates of AAPL.XNAS"), "{err}");
+        assert!(
+            err.contains("[2026-10-30T16:00:00Z, 2026-10-31T00:00:00Z] is missing"),
             "{err}"
         );
     }
