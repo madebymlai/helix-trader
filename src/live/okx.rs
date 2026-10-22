@@ -17,12 +17,11 @@
 //! it. OKX sets the leverage, by hand on the account; this module never
 //! changes the account.
 //!
-//! OKX serves no quote history: the data client does not implement
-//! `request_quotes`, and Nautilus' default logs that and never answers, so
-//! the strategy's warmup request would wait forever. OKX's archive lags two
-//! to three days, too old to warm up on. Until live quotes are recorded
-//! into the catalog, a run with OKX instruments refuses to start (see
-//! `ensure_quote_history`), after the checks above.
+//! The strategy trades OKX instruments on bars built from OKX's 1-minute
+//! candles (a composite bar type): the data client serves their warmup
+//! from OKX's REST candles, up to now, and the live bars from the candle
+//! channel. OKX serves no quote history (the data client does not
+//! implement `request_quotes`), so bars built from quotes get no warmup.
 
 use std::collections::HashMap;
 
@@ -112,9 +111,7 @@ fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
 /// The client configs of `instrument_ids`, OKX swaps or X-Perps: their
 /// instrument types and families are loaded (see `OkxContract`), on
 /// `environment` and `REGION`, orders in `MARGIN_MODE`; no credential, so
-/// the adapter reads them from the environment. Quotes come tick by tick
-/// (the adapter's `bbo-tbt` channel), so internal bars are built from
-/// every change of the best bid or ask.
+/// the adapter reads them from the environment.
 fn configs(
     instrument_ids: &[InstrumentId],
     environment: OKXEnvironment,
@@ -167,19 +164,6 @@ impl OkxClients {
             routing: RoutingConfig::default(),
         }
     }
-}
-
-/// Fails, naming `instrument_ids`: their warmup needs recent quotes in the
-/// catalog, which OKX does not serve and nothing records yet. The node
-/// would otherwise wait for a warmup that never comes.
-pub(super) fn ensure_quote_history(instrument_ids: &[InstrumentId]) -> anyhow::Result<()> {
-    let ids: Vec<String> = instrument_ids.iter().map(ToString::to_string).collect();
-    anyhow::bail!(
-        "OKX live needs recorded quotes, not available yet: the warmup of {} \
-         needs recent quotes in the catalog, OKX serves no quote history and \
-         its archive is two to three days behind",
-        ids.join(", ")
-    )
 }
 
 /// Fails unless the account is in net position mode: one position per
@@ -458,18 +442,6 @@ mod tests {
                 "{id}"
             );
         }
-    }
-
-    #[test]
-    fn an_okx_run_is_refused_for_lack_of_recorded_quotes() {
-        let err = ensure_quote_history(&[xperp(), swap()])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("recorded quotes"), "{err}");
-        assert!(
-            err.contains("BTC-USD_UM_XPERP-310328.OKX, BTC-USDT-SWAP.OKX"),
-            "{err}"
-        );
     }
 
     #[test]

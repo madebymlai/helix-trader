@@ -134,6 +134,12 @@ impl DataActor for Recorder {
         Ok(())
     }
 
+    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
+        let bars = warmup::bars(self, bars);
+        self.record.borrow_mut().warmup.extend(bars);
+        Ok(())
+    }
+
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
         let index = self.record.borrow().bars.len();
         let first = index == 0;
