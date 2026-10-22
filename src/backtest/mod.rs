@@ -58,8 +58,7 @@ impl Backtest {
     ///
     /// Returns an error if the inputs are inconsistent (no instruments,
     /// several venues, a negative warmup, `start` not before
-    /// `end`), if perpetual swaps settle in more than one currency or the
-    /// balance is not in theirs, if the cache cannot hold the warmup bars of a bar type (see
+    /// `end`), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of its quotes
     /// over `[start - 1 ns - warmup, end]`, if the node fails to build
     /// or run, or if a fill has no quote before it.
@@ -67,7 +66,8 @@ impl Backtest {
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
-        let config = node::run_config(self, || coverage::check(self))?;
+        let config = node::run_config(self)?;
+        coverage::check(self)?;
         node::run(config, strategy)
     }
 

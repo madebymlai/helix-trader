@@ -201,7 +201,6 @@ fn an_okx_swap_trades_on_its_tick_quotes_with_margin_and_commission() {
     let result = &outcome.result;
     let summary = |key: &str| result.summary[&format!("account.OKX.{key}")].clone();
     assert_eq!(summary("type"), "MARGIN");
-    assert_eq!(summary("base_currency"), "USDT");
     assert_eq!(summary("balance.USDT.total"), "9997.57591300 USDT");
     assert_eq!(summary("balance.USDT.locked"), "4.00020000 USDT");
 

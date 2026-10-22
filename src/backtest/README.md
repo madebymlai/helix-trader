@@ -180,6 +180,7 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | `account_type` | `AccountType::Margin` (the EMA strategy goes short) |
 | `book_type` | `BookType::L1_MBP` (`new` rejects deeper books without book data) |
 | `starting_balances: Vec<String>` | the balance, `Money::to_string()`, for example `"10000.00 EUR"` |
+| `margin_model: Option<MarginModelAny>` | `Standard(StandardMarginModel)`: margin = notional × the instrument's `margin_init` (orders) or `margin_maint` (positions), leverage ignored (see OKX swaps) |
 | `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
 | `bar_execution` | `false`: only quotes move the book |
@@ -187,8 +188,8 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 Flags worth knowing: `liquidity_consumption` (default `false`, left off:
 every order sees the full quote size), `bar_adaptive_high_low_ordering`
 (bar execution only), `use_reduce_only` (`true`), `allow_cash_borrowing`
-(`false`). Optional: `margin_model`, `latency_model`, `default_leverage`,
-`leverages`, `base_currency`.
+(`false`). Optional: `latency_model`, `default_leverage`, `leverages`,
+`base_currency` (left unset: see OKX swaps).
 
 ### Data
 
