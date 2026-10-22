@@ -1,27 +1,19 @@
-//! End to end on OKX's demo trading (EEA region): the live node starts on
-//! the BTC X-Perp, checks the account (net position mode, the leverage),
-//! starts warming up on live bars and stops cleanly on SIGINT. It needs the
-//! demo key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) from the
+//! End to end on OKX's demo trading (EEA region): a live run on the BTC
+//! X-Perp passes the start checks against the real demo account (the
+//! credentials set, net position mode, the leverage) and is then refused
+//! for lack of recorded quotes, before any node is built. It needs the demo
+//! key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) from the
 //! environment or `.env`, and the account's leverage on the X-Perp in
-//! `NAUTILUS_OKX_LEVERAGE` (1 if unset).
+//! `NAUTILUS_OKX_LEVERAGE` (1 if unset): a failing check would fail the
+//! test with its own message.
 //!
 //! Gated as `ib_gateway.rs` is: the test returns at once, saying it was
-//! skipped, unless `NAUTILUS_OKX_RUN=1` is set in the shell. It places no
-//! order: the EMA needs 30 one-minute bars before its first target, and the
-//! run lasts under three minutes. Run it with:
+//! skipped, unless `NAUTILUS_OKX_RUN=1` is set in the shell. It only reads
+//! the account and places no order. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_OKX_RUN=1 NAUTILUS_OKX_LEVERAGE=3 cargo test --test okx_demo -- --nocapture
 //! ```
-//!
-//! With `nautilus-okx` 0.66.0 the X-Perp gets no quote, hence no bar: the
-//! adapter subscribes it on the spread channel, which OKX refuses
-//! (nautilus_trader#5337, fixed after 0.66.0). The run still starts,
-//! reconciles and stops cleanly.
-//!
-//! One node per process, so one run per file.
-
-use std::{process::Command, time::Duration};
 
 use helix_trader::{
     live::Live,
@@ -62,13 +54,10 @@ fn x_perp_ema_cross() -> EmaCrossConfig {
     config
 }
 
-/// Long enough for the first full one-minute bar: the first, partial one
-/// is dropped.
-const LIVE_RUN: Duration = Duration::from_secs(150);
-
 #[tokio::test(flavor = "multi_thread")]
-async fn live_runs_on_the_okx_demo_and_stops_cleanly_on_sigint() {
-    if !opted_in("live_runs_on_the_okx_demo_and_stops_cleanly_on_sigint") {
+async fn an_okx_run_passes_the_account_checks_then_is_refused_for_lack_of_recorded_quotes() {
+    if !opted_in("an_okx_run_passes_the_account_checks_then_is_refused_for_lack_of_recorded_quotes")
+    {
         return;
     }
     dotenvy::dotenv().ok();
@@ -85,25 +74,12 @@ async fn live_runs_on_the_okx_demo_and_stops_cleanly_on_sigint() {
         leverage,
         logging: LoggerConfig::default(),
     };
-    // As Ctrl-C would, once the node runs: its signal handler stops it.
-    // The node is not `Send`, so it runs here and the signal is sent from
-    // another task.
-    let interrupt = tokio::spawn(async {
-        tokio::time::sleep(LIVE_RUN).await;
-        let status = Command::new("kill")
-            .args(["-INT", &std::process::id().to_string()])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    });
-    let ran = tokio::time::timeout(
-        LIVE_RUN + Duration::from_secs(60),
-        live.run(&requirements, EmaCross::new(config).unwrap()),
-    )
-    .await;
-    let interrupted = interrupt.is_finished();
-    interrupt.abort();
-    ran.expect("the node stops within a minute of SIGINT")
-        .unwrap();
-    assert!(interrupted, "the node stopped before SIGINT");
+
+    let err = live
+        .run(&requirements, EmaCross::new(config).unwrap())
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("OKX live needs recorded quotes"), "{err}");
 }

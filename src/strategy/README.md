@@ -117,7 +117,6 @@ pub struct Trend {
     core: StrategyCore,
     config: TrendConfig,
     book: Book,
-    live_bars: Vec<InstrumentId>,
 }
 
 impl Trend {
@@ -126,24 +125,16 @@ impl Trend {
             core: StrategyCore::new(config.base.clone()),
             book: Book::new(&config),
             config,
-            live_bars: vec![],
         }
     }
 }
 
 nautilus_strategy!(Trend);
 
-impl WarmUp for Trend {
-    fn warm_up_on_live_bars(&mut self, instrument_ids: &[InstrumentId]) {
-        self.live_bars = instrument_ids.to_vec();
-    }
-}
-
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let (bar_types, warmup) = (self.config.bar_types(), self.config.warmup);
-        let live_bars = self.live_bars.clone();
-        warmup::start(self, &bar_types, warmup, &live_bars)
+        warmup::start(self, &bar_types, warmup)
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
@@ -235,12 +226,11 @@ Warmup is the history a strategy needs before it trades: indicators to
 initialise and models to train. A model is trained by the strategy itself.
 
 The warmup of bars built from quotes is the module `strategy::warmup`, the
-one place that knows Nautilus' protocol for it. A strategy makes two calls, and implements `warmup::WarmUp`:
+one place that knows Nautilus' protocol for it. A strategy makes two calls:
 
 ```rust
 // In on_start: requests the warmup and subscribes to the bars.
-let live_bars = self.live_bars.clone();
-warmup::start(self, &bar_types, self.config.warmup, &live_bars)?;
+warmup::start(self, &bar_types, self.config.warmup)?;
 
 // In on_historical_quotes: the warmup bars of that instrument, oldest first.
 let bars = warmup::bars(self, quotes);
@@ -257,16 +247,6 @@ let bars = warmup::bars(self, quotes);
   Then it subscribes to the bar types. `backtest_bars.rs` and
   `backtest_bars_on_close.rs` fail without `update_subscriptions` or
   `skip_first_non_full_bar`.
-- **Warmup on live bars.** A live run tells the strategy, through
-  `WarmUp::warm_up_on_live_bars`, which instruments have no history to warm
-  up on (OKX's: the live README says why); the strategy keeps them and
-  passes them to `start`. `start` requests nothing for those: their bars
-  come from the live quotes alone, and the first, partial since it opens at
-  the start, is dropped (`skip_first_non_full_bar` on the subscription). No
-  quotes response comes for them, so `on_historical_quotes` is not called;
-  the strategy trades once its indicators have filled from live bars, as
-  the EMA does once its slow period is in. A backtest never calls it.
-  `backtest_live_bars_warmup.rs` checks the bars.
 - **What `bars` does.** The bars a request builds go to the cache only,
   never to `on_historical_bars`; they are there when the quotes response
   arrives in `on_historical_quotes`. `bars` reads that instrument's internal
@@ -290,7 +270,8 @@ let bars = warmup::bars(self, quotes);
   In backtest the client answers nothing, so the catalog must be registered
   and cover the whole window, or no response comes (see the backtest
   README). In live it can be a catalog, the adapter, or both (see the live
-  README).
+  README). OKX serves no quote history, so a live run with OKX instruments
+  refuses to start until live quotes are recorded into the catalog.
 - **Bound by `start`.** `self.clock().utc_now()` is the simulated time in
   backtest; `warmup::start` bounds the request with `now - warmup`.
 - **`request_bars` does not aggregate.** On an internal bar type it does

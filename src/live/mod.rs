@@ -4,7 +4,8 @@
 //! those of the instruments' venues: OKX's for OKX instruments (`okx.rs`),
 //! IB's for the others (`ib.rs`), both if the instruments span both. The
 //! start brings the catalog up to now for the IB instruments, and the node
-//! serves their warmup from it; OKX instruments warm up on live bars.
+//! serves their warmup from it. OKX instruments have no recent quotes to
+//! warm up on yet, so a run with any refuses to start (see `okx.rs`).
 
 mod ib;
 mod node;
@@ -37,16 +38,13 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IbHistory, OkxHistory, fill_catalog},
-    strategy::{
-        DataRequirements,
-        warmup::{self, WarmUp},
-    },
+    strategy::{DataRequirements, warmup},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
-/// through IB with `client_id`, warmed up from the catalog, and its OKX
-/// instruments on OKX's demo at `leverage`, warmed up on live bars; on
-/// bars the node builds from the venues' quotes.
+/// through IB with `client_id`, and its OKX instruments on OKX's demo at
+/// `leverage`; on bars the node builds from the venues' quotes, warmed up
+/// from the catalog.
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The catalog directory: the start fills it up to now, and the node
@@ -67,7 +65,7 @@ pub struct Live {
 
 impl Live {
     /// Sets up the clients of the instruments of `requirements`, OKX's then
-    /// IB's, tells `strategy` to warm the OKX ones up on live bars, fills
+    /// IB's, fills
     /// the catalog with the quotes of the IB ones up to now, from
     /// `now - warmup` or from where the catalog ends, then runs `strategy`
     /// on a live node until SIGINT or SIGTERM. The node asks IB only for
@@ -78,18 +76,16 @@ impl Live {
     /// Returns an error if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if OKX's clients cannot be set up
     /// or the OKX account does not suit the run (see `okx::clients`), if
+    /// the strategy trades any OKX instrument, which has no quotes to warm
+    /// up on yet (see `okx::ensure_quote_history`), if
     /// the strategy trades IB instruments and no account is given, if IB's
     /// clients cannot be set up (see `ib::clients`), if the catalog cannot
     /// be filled (IB unreachable, an instrument IB does not know, a catalog
     /// starting after `now - warmup`), or if the node fails (see
     /// `node::run`).
-    pub async fn run<S>(
-        &self,
-        requirements: &DataRequirements,
-        mut strategy: S,
-    ) -> anyhow::Result<()>
+    pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
     where
-        S: Strategy + StrategyNative + DataActorNative + Component + Debug + WarmUp + 'static,
+        S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
         let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
         let instrument_ids = requirements.instrument_ids();
@@ -110,9 +106,8 @@ impl Live {
         let mut clients = Vec::new();
         if !okx_ids.is_empty() {
             let okx = okx::clients(&okx_ids, self.leverage).await?;
+            okx::ensure_quote_history(&okx_ids)?;
             clients.push(okx.into_node_clients());
-            // OKX serves no quote history.
-            strategy.warm_up_on_live_bars(&okx_ids);
         }
         if !ib_ids.is_empty() {
             let account = self.account.as_ref().context(

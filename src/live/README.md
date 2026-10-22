@@ -34,8 +34,7 @@ wins.
 No `fill-catalog` run is needed first, nor a gateway: the command starts
 it. In code: `live::Live { catalog, account, client_id, leverage, logging
 }.run(&requirements, strategy)`, generic over the strategy like
-`Backtest::run`; the strategy also implements `strategy::warmup::WarmUp`,
-so the run can tell it which instruments warm up on live bars.
+`Backtest::run`.
 
 ### Start sequence
 
@@ -44,8 +43,8 @@ so the run can tell it which instruments warm up on live bars.
    exists, and the node reuses that logger when built.
 2. OKX instruments, if any: check the credentials are set, build the OKX
    client configs, check the account (net position mode, each
-   instrument's leverage equal to `--leverage`), and tell the strategy to
-   warm them up on live bars (see "OKX specifics").
+   instrument's leverage equal to `--leverage`), then refuse to start: no
+   recent OKX quotes to warm up on yet (see "OKX specifics").
 3. IB instruments, if any: check the client id, start or reuse the Docker
    gateway of the account's mode, wait for its login, and build the IB
    client configs on it.
@@ -548,15 +547,22 @@ OKXExecutionClientFactory::new()  // name() == "OKX"
    use_hyphens_in_client_order_ids = false
    ```
 
-### Warmup
+### Warmup: OKX live refuses to start for now
 
-OKX serves no quote history, and its archive lags two to three days, too
-old for a minute EMA. So the start fills no catalog for OKX instruments and
-the strategy requests no history for them: it warms up on live bars
-(`strategy::warmup::WarmUp`, see the strategy README), and trades once its
-indicators have filled. The first live bar, partial, is dropped. A request
-would hang: the OKX data client does not implement `request_quotes`
-(Nautilus' default logs it and never answers).
+OKX instruments warm up as IB's do: bars built from quotes, the warmup
+requested with `request_quotes` and served from the catalog. But there are
+no recent OKX quotes to serve it:
+
+- OKX serves no quote history. The OKX data client does not implement
+  `request_quotes`; Nautilus' default logs that and never answers, so the
+  warmup would wait forever.
+- OKX's archive is two to three days behind, so `fill-catalog` cannot
+  bring the catalog up to now.
+
+So a run with any OKX instrument stops at the start, after the account
+checks and before the node is built, with "OKX live needs recorded
+quotes, not available yet". Recording OKX's live quotes into the catalog
+will fill that gap and lift the refusal.
 
 ### Known limits
 
@@ -567,16 +573,16 @@ would hang: the OKX data client does not implement `request_quotes`
   subscription goes to the spread channel `sprd-bbo-tbt`, which OKX
   refuses (`60018 ... sprdId:BTC-USD_UM_XPERP-310328 doesn't exist`), and
   orders, cancels and order queries would take the spread routes
-  (`place_spread_order`). Seen on the demo on 2026-10-22: the node starts,
-  reconciles and stops cleanly, but no quote and no bar arrives. Upstream:
+  (`place_spread_order`). Seen on the demo on 2026-10-22, in a run built
+  before the refusal above: the node started, reconciled and stopped
+  cleanly, but no quote and no bar arrived. Upstream:
   [nautilus_trader#5337](https://github.com/nautechsystems/nautilus_trader/issues/5337),
   fixed on `develop` after `0.66.0` (commit `4d032a3e8d`), not yet
   released. No workaround here: X-Perps need the next release. Swaps
   (`BTC-USDT-SWAP`) are not affected.
 - **nautilus_trader#5393** (the warmup panic, see "Known limits" above)
-  cannot happen on OKX: it needs a warmup request still pending when a live
-  quote arrives, and OKX instruments request none. Checked on the demo only
-  as far as #5337 allows: no panic, but no quote either.
+  will apply to OKX as to IB once its warmup is requested; not checked on
+  OKX, since no OKX run gets that far yet.
 
 ### OKX rules
 
@@ -589,15 +595,14 @@ would hang: the OKX data client does not implement `request_quotes`
 
 - Unit tests in `okx.rs`: the configs (demo and EEA endpoints, cross
   margin, credentials left to the environment, instrument types and
-  families), net mode refused otherwise, the leverage check and the
-  parsing of OKX's leverage answer.
-- `tests/backtest_live_bars_warmup.rs`: a strategy told to warm up on live
-  bars gets no warmup and only full bars.
-- End to end, `tests/okx_demo.rs`: `Live` on the demo's BTC X-Perp, stopped
-  by SIGINT after two and a half minutes; no order (the EMA needs 30
-  one-minute bars). Gated: it is skipped unless `NAUTILUS_OKX_RUN=1` is set
-  in the shell. The account's X-Perp leverage goes in
-  `NAUTILUS_OKX_LEVERAGE` (1 if unset):
+  families), net mode refused otherwise, the leverage check, the parsing
+  of OKX's leverage answer, and the refusal for lack of recorded quotes.
+- End to end, `tests/okx_demo.rs`: `Live` on the demo's BTC X-Perp passes
+  the account checks against the real demo account, then is refused for
+  lack of recorded quotes; it only reads the account. Gated: it is skipped
+  unless `NAUTILUS_OKX_RUN=1` is set in the shell. The account's X-Perp
+  leverage goes in `NAUTILUS_OKX_LEVERAGE` (1 if unset); a wrong one fails
+  the test with the leverage message:
 
   ```sh
   NAUTILUS_OKX_RUN=1 NAUTILUS_OKX_LEVERAGE=3 cargo test --test okx_demo -- --nocapture

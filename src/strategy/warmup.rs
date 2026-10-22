@@ -25,13 +25,6 @@
 //! `data_engine_config` (backtest) or `live_data_engine_config` (live),
 //! which turn `time_bars_build_with_no_updates` off.
 //!
-//! An instrument whose history the run cannot serve, as on a venue with
-//! no quote history, warms up on live bars instead: no request, and the
-//! first bar, partial since it opens at the start, is dropped
-//! (`skip_first_non_full_bar` on the subscription). The run tells the
-//! strategy which instruments those are through `WarmUp`, before it
-//! starts.
-//!
 //! A strategy calls `start` from `on_start` and `bars` from
 //! `on_historical_quotes`.
 
@@ -53,38 +46,20 @@ use nautilus_model::{
 };
 use serde_json::json;
 
-/// A strategy warmed up through `start`, which a run tells, before
-/// starting it, which of its instruments have no history to warm up on.
-pub trait WarmUp {
-    /// Warms `instrument_ids` up on live bars only: the strategy passes
-    /// them to `start`, which requests no history for them.
-    fn warm_up_on_live_bars(&mut self, instrument_ids: &[InstrumentId]);
-}
-
 /// Requests the warmup of `bar_types`, internal bar types, over `warmup`
 /// before now, then subscribes `actor` to them. The warmup of each
 /// instrument arrives in `on_historical_quotes`, where `bars` returns it.
-/// The instruments of `live_bars` get no request: their bars come from the
-/// live quotes alone, the first, partial one dropped.
 ///
 /// # Errors
 ///
 /// Returns an error if a request fails.
-pub fn start<A>(
-    actor: &mut A,
-    bar_types: &[BarType],
-    warmup: SignedDuration,
-    live_bars: &[InstrumentId],
-) -> anyhow::Result<()>
+pub fn start<A>(actor: &mut A, bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Result<()>
 where
     A: DataActor + DataActorNative + Debug + 'static,
 {
     let start = actor.clock().utc_now().checked_sub(warmup)?;
-    let instruments: BTreeSet<InstrumentId> = bar_types
-        .iter()
-        .map(BarType::instrument_id)
-        .filter(|id| !live_bars.contains(id))
-        .collect();
+    let instruments: BTreeSet<InstrumentId> =
+        bar_types.iter().map(BarType::instrument_id).collect();
     for instrument_id in instruments {
         let of_instrument: Vec<String> = bar_types
             .iter()
@@ -98,12 +73,7 @@ where
         actor.request_quotes(instrument_id, Some(start), None, None, None, Some(params))?;
     }
     for bar_type in bar_types {
-        let params = live_bars.contains(&bar_type.instrument_id()).then(|| {
-            let mut params = Params::new();
-            params.insert("skip_first_non_full_bar".to_string(), json!(true));
-            params
-        });
-        actor.subscribe_bars(*bar_type, None, params);
+        actor.subscribe_bars(*bar_type, None, None);
     }
     Ok(())
 }

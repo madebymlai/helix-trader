@@ -46,9 +46,9 @@ enum Command {
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node: OKX instruments on OKX's demo,
-    /// warmed up on live bars, the others on Interactive Brokers after
-    /// filling the catalog up to now; stops on Ctrl-C.
+    /// Runs the strategy on a live node with Interactive Brokers, after
+    /// filling the catalog up to now; stops on Ctrl-C. OKX instruments are
+    /// refused until recorded quotes can warm them up.
     Live(LiveArgs),
 }
 
