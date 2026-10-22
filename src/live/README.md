@@ -589,6 +589,9 @@ on SIGINT.
   response panics the node. OKX answers a 3-hour warmup in well under a
   second, and a candle arrives once a minute; a long warmup (720 hours is
   about 430 history pages, at OKX's 20 requests per 2 s) makes it likely.
+- **Warmup beyond about 833 hours is cut short silently.** The adapter's
+  `request_bars` stops after 500 pages of 100 1-minute candles
+  (`MAX_PAGES_SOFT`, `nautilus-okx` `http/client.rs`) without an error.
 
 ### OKX rules
 

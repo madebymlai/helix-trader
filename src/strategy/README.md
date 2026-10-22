@@ -84,7 +84,10 @@ session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 - Loading then validates what serde cannot: at least one instrument, all on
   one venue, a bar spec aggregated on time (the session needs the bar's
   length) and, built from quotes, priced `BID`, `ASK` or `MID` (`LAST`
-  fails at load), a session, if any, opening before it closes.
+  fails at load), a session, if any, opening before it closes, and no
+  session with `composite` (live composite bars are stamped 5 s after
+  their close, so the session would drop its last bar live but not in a
+  backtest; see below).
 
 The config builds the bar types the strategy uses, one per instrument:
 `BarType::new(id, bar_spec, AggregationSource::Internal)`, such as
