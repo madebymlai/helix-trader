@@ -7,7 +7,8 @@ for the IB ones, then wires the clients, the strategy and the node. OKX
 instruments go to OKX's clients, all others to IB's; a strategy trading
 both gets both. Filling the catalog needs no node (see the data README).
 
-APIs are those of the `nautilus-*` crates at `0.66.0`; open points are under
+APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
+`develop` commit in `docs/ARCHITECTURE.md` (Version). Open points are under
 "Unverified". Process-wide rules (one node per process, Nautilus owns the
 logger) are in `docs/ARCHITECTURE.md`.
 
@@ -71,7 +72,8 @@ limits").
 
 ### Known limits
 
-Both are Nautilus bugs, present in `0.65.0` and `0.66.0`; there is no
+Both are Nautilus bugs, present in `0.65.0`, `0.66.0` and the pinned
+`develop` commit; there is no
 documented way around them, so the code keeps the documented usage.
 
 - **The IB part of the warmup is lost.** The adapter stamps historical
@@ -129,11 +131,11 @@ and never names a broker.
 ## Cargo
 
 ```toml
-nautilus-live = { version = "=0.66.0", features = ["streaming"] }
-nautilus-common = "=0.66.0"
-nautilus-system = "=0.66.0"
-nautilus-persistence = "=0.66.0"
-nautilus-trading = "=0.66.0"
+nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["streaming"] }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-system = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -303,8 +305,8 @@ logs written through `tracing` into the same output.
 ## Interactive Brokers specifics (live)
 
 `nautilus_interactive_brokers::{config, factories}`; Cargo:
-`nautilus-interactive-brokers = "=0.66.0"`, features `execution` and
-`gateway` (the Docker-managed gateway, through `bollard`).
+`nautilus-interactive-brokers`, pinned as the others, features `execution`
+and `gateway` (the Docker-managed gateway, through `bollard`).
 
 ```rust
 InteractiveBrokersDataClientFactory::new()       // name() == "IB"
@@ -570,7 +572,7 @@ will fill that gap and lift the refusal.
 
 ### Known limits
 
-- **X-Perps get no quotes and cannot be traded in `0.66.0`.** The adapter
+- **X-Perps got no quotes and could not be traded in `0.66.0`.** The adapter
   takes any symbol with an underscore for a spread
   (`common::parse::is_okx_spread_symbol` is `symbol.contains('_')`), and
   every X-Perp symbol has one (`BTC-USD_UM_XPERP-310328`). So the quote
@@ -581,8 +583,10 @@ will fill that gap and lift the refusal.
   before the refusal above: the node started, reconciled and stopped
   cleanly, but no quote and no bar arrived. Upstream:
   [nautilus_trader#5337](https://github.com/nautechsystems/nautilus_trader/issues/5337),
-  fixed on `develop` after `0.66.0` (commit `4d032a3e8d`), not yet
-  released. No workaround here: X-Perps need the next release. Swaps
+  fixed on `develop` after `0.66.0` (commit `4d032a3e8d`), which the
+  pinned commit includes: an X-Perp symbol is no longer a spread
+  (`is_okx_spread_symbol` matches legs on the base). Not yet rerun on the
+  demo. Swaps
   (`BTC-USDT-SWAP`) are not affected.
 - **nautilus_trader#5393** (the warmup panic, see "Known limits" above)
   will apply to OKX as to IB once its warmup is requested; not checked on

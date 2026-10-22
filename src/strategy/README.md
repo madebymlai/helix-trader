@@ -5,7 +5,8 @@ any type that implements the Nautilus `Strategy` trait and never name a
 concrete strategy. A process runs one strategy at a time; `main` picks it by
 name.
 
-APIs are those of the `nautilus-*` crates at `0.66.0`. Process-wide rules
+APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
+`develop` commit in `docs/ARCHITECTURE.md` (Version). Process-wide rules
 (one node per process, Nautilus owns the logger) are in
 `docs/ARCHITECTURE.md`.
 
