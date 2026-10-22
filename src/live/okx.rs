@@ -2,10 +2,12 @@
 //!
 //! Provides the Nautilus client factories and configs from `nautilus_okx`:
 //! `OKXDataClientFactory`, `OKXExecutionClientFactory` and their configs,
-//! on OKX's demo environment of the EEA region (`eea.okx.com`, where an
-//! EEA account trades X-Perps), in cross margin. The adapter reads the
-//! credentials from `OKX_API_KEY`, `OKX_API_SECRET` and
-//! `OKX_API_PASSPHRASE`; this module only checks they are set.
+//! in the EEA region (`eea.okx.com`, where an EEA account trades X-Perps),
+//! in cross margin, on the environment `OKX_ENVIRONMENT` names: `demo` or
+//! `live`, required, read by us since the adapter takes it only as a
+//! config field. The adapter reads the credentials from `OKX_API_KEY`,
+//! `OKX_API_SECRET` and `OKX_API_PASSPHRASE`; this module only checks they
+//! are set.
 //!
 //! Before the node starts, the account is checked: net position mode,
 //! read through the adapter (`get_account_configuration`), and each
@@ -46,8 +48,8 @@ use serde::Deserialize;
 use super::node::Clients;
 use crate::data::OkxContract;
 
-/// OKX's demo trading. The real account is `OKXEnvironment::Live`.
-const ENVIRONMENT: OKXEnvironment = OKXEnvironment::Demo;
+/// The variable naming the OKX environment of the run, `demo` or `live`.
+const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";
 
 /// The region of an account opened on my.okx.com, which trades X-Perps.
 const REGION: OKXRegion = OKXRegion::Eea;
@@ -66,21 +68,24 @@ pub(super) struct OkxClients {
     pub(super) exec: OKXExecutionClientConfig,
 }
 
-/// Checks the credentials are set, builds the client configs of
-/// `instrument_ids` (see `configs`), then checks the account: net position
-/// mode, and the leverage of each instrument equal to `leverage`.
+/// Reads the environment (see `environment_of`), builds the client configs
+/// of `instrument_ids` on it (see `configs`), checks the credentials are
+/// set, then checks the account: net position mode, and the leverage of
+/// each instrument equal to `leverage`.
 ///
 /// # Errors
 ///
-/// Returns an error if an id is not an OKX swap or X-Perp, if a credential
-/// is not set (checked before any request), if OKX cannot be reached or
+/// Returns an error if `OKX_ENVIRONMENT` is not `demo` or `live`, if an id
+/// is not an OKX swap or X-Perp, if a credential is not set (all checked
+/// before any request), if OKX cannot be reached or
 /// refuses the key, if the account is not in net position mode, or if an
 /// instrument's leverage is not `leverage` (or OKX does not list it).
 pub(super) async fn clients(
     instrument_ids: &[InstrumentId],
     leverage: Decimal,
 ) -> anyhow::Result<OkxClients> {
-    let clients = configs(instrument_ids)?;
+    let environment = environment_of(std::env::var(ENVIRONMENT_VAR).ok().as_deref())?;
+    let clients = configs(instrument_ids, environment)?;
     let account = Account::connect(&clients.exec)?;
     ensure_net_mode(account.position_mode().await?)?;
     for &id in instrument_ids {
@@ -89,13 +94,31 @@ pub(super) async fn clients(
     Ok(clients)
 }
 
+/// The OKX environment `value` of `OKX_ENVIRONMENT` names: `demo` or
+/// `live`, exactly, as Nautilus' serde names them. No default: a missing,
+/// empty or other value is an error naming both.
+fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
+    let refused = || {
+        anyhow::anyhow!(
+            "{ENVIRONMENT_VAR} must be `demo` or `live` (got {value:?}): set it \
+             in .env to the environment of the OKX key, `demo` for a demo \
+             trading key, `live` for a real one (see .env.example)"
+        )
+    };
+    let value = value.ok_or_else(refused)?;
+    serde_json::from_value(serde_json::Value::from(value)).map_err(|_| refused())
+}
+
 /// The client configs of `instrument_ids`, OKX swaps or X-Perps: their
 /// instrument types and families are loaded (see `OkxContract`), on
-/// `ENVIRONMENT` and `REGION`, orders in `MARGIN_MODE`; no credential, so
+/// `environment` and `REGION`, orders in `MARGIN_MODE`; no credential, so
 /// the adapter reads them from the environment. Quotes come tick by tick
 /// (the adapter's `bbo-tbt` channel), so internal bars are built from
 /// every change of the best bid or ask.
-fn configs(instrument_ids: &[InstrumentId]) -> anyhow::Result<OkxClients> {
+fn configs(
+    instrument_ids: &[InstrumentId],
+    environment: OKXEnvironment,
+) -> anyhow::Result<OkxClients> {
     let mut instrument_types = Vec::new();
     let mut families = Vec::new();
     for &id in instrument_ids {
@@ -112,14 +135,14 @@ fn configs(instrument_ids: &[InstrumentId]) -> anyhow::Result<OkxClients> {
         data: OKXDataClientConfig {
             instrument_types: instrument_types.clone(),
             instrument_families: Some(families.clone()),
-            environment: ENVIRONMENT,
+            environment,
             region: REGION,
             ..Default::default()
         },
         exec: OKXExecutionClientConfig {
             instrument_types,
             instrument_families: Some(families),
-            environment: ENVIRONMENT,
+            environment,
             region: REGION,
             margin_mode: Some(MARGIN_MODE),
             ..Default::default()
@@ -356,8 +379,23 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_is_demo_or_live_by_its_lowercase_name() {
+        assert_eq!(environment_of(Some("demo")).unwrap(), OKXEnvironment::Demo);
+        assert_eq!(environment_of(Some("live")).unwrap(), OKXEnvironment::Live);
+    }
+
+    #[test]
+    fn a_missing_empty_or_other_environment_is_refused_naming_the_variable_and_values() {
+        for value in [None, Some(""), Some("Demo"), Some("real"), Some(" demo")] {
+            let err = environment_of(value).unwrap_err().to_string();
+            assert!(err.contains("OKX_ENVIRONMENT"), "{value:?}: {err}");
+            assert!(err.contains("`demo` or `live`"), "{value:?}: {err}");
+        }
+    }
+
+    #[test]
     fn both_clients_trade_on_the_eea_demo_never_the_real_account() {
-        let clients = configs(&[xperp()]).unwrap();
+        let clients = configs(&[xperp()], OKXEnvironment::Demo).unwrap();
         assert_eq!(
             (clients.data.environment, clients.data.region),
             (OKXEnvironment::Demo, OKXRegion::Eea)
@@ -379,13 +417,13 @@ mod tests {
 
     #[test]
     fn orders_are_in_cross_margin() {
-        let exec = configs(&[xperp()]).unwrap().exec;
+        let exec = configs(&[xperp()], OKXEnvironment::Demo).unwrap().exec;
         assert_eq!(exec.margin_mode, Some(OKXMarginMode::Cross));
     }
 
     #[test]
     fn the_credentials_are_left_to_the_adapter_from_the_environment() {
-        let clients = configs(&[xperp()]).unwrap();
+        let clients = configs(&[xperp()], OKXEnvironment::Demo).unwrap();
         let data = &clients.data;
         let exec = &clients.exec;
         assert!(data.api_key.is_none() && data.api_secret.is_none());
@@ -397,7 +435,7 @@ mod tests {
     #[test]
     fn the_clients_load_the_types_and_families_of_the_instruments_each_once() {
         let other_xperp = InstrumentId::from("BTC-USD_UM_XPERP-310404.OKX");
-        let clients = configs(&[xperp(), swap(), other_xperp]).unwrap();
+        let clients = configs(&[xperp(), swap(), other_xperp], OKXEnvironment::Demo).unwrap();
         let types = [OKXInstrumentType::Futures, OKXInstrumentType::Swap];
         let families = ["BTC-USD_UM_XPERP".to_string(), "BTC-USDT".to_string()];
         assert_eq!(clients.data.instrument_types, types);
@@ -415,7 +453,10 @@ mod tests {
     #[test]
     fn an_instrument_not_an_okx_swap_or_future_is_refused() {
         for id in ["SXR8.IBIS", "BTC-USDT.OKX"] {
-            assert!(configs(&[InstrumentId::from(id)]).is_err(), "{id}");
+            assert!(
+                configs(&[InstrumentId::from(id)], OKXEnvironment::Demo).is_err(),
+                "{id}"
+            );
         }
     }
 

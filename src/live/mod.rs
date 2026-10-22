@@ -42,8 +42,8 @@ use crate::{
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
-/// through IB with `client_id`, and its OKX instruments on OKX's demo at
-/// `leverage`; on bars the node builds from the venues' quotes, warmed up
+/// through IB with `client_id`, and its OKX instruments on the OKX
+/// environment `OKX_ENVIRONMENT` names at `leverage`; on bars the node builds from the venues' quotes, warmed up
 /// from the catalog.
 #[derive(Debug, Clone)]
 pub struct Live {

@@ -2,10 +2,11 @@
 //! X-Perp passes the start checks against the real demo account (the
 //! credentials set, net position mode, the leverage) and is then refused
 //! for lack of recorded quotes, before any node is built. It needs the demo
-//! key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) from the
-//! environment or `.env`, and the account's leverage on the X-Perp in
-//! `NAUTILUS_OKX_LEVERAGE` (1 if unset): a failing check would fail the
-//! test with its own message.
+//! key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) and
+//! `OKX_ENVIRONMENT=demo` from the environment or `.env` (any other
+//! environment fails the test before any request), and the account's
+//! leverage on the X-Perp in `NAUTILUS_OKX_LEVERAGE` (1 if unset): a
+//! failing check would fail the test with its own message.
 //!
 //! Gated as `ib_gateway.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_OKX_RUN=1` is set in the shell. It only reads
@@ -61,6 +62,11 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_for_lack_of_record
         return;
     }
     dotenvy::dotenv().ok();
+    assert_eq!(
+        std::env::var("OKX_ENVIRONMENT").as_deref(),
+        Ok("demo"),
+        "the OKX end to end test runs on the demo only: set OKX_ENVIRONMENT=demo"
+    );
     let leverage: Decimal = std::env::var("NAUTILUS_OKX_LEVERAGE")
         .map_or(Ok(Decimal::ONE), |leverage| leverage.parse())
         .expect("NAUTILUS_OKX_LEVERAGE, a decimal");
