@@ -580,8 +580,8 @@ uses OKX's public endpoints only, with no key.
 ```rust
 OkxHistory::new() -> anyhow::Result<OkxHistory>
 history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
-    .await -> anyhow::Result<()>        // per series: its instrument, then bars month by month, then day by day,
-                                        // then a swap's funding month by month, then funding from the API
+    .await -> anyhow::Result<()>        // per series: its instrument, a swap's funding month by month, then funding
+                                        // from the API, then bars month by month, then day by day
 ```
 
 - **Instruments.** The symbol gives the type (Nautilus'
@@ -655,7 +655,7 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   of the next month (2026-09's on 2026-10-01) and a day's about two days
   after it ends; a later day with no file stops the series without
   recording it, and the next run asks for it again.
-- **Funding of swaps.** After a swap's bars, `fill` stores its
+- **Funding of swaps.** Before a swap's bars, `fill` stores its
   `FundingRateUpdate`s (series `FundingRateUpdate`, keyed by the
   instrument id) from the archive's module 3 (`dateAggrType` `monthly`
   only; `BTC-USDT-SWAP-fundingrates-<month>.zip`, a CSV of
@@ -672,7 +672,9 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   start, month end − 1 ns]`, contiguous; the fill resumes after the stored
   end and stops at the first month not published, so the funding ends
   with the last complete month while the bars go on day by day. No file
-  for the first month is an error naming the series. The backtest then
+  for the first month is an error naming the series. A failed funding
+  fill stores no new bars, so a backtest over them is refused for want of
+  funding rather than run without it. The backtest then
   needs the funding over its whole window (see the backtest README, "OKX
   on candles").
 - **Funding from the API.** After the archive's months for a swap, and
@@ -690,7 +692,8 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   BTC-USDT-SWAP and the BTC X-Perp, in one response of 283 times), so an
   older `start` stores the X-Perp's funding from its second oldest time.
   The stored range ends on the newest funding time, so a re-run asks for
-  what OKX settled since. A resumed fill OKX no longer reaches back to (a
+  what OKX settled since; a window the stored funding already covers to
+  `end` (a swap's archive months) asks for nothing. A resumed fill OKX no longer reaches back to (a
   catalog left more than 3 months) is an error, not a hole; no funding on
   a first fill is an error naming the series. A swap's `start` in a month
   the archive has not published is still an error (no funding file for
@@ -921,7 +924,10 @@ bar after a roll behaves when the new contract has not ticked yet is
     the X-Perp) served locally to Nautilus' client, paged back to the
     window's start with every stored update's interval, or as far as OKX
     keeps it, resumed after the stored end as one uninterrupted fill, a
-    resume OKX no longer reaches and no funding on a first fill errors.
+    resume OKX no longer reaches and no funding on a first fill errors, a
+    window the stored funding covers asking for nothing; the funding
+    filled before the bars, a failed one (a swap's unpublished first
+    month, an X-Perp's window older than OKX keeps) storing no bars.
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last
