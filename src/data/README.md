@@ -9,7 +9,8 @@ from IB), or, for a composite bar type, from its source bars (OKX's
 It adds what Nautilus does not provide: filling the catalog from a
 historical source, and the roll dates.
 
-APIs are those of the `nautilus-*` crates at `0.66.0`; **unverified** marks
+APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
+`develop` commit in `docs/ARCHITECTURE.md` (Version). **Unverified** marks
 what the sources did not confirm. Examples use the future `ESM4.CME`, its
 predecessor `ESH4.CME` and the continuous root `ES.CME`.
 
@@ -371,8 +372,8 @@ history.quotes(instrument_id, start, end)
   bars between the two segments go missing without an error (paper
   gateway 2026-10-07: ESZ6 1-HOUR over `[10-05T00:00Z, 10-07T18:00Z]` lacked
   10-05 19:00-21:00). The live data client shares that segmentation
-  (`data/convert.rs` in the adapter; unchanged in 0.66.0,
-  nautechsystems/nautilus_trader#5384 is open). `quoted_bars` never passes a start: it
+  (`data/convert.rs` in the adapter; unchanged in 0.66.0 and the pinned
+  commit, nautechsystems/nautilus_trader#5384 is open). `quoted_bars` never passes a start: it
   walks back from `end` (`walk_back`), each request with an explicit
   duration (one segment, `start_date_time: None`) ending at the oldest
   bar so far, so consecutive answers overlap by a bar and leave no hole.
@@ -623,9 +624,9 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   (Concepts › Backtesting › Bar execution, "Bar timestamp convention":
   `ts_init` must be the close, else the whole bar is visible before it
   formed), and what the adapter does for its own historical bars from the
-  release after 0.66.0 (nautilus_trader#5339, commit `fc94ea1`); 0.66.0
-  still stamps them at the request time. The backtest replays by
-  `ts_init` and the data engine aggregates by it, so the hour bar closing
+  release after 0.66.0 (nautilus_trader#5339, commit `fc94ea1`, in the
+  pinned commit); 0.66.0 stamped them at the request time. The backtest
+  replays by `ts_init` and the data engine aggregates by it, so the hour bar closing
   10:00 holds the minutes opening 09:00 to 09:59 and is built at 10:00
   (`backtest_okx_swap.rs` checks both).
 - **One archive day at a time.** `fill` calls `fill_catalog` once per

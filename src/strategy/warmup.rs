@@ -66,10 +66,14 @@ where
             .filter(|bar_type| bar_type.instrument_id() == instrument_id)
             .map(ToString::to_string)
             .collect();
-        let mut params = Params::new();
-        params.insert("bar_types".to_string(), json!(of_instrument));
-        params.insert("update_subscriptions".to_string(), json!(true));
-        params.insert("skip_first_non_full_bar".to_string(), json!(true));
+        let params = Params::new(
+            [
+                ("bar_types".to_string(), json!(of_instrument)),
+                ("update_subscriptions".to_string(), json!(true)),
+                ("skip_first_non_full_bar".to_string(), json!(true)),
+            ]
+            .into(),
+        );
         actor.request_quotes(instrument_id, Some(start), None, None, None, Some(params))?;
     }
     for bar_type in bar_types {

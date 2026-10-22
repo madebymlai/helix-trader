@@ -33,9 +33,13 @@ Nautilus does not already provide.
 
 ## Version
 
-NautilusTrader `2.0.0rc7`: the `nautilus-*` crates at `=0.66.0`, pinned
-exactly. Upgrades are deliberate: one change, release notes read, full test
-suite green.
+The `nautilus-*` crates come from NautilusTrader's git repository, all
+pinned to the `develop` commit `a51ae015c1` (2026-10-22, crate version
+`0.67.0`, unreleased): it has the OKX fixes after `0.66.0` that OKX needs
+(nautilus_trader#5339, #5337). Back to crates.io at the next release. Their
+sources are under
+`~/.cargo/git/checkouts/nautilus_trader-*/a51ae01/crates/`. Upgrades are
+deliberate: one change, release notes read, full test suite green.
 
 ## Build order
 
