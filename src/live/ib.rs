@@ -5,7 +5,7 @@
 //! `InteractiveBrokersExecutionClientFactory` and their configs, on the
 //! gateway of the account's trading mode (`data::IbGateway`); the account
 //! id goes in the execution config. Another broker is another file next
-//! to this one.
+//! to this one (`okx.rs`).
 
 use anyhow::ensure;
 use nautilus_interactive_brokers::{
@@ -15,6 +15,7 @@ use nautilus_interactive_brokers::{
     },
     factories::{InteractiveBrokersDataClientFactory, InteractiveBrokersExecutionClientFactory},
 };
+use nautilus_live::config::RoutingConfig;
 use nautilus_model::identifiers::InstrumentId;
 
 use super::node::Clients;
@@ -82,13 +83,15 @@ fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[Instrumen
 }
 
 impl IbClients {
-    /// The factories and configs, for the node.
+    /// The factories and configs, for the node: the default route for
+    /// data and orders, since IB spans many venues.
     pub(super) fn into_node_clients(self) -> Clients {
         Clients {
             data_factory: Box::new(InteractiveBrokersDataClientFactory::new()),
             data_config: Box::new(self.data),
             exec_factory: Box::new(InteractiveBrokersExecutionClientFactory::new()),
             exec_config: Box::new(self.exec),
+            routing: RoutingConfig::builder().default(true).build(),
         }
     }
 }

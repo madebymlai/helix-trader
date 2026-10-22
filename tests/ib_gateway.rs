@@ -33,6 +33,7 @@ use jiff::{Timestamp, ToSpan};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::identifiers::InstrumentId;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 
 /// One test at a time: the adapter's start is not safe against another
@@ -156,8 +157,9 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     let requirements = config.data_requirements();
     let live = Live {
         catalog: catalog.path().to_path_buf(),
-        account,
+        account: Some(account),
         client_id: 43,
+        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
     };
     // As Ctrl-C would, once the node runs: its signal handler stops it.

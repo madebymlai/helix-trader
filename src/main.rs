@@ -46,7 +46,8 @@ enum Command {
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node with Interactive Brokers, after
+    /// Runs the strategy on a live node: OKX instruments on OKX's demo,
+    /// warmed up on live bars, the others on Interactive Brokers after
     /// filling the catalog up to now; stops on Ctrl-C.
     Live(LiveArgs),
 }
@@ -136,12 +137,18 @@ struct LiveArgs {
     /// The catalog directory, filled up to now at start.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
-    /// The IB account traded, for example DU1234567 (paper).
+    /// The IB account traded, for example DU1234567 (paper); needed only
+    /// for IB instruments.
     #[arg(long, env = "NAUTILUS_IB_ACCOUNT_ID")]
-    account: IbAccount,
+    account: Option<IbAccount>,
     /// IB client id of the node, the adapter default.
     #[arg(long, default_value_t = 1)]
     client_id: i32,
+    /// The leverage the run expects, as in a backtest. OKX applies the
+    /// account's, set by hand per instrument: the start refuses an OKX
+    /// instrument at another one.
+    #[arg(long, default_value = "1")]
+    leverage: Decimal,
 }
 
 /// The strategies, by command-line name.
@@ -293,6 +300,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         catalog: args.catalog,
         account: args.account,
         client_id: args.client_id,
+        leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     match args.strategy {
@@ -447,12 +455,22 @@ mod tests {
         assert_eq!(args.strategy, Strategy::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
         assert_eq!(args.catalog, PathBuf::from("catalog"));
-        assert_eq!(args.account, "DU1234567".parse().unwrap());
+        assert_eq!(args.account, Some("DU1234567".parse().unwrap()));
         assert_eq!(args.client_id, 1);
+        assert_eq!(args.leverage, Decimal::ONE);
+    }
+
+    #[test]
+    fn live_takes_the_leverage_it_expects() {
+        let args = parse_live(&["ema", "--config", "okx.toml", "--leverage", "3"]).unwrap();
+        assert_eq!(args.leverage, Decimal::from(3));
+        let err = parse_live(&["ema", "--config", "okx.toml", "--leverage", "x"]).unwrap_err();
+        assert!(err.to_string().contains("--leverage"), "{err}");
     }
 
     /// Read from the arguments' definition: setting the variable would race
-    /// the other tests, and the developer's environment may have it.
+    /// the other tests, and the developer's environment may have it. Not
+    /// required: a run on OKX alone has no IB account.
     #[test]
     fn the_live_account_falls_back_on_nautilus_ib_account_id() {
         use clap::CommandFactory;
@@ -466,7 +484,7 @@ mod tests {
             account.get_env(),
             Some(std::ffi::OsStr::new("NAUTILUS_IB_ACCOUNT_ID"))
         );
-        assert!(account.is_required_set());
+        assert!(!account.is_required_set());
     }
 
     #[test]

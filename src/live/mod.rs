@@ -1,11 +1,14 @@
 //! Runs the strategy on a Nautilus live node.
 //!
-//! Build step 3: paper, then live. One node per process. The start brings
-//! the catalog up to now, then the node serves the strategy's warmup from
-//! it.
+//! Build step 3: paper, then live. One node per process. The clients are
+//! those of the instruments' venues: OKX's for OKX instruments (`okx.rs`),
+//! IB's for the others (`ib.rs`), both if the instruments span both. The
+//! start brings the catalog up to now for the IB instruments, and the node
+//! serves their warmup from it; OKX instruments warm up on live bars.
 
 mod ib;
 mod node;
+mod okx;
 
 pub use crate::data::IbAccount;
 
@@ -23,48 +26,70 @@ use nautilus_common::{
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
 use nautilus_core::UUID4;
-use nautilus_model::{data::QuoteTick, identifiers::InstrumentId, instruments::InstrumentAny};
+use nautilus_model::{
+    data::{BarType, QuoteTick},
+    identifiers::InstrumentId,
+    instruments::InstrumentAny,
+};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
+use rust_decimal::Decimal;
 
 use crate::{
-    data::{IbHistory, fill_catalog},
-    strategy::{DataRequirements, warmup},
+    data::{IbHistory, OkxHistory, fill_catalog},
+    strategy::{
+        DataRequirements,
+        warmup::{self, WarmUp},
+    },
 };
 
-/// One live run: the strategy trades `account` through IB with
-/// `client_id`, on bars the node builds from IB's quotes, warmed up from
-/// the catalog.
+/// One live run: the strategy trades its IB instruments in `account`
+/// through IB with `client_id`, warmed up from the catalog, and its OKX
+/// instruments on OKX's demo at `leverage`, warmed up on live bars; on
+/// bars the node builds from the venues' quotes.
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The catalog directory: the start fills it up to now, and the node
     /// serves the warmup from it.
     pub catalog: PathBuf,
-    /// The account traded.
-    pub account: IbAccount,
+    /// The IB account traded; needed only if the strategy trades IB
+    /// instruments.
+    pub account: Option<IbAccount>,
     /// The IB client id, for the history the start fills the catalog with
     /// and for the node's clients, one after the other.
     pub client_id: i32,
+    /// The leverage the run expects. OKX applies the account's leverage,
+    /// set by hand: the start refuses an OKX instrument at another one.
+    pub leverage: Decimal,
     /// The Nautilus logger, installed for the start and kept by the node.
     pub logging: LoggerConfig,
 }
 
 impl Live {
-    /// Fills the catalog with the quotes of the instruments of
-    /// `requirements` up to now, from `now - warmup` or from where the
-    /// catalog ends, then runs `strategy` on a live node until SIGINT or
-    /// SIGTERM. The node asks IB only for the quotes since the fill.
+    /// Sets up the clients of the instruments of `requirements`, OKX's then
+    /// IB's, tells `strategy` to warm the OKX ones up on live bars, fills
+    /// the catalog with the quotes of the IB ones up to now, from
+    /// `now - warmup` or from where the catalog ends, then runs `strategy`
+    /// on a live node until SIGINT or SIGTERM. The node asks IB only for
+    /// the quotes since the fill.
     ///
     /// # Errors
     ///
     /// Returns an error if the cache cannot hold the warmup bars of a bar
-    /// type (see `warmup::cache_config`), if IB's clients cannot be set up
-    /// (see `ib::clients`), if the catalog cannot be filled (IB
-    /// unreachable, an instrument IB does not know, a catalog starting after
-    /// `now - warmup`), or if the node fails (see `node::run`).
-    pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
+    /// type (see `warmup::cache_config`), if OKX's clients cannot be set up
+    /// or the OKX account does not suit the run (see `okx::clients`), if
+    /// the strategy trades IB instruments and no account is given, if IB's
+    /// clients cannot be set up (see `ib::clients`), if the catalog cannot
+    /// be filled (IB unreachable, an instrument IB does not know, a catalog
+    /// starting after `now - warmup`), or if the node fails (see
+    /// `node::run`).
+    pub async fn run<S>(
+        &self,
+        requirements: &DataRequirements,
+        mut strategy: S,
+    ) -> anyhow::Result<()>
     where
-        S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+        S: Strategy + StrategyNative + DataActorNative + Component + Debug + WarmUp + 'static,
     {
         let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
         let instrument_ids = requirements.instrument_ids();
@@ -79,13 +104,31 @@ impl Live {
             file_config,
         )?;
         init_tracing()?;
-        let clients = ib::clients(&self.account, self.client_id, &instrument_ids).await?;
-        self.fill_catalog(requirements).await?;
+        let (okx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = instrument_ids
+            .iter()
+            .partition(|&&id| OkxHistory::serves(id));
+        let mut clients = Vec::new();
+        if !okx_ids.is_empty() {
+            let okx = okx::clients(&okx_ids, self.leverage).await?;
+            clients.push(okx.into_node_clients());
+            // OKX serves no quote history.
+            strategy.warm_up_on_live_bars(&okx_ids);
+        }
+        if !ib_ids.is_empty() {
+            let account = self.account.as_ref().context(
+                "the strategy trades IB instruments: give the IB account \
+                 (--account or NAUTILUS_IB_ACCOUNT_ID)",
+            )?;
+            let ib = ib::clients(account, self.client_id, &ib_ids).await?;
+            clients.push(ib.into_node_clients());
+            self.fill_catalog(&of_instruments(requirements, &ib_ids))
+                .await?;
+        }
         node::run(
             &self.catalog,
             self.logging.clone(),
             cache,
-            clients.into_node_clients(),
+            clients,
             &instrument_ids,
             strategy,
         )
@@ -106,6 +149,22 @@ impl Live {
             async |id, from, to| ib.quotes(id, from, to).await,
         )
         .await
+    }
+}
+
+/// The requirements of `requirements` on `instrument_ids` alone.
+fn of_instruments(
+    requirements: &DataRequirements,
+    instrument_ids: &[InstrumentId],
+) -> DataRequirements {
+    DataRequirements {
+        bar_types: requirements
+            .bar_types
+            .iter()
+            .filter(|bar_type| instrument_ids.contains(&bar_type.instrument_id()))
+            .copied()
+            .collect::<Vec<BarType>>(),
+        warmup: requirements.warmup,
     }
 }
 

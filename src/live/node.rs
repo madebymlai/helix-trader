@@ -1,8 +1,9 @@
 //! Live node: builds and runs it.
 //!
 //! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since catalogs
-//! are a `LiveNodeConfig` field, with the data and execution clients of the
-//! chosen adapter routed by default, adds the strategy (`add_strategy`),
+//! are a `LiveNodeConfig` field, with the data and execution clients of
+//! each adapter the instruments need, each with its routing, adds the
+//! strategy (`add_strategy`),
 //! claims its instruments' external orders, and calls `run`, which stops on
 //! SIGINT or SIGTERM. Follows the IB adapter's `node_exec_tester` example.
 //! Never names a broker.
@@ -34,17 +35,19 @@ pub(super) fn trader_id() -> TraderId {
     TraderId::from("HELIX-001")
 }
 
-/// One adapter's data and execution client factories and configs.
+/// One adapter's data and execution client factories and configs, and
+/// how Nautilus routes data and orders to them.
 pub(super) struct Clients {
     pub(super) data_factory: Box<dyn DataClientFactory>,
     pub(super) data_config: Box<dyn ClientConfig>,
     pub(super) exec_factory: Box<dyn ExecutionClientFactory>,
     pub(super) exec_config: Box<dyn ClientConfig>,
+    pub(super) routing: RoutingConfig,
 }
 
-/// Builds a live node on `clients`, the default route for data and orders,
-/// with the catalog at `catalog` serving historical requests and `cache`
-/// configuring the cache (sized for the warmup), adds
+/// Builds a live node on the clients of each adapter in `clients`, routed
+/// as each says, with the catalog at `catalog` serving historical requests
+/// and `cache` configuring the cache (sized for the warmup), adds
 /// `strategy` claiming the external orders of `instrument_ids`, and runs it
 /// until SIGINT or SIGTERM.
 ///
@@ -54,14 +57,15 @@ pub(super) struct Clients {
 ///
 /// # Errors
 ///
-/// Returns an error if the node fails to build, the strategy cannot be
+/// Returns an error if the node fails to build (two clients claiming the
+/// same route included), the strategy cannot be
 /// added or claim its instruments, or the node fails to start, run or stop
 /// (orders still unresolved after the post-stop delay included).
 pub(super) async fn run<S>(
     catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
-    clients: Clients,
+    clients: Vec<Clients>,
     instrument_ids: &[InstrumentId],
     strategy: S,
 ) -> anyhow::Result<()>
@@ -69,18 +73,25 @@ where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
     let config = config(catalog, logging, cache)?;
-    let routing = RoutingConfig::builder().default(true).build();
-    let mut node = LiveNodeBuilder::from_config(config)?
+    let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
-        .with_delay_post_stop_secs(5)
-        .add_data_client_with_routing(
-            None,
-            clients.data_factory,
-            clients.data_config,
-            routing.clone(),
-        )?
-        .add_exec_client_with_routing(None, clients.exec_factory, clients.exec_config, routing)?
-        .build()?;
+        .with_delay_post_stop_secs(5);
+    for clients in clients {
+        builder = builder
+            .add_data_client_with_routing(
+                None,
+                clients.data_factory,
+                clients.data_config,
+                clients.routing.clone(),
+            )?
+            .add_exec_client_with_routing(
+                None,
+                clients.exec_factory,
+                clients.exec_config,
+                clients.routing,
+            )?;
+    }
+    let mut node = builder.build()?;
     let strategy_id = strategy
         .strategy_id()
         .context("the strategy has no id to claim its instruments with")?;
