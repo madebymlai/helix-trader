@@ -185,7 +185,7 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | `default_leverage: Option<Decimal>` | the run's leverage, `--leverage` (see Leverage) |
 | `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
-| `bar_execution` | `false`: only quotes move the book |
+| `bar_execution` | left at Nautilus' default, `true`: only `EXTERNAL` bars drive fills, and the catalog holds none, so quotes alone move the book |
 
 Flags worth knowing: `liquidity_consumption` (default `false`, left off:
 every order sees the full quote size), `bar_adaptive_high_low_ordering`
@@ -481,8 +481,9 @@ side of EUR 6,000 the strategy's orders fall.
 
 ### Fills
 
-The venue fills on quotes. With `bar_execution` off, the instruments'
-`QuoteTick`s alone set the L1 book. A market buy fills at the ask, a sell
+The venue fills on quotes. The instruments' `QuoteTick`s alone set the
+L1 book: `bar_execution` is on (Nautilus' default), but the matching
+engine skips `INTERNAL` bars and the catalog stores no `EXTERNAL` ones. A market buy fills at the ask, a sell
 at the bid, of the last quote replayed before the order: the catalog holds
 a quote a minute, stamped 1 ns before the minute's close (data README), so
 an order sent in `on_bar` fills, in full and stamped at the bar's close, on
@@ -669,7 +670,8 @@ variants:
 
 Applied (see Fills, The run config):
 
-- Venue as in `node.rs` with `.bar_execution(false)`;
+- Venue as in `node.rs`, then with `.bar_execution(false)` while the
+  catalog also held bars (now left at the default: see Fills);
   `liquidity_consumption` left off; the quotes of every instrument as a
   `QuoteTick` data config next to the bars.
 - Fill model `FillModelAny::Default(DefaultFillModel::new(1.0, 0.0,
