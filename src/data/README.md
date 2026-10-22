@@ -2,7 +2,7 @@
 
 `data` is build step 1. It fills the Nautilus Parquet catalog with the
 instruments the strategy trades and the data their bars are built from,
-and the funding of OKX swaps, which backtests settle, and nothing else. The strategies' bars are internal, built by the
+and the funding of OKX swaps and X-Perps, which backtests settle, and nothing else. The strategies' bars are internal, built by the
 Nautilus data engine (see the strategy README): from quotes (one a minute
 from IB), or, for a composite bar type, from its source bars (OKX's
 1-minute candles). Backtest reads that catalog.
@@ -26,7 +26,7 @@ data/
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
-    testdata/      samples of real archive files and real instruments
+    testdata/      samples of real archive files, a funding history page and real instruments
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
@@ -581,7 +581,7 @@ uses OKX's public endpoints only, with no key.
 OkxHistory::new() -> anyhow::Result<OkxHistory>
 history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
     .await -> anyhow::Result<()>        // per series: its instrument, then bars month by month, then day by day,
-                                        // then a swap's funding month by month
+                                        // then a swap's funding month by month, then funding from the API
 ```
 
 - **Instruments.** The symbol gives the type (Nautilus'
@@ -602,8 +602,8 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   are not stored.
 - **X-Perps.** A `CryptoFuture` expiring in 2031, linear, settled in USD
   (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole
-  contracts, tick 0.1. Their funding is not filled: the archive holds the
-  funding of swaps only.
+  contracts, tick 0.1. The archive holds the funding of swaps only, so
+  theirs comes from the API (see "Funding from the API").
 - **The archive.** `GET /api/v5/public/market-data-history` (module 2,
   1-minute candles; `instType` `SWAP` or `FUTURES`, the family;
   `dateAggrType` `monthly` or `daily`; 5 requests per 2 s, kept to one
@@ -675,6 +675,31 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   for the first month is an error naming the series. The backtest then
   needs the funding over its whole window (see the backtest README, "OKX
   on candles").
+- **Funding from the API.** After the archive's months for a swap, and
+  for an X-Perp from `start`, `fill` stores the funding from Nautilus'
+  `OKXHttpClient::request_funding_rates` (`/public/funding-rate-history`,
+  public, its own quota of 5 requests a second), which parses it as the
+  archive's rows (`parse_funding_rate`) except the oldest update of a
+  response, left without an interval since its time before is not in the
+  response: it would not settle. So pages go backwards from `end`, each
+  asking for the times before the oldest of the one before + 1 ms (OKX's
+  `after`, exclusive), which brings that time back with its interval, until
+  a page reaches before the window (or the stored end, plus 1 ns) or holds
+  only that time; only updates with an interval are stored. OKX keeps
+  about 3 months (from 2026-07-20T16:00Z on 2026-10-23, the same for
+  BTC-USDT-SWAP and the BTC X-Perp, in one response of 283 times), so an
+  older `start` stores the X-Perp's funding from its second oldest time.
+  The stored range ends on the newest funding time, so a re-run asks for
+  what OKX settled since. A resumed fill OKX no longer reaches back to (a
+  catalog left more than 3 months) is an error, not a hole; no funding on
+  a first fill is an error naming the series. A swap's `start` in a month
+  the archive has not published is still an error (no funding file for
+  its first month). Verified 2026-10-23 (release build, `fill-catalog`
+  from 2026-08-01 for the swap, 2026-07-01 for the X-Perp, to now): the
+  swap's funding stored over 2026-07-31T16:00Z to 2026-09-30T15:59:59.999999999Z from the archive and on to
+  2026-10-22T16:00Z from the API (one request, 283 times); the X-Perp's
+  over 2026-07-21T00:00Z to 2026-10-22T16:00Z (two requests). A re-run
+  wrote nothing new.
 - **Catalogs filled before candles.** A catalog filled when `okx/` stored
   quotes rebuilt from the order book must be filled again, fresh, into a
   new directory: its quotes are no longer filled or extended, and nothing
@@ -892,7 +917,11 @@ bar after a roll behaves when the new contract has not ticked yet is
     fill with a fake archive (monthly files only, windows `[month start,
     month end − 1 ns]`, a stop at the first month not published, resumed
     after the stored end as one uninterrupted fill, no file for the first
-    month an error naming the series).
+    month an error naming the series); a real API page (8 funding times of
+    the X-Perp) served locally to Nautilus' client, paged back to the
+    window's start with every stored update's interval, or as far as OKX
+    keeps it, resumed after the stored end as one uninterrupted fill, a
+    resume OKX no longer reaches and no funding on a first fill errors.
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last

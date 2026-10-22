@@ -748,7 +748,7 @@ directory (data README).
   each fill's value (contracts × contract size × price), no minimum.
 - **Funding.** OKX settles funding on open swap and X-Perp positions
   (BTC every 8 hours, 00:00, 08:00 and 16:00 UTC, about 0.01% of the
-  position each time). A swap's catalog stores its funding rates (data
+  position each time). The catalog stores their funding rates (data
   README), so the run replays them by instrument id and Nautilus'
   simulated venue settles them: an update whose `ts_event` is on its
   interval's boundary makes one `FundingSettlement` at that time on the
@@ -760,11 +760,12 @@ directory (data README).
   negligible). The settlement adjusts the position's realized PnL and the
   balance, so the report's PnL and final balance include it; we add no
   code of our own. The stored funding must cover the whole window, as the
-  bars: it ends with the last complete UTC+8 month, so a run reaching into
-  the current month is refused naming `the funding_rates of …` and the
-  missing range. X-Perps' funding is not filled yet: their runs charge
-  none. `backtest_okx_swap_funding.rs` checks a long paying and receiving
-  at two funding times.
+  bars, else the run is refused naming `the funding_rates of …` and the
+  missing range. It reaches the last funding time before the fill, but an
+  X-Perp's starts only about 3 months before its first fill (all OKX
+  keeps): use the swap for longer studies. `backtest_okx_swap_funding.rs`
+  and `backtest_okx_xperp_funding.rs` check a long paying and receiving at
+  two funding times, and a window the funding does not cover refused.
 - **Hour bars.** A minute bar is stamped at its open (`ts_event`) and
   replayed at its close (`ts_init`), so the hour bar closing 10:00 holds
   the minutes opening 09:00 to 09:59 and is built at 10:00, after its last
