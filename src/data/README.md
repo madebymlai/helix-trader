@@ -4,8 +4,8 @@
 instruments the strategy trades and the data their bars are built from,
 and nothing else. The strategies' bars are internal, built by the
 Nautilus data engine (see the strategy README): from quotes (one a minute
-from IB, every change of the best bid or ask from OKX), or, for a
-composite bar type, from its source bars. Backtest reads that catalog.
+from IB), or, for a composite bar type, from its source bars (OKX's
+1-minute candles). Backtest reads that catalog.
 It adds what Nautilus does not provide: filling the catalog from a
 historical source, and the roll dates.
 
@@ -23,8 +23,8 @@ data/
     mod.rs         Interactive Brokers history: instruments, quotes
     gateway.rs     the IB account and the Docker gateway, started and logged in
   okx/
-    mod.rs         OKX history: instruments, the archive, the fill one day at a time
-    archive.rs     an order-book day file -> quotes
+    mod.rs         OKX history: instruments, the archive, the fill one archive day at a time
+    archive.rs     a candle day file -> bars
     testdata/      samples of real archive files and real instruments
   rolls.rs         roll dates -> continuous_future_transitions params
 ```
@@ -32,12 +32,13 @@ data/
 No node and no port of our own. The IB part starts the Docker IB Gateway
 it connects to (see "The gateway" below). A source is an adapter's historical
 client, which returns Nautilus types (`Vec<InstrumentAny>`, and the data
-of a series as `Vec<Data>`: IB's quotes, made from bars);
+of a series as `Vec<Data>`: IB's quotes, made from bars; OKX's
+candles, as bars);
 `ParquetDataCatalog` is the storage.
 
 ```
 strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
-        └──────────► okx/ ──► fill_catalog, one call per UTC day ──(OKX public API, archive files)──► OKX
+        └──────────► okx/ ──► fill_catalog, one call per archive day ──(OKX public API, archive files)──► OKX
                          └──► ParquetDataCatalog ──► backtest
 rolls ◄── catalog quotes of each contract ──► params for the INTERNAL bar type
 ```
@@ -65,7 +66,8 @@ catalog keys it:
 The rule is the data engine's: a composite bar type is built from its
 source bars, an internal one priced LAST from trades, any other from
 quotes. `ib/` serves quotes only, made from IB's `EXTERNAL` 1-MINUTE BID
-and ASK bars, which it never stores.
+and ASK bars, which it never stores. `okx/` serves the bars of
+`X.OKX-1-MINUTE-LAST-EXTERNAL` only, OKX's 1-minute candles.
 
 ### Bar type format
 
@@ -177,7 +179,7 @@ pub async fn fill_catalog(
 ```
 
 `fetch` is the seam: `ib/` supplies `IbHistory::data` over the whole
-window, `okx/` one per UTC day (see "OKX specifics"). Tests pass closures
+window, `okx/` one per archive day (see "OKX specifics"). Tests pass closures
 with canned data. A fetch over `[from, to]` returns the items of the
 series whose `ts_init` lies in it, the closed interval stored (Nautilus'
 catalog intervals are closed, the next contiguous when it starts 1 ns
@@ -566,13 +568,18 @@ instrument is in it.
 ### OKX specifics (history)
 
 `okx/` serves OKX swaps (`BTC-USDT-SWAP.OKX`) and X-Perps
-(`BTC-USD_UM_XPERP-310404.OKX`, the contracts an EEA account trades). It
+(`BTC-USD_UM_XPERP-310404.OKX`, the contracts an EEA account trades): their
+1-minute candles, stored as the bars of the instrument's
+`1-MINUTE-LAST-EXTERNAL` bar type. A strategy trades OKX on a composite
+bar type built from them, such as
+`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`; any other
+series (quotes, trades, other bars) is refused before any request. It
 uses OKX's public endpoints only, with no key.
 
 ```rust
 OkxHistory::new() -> anyhow::Result<OkxHistory>
-history.fill(&mut catalog, ids: &[InstrumentId], start, end)
-    .await -> anyhow::Result<()>        // instruments, then quotes day by day
+history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
+    .await -> anyhow::Result<()>        // per series: its instrument, then bars day by day
 ```
 
 - **Instruments.** The symbol gives the type (Nautilus'
@@ -590,75 +597,68 @@ history.fill(&mut catalog, ids: &[InstrumentId], start, end)
   divides the value by it, times the instrument's margin (see the backtest
   README, "Leverage"). OKX's own maintenance rates (BTC X-Perp: 0.65%)
   only decide liquidation, which the backtest does not simulate, so they
-  are not stored. A catalog filled before this keeps OKX's old rates
-  (`fill` never rewrites a stored instrument), which the backtest would
-  read as multipliers: delete its OKX instrument directories and fill
-  again.
+  are not stored.
 - **X-Perps.** A `CryptoFuture` expiring in 2031, linear, settled in USD
   (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole
   contracts, tick 0.1. Funding is not filled (out of scope, as for swaps).
-- **One UTC day at a time.** `fill` calls `fill_catalog` once per UTC day
-  and per instrument, over `[start, end of that day]`, the day ending 1 ns
-  before the next midnight: a line stamped at midnight is in the next
-  day's file and opens the next window. Closed and contiguous, as
-  Nautilus' catalog files of one UTC day
-  (`2024-01-01T00-00-00-000000000Z_2024-01-01T23-59-59-999999999Z.parquet`,
-  as its Tardis loader writes them) and as its data engine asks a venue
-  for each missing closed interval. Each call resumes where the catalog
-  stopped, so only one day of quotes is in memory and a stopped run picks
-  up at its last stored day. An instrument starts on the day it resumes
-  in; a day starting at `end` is left to the next run.
-- **The archive.** For each day, `GET /api/v5/public/market-data-history`
-  (module 4, the 400-level order book; 5 requests per 2 s; `instType`
-  `SWAP` or `FUTURES`, the family) names the day's file; it is downloaded
-  from `static.okx.com` into a temporary file, read as a stream and
-  deleted. Days are UTC. A swap has its own file
-  (`BTC-USDT-SWAP-L2orderbook-400lv-<day>.tar.gz`, about 375 MB for BTC);
-  a future is in its family's chain file
-  (`BTC-USD_UM_XPERP-futureschain-L2orderbook-400lv-<day>.tar.gz`, 20-60 MB
-  for BTC), which holds one `.data` file per contract of the family, named
-  after it. The reader takes the contract's file and skips the others; a
-  line naming another contract is an error. The X-Perp archive starts in
-  April 2026.
-- **Quotes from the book.** Each line of the file (a snapshot every 15
-  minutes, changed levels in between) becomes the adapter's `OKXBookMsg`,
-  `parse_book_msg` makes its deltas, and a Nautilus `OrderBook` (L2)
-  replays them; a snapshot clears the book. After each line, if the best
-  bid, best ask or one of their sizes changed, the top becomes a
-  `QuoteTick` stamped with the line's exchange time, at the instrument's
-  precisions. The first line of a window gives a quote whatever the
-  change. Crossed tops (ask below bid) and one-sided tops are dropped and
-  counted in the log; a locked top (ask = bid) is kept.
-- **Archive start.** The order-book archive begins on 2023-01-01; an
-  earlier `start` is refused before any request. An instrument listed
-  later has no file on its first day: an empty first response, an error
-  naming it.
-- **Archive lag.** OKX publishes a day about two days after it ends. A
-  day with no file stops that instrument without recording it; the next
-  run asks for it again.
-- **Logging.** Each download logs its file and size and its progress
-  every 100 MB; each day logs its quotes and the tops dropped.
-- **Verified** (2026-10-21, release build, BTC-USDT-SWAP.OKX,
-  2026-10-17 to 10-19, `fill-catalog` with an EMA config on that id):
-
-  | Day | Archive file | Quotes | Crossed / one-sided | Catalog file |
-  |---|---|---|---|---|
-  | 2026-10-17 | 194 MB | 1,613,229 | 0 / 0 | 15 MB |
-  | 2026-10-18 | 292 MB | 1,957,395 | 0 / 0 | 20 MB |
-  | 2026-10-19 | 375 MB | 2,603,074 | 0 / 0 | 27 MB |
-
-  About 10.5 bytes per quote, so roughly 15-30 MB per BTC day and 10 GB
-  per year. The 10-19 count equals the archive probe's count of top
-  changes. A day takes 50-90 s: the download runs at about 6.5 MB/s
-  (two downloads at once share that rate, so parallel days would not help)
-  and reading the file takes 20-30 s. A re-run over the same window asked
-  for nothing; extending to 10-21 filled 10-19 and stopped at 10-20, not
-  yet published.
-- **Verified on X-Perps** (2026-10-22, BTC-USD_UM_XPERP-310404.OKX,
-  2026-10-18 to 10-20): chain files of 30, 39 and 47 MB gave 606,439,
-  884,471 and 1,070,913 quotes (0 crossed, 0 one-sided), 5-9 MB a day in
-  the catalog, the three days in 68 s. The 10-19 count equals a plain
-  replay of the file outside Nautilus.
+- **The archive.** `GET /api/v5/public/market-data-history` (module 2,
+  1-minute candles; `instType` `SWAP` or `FUTURES`, the family; 5 requests
+  per 2 s, kept to one every 600 ms) names a day's file, a zip of one CSV
+  of about 0.04 MB for BTC, downloaded from `static.okx.com` into memory.
+  A swap has its own file (`BTC-USDT-SWAP-candlesticks-<day>.zip`); a
+  future is in its family's chain file
+  (`BTC-USD_UM_XPERP-futureschain-candlesticks-<day>.zip`), whose rows of
+  other contracts are skipped. Every row is a confirmed candle: an
+  unconfirmed one is an error.
+- **Days of UTC+8.** The archive's day is that of UTC+8: the file of
+  2026-10-19 holds the 1,440 minutes opening from 2026-10-18T16:00Z to
+  2026-10-19T15:59Z. Files are chosen by that day, not by the UTC date.
+- **Bars as the adapter makes them.** Each row becomes the adapter's
+  `OKXCandlestick` and its `parse_candlestick` makes the bar, at the
+  instrument's precisions: the prices, and the volume in contracts (OKX's
+  `vol`), of the bars Nautilus' OKX clients make from the API.
+- **Stamped at the open, seen at the close.** `ts_event` is the candle's
+  open, as OKX and the adapter stamp it; `ts_init` is its close (open +
+  1 minute). This is Nautilus' convention for bars stamped at their open
+  (Concepts › Backtesting › Bar execution, "Bar timestamp convention":
+  `ts_init` must be the close, else the whole bar is visible before it
+  formed), and what the adapter does for its own historical bars from the
+  release after 0.66.0 (nautilus_trader#5339, commit `fc94ea1`); 0.66.0
+  still stamps them at the request time. The backtest replays by
+  `ts_init` and the data engine aggregates by it, so the hour bar closing
+  10:00 holds the minutes opening 09:00 to 09:59 and is built at 10:00
+  (`backtest_okx_swap.rs` checks both).
+- **One archive day at a time.** `fill` calls `fill_catalog` once per
+  archive day and series, over the bars closing in `(day start, day end]`
+  (UTC+8 midnights), closed and contiguous with the next day's, as
+  Nautilus' catalog intervals. The first window starts with the day of
+  `start`, which its file covers whole, so the stored range may begin
+  before `start`. Each call resumes where the catalog stopped; a stopped
+  run picks up at its last stored day. A day starting at `end` is left to
+  the next run.
+- **Archive start and lag.** A day with no file on the first day of a
+  fill (before the listing, or before the archive) is an empty first
+  response, an error naming the series. OKX publishes a day about two
+  days after it ends; a later day with no file stops the series without
+  recording it, and the next run asks for it again.
+- **Catalogs filled before candles.** A catalog filled when `okx/` stored
+  quotes rebuilt from the order book must be filled again, fresh, into a
+  new directory: its quotes are no longer filled or extended, and nothing
+  deletes them.
+- **Candles against the API.** One archive day (2026-10-19, 1,440
+  minutes) compared minute by minute with OKX's
+  `/api/v5/market/history-candles` (`bar=1m`, public, 2026-10-22), for
+  BTC-USDT-SWAP and BTC-USD_UM_XPERP-310404: the same 1,440 minutes on
+  both, no difference in open, high, low, close, `vol`, `volCcy`,
+  `volCcyQuote` or `confirm`.
+- **Verified** (2026-10-22, release build, `fill-catalog` with an EMA
+  config on each id, `--start 2026-10-13 --end 2026-10-21`): archive days
+  10-13 to 10-20 of 1,440 bars each per instrument, then a stop at 10-21,
+  not yet published; later that day 10-21 was out and the same fill took
+  its first 480 minutes, up to `end`. About 6 s per instrument; the
+  catalog holds about 50 KB a day per instrument. A re-run asked for
+  nothing. Four fills back to back got no HTTP 429 at one listing every
+  600 ms (one every 400 ms did, now and then).
 
 ### Other sources
 
@@ -826,19 +826,17 @@ bar after a roll behaves when the new contract has not ticked yet is
     unique); the data client config and the bar requests use the full
     session; a series other than quotes refused.
   - `okx/`: the samples of a real swap file and a real X-Perp chain file
-    to quotes (count, first and last against a plain replay, precisions,
-    exchange time, a window from a resume point, a line at its start), and
-    on small hand-made lines: a change below the top gives no quote, a
-    snapshot resets the book, crossed and one-sided tops dropped and
-    counted, a locked one kept, a bad line named, a line of another
-    contract named; of a chain only the contract's file read, a chain
-    without it an error; the real BTC swap and X-Perp to a
-    `CryptoPerpetual` and a `CryptoFuture` with margins of 1, a dated
-    future refused; the type and family of a symbol; the archive listing
-    of a swap and of a chain; the fill one UTC day per call with a fake
-    day source (resume, the line at midnight, a day not published, a later
-    start, a failed day keeping the days before, no file on the first
-    day); a start before the archive refused.
+    (the first 61 minutes and the last of 2026-10-19) to bars: stamped at
+    the open, seen at the close, prices and volume in contracts, the
+    minutes of an hour; on small hand-made files an unconfirmed candle
+    named, the rows of other contracts skipped, a file without the
+    contract an error; the real BTC swap and X-Perp to a `CryptoPerpetual`
+    and a `CryptoFuture` with margins of 1, a dated future refused; the
+    type and family of a symbol; only minute candles served; the archive
+    listing of a swap and of a chain; days of UTC+8; the fill one archive
+    day per call with a fake day source (resume, a start on a day's end,
+    a day not published, a failed day keeping the days before, no file on
+    the first day).
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last

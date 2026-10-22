@@ -74,7 +74,8 @@ impl Backtest {
     /// `end`, a leverage not positive), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of a series
     /// over `[start - 1 ns - warmup, end]`, if the node fails to build
-    /// or run, or if a fill has no quote before it.
+    /// or run, or if a fill of an instrument with quotes has none before
+    /// it.
     pub fn run<S>(&self, strategy: S) -> anyhow::Result<Outcome>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,

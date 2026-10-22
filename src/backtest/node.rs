@@ -118,7 +118,8 @@ fn data_config(
 
 /// Runs `config` with `strategy` on a new `BacktestNode` and returns its
 /// one result, with the costs of the fills in the engine's cache, each on
-/// the quotes the run replayed, loaded again as the node loads them.
+/// the quotes the run replayed, if any, loaded again as the node loads
+/// them.
 pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -228,6 +229,8 @@ mod tests {
         let config = run_config(&backtest()).unwrap();
         let venue = &config.venues()[0];
         assert!(venue.bar_execution());
+        // Nautilus' default: external bars replay open, high, low, close.
+        assert!(!venue.bar_adaptive_high_low_ordering());
         assert!(!venue.liquidity_consumption());
     }
 

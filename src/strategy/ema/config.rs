@@ -1,8 +1,8 @@
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use jiff::SignedDuration;
 use nautilus_model::{
     data::{BarSpecification, BarType},
-    enums::{AggregationSource, PriceType},
+    enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
     types::Quantity,
 };
@@ -22,8 +22,16 @@ pub struct EmaCrossConfig {
     /// The contracts traded and stored in the catalog.
     pub instrument_ids: Vec<InstrumentId>,
     /// The bars, the same for every instrument: time bars Nautilus builds
-    /// from the quotes, so priced BID, ASK or MID.
+    /// from the quotes, so priced BID, ASK or MID, or, with `composite`,
+    /// from the instrument's source bars, priced as those.
     pub bar_spec: BarSpecification,
+    /// The source bars of a composite bar type, if the bars are built from
+    /// bars rather than quotes: `{ step = 1, aggregation = "MINUTE",
+    /// aggregation_source = "EXTERNAL" }` makes
+    /// `<instrument>-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` of a `1-HOUR`
+    /// `LAST` bar spec, as OKX's 1-minute candles are.
+    #[serde(default)]
+    pub composite: Option<CompositeSource>,
     #[serde(default = "default_fast_period")]
     #[builder(default = default_fast_period())]
     pub fast_period: usize,
@@ -51,20 +59,32 @@ impl EmaCrossConfig {
         }
     }
 
-    /// One internal bar type per instrument.
+    /// One internal bar type per instrument, composite if built from
+    /// source bars.
     #[must_use]
     pub fn bar_types(&self) -> Vec<BarType> {
         self.instrument_ids
             .iter()
-            .map(|id| BarType::new(*id, self.bar_spec, AggregationSource::Internal))
+            .map(|&id| match self.composite {
+                None => BarType::new(id, self.bar_spec, AggregationSource::Internal),
+                Some(source) => BarType::new_composite(
+                    id,
+                    self.bar_spec,
+                    AggregationSource::Internal,
+                    source.step,
+                    source.aggregation,
+                    source.aggregation_source,
+                ),
+            })
             .collect()
     }
 
     /// # Errors
     ///
     /// Returns an error if the config is inconsistent: no instruments,
-    /// several venues, a bar spec not aggregated on time or not priced on
-    /// the quotes (BID, ASK or MID), periods out of
+    /// several venues, a bar spec not aggregated on time or, built from
+    /// quotes, not priced on them (BID, ASK or MID), invalid composite
+    /// source bars, periods out of
     /// order, a non-positive size or warmup, a session, if any, not opening
     /// before it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -81,10 +101,11 @@ impl EmaCrossConfig {
             self.bar_spec
         );
         ensure!(
-            matches!(
-                self.bar_spec.price_type,
-                PriceType::Bid | PriceType::Ask | PriceType::Mid
-            ),
+            self.composite.is_some()
+                || matches!(
+                    self.bar_spec.price_type,
+                    PriceType::Bid | PriceType::Ask | PriceType::Mid
+                ),
             "bar spec {} is not priced BID, ASK or MID: its bars are built from quotes",
             self.bar_spec
         );
@@ -92,10 +113,28 @@ impl EmaCrossConfig {
             self.fast_period > 0 && self.fast_period < self.slow_period,
             "fast period must be positive and below the slow period"
         );
+        if let Some(source) = self.composite {
+            BarSpecification::new_checked(
+                source.step,
+                source.aggregation,
+                self.bar_spec.price_type,
+            )
+            .with_context(|| format!("invalid composite source bars {source:?}"))?;
+        }
         ensure!(self.trade_size.is_positive(), "trade size must be positive");
         ensure!(self.warmup.is_positive(), "warmup must be positive");
         self.session.as_ref().map_or(Ok(()), Session::validate)
     }
+}
+
+/// The source bars of a composite bar type: the `composite_*` arguments of
+/// Nautilus' `BarType::new_composite`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositeSource {
+    pub step: usize,
+    pub aggregation: BarAggregation,
+    pub aggregation_source: AggregationSource,
 }
 
 fn default_base() -> StrategyConfig {
@@ -205,6 +244,37 @@ mod tests {
         let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("LAST"), "{err}");
+    }
+
+    const COMPOSITE_TOML: &str = r#"
+        instrument_ids = ["BTC-USDT-SWAP.OKX"]
+        bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+        composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
+        trade_size = "0.01"
+        warmup = "2h"
+    "#;
+
+    #[test]
+    fn bars_built_from_source_bars_are_a_composite_bar_type_priced_as_their_source() {
+        let config: EmaCrossConfig = toml::from_str(COMPOSITE_TOML).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.bar_types(),
+            [BarType::from(
+                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+            )]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_source_bars() {
+        let toml = COMPOSITE_TOML.replace(
+            "step = 1, aggregation = \"MINUTE\"",
+            "step = 60, aggregation = \"MINUTE\"",
+        );
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("composite"), "{err}");
     }
 
     #[test]

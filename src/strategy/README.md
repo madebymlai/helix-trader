@@ -82,12 +82,25 @@ session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
   day, since `00:00`-`23:59` still drops the bar closing at midnight).
 - Loading then validates what serde cannot: at least one instrument, all on
   one venue, a bar spec aggregated on time (the session needs the bar's
-  length) and priced `BID`, `ASK` or `MID` (bars built from quotes; `LAST`
+  length) and, built from quotes, priced `BID`, `ASK` or `MID` (`LAST`
   fails at load), a session, if any, opening before it closes.
 
 The config builds the bar types the strategy uses, one per instrument:
 `BarType::new(id, bar_spec, AggregationSource::Internal)`, such as
-`SXR8.IBIS-1-HOUR-MID-INTERNAL`.
+`SXR8.IBIS-1-HOUR-MID-INTERNAL`. With the optional `composite` line the
+bars are built from the instrument's source bars instead, a composite bar
+type (`BarType::new_composite`, its `composite_*` arguments):
+
+```toml
+instrument_ids = ["BTC-USDT-SWAP.OKX"]
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
+```
+
+gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
+bars of OKX's 1-minute candles, any price type (the source's). The
+warmup does not serve composite bar types yet: it requests quotes, which
+OKX has none of (see the backtest README, "OKX on candles").
 
 The config also states what the strategy needs from data, as one
 `strategy::DataRequirements`: its bar types and its warmup; its

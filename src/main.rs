@@ -218,8 +218,8 @@ async fn main() -> anyhow::Result<()> {
 /// Checks everything that needs no gateway, then fills the catalog with the
 /// instruments and the series their bars are built from (see
 /// `strategy::catalog_series`) from each instrument's source: OKX's
-/// archive for OKX instruments (their quotes), IB (connected only if
-/// needed) for the others.
+/// archive for OKX instruments (their 1-minute candles), IB (connected
+/// only if needed) for the others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -247,8 +247,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .into_iter()
         .partition(|&id| OkxHistory::serves(id));
     if !okx_ids.is_empty() {
+        let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
         OkxHistory::new()?
-            .fill(&mut catalog, &okx_ids, start, end)
+            .fill(&mut catalog, &series, start, end)
             .await?;
     }
     if !ib_ids.is_empty() {

@@ -6,7 +6,8 @@
 //! `MaxDrawdown` (`nautilus_analysis`) over the returns series. Next to the
 //! PnL it prints the costs, which the result does not hold: from the fills
 //! (`OrderFilled`, with their commission) of the orders in the engine's
-//! cache, and the quotes they filled on.
+//! cache, and the quotes they filled on, if the run replayed quotes of
+//! their instrument; a run on bars alone has no spread to measure.
 
 use std::{collections::BTreeMap, fmt::Write};
 
@@ -41,18 +42,22 @@ struct Costs {
     spread: Decimal,
     /// The fills priced in this currency.
     trades: usize,
+    /// Those of an instrument the run replayed no quote of: if any, the
+    /// spread of the currency is not measured.
+    unquoted: usize,
 }
 
 impl Outcome {
     /// `result` and the costs of every fill of the orders in `cache`, each
     /// on the last of `quotes` of its instrument stamped at or before the
-    /// fill: the quote the venue filled it on.
+    /// fill: the quote the venue filled it on. A fill of an instrument
+    /// with no quote in `quotes` (a run on bars) has no spread.
     ///
     /// # Errors
     ///
     /// Returns an error if a fill's instrument is not in `cache` or is
-    /// inverse (its value is not linear in the price), or if no quote of
-    /// it precedes the fill.
+    /// inverse (its value is not linear in the price), or if its instrument
+    /// has quotes and none precedes the fill.
     pub(super) fn new(
         result: BacktestResult,
         cache: &Cache,
@@ -76,7 +81,19 @@ impl Outcome {
                     .instrument(&id)
                     .with_context(|| format!("instrument {id} of a fill not in the cache"))?;
                 ensure!(!instrument.is_inverse(), "{id} is inverse");
-                let quotes = quoted.get(&id).map_or(&[][..], Vec::as_slice);
+                let cost = costs.entry(fill.currency.code.to_string()).or_default();
+                cost.trades += 1;
+                if let Some(commission) = fill.commission {
+                    let code = commission.currency.code.to_string();
+                    costs.entry(code).or_default().commission += commission.as_decimal();
+                }
+                let Some(quotes) = quoted.get(&id) else {
+                    costs
+                        .entry(fill.currency.code.to_string())
+                        .or_default()
+                        .unquoted += 1;
+                    continue;
+                };
                 let before = quotes.partition_point(|quote| quote.ts_init <= fill.ts_event);
                 let quote = before
                     .checked_sub(1)
@@ -92,13 +109,10 @@ impl Outcome {
                     mid - price
                 };
                 let size = fill.last_qty.as_decimal() * instrument.multiplier().as_decimal();
-                let cost = costs.entry(fill.currency.code.to_string()).or_default();
-                cost.spread += paid * size;
-                cost.trades += 1;
-                if let Some(commission) = fill.commission {
-                    let code = commission.currency.code.to_string();
-                    costs.entry(code).or_default().commission += commission.as_decimal();
-                }
+                costs
+                    .entry(fill.currency.code.to_string())
+                    .or_default()
+                    .spread += paid * size;
             }
         }
         Ok(Self { result, costs })
@@ -111,7 +125,10 @@ impl Outcome {
 /// The costs of each currency: the commission, the spread paid, their sum
 /// per trade (a fill), and the gross PnL, the PnL before both: Nautilus'
 /// `PnL (total)` plus the two. That PnL is realized only, so the gross
-/// also holds the spread a position still open at the end paid to open.
+/// also holds the spread a position still open at the end paid to open. A
+/// currency with a fill on no quote (a run on bars) prints its spread as
+/// not applicable, and its cost per trade and gross PnL hold the commission
+/// alone.
 #[must_use]
 pub fn report(outcome: &Outcome) -> String {
     let result = &outcome.result;
@@ -125,11 +142,12 @@ pub fn report(outcome: &Outcome) -> String {
     }
     for (currency, costs) in &outcome.costs {
         let f64 = |value: Decimal| value.to_f64().unwrap_or(f64::NAN);
-        let total = costs.commission + costs.spread;
-        let mut figures = BTreeMap::from([
-            ("Commission".to_string(), f64(costs.commission)),
-            ("Spread".to_string(), f64(costs.spread)),
-        ]);
+        let spread = (costs.unquoted == 0).then_some(costs.spread);
+        let total = costs.commission + spread.unwrap_or_default();
+        let mut figures = BTreeMap::from([("Commission".to_string(), f64(costs.commission))]);
+        if let Some(spread) = spread {
+            figures.insert("Spread".to_string(), f64(spread));
+        }
         if costs.trades > 0 {
             let per_trade = total / Decimal::from(costs.trades);
             figures.insert("Cost per trade".to_string(), f64(per_trade));
@@ -141,6 +159,10 @@ pub fn report(outcome: &Outcome) -> String {
             figures.insert("Gross PnL".to_string(), pnl + f64(total));
         }
         section(&mut out, &format!("Costs ({currency})"), &figures);
+        if spread.is_none() {
+            // Last of the section's sorted names.
+            out.push_str("  Spread: n/a (no quotes)\n");
+        }
     }
     let mut returns = result.stats_returns.clone();
     if let Some(drawdown) = MaxDrawdown::new().calculate_from_returns(&result.returns_series) {
@@ -238,12 +260,23 @@ mod tests {
                     commission: Decimal::new(2700, 2),
                     spread: Decimal::new(450, 2),
                     trades: 9,
+                    unquoted: 0,
                 },
             ),
             (
                 "GBP".to_string(),
                 Costs {
                     commission: Decimal::new(125, 2),
+                    ..Costs::default()
+                },
+            ),
+            // 2 fills on bars, with no quote to measure a spread on.
+            (
+                "USD".to_string(),
+                Costs {
+                    commission: Decimal::new(50, 2),
+                    unquoted: 2,
+                    trades: 2,
                     ..Costs::default()
                 },
             ),
@@ -280,6 +313,12 @@ Costs (GBP)
   Commission: 1.250000
   Gross PnL: 4.750000
   Spread: 0.000000
+
+Costs (USD)
+  Commission: 0.500000
+  Cost per trade: 0.250000
+  Gross PnL: 2.000000
+  Spread: n/a (no quotes)
 
 Return statistics
   Average (Return): 0.001000
