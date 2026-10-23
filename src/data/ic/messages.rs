@@ -11,6 +11,7 @@
 use std::fmt;
 
 use prost::Message as _;
+use zeroize::Zeroize;
 
 #[allow(clippy::all, clippy::pedantic, missing_docs, dead_code)]
 mod proto {
@@ -76,6 +77,20 @@ pub(super) fn frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> V
         client_msg_id,
     }
     .encode_to_vec()
+}
+
+/// As `frame`, for a message holding secret material: the encoded copy
+/// of the message is wiped once the frame holds it. The frame itself goes
+/// to the transport, out of the adapter's reach.
+pub(super) fn secret_frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> Vec<u8> {
+    let mut envelope = ProtoMessage {
+        payload_type: M::TYPE,
+        payload: Some(message.encode_to_vec()),
+        client_msg_id,
+    };
+    let frame = envelope.encode_to_vec();
+    envelope.payload.zeroize();
+    frame
 }
 
 /// The message `envelope` holds: an `M`, or the error cTrader answered.
@@ -176,6 +191,20 @@ mod tests {
         assert_eq!(envelope.payload_type, 2116);
         assert_eq!(envelope.client_msg_id.as_deref(), Some("7"));
         assert_eq!(open::<ProtoOaSymbolByIdReq>(&envelope), Ok(request));
+    }
+
+    #[test]
+    fn a_secret_frame_is_the_same_frame() {
+        let request = ProtoOaApplicationAuthReq {
+            client_id: "12345_clientIdValue".to_owned(),
+            client_secret: "clientSecretValue".to_owned(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            secret_frame(&request, Some("1".to_owned())),
+            frame(&request, Some("1".to_owned()))
+        );
     }
 
     #[test]

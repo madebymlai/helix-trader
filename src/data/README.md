@@ -764,7 +764,9 @@ history.disconnect().await
   `ctidTraderAccountId` of the IC account. A token lasts about 30 days;
   renew it by hand in the Playground. None is ever printed: they are
   `SecretString`s, `Debug` redacts them, errors name variables and
-  cTrader's error codes only.
+  cTrader's error codes only. The plaintext copies an auth frame is built
+  from are wiped (`zeroize`) once it is encoded; the frame itself goes to
+  the transport.
 - **Session.** Application auth, then account auth; a refusal names the
   code and what to check (`CH_ACCESS_TOKEN_INVALID`: renew
   `IC_ACCESS_TOKEN`), as does an account other than `IC_ACCOUNT_ID`. A

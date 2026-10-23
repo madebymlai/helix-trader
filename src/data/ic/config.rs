@@ -92,16 +92,18 @@ impl IcCredential {
     /// Returns an error naming every variable missing or empty, or if the
     /// account id is not an integer; never a value.
     pub(super) fn from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
-        let set = |name| var(name).filter(|value| !value.is_empty());
-        let names = [
-            CLIENT_ID_VAR,
-            CLIENT_SECRET_VAR,
-            ACCESS_TOKEN_VAR,
-            ACCOUNT_ID_VAR,
+        // Each value is read once, straight into a zeroizing owner.
+        let read = |name| SecretString::from(var(name).unwrap_or_default());
+        let values = [
+            (CLIENT_ID_VAR, read(CLIENT_ID_VAR)),
+            (CLIENT_SECRET_VAR, read(CLIENT_SECRET_VAR)),
+            (ACCESS_TOKEN_VAR, read(ACCESS_TOKEN_VAR)),
+            (ACCOUNT_ID_VAR, read(ACCOUNT_ID_VAR)),
         ];
-        let missing: Vec<&str> = names
-            .into_iter()
-            .filter(|name| set(name).is_none())
+        let missing: Vec<&str> = values
+            .iter()
+            .filter(|(_, value)| value.expose_secret().is_empty())
+            .map(|(name, _)| *name)
             .collect();
         if !missing.is_empty() {
             bail!(
@@ -110,18 +112,19 @@ impl IcCredential {
                 missing.join(", ")
             );
         }
-        let secret = |name| SecretString::from(set(name).unwrap_or_default());
-        let account_id = SecretString::from(set(ACCOUNT_ID_VAR).unwrap_or_default())
-            .expose_secret()
-            .parse()
-            .ok()
-            .with_context(|| {
-                format!("{ACCOUNT_ID_VAR} must be an integer, the account's ctidTraderAccountId")
-            })?;
+        let [
+            (_, client_id),
+            (_, client_secret),
+            (_, access_token),
+            (_, account_id),
+        ] = values;
+        let account_id = account_id.expose_secret().parse().ok().with_context(|| {
+            format!("{ACCOUNT_ID_VAR} must be an integer, the account's ctidTraderAccountId")
+        })?;
         Ok(Self {
-            client_id: secret(CLIENT_ID_VAR),
-            client_secret: secret(CLIENT_SECRET_VAR),
-            access_token: secret(ACCESS_TOKEN_VAR),
+            client_id,
+            client_secret,
+            access_token,
             account_id: IcAccountId::new(account_id),
         })
     }

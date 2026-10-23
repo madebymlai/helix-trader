@@ -10,13 +10,14 @@ use nautilus_network::{
 };
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
+use zeroize::Zeroize;
 
 use super::super::{
     config::IcCredential,
     messages::{
         IcError, Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
         ProtoOaAccountAuthRes, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-        ProtoOaPayloadType, frame, open, payload_name,
+        ProtoOaPayloadType, frame, open, payload_name, secret_frame,
     },
 };
 
@@ -140,7 +141,8 @@ impl IcWsHandler {
     }
 
     /// Sends one frame. No frame content is logged: auth frames hold the
-    /// secret and the token.
+    /// secret and the token. The transport takes the frame; its copies are
+    /// out of the adapter's reach.
     async fn send(&self, frame: Vec<u8>) -> Result<(), IcError> {
         let client = self
             .client
@@ -170,12 +172,15 @@ impl IcWsHandler {
     /// response (see `receive`).
     async fn authenticate(&mut self) {
         let id = self.next_id();
-        let request = ProtoOaApplicationAuthReq {
+        let mut request = ProtoOaApplicationAuthReq {
             client_id: self.credential.client_id.expose_secret().to_owned(),
             client_secret: self.credential.client_secret.expose_secret().to_owned(),
             ..Default::default()
         };
-        match self.send(frame(&request, Some(id.clone()))).await {
+        let frame = secret_frame(&request, Some(id.clone()));
+        request.client_id.zeroize();
+        request.client_secret.zeroize();
+        match self.send(frame).await {
             Ok(()) => self.session = Session::ApplicationAuth(id),
             Err(e) => self.fail_session(format!("sending the application auth: {e}")),
         }
@@ -183,12 +188,14 @@ impl IcWsHandler {
 
     async fn authenticate_account(&mut self) {
         let id = self.next_id();
-        let request = ProtoOaAccountAuthReq {
+        let mut request = ProtoOaAccountAuthReq {
             ctid_trader_account_id: self.credential.account_id.get(),
             access_token: self.credential.access_token.expose_secret().to_owned(),
             ..Default::default()
         };
-        match self.send(frame(&request, Some(id.clone()))).await {
+        let frame = secret_frame(&request, Some(id.clone()));
+        request.access_token.zeroize();
+        match self.send(frame).await {
             Ok(()) => self.session = Session::AccountAuth(id),
             Err(e) => self.fail_session(format!("sending the account auth: {e}")),
         }

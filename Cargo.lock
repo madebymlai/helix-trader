@@ -2106,6 +2106,7 @@ dependencies = [
  "tokio",
  "toml",
  "tungstenite",
+ "zeroize",
  "zip",
 ]
 
