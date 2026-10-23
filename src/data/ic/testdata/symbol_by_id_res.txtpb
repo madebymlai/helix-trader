@@ -1,0 +1,26 @@
+# Synthetic fixture, not a capture: built from Spotware's OpenApiMessages.proto
+# and OpenApiModelMessages.proto (commit 3fd8bddf). Ids, maximum volumes and
+# commissions are made up; the contract sizes (100,000 EUR and 100 oz a lot,
+# 0.01 lot minimum and step) are IC's published ones, in cents of a unit as
+# help.ctrader.com/open-api/model-messages states. Account id 1000001 is fake.
+# To be replaced by a scrubbed capture from the IC demo.
+# Encoded with: protoc -I ../proto --encode=<Message> OpenApiMessages.proto < x.txtpb > x.bin
+# Message: ProtoOASymbolByIdRes
+ctidTraderAccountId: 1000001
+symbol {
+  symbolId: 1 digits: 5 pipPosition: 4 enableShortSelling: true
+  maxVolume: 1000000000 minVolume: 100000 stepVolume: 100000
+  commissionType: USD_PER_MILLION_USD preciseTradingCommissionRate: 3500000000
+  lotSize: 10000000 measurementUnits: "EUR"
+}
+symbol {
+  symbolId: 41 digits: 2 pipPosition: 2 enableShortSelling: true
+  maxVolume: 1000000 minVolume: 100 stepVolume: 100
+  commissionType: USD_PER_LOT preciseTradingCommissionRate: 700000000
+  lotSize: 10000 measurementUnits: "OZ"
+}
+symbol {
+  symbolId: 10015 digits: 2 pipPosition: 1 enableShortSelling: true
+  maxVolume: 1000000 minVolume: 100 stepVolume: 100
+  lotSize: 100 measurementUnits: "US500"
+}

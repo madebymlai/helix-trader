@@ -1,0 +1,13 @@
+# Synthetic fixture, not a capture: built from Spotware's OpenApiMessages.proto
+# and OpenApiModelMessages.proto (commit 3fd8bddf). Ids, maximum volumes and
+# commissions are made up; the contract sizes (100,000 EUR and 100 oz a lot,
+# 0.01 lot minimum and step) are IC's published ones, in cents of a unit as
+# help.ctrader.com/open-api/model-messages states. Account id 1000001 is fake.
+# To be replaced by a scrubbed capture from the IC demo.
+# Encoded with: protoc -I ../proto --encode=<Message> OpenApiMessages.proto < x.txtpb > x.bin
+# The errorCode and description are ProtoOAErrorCode CH_ACCESS_TOKEN_INVALID
+# and its comment in OpenApiModelMessages.proto.
+# Message: ProtoOAErrorRes
+ctidTraderAccountId: 1000001
+errorCode: "CH_ACCESS_TOKEN_INVALID"
+description: "Access token is invalid."

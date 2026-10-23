@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IbHistory, OkxHistory, fill_catalog},
+    data::{IbHistory, IcHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
         DataRequirements, catalog_series,
@@ -217,8 +217,9 @@ async fn main() -> anyhow::Result<()> {
 /// Checks everything that needs no gateway, then fills the catalog with the
 /// instruments and the series their bars are built from (see
 /// `strategy::catalog_series`) from each instrument's source: OKX's
-/// archive for OKX instruments (their 1-minute candles), IB (connected
-/// only if needed) for the others.
+/// archive for OKX instruments (their 1-minute candles), IC Markets'
+/// cTrader for IC instruments, IB (connected only if needed) for the
+/// others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -240,16 +241,25 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     // The source of an instrument is its venue's: OKX's archive for OKX,
-    // IB for every other venue.
-    let (okx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
+    // IC's cTrader for IC, IB for every other venue.
+    let (okx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
         .instrument_ids()
         .into_iter()
         .partition(|&id| OkxHistory::serves(id));
+    let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
+        others.into_iter().partition(|&id| IcHistory::serves(id));
     if !okx_ids.is_empty() {
         let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
         OkxHistory::new()?
             .fill(&mut catalog, &series, start, end)
             .await?;
+    }
+    if !ic_ids.is_empty() {
+        let series = catalog_series(&requirements.of_instruments(&ic_ids).bar_types);
+        let ic = IcHistory::connect().await?;
+        let filled = ic.fill(&mut catalog, &series, start, end).await;
+        ic.disconnect().await;
+        filled?;
     }
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;

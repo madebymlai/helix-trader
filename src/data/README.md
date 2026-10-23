@@ -23,6 +23,14 @@ data/
   ib/
     mod.rs         Interactive Brokers history: instruments, quotes
     gateway.rs     the IB account and the Docker gateway, started and logged in
+  ic/
+    mod.rs         IC Markets history: the session, instruments, the fill
+    config.rs      the environment and the credential, from IC_*
+    messages.rs    Spotware's protobuf messages, their payload types, the envelope
+    parse.rs       cTrader symbols -> CurrencyPair, ids
+    websocket/     the cTrader connection: outer client, handler task
+    proto/         Spotware's four .proto files, vendored (build.rs compiles them)
+    testdata/      synthetic responses, text and wire forms
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
@@ -39,6 +47,7 @@ candles, as bars);
 
 ```
 strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
+        ├──────────► ic/ ──► fill_catalog ──(cTrader Open API, protobuf over WebSocket)──► IC Markets
         └──────────► okx/ ──► fill_catalog, one call per archive month or day ──(OKX public API, archive files)──► OKX
                          └──► ParquetDataCatalog ──► backtest
 rolls ◄── catalog quotes of each contract ──► params for the INTERNAL bar type
@@ -562,9 +571,10 @@ history.quotes(instrument_id, start, end)
 ### Choosing the source
 
 `fill-catalog` picks each instrument's source from its venue
-(`OkxHistory::serves`): OKX's archive for `….OKX` ids, IB for every other
-venue. A config may hold both; IB's gateway starts only if an IB
-instrument is in it.
+(`OkxHistory::serves`, `IcHistory::serves`): OKX's archive for `….OKX`
+ids, IC's cTrader for `….ICMARKETS`, IB for every other venue. A config
+may hold all three; IB's gateway starts, and IC connects, only if one of
+their instruments is in it.
 
 ### OKX specifics (history)
 
@@ -729,6 +739,62 @@ history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
   in 45 contiguous intervals, 34 MB, in 12.6 s. A re-run took 1.2 s (two
   listings, nothing new). The monthly files of those 24 months hold, byte
   for byte, the rows of their daily files.
+
+### IC Markets specifics (history)
+
+`ic/` serves IC Markets' forex and metals through Spotware's cTrader Open
+API: binary protobuf frames over Nautilus' `WebSocketClient`, on
+`wss://demo.ctraderapi.com:5035` or `wss://live.ctraderapi.com:5035`.
+Nautilus has no cTrader adapter; this one follows its adapter guide
+(outer client and handler task, `SetClient` first, `AuthTracker`). The
+messages are Spotware's `.proto` files, vendored in `ic/proto/` (commit
+in `build.rs`) and compiled with prost; `build.rs` needs `protoc`.
+
+```rust
+IcHistory::connect().await -> anyhow::Result<IcHistory>   // reads IC_*, authenticates
+history.instruments(&ids).await -> anyhow::Result<Vec<InstrumentAny>>
+history.fill(&mut catalog, series, start, end).await      // instruments, then quotes (not yet)
+history.disconnect().await
+```
+
+- **Credentials, in `.env`.** `IC_ENVIRONMENT`, `demo` or `live`,
+  required. `IC_CLIENT_ID` and `IC_CLIENT_SECRET`: the app registered on
+  openapi.ctrader.com (Applications, Credentials). `IC_ACCESS_TOKEN` and
+  `IC_ACCOUNT_ID`: from the app's Playground, the access token and the
+  `ctidTraderAccountId` of the IC account. A token lasts about 30 days;
+  renew it by hand in the Playground. None is ever printed: they are
+  `SecretString`s, `Debug` redacts them, errors name variables and
+  cTrader's error codes only.
+- **Session.** Application auth, then account auth; a refusal names the
+  code and what to check (`CH_ACCESS_TOKEN_INVALID`: renew
+  `IC_ACCESS_TOKEN`), as does an account other than `IC_ACCOUNT_ID`. A
+  `ProtoHeartbeatEvent` every 10 s (the transport's Ping is off).
+  Requests carry a `clientMsgId` and get the response that echoes it.
+  After a reconnect the session authenticates again; requests in flight
+  fail. cTrader ending the session (token invalidated) fails every
+  request until a reconnect.
+- **Ids.** `XAUUSD.ICMARKETS`: the symbol name cTrader lists, on venue
+  `ICMARKETS`. cTrader's `symbolId` differs per server, so it is looked up
+  by name on each request.
+- **Instruments.** A symbol whose base and quote assets are currencies
+  Nautilus knows (forex, XAU) becomes a `CurrencyPair`: price precision
+  `digits`; sizes in units of the base, cTrader's volumes being in cents
+  of a unit (`stepVolume` / 100 the increment, `minVolume`, `maxVolume`
+  and `lotSize` / 100: XAUUSD 100 oz a lot); margins of 1, as OKX's;
+  stamped at receipt (a symbol has no time). Indices and shares are
+  refused, naming the symbol.
+- **Quotes: not served yet.** A fill stores the instruments, then fails
+  on the first quote series, naming it.
+
+**Unverified** until a demo run: IC's symbol names, the cents unit on
+`lotSize` and `stepVolume`, whether cTrader sends heartbeats of its own.
+The test fixtures are synthetic (from the `.proto` schemas), to be
+replaced by scrubbed captures.
+
+**Tick history probe: not run** (no demo credentials yet). To record
+here: ticks per page, the time to fetch one month of XAUUSD BID and ASK
+ticks, the oldest tick served against the oldest M1 bar, and from them
+the choice of ticks or the M1 BID fallback.
 
 ### Other sources
 
@@ -928,6 +994,20 @@ bar after a roll behaves when the new contract has not ticked yet is
     window the stored funding covers asking for nothing; the funding
     filled before the bars, a failed one (a swap's unpublished first
     month, an X-Perp's window older than OKX keeps) storing no bars.
+  - `ic/`, on synthetic fixtures and a mock cTrader peer (a local
+    WebSocket server): the environment required, the credential read
+    whole and never in `Debug` or errors; envelopes, error responses and
+    malformed payloads; XAUUSD and EURUSD to `CurrencyPair`s, an index,
+    a missing step, a minimum finer than the step, digits out of range
+    and an unlisted asset refused, ids round trip; the session's exact
+    auth frames, the binary heartbeat, two requests answered in reverse
+    order each getting its own, a venue error, a refused token or app
+    (naming the code, never a credential), another account refused,
+    malformed and unknown frames skipped, re-authentication after a
+    reconnect, requests failing once cTrader ends the session; the
+    instruments from assets, symbol list and details, an unlisted symbol
+    and another venue refused, a fill storing the instruments then naming
+    the quotes, a series other than quotes refused before any request.
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last
@@ -935,6 +1015,8 @@ bar after a roll behaves when the new contract has not ticked yet is
 - Integration tests in `tests/`, one node per file: a backtest of a
   continuous future over a fixture catalog and roll params, which also
   proves the engine accepts our params.
+- On IC's cTrader demo, `tests/ic_demo.rs` (gated by `NAUTILUS_IC_RUN=1`,
+  demo only): XAUUSD and EURUSD loaded as currency pairs. **Not run yet.**
 - Against the Docker paper gateway, `tests/ib_gateway.rs` (gated by
   `NAUTILUS_IB_RUN=1`, see the live README, "IB tests"): starting or
   reusing it, and a day of SXR8.IBIS quotes filled through it.
