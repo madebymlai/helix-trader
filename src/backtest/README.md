@@ -217,8 +217,7 @@ any leverage.
 
 Liquidation is off, so OKX's own maintenance rate (BTC X-Perp: 0.65%),
 which only decides when OKX liquidates, is not modelled: a run never
-closes a position for lack of margin. On the X-Perp run below, leverage
-changed only the margin locked, not the fills or the PnL.
+closes a position for lack of margin.
 
 The risk engine denies an order whose initial margin exceeds the free
 balance (`InitialMarginExceedsFreeBalance`, `nautilus-risk`
