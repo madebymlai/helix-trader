@@ -74,9 +74,7 @@ composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" 
 
 gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
 bars of OKX's 1-minute candles, any price type (the source's), warmed up on
-those candles (see "Warmup and training"). For continuous futures, subscribe
-to the `INTERNAL` bar type with the roll params from `data::rolls` (not built yet; see `data/README.md`,
-"rolls.rs").
+those candles (see "Warmup and training").
 
 The config states what the strategy needs from data as one
 `strategy::DataRequirements`: its bar types and its warmup, its instruments

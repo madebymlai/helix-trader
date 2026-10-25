@@ -64,9 +64,6 @@ Build a thin slice; each step works end to end before the next starts.
   configures them with `LoggerConfig`.
 - **Backtests through `BacktestNode`.** A backtest is a `BacktestRunConfig`
   run by a `BacktestNode`: one run per process, no parameter sweeps.
-- **Continuous futures.** Nautilus stitches contracts but does not find the
-  rolls, so we detect the roll dates and pass them in as
-  `continuous_future_transitions` (`src/data/README.md`).
 
 ## Layout
 

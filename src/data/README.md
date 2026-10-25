@@ -7,13 +7,12 @@ which backtests settle. The strategies' bars themselves are internal, built
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
 quotes"): from quotes (one a minute from IB) or, for a composite bar type,
 from its source bars (OKX's 1-minute candles). The module adds what Nautilus
-lacks: filling the catalog from a historical source, and the roll dates.
+lacks: filling the catalog from a historical source.
 
 APIs were read in the `nautilus-*` crates at `0.66.0` and their signatures
 and engine checks rechecked at the `develop` commit the build pins (see
 `docs/ARCHITECTURE.md`, "Version"). **Unverified** marks what the sources
-did not confirm. Examples use the future `ESM4.CME`, its
-predecessor `ESH4.CME` and the continuous root `ES.CME`.
+did not confirm. Examples use the future `ESM4.CME`.
 
 ## Layout
 
@@ -30,7 +29,6 @@ data/
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
     testdata/      samples of real archive files, a funding history page and real instruments
     README.md      OKX history: candles, funding, the archive, tests
-  rolls.rs         roll dates -> continuous_future_transitions params
 ```
 
 The module runs no node and opens no port of its own; the IB part starts the
@@ -43,12 +41,10 @@ from bars; OKX's candles, as bars). `ParquetDataCatalog` is the storage.
 strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
         └──────────► okx/ ──► fill_catalog, one call per archive month or day ──(OKX public API, archive files)──► OKX
                          └──► ParquetDataCatalog ──► backtest
-rolls ◄── catalog quotes of each contract ──► params for the INTERNAL bar type
 ```
 
-Only Nautilus types cross this module: no parallel `Symbol`, `Bar` or `Roll`
-types beyond the params `rolls.rs` returns. `fill_catalog` is the only
-writer of the catalog.
+Only Nautilus types cross this module: no parallel `Symbol` or `Bar`
+types. `fill_catalog` is the only writer of the catalog.
 
 ## Instruments and bar types
 
@@ -108,10 +104,10 @@ venue or adapter: what `request_bars` returns and `subscribe_bars` streams;
 `ib/` requests them to make quotes and does not store them, while a
 composite bar type's source bars are stored as they are. `INTERNAL` bars are
 built by the Nautilus data engine from ticks or other bars: the strategies'
-bars, from the stored quotes or source bars, and continuous futures.
+bars, from the stored quotes or source bars.
 
 A composite bar type builds a target from a finer bar type:
-`ES.CME-1-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL`. The target must be
+`ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. The target must be
 `INTERNAL`. `request_bars` rejects a composite `bar_type` (pass it through
 the `bar_types` param instead); `subscribe_bars` takes it directly.
 
@@ -320,120 +316,6 @@ Databento (`nautilus-databento`, not used yet) has the same shape:
 own `fetch`. Its ids are on `GLBX` unless `use_exchange_as_venue` is set
 (see "Instrument ids across sources").
 
-## rolls.rs
-
-Nautilus stitches contracts into a continuous future but does not find the
-rolls. This module finds them and renders them as the params that
-`subscribe_bars` and `request_bars` take on an `INTERNAL` bar type. Not
-built yet: continuous futures are out of scope for now, and this section
-predates the quotes-only catalog.
-
-`rolls.rs` is pure computation, with no clock and no I/O: prices and time
-come in as arguments, values go out.
-
-1. **Input:** the catalog's quotes of each contract of one root, per
-   `InstrumentId`, read by the caller. A calendar rule also takes the
-   contracts' expiries, as values.
-2. **Detect** each roll between consecutive contracts: the
-   `transition_time_ns`, and the two contracts' prices at that same moment.
-   The rule is ours (for example the first close at which the next
-   contract's volume exceeds the expiring one's); Nautilus has none.
-3. **Render** the list as `nautilus_core::Params`.
-
-Per-contract quotes are the stored truth: an adjusted series is never
-written, continuous series are built at read time. Rolls are values, so
-backtest and live pass the same params to the same engine call.
-
-### The params
-
-```json
-{
-  "continuous_future_transitions": [
-    {
-      "transition_time_ns": 1710460800000000000,
-      "pre_instrument_id":  "ESH4.CME",
-      "post_instrument_id": "ESM4.CME",
-      "pre_price":  "5001.00",
-      "post_price": "4995.50"
-    }
-  ],
-  "continuous_future_adjustment_mode": "BACKWARD_SPREAD",
-  "first_pre_instrument_id": "ESH4.CME",
-  "last_post_instrument_id": "ESM4.CME"
-}
-```
-
-- `transition_time_ns`: a JSON integer, not a string.
-- Prices: decimal strings, from `Price::as_decimal()` or `Display`, never
-  from `f64` (the engine also parses JSON numbers; we do not send them).
-- `continuous_future_adjustment_mode`: optional, default `BACKWARD_SPREAD`.
-- `first_pre_instrument_id`, `last_post_instrument_id`: optional bounds on
-  which transitions accumulate; each must appear in the chain.
-- Build with `serde_json::json!` and `serde_json::from_value::<Params>`
-  (needs `serde_json` and `rust_decimal` in `Cargo.toml`).
-
-The engine rejects at request or subscribe time:
-
-- an empty list, or times not strictly increasing;
-- a broken chain: each `pre_instrument_id` must be the previous
-  `post_instrument_id`;
-- a contract or bound on another venue than the target bar type, or a
-  bound absent from the chain;
-- a non-`INTERNAL` target;
-- non-positive prices in a ratio mode;
-- on `subscribe_bars` only, a `bar_types` param: a subscription takes the
-  target (composite or not) as its bar type.
-
-The first contract covers up to the first transition, each next one from its
-transition to the next. A bar stamped exactly at `transition_time_ns`
-belongs to the new contract, so pick roll times on bar closes.
-
-### Adjustment modes
-
-`ContinuousFutureAdjustmentType` (`nautilus_model::enums`):
-
-| Mode | Applied to segment k of N transitions |
-|---|---|
-| `BACKWARD_SPREAD` (default) | sum over i in [k, N) of (post_i - pre_i) |
-| `FORWARD_SPREAD` | sum over i in [0, k) of (pre_i - post_i) |
-| `BACKWARD_RATIO` | product over i in [k, N) of (post_i / pre_i) |
-| `FORWARD_RATIO` | product over i in [0, k) of (pre_i / post_i) |
-
-Backward modes keep the latest contract unadjusted and move old prices into
-its frame; forward modes anchor on the first contract. Spreads keep price
-differences (and can go negative over long histories); ratios keep returns.
-
-### What every segment needs
-
-- Each contract's instrument in the cache and its source data available
-  (`EXTERNAL` bars, trades or quotes, by the rule below): in backtest,
-  instruments added to the engine and that data in the catalog; in
-  live, from the adapter or the catalog. A missing segment is a hole, not an
-  error. A request builds no synthetic bars over roll gaps and weekends;
-  a subscription does unless the data engine config turns
-  `time_bars_build_with_no_updates` off, as ours does (strategy README,
-  "Hours without quotes").
-- The root (`ES.CME`) is not a real contract. If absent, the engine builds it
-  from the first segment's `FuturesContract`; if that is not in the cache
-  it only logs a warning.
-- To build from bars rather than ticks, request the composite form
-  `ES.CME-1-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL` through the `bar_types`
-  param (see "Bar type format"); each segment then requests its own
-  contract's `EXTERNAL` bars. A standard `INTERNAL` target is built from
-  trade ticks when priced `LAST`, from quotes otherwise (so a `MID` target
-  builds from the quotes this catalog stores). The actor-level request with
-  `bar_types` is **unverified** until a test of ours passes.
-- `limit` applies per segment, not to the total.
-
-### Live rolls
-
-`subscribe_bars` with the same params sets a timer for the next transition,
-switches contracts when it fires, then schedules the one after. The roll
-list must therefore already contain the next roll when the node starts: detect it ahead from the calendar, since a
-volume rule only knows the past. New dates need a restart. How the first bar
-after a roll behaves when the new contract has not ticked yet is
-**unverified**.
-
 ## Tests
 
 Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
@@ -453,11 +335,4 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   - a failure keeps the instruments filled before it;
   - a minute-cadence source stored every minute and resumed with only the
     new minutes.
-- `rolls.rs`, once built: detection on small synthetic series (clean roll,
-  a gap, no overlap); params checked as JSON (increasing times, contiguous
-  chain, decimal strings, each mode).
 - `ib/`, `ib/gateway.rs` and `okx/`: see their READMEs.
-
-Integration tests live in `tests/`, one node per file. Planned with
-`rolls.rs`: a backtest of a continuous future over a fixture catalog and
-roll params, which also proves the engine accepts our params.

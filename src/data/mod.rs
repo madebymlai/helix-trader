@@ -13,4 +13,3 @@ pub(crate) use ib::{IbGateway, data_client_config};
 mod okx;
 pub(crate) use okx::Contract as OkxContract;
 pub use okx::OkxHistory;
-mod rolls;
