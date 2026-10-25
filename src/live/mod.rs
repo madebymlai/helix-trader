@@ -1,11 +1,11 @@
 //! Runs the strategy on a Nautilus live node.
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
-//! those of the instruments' venues: OKX's for OKX instruments (`okx.rs`),
-//! IB's for the others (`ib.rs`), both if the instruments span both. The
+//! those of the instruments' venues: OKX's for OKX instruments (`okx/`),
+//! IB's for the others (`ib/`), both if the instruments span both. The
 //! start brings the catalog up to now for the IB instruments, and the node
 //! serves their warmup from it. OKX's data client serves the warmup of the
-//! OKX instruments, OKX's candles up to now (see `okx.rs`).
+//! OKX instruments, OKX's candles up to now (see `okx/`).
 
 mod ib;
 mod node;

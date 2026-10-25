@@ -61,10 +61,10 @@ IB paper gateway, `NAUTILUS_OKX_RUN=1` for the OKX demo account.
 | Document | Covers |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rules, the pinned Nautilus version, process-wide constraints |
-| [src/data/README.md](src/data/README.md) | Filling the catalog from IB and OKX, continuous-future rolls |
+| [src/data/README.md](src/data/README.md) | Filling the catalog, continuous-future rolls; IB and OKX history in `ib/` and `okx/` |
 | [src/strategy/README.md](src/strategy/README.md) | Writing a strategy, its config, warmup |
 | [src/backtest/README.md](src/backtest/README.md) | The backtest run, costs, fills, leverage, results |
-| [src/live/README.md](src/live/README.md) | Live nodes, the IB Gateway, OKX specifics |
+| [src/live/README.md](src/live/README.md) | Live nodes; IB and OKX clients in `ib/` and `okx/` |
 | [docs/research/](docs/research/README.md) | Desk research on strategies, costs and brokers |
 
 ## Disclaimer

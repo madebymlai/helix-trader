@@ -5,7 +5,7 @@
 //! `InteractiveBrokersExecutionClientFactory` and their configs, on the
 //! gateway of the account's trading mode (`data::IbGateway`); the account
 //! id goes in the execution config. Another broker is another file next
-//! to this one (`okx.rs`).
+//! to this one (`okx/`).
 
 use anyhow::ensure;
 use nautilus_interactive_brokers::{
