@@ -2,7 +2,7 @@
 //! instruments and the series their strategy's bars are built from.
 //!
 //! Source-agnostic, no node: the data comes from a fetch function the
-//! caller passes, backed by an adapter's historical client (`ib.rs`). A
+//! caller passes, backed by an adapter's historical client (`ib/`, `okx/`). A
 //! series is a Nautilus data type and its catalog identifier (see
 //! `strategy::catalog_series`): the quotes of an instrument, keyed by its
 //! id, or the bars of a bar type, keyed by the bar type. Per series it

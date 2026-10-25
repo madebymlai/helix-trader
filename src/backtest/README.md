@@ -214,7 +214,7 @@ The margin model is Nautilus' default for margin accounts,
 - an open position locks notional / leverage × `margin_maint`, its value
   at entry.
 
-OKX instruments are stored with both margins at 1 (data README), so a
+OKX instruments are stored with both margins at 1 (`data/okx/README.md`), so a
 position locks notional / leverage, as on OKX. IB's instruments have
 margins of 0 and lock nothing at any leverage.
 
@@ -512,7 +512,7 @@ engine skips `INTERNAL` bars, and the catalog stores `EXTERNAL` ones only
 for a composite bar type, whose run fills on those bars instead (OKX, see
 Fills on candles). A market buy fills at the ask, a sell
 at the bid, of the last quote replayed before the order: the catalog holds
-a quote a minute, stamped 1 ns before the minute's close (data README), so
+a quote a minute, stamped 1 ns before the minute's close (`data/ib/README.md`), so
 an order sent in `on_bar` fills, in full and stamped at the bar's close, on
 the quote of the bar's last minute, the one that closed the bar. The fill
 model is `Default` with `(1.0, 0.0, FILL_SEED)`: nothing on top of the
@@ -557,7 +557,7 @@ Can the matching engine charge the real spread from IB's BID and ASK
 bars? Tested on 2026-10-08 with a throwaway probe (market buy on one
 decision bar, sell on a later one, six orders over 2026-09-01 to 09-03,
 `OrderFilled` prices recorded) over a scratch catalog of SXR8 1-HOUR
-LAST, BID, ASK and MID bars (see the data README). Answer: **not with
+LAST, BID, ASK and MID bars (see `data/ib/README.md`). Answer: **not with
 IB's bars as stored**.
 
 How the engine picks the bars it executes on
@@ -618,7 +618,7 @@ Setup:
 
 - A scratch catalog: SXR8.IBIS (price precision 4, size precision 0,
   tick 0.0001), its 1-HOUR-LAST bars, and one `QuoteTick` per BID and
-  ASK bar pair of IB (see the data README) over the run window: bid =
+  ASK bar pair of IB (see `data/ib/README.md`) over the run window: bid =
   BID close, ask = ASK close, size 1,000,000 on both sides, `ts_event =
   ts_init =` the bars' close − 1 ns, written with `write_to_parquet`.
 - The node as in `node.rs` (netting, margin, L1 book, fixed fee) but
@@ -707,7 +707,7 @@ Applied (see Fills, The run config):
   warmup response also held the bar at `start`, which the replay delivered
   again): the engine starts 1 ns earlier.
 
-For the data side (see the data README):
+For the data side (see `data/ib/README.md`):
 
 - Quotes: bid and ask at the instrument's price precision (IB's bars
   already are), size 1,000,000 at its size precision, `ts_event = ts_init
@@ -727,12 +727,12 @@ An OKX swap (`BTC-USDT-SWAP.OKX`) or X-Perp (`BTC-USD_UM_XPERP-310404.OKX`,
 the contract an EEA account trades) backtests through the same code as
 IB's instruments, on its 1-minute candles. The catalog holds a
 `CryptoPerpetual` or a `CryptoFuture` and the bars of
-`…-1-MINUTE-LAST-EXTERNAL` (data README, "OKX specifics"). The strategy
+`…-1-MINUTE-LAST-EXTERNAL` (`data/okx/README.md`). The strategy
 trades a composite bar type built from them, such as
 `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (strategy
 README), and the run replays the minute bars and nothing else. A catalog
 filled before candles, with OKX quotes, must be filled again into a new
-directory (data README).
+directory (`data/okx/README.md`).
 
 - **Venue.** Named `OKX` after the instruments' venue, with the same
   config as for IB. The balance is in the settlement currency: USDT for a
@@ -899,7 +899,7 @@ It prints `Orders: 113`, `PnL (total): -525.70`, a final balance of
   instrument's tick, stamped at the bar's `ts_event`.
 - **Session.** 58 of the 113 orders were sent on bars that close outside
   Xetra's continuous trading (09:00-17:30 Frankfurt time): 9 on the first
-  bar of the day (a half-hour bar, see the data README), 9 on the
+  bar of the day (a half-hour bar, see `data/ib/README.md`), 9 on the
   pre-opening hour, 40 after the close, 33 of them on the 19:00-23:00
   bars (median volume 154 shares a bar, 12 under 100, one with 0). Bars
   in continuous trading had a median 6,429. Those fills are at prices with
@@ -910,7 +910,7 @@ It prints `Orders: 113`, `PnL (total): -525.70`, a final balance of
   to two decimals.
 
 On internal bars, 2026-10-20: the catalog of SXR8.IBIS 1-minute quotes
-filled from the paper gateway (2026-08-24 to 10-01, see the data README),
+filled from the paper gateway (2026-08-24 to 10-01, see `data/ib/README.md`),
 EMA 5/15 on `1-HOUR-MID` bars, `trade_size = 10`, `warmup = "168h"`,
 Xetra's session, September 2026, 3 EUR an order. The warmup request asked
 for the quotes from 2026-08-24 23:59:59.999999999 with the three params of
