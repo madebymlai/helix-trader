@@ -35,11 +35,13 @@ refused for want of funding rather than run without it.
 The symbol gives the type (Nautilus' `okx_instrument_type_from_symbol`:
 `…-SWAP` a swap, `…-310404` a future) and the family (the symbol without
 its last part: `BTC-USDT`, `BTC-USD_UM_XPERP`).
-`OKXRawHttpClient::get_instruments` (`/public/instruments`) gives OKX's
-definition; `parse_instrument_any` turns a swap into a `CryptoPerpetual`
-and a future into a `CryptoFuture` (`ctVal` × `ctMult` as the multiplier,
-tick and lot sizes as increments). A future whose rule type is not `xperp`
-(the adapter's `is_xperp_rule_type`) is a dated future and is refused.
+`OKXRawHttpClient::get_instruments` (`/public/instruments`), on the raw
+client of the `OKXHttpClient` that also requests the funding (see Funding
+from the API), gives OKX's definition; `parse_instrument_any` turns a
+swap into a `CryptoPerpetual` and a future into a `CryptoFuture` (`ctVal`
+× `ctMult` as the multiplier, tick and lot sizes as increments). A future
+whose rule type is not `xperp` (the adapter's `is_xperp_rule_type`) is a
+dated future and is refused.
 
 An X-Perp is a `CryptoFuture` expiring in 2031, linear, settled in USD
 (Nautilus' USD, two decimals). BTC: 0.0001 BTC a contract, whole

@@ -1,18 +1,17 @@
 //! The results of a run, as plain text.
 //!
 //! Prints what the Nautilus `BacktestResult` holds: the order and position
-//! counts, its statistics, the final balances from its summary, and the max
-//! drawdown, which is not in its default statistics: Nautilus's
-//! `MaxDrawdown` (`nautilus_analysis`) over the returns series. Next to the
-//! PnL it prints the costs, which the result does not hold: from the fills
-//! (`OrderFilled`, with their commission) of the orders in the engine's
-//! cache, and the quotes they filled on, if the run replayed quotes of
-//! their instrument; a run on bars alone has no spread to measure.
+//! counts, its statistics (with the max drawdown, which the run registers
+//! with the portfolio: see `node::run`) and the final balances from its
+//! summary. Next to the PnL it prints the costs, which the result does not
+//! hold: from the fills (`OrderFilled`, with their commission) of the
+//! orders in the engine's cache, and the quotes they filled on, if the run
+//! replayed quotes of their instrument; a run on bars alone has no spread
+//! to measure.
 
 use std::{collections::BTreeMap, fmt::Write};
 
 use anyhow::{Context, ensure};
-use nautilus_analysis::{statistic::PortfolioStatistic, statistics::max_drawdown::MaxDrawdown};
 use nautilus_backtest::result::BacktestResult;
 use nautilus_common::cache::Cache;
 use nautilus_model::{
@@ -164,11 +163,7 @@ pub fn report(outcome: &Outcome) -> String {
             out.push_str("  Spread: n/a (no quotes)\n");
         }
     }
-    let mut returns = result.stats_returns.clone();
-    if let Some(drawdown) = MaxDrawdown::new().calculate_from_returns(&result.returns_series) {
-        returns.insert(MaxDrawdown::new().name(), drawdown);
-    }
-    section(&mut out, "Return statistics", &returns);
+    section(&mut out, "Return statistics", &result.stats_returns);
     section(&mut out, "General statistics", &result.stats_general);
     let balances: BTreeMap<_, _> = result
         .summary
@@ -197,7 +192,7 @@ fn section<'a>(
 
 #[cfg(test)]
 mod tests {
-    use nautilus_core::{UUID4, UnixNanos};
+    use nautilus_core::UUID4;
 
     use super::*;
 
@@ -244,13 +239,11 @@ mod tests {
             .collect(),
             stats_returns: stats(&[
                 ("Sharpe Ratio (252 days)", 1.25),
+                ("Max Drawdown", -0.2),
                 ("Average (Return)", 0.001),
             ]),
             stats_general: stats(&[("Long Ratio", 0.5)]),
-            // Up 10%, then down 20%: the equity falls from 1.1 to 0.88.
-            returns_series: [(UnixNanos::from(1), 0.1), (UnixNanos::from(2), -0.2)]
-                .into_iter()
-                .collect(),
+            returns_series: BTreeMap::new(),
         };
         // 9 fills in EUR; a commission in GBP, of fills priced in EUR too.
         let costs = BTreeMap::from([
