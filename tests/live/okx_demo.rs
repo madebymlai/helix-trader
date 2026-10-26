@@ -78,7 +78,8 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     let leverage = Decimal::from(1000);
     let config = x_perp_ema_cross();
     let requirements = config.bars.data_requirements();
-    // An empty catalog of its own: the venue answers the whole warmup.
+    // An empty catalog of its own, which `Live` takes: the run is refused
+    // before any node is built, so nothing reads it.
     let catalog = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-001"),

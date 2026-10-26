@@ -2,14 +2,12 @@
 //! GC.v.0.GLBX's book depth gets the snapshots the catalog stores of the
 //! run's window, in order, and the cache's book (`cache.order_book`) holds
 //! each as it arrives. Gold's bars have no source in the catalog (no
-//! quotes): they are left out, and the run goes on. One node per process,
-//! so one run per file.
-
-mod common;
+//! quotes): they are left out, and the run goes on. One node per thread,
+//! so one run per test.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
-use common::{glbx, ic::at};
+use crate::common::{glbx, ic::at};
 use helix_trader::backtest::{Backtest, commission_rate, venue_oms_type};
 use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};

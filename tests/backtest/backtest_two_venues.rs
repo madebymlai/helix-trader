@@ -3,13 +3,11 @@
 //! strategy reading gold's book buys 10 oz of XAUUSD on IC's first hour
 //! bar: each venue is simulated, keeping positions as the real one does
 //! (`venue_oms_type`), each with the backtest's balance, and the report
-//! shows each venue's account. One node per process, so one run per file.
-
-mod common;
+//! shows each venue's account. One node per thread, so one run per test.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
-use common::{glbx, ic};
+use crate::common::{glbx, ic};
 use helix_trader::backtest::report;
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
