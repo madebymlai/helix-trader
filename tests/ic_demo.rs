@@ -3,7 +3,8 @@
 //! a day of XAU/USD's quotes fills a temporary catalog, in one fill and
 //! resumed, and the execution client reads the account: its state and its
 //! startup reconciliation. It needs the app's `IC_CLIENT_ID` and `IC_CLIENT_SECRET`, the
-//! demo account's `IC_ACCESS_TOKEN` and `IC_ACCOUNT_ID`, and
+//! demo account's `IC_ACCESS_TOKEN`, `IC_REFRESH_TOKEN` (they seed the
+//! token file, which then holds the latest pair) and `IC_ACCOUNT_ID`, and
 //! `IC_ENVIRONMENT=demo`, from the environment or `.env` (any other
 //! environment fails the test before connecting).
 //!
