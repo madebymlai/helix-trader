@@ -14,8 +14,10 @@ use tungstenite::Message;
 use super::config::{IcAccountId, IcCredential};
 use super::messages::{
     Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
-    ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, frame,
+    ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaGetTickDataReq,
+    ProtoOaGetTickDataRes, ProtoOaTickData, frame,
 };
+use super::ticks::Tick;
 
 /// The fake account the tests authenticate: the `ctidTraderAccountId` the
 /// captured responses were scrubbed to.
@@ -33,6 +35,8 @@ pub(super) const ASSET_LIST_RES: &[u8] = include_bytes!("testdata/asset_list_res
 pub(super) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("testdata/symbols_list_res.bin");
 pub(super) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("testdata/symbol_by_id_res.bin");
 pub(super) const SYMBOL_BY_ID_UNKNOWN: &[u8] = include_bytes!("testdata/symbol_by_id_unknown.bin");
+pub(super) const TICK_DATA_BID_RES: &[u8] = include_bytes!("testdata/tick_data_bid_res.bin");
+pub(super) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("testdata/tick_data_ask_res.bin");
 
 /// What the peer does after a frame.
 pub(super) enum Action {
@@ -152,5 +156,68 @@ pub(super) fn credential() -> IcCredential {
         client_secret: SecretString::from("clientSecretValue"),
         access_token: SecretString::from("accessTokenValue"),
         account_id: IcAccountId::new(ACCOUNT_ID),
+    }
+}
+
+/// cTrader's answer to a tick request over `[from, to)` on a side whose
+/// ticks are `ticks`, oldest first: the newest `page_size` ticks of the
+/// window, newest first, and whether the window holds more (as measured
+/// on the demo, see `ic/README.md`, "Tick history").
+pub(super) fn venue_page(
+    ticks: &[Tick],
+    from: i64,
+    to: i64,
+    page_size: usize,
+) -> (Vec<Tick>, bool) {
+    let window: Vec<Tick> = ticks
+        .iter()
+        .rev()
+        .filter(|t| from <= t.ms && t.ms < to)
+        .copied()
+        .collect();
+    let more = window.len() > page_size;
+    (window.into_iter().take(page_size).collect(), more)
+}
+
+/// cTrader's answer to `request`, a tick request, on a symbol whose BID
+/// and ASK ticks are `bids` and `asks`, oldest first, in pages of
+/// `page_size` (see `venue_page`): the first tick absolute, the others
+/// differences from the one before.
+pub(super) fn tick_answer(
+    request: &ProtoOaGetTickDataReq,
+    bids: &[Tick],
+    asks: &[Tick],
+    page_size: usize,
+) -> ProtoOaGetTickDataRes {
+    let ticks = if request.r#type == 1 { bids } else { asks };
+    let (page, has_more) = venue_page(
+        ticks,
+        request.from_timestamp.unwrap(),
+        request.to_timestamp.unwrap(),
+        page_size,
+    );
+    let mut before: Option<Tick> = None;
+    let tick_data = page
+        .into_iter()
+        .map(|tick| {
+            let data = match before {
+                None => ProtoOaTickData {
+                    timestamp: tick.ms,
+                    tick: tick.price,
+                },
+                Some(newer) => ProtoOaTickData {
+                    timestamp: tick.ms - newer.ms,
+                    tick: tick.price - newer.price,
+                },
+            };
+            before = Some(tick);
+            data
+        })
+        .collect();
+    ProtoOaGetTickDataRes {
+        ctid_trader_account_id: request.ctid_trader_account_id,
+        tick_data,
+        has_more,
+        ..Default::default()
     }
 }
