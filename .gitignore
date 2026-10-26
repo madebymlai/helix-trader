@@ -4,3 +4,4 @@ target/
 .env
 /catalog/*
 !/catalog/.gitkeep
+/docs/research/
