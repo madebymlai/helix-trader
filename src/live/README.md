@@ -211,6 +211,10 @@ goes to both. Everything goes in before `run()`: clients, the strategy and
 claims; `add_strategy` fails unless the node is `Idle`, and a duplicate
 strategy id is an error.
 
+Positions are kept as the venue keeps them: strategies leave `oms_type`
+unset, so Nautilus takes each execution client's OMS (IB specifics in
+`ib/README.md`, "Execution client config").
+
 Orders found at the venue that no strategy sent belong to `EXTERNAL`. A
 strategy claims them per instrument, through its config or
 `register_external_order_claims`:
