@@ -32,12 +32,15 @@ use std::{
 use helix_trader::{
     data::{IbAccount, IbHistory, fill_catalog},
     live::Live,
-    strategy::ema::{EmaCross, EmaCrossConfig},
+    strategy::{
+        catalog_series,
+        ema::{EmaCross, EmaCrossConfig},
+    },
 };
 use jiff::{Timestamp, ToSpan};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
-    data::NautilusDataType,
+    data::BarType,
     identifiers::{InstrumentId, TraderId},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -94,25 +97,31 @@ async fn history_starts_or_reuses_the_paper_gateway_and_a_second_connection_reus
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fill_catalog_stores_quotes_through_the_paper_gateway() {
-    if !opted_in("fill_catalog_stores_quotes_through_the_paper_gateway") {
+async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
+    if !opted_in("fill_catalog_stores_minute_bars_through_the_paper_gateway") {
         return;
     }
     let _gateway = GATEWAY.lock().await;
     load_env();
     let now = Timestamp::now();
-    // A day back, so the window holds Xetra quotes whenever the test runs
-    // on a trading day's evening or the next morning.
+    // A day back, so the window holds Xetra bars whenever the test runs on
+    // a trading day's evening or the next morning.
     let end = IbHistory::latest_end(now).unwrap();
     let start = end - 24.hours();
     let ib = IbHistory::connect(42, end, now).await.unwrap();
     let instruments = ib.instruments(&[sxr8()]).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    // The MID bars the hour bars are built from, and the BID and ASK bars
+    // orders fill on.
+    let series = catalog_series(&[BarType::from(
+        "SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL",
+    )]);
+    assert_eq!(series.len(), 3);
     fill_catalog(
         &mut catalog,
         instruments,
-        &[(NautilusDataType::QuoteTick, sxr8().to_string())],
+        &series,
         start,
         end,
         async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
@@ -120,10 +129,12 @@ async fn fill_catalog_stores_quotes_through_the_paper_gateway() {
     .await
     .unwrap();
     assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 1);
-    let quotes = catalog
-        .quote_ticks(Some(vec![sxr8().to_string()]), None, None)
-        .unwrap();
-    println!("{} quotes of SXR8.IBIS over the last day", quotes.len());
+    for (_, bar_type) in series {
+        let bars = catalog
+            .bars(Some(vec![bar_type.clone()]), None, None)
+            .unwrap();
+        println!("{} bars of {bar_type} over the last day", bars.len());
+    }
 }
 
 /// The EMA crossover on SXR8.IBIS whose session, half an hour, holds no

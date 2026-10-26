@@ -1,11 +1,12 @@
 # Interactive Brokers history
 
-`data/ib/` fetches IB instruments and quotes for `fill_catalog` (the
-`fill-catalog` command, and `live` catching the catalog up before it
-starts). IB has no usable quote history, so the quotes are made here from
-1-MINUTE BID and ASK bars, one quote a minute; IB serves nothing else to
-the catalog. Every request goes through the Docker paper gateway this
-module starts or reuses.
+`data/ib/` fetches IB instruments and IB's own 1-MINUTE bars for
+`fill_catalog` (the `fill-catalog` command), stored as IB gives them: the
+source bars of the strategies' composite bar types and the BID and ASK
+bars orders fill on (`strategy::catalog_series`). IB serves nothing else
+to the catalog. Every request goes through the Docker paper gateway this
+module starts or reuses. A live node fills nothing: IB's data client
+serves its warmup (`live/README.md`).
 
 Neighbouring docs: the fill algorithm (resume, coverage, writing) is in
 `data/README.md`, "fill_catalog.rs"; the live data and execution clients,
@@ -15,7 +16,7 @@ their config and the gateway container are in `live/ib/README.md`.
 
 ```
 ib/
-  mod.rs       IbHistory: connect, instruments, quotes; the data client config
+  mod.rs       IbHistory: connect, instruments, bars; the data client config
   gateway.rs   IbAccount and IbGateway: the Docker gateway, started or reused
 ```
 
@@ -44,10 +45,10 @@ IbHistory::connect(client_id: i32, end: Timestamp, now: Timestamp)
 IbHistory::latest_end(now: Timestamp) -> anyhow::Result<Timestamp>  // now − 1 minute
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
 history.data(&data_type, identifier, start, end)
-    .await -> anyhow::Result<Vec<Data>>        // the fetch of fill_catalog: quotes only,
-                                               // any other data type is an error
-history.quotes(instrument_id, start, end)
-    .await -> anyhow::Result<Vec<QuoteTick>>   // [start, end], one a minute, sorted
+    .await -> anyhow::Result<Vec<Data>>        // the fetch of fill_catalog: the bars of
+                                               // an EXTERNAL 1-MINUTE bar type over
+                                               // [start, end], sorted; any other series
+                                               // is an error
 ```
 
 ## Connecting
@@ -62,10 +63,10 @@ live account, so it never needs a live login or 2FA. `fill-catalog` also
 reads `TWS_USERNAME` and `TWS_PASSWORD` from `.env`.
 
 `connect` checks `end` before the gateway starts: `end` must be at or
-before `latest_end(now)`, a minute (the quote cadence) before now, because
-IB answers a window ending within one bar of now with the bar still in
-progress, and `fill_catalog` would store its quote and resume past it.
-`main` reads the clock.
+before `latest_end(now)`, a minute (one bar) before now, because IB
+answers a window ending within one bar of now with the bar still in
+progress, and `fill_catalog` would store it and resume past it. `main`
+reads the clock.
 
 ### No node
 
@@ -98,7 +99,7 @@ only a warning, so `instruments` loads every instrument or fails: it asks
 again for each missing future as an explicit contract (root symbol, local
 symbol, exchange, `includeExpired: true`), the form that resolved the
 expired `ESU5` on the paper gateway, then fails naming the ids still
-missing, before any quote request.
+missing, before any bar request.
 
 Load instruments before requesting bars. Given an instrument id,
 `request_bars` first tries to fetch its contract details itself and skips,
@@ -114,49 +115,43 @@ the provider`; up to 0.65.0 its bars came out at a fallback precision
 `XCEC`, `XFXS`, `GLBX`), so the venue can change from one process to the
 next.
 
-## Quotes from BID and ASK bars
+## Bars as IB gives them
 
-`quotes` fetches the 1-MINUTE BID and ASK bars of the instrument
-(`quoted_bar_type`) by walking back (`quoted_bars`, see "Walking back, not
-segments"), never stores them, and turns each pair of the same close into
-one `QuoteTick` (`quotes_from_bars`, pure):
+`data` serves the bars of an `EXTERNAL` 1-MINUTE bar type of any price
+type (`served_bar_type`), fetched by walking back (`bars`, see "Walking
+back, not segments"), and refuses any other series, quotes included. IB
+has no usable quote history, and no quote is made here from bars.
 
-- bid = BID close, ask = ASK close, at the bars' price precision (the
-  instrument's, since the instruments are loaded first);
-- size 1,000,000 on both sides at the bars' size precision: IB gives none,
-  and that size never limits an order;
-- `ts_event = ts_init` = close − 1 ns, so the quote sorts before a bar of
-  the same close and an order decided on that bar fills on its quote (see
-  `backtest/README.md`, "Fills on quotes"; "The engine start" there says
-  why not Nautilus' bar build delay instead).
+For a strategy on `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL`,
+`strategy::catalog_series` asks for three series, each stored as IB gives
+it:
 
-The quotes over `[start, end]` are thus those of the bars closing over
-`[start + 1 ns, end + 1 ns]` (`quoted_bars_window`). Two cases are dropped,
-counted and logged at `INFO`, not errors, and that minute then fills on
-the previous quote: a bar without the other side's bar of the same close,
-and a crossed pair (ask < bid, mostly the pre-opening auction). A locked
-pair (ask = bid) is kept.
+- `SXR8.IBIS-1-MINUTE-MID-EXTERNAL`, the bars the hour bars are built
+  from;
+- `SXR8.IBIS-1-MINUTE-BID-EXTERNAL` and `…-ASK-EXTERNAL`, which a
+  backtest's matching engine pairs, same `ts_init`, into the quotes orders
+  fill on (`execution/src/matching_engine/mod.rs`, `process_bar` and
+  `process_quote_ticks_from_bar`).
 
-Only `ib/` knows quotes come from bars; a source with quotes (Databento's
-`bbo-1m`) would return `QuoteTick`s directly.
+IB's BID, ASK and MID bars all have volume 0 (IB gives -1, "not
+available", which the adapter's `ib_bar_to_nautilus_bar` turns into 0),
+so the matching engine finds no market in them: see
+`backtest/README.md`, "Fills on BID and ASK bars".
 
-### Quote cadence: 1 minute, fixed
+### 1-MINUTE bars only
 
-`quotes` has no cadence parameter: the cadence is a detail of this source,
-not of the strategy or the CLI. One quote a minute lets the backtest fill a
-market order on the quote of the minute closing with its bar and check
-resting orders every minute, whatever the strategy's bar size; 1 minute is
-the finest bar size IB paces softly. `fill-catalog` stores the instruments
-and these quotes only; the strategies' bars are built from the quotes (see
-`strategy/README.md`, "Bars built from quotes").
+`data` takes no cadence but the bar type's, and refuses any but 1-MINUTE:
+1 minute is the finest bar size IB paces softly, `latest_end` is one such
+bar before now, and the request duration (`BARS_PER_REQUEST`) is sized
+for it. A strategy's bars are built from them (see `strategy/README.md`,
+"Composite bars"), whatever its own bar size.
 
 ## Bar requests
 
 Bar spec strings are `"{step}-{aggregation}-{price_type}"`, e.g.
 `"1-MINUTE-BID"`, the `Display` of `BarSpecification`, which the historical
 client splits on `-`. It parses SECOND, MINUTE, HOUR, DAY and WEEK only
-(no MONTH). `ib/` asks only for the 1-MINUTE BID and ASK bars quotes are
-made from (`quoted_bar_spec`).
+(no MONTH). `ib/` asks only for 1-MINUTE bars (`served_spec`).
 
 ### Walking back, not segments
 
@@ -171,30 +166,32 @@ lacked 10-05 19:00-21:00). The live data
 client shares that segmentation (`data/convert.rs` in the adapter; still
 so at the pinned commit; nautechsystems/nautilus_trader#5384 is open).
 
-So `quoted_bars` never passes a start. It walks back from `end`
+So `bars` never passes a start. It walks back from `end`
 (`walk_back`), each request one explicit duration (`start_date_time:
 None`) ending at the oldest bar so far, so consecutive answers overlap by a
 bar and leave no hole. It stops once a bar at or before `start` arrived, on
 an empty answer, or when an answer brings nothing older than the request's
 end (no endless loop when IB has no more). It returns the bars in
-`(start, end]`, sorted by `ts_init`, duplicates at the joins dropped.
+`[start, end]`, the closed window `fill_catalog` asks for, sorted by
+`ts_init`, duplicates at the joins dropped.
 
 An empty first answer is returned empty; `fill_catalog` decides whether
 that is an error. A failed request or a timeout fails the whole call. So
 does an instrument id the adapter cannot resolve to a contract: it skips
 the id with a warning, and with no contract left `request_bars` fails (`No
-valid contracts found after conversion`), since `quoted_bars` asks for one
-id at a time.
+valid contracts found after conversion`), since `bars` asks for one id
+at a time.
 
 ### Duration per request
 
-`QUOTED_BARS_PER_REQUEST` is `86400 S`, within IB's documented maximum
+`BARS_PER_REQUEST` is `86400 S`, within IB's documented maximum
 duration for 1-MINUTE bars. Seconds, not `1 D`: `D` counts whole trading
 days, so a `1 D` request ending in a session's first minute answers that
 one bar and the walk back stops there; `86400 S` answers the 1,440 bars
 before the end, across sessions and weekends. That is about 165 requests
-per price type for a year (about 252 sessions), so about 28 requests per
-instrument-month and 330 per instrument-year for BID and ASK together.
+per series for a year (about 252 sessions), so for the three series of a
+MID composite bar type (MID, BID, ASK) about 41 requests per
+instrument-month and 495 per instrument-year.
 
 ### Pacing
 
@@ -211,10 +208,9 @@ ASK: September and August 2026 back to back, 84 requests in about six
 minutes, no pacing error and no slowdown (3-4 s per request, 1,440 bars
 each), each month complete (930 bars a session); about 3.5 minutes per
 instrument-month for the three types, so about 40 minutes per
-instrument-year. For quotes (BID and ASK only), the minute-quote run under
-"Verified runs" gives about 1.8 minutes per instrument-month, so 20-25
-minutes per instrument-year, soft throttling only. An instrument-month of
-Xetra quotes is about 20,000 rows (930 minutes a session).
+instrument-year; three series (MID, BID, ASK) cost the same. An
+instrument-month of Xetra is about 20,000 bars per series (930 minutes a
+session).
 
 ### Timestamps
 
@@ -249,8 +245,8 @@ explicit contract with `includeExpired: true`, and only back about 13 to 15
 months, although IB documents two years: `ESZ5` (expired 10 months earlier)
 and `ESU5` (12.6 months) resolved; `ESM5` (15.5 months), `ESH5`, `ESZ4` and
 `ESZ3` did not, by id or by contract. Once loaded that way, `request_bars`
-by instrument id returns the bars (`ESU5.CME`, precision 2), so
-`quoted_bars` always asks by id; the contract-month form returned them
+by instrument id returns the bars (`ESU5.CME`, precision 2), so `bars`
+always asks by id; the contract-month form returned them
 under another id (`ES202509.CME`) at the fallback precision 5 (0.65.0).
 **IB as the source gives about one year of expired ES contracts**, and that
 bounds the backtest; for more depth use another source (see `data/README.md`,
@@ -262,7 +258,7 @@ happen before expiry, so a continuous series never uses them; a
 single-contract backtest through expiry would.
 
 IB's own continuous future, `CONTFUT`, is no substitute for the
-per-contract quotes, even for older history: it is one series with IB's
+per-contract bars, even for older history: it is one series with IB's
 roll rule and adjustment, which the Nautilus continuous future (contract
 bars plus our transitions) cannot use and live cannot trade. The client
 also drops the end date for it (IB error 10339) and returns only the first
@@ -323,11 +319,12 @@ spread in continuous trading, the cost of a market order, is about 0.3 bps
 
 ## Verified runs
 
-All on the paper gateway.
+All on the paper gateway. The two quote runs are from when `fill-catalog`
+stored quotes made from the BID and ASK closes, which it no longer does.
 
 - **End to end on ES** (2026-10-07, `fill-catalog` on `ESZ6.CME` and
-  `ESU5.CME`, 1-HOUR-LAST, when it still stored bars; the resume algorithm
-  is the one quotes use now): a fill reads back sorted and unique; a re-run
+  `ESU5.CME`, 1-HOUR-LAST; the resume algorithm is the one every series
+  uses): a fill reads back sorted and unique; a re-run
   asks for nothing; a window filled in two runs equals the same window
   filled in one (110 bars, identical); bars are stamped on the hour, 23 per
   day over the full session; an end after a contract's expiry works.
@@ -345,23 +342,26 @@ All on the paper gateway.
   nothing. A backtest over September (EMA 5/15, Xetra's session) filled all
   14 market orders at the bid (sells) or ask (buys) of the quote stamped
   1 ns before the decision bar's close, the previous quote 60 s earlier.
+- **Minute bars** (2026-10-26, SXR8.IBIS, `fill-catalog` from 2026-09-04
+  to 09-12 for `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL`): 5,580
+  MID, 5,580 BID and 5,580 ASK bars (930 a session, six sessions), every
+  one with volume 0; the whole fill took 44 s. The backtest on them is in
+  `backtest/README.md`, "Verified on IB data".
 
 ## Tests
 
-- `ib/mod.rs`: BID and ASK bars to quotes (prices and precision, the 1 ns
-  stamp, the nominal size at the bars' size precision, a side without the
-  other dropped, a crossed pair dropped and a locked one kept, empty input,
-  different precisions an error); the bar window of a quote window; the
-  1-MINUTE BID and ASK bars quotes are made from; the latest end a minute
-  before now, and an `end` within a minute of now rejected before the
-  gateway starts; the walk back over canned answers (no hole at the joins,
-  stops at start, on an empty answer and on no progress, trims to
-  `(start, end]`, sorted and unique); the data client config and the bar
-  requests use the full session; a series other than quotes refused.
+- `ib/mod.rs`: the series IB serves (its own 1-MINUTE bars of any price
+  type) and those it refuses (quotes, other bar sizes, internal bars); the
+  latest end a minute before now, and an `end` within a minute of now
+  rejected before the gateway starts; the walk back over canned answers (no
+  hole at the joins, stops at start, on an empty answer and on no
+  progress, keeps `[start, end]`, sorted and unique); the data client
+  config and the bar requests use the full session.
 - `ib/gateway.rs`: account forms and their mode, the container config (the
   mode, the API open to orders), the login wait on fake statuses (ready at
   once, ready after a wait, the deadline naming the last status, a vanished
   container, a failed status).
 - `tests/ib_gateway.rs`, against the Docker paper gateway (gated by
   `NAUTILUS_IB_RUN=1`, see `live/ib/README.md`, "IB tests"): starting or
-  reusing it, and a day of SXR8.IBIS quotes filled through it.
+  reusing it, and a day of SXR8.IBIS MID, BID and ASK minute bars filled
+  through it.

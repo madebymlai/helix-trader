@@ -5,9 +5,11 @@ reads, with three things only: the instruments the strategies trade, the
 series their bars are built from, and the funding of OKX swaps and X-Perps,
 which backtests settle. The strategies' bars themselves are internal, built
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
-quotes"): from quotes (one a minute from IB) or, for a composite bar type,
-from its source bars (OKX's 1-minute candles). The module adds what Nautilus
-lacks: filling the catalog from a historical source.
+quotes"): for a composite bar type from its source bars (IB's 1-minute
+bars, OKX's 1-minute candles), otherwise from quotes. Beside IB's source
+bars the catalog holds IB's BID and ASK 1-minute bars, which the backtest
+fills orders on. The module adds what Nautilus lacks: filling the catalog
+from a historical source.
 
 APIs were read in the `nautilus-*` crates at `0.66.0` and their signatures
 and engine checks rechecked at the `develop` commit the build pins (see
@@ -21,7 +23,7 @@ data/
   mod.rs           declares the modules, exposes only what others call
   fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write
   ib/
-    mod.rs         Interactive Brokers history: instruments, quotes
+    mod.rs         Interactive Brokers history: instruments, 1-minute bars
     gateway.rs     the IB account and the Docker gateway, started and logged in
     README.md      IB history: requests, the gateway, depths, tests
   okx/
@@ -34,8 +36,8 @@ data/
 The module runs no node and opens no port of its own; the IB part starts the
 Docker IB Gateway it connects to (see `ib/README.md`, "The gateway"). A
 source is an adapter's historical client returning Nautilus types:
-`Vec<InstrumentAny>`, and a series' data as `Vec<Data>` (IB's quotes, made
-from bars; OKX's candles, as bars). `ParquetDataCatalog` is the storage.
+`Vec<InstrumentAny>`, and a series' data as `Vec<Data>` (IB's 1-minute
+bars and OKX's candles, as bars). `ParquetDataCatalog` is the storage.
 
 ```
 strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
@@ -61,15 +63,18 @@ keys it:
 
 | Strategy bar type | Series stored |
 |---|---|
-| `SXR8.IBIS-1-HOUR-MID-INTERNAL` | quotes of `SXR8.IBIS` |
+| `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `SXR8.IBIS-1-MINUTE-MID-EXTERNAL`, `…-BID-EXTERNAL` and `…-ASK-EXTERNAL` |
 | `X.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `X.OKX-1-MINUTE-LAST-EXTERNAL` |
 | `X.OKX-1-MINUTE-LAST-EXTERNAL` | bars of that bar type |
+| `SXR8.IBIS-1-HOUR-MID-INTERNAL` | quotes of `SXR8.IBIS` (no source serves them) |
 | `X.OKX-1-HOUR-LAST-INTERNAL` | trades of `X.OKX` (no source serves them yet) |
 
 The rule is the data engine's: a composite bar type is built from its source
-bars, an internal one priced LAST from trades, any other from quotes. `ib/`
-serves quotes only, made from IB's `EXTERNAL` 1-MINUTE BID and ASK bars,
-which it never stores. `okx/` serves only the bars of
+bars, an internal one priced LAST from trades, any other from quotes. And
+the matching engine's: external bars priced other than LAST come with the
+BID and ASK bars of their spec, which a backtest pairs into the quotes
+orders fill on (a MID bar holds no bid or ask). `ib/` serves only IB's
+`EXTERNAL` 1-MINUTE bars, stored as IB gives them; `okx/` only the bars of
 `X.OKX-1-MINUTE-LAST-EXTERNAL`, OKX's 1-minute candles.
 
 ### Bar type format
@@ -101,10 +106,9 @@ So `60-MINUTE` is rejected: write `1-HOUR`.
 
 The last token is the aggregation source. `EXTERNAL` bars are made by the
 venue or adapter: what `request_bars` returns and `subscribe_bars` streams;
-`ib/` requests them to make quotes and does not store them, while a
-composite bar type's source bars are stored as they are. `INTERNAL` bars are
-built by the Nautilus data engine from ticks or other bars: the strategies'
-bars, from the stored quotes or source bars.
+`ib/` and `okx/` store them as they are. `INTERNAL` bars are built by the
+Nautilus data engine from ticks or other bars: the strategies' bars, from
+the stored source bars (or quotes).
 
 A composite bar type builds a target from a finer bar type:
 `ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. The target must be
@@ -139,9 +143,9 @@ decade, or a symbol rewrite that breaks the match with the live broker.
 ## fill_catalog.rs
 
 Fills the catalog over one window with the instruments and the series their
-bars are built from (Nautilus `Data`: quotes, or bars for a composite bar
-type; the backtest builds the strategies' bars from them and fills orders on
-them, see `src/backtest/README.md`). A source's historical client is a plain
+bars are built from and orders fill on (Nautilus `Data`: bars for a
+composite bar type, or quotes; the backtest builds the strategies' bars from
+them and fills orders on them, see `src/backtest/README.md`). A source's historical client is a plain
 async call returning Nautilus types, the pattern the Nautilus docs use for
 every source (a client or loader, then `catalog.write_*`). Filling the
 catalog is its own process run.
@@ -183,11 +187,10 @@ pub async fn fill_catalog(
 closures with canned data. A fetch over `[from, to]` returns the items of
 the series whose `ts_init` lies in it, the closed interval stored
 (Nautilus' catalog intervals are closed, the next contiguous when it starts
-1 ns after the end). How the source makes the items (IB's quotes come from
-bars) and at what cadence (one a minute for IB, see `ib/README.md`) is its
-own business: no caller passes the cadence, and `ib/` checks `end` against
-it before starting the gateway. A source refuses a data type it does not
-serve.
+1 ns after the end). The series' bar type states its cadence; `ib/`
+serves 1-MINUTE bars only and checks `end` against the minute in progress
+before starting the gateway (see `ib/README.md`). A source refuses a series
+it does not serve.
 
 The steps say quotes and instruments; bars go the same way, keyed by their
 bar type instead of the instrument id.
@@ -229,15 +232,12 @@ is deliberate: the historical client fails the whole call on a failed
 request, so a short answer that is not an error means the source has no
 more.
 
-A fill over `[start, end]` therefore records quotes over `[start, end]`,
-whatever their stamps. IB's quotes sit 1 ns before their bar's close, so the
-last quote of a window ending on a close is at `end − 1 ns`, yet the
-interval reaches `end`; and since the fetch is over `(from, end]` in quote
-stamps, the quote of the bar closing just after `end` (stamped `end`
-itself) belongs to this fill, not the next. The backtest requires quotes
-over `[start − 1 ns, end]` of its run, so start the fill (or the earlier
-fill the catalog resumes from) at least the warmup before the run (see
-`src/backtest/README.md`, "Coverage check").
+A fill over `[start, end]` therefore records a series over `[start, end]`,
+whatever its stamps. IB's bars are stamped at their close, so the bar
+closing at `end` belongs to this fill, not the next. The backtest requires
+every series over `[start − 1 ns − warmup, end]` of its run, so start the
+fill (or the earlier fill the catalog resumes from) at least the warmup
+before the run (see `src/backtest/README.md`, "Coverage check").
 
 ### Writing
 
@@ -281,7 +281,7 @@ Layout on disk:
 
 ```
 {catalog}/data/quotes/ESM4.CME/{start}_{end}.parquet
-{catalog}/data/bars/{bar type}/{start}_{end}.parquet      // composite bar types' sources only
+{catalog}/data/bars/{bar type}/{start}_{end}.parquet      // composite sources, their BID and ASK bars
 {catalog}/data/futures_contract/ESM4.CME/{ts}_{ts}.parquet
 ```
 
@@ -301,8 +301,8 @@ catalog.query_last_timestamp(..)                     // the stored end a re-run 
 venue. A config may hold both; IB's gateway starts only if an IB instrument
 is in it.
 
-- `ib/` fills IB instruments' quotes through the Docker IB Gateway it
-  starts: see [`ib/README.md`](ib/README.md).
+- `ib/` fills IB instruments' 1-minute bars through the Docker IB Gateway
+  it starts: see [`ib/README.md`](ib/README.md).
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
 
