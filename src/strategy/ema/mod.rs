@@ -48,7 +48,9 @@ impl EmaCross {
 
     /// Submits a market order moving the position of the bar's instrument
     /// to the book's target on `bar`, unless an order for the instrument is
-    /// still pending.
+    /// still pending. The move is rounded to the instrument's size
+    /// precision: one rounding to zero, as a trade size off that grid
+    /// leaves, is an error and no order, logged by Nautilus.
     fn rebalance(&mut self, bar: &Bar) -> anyhow::Result<()> {
         let Some(target) = self.book.target(bar) else {
             return Ok(());
@@ -61,8 +63,8 @@ impl EmaCross {
         let instrument = {
             let cache = self.cache();
             let id = Some(&instrument_id);
-            if !cache.orders_open(None, id, None, None, None).is_empty()
-                || !cache.orders_inflight(None, id, None, None, None).is_empty()
+            if cache.has_orders_open(None, id, None, None, None)
+                || cache.has_orders_inflight(None, id, None, None, None)
             {
                 return Ok(());
             }
@@ -75,7 +77,11 @@ impl EmaCross {
         } else {
             OrderSide::Sell
         };
-        let quantity = instrument.make_qty_from_decimal(delta.abs(), None);
+        let quantity = instrument
+            .try_make_qty_from_decimal(delta.abs(), None)
+            // In the message, not as context: Nautilus logs only the top
+            // error of the chain.
+            .map_err(|e| anyhow::anyhow!("ordering {delta} of {instrument_id}: {e}"))?;
         let order = self.order().market(
             instrument_id,
             side,

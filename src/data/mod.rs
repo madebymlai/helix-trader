@@ -15,4 +15,3 @@ mod okx;
 pub use ic::IcHistory;
 pub(crate) use okx::Contract as OkxContract;
 pub use okx::OkxHistory;
-mod rolls;

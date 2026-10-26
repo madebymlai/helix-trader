@@ -3,7 +3,7 @@
 //!
 //! The app's client id and secret come from Spotware's Open API portal;
 //! the access token, and the account it grants, from the portal's
-//! playground (see the data README, "IC Markets specifics"). The secret and
+//! playground (see `ic/README.md`, "Credentials"). The secret and
 //! the token are secret material, the client id and the account id
 //! credential identity: none of them appears in `Debug`, errors or logs.
 
@@ -107,8 +107,8 @@ impl IcCredential {
             .collect();
         if !missing.is_empty() {
             bail!(
-                "the IC credential is incomplete: set {} in .env (see the data README, \
-                 \"IC Markets specifics\")",
+                "the IC credential is incomplete: set {} in .env (see src/data/ic/README.md, \
+                 \"Credentials\")",
                 missing.join(", ")
             );
         }

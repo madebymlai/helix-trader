@@ -8,9 +8,10 @@
 //! The engine is kept after the run, so that the report reads the fills
 //! from its cache, then disposed.
 
-use std::{collections::BTreeSet, fmt::Debug, str::FromStr};
+use std::{collections::BTreeSet, fmt::Debug, str::FromStr, sync::Arc};
 
 use anyhow::{Context, anyhow, ensure};
+use nautilus_analysis::statistics::max_drawdown::MaxDrawdown;
 use nautilus_backtest::{
     config::{BacktestDataConfig, BacktestEngineConfig, BacktestRunConfig, BacktestVenueConfig},
     node::BacktestNode,
@@ -118,18 +119,25 @@ fn data_config(
 }
 
 /// Runs `config` with `strategy` on a new `BacktestNode` and returns its
-/// one result, with the costs of the fills in the engine's cache, each on
-/// the quotes the run replayed, if any, loaded again as the node loads
-/// them.
+/// one result, its return statistics with `MaxDrawdown` (registered with
+/// the portfolio before the run), with the costs of the fills in the
+/// engine's cache, each on the quotes the run replayed, if any, loaded
+/// again as the node loads them.
 pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
     let mut node = BacktestNode::new(vec![config])?;
     node.build()?;
-    node.get_engine_mut(RUN_ID)
-        .context("no engine for the run")?
-        .add_strategy(strategy)?;
+    let engine = node
+        .get_engine_mut(RUN_ID)
+        .context("no engine for the run")?;
+    engine
+        .kernel_mut()
+        .portfolio
+        .borrow_mut()
+        .register_statistic(Arc::new(MaxDrawdown::new()));
+    engine.add_strategy(strategy)?;
     let results = node.run()?;
     let [result] = <[BacktestResult; 1]>::try_from(results)
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;

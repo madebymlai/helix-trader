@@ -354,7 +354,7 @@ fn auth_failure(stage: &str, error: &IcError) -> String {
             "check IC_ACCOUNT_ID, and IC_ENVIRONMENT: an account authenticates only on its own \
              environment"
         }
-        _ => "see the data README, \"IC Markets specifics\"",
+        _ => "see src/data/ic/README.md, \"Credentials\"",
     };
     format!("cTrader refused the {stage} authentication ({code}): {hint}")
 }

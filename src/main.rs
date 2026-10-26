@@ -19,11 +19,11 @@ use helix_trader::{
         ema::{EmaCross, EmaCrossConfig},
     },
 };
-use jiff::{Timestamp, civil::Date, tz::TimeZone};
+use jiff::Timestamp;
 use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
-use nautilus_core::UUID4;
+use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{
     identifiers::{InstrumentId, TraderId},
@@ -156,15 +156,12 @@ enum Strategy {
     Ema,
 }
 
-/// An RFC 3339 timestamp, or a date taken as midnight UTC.
-fn parse_time(s: &str) -> anyhow::Result<Timestamp> {
-    if let Ok(timestamp) = s.parse::<Timestamp>() {
-        return Ok(timestamp);
-    }
-    let date: Date = s
-        .parse()
-        .with_context(|| format!("{s:?} is neither a date nor an RFC 3339 timestamp"))?;
-    Ok(date.to_zoned(TimeZone::UTC)?.timestamp())
+/// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
+/// UTC, or Unix nanoseconds or seconds.
+fn parse_time(s: &str) -> Result<Timestamp, String> {
+    s.parse::<UnixNanos>()
+        .map(Timestamp::from)
+        .map_err(|e| e.to_string())
 }
 
 /// An amount and a currency code, for example "3 EUR". Explicit, since
