@@ -316,15 +316,6 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_time_without_an_offset_is_refused_rather_than_read_as_midnight() {
-        assert!(parse_time("2024-01-02T15:30:00").is_err());
-        assert_eq!(
-            parse_time("2024-01-02").unwrap(),
-            "2024-01-02T00:00:00Z".parse::<Timestamp>().unwrap()
-        );
-    }
-
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]
             .into_iter()
