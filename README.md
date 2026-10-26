@@ -79,7 +79,6 @@ NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture
 | [src/strategy/README.md](src/strategy/README.md) | Writing a strategy, its config, warmup |
 | [src/backtest/README.md](src/backtest/README.md) | The backtest run, costs, fills, leverage, results |
 | [src/live/README.md](src/live/README.md) | Live nodes; IB, IC and OKX clients in `ib/`, `ic/` and `okx/` |
-| [docs/research/](docs/research/README.md) | Desk research on strategies, costs and brokers |
 
 ## Disclaimer
 
