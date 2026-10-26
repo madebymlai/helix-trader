@@ -10,8 +10,9 @@
 //! instruments (`parse`), the tick history merged into quotes (`ticks`),
 //! the spot events merged the same way (`spots`), the data client
 //! (`data`), the account (`account`), the reconciliation reports
-//! (`reports`) and the execution client (`execution`). IC's instruments are on venue `ICMARKETS`
-//! (`XAUUSD.ICMARKETS`).
+//! (`reports`), the execution client (`execution`) and the token pair with
+//! the token file that keeps it renewed (`token`). IC's instruments are on
+//! venue `ICMARKETS` (`XAUUSD.ICMARKETS`).
 
 use std::{collections::HashMap, str::FromStr};
 
@@ -51,6 +52,7 @@ mod spots;
 #[cfg(test)]
 mod testing;
 mod ticks;
+mod token;
 mod websocket;
 
 /// A cTrader session on IC's account: history, the spot subscriptions of
@@ -64,9 +66,10 @@ pub struct IcHistory {
 
 impl IcHistory {
     /// Connects to the environment `IC_ENVIRONMENT` names and
-    /// authenticates the credential `IC_CLIENT_ID`, `IC_CLIENT_SECRET`,
-    /// `IC_ACCESS_TOKEN` and `IC_ACCOUNT_ID` from the environment (or
-    /// `.env`); none is ever printed.
+    /// authenticates the credential `IC_CLIENT_ID`, `IC_CLIENT_SECRET` and
+    /// `IC_ACCOUNT_ID` from the environment (or `.env`), with the token
+    /// file's pair (`IC_ACCESS_TOKEN` and `IC_REFRESH_TOKEN` seed it), renewed
+    /// when due; none is ever printed.
     ///
     /// # Errors
     ///
@@ -528,7 +531,7 @@ mod tests {
         messages::{Payload, ProtoMessage},
         testing::{
             self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            TRADER_RES, accept_auth, credential, replay, reply, tick_answer,
+            TRADER_RES, accept_auth, replay, reply, tick_answer,
         },
         ticks::{Tick, WEEK_MS},
         *,
@@ -586,7 +589,8 @@ mod tests {
         peer: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
     ) -> (IcHistory, Received) {
         let (url, received) = testing::start(peer);
-        let (history, _) = IcHistory::connect_to(&url, credential(), HEARTBEAT_INTERVAL)
+        let (credential, _tokens) = testing::credential();
+        let (history, _) = IcHistory::connect_to(&url, credential, HEARTBEAT_INTERVAL)
             .await
             .unwrap();
         (history, received)
@@ -1009,5 +1013,149 @@ mod tests {
         );
         assert_eq!(requests(&received), []);
         history.disconnect().await;
+    }
+
+    /// The log records of the IC adapter at info and above, for the demo
+    /// test to show: none holds a token.
+    struct Captured(std::sync::Mutex<Vec<String>>);
+
+    impl log::Log for Captured {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Info && metadata.target().contains("::ic")
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                let line = format!("{} {}", record.level(), record.args());
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURED: Captured = Captured(std::sync::Mutex::new(Vec::new()));
+
+    /// Prints the records captured when dropped, the test failing or not.
+    struct ShowLogs;
+
+    impl Drop for ShowLogs {
+        fn drop(&mut self) {
+            for line in CAPTURED.0.lock().unwrap().iter() {
+                println!("log: {line}");
+            }
+        }
+    }
+
+    async fn next_spot(
+        spots: &mut SpotEvents,
+        timeout: std::time::Duration,
+    ) -> messages::ProtoOaSpotEvent {
+        tokio::time::timeout(timeout, spots.recv())
+            .await
+            .expect("no spot event in time")
+            .expect("the spot events ended")
+    }
+
+    /// End to end on IC's cTrader demo, gated as `tests/ic_demo.rs` is
+    /// (`NAUTILUS_IC_RUN=1` from the shell; demo only; no order): a forced
+    /// renewal of the access token on a running session, which goes on
+    /// receiving quotes and answering requests; then a fresh session
+    /// authenticates from the token file without renewing. It ROTATES the
+    /// account's real token pair: the file keeps the new one, `.env`'s is
+    /// spent. Run it with:
+    ///
+    /// ```sh
+    /// NAUTILUS_IC_RUN=1 cargo test --lib the_demo_session_renews -- --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
+        use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+        if std::env::var("NAUTILUS_IC_RUN").is_ok_and(|v| v == "1") {
+            dotenvy::dotenv().ok();
+        } else {
+            println!("skipped; set NAUTILUS_IC_RUN=1 to run it on IC's cTrader demo");
+            return;
+        }
+        assert_eq!(
+            std::env::var("IC_ENVIRONMENT").as_deref(),
+            Ok("demo"),
+            "the IC end to end test runs on the demo only: set IC_ENVIRONMENT=demo"
+        );
+        let _ = log::set_logger(&CAPTURED);
+        log::set_max_level(log::LevelFilter::Info);
+        let _logs = ShowLogs;
+        let connection = IcConnection::from_env().unwrap();
+        let tokens = connection.credential.tokens.clone();
+        let url = connection.environment.url();
+        let (history, mut spots) =
+            IcHistory::connect_to(url, connection.credential.clone(), HEARTBEAT_INTERVAL)
+                .await
+                .unwrap();
+        let ids = [
+            InstrumentId::from("XAUUSD.ICMARKETS"),
+            InstrumentId::from("EURUSD.ICMARKETS"),
+        ];
+        for symbol in history.symbols(&ids).await.unwrap() {
+            history.client.subscribe_spots(symbol.symbol_id).unwrap();
+        }
+        next_spot(&mut spots, Duration::from_secs(30)).await;
+        let before = tokens.read().unwrap();
+
+        history.client.renew_token();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokens.read().unwrap().same_access_token(&before) {
+            assert!(tokio::time::Instant::now() < deadline, "no renewal in 30 s");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let renewed_at = Timestamp::now();
+        let after = loop {
+            let spot = next_spot(&mut spots, Duration::from_secs(60)).await;
+            let at = Timestamp::from_millisecond(spot.timestamp.unwrap_or_default()).unwrap();
+            if at > renewed_at {
+                break at;
+            }
+        };
+        let instruments = history.instruments(&ids).await;
+        history.disconnect().await;
+
+        let renewed = tokens.read().unwrap();
+        let mode = std::fs::metadata(tokens.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let left = renewed.expires_at.unwrap().duration_since(Timestamp::now());
+        println!(
+            "renewed at {renewed_at}, a spot at {after}; token file {} mode {mode:o}, the \
+             access token valid until {:?} ({:.1} days)",
+            tokens.path().display(),
+            renewed.expires_at,
+            left.as_secs_f64() / 86_400.0
+        );
+        assert_eq!(instruments.unwrap().len(), 2);
+        assert_eq!(mode, 0o600);
+        assert!(!renewed.access_token.expose_secret().is_empty());
+        assert!(!renewed.refresh_token.expose_secret().is_empty());
+        assert!(
+            renewed.refresh_token.expose_secret() != before.refresh_token.expose_secret(),
+            "the refresh token was not replaced"
+        );
+        assert!(
+            jiff::SignedDuration::from_hours(24 * 20) < left
+                && left < jiff::SignedDuration::from_hours(24 * 40),
+            "{left:?}"
+        );
+
+        // A fresh session, as the next run: from the file, no renewal.
+        let fresh = IcHistory::connect_as(&IcConnection::from_env().unwrap())
+            .await
+            .unwrap();
+        let account = fresh.check_account().await;
+        fresh.disconnect().await;
+
+        account.unwrap();
+        assert!(tokens.read().unwrap().same_access_token(&renewed));
     }
 }

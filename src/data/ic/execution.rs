@@ -643,14 +643,14 @@ mod tests {
             ProtoOaClosePositionDetail, ProtoOaDeal, ProtoOaDealListReq, ProtoOaDealListRes,
             ProtoOaDealStatus, ProtoOaErrorRes, ProtoOaOrder, ProtoOaOrderStatus,
             ProtoOaOrderTriggerMethod, ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus,
-            ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
-            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTimeInForce, ProtoOaTradeData,
-            ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
+            ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaRefreshTokenReq, ProtoOaSymbolByIdReq,
+            ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTimeInForce,
+            ProtoOaTradeData, ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
         },
         testing::{
             self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, ASSET_LIST_RES, Action,
             DEAL_LIST_RES_EMPTY, RECONCILE_RES_EMPTY, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            TRADER_RES, accept_auth, credential, replay, reply,
+            TRADER_RES, accept_auth, replay, reply, token_refused,
         },
     };
 
@@ -695,6 +695,9 @@ mod tests {
                     };
                     return vec![reply(request, &other)];
                 }
+            }
+            if venue.refuse_token && request.payload_type == ProtoOaRefreshTokenReq::TYPE {
+                return vec![token_refused(request)];
             }
             if let Some(actions) = accept_auth(request) {
                 return actions;
@@ -765,8 +768,17 @@ mod tests {
     type Events = mpsc::UnboundedReceiver<ExecutionEvent>;
 
     /// A started client of XAUUSD and EURUSD on the peer of `venue`, its
-    /// cache, the node's execution events and the frames received.
-    fn started(venue: Script) -> (IcExecutionClient, Rc<RefCell<Cache>>, Events, Received) {
+    /// cache, the node's execution events, the frames received and its
+    /// token file's directory.
+    fn started(
+        venue: Script,
+    ) -> (
+        IcExecutionClient,
+        Rc<RefCell<Cache>>,
+        Events,
+        Received,
+        tempfile::TempDir,
+    ) {
         let (url, received) = testing::start(peer(venue));
         let (tx, events) = mpsc::unbounded_channel();
         replace_exec_event_sender(tx);
@@ -781,14 +793,15 @@ mod tests {
             None,
             cache.clone(),
         );
+        let (credential, tokens) = testing::credential();
         let mut client = IcExecutionClient::with_endpoint(
             core,
             url,
-            credential(),
+            credential,
             vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
         );
         client.start().unwrap();
-        (client, cache, events, received)
+        (client, cache, events, received, tokens)
     }
 
     /// Plays the node: the first account state the client publishes goes
@@ -942,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn connecting_publishes_the_captured_account_state_and_waits_for_the_node() {
-        let (mut client, cache, mut events, _) = started(Script::default());
+        let (mut client, cache, mut events, _, _tokens) = started(Script::default());
 
         let state = connect(&mut client, &mut events, &cache).await;
 
@@ -979,7 +992,7 @@ mod tests {
             reconcile: Some(two_gold_positions()),
             ..Script::default()
         };
-        let (mut client, cache, mut events, _) = started(venue);
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
 
         let state = connect(&mut client, &mut events, &cache).await;
 
@@ -1014,7 +1027,7 @@ mod tests {
             trader: Some(trader),
             ..Script::default()
         };
-        let (mut client, _cache, mut events, _) = started(venue);
+        let (mut client, _cache, mut events, _, _tokens) = started(venue);
 
         let err = client.connect().await.unwrap_err().to_string();
 
@@ -1026,19 +1039,23 @@ mod tests {
         assert!(events.try_recv().is_err(), "an account state was published");
     }
 
-    /// The refusal is the fixture `account_auth_token_invalid`.
+    /// The refusal is the fixture `account_auth_token_invalid`, the
+    /// renewal's synthetic.
     #[tokio::test]
-    async fn an_expired_token_is_refused_at_connect() {
+    async fn an_expired_token_ctrader_refuses_to_renew_is_refused_at_connect() {
         let venue = Script {
             refuse_token: true,
             ..Script::default()
         };
-        let (mut client, _cache, _events, _) = started(venue);
+        let (mut client, _cache, _events, _, _tokens) = started(venue);
 
         let err = format!("{:#}", client.connect().await.unwrap_err());
 
-        assert!(err.contains("CH_ACCESS_TOKEN_INVALID"), "{err}");
-        assert!(err.contains("renew IC_ACCESS_TOKEN"), "{err}");
+        assert!(
+            err.contains("cTrader refused to renew the access token (CH_ACCESS_TOKEN_INVALID)"),
+            "{err}"
+        );
+        assert!(err.contains("Playground"), "{err}");
         assert!(!client.is_connected());
     }
 
@@ -1049,7 +1066,7 @@ mod tests {
             other_account: true,
             ..Script::default()
         };
-        let (mut client, _cache, _events, _) = started(venue);
+        let (mut client, _cache, _events, _, _tokens) = started(venue);
 
         let err = format!("{:#}", client.connect().await.unwrap_err());
 
@@ -1062,7 +1079,7 @@ mod tests {
         venue: Script,
         lookback_mins: Option<u64>,
     ) -> (ExecutionMassStatus, Received) {
-        let (mut client, cache, mut events, received) = started(venue);
+        let (mut client, cache, mut events, received, _tokens) = started(venue);
         connect(&mut client, &mut events, &cache).await;
         let mass_status = client
             .generate_mass_status(lookback_mins)
@@ -1253,7 +1270,7 @@ mod tests {
     #[tokio::test]
     async fn a_longer_lookback_reads_the_deals_from_its_start() {
         let venue = gold_venue();
-        let (mut client, cache, mut events, received) = started(venue);
+        let (mut client, cache, mut events, received, _tokens) = started(venue);
         connect(&mut client, &mut events, &cache).await;
         let before = client.now();
 
@@ -1286,7 +1303,7 @@ mod tests {
             position::Position,
         };
 
-        let (mut client, cache, mut events, received) = started(gold_venue());
+        let (mut client, cache, mut events, received, _tokens) = started(gold_venue());
         connect(&mut client, &mut events, &cache).await;
         let gold = client.session().unwrap().instruments[&XAUUSD_SYMBOL_ID].clone();
         let order = OrderTestBuilder::new(OrderType::Market)
@@ -1345,7 +1362,7 @@ mod tests {
             GenerateOrderStatusReportsBuilder, GeneratePositionStatusReportsBuilder,
         };
 
-        let (mut client, cache, mut events, _) = started(gold_venue());
+        let (mut client, cache, mut events, _, _tokens) = started(gold_venue());
         connect(&mut client, &mut events, &cache).await;
         let gold = InstrumentId::from(XAUUSD);
 
@@ -1385,7 +1402,7 @@ mod tests {
     async fn an_order_is_denied_and_nothing_reaches_ic() {
         use nautilus_model::orders::OrderTestBuilder;
 
-        let (mut client, cache, mut events, received) = started(Script::default());
+        let (mut client, cache, mut events, received, _tokens) = started(Script::default());
         connect(&mut client, &mut events, &cache).await;
         let order = OrderTestBuilder::new(OrderType::Market)
             .instrument_id(InstrumentId::from(XAUUSD))

@@ -33,7 +33,8 @@ data/
     parse.rs       cTrader symbols -> CurrencyPair, ids
     spots.rs       live quotes: spot events merged into quotes as the history's
     ticks.rs       tick history: decoding, paging, the merge into quotes, their size
-    websocket/     the cTrader connection: outer client, handler task, spot subscriptions
+    token.rs       the token pair and the user-only token file that keeps the latest one
+    websocket/     the cTrader connection: outer client, handler task, spot subscriptions, token renewal
     testing.rs     a mock cTrader peer (a local WebSocket server) for the tests
     proto/         Spotware's four .proto files, vendored (build.rs compiles them)
     testdata/      responses captured from IC's demo, scrubbed, text and wire forms

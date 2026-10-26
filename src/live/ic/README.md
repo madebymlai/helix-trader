@@ -27,13 +27,20 @@ again.
 
 `ic::clients` reads `IC_ENVIRONMENT` (`demo` or `live`, required, no
 default) and the credential (`IC_CLIENT_ID`, `IC_CLIENT_SECRET`,
-`IC_ACCESS_TOKEN`, `IC_ACCOUNT_ID`) into an `IcConnection` before anything
+`IC_ACCESS_TOKEN`, `IC_REFRESH_TOKEN`, `IC_ACCOUNT_ID`, and the token
+file's place from `XDG_STATE_HOME` or `HOME`) into an `IcConnection` before anything
 connects, as `OKX_ENVIRONMENT` is read for OKX: a missing or unknown value
 fails the start naming the variable, never a value. The config carries the
 connection; `Debug` redacts the credential.
 
-The access token lasts about 30 days; renewing it is a manual step
-(`data/ic/README.md`, "Credentials").
+Renewal is automatic: the access token (about 30 days) is renewed by
+every session, the start's fill and the node's data and execution clients
+alike, at start when due, a day before it expires while the node runs, and
+when cTrader refuses or invalidates it, re-authenticating the account on
+the open connection. The latest pair lives in the token file
+(`~/.local/state/helix-trader/ic-token.json`, mode 0600), seeded once from
+`.env`, which is never written; the sessions share it under a lock
+(`data/ic/README.md`, "Token file and renewal").
 
 ## Refused before the node runs
 
@@ -41,8 +48,11 @@ The start's catalog fill opens a cTrader session before the node is built,
 and checks the account there (`IcHistory::check_account`), so each of these
 fails `Live::run` with its reason, before any node or strategy:
 
-- an expired or invalid token: `cTrader refused the account authentication
-  (CH_ACCESS_TOKEN_INVALID): ... renew IC_ACCESS_TOKEN`;
+- a token pair cTrader no longer renews (revoked, or lost): `cTrader
+  refused to renew the access token (CH_ACCESS_TOKEN_INVALID): generate a
+  new token pair in the Playground ...`, or the same remedy after
+  `cTrader refused the account authentication (...) even with a renewed
+  access token`;
 - another account than `IC_ACCOUNT_ID` (the account auth or the trader of
   another account): `... another account than IC_ACCOUNT_ID`;
 - a netting (or spread betting) account: `the IC account is NETTED, not

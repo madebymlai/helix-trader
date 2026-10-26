@@ -37,6 +37,7 @@ ic/
   parse.rs      cTrader symbols -> CurrencyPair, ids
   spots.rs      live quotes: spot events merged into quotes, held during a request
   ticks.rs      tick history: decoding, paging, the merge into quotes, their size
+  token.rs      the token pair and the token file that keeps the latest one
   websocket/    the cTrader connection: outer client, handler task, spot subscriptions
   testing.rs    a mock cTrader peer (a local WebSocket server) for the tests
   proto/        Spotware's four .proto files, vendored
@@ -72,32 +73,85 @@ In `.env`:
 - `IC_ENVIRONMENT`, `demo` or `live`, required.
 - `IC_CLIENT_ID` and `IC_CLIENT_SECRET`: the app registered on
   openapi.ctrader.com (Applications, Credentials).
-- `IC_ACCESS_TOKEN` and `IC_ACCOUNT_ID`: from the app's Playground, the
-  access token and the `ctidTraderAccountId` of the IC account. A token
-  lasts about 30 days; renew it by hand in the Playground (or with the
-  refresh token on the portal) and update `.env`. `.env.example` also lists
-  `IC_REFRESH_TOKEN`, from the same page; the adapter does not read it:
-  renewal inside the binary (`ProtoOARefreshTokenReq`) is out of this
-  epic's scope. An expired token fails the start (`CH_ACCESS_TOKEN_INVALID`)
-  and a token invalidated while running ends the session (see "Session").
+- `IC_ACCESS_TOKEN`, `IC_REFRESH_TOKEN` and `IC_ACCOUNT_ID`: from the
+  app's Playground, the first token pair and the `ctidTraderAccountId` of
+  the IC account. They only seed the token file (below): from then on the
+  adapter renews the pair by itself.
 
 None is ever printed: they are `SecretString`s, `Debug` redacts them,
 errors name variables and cTrader's error codes only. The plaintext copies
-an auth frame is built from are wiped (`zeroize`) once it is encoded; the
-frame itself goes to the transport.
+an auth or renewal frame is built from are wiped (`zeroize`) once it is
+encoded; the frame itself goes to the transport.
+
+### Token file and renewal
+
+The access token lasts 2,628,000 s (about 30 days); the refresh token
+renews it with `ProtoOARefreshTokenReq`, whose answer holds a new access
+token, its lifetime (`expiresIn`, in seconds) and a new refresh token, the
+old pair invalidated at once (Spotware's docs: the refresh token has no
+expiry but is valid until used). So the latest pair lives in a token file,
+outside the repository, the user's only:
+
+- where: `$XDG_STATE_HOME/helix-trader/ic-token.json` (XDG base directory
+  convention for user state), by default
+  `~/.local/state/helix-trader/ic-token.json`; a relative
+  `XDG_STATE_HOME` is ignored, as the specification says;
+- what: JSON with both tokens, the access token's expiry and a SHA-256
+  fingerprint of the `.env` pair that seeded it; mode 0600, its directory
+  0700;
+- seeded from `.env` once: at the first connect, or when `.env` holds
+  another pair than the one that seeded it (a new one from the
+  Playground). `.env` is never written; after the first renewal its pair
+  is spent;
+- written atomically (a temporary file renamed over it), so a reader sees
+  a whole pair; a renewal holds an advisory lock (`flock` on
+  `ic-token.json.lock`) from before its request until the new pair is
+  written, so sessions of several processes (a fill and a live node) never
+  spend the same refresh token: the one that finds the file renewed takes
+  that pair instead.
+
+Every session (fill, data client, execution client) renews by itself:
+
+- at start, when the expiry is unknown (a pair just seeded) or less than
+  a day away (`RENEW_BEFORE`);
+- on schedule while it runs, a day before the expiry;
+- when cTrader refuses the token at the account auth
+  (`CH_ACCESS_TOKEN_INVALID`, `OA_AUTH_TOKEN_EXPIRED`), once;
+- when cTrader ends the account session
+  (`ProtoOAAccountsTokenInvalidatedEvent`, `ProtoOAAccountDisconnectEvent`:
+  the token renewed by another session, or expired): the account
+  authenticates again with the file's pair, renewed first if refused.
+
+The renewal's answer is the only copy of the new pair: it is written to
+the file before anything else, whatever the session went through while
+it was out (an event ending the account session, an expired wait), known
+by its `clientMsgId` or its payload type; a disconnect waits for it up to
+30 s. Then the account authenticates again on the open connection:
+requests in flight keep awaiting their answers, new ones wait. The spot
+subscriptions stay: cTrader keeps them on the connection across a new
+account auth, and answers `ALREADY_SUBSCRIBED` to one sent again (demo,
+2026-10-26); only those subscribed or unsubscribed meanwhile are sent. A
+new connection subscribes them all again.
+
+A refused renewal fails the session naming the code and the remedy:
+generate a new pair in the Playground, set `IC_ACCESS_TOKEN` and
+`IC_REFRESH_TOKEN` in `.env` (which seeds the file again). The pair is
+lost, and the same remedy applies, if the connection drops or the process
+dies between the renewal request and its answer.
 
 ### Session
 
-Application auth, then account auth. A refusal names the code and what to
-check (`CH_ACCESS_TOKEN_INVALID`: renew `IC_ACCESS_TOKEN`), as does an
-account other than `IC_ACCOUNT_ID`. A `ProtoHeartbeatEvent` goes out every
+Application auth, then account auth (the token renewed first if due, see
+above). A refusal names the code and what to check, as does an account
+other than `IC_ACCOUNT_ID`. A `ProtoHeartbeatEvent` goes out every
 10 s (the transport's Ping is off). Requests carry a `clientMsgId` and get
 the response that echoes it.
 
 After a reconnect the session authenticates again, then subscribes again
 to the spots of every symbol subscribed, before serving the requests that
-waited; requests in flight fail. cTrader ending the session (token
-invalidated) fails every request until a reconnect.
+waited; requests in flight fail. cTrader ending the client's session
+(`ProtoOAClientDisconnectEvent`) fails every request until a reconnect;
+an account session ended is authenticated again (see above).
 
 On the demo (2026-10-26) cTrader sent no heartbeat of its own in 25 s
 while ours ran, and none is needed: the transport's reconnect handles a
@@ -399,7 +453,14 @@ placed to capture them.
   can be had: another account, a token invalidated, malformed frames) and
   the mock cTrader peer of `testing.rs`:
   - `config.rs`: the environment required, the credential read whole and
-    never in `Debug` or errors;
+    never in `Debug` or errors, the `.env` pair seeding the token file;
+  - `token.rs`: the file seeded from `.env` (expiry unknown), mode 0600 in
+    a 0700 directory, a renewed pair found by the next load, another `.env`
+    pair seeding it again; the lock one session at a time; two writers and
+    a reader at once never leaving a partial pair, the last writer's kept;
+    a file that is no token file named, never its content; the expiry from
+    `expiresIn` and the renewal a day before; the path under
+    `XDG_STATE_HOME` or `~/.local/state`;
   - `messages.rs`: envelopes, error responses and malformed payloads;
   - `parse.rs`: XAUUSD and EURUSD to `CurrencyPair`s; an index, a missing
     step, a minimum finer than the step, digits out of range and an
@@ -413,10 +474,28 @@ placed to capture them.
     kept, the size and its cap, a price off precision refused);
   - `websocket/`: the session's exact auth frames, the binary heartbeat,
     two requests answered in reverse order each getting its own, a venue
-    error, a refused token or app (naming the code, never a credential),
-    another account refused, malformed and unknown frames skipped,
+    error, a refused app (naming the code, never a credential), another
+    account refused, malformed and unknown frames skipped,
     re-authentication after a reconnect, requests failing once cTrader
-    ends the session; tick requests at most 5 a second, others unlimited;
+    ends the client's session; tick requests at most 5 a second, others
+    unlimited;
+  - `websocket/` (renewal), against a peer keeping one token pair as
+    cTrader does (a renewal replaces it and ends the sessions of the old
+    one): a pair of unknown expiry, or expiring within a day, renewed and
+    saved before the account auth, one expiring later not; a running
+    session renewing on schedule, its spots and a request in flight kept;
+    an invalidated token renewed and the account authenticated again; a
+    token refused at start renewed; a refused renewal naming the
+    Playground, the pair kept; a token refused even renewed naming the
+    Playground, never a token; two sessions on one file, starting or due
+    together, renewing once; a session whose token another renewed taking
+    the new pair from the file; the renewal's answer saved after cTrader
+    drops the account session, without its `clientMsgId`, and at a
+    disconnect; an account session dropped authenticated again; against a
+    peer keeping the connection's subscriptions across a new account auth
+    and refusing one held (`ALREADY_SUBSCRIBED`, as the demo), none sent
+    again after a renewal, those changed during it sent once authenticated
+    again;
   - `mod.rs`: the instruments from assets, symbol list and details; an
     unlisted symbol and another venue refused; a series other than quotes
     refused before any request; a fill, against a peer serving ticks as
@@ -439,8 +518,8 @@ placed to capture them.
   - `execution.rs`, the `ExecutionClient` against the mock peer: the
     captured account state published at connect (EUR, the balance, no
     margin), connected once the node registers it; the margin of open
-    positions locked; a netting account, an expired token and another
-    account refused at connect, nothing published; on two open XAUUSD
+    positions locked; a netting account, an expired token cTrader refuses
+    to renew and another account refused at connect, nothing published; on two open XAUUSD
     positions (a long with stop loss and take profit, a short of two deals
     reduced once, with a double-trade stop loss), a US500 position out of
     scope and a pending EURUSD limit: one position report per position by
@@ -468,6 +547,30 @@ placed to capture them.
   one fill and resumed at a time between two milliseconds, one quote a
   millisecond, none crossed, sized 10,000, covered over the day. Passed on
   2026-10-26 (about 20 s), the execution client's test too.
+- `mod.rs`, `the_demo_session_renews_its_token_and_keeps_receiving_quotes`,
+  on the demo (same gate; in the library, as it forces a renewal through
+  the client's test-only command): a running session subscribed to XAUUSD
+  and EURUSD spots renews on demand, the token file then holding a new
+  pair (mode 0600, both tokens, the refresh token replaced, the expiry
+  20 to 40 days out), spots after the renewal, a request answered; then a
+  fresh session authenticates from the file without renewing. It ROTATES
+  the real pair. Run it with `NAUTILUS_IC_RUN=1 cargo test --lib
+  the_demo_session_renews -- --nocapture`. Its first run (2026-10-26,
+  13:47 UTC, an earlier handler) renewed at start, the file seeded from
+  `.env`: saved, the account authenticated with the new token, `expiresIn`
+  2,628,000 s (the expiry 30 days 10 hours out); the forced renewal on the
+  running session then rotated the pair at cTrader without the answer
+  reaching the file, so the pair was lost (the next session: account auth
+  refused, renewal refused, `CH_ACCESS_TOKEN_INVALID`). That handler
+  dropped a renewal out when an event ended the session, the likely cause
+  (cTrader ending the account session as the token is refreshed); the
+  handler now keeps it (see "Token file and renewal"). With a new pair
+  from the Playground it passed on 2026-10-26: two renewals saved to the
+  file (mode 0600), quotes flowing on through the renewal, and
+  `tests/ic_demo.rs` passing 3/3 from the file. Its log showed cTrader
+  answering `ALREADY_SUBSCRIBED` to the subscription sent again after the
+  re-auth: subscriptions survive a re-auth on the same connection, so the
+  handler no longer sends them again then.
 - `tests/ic_live_demo.rs`, on the demo (same gate, no order; the node
   reconciles the account through the execution client at start): `Live` on XAUUSD fills the catalog over a 30-minute warmup,
   then a recording strategy gets its 1-minute MID bars warmed up from the

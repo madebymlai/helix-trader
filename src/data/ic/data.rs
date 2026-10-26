@@ -400,7 +400,7 @@ mod tests {
         testing::{
             self, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
             SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            UNSUBSCRIBE_SPOTS_RES, accept_auth, credential, replay, reply, tick_answer,
+            UNSUBSCRIBE_SPOTS_RES, accept_auth, replay, reply, tick_answer,
         },
         ticks::Tick,
     };
@@ -483,10 +483,11 @@ mod tests {
         let (url, received) = testing::start(script);
         let (tx, events) = mpsc::unbounded_channel();
         replace_data_event_sender(tx);
+        let (credential, _tokens) = testing::credential();
         let mut client = IcDataClient::with_endpoint(
             ClientId::from("ICMARKETS"),
             url,
-            credential(),
+            credential,
             vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
         );
         client.connect().await.unwrap();
