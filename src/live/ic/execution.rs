@@ -14,10 +14,12 @@
 //! on the position; an order naming a position closes it, in part or
 //! whole, or adds to it. A modification amends a pending order, or moves a
 //! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
-//! one left out); a cancel cancels a pending order, or removes a
-//! protection. A request the session never sent is rejected; one sent but
-//! unanswered stays in flight (`retain_unresolved_submissions`) until its
-//! events, a query or reconciliation resolve it.
+//! one left out, the other as last asked); a cancel cancels a pending
+//! order, or removes a protection. A request the session never sent is
+//! rejected; one sent but unanswered stays in flight
+//! (`retain_unresolved_submissions`) until its events, a query or
+//! reconciliation resolve it; a query finding no such order at IC rejects
+//! it.
 //!
 //! Reconciliation reads the reconcile request (open positions, their stop
 //! loss and take profit, pending orders), the deal list (fills), and for a
@@ -62,7 +64,7 @@ use nautilus_model::{
 };
 
 use super::{
-    dispatch::{Dispatch, Output, Role},
+    dispatch::{Dispatch, Output, Role, Want},
     orders::{self, Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
@@ -88,6 +90,9 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 /// How far before an order's creation a query looks for it in the order
 /// list: the venue's clock and the node's may differ.
 const QUERY_MARGIN_MS: i64 = 60_000;
+
+/// Why an order IC holds nowhere is rejected.
+const ABSENT: &str = "IC holds no such order: its request never reached IC";
 
 /// IC's execution client: orders, the account state and reconciliation
 /// reports of the account, on venue `ICMARKETS`.
@@ -408,7 +413,13 @@ impl IcExecutionClient {
         let clock = self.clock;
         self.spawn_command("IC trade request", async move {
             let refused = match sent.await {
-                Ok(Ok(())) => return Ok(()),
+                Ok(Ok(())) => {
+                    dispatch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .sent(tag);
+                    return Ok(());
+                }
                 Ok(Err(e)) => format!("not sent to IC: {e}"),
                 Err(_) => "not sent to IC: the session closed".to_owned(),
             };
@@ -556,9 +567,10 @@ impl IcExecutionClient {
         self.core.cache().order_owned(id)
     }
 
-    /// The price of the open protection `leg` of `position` in the node's
-    /// cache, else none.
-    fn cached_protection(&self, position: i64, leg: Leg) -> Option<Price> {
+    /// The price of the protection `leg` of `position` as last asked: none
+    /// if it is not open in the node's cache, else the dispatch's wanted
+    /// change of it, else its price in the cache.
+    fn asked_protection(&self, session: &Session, position: i64, leg: Leg) -> Option<Price> {
         let venue = orders::protection_id(position, leg);
         let cache = self.core.cache();
         let id = cache.client_order_id(&venue)?;
@@ -566,29 +578,21 @@ impl IcExecutionClient {
         if order.is_closed() {
             return None;
         }
-        match leg {
-            Leg::StopLoss => order.trigger_price(),
-            Leg::TakeProfit => order.price(),
+        match session.dispatch().wanted(*id) {
+            Some(Want::Move(price)) => Some(price),
+            Some(Want::Remove) => None,
+            None => match leg {
+                Leg::StopLoss => order.trigger_price(),
+                Leg::TakeProfit => order.price(),
+            },
         }
     }
 
-    /// The request moving or removing protections of `position`: `changes`
-    /// the legs set (`Some` price) or removed (`None`), the others kept as
-    /// the cache holds them, since cTrader drops a price left out.
-    fn amend_protections(
-        &self,
-        position: i64,
-        changes: &[(Leg, Option<Price>)],
-    ) -> ProtoOaAmendPositionSltpReq {
-        let price = |leg: Leg| {
-            changes
-                .iter()
-                .find(|(changed, _)| *changed == leg)
-                .map_or_else(
-                    || self.cached_protection(position, leg),
-                    |(_, price)| *price,
-                )
-        };
+    /// The request setting the protections of `position` as last asked
+    /// (see `asked_protection`): both prices, since cTrader drops a price
+    /// left out.
+    fn amend_protections(&self, session: &Session, position: i64) -> ProtoOaAmendPositionSltpReq {
+        let price = |leg| self.asked_protection(session, position, leg);
         ProtoOaAmendPositionSltpReq {
             position_id: position,
             stop_loss: price(Leg::StopLoss).map(|p| p.as_f64()),
@@ -632,6 +636,7 @@ impl IcExecutionClient {
         let order = self
             .cached_order(&id)
             .ok_or_else(|| format!("{id} is not in the cache"))?;
+        session.dispatch().adopt(&order);
         let venue = cmd.venue_order_id.or(order.venue_order_id());
         if let Some((position, leg)) = venue.and_then(parse_protection_id) {
             if cmd.quantity.is_some_and(|q| q != order.quantity()) {
@@ -645,8 +650,11 @@ impl IcExecutionClient {
                 Leg::StopLoss => cmd.trigger_price,
                 Leg::TakeProfit => cmd.price,
             };
-            let request =
-                self.amend_protections(position, &[(leg, price.or(leg_price(&order, leg)))]);
+            let price = price
+                .or(leg_price(&order, leg))
+                .ok_or("no price to move to")?;
+            session.dispatch().want(id, Want::Move(price));
+            let request = self.amend_protections(session, position);
             self.send(session, request, Tag::Protect(id));
             return Ok(());
         }
@@ -664,9 +672,8 @@ impl IcExecutionClient {
             let price = price
                 .or(leg_price(&order, leg))
                 .ok_or("no price to move to")?;
-            let protection = session
-                .dispatch()
-                .protection(entry, None, Some((id, price)));
+            session.dispatch().want(id, Want::Move(price));
+            let protection = session.dispatch().protection(entry);
             let request = Self::amend_order(
                 &entry_order,
                 entry_venue,
@@ -680,7 +687,7 @@ impl IcExecutionClient {
             return Ok(());
         }
         let venue = pending_venue_id(&order)?;
-        let protection = session.dispatch().protection(id, None, None);
+        let protection = session.dispatch().protection(id);
         let request = Self::amend_order(
             &order,
             venue,
@@ -698,25 +705,27 @@ impl IcExecutionClient {
     /// one amendment of their position each, a pending entry's by its
     /// amendment. Refuses those it cannot cancel.
     fn cancel(&self, session: &Session, ids: &[ClientOrderId]) {
-        let mut protections: HashMap<i64, Vec<(Leg, ClientOrderId)>> = HashMap::new();
+        let mut protections: HashMap<i64, Vec<ClientOrderId>> = HashMap::new();
         for &id in ids {
             let outcome = (|| {
                 let order = self
                     .cached_order(&id)
                     .ok_or_else(|| format!("{id} is not in the cache"))?;
-                if let Some((position, leg)) = order.venue_order_id().and_then(parse_protection_id)
-                {
-                    protections.entry(position).or_default().push((leg, id));
+                session.dispatch().adopt(&order);
+                if let Some((position, _)) = order.venue_order_id().and_then(parse_protection_id) {
+                    session.dispatch().want(id, Want::Remove);
+                    protections.entry(position).or_default().push(id);
                     return Ok(());
                 }
-                if let Some(Role::Leg { entry, .. }) =
-                    session.dispatch().tracked(id).map(|t| t.role)
-                {
+                // Bound first: the dispatch's lock must not outlive it.
+                let tracked_role = session.dispatch().tracked(id).map(|t| t.role);
+                if let Some(Role::Leg { entry, .. }) = tracked_role {
                     let entry_order = self
                         .cached_order(&entry)
                         .ok_or_else(|| format!("the entry {entry} is not in the cache"))?;
                     let venue = pending_venue_id(&entry_order)?;
-                    let protection = session.dispatch().protection(entry, Some(id), None);
+                    session.dispatch().want(id, Want::Remove);
+                    let protection = session.dispatch().protection(entry);
                     let request = Self::amend_order(
                         &entry_order,
                         venue,
@@ -738,35 +747,18 @@ impl IcExecutionClient {
                 Ok::<_, String>(())
             })();
             if let Err(reason) = outcome {
-                self.refuse_cancel(session, id, &reason);
+                self.refuse_now(session, Tag::Cancel(id), &reason);
             }
         }
         for (position, legs) in protections {
-            let changes: Vec<(Leg, Option<Price>)> =
-                legs.iter().map(|(leg, _)| (*leg, None)).collect();
-            let request = self.amend_protections(position, &changes);
-            self.send(session, request, Tag::Unprotect(legs[0].1));
-        }
-    }
-
-    /// Rejects the cancel of `id`, tracked or only cached, for `reason`:
-    /// nothing was sent.
-    fn refuse_cancel(&self, session: &Session, id: ClientOrderId, reason: &str) {
-        if session.dispatch().tracked(id).is_some() {
-            self.refuse_now(session, Tag::Cancel(id), reason);
-        } else if let Some(order) = self.cached_order(&id) {
-            self.emitter.emit_order_cancel_rejected(
-                &order,
-                order.venue_order_id(),
-                reason,
-                self.now(),
-            );
+            let request = self.amend_protections(session, position);
+            self.send(session, request, Tag::Unprotect(legs[0]));
         }
     }
 
     /// The order `id` (venue order id `venue`, sent at the earliest at
-    /// `since`) as IC holds it, open or not, with its fills; `None` if IC
-    /// holds no such order since then.
+    /// `since`) as IC holds it, open or not, with its fills: by its venue
+    /// order id, else among the orders IC updated since then.
     async fn find_order(
         history: &IcHistory,
         reports: &Reports<'_>,
@@ -774,7 +766,7 @@ impl IcExecutionClient {
         venue: Option<VenueOrderId>,
         since: UnixNanos,
         now: UnixNanos,
-    ) -> anyhow::Result<Option<(OrderStatusReport, Vec<FillReport>)>> {
+    ) -> anyhow::Result<Held> {
         let order_id = match venue.and_then(|v| v.as_str().parse::<i64>().ok()) {
             Some(order_id) => Some(order_id),
             None => {
@@ -792,22 +784,33 @@ impl IcExecutionClient {
             }
         };
         let Some(order_id) = order_id else {
-            return Ok(None);
+            return Ok(Held::Nothing);
         };
         let details = history
             .order_details(order_id)
             .await
             .with_context(|| format!("requesting IC's order {order_id}"))?;
         let Some(mut status) = reports.order(&details.order)? else {
-            return Ok(None);
+            return Ok(Held::Unreported);
         };
         status.client_order_id = Some(id);
         let mut fills = Vec::new();
         for deal in &details.deal {
             fills.extend(reports.fill(deal)?);
         }
-        Ok(Some((status, fills)))
+        Ok(Held::Order(status, fills))
     }
+}
+
+/// What IC holds of an order a query looks for.
+#[expect(clippy::large_enum_variant, reason = "one per query, consumed at once")]
+enum Held {
+    /// The order as IC holds it, with its fills.
+    Order(OrderStatusReport, Vec<FillReport>),
+    /// No order of its id among those IC updated over its window.
+    Nothing,
+    /// An order the run does not report: of a symbol it did not load.
+    Unreported,
 }
 
 /// Whether cTrader's `order` is the Nautilus order `id`: its client order
@@ -1072,15 +1075,35 @@ impl ExecutionClient for IcExecutionClient {
     }
 
     /// Sends the report of the order of `cmd` as IC holds it, open or not,
-    /// with its fills; logs it if IC holds none.
+    /// with its fills. If IC's order list over its window holds none, its
+    /// request never reached IC: it is reported rejected, with an entry's
+    /// legs, unless the request may still wait in the session's queue (see
+    /// `Dispatch::absent`). A protection (`-SL`, `-TP`) is not queried: the
+    /// open-order check reads it.
     fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let session = self.session()?;
-        let since = self
-            .cached_order(&cmd.client_order_id)
-            .map_or(UnixNanos::default(), |o| o.ts_init());
+        let id = cmd.client_order_id;
+        let order = self.cached_order(&id);
         let venue = cmd
             .venue_order_id
-            .filter(|v| parse_protection_id(*v).is_none());
+            .or(order.as_ref().and_then(OrderAny::venue_order_id));
+        if venue.is_some_and(|v| parse_protection_id(v).is_some()) {
+            log::debug!("{id} is a protection: the open-order check reads it");
+            return Ok(());
+        }
+        let since = order
+            .as_ref()
+            .map_or(UnixNanos::default(), OrderAny::ts_init);
+        // The orders a conclusion of absence rejects: the order, an entry's
+        // legs.
+        let orders: HashMap<ClientOrderId, OrderAny> = order
+            .iter()
+            .flat_map(|o| o.linked_order_ids().unwrap_or_default().to_vec())
+            .filter_map(|leg| self.cached_order(&leg))
+            .chain(order.clone())
+            .map(|o| (o.client_order_id(), o))
+            .collect();
+        let dispatch = Arc::clone(&session.dispatch);
         let history = Arc::clone(&session.history);
         let account_id = self.core.account_id;
         let instruments = session.instruments.clone();
@@ -1095,12 +1118,25 @@ impl ExecutionClient for IcExecutionClient {
                 currency,
                 ts_init: now,
             };
-            let found =
-                Self::find_order(&history, &reports, cmd.client_order_id, venue, since, now)
-                    .await?;
-            match found {
-                Some((status, fills)) => emitter.send_order_with_fills(status, fills),
-                None => log::warn!("IC holds no order {} since {since}", cmd.client_order_id),
+            match Self::find_order(&history, &reports, id, venue, since, now).await? {
+                Held::Order(status, fills) => emitter.send_order_with_fills(status, fills),
+                Held::Nothing => {
+                    let absent = dispatch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .absent(id);
+                    let Some(ids) = absent else {
+                        log::info!("IC holds no order {id} since {since} yet: not concluded");
+                        return Ok(());
+                    };
+                    log::warn!("IC holds no order {id} since {since}: rejected");
+                    for absent in ids.iter().filter_map(|id| orders.get(id)) {
+                        emitter.send_order_status_report(reports.absent(absent, ABSENT));
+                    }
+                }
+                Held::Unreported => {
+                    log::warn!("IC's order {id} is of a symbol the run did not load");
+                }
             }
             Ok(())
         });
@@ -1137,7 +1173,10 @@ impl ExecutionClient for IcExecutionClient {
             .filter(|v| parse_protection_id(*v).is_none());
         let found =
             Self::find_order(&session.history, &reports, id, venue, since, self.now()).await?;
-        Ok(found.map(|(status, _)| status))
+        Ok(match found {
+            Held::Order(status, _) => Some(status),
+            Held::Nothing | Held::Unreported => None,
+        })
     }
 
     /// The open orders (the pending orders, the positions' stop loss and

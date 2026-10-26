@@ -327,7 +327,9 @@ them, as a strategy reading a signal instrument would read them.
   other leg; or the hold: the entry's first fill sets a time alert `hold`
   later, named after the entry, which cancels the trade's legs still open
   and closes its position by id (`close_position`). A leg's fill cancels
-  the alert.
+  the alert. At start (a restart) each open position of the strategy on
+  the traded instrument gets its alert again, named after its opening
+  order, `hold` after its opening, or at once if that has passed.
 - **Overlap.** Each cross is a new trade, whatever is open. On a hedging
   venue (IC) each trade is a position of its own, closed by its own alert
   (`backtest_ema_overlap.rs`). On a netting venue (IB, OKX) trades add into

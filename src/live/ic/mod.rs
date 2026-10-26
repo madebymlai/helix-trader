@@ -215,7 +215,8 @@ impl IcClients {
         Clients {
             data_factory: Box::new(IcDataClientFactory),
             data_config: Box::new(self.data),
-            exec: Some((Box::new(IcExecutionClientFactory), Box::new(self.exec))),
+            exec_factory: Box::new(IcExecutionClientFactory),
+            exec_config: Box::new(self.exec),
             routing: RoutingConfig::default(),
         }
     }
@@ -367,8 +368,8 @@ mod tests {
     fn the_node_gets_ic_s_execution_client() {
         let clients = clients(&[gold_bars()], vars(&demo())).unwrap();
 
-        let (factory, _) = clients.into_node_clients().exec.unwrap();
+        let node_clients = clients.into_node_clients();
 
-        assert_eq!(factory.name(), "ICMARKETS");
+        assert_eq!(node_clients.exec_factory.name(), "ICMARKETS");
     }
 }

@@ -585,13 +585,25 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
 
 /// A market entry protected by a stop loss and a take profit.
 fn bracket(entry: &str, stop_loss: &str, take_profit: &str) -> [OrderAny; 3] {
+    let market = order(OrderType::Market, entry, OrderSide::Buy, 1);
+    bracket_on(market, entry, stop_loss, take_profit)
+}
+
+/// The entry of `builder`, `entry`, protected by a stop loss and a take
+/// profit.
+fn bracket_on(
+    mut builder: OrderTestBuilder,
+    entry: &str,
+    stop_loss: &str,
+    take_profit: &str,
+) -> [OrderAny; 3] {
     let (sl, tp) = (format!("{entry}-SL"), format!("{entry}-TP"));
     let legs = vec![
         ClientOrderId::from(sl.as_str()),
         ClientOrderId::from(tp.as_str()),
     ];
     let list = OrderListId::from("OL-1");
-    let entry_order = order(OrderType::Market, entry, OrderSide::Buy, 1)
+    let entry_order = builder
         .contingency_type(ContingencyType::Oto)
         .linked_order_ids(legs)
         .order_list_id(list)
@@ -951,5 +963,254 @@ async fn closing_a_protected_position_cancels_its_protections() {
             row("PROBE-1-TP", "canceled"),
         ]
     );
+    node.client.disconnect().await.unwrap();
+}
+
+/// A stop loss reconciliation left in the cache after a restart: an
+/// accepted reduce-only stop market `id` under the venue order id `venue`,
+/// which this session never sent.
+fn reconciled_stop_loss(node: &Node, id: &str, venue: &str) {
+    let mut order = order(OrderType::StopMarket, id, OrderSide::Sell, 1)
+        .trigger_price(Price::from("3992.78"))
+        .reduce_only(true)
+        .build();
+    let account = AccountId::from("ICMARKETS-DEMO");
+    node.add(&[&order]);
+    for event in [
+        TestOrderEventStubs::submitted(&order, account),
+        TestOrderEventStubs::accepted(&order, account, VenueOrderId::from(venue)),
+    ] {
+        order.apply(event.clone()).unwrap();
+        node.cache.borrow_mut().update_order(&event).unwrap();
+    }
+}
+
+/// IC refuses every trade request: the position is gone.
+fn refusing(request: &ProtoMessage) -> Vec<Action> {
+    vec![event(
+        &decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_POSITION_NOT_FOUND),
+        request.client_msg_id.as_deref(),
+    )]
+}
+
+#[tokio::test]
+async fn a_refused_move_of_a_protection_from_before_a_restart_is_rejected() {
+    let mut node = Node::start(refusing).await;
+    reconciled_stop_loss(&node, "O-RECON-SL", "690004734-SL");
+
+    node.modify("O-RECON-SL", None, Some(Price::from("3982.78")));
+
+    let events = node.order_events(1).await;
+    let OrderEventAny::ModifyRejected(rejected) = &events[0] else {
+        panic!("not a modify rejection: {events:?}");
+    };
+    assert_eq!(rejected.client_order_id, ClientOrderId::from("O-RECON-SL"));
+    assert_eq!(
+        rejected.reason.as_str(),
+        "POSITION_NOT_FOUND: Position not found with id 690004734"
+    );
+    node.client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_cancel_of_a_protection_from_before_a_restart_is_rejected() {
+    let mut node = Node::start(refusing).await;
+    reconciled_stop_loss(&node, "O-RECON-SL", "690004734-SL");
+
+    node.cancel("O-RECON-SL");
+
+    let events = node.order_events(1).await;
+    let OrderEventAny::CancelRejected(rejected) = &events[0] else {
+        panic!("not a cancel rejection: {events:?}");
+    };
+    assert_eq!(rejected.client_order_id, ClientOrderId::from("O-RECON-SL"));
+    assert_eq!(node.tags::<ProtoOaAmendPositionSltpReq>(), ["U:O-RECON-SL"]);
+    node.client.disconnect().await.unwrap();
+}
+
+/// A bracket's entry filled and its protections accepted on position
+/// 690004734 (stop loss 3992.78, take profit 4052.78); IC answers no
+/// amendment of them.
+async fn protected_position() -> Node {
+    let mut node = Node::start(|request| match request.payload_type {
+        t if t == ProtoOaNewOrderReq::TYPE => vec![
+            answer(request, &execution(EXECUTION_MARKET_FILLED)),
+            event(&execution(EXECUTION_PROTECTION_ACCEPTED), Some("PROBE-1")),
+        ],
+        _ => vec![],
+    })
+    .await;
+    let [entry, stop_loss, take_profit] = bracket("PROBE-1", "3992.78", "4052.78");
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
+    node.order_events(7).await;
+    node
+}
+
+/// The `n` amendments of protections IC received.
+async fn protection_amendments(node: &Node, n: usize) -> Vec<ProtoOaAmendPositionSltpReq> {
+    testing::wait_until(&node.received, |frames| {
+        frames
+            .iter()
+            .filter(|(_, f)| f.payload_type == ProtoOaAmendPositionSltpReq::TYPE)
+            .count()
+            >= n
+    })
+    .await;
+    node.requests()
+}
+
+#[tokio::test]
+async fn a_move_after_an_unanswered_cancel_keeps_the_cancelled_protection_gone() {
+    let mut node = protected_position().await;
+
+    node.cancel("PROBE-1-TP");
+    node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
+
+    let amended = protection_amendments(&node, 2).await;
+    assert_eq!(amended[1].stop_loss, Some(3982.78));
+    assert_eq!(amended[1].take_profit, None);
+    node.client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_move_after_an_unanswered_move_keeps_the_first_move() {
+    let mut node = protected_position().await;
+
+    node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
+    node.modify("PROBE-1-TP", Some(Price::from("4062.78")), None);
+
+    let amended = protection_amendments(&node, 2).await;
+    assert_eq!(amended[1].stop_loss, Some(3982.78));
+    assert_eq!(amended[1].take_profit, Some(4062.78));
+    node.client.disconnect().await.unwrap();
+}
+
+/// While the entry is pending its protections live on it: the captured
+/// limit entry PROBE-2, its stop loss at 3802.73 and take profit at
+/// 3842.73. IC answers no amendment.
+#[tokio::test]
+async fn a_move_after_an_unanswered_cancel_on_a_pending_entry_keeps_the_cancelled_leg_gone() {
+    let mut node = Node::start(|request| match request.payload_type {
+        t if t == ProtoOaNewOrderReq::TYPE => {
+            vec![answer(request, &execution(EXECUTION_LIMIT_ACCEPTED))]
+        }
+        _ => vec![],
+    })
+    .await;
+    let mut limit = order(OrderType::Limit, "PROBE-2", OrderSide::Buy, 1);
+    limit.price(Price::from("3822.73"));
+    let [entry, stop_loss, take_profit] = bracket_on(limit, "PROBE-2", "3802.73", "3842.73");
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
+    node.order_events(4).await;
+
+    node.cancel("PROBE-2-TP");
+    node.modify("PROBE-2-SL", None, Some(Price::from("3792.73")));
+
+    testing::wait_until(&node.received, |frames| {
+        frames
+            .iter()
+            .filter(|(_, f)| f.payload_type == ProtoOaAmendOrderReq::TYPE)
+            .count()
+            >= 2
+    })
+    .await;
+    let amended = node.requests::<ProtoOaAmendOrderReq>();
+    assert_eq!(amended[1].order_id, 1_031_776_354);
+    assert_eq!(amended[1].stop_loss, Some(3792.73));
+    assert_eq!(amended[1].take_profit, None);
+    node.client.disconnect().await.unwrap();
+}
+
+/// Both protections of a position cancelled together go in one
+/// amendment; IC refuses it.
+#[tokio::test]
+async fn a_refused_cancel_of_both_protections_rejects_the_cancel_of_each() {
+    let mut node = Node::start(|request| match request.payload_type {
+        t if t == ProtoOaNewOrderReq::TYPE => vec![
+            answer(request, &execution(EXECUTION_MARKET_FILLED)),
+            event(&execution(EXECUTION_PROTECTION_ACCEPTED), Some("PROBE-1")),
+        ],
+        _ => refusing(request),
+    })
+    .await;
+    let [entry, stop_loss, take_profit] = bracket("PROBE-1", "3992.78", "4052.78");
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
+    node.order_events(7).await;
+
+    node.client
+        .cancel_all_orders(CancelAllOrders::new(
+            TraderId::from("HELIX-001"),
+            Some(ClientId::from("ICMARKETS")),
+            StrategyId::from(STRATEGY),
+            InstrumentId::from(XAUUSD),
+            None,
+            UUID4::new(),
+            node.client.now(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let events = node.order_events(2).await;
+    let mut rejected = kinds(&events);
+    rejected.sort();
+    assert_eq!(
+        rejected,
+        [
+            row("PROBE-1-SL", "cancel rejected"),
+            row("PROBE-1-TP", "cancel rejected")
+        ]
+    );
+    assert_eq!(node.requests::<ProtoOaAmendPositionSltpReq>().len(), 1);
+    node.client.disconnect().await.unwrap();
+}
+
+/// The peer never answers the order, and its order list over the order's
+/// window holds none: the request never reached IC, so the query reports
+/// the order rejected.
+#[tokio::test]
+async fn an_unanswered_order_ic_holds_nowhere_is_reported_rejected_by_a_query() {
+    let mut node = Node::start(|request| match request.payload_type {
+        t if t == ProtoOaOrderListReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderListRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                has_more: false,
+                ..Default::default()
+            },
+        )],
+        _ => vec![],
+    })
+    .await;
+    node.submit(&market("PROBE-1", OrderSide::Buy, 1), None);
+    node.order_events(1).await;
+    node.quiet().await;
+
+    node.client
+        .query_order(QueryOrder::new(
+            TraderId::from("HELIX-001"),
+            Some(ClientId::from("ICMARKETS")),
+            StrategyId::from(STRATEGY),
+            InstrumentId::from(XAUUSD),
+            ClientOrderId::from("PROBE-1"),
+            None,
+            UUID4::new(),
+            node.client.now(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let ExecutionEvent::Report(nautilus_common::messages::ExecutionReport::Order(status)) =
+        node.next().await
+    else {
+        panic!("not an order report");
+    };
+    assert_eq!(status.client_order_id, Some(ClientOrderId::from("PROBE-1")));
+    assert_eq!(status.instrument_id, InstrumentId::from(XAUUSD));
+    assert_eq!(status.order_status, OrderStatus::Rejected);
+    assert_eq!(status.filled_qty, Quantity::from(0));
+    let listed: Vec<ProtoOaOrderListReq> = node.requests();
+    assert_eq!(listed.len(), 1);
     node.client.disconnect().await.unwrap();
 }

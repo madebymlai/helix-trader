@@ -31,6 +31,7 @@ use nautilus_model::{
     },
     identifiers::{AccountId, ClientOrderId, PositionId, TradeId, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
+    orders::{Order, OrderAny},
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
     types::{Currency, Money, Price, Quantity},
 };
@@ -259,6 +260,32 @@ impl Reports<'_> {
             return None;
         }
         self.instrument(position.trade_data.symbol_id, "position")
+    }
+
+    /// The report of `order`, which IC holds nowhere: its request never
+    /// reached IC, so it is rejected for `reason`. Its venue order id is
+    /// its own, else its client order id, IC having given it none.
+    pub(super) fn absent(&self, order: &OrderAny, reason: &str) -> OrderStatusReport {
+        let venue = order
+            .venue_order_id()
+            .unwrap_or_else(|| VenueOrderId::new(order.client_order_id().as_str()));
+        OrderStatusReport::new(
+            self.account_id,
+            order.instrument_id(),
+            Some(order.client_order_id()),
+            venue,
+            Some(order.order_side()),
+            order.order_type(),
+            order.time_in_force(),
+            OrderStatus::Rejected,
+            order.quantity(),
+            order.filled_qty(),
+            self.ts_init,
+            self.ts_init,
+            self.ts_init,
+            None,
+        )
+        .with_cancel_reason(reason.to_owned())
     }
 
     /// The report of `order`, if of a loaded symbol.

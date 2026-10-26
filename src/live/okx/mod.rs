@@ -159,7 +159,8 @@ impl OkxClients {
         Clients {
             data_factory,
             data_config,
-            exec: Some((exec_factory, exec_config)),
+            exec_factory,
+            exec_config,
             routing: RoutingConfig::default(),
         }
     }
