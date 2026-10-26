@@ -54,10 +54,17 @@ Build a thin slice; each step works end to end before the next starts.
 ## Nautilus v2 constraints
 
 - **One node per process.** Run only one `BacktestNode` or `LiveNode` in a
-  process, even across threads: the message bus is thread-local, the logger
-  and the Tokio runtime are process-wide. Parallel backtests use separate
-  processes. Each integration test file is its own process, so one node per
-  test file.
+  process: the message bus is thread-local, the logger and the Tokio
+  runtime are process-wide. The backtest tests are the exception: one
+  binary (`tests/backtest/`) runs them in parallel, a node per test, each
+  on its own test thread; the message bus and the actor and component
+  registries are thread-local, and the logger, installed by the first node
+  with the default config every test uses, is shared by the others; so is
+  its clock, which each backtest sets to its own simulated time, so a log
+  line there may carry another test's time. A live node also takes the
+  process's SIGINT and installs the `tracing` subscriber, which only one
+  per process can, so the live tests (`tests/live/`) run one module per
+  process (`tests/live/main.rs`).
 - **Nautilus owns the logger.** Creating a node installs the global `log`
   logger, and fails if another logger (`env_logger`, a `tracing`
   subscriber) was installed first. Code logs through the `log` macros and
@@ -71,7 +78,10 @@ Build a thin slice; each step works end to end before the next starts.
 Cargo.toml    crate manifest
 build.rs      compiles Spotware's cTrader protos for src/data/ic/ (needs protoc)
 src/          crate code, unit tests included
-tests/        integration tests: full runs through Nautilus
+tests/        integration tests: full runs through Nautilus, two binaries
+  backtest/   the backtests, a node per test, in parallel
+  live/       the gated runs on real venues, one module per process
+  common/     their fixtures, included by both
 docs/         project docs
 ```
 

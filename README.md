@@ -59,10 +59,16 @@ nowhere else. `--help` on each subcommand lists every flag.
 cargo test
 ```
 
-Integration tests run full Nautilus nodes, one per test file. The tests
-against real venues are skipped unless enabled: `NAUTILUS_IB_RUN=1` for the
-IB paper gateway, `NAUTILUS_OKX_RUN=1` for the OKX demo account,
-`NAUTILUS_IC_RUN=1` for IC's cTrader demo.
+Integration tests run full Nautilus nodes, one per test, in two test
+binaries: `backtest` (`tests/backtest/`) and `live` (`tests/live/`). The
+tests against real venues, in `live`, are skipped unless enabled:
+`NAUTILUS_IB_RUN=1` for the IB paper gateway, `NAUTILUS_OKX_RUN=1` for the
+OKX demo account, `NAUTILUS_IC_RUN=1` for IC's cTrader demo; run one module
+of them at a time:
+
+```sh
+NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture
+```
 
 ## Documentation
 

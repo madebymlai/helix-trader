@@ -120,11 +120,11 @@ on SIGINT.
   margin, credentials left to the environment, instrument types and
   families), long/short mode refused, the leverage check and the parsing
   of OKX's leverage answer.
-- End to end, `tests/okx_demo.rs`: `Live` on the demo's BTC X-Perp reads
+- End to end, `tests/live/okx_demo.rs`: `Live` on the demo's BTC X-Perp reads
   the real demo account and is refused at a leverage of 1000, which no
   account has, before any node is built; it only reads the account. It is
   skipped unless `NAUTILUS_OKX_RUN=1` is set in the shell:
 
   ```sh
-  NAUTILUS_OKX_RUN=1 cargo test --test okx_demo -- --nocapture
+  NAUTILUS_OKX_RUN=1 cargo test --test live okx_demo:: -- --nocapture
   ```

@@ -9,7 +9,7 @@
 //! overlapping trades; noise, for the recording strategy of `recorder.rs`
 //! to check every price of the bars; a fall, for its stop.
 
-#![allow(dead_code, reason = "each test file uses part of the fixture")]
+#![allow(dead_code, reason = "each test module uses part of the fixture")]
 
 pub mod cache;
 pub mod ic;

@@ -409,7 +409,7 @@ of quotes: OKX's candles (backtest README, "OKX on candles") and IB's
 1-minute bars. Live, a venue sends a source bar only once it has closed:
 OKX's confirmed 1-minute candles arrived 0.3 to 1.5 s after their close on
 2026-10-22, IB's keepUpToDate 1-minute bars 0.4 to 1.3 s after on
-2026-10-26 (`tests/ib_minute_bars.rs`). So the live node builds time bars
+2026-10-26 (`tests/live/ib_minute_bars.rs`). So the live node builds time bars
 5 s after their close when the strategy has a composite bar type
 (`warmup::live_data_engine_config`, Nautilus' `time_bars_build_delay`);
 otherwise the last minute would land in the next bar. Such a live bar is
@@ -508,11 +508,11 @@ same code and nothing passes from backtest to live.
   fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through
   `Backtest::run` on a small fixture catalog of 1-minute quotes, one run per
-  file (one node per process). They test the warmup module too: the
-  fixture's prices are chosen so that the warmup bars, the partial oldest
-  bar, the bar at the run start and the session each change the orders and
-  the final balance. The EMA's own tests run it on fixtures where each
-  cross, stop loss, take profit and hold is worked out by hand
+  test (one node per test thread, `tests/backtest/`). They test the warmup
+  module too: the fixture's prices are chosen so that the warmup bars, the
+  partial oldest bar, the bar at the run start and the session each change
+  the orders and the final balance. The EMA's own tests run it on fixtures
+  where each cross, stop loss, take profit and hold is worked out by hand
   (`backtest_ema_*.rs`, backtest README, "Tests"). A recording strategy in
   `tests/common` checks what the EMA cannot show: every price of the bars,
   orders of a given side and size, and positions on a netting and on a
