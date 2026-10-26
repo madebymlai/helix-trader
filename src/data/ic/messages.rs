@@ -20,13 +20,22 @@ mod proto {
 
 pub(super) use proto::{
     ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
-    ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-    ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaGetTickDataReq,
-    ProtoOaGetTickDataRes, ProtoOaLightSymbol, ProtoOaPayloadType, ProtoOaQuoteType,
-    ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol,
-    ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
-    ProtoOaTickData, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
+    ProtoOaAccountType, ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq,
+    ProtoOaApplicationAuthRes, ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal,
+    ProtoOaDealListReq, ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaErrorRes,
+    ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaLightSymbol, ProtoOaOrder,
+    ProtoOaOrderListReq, ProtoOaOrderListRes, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod,
+    ProtoOaOrderType, ProtoOaPayloadType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaQuoteType,
+    ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+    ProtoOaSubscribeSpotsRes, ProtoOaSymbol, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+    ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTickData, ProtoOaTimeInForce,
+    ProtoOaTradeSide, ProtoOaTrader, ProtoOaTraderReq, ProtoOaTraderRes,
+    ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
 };
+
+// The synthetic positions and deals of the tests are built from these.
+#[cfg(test)]
+pub(super) use proto::{ProtoOaClosePositionDetail, ProtoOaTradeData};
 
 /// A message and the payload type it travels under.
 pub(super) trait Payload: prost::Message + Default {
@@ -64,13 +73,22 @@ payload! {
     ProtoOaUnsubscribeSpotsReq => ProtoOaPayloadType::ProtoOaUnsubscribeSpotsReq,
     ProtoOaUnsubscribeSpotsRes => ProtoOaPayloadType::ProtoOaUnsubscribeSpotsRes,
     ProtoOaSpotEvent => ProtoOaPayloadType::ProtoOaSpotEvent,
+    ProtoOaTraderReq => ProtoOaPayloadType::ProtoOaTraderReq,
+    ProtoOaTraderRes => ProtoOaPayloadType::ProtoOaTraderRes,
+    ProtoOaReconcileReq => ProtoOaPayloadType::ProtoOaReconcileReq,
+    ProtoOaReconcileRes => ProtoOaPayloadType::ProtoOaReconcileRes,
+    ProtoOaDealListReq => ProtoOaPayloadType::ProtoOaDealListReq,
+    ProtoOaDealListRes => ProtoOaPayloadType::ProtoOaDealListRes,
+    ProtoOaOrderListReq => ProtoOaPayloadType::ProtoOaOrderListReq,
+    ProtoOaOrderListRes => ProtoOaPayloadType::ProtoOaOrderListRes,
 }
 
 /// Whether a request of `payload_type` counts against cTrader's limit of
-/// historical requests (5 a second per connection): the tick requests,
-/// the only historical ones the adapter sends.
+/// historical requests (5 a second per connection): the tick requests, and
+/// the deal list, history too (Spotware's docs name no list of either
+/// kind, so it is held to the lower limit).
 pub(super) fn is_historical(payload_type: u32) -> bool {
-    payload_type == ProtoOaGetTickDataReq::TYPE
+    payload_type == ProtoOaGetTickDataReq::TYPE || payload_type == ProtoOaDealListReq::TYPE
 }
 
 /// The name of a payload type, as the `.proto` files spell it, or its
@@ -289,6 +307,14 @@ mod tests {
             matches!(&opened, Err(IcError::Protocol(e)) if e.starts_with("malformed PROTO_OA_ASSET_LIST_RES")),
             "{opened:?}"
         );
+    }
+
+    #[test]
+    fn tick_and_deal_requests_are_historical_others_not() {
+        assert!(is_historical(ProtoOaGetTickDataReq::TYPE));
+        assert!(is_historical(ProtoOaDealListReq::TYPE));
+        assert!(!is_historical(ProtoOaReconcileReq::TYPE));
+        assert!(!is_historical(ProtoOaSymbolByIdReq::TYPE));
     }
 
     #[test]

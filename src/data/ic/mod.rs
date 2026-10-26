@@ -1,6 +1,6 @@
-//! IC Markets history and live data, over Spotware's cTrader Open API: the
-//! instruments of IC's forex and metals, filled into the catalog, and the
-//! live node's data client.
+//! IC Markets history, live data and account, over Spotware's cTrader Open
+//! API: the instruments of IC's forex and metals, filled into the catalog,
+//! and the live node's data and execution clients.
 //!
 //! Nautilus has no cTrader adapter, so this module is one, laid out as
 //! Nautilus' adapters are (`docs/developer_guide/adapters.md`): Spotware's
@@ -8,8 +8,9 @@
 //! environment and credential (`config`), the connection (`websocket`, an
 //! outer client and its handler task) and the parsing of symbols into
 //! instruments (`parse`), the tick history merged into quotes (`ticks`),
-//! the spot events merged the same way (`spots`) and the data client
-//! (`data`). IC's instruments are on venue `ICMARKETS`
+//! the spot events merged the same way (`spots`), the data client
+//! (`data`), the account (`account`), the reconciliation reports
+//! (`reports`) and the execution client (`execution`). IC's instruments are on venue `ICMARKETS`
 //! (`XAUUSD.ICMARKETS`).
 
 use std::{collections::HashMap, str::FromStr};
@@ -24,31 +25,37 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
-pub use self::{config::IcConnection, data::IcDataClient};
 use self::{
+    account::IcAccount,
     config::{IcAccountId, IcCredential},
     messages::{
-        ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
-        ProtoOaQuoteType, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
-        ProtoOaSymbolsListRes,
+        ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
+        ProtoOaDealListRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType,
+        ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+        ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes,
     },
     ticks::{SideTicks, Tick},
     websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents},
 };
+pub use self::{config::IcConnection, data::IcDataClient, execution::IcExecutionClient};
 use super::fill_catalog;
 
+mod account;
 mod config;
 mod data;
+mod execution;
 mod messages;
 mod parse;
+mod reports;
 mod spots;
 #[cfg(test)]
 mod testing;
 mod ticks;
 mod websocket;
 
-/// A cTrader session on IC's account: history, and the spot
-/// subscriptions of the data client.
+/// A cTrader session on IC's account: history, the spot subscriptions of
+/// the data client, and the account, open positions and deals of the
+/// execution client.
 #[derive(Debug)]
 pub struct IcHistory {
     client: IcWebSocketClient,
@@ -104,6 +111,107 @@ impl IcHistory {
     #[must_use]
     pub fn serves(id: InstrumentId) -> bool {
         parse::is_ic(id)
+    }
+
+    /// Checks the account: hedging and `IC_ACCOUNT_ID`'s (see `account`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a request fails, or the account is another one,
+    /// is not hedging or has a deposit asset Nautilus does not know.
+    pub async fn check_account(&self) -> anyhow::Result<()> {
+        self.account().await.map(|_| ())
+    }
+
+    /// The account, from the trader and the assets, checked (see
+    /// `IcAccount::check`).
+    async fn account(&self) -> anyhow::Result<IcAccount> {
+        let account = self.account_id.get();
+        let (trader, assets) = tokio::try_join!(
+            async {
+                self.client
+                    .request::<_, ProtoOaTraderRes>(&ProtoOaTraderReq {
+                        ctid_trader_account_id: account,
+                        ..Default::default()
+                    })
+                    .await
+                    .context("requesting IC's account")
+            },
+            async {
+                self.client
+                    .request::<_, ProtoOaAssetListRes>(&ProtoOaAssetListReq {
+                        ctid_trader_account_id: account,
+                        ..Default::default()
+                    })
+                    .await
+                    .context("requesting IC's assets")
+            },
+        )?;
+        IcAccount::check(
+            &trader.trader,
+            self.account_id,
+            &parse::assets_by_id(assets.asset),
+        )
+    }
+
+    /// The open positions and pending orders, their stop loss and take
+    /// profit in the positions' fields.
+    async fn reconcile(&self) -> anyhow::Result<ProtoOaReconcileRes> {
+        self.client
+            .request(&ProtoOaReconcileReq {
+                ctid_trader_account_id: self.account_id.get(),
+                return_protection_orders: Some(false),
+                ..Default::default()
+            })
+            .await
+            .context("requesting IC's open positions and orders")
+    }
+
+    /// The deals over `[from_ms, to_ms]`, each once, oldest first; none
+    /// when the window is empty. A
+    /// window cTrader answers only in part (`hasMore`) is asked again in
+    /// halves, which needs no knowledge of the order or size of its pages
+    /// (neither is documented).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a request fails, or a single millisecond holds
+    /// more deals than a page.
+    async fn deals(&self, from_ms: i64, to_ms: i64) -> anyhow::Result<Vec<ProtoOaDeal>> {
+        // cTrader refuses a window not ending after its start
+        // (`INCORRECT_BOUNDARIES`, demo, 2026-10-26); it holds no deal.
+        if from_ms >= to_ms {
+            return Ok(Vec::new());
+        }
+        let mut windows = vec![(from_ms, to_ms)];
+        let mut deals: HashMap<i64, ProtoOaDeal> = HashMap::new();
+        while let Some((from, to)) = windows.pop() {
+            let page: ProtoOaDealListRes = self
+                .client
+                .request(&ProtoOaDealListReq {
+                    ctid_trader_account_id: self.account_id.get(),
+                    from_timestamp: Some(from),
+                    to_timestamp: Some(to),
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| format!("requesting IC's deals over [{from}, {to}] ms"))?;
+            if page.has_more {
+                // The halves overlap by a millisecond: whether cTrader's
+                // bounds are inclusive or not, no deal falls between them.
+                ensure!(
+                    to - from > 2,
+                    "IC holds more deals over [{from}, {to}] ms than one answer carries"
+                );
+                let middle = from + (to - from) / 2;
+                windows.push((from, middle + 1));
+                windows.push((middle, to));
+            }
+            deals.extend(page.deal.into_iter().map(|d| (d.deal_id, d)));
+        }
+        let mut deals: Vec<ProtoOaDeal> = deals.into_values().collect();
+        deals.sort_by_key(|d| (d.execution_timestamp, d.deal_id));
+        Ok(deals)
     }
 
     /// The instruments of `ids`, from cTrader's current definitions: the
@@ -420,7 +528,7 @@ mod tests {
         messages::{Payload, ProtoMessage},
         testing::{
             self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            accept_auth, credential, replay, reply, tick_answer,
+            TRADER_RES, accept_auth, credential, replay, reply, tick_answer,
         },
         ticks::{Tick, WEEK_MS},
         *,
@@ -523,6 +631,66 @@ mod tests {
             ProtoOaSymbolByIdReq::decode(requests[2].payload.as_deref().unwrap()).unwrap();
         assert_eq!(details.ctid_trader_account_id, ACCOUNT_ID);
         assert_eq!(details.symbol_id, [41, 1]);
+        history.disconnect().await;
+    }
+
+    /// A cTrader serving the fixtures and `trader` as the account.
+    fn trader_peer(
+        trader: ProtoOaTraderRes,
+    ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
+        move |connection, request| {
+            if request.payload_type == ProtoOaTraderReq::TYPE {
+                return vec![reply(request, &trader)];
+            }
+            fixtures_peer(connection, request)
+        }
+    }
+
+    /// The captured trader: the demo account, hedged, in EUR.
+    fn captured_trader() -> ProtoOaTraderRes {
+        ProtoOaTraderRes::decode(TRADER_RES).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_captured_hedged_account_passes_the_check() {
+        let (history, received) = connected_to(trader_peer(captured_trader())).await;
+
+        history.check_account().await.unwrap();
+
+        let asked = requests(&received)
+            .into_iter()
+            .find(|f| f.payload_type == ProtoOaTraderReq::TYPE)
+            .unwrap();
+        let asked = ProtoOaTraderReq::decode(asked.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(asked.ctid_trader_account_id, ACCOUNT_ID);
+        history.disconnect().await;
+    }
+
+    /// Synthetic: the captured trader made a netting account.
+    #[tokio::test]
+    async fn a_netting_account_is_refused_naming_its_type() {
+        let mut trader = captured_trader();
+        trader
+            .trader
+            .set_account_type(messages::ProtoOaAccountType::Netted);
+        let (history, _) = connected_to(trader_peer(trader)).await;
+
+        let err = history.check_account().await.unwrap_err().to_string();
+
+        assert!(err.contains("NETTED, not HEDGED"), "{err}");
+        history.disconnect().await;
+    }
+
+    /// Synthetic: the captured trader of another account.
+    #[tokio::test]
+    async fn the_trader_of_another_account_is_refused() {
+        let mut trader = captured_trader();
+        trader.trader.ctid_trader_account_id = ACCOUNT_ID + 1;
+        let (history, _) = connected_to(trader_peer(trader)).await;
+
+        let err = history.check_account().await.unwrap_err().to_string();
+
+        assert!(err.contains("another account than IC_ACCOUNT_ID"), "{err}");
         history.disconnect().await;
     }
 
