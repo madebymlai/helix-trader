@@ -1214,3 +1214,93 @@ async fn an_unanswered_order_ic_holds_nowhere_is_reported_rejected_by_a_query() 
     assert_eq!(listed.len(), 1);
     node.client.disconnect().await.unwrap();
 }
+
+/// A bracket left in the cache by a restart while its limit entry PROBE-2
+/// is pending at IC (venue order id 1031776354): the entry accepted, its
+/// legs submitted with no venue order id, none sent by this session.
+fn reconciled_pending_bracket(node: &Node) {
+    let mut limit = order(OrderType::Limit, "PROBE-2", OrderSide::Buy, 1);
+    limit.price(Price::from("3822.73"));
+    let bracket = bracket_on(limit, "PROBE-2", "3802.73", "3842.73");
+    node.add(&bracket.iter().collect::<Vec<_>>());
+    let account = AccountId::from("ICMARKETS-DEMO");
+    for mut order in bracket {
+        let mut events = vec![TestOrderEventStubs::submitted(&order, account)];
+        if order.parent_order_id().is_none() {
+            events.push(TestOrderEventStubs::accepted(
+                &order,
+                account,
+                VenueOrderId::from("1031776354"),
+            ));
+        }
+        for event in events {
+            order.apply(event.clone()).unwrap();
+            node.cache.borrow_mut().update_order(&event).unwrap();
+        }
+    }
+}
+
+/// IC's order list holds nothing: no order of a bracket leg's id, as IC
+/// never holds a leg as an order of its own.
+fn listing_nothing(request: &ProtoMessage) -> Vec<Action> {
+    match request.payload_type {
+        t if t == ProtoOaOrderListReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderListRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                has_more: false,
+                ..Default::default()
+            },
+        )],
+        _ => vec![],
+    }
+}
+
+impl Node {
+    fn query(&self, id: &str) {
+        self.client
+            .query_order(QueryOrder::new(
+                TraderId::from("HELIX-001"),
+                Some(ClientId::from("ICMARKETS")),
+                StrategyId::from(STRATEGY),
+                InstrumentId::from(XAUUSD),
+                ClientOrderId::from(id),
+                None,
+                UUID4::new(),
+                self.client.now(),
+                None,
+                None,
+            ))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_query_of_a_bracket_leg_from_before_a_restart_concludes_nothing() {
+    let mut node = Node::start(listing_nothing).await;
+    reconciled_pending_bracket(&node);
+
+    node.query("PROBE-2-SL");
+
+    node.quiet().await;
+    assert_eq!(node.cached("PROBE-2-SL").status(), OrderStatus::Submitted);
+    node.client.disconnect().await.unwrap();
+}
+
+/// A cancel of a leg the restart left with no venue order id is refused,
+/// which tracks the leg as an order of its own; the inflight check's
+/// query of it still concludes nothing.
+#[tokio::test]
+async fn a_query_of_a_bracket_leg_whose_cancel_was_refused_after_a_restart_concludes_nothing() {
+    let mut node = Node::start(listing_nothing).await;
+    reconciled_pending_bracket(&node);
+    node.cancel("PROBE-2-SL");
+    let events = node.order_events(1).await;
+    assert_eq!(kinds(&events), [row("PROBE-2-SL", "cancel rejected")]);
+
+    node.query("PROBE-2-SL");
+
+    node.quiet().await;
+    assert_eq!(node.cached("PROBE-2-SL").status(), OrderStatus::Submitted);
+    node.client.disconnect().await.unwrap();
+}

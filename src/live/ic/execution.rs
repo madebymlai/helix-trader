@@ -1079,11 +1079,20 @@ impl ExecutionClient for IcExecutionClient {
     /// request never reached IC: it is reported rejected, with an entry's
     /// legs, unless the request may still wait in the session's queue (see
     /// `Dispatch::absent`). A protection (`-SL`, `-TP`) is not queried: the
-    /// open-order check reads it.
+    /// open-order check reads it. Nor is a bracket's leg, tracked or not:
+    /// IC holds it on its entry or position, never as an order of its own,
+    /// so its absence from the order list concludes nothing.
     fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let session = self.session()?;
         let id = cmd.client_order_id;
         let order = self.cached_order(&id);
+        if order
+            .as_ref()
+            .is_some_and(|o| o.parent_order_id().is_some())
+        {
+            log::debug!("{id} is a bracket's leg: IC holds it on its entry or position");
+            return Ok(());
+        }
         let venue = cmd
             .venue_order_id
             .or(order.as_ref().and_then(OrderAny::venue_order_id));

@@ -192,9 +192,13 @@ submitted and sends it.
   entry's legs, its reason "IC holds no such order: its request never
   reached IC". Not while its request may still wait in the session's
   queue (sent only once the session is authenticated): until the session
-  wrote it, the query concludes nothing. A bracket's leg is never
-  concluded on its own (IC holds it on its entry or position), nor is a
-  protection (`-SL`, `-TP`) queried. cTrader's deals carry no client order
+  wrote it, the query concludes nothing. A bracket's leg (an order with a
+  parent) is never queried on its own, whether this session sent it or
+  a restart left it in the cache, a modify or cancel of it refused or
+  not: IC holds it on its entry or position, so its absence from the
+  order list says nothing, and rejecting it would let the OCO cancel its
+  sibling while IC still holds both. Nor is a protection (`-SL`, `-TP`)
+  queried. cTrader's deals carry no client order
   id, so the deal list cannot find an order the order list lacks.
 
 ## Trade events
@@ -467,7 +471,9 @@ limits") away from IC, however long the history takes.
     unanswered cancel or move carrying it, on a position and on a pending
     entry; a refused cancel of both protections rejecting the cancel of
     each; a refused move and cancel of a protection reconciled before a
-    restart rejected; the demo's stop loss
+    restart rejected; a query of a bracket leg a restart left with no
+    venue order id concluding nothing, its cancel refused or not; the
+    demo's stop loss
     hit filling the stop loss and cancelling the take profit, a take profit
     hit the reverse; one of two positions closed by its id, a partial
     close, a close of a position IC no longer holds rejected, a close
