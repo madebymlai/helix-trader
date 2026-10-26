@@ -7,8 +7,9 @@
 //! `live`, required, with the credential from `IC_*`, both read before
 //! anything connects. The data
 //! client loads the run's instruments at connect; the execution client
-//! checks the account (hedging, the configured one), publishes its state
-//! and reconciles it. It places no order yet: IC orders are denied.
+//! checks the account (hedging, the configured one), publishes its state,
+//! reconciles it, and trades (`orders` the requests, `dispatch` the trade
+//! events).
 
 use std::{any::Any, cell::RefCell, rc::Rc};
 
@@ -30,7 +31,9 @@ use super::node::Clients;
 use crate::data::{IcConnection, IcHistory};
 
 mod data;
+mod dispatch;
 mod execution;
+mod orders;
 mod reports;
 mod spots;
 

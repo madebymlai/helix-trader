@@ -54,8 +54,9 @@ Nautilus refuses one that is not positive before the run.
 
 On the wave of the tests (EMA 5/15 on 1-HOUR-MID internal bars, 10
 shares, warmup 48h, Xetra's session, 3 EUR commission) it prints
-`Orders: 4`, `PnL (total): -246.000000` (the wave's -234.00 without
-commission, less 4 × 3 EUR) and a final balance of `9754.00 EUR`.
+`Orders: 7` (an opening, then each of three crossings a close by id and
+an opening), `PnL (total): -255.000000` (the wave's -234.00 without
+commission, less 7 × 3 EUR) and a final balance of `9745.00 EUR`.
 
 ## The entry point
 
@@ -199,8 +200,9 @@ The simulated venue keeps positions as the real one does, so that a
 strategy, its `oms_type` unset, trades as it does live (strategy README,
 "Position mode: the venue's"). `venue_oms_type` declares each venue's mode
 in one place, as Nautilus' execution clients declare it live: `Hedging`
-for the venues in `HEDGING_VENUES` (none yet; a cTrader hedging account
-will be one), `Netting` for every other, IB's exchanges (Nautilus' IB
+for the venues in `HEDGING_VENUES` (`ICMARKETS`, IC's hedging cTrader
+account, `live/ic/README.md`, "Hedging positions"), `Netting` for every
+other, IB's exchanges (Nautilus' IB
 execution client nets) and OKX (its client nets derivatives, in the net
 position mode `live` requires). `main` sets `oms_type` from the strategy's
 venue. With an unset strategy OMS, Nautilus takes the venue's: two
@@ -586,9 +588,14 @@ internal bars built from them, such as `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`.
 - **Venue and balance.** Named `ICMARKETS`; the balance in USD
   (`--balance "10000 USD"`), the leverage the account's (`--leverage 30`
   on the demo).
+- **Hedging.** The venue keeps positions as IC's hedging account does
+  (`venue_oms_type`): an order opens a position of its own unless it names
+  one, so a strategy reduces with `close_position` (`live/ic/README.md`,
+  "Hedging positions").
 
 `backtest_ic_quotes.rs` checks the fills, the commission and the spread in
-the report on gold quotes written through `fill_catalog`.
+the report on gold quotes written through `fill_catalog`;
+`backtest_ic_hedging.rs` two overlapping trades kept as two positions.
 
 ## OKX on candles
 
@@ -1003,7 +1010,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     commission` than in `backtest_ema_cross_free.rs`, and its final
     balance; `backtest_max_drawdown.rs` that the result's `stats_returns`
     hold `Max Drawdown`, the largest fall from a peak of the equity
-    compounded over its returns series;
+    compounded over its returns series; `backtest_ema_hedging.rs` that on
+    a hedging venue it sends the same 7 orders and makes the same PnL as
+    on the netting one, closing before it turns;
   - steps, a level per hour chosen so that the shortest crossover (1/2)
     trades at hours worked out by hand, and so that what is tested changes
     the orders and the final balance: `backtest_warmup.rs` (a run off an
@@ -1068,9 +1077,13 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     open locking a tenth of its value.
   - `backtest_ic_quotes.rs`: XAUUSD.ICMARKETS, a `CurrencyPair` with
     margins of 1, on irregular millisecond quotes sized 10,000 as IC's fill
-    stores them, written through `fill_catalog`. A recorder without warmup
-    on hour MID bars buys 10,000 oz on the first bar and sells them on the
-    second: each fills whole at the ask, then the bid, of the last quote
+    stores them, written through `fill_catalog` (`common::ic`). A recorder
+    without warmup on hour MID bars buys 10,000 oz on the first bar and
+    closes that position by its id on the second (`close_position`), the
+    venue hedging: each fills whole at the ask, then the bid, of the last quote
     before the bar's close, 30 USD per million is charged on each fill's
     value, and the report shows the spread paid (half each quote's spread
     on 10,000 oz) and the gross PnL (the mids' move).
+  - `backtest_ic_hedging.rs`: on the same quotes, the venue
+    `venue_oms_type(ICMARKETS)`, two buys of 10 oz on two bars are two
+    open positions, at 4006.10 and 4012.15.

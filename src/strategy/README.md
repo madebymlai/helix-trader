@@ -275,8 +275,14 @@ blended average, which differs from the cached per-trade positions, and
 Nautilus refuses the start. The backtest's venue keeps positions the same
 way (backtest README, "Venue").
 
-The EMA strategy decides on each bar's close and sends a market order to
-reach its target position. Limit and stop orders backtest less faithfully:
+The EMA strategy decides on each bar's close and moves to its target
+position with market orders. A target on the other side of the position
+first closes the open position by its id (`close_position`), then a market
+order opens the target; a target on the same side gets the difference. So
+it reduces the same way on a netting venue and on a hedging one such as
+IC's, where an opposite order would open a second position beside the
+first: a crossing is two orders, the close and the opening, on both
+(`backtest_ema_hedging.rs`). Limit and stop orders backtest less faithfully:
 see `docs/ARCHITECTURE.md`, "Orders", and the backtest README, "Fills".
 
 ## The pure core

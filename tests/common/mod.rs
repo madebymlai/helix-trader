@@ -11,6 +11,7 @@
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
 
 pub mod cache;
+pub mod ic;
 pub mod recorder;
 
 use std::path::Path;
@@ -265,14 +266,17 @@ pub mod wave {
 
     pub const WARMUP: SignedDuration = SignedDuration::from_hours(48);
 
-    /// The orders the EMA crossover sends on the wave.
-    pub const EMA_ORDERS: usize = 4;
+    /// The orders the EMA crossover sends on the wave: the first opens a
+    /// position, each of the three crossings closes it by its id and opens
+    /// the other side (4 when a crossing was one order for twice the size).
+    pub const EMA_ORDERS: usize = 7;
     /// Its PnL (total) without commission: the spread paid included.
     ///
-    /// The orders and the PnL are those of the earlier fixture, which
-    /// stored the wave as external hour bars, one quote per bar: the
-    /// internal bars close on the same mids, at the same hours, and the
-    /// orders fill on the same quotes.
+    /// The PnL is that of the earlier fixture, which stored the wave as
+    /// external hour bars, one quote per bar: the internal bars close on
+    /// the same mids, at the same hours, and the orders fill on the same
+    /// quotes; a crossing's two orders fill on the same quote as its one
+    /// order did.
     pub const EMA_PNL_WITHOUT_COMMISSION: f64 = -234.0;
 
     fn first() -> Timestamp {
@@ -318,18 +322,19 @@ pub mod wave {
 ///
 /// - 12:00 and 13:00: 620.60 above 600.60, long: it buys 10 at the ask of
 ///   the quote closing 13:00, 620.65;
-/// - 14:00: 580.60 below the slow EMA of 610.60, short: it sells 20 at the
-///   bid of the quote closing 14:00, 580.55.
+/// - 14:00: 580.60 below the slow EMA of 610.60, short: it closes the long
+///   by its id (sells 10) and sells 10 more, both at the bid of the quote
+///   closing 14:00, 580.55.
 ///
 /// The 10 shares bought and sold lose 40.10 each: the balance ends at
-/// 9599.00 EUR, after 2 orders. Had the partial bar counted, the slow EMA
+/// 9599.00 EUR, after 3 orders. Had the partial bar counted, the slow EMA
 /// would be 650.60 at 13:00: one sell, no buy; without the warmup, the
 /// crossover would still be cold at 13:00: one sell, at 14:00.
 pub mod steps {
     use super::*;
 
     pub const WARMUP: SignedDuration = SignedDuration::from_hours(2);
-    pub const ORDERS: usize = 2;
+    pub const ORDERS: usize = 3;
     pub const BALANCE: &str = "9599.00 EUR";
 
     /// `hh:mm` UTC on the day of the steps.

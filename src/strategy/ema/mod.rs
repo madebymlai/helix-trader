@@ -1,5 +1,7 @@
 //! EMA crossover: per instrument, long while the fast EMA is above the slow
-//! one, short otherwise, on the bars inside its session, if it has one. A
+//! one, short otherwise, on the bars inside its session, if it has one. It
+//! turns by closing its position by id, then opening the other side, so it
+//! trades alike on netting and hedging venues. A
 //! minimal strategy to drive data, backtest and paper. Its bars are built
 //! by Nautilus from the quotes or from source bars, and warmed up through
 //! `strategy::warmup`.
@@ -44,21 +46,25 @@ impl EmaCross {
         })
     }
 
-    /// Submits a market order moving the position of the bar's instrument
-    /// to the book's target on `bar`, unless an order for the instrument is
-    /// still pending. The move is rounded to the instrument's size
-    /// precision: one rounding to zero, as a trade size off that grid
-    /// leaves, is an error and no order, logged by Nautilus.
+    /// Moves the position of the bar's instrument to the book's target on
+    /// `bar`, unless an order for the instrument is still pending: a target
+    /// on the other side of the position closes the open positions
+    /// (`close_position`, each by its id), then a market order opens the
+    /// target; else a market order adds the difference. So a hedging venue
+    /// reduces as a netting one does, never holding opposite positions.
+    /// The order is rounded to the instrument's size precision: one
+    /// rounding to zero, as a trade size off that grid leaves, is an error
+    /// and no order, logged by Nautilus.
     fn rebalance(&mut self, bar: &Bar) -> anyhow::Result<()> {
         let Some(target) = self.book.target(bar) else {
             return Ok(());
         };
         let instrument_id = bar.bar_type.instrument_id();
-        let delta = target - self.portfolio().net_position(&instrument_id);
-        if delta == Decimal::ZERO {
+        let net = self.portfolio().net_position(&instrument_id);
+        if target == net {
             return Ok(());
         }
-        let instrument = {
+        let (instrument, open) = {
             let cache = self.cache();
             let id = Some(&instrument_id);
             if cache.has_orders_open(None, id, None, None, None)
@@ -66,10 +72,24 @@ impl EmaCross {
             {
                 return Ok(());
             }
-            cache
+            let instrument = cache
                 .instrument(&instrument_id)
-                .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?
+                .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?;
+            let open = cache.positions_open(None, id, None, None, None);
+            (instrument, open)
         };
+        let crosses = target == Decimal::ZERO || (target > Decimal::ZERO) != (net > Decimal::ZERO);
+        let delta = if net != Decimal::ZERO && crosses {
+            for position in &open {
+                self.close_position(position, None, None, None, None, None, None)?;
+            }
+            target
+        } else {
+            target - net
+        };
+        if delta == Decimal::ZERO {
+            return Ok(());
+        }
         let side = if delta > Decimal::ZERO {
             OrderSide::Buy
         } else {

@@ -57,6 +57,41 @@ pub(crate) const TRADER_RES: &[u8] = include_bytes!("testdata/trader_res.bin");
 pub(crate) const RECONCILE_RES_EMPTY: &[u8] = include_bytes!("testdata/reconcile_res_empty.bin");
 pub(crate) const DEAL_LIST_RES_EMPTY: &[u8] = include_bytes!("testdata/deal_list_res_empty.bin");
 
+// Trade events captured on the demo with 1 oz orders of XAUUSD (see
+// each `.txtpb`).
+pub(crate) const EXECUTION_MARKET_ACCEPTED: &[u8] =
+    include_bytes!("testdata/execution_market_accepted.bin");
+pub(crate) const EXECUTION_MARKET_FILLED: &[u8] =
+    include_bytes!("testdata/execution_market_filled.bin");
+pub(crate) const EXECUTION_PROTECTION_ACCEPTED: &[u8] =
+    include_bytes!("testdata/execution_protection_accepted.bin");
+pub(crate) const EXECUTION_PROTECTION_REPLACED: &[u8] =
+    include_bytes!("testdata/execution_protection_replaced.bin");
+pub(crate) const EXECUTION_CLOSE_ACCEPTED: &[u8] =
+    include_bytes!("testdata/execution_close_accepted.bin");
+pub(crate) const EXECUTION_CLOSE_FILLED: &[u8] =
+    include_bytes!("testdata/execution_close_filled.bin");
+pub(crate) const EXECUTION_PROTECTION_CANCELLED: &[u8] =
+    include_bytes!("testdata/execution_protection_cancelled.bin");
+pub(crate) const EXECUTION_LIMIT_ACCEPTED: &[u8] =
+    include_bytes!("testdata/execution_limit_accepted.bin");
+pub(crate) const EXECUTION_LIMIT_REPLACED: &[u8] =
+    include_bytes!("testdata/execution_limit_replaced.bin");
+pub(crate) const EXECUTION_LIMIT_CANCELLED: &[u8] =
+    include_bytes!("testdata/execution_limit_cancelled.bin");
+pub(crate) const EXECUTION_STOP_LOSS_ENTRY_FILLED: &[u8] =
+    include_bytes!("testdata/execution_stop_loss_entry_filled.bin");
+pub(crate) const EXECUTION_STOP_LOSS_ACCEPTED: &[u8] =
+    include_bytes!("testdata/execution_stop_loss_accepted.bin");
+pub(crate) const EXECUTION_STOP_LOSS_FILLED: &[u8] =
+    include_bytes!("testdata/execution_stop_loss_filled.bin");
+pub(crate) const ORDER_ERROR_BAD_VOLUME: &[u8] =
+    include_bytes!("testdata/order_error_bad_volume.bin");
+pub(crate) const ORDER_ERROR_ORDER_NOT_FOUND: &[u8] =
+    include_bytes!("testdata/order_error_order_not_found.bin");
+pub(crate) const ORDER_ERROR_POSITION_NOT_FOUND: &[u8] =
+    include_bytes!("testdata/order_error_position_not_found.bin");
+
 /// What the peer does after a frame.
 pub(crate) enum Action {
     /// Sends these bytes as one binary frame.
@@ -68,6 +103,11 @@ pub(crate) enum Action {
 /// The answer to `request`: `response` under the request's `clientMsgId`.
 pub(crate) fn reply<M: Payload>(request: &ProtoMessage, response: &M) -> Action {
     Action::Send(frame(response, request.client_msg_id.clone()))
+}
+
+/// `message`, an event, under `client_msg_id`.
+pub(crate) fn event<M: Payload>(message: &M, client_msg_id: Option<&str>) -> Action {
+    Action::Send(frame(message, client_msg_id.map(str::to_owned)))
 }
 
 /// The answer to `request`: the captured `payload`, an `M`, under the

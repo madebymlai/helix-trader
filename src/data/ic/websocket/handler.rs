@@ -25,6 +25,14 @@
 //! which cTrader keeps on the connection, are not sent again: the
 //! (un)subscriptions asked meanwhile wait, and are sent once the account
 //! is authenticated again.
+//!
+//! Trade requests (orders, amendments, cancels, closes) go out under the
+//! `clientMsgId` their caller chose, who learns only whether the frame was
+//! sent: their outcome comes as trade events, the execution events and
+//! order errors of the account and cTrader's error answers to a trade
+//! request, passed on with their `clientMsgId` once a listener asked for
+//! them (`TradeEvents`). A trade request still waiting when the session
+//! fails or the connection closes was never sent, and says so.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -45,16 +53,20 @@ use zeroize::Zeroize;
 use super::super::{
     config::IcCredential,
     messages::{
-        IcError, Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
+        IcError, Payload, ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
         ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent, ProtoOaAccountsTokenInvalidatedEvent,
         ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaClientDisconnectEvent,
-        ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+        ProtoOaErrorRes, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq,
+        ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
         ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame,
         is_historical, open, payload_name, secret_frame,
     },
     token::{TokenLock, TokenPair},
 };
-use super::{AUTH_TIMEOUT, HISTORICAL_KEY, spot_subscribed, spot_symbol, spot_topic};
+use super::{
+    AUTH_TIMEOUT, HISTORICAL_KEY, TradeEvent, TradeMessage, spot_subscribed, spot_symbol,
+    spot_topic,
+};
 
 /// How often a renewal tries the token file's lock while another session
 /// holds it.
@@ -71,6 +83,10 @@ const PLAYGROUND: &str = "generate a new token pair in the Playground of the app
 /// Where a response goes: the caller awaiting it.
 pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, IcError>>;
 
+/// Where a trade request's sending goes: `Ok` once its frame is written,
+/// an error if it never was.
+pub(super) type Sent = oneshot::Sender<Result<(), IcError>>;
+
 /// Commands from the outer client to the handler.
 pub(super) enum HandlerCommand {
     /// The connected client; the first command, queued before the command
@@ -82,6 +98,16 @@ pub(super) enum HandlerCommand {
         payload: Vec<u8>,
         reply: Reply,
     },
+    /// A trade request: its payload type, encoded message and the
+    /// `clientMsgId` its answer and events come back under.
+    Trade {
+        payload_type: u32,
+        payload: Vec<u8>,
+        client_msg_id: String,
+        sent: Sent,
+    },
+    /// The listener of the trade events, from now on.
+    TradeEvents(mpsc::UnboundedSender<TradeEvent>),
     /// Spot events of a symbol, from now on.
     SubscribeSpots(i64),
     /// No more spot events of a symbol.
@@ -120,6 +146,8 @@ enum Pending {
         subscribe: bool,
         symbol_ids: Vec<i64>,
     },
+    /// A trade request, whose answer is a trade event.
+    Trade,
 }
 
 /// A renewal request out, under the token file's lock.
@@ -134,7 +162,29 @@ struct Renewal {
 struct Queued {
     payload_type: u32,
     payload: Vec<u8>,
-    reply: Reply,
+    awaiting: Awaiting,
+}
+
+/// Who awaits a queued request.
+enum Awaiting {
+    /// A caller of the outer client, for the response.
+    Caller(Reply),
+    /// A trade request's caller, for its sending, under its `clientMsgId`.
+    Trade { client_msg_id: String, sent: Sent },
+}
+
+impl Awaiting {
+    /// Tells the caller the request failed: it was never sent.
+    fn fail(self, error: IcError) {
+        match self {
+            Self::Caller(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Trade { sent, .. } => {
+                let _ = sent.send(Err(error));
+            }
+        }
+    }
 }
 
 pub(super) struct IcWsHandler {
@@ -155,6 +205,8 @@ pub(super) struct IcWsHandler {
     cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: mpsc::UnboundedReceiver<Message>,
     spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
+    /// The listener of the trade events, once one asked.
+    trade_tx: Option<mpsc::UnboundedSender<TradeEvent>>,
     heartbeat: Duration,
     session: Session,
     next_id: u64,
@@ -201,6 +253,7 @@ impl IcWsHandler {
             cmd_rx,
             raw_rx,
             spot_tx,
+            trade_tx: None,
             heartbeat,
             session: Session::Unconnected,
             next_id: 0,
@@ -226,7 +279,15 @@ impl IcWsHandler {
                         self.authenticate().await;
                     }
                     Some(HandlerCommand::Request { payload_type, payload, reply }) => {
-                        self.request(Queued { payload_type, payload, reply }).await;
+                        let awaiting = Awaiting::Caller(reply);
+                        self.request(Queued { payload_type, payload, awaiting }).await;
+                    }
+                    Some(HandlerCommand::Trade { payload_type, payload, client_msg_id, sent }) => {
+                        let awaiting = Awaiting::Trade { client_msg_id, sent };
+                        self.request(Queued { payload_type, payload, awaiting }).await;
+                    }
+                    Some(HandlerCommand::TradeEvents(listener)) => {
+                        self.trade_tx = Some(listener);
                     }
                     Some(HandlerCommand::SubscribeSpots(symbol_id)) => {
                         self.change_spots(symbol_id, true).await;
@@ -291,7 +352,7 @@ impl IcWsHandler {
         }
         self.fail_pending(&IcError::ConnectionLost);
         for queued in self.queued.drain(..) {
-            let _ = queued.reply.send(Err(IcError::ConnectionLost));
+            queued.awaiting.fail(IcError::ConnectionLost);
         }
     }
 
@@ -567,14 +628,16 @@ impl IcWsHandler {
         self.auth.fail(reason.clone());
         self.fail_pending(&IcError::Session(reason.clone()));
         for queued in self.queued.drain(..) {
-            let _ = queued.reply.send(Err(IcError::Session(reason.clone())));
+            queued.awaiting.fail(IcError::Session(reason.clone()));
         }
         self.wake = None;
         self.session = Session::Failed(reason);
     }
 
     /// Fails the callers awaiting a response. The handler's own spot
-    /// requests are dropped: the next connection sends them again.
+    /// requests are dropped: the next connection sends them again. So are
+    /// the trade requests out: their outcome is unknown, which
+    /// reconciliation resolves.
     fn fail_pending(&mut self, error: &IcError) {
         for (_, pending) in self.pending.drain() {
             if let Pending::Caller(reply) = pending {
@@ -660,7 +723,7 @@ impl IcWsHandler {
         match &self.session {
             Session::Ready => self.dispatch(request).await,
             Session::Failed(reason) => {
-                let _ = request.reply.send(Err(IcError::Session(reason.clone())));
+                request.awaiting.fail(IcError::Session(reason.clone()));
             }
             Session::Unconnected
             | Session::ApplicationAuth(_)
@@ -673,7 +736,10 @@ impl IcWsHandler {
     }
 
     async fn dispatch(&mut self, request: Queued) {
-        let id = self.next_id();
+        let id = match &request.awaiting {
+            Awaiting::Caller(_) => self.next_id(),
+            Awaiting::Trade { client_msg_id, .. } => client_msg_id.clone(),
+        };
         let historical = [Ustr::from(HISTORICAL_KEY)];
         let keys = is_historical(request.payload_type).then_some(historical.as_slice());
         let frame = ProtoMessage {
@@ -682,17 +748,22 @@ impl IcWsHandler {
             client_msg_id: Some(id.clone()),
         }
         .encode_to_vec();
-        match self.send(frame, keys).await {
-            Ok(()) => {
-                // Callers that timed out left their replies closed.
-                self.pending.retain(|_, pending| match pending {
-                    Pending::Caller(reply) => !reply.is_closed(),
-                    Pending::Spots { .. } => true,
-                });
-                self.pending.insert(id, Pending::Caller(request.reply));
+        if let Err(e) = self.send(frame, keys).await {
+            request.awaiting.fail(e);
+            return;
+        }
+        // Callers that timed out left their replies closed.
+        self.pending.retain(|_, pending| match pending {
+            Pending::Caller(reply) => !reply.is_closed(),
+            Pending::Spots { .. } | Pending::Trade => true,
+        });
+        match request.awaiting {
+            Awaiting::Caller(reply) => {
+                self.pending.insert(id, Pending::Caller(reply));
             }
-            Err(e) => {
-                let _ = request.reply.send(Err(e));
+            Awaiting::Trade { sent, .. } => {
+                self.pending.insert(id, Pending::Trade);
+                let _ = sent.send(Ok(()));
             }
         }
     }
@@ -767,8 +838,59 @@ impl IcWsHandler {
                 subscribe,
                 symbol_ids,
             }) => self.spots_answered(subscribe, &symbol_ids, &envelope),
+            Some(Pending::Trade) => self.trade_answered(&envelope),
             None => self.event(&envelope).await,
         }
+    }
+
+    /// cTrader's answer to a trade request: an execution event, an order
+    /// error, or an error response, passed on as a trade event.
+    fn trade_answered(&self, envelope: &ProtoMessage) {
+        let message = match envelope.payload_type {
+            t if t == ProtoOaExecutionEvent::TYPE => {
+                open::<ProtoOaExecutionEvent>(envelope).map(TradeMessage::Execution)
+            }
+            t if t == ProtoOaOrderErrorEvent::TYPE => {
+                open::<ProtoOaOrderErrorEvent>(envelope).map(TradeMessage::OrderError)
+            }
+            t if t == ProtoOaErrorRes::TYPE => open::<ProtoOaErrorRes>(envelope).map(|e| {
+                TradeMessage::Refused(IcError::Venue {
+                    code: e.error_code,
+                    description: e.description,
+                })
+            }),
+            t if t == ProtoErrorRes::TYPE => open::<ProtoErrorRes>(envelope).map(|e| {
+                TradeMessage::Refused(IcError::Venue {
+                    code: e.error_code,
+                    description: e.description,
+                })
+            }),
+            other => Err(IcError::Protocol(format!(
+                "unexpected {}",
+                payload_name(other)
+            ))),
+        };
+        match message {
+            Ok(message) => self.pass_trade(envelope, message),
+            Err(e) => log::warn!("cTrader's answer to a trade request: {e}"),
+        }
+    }
+
+    /// Passes a trade event on to its listener, if any: without one, it
+    /// is dropped (a session whose client places no order).
+    fn pass_trade(&self, envelope: &ProtoMessage, message: TradeMessage) {
+        let Some(listener) = &self.trade_tx else {
+            log::debug!(
+                "cTrader {} dropped: no trade listener",
+                payload_name(envelope.payload_type)
+            );
+            return;
+        };
+        // The receiver is gone once the client stopped listening.
+        let _ = listener.send(TradeEvent {
+            client_msg_id: envelope.client_msg_id.clone(),
+            message,
+        });
     }
 
     /// cTrader's answer to the handler's spot (un)subscription of
@@ -833,6 +955,20 @@ impl IcWsHandler {
         {
             self.account_ended(&payload_name(envelope.payload_type))
                 .await;
+            return;
+        }
+        if envelope.payload_type == ProtoOaExecutionEvent::TYPE {
+            match open::<ProtoOaExecutionEvent>(envelope) {
+                Ok(event) => self.pass_trade(envelope, TradeMessage::Execution(event)),
+                Err(e) => log::warn!("cTrader execution event: {e}"),
+            }
+            return;
+        }
+        if envelope.payload_type == ProtoOaOrderErrorEvent::TYPE {
+            match open::<ProtoOaOrderErrorEvent>(envelope) {
+                Ok(event) => self.pass_trade(envelope, TradeMessage::OrderError(event)),
+                Err(e) => log::warn!("cTrader order error event: {e}"),
+            }
             return;
         }
         if envelope.payload_type == ProtoOaSpotEvent::TYPE {

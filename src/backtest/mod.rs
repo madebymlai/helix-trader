@@ -70,8 +70,9 @@ pub struct Backtest {
     pub logging: LoggerConfig,
 }
 
-/// The venues whose accounts hold each trade as a position of its own.
-const HEDGING_VENUES: &[&str] = &[];
+/// The venues whose accounts hold each trade as a position of its own:
+/// IC Markets, whose cTrader account is hedging (`live/ic`).
+const HEDGING_VENUES: &[&str] = &["ICMARKETS"];
 
 /// How the accounts of `venue` keep positions, as the live execution
 /// client declares it: `Hedging` for the venues in `HEDGING_VENUES`,
@@ -196,6 +197,11 @@ mod tests {
     #[test]
     fn okx_nets_positions() {
         assert_eq!(venue_oms_type(Venue::from("OKX")), OmsType::Netting);
+    }
+
+    #[test]
+    fn ic_markets_hedges_positions() {
+        assert_eq!(venue_oms_type(Venue::from("ICMARKETS")), OmsType::Hedging);
     }
 
     #[test]

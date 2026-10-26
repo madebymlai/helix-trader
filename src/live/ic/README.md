@@ -17,8 +17,11 @@ ic/
   mod.rs        the factories and configs, ic::clients, the node's IC clients
   data.rs       IcDataClient: Nautilus' DataClient on a cTrader session
   spots.rs      live quotes: spot events merged into quotes, held during a request
-  execution.rs  IcExecutionClient: Nautilus' ExecutionClient, up to orders
+  execution.rs  IcExecutionClient: Nautilus' ExecutionClient
+  orders.rs     Nautilus orders as cTrader trade requests, and their tags
+  dispatch.rs   cTrader's trade events as Nautilus order events and reports
   reports.rs    positions, orders and deals as reconciliation reports
+  execution/tests/order_flow.rs  the order flow against the mock peer
 ```
 
 ## Interface
@@ -84,18 +87,125 @@ account is `HEDGED`, its deposit currency EUR.
 ## What the execution client does
 
 - **Connect**: authenticates, checks the account, loads the run's
-  instruments, publishes the account state (balance, and the margin the
-  open positions use, in the deposit currency), then waits until the
-  node's cache holds the account before reporting connected.
+  instruments, listens to the account's trade events, publishes the
+  account state (balance, and the margin the open positions use, in the
+  deposit currency), then waits until the node's cache holds the account
+  before reporting connected.
 - **Startup reconciliation**: one report per cTrader position, its
   `positionId` the venue position id; the stop loss and take profit as the
   position's reduce-only orders; pending orders; the deals as fills (see
   "Reconciliation").
 - **Periodic checks** (open orders every 10 s, positions every 30 s, as the
   node is configured): the reconcile request each time.
-- **Orders**: none reaches IC yet. A submission is denied (`OrderDenied`,
-  "IC's execution client places no order yet"), a modification or cancel
-  rejected; the next slice of the adapter adds the order flow.
+- **Orders**: market, limit and stop market orders, brackets, closes by
+  position, amendments and cancels (see "Orders"), their outcomes from
+  cTrader's trade events (see "Trade events").
+
+## Hedging positions
+
+The account is hedging, and so is the venue to Nautilus (`OmsType::Hedging`,
+and `backtest::venue_oms_type` for `ICMARKETS`): every order that names no
+position opens one of its own, its cTrader `positionId` the Nautilus
+position id, carried by every fill (`OrderFilled.position_id`). Two buys
+of gold are two positions, each at its price; a sell does not reduce a
+long, it opens a short beside it. A strategy reduces a position by naming
+it: `close_position` (a market order on the closing side with the
+position's id), or any order with `position_id` set. The EMA crossover
+closes its position that way before it turns (`strategy/README.md`,
+"Position mode: the venue's").
+
+## Orders
+
+`orders.rs` turns a Nautilus order into a cTrader request; `execution.rs`
+checks it, registers it with the dispatch (`dispatch.rs`), reports it
+submitted and sends it.
+
+- **New orders** (`ProtoOANewOrderReq`): market, limit (`limitPrice`) and
+  stop market (`STOP`, `stopPrice`, the trigger `DEFAULT`/`BID_ASK` as
+  `TRADE`, `DOUBLE_BID_ASK` as `DOUBLE_TRADE`) orders; GTC, GTD (its
+  expiry in ms), IOC and FOK; a market order keeps cTrader's own time in
+  force (IOC). The `clientOrderId` is the Nautilus one. Denied before
+  anything is sent (`OrderDenied`): another order type (stop limit,
+  trailing, if-touched), `DAY` and other times in force, post-only,
+  quote-quantity and iceberg orders, an instrument the client did not
+  load, a quantity off the cent grid of a unit.
+- **Brackets** (`submit_order_list` of an entry and its contingent legs, as
+  Nautilus' `bracket()` builds them): the entry (market, limit or stop
+  market) carries the stop loss (the stop market leg's trigger) and the
+  take profit (the limit leg's price) as absolute `stopLoss` and
+  `takeProfit`; one request. Spotware's proto says absolute protections
+  are not supported for market orders; the demo took them on a market
+  entry and set them on its position (2026-10-26). Once the entry fills,
+  cTrader holds them on the position as one `STOP_LOSS_TAKE_PROFIT` order,
+  and the legs are accepted under the venue order ids `<positionId>-SL`
+  and `<positionId>-TP`, as reconciliation names them. The legs must be a
+  stop market and a limit (either may be left out), for the entry's
+  quantity, on the other side; any other list with contingencies is
+  denied whole; a list without contingencies goes as its orders.
+- **Closing a position**: an order naming a position (`SubmitOrder`'s
+  `position_id`, as `close_position` sends) and on its closing side, at
+  market, is `ProtoOAClosePositionReq` for its quantity: the position
+  closes, or shrinks, by its id, never past flat (a larger quantity is
+  denied), and no other position is touched. cTrader makes the request's
+  `clientMsgId` the closing order's `clientOrderId`. Any other order naming
+  a position carries its `positionId` (a limit closing it, an order adding
+  to it). A reduce-only order naming no position is denied: on a hedging
+  account it would open one.
+- **Modify**: a pending order is amended (`ProtoOAAmendOrderReq`: volume,
+  limit or stop price, and the bracket's protections, which an amendment
+  otherwise drops: the demo's amended limit lost its own); a protection is
+  moved on its position (`ProtoOAAmendPositionSLTPReq`) with the other
+  protection's price as the cache holds it, since cTrader drops a price
+  left out (the demo: amending the stop loss alone removed the take
+  profit). A leg of a bracket whose entry is pending is moved on the entry.
+  A protection's quantity is the position's: a modification of it is
+  rejected.
+- **Cancel**: a pending order by its `orderId` (`ProtoOACancelOrderReq`); a
+  protection by amending its position without it, the other kept (both
+  legs of one position cancelled together go in one amendment); a leg of a
+  pending entry by amending the entry.
+- **Unknown outcomes**: a request is sent under a `clientMsgId` naming the
+  operation and the order (`N:`, `A:`, `X:`, `C:`, `P:`, `U:` and the
+  client order id). One the session never sent (it failed, or the
+  connection closed first) is rejected at once (`OrderRejected`,
+  `OrderModifyRejected` or `OrderCancelRejected`, "not sent to IC: ...").
+  One sent and never answered (a disconnect) stays in flight: the client
+  declares `retain_unresolved_submissions`, so Nautilus never times it out
+  into a rejection; the venue's later events, `query_order` (the order by
+  its id or, without one, among the orders cTrader updated since it was
+  created, with its deals) and the periodic checks resolve it.
+
+## Trade events
+
+cTrader sends every execution event and order error of the account to each
+session; the execution client's session passes them on (the data client's
+drops them). Its first events for a request come under the request's
+`clientMsgId`; events of the server (a stop loss hit) come under the
+order's `clientOrderId`. `dispatch.rs` maps them (captured on the demo,
+2026-10-26, 1 oz of gold):
+
+| cTrader | Nautilus |
+|---|---|
+| `ORDER_ACCEPTED` | `OrderAccepted`, venue order id the `orderId` (once) |
+| `ORDER_FILLED`, `ORDER_PARTIAL_FILL` | `OrderFilled` per deal (once, by `dealId`): `executionPrice`, `filledVolume`, `positionId`, the commission (a positive cost in the deposit currency), no liquidity side; preceded by `OrderAccepted` if none came |
+| `ORDER_REPLACED` | `OrderUpdated`: volume, limit or stop price |
+| `ORDER_CANCELLED`, `ORDER_EXPIRED` | `OrderCanceled`, `OrderExpired`, and a pending entry's legs cancelled |
+| `ORDER_REJECTED`, `ProtoOAOrderErrorEvent`, an error answer | `OrderRejected` of a new order or a close (and a bracket entry's legs), `OrderModifyRejected` of an amendment, `OrderCancelRejected` of a cancel, the reason cTrader's code and description (`TRADING_BAD_VOLUME: Order volume = 0.50 is smaller than minimum allowed volume = 1.00.`) |
+| `STOP_LOSS_TAKE_PROFIT` accepted or replaced | the legs accepted, or updated to its prices and the position's volume; a price gone cancels its leg |
+| `STOP_LOSS_TAKE_PROFIT` filled | the leg whose price is nearer the deal's filled, on the position (closing it), the other leg cancelled |
+| `STOP_LOSS_TAKE_PROFIT` cancelled | the legs cancelled (the position closed otherwise) |
+
+An event of an order this client did not send (or sent before a restart)
+becomes reports instead, which Nautilus reconciles: the order's status
+with its fill, or the status of a position's protections under their
+`-SL`/`-TP` ids. A terminal order's repeated events are dropped; a new
+deal after it goes as a report.
+
+**Commission.** A fill carries cTrader's charge of its deal: IC's Raw
+commission, 30 USD per million per side, in EUR on the demo account. On
+the demo (2026-10-26) 1 oz of gold at 4,018.30 and 4,018.20 (0.1205 USD)
+was charged 0.11 EUR each side, as the deals state it; the backtest charges
+the same rate (`commission_rate(0.00003)`) in USD.
 
 ## Reconciliation
 
@@ -147,9 +257,16 @@ account is `HEDGED`, its deposit currency EUR.
   profit are read at the instrument's precision, a finer one an error.
   Volumes are in cents of a unit, as the instruments'.
 - **Periodic checks**: open orders and positions from the reconcile request
-  each time; fills from the deal list over the asked window. A single-order
-  query finds open orders only, and answers an error, not an absence, for
-  any other.
+  each time; fills from the deal list over the asked window.
+- **A single order** (`generate_order_status_report`, `query_order`): open,
+  from the reconcile request; else by its venue order id, or, without one,
+  among the orders cTrader updated since the cached order was created
+  (`ProtoOAOrderListReq`, a minute of margin each side, through the
+  historical limiter), from its details (`ProtoOAOrderDetailsReq`, the
+  order and its deals). An order cTrader holds nowhere in that window is
+  `None`, an absence; a failed request an error. The protections
+  (`-SL`, `-TP`) are not queried one by one: the open-order check reads
+  them.
 
 The same positions come back whether the node starts from a persisted cache
 or from scratch: cTrader positions carry their own ids, which are the
@@ -234,10 +351,29 @@ does when the catalog ends before the node starts.
 
 ## Known limits
 
-- **No order flow.** An order on an IC instrument is denied by IC's
-  execution client; nothing reaches IC. A strategy trading IC instruments
-  with IB ones is still refused at the start (kept from before IC had an
-  execution client; IC's client now gets IC's orders by venue).
+- **EUR/USD quotes for the risk engine.** The account is in EUR, gold and
+  EUR/USD are quoted in USD: Nautilus' risk engine converts an order's
+  margin at the cache's USD/EUR rate, from EUR/USD's quotes, and denies the
+  order without them (`VALIDATION_FAILED: Account currency conversion
+  failed: No exchange rate from USD to EUR`, demo, 2026-10-26). A strategy
+  trading IC instruments quoted in USD subscribes to EURUSD.ICMARKETS's
+  quotes too (its bars or a `subscribe_quotes`), as `ic_orders_demo.rs`
+  does.
+- **Margins.** IC's instruments carry margins of 1 (`data/ic/README.md`,
+  "Currency pairs"), while the demo account runs 1:30: Nautilus' risk
+  engine checks an order's margin as its notional / the account's leverage
+  in Nautilus (1 unless set), 30 times IC's, so it may deny an order IC
+  would take when the free balance is short. The backtest applies
+  `--leverage` (backtest README, "Leverage"). Not changed here.
+- **Account state after fills.** The account state is published at
+  connect; balances and margins are not read again after a fill (the
+  closing deal's `balance` is not used).
+- **Partial closes and protections.** After a partial close the legs of the
+  position's bracket are updated to the position's remaining volume
+  (tested against the mock peer only: the demo's minimum, 1 oz, cannot be
+  closed in part).
+- **IC with IB.** A strategy trading IC instruments with IB ones is
+  refused at the start.
 - **Market closed over the whole warmup** (a weekend with a short warmup):
   the start's fill fails, naming the series and the window, as
   `fill-catalog` does.
@@ -272,8 +408,25 @@ does when the catalog ends before the node starts.
     position opened before the window left out and the window incomplete;
     the deals read from the lookback's start, and from the opening of a
     position the cache holds open; the captured empty account reporting
-    nothing; the periodic checks of one instrument; an order denied, no
-    frame sent;
+    nothing; the periodic checks of one instrument;
+  - `execution/tests/order_flow.rs`, the order flow on the trade events
+    captured on the demo (`data/ic/testdata/execution_*`, `order_error_*`),
+    the node played (orders cached, events applied): a market order sent
+    with its id and volume, accepted and filled at 4022.78 on position
+    690004734, charged 0.11 EUR; a limit order accepted, amended and
+    cancelled; a rejection and a refused cancel with IC's reasons; a fill
+    before the acceptance and events twice making one acceptance and one
+    fill; an unanswered order staying submitted until a query finds it
+    filled; a bracket riding on its entry, its legs accepted as
+    `690004734-SL` and `-TP`, a moved stop loss sent with the take profit
+    kept, a removed take profit keeping the stop loss; the demo's stop loss
+    hit filling the stop loss and cancelling the take profit, a take profit
+    hit the reverse; one of two positions closed by its id, a partial
+    close, a close of a position IC no longer holds rejected, a close
+    larger than its position denied, a protected position closed cancelling
+    its legs;
+  - `orders.rs`: tags and protection ids read back; market, bracket entry
+    and stop requests; order types and flags cTrader lacks denied;
   - `data.rs`, the `DataClient` against the mock peer: the instruments sent
     at connect on venue `ICMARKETS`; subscribed quotes from the captured
     spot events; an unsubscription sent; a quote request answered from the
@@ -291,4 +444,18 @@ does when the catalog ends before the node starts.
 
   ```sh
   NAUTILUS_IC_RUN=1 cargo test --test ic_live_demo -- --nocapture
+  ```
+- End to end with orders, `tests/ic_orders_demo.rs` (same gate, demo only):
+  `Live` on XAUUSD and EURUSD, a strategy sending, on gold's first quote
+  after a EUR/USD one, one bracket of 1 oz (a market buy, its stop loss
+  30.00 under the bid, its take profit 30.00 over the ask) and closing the
+  position it opens at once (`close_position`); then IC's execution client
+  reads the account: no position, no order open. Passed on 2026-10-26
+  (15:39 UTC, 13 s): the entry accepted and filled at 4018.30 on position
+  690014736, the legs accepted as `690014736-SL` (3988.21) and `-TP`
+  (4048.31), the close filled at 4018.20, the legs cancelled with the
+  position, each fill charged 0.11 EUR; the account flat after.
+
+  ```sh
+  NAUTILUS_IC_RUN=1 cargo test --test ic_orders_demo -- --nocapture
   ```

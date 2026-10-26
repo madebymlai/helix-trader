@@ -21,17 +21,20 @@ mod proto {
 pub(crate) use proto::{
     ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountDisconnectEvent, ProtoOaAccountType, ProtoOaAccountsTokenInvalidatedEvent,
-    ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaAsset, ProtoOaAssetListReq,
-    ProtoOaAssetListRes, ProtoOaClientDisconnectEvent, ProtoOaDeal, ProtoOaDealListReq,
-    ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaErrorRes, ProtoOaGetTickDataReq,
-    ProtoOaGetTickDataRes, ProtoOaLightSymbol, ProtoOaOrder, ProtoOaOrderListReq,
-    ProtoOaOrderListRes, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod, ProtoOaOrderType,
-    ProtoOaPayloadType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaQuoteType,
-    ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes,
-    ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol,
-    ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
-    ProtoOaTickData, ProtoOaTimeInForce, ProtoOaTradeSide, ProtoOaTrader, ProtoOaTraderReq,
-    ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
+    ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaApplicationAuthReq,
+    ProtoOaApplicationAuthRes, ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes,
+    ProtoOaCancelOrderReq, ProtoOaClientDisconnectEvent, ProtoOaClosePositionReq, ProtoOaDeal,
+    ProtoOaDealListReq, ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaErrorRes,
+    ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
+    ProtoOaLightSymbol, ProtoOaNewOrderReq, ProtoOaOrder, ProtoOaOrderDetailsReq,
+    ProtoOaOrderDetailsRes, ProtoOaOrderErrorEvent, ProtoOaOrderListReq, ProtoOaOrderListRes,
+    ProtoOaOrderStatus, ProtoOaOrderTriggerMethod, ProtoOaOrderType, ProtoOaPayloadType,
+    ProtoOaPosition, ProtoOaPositionStatus, ProtoOaQuoteType, ProtoOaReconcileReq,
+    ProtoOaReconcileRes, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent,
+    ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol, ProtoOaSymbolByIdReq,
+    ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTickData,
+    ProtoOaTimeInForce, ProtoOaTradeSide, ProtoOaTrader, ProtoOaTraderReq, ProtoOaTraderRes,
+    ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
 };
 
 // The synthetic positions and deals of the tests are built from these.
@@ -86,14 +89,52 @@ payload! {
     ProtoOaDealListRes => ProtoOaPayloadType::ProtoOaDealListRes,
     ProtoOaOrderListReq => ProtoOaPayloadType::ProtoOaOrderListReq,
     ProtoOaOrderListRes => ProtoOaPayloadType::ProtoOaOrderListRes,
+    ProtoOaOrderDetailsReq => ProtoOaPayloadType::ProtoOaOrderDetailsReq,
+    ProtoOaOrderDetailsRes => ProtoOaPayloadType::ProtoOaOrderDetailsRes,
+    ProtoOaNewOrderReq => ProtoOaPayloadType::ProtoOaNewOrderReq,
+    ProtoOaAmendOrderReq => ProtoOaPayloadType::ProtoOaAmendOrderReq,
+    ProtoOaAmendPositionSltpReq => ProtoOaPayloadType::ProtoOaAmendPositionSltpReq,
+    ProtoOaCancelOrderReq => ProtoOaPayloadType::ProtoOaCancelOrderReq,
+    ProtoOaClosePositionReq => ProtoOaPayloadType::ProtoOaClosePositionReq,
+    ProtoOaExecutionEvent => ProtoOaPayloadType::ProtoOaExecutionEvent,
+    ProtoOaOrderErrorEvent => ProtoOaPayloadType::ProtoOaOrderErrorEvent,
+}
+
+/// A trade request: one of the account's, which the session fills in.
+pub(crate) trait TradeRequest: Payload {
+    /// Sets the account the request is for.
+    fn set_account(&mut self, ctid_trader_account_id: i64);
+}
+
+macro_rules! trade_request {
+    ($($message:ident),* $(,)?) => {
+        $(impl TradeRequest for $message {
+            fn set_account(&mut self, ctid_trader_account_id: i64) {
+                self.ctid_trader_account_id = ctid_trader_account_id;
+            }
+        })*
+    };
+}
+
+trade_request! {
+    ProtoOaNewOrderReq,
+    ProtoOaAmendOrderReq,
+    ProtoOaAmendPositionSltpReq,
+    ProtoOaCancelOrderReq,
+    ProtoOaClosePositionReq,
 }
 
 /// Whether a request of `payload_type` counts against cTrader's limit of
 /// historical requests (5 a second per connection): the tick requests, and
-/// the deal list, history too (Spotware's docs name no list of either
-/// kind, so it is held to the lower limit).
+/// the deal and order lists, history too (Spotware's docs name no list of
+/// either kind, so they are held to the lower limit).
 pub(super) fn is_historical(payload_type: u32) -> bool {
-    payload_type == ProtoOaGetTickDataReq::TYPE || payload_type == ProtoOaDealListReq::TYPE
+    [
+        ProtoOaGetTickDataReq::TYPE,
+        ProtoOaDealListReq::TYPE,
+        ProtoOaOrderListReq::TYPE,
+    ]
+    .contains(&payload_type)
 }
 
 /// The name of a payload type, as the `.proto` files spell it, or its
@@ -167,7 +208,7 @@ pub(super) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, IcError> {
 
 /// Why a request to cTrader failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum IcError {
+pub(crate) enum IcError {
     /// cTrader answered with an error: its code (a `ProtoOAErrorCode` or
     /// `ProtoErrorCode` name) and description.
     Venue {
@@ -315,9 +356,11 @@ mod tests {
     }
 
     #[test]
-    fn tick_and_deal_requests_are_historical_others_not() {
+    fn tick_deal_and_order_list_requests_are_historical_others_not() {
         assert!(is_historical(ProtoOaGetTickDataReq::TYPE));
         assert!(is_historical(ProtoOaDealListReq::TYPE));
+        assert!(is_historical(ProtoOaOrderListReq::TYPE));
+        assert!(!is_historical(ProtoOaNewOrderReq::TYPE));
         assert!(!is_historical(ProtoOaReconcileReq::TYPE));
         assert!(!is_historical(ProtoOaSymbolByIdReq::TYPE));
     }

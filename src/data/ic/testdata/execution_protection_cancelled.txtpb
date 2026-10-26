@@ -1,0 +1,56 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# then the closed position's protection order cancelled.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_protection_cancelled.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_CANCELLED
+position {
+  positionId: 690004734
+  tradeData {
+    symbolId: 41
+    volume: 0
+    tradeSide: BUY
+    openTimestamp: 1793027466285
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1793027475436
+  }
+  positionStatus: POSITION_STATUS_CLOSED
+  swap: 0
+  price: 0
+  utcLastUpdateTimestamp: 1793027475436
+  commission: 0
+  marginRate: 0
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 0
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1031776266
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1793027466291
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1793027475436
+  }
+  orderType: STOP_LOSS_TAKE_PROFIT
+  orderStatus: ORDER_STATUS_CANCELLED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1793027475436
+  closingOrder: true
+  limitPrice: 4062.78
+  stopPrice: 3982.78
+  clientOrderId: "PROBE-1"
+  timeInForce: GOOD_TILL_CANCEL
+  positionId: 690004734
+  trailingStopLoss: false
+  stopTriggerMethod: TRADE
+}
+isServerEvent: true

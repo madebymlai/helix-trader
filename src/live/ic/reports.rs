@@ -36,6 +36,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
+use super::orders::{Leg, protection_id};
 use crate::data::ic::messages::{
     ProtoOaDeal, ProtoOaDealStatus, ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod,
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
@@ -120,12 +121,12 @@ impl Reports<'_> {
         let quantity = quantity(instrument, trade.volume).with_context(what)?;
         let ts = millis(position.utc_last_update_timestamp.or(trade.open_timestamp))
             .with_context(what)?;
-        let protection = |suffix: &str, order_type| {
+        let protection = |leg: Leg, order_type| {
             OrderStatusReport::new(
                 self.account_id,
                 instrument.id(),
                 None,
-                VenueOrderId::new(format!("{}-{suffix}", position.position_id)),
+                protection_id(position.position_id, leg),
                 Some(closing),
                 order_type,
                 TimeInForce::Gtc,
@@ -144,16 +145,105 @@ impl Reports<'_> {
         if let Some(stop_loss) = position.stop_loss.filter(|p| *p > 0.0) {
             let trigger = price(instrument, stop_loss).with_context(what)?;
             reports.push(
-                protection("SL", OrderType::StopMarket)
+                protection(Leg::StopLoss, OrderType::StopMarket)
                     .with_trigger_price(trigger)
                     .with_trigger_type(trigger_type(position.stop_loss_trigger_method())),
             );
         }
         if let Some(take_profit) = position.take_profit.filter(|p| *p > 0.0) {
             let limit = price(instrument, take_profit).with_context(what)?;
-            reports.push(protection("TP", OrderType::Limit).with_price(limit));
+            reports.push(protection(Leg::TakeProfit, OrderType::Limit).with_price(limit));
         }
         Ok(reports)
+    }
+
+    /// The report of `leg` of the protection order `order` (a position's
+    /// `STOP_LOSS_TAKE_PROFIT` order, its stop price the stop loss, its
+    /// limit price the take profit) as `status`, if the order holds the leg
+    /// and is of a loaded symbol.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a price is off the instrument's tick, or the
+    /// volume or times cannot be read.
+    pub(super) fn protection_status(
+        &self,
+        order: &ProtoOaOrder,
+        leg: Leg,
+        status: OrderStatus,
+    ) -> anyhow::Result<Option<OrderStatusReport>> {
+        let trade = &order.trade_data;
+        let held = match leg {
+            Leg::StopLoss => order.stop_price,
+            Leg::TakeProfit => order.limit_price,
+        };
+        let (Some(held), Some(position)) = (held.filter(|p| *p > 0.0), order.position_id) else {
+            return Ok(None);
+        };
+        let Some(instrument) = self.instrument(trade.symbol_id, "protection") else {
+            return Ok(None);
+        };
+        let what = || format!("IC protection order {}", order.order_id);
+        let quantity = quantity(instrument, trade.volume).with_context(what)?;
+        let filled = if status == OrderStatus::Filled {
+            quantity
+        } else {
+            Quantity::zero(instrument.size_precision())
+        };
+        let ts =
+            millis(order.utc_last_update_timestamp.or(trade.open_timestamp)).with_context(what)?;
+        let report = OrderStatusReport::new(
+            self.account_id,
+            instrument.id(),
+            None,
+            protection_id(position, leg),
+            Some(side(trade.trade_side())),
+            leg.order_type(),
+            TimeInForce::Gtc,
+            status,
+            quantity,
+            filled,
+            ts,
+            ts,
+            self.ts_init,
+            None,
+        )
+        .with_reduce_only(true)
+        .with_venue_position_id(position_id(position));
+        let held = price(instrument, held).with_context(what)?;
+        Ok(Some(match leg {
+            Leg::StopLoss => report
+                .with_trigger_price(held)
+                .with_trigger_type(trigger_type(order.stop_trigger_method())),
+            Leg::TakeProfit => report.with_price(held),
+        }))
+    }
+
+    /// The reports of `leg` of the protection order `order` filled by
+    /// `deal`: its status, filled, and the fill, under the leg's venue order
+    /// id.
+    ///
+    /// # Errors
+    ///
+    /// As `protection_status` and `fill`.
+    pub(super) fn protection_fill(
+        &self,
+        order: &ProtoOaOrder,
+        deal: &ProtoOaDeal,
+        leg: Leg,
+    ) -> anyhow::Result<Option<(OrderStatusReport, FillReport)>> {
+        let Some(status) = self.protection_status(order, leg, OrderStatus::Filled)? else {
+            return Ok(None);
+        };
+        let Some(mut fill) = self.fill(deal)? else {
+            return Ok(None);
+        };
+        fill.venue_order_id = status.venue_order_id;
+        let status = match deal.execution_price {
+            Some(avg) => status.with_avg_px(decimal(avg)?),
+            None => status,
+        };
+        Ok(Some((status, fill)))
     }
 
     /// The instrument of `position`, if open and loaded: cTrader also
@@ -291,12 +381,7 @@ impl Reports<'_> {
             .execution_price
             .context("a filled deal without an execution price")
             .with_context(what)?;
-        let charged = Decimal::new(
-            deal.commission.unwrap_or_default(),
-            deal.money_digits.unwrap_or(2),
-        );
-        let commission = Money::from_decimal(-charged, self.currency)
-            .map_err(|e| anyhow::anyhow!("{}: commission: {e}", what()))?;
+        let commission = commission(deal, self.currency).with_context(what)?;
         Ok(Some(FillReport::new(
             self.account_id,
             instrument.id(),
@@ -363,22 +448,37 @@ pub(super) fn open_volumes(positions: &[ProtoOaPosition]) -> HashMap<i64, i64> {
         .collect()
 }
 
+/// The commission cTrader charged on `deal` (a negative amount in the
+/// deposit currency `currency`, at its `moneyDigits`) as Nautilus' positive
+/// cost.
+///
+/// # Errors
+///
+/// Returns an error if the amount does not fit `currency`.
+pub(super) fn commission(deal: &ProtoOaDeal, currency: Currency) -> anyhow::Result<Money> {
+    let charged = Decimal::new(
+        deal.commission.unwrap_or_default(),
+        deal.money_digits.unwrap_or(2),
+    );
+    Money::from_decimal(-charged, currency).map_err(|e| anyhow::anyhow!("commission: {e}"))
+}
+
 /// Whether `deal` executed some volume.
-fn fills(deal: &ProtoOaDeal) -> bool {
+pub(super) fn fills(deal: &ProtoOaDeal) -> bool {
     matches!(
         deal.deal_status(),
         ProtoOaDealStatus::Filled | ProtoOaDealStatus::PartiallyFilled
     ) && deal.filled_volume > 0
 }
 
-fn side(side: ProtoOaTradeSide) -> OrderSide {
+pub(super) fn side(side: ProtoOaTradeSide) -> OrderSide {
     match side {
         ProtoOaTradeSide::Buy => OrderSide::Buy,
         ProtoOaTradeSide::Sell => OrderSide::Sell,
     }
 }
 
-fn position_id(id: i64) -> PositionId {
+pub(super) fn position_id(id: i64) -> PositionId {
     PositionId::new(id.to_string())
 }
 
@@ -386,7 +486,7 @@ fn position_id(id: i64) -> PositionId {
 /// ask, a sell by the bid) is `BID_ASK`, `DOUBLE_TRADE` `DOUBLE_BID_ASK`;
 /// the `OPPOSITE` methods have no Nautilus counterpart, and the venue holds
 /// the order: `DEFAULT`.
-fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
+pub(super) fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
     match method {
         ProtoOaOrderTriggerMethod::Trade => TriggerType::BidAsk,
         ProtoOaOrderTriggerMethod::DoubleTrade => TriggerType::DoubleBidAsk,
@@ -397,7 +497,7 @@ fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
 }
 
 /// The decimal a double was written from: its shortest round-trip form.
-fn decimal(value: f64) -> anyhow::Result<Decimal> {
+pub(super) fn decimal(value: f64) -> anyhow::Result<Decimal> {
     ensure!(value.is_finite(), "price {value} is not finite");
     value
         .to_string()
@@ -406,7 +506,7 @@ fn decimal(value: f64) -> anyhow::Result<Decimal> {
 }
 
 /// `value`, a price on `instrument`'s tick, at its precision.
-fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Price> {
+pub(super) fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Price> {
     let precision = instrument.price_precision();
     let value = decimal(value)?.normalize();
     ensure!(
@@ -418,7 +518,7 @@ fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Price> {
 }
 
 /// A volume, in cents of a unit, as a quantity of `instrument`.
-fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result<Quantity> {
+pub(super) fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result<Quantity> {
     ensure!(cents > 0, "volume {cents} is not positive");
     let precision = instrument.size_precision();
     let units = Decimal::new(cents, 2).normalize();
@@ -431,7 +531,7 @@ fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result<Quantity> 
 }
 
 /// A Unix time in milliseconds, which must be there.
-fn millis(ms: Option<i64>) -> anyhow::Result<UnixNanos> {
+pub(super) fn millis(ms: Option<i64>) -> anyhow::Result<UnixNanos> {
     let ms = ms.context("no time")?;
     let ms = u64::try_from(ms).with_context(|| format!("time {ms} ms before 1970"))?;
     ms.checked_mul(1_000_000)

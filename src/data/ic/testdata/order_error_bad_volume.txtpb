@@ -1,0 +1,10 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a market order of 0.5 oz (volume 50), under clientMsgId
+# N:PROBE-3.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAOrderErrorEvent OpenApiMessages.proto < order_error_bad_volume.bin
+# Message: ProtoOAOrderErrorEvent
+errorCode: "TRADING_BAD_VOLUME"
+ctidTraderAccountId: 1000001
+description: "Order volume = 0.50 is smaller than minimum allowed volume = 1.00."

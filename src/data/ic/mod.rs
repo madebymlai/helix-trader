@@ -30,12 +30,14 @@ use self::{
     config::{IcAccountId, IcCredential},
     messages::{
         ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
-        ProtoOaDealListRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType,
-        ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
-        ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes,
+        ProtoOaDealListRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaOrder,
+        ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderListReq, ProtoOaOrderListRes,
+        ProtoOaQuoteType, ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaSymbolByIdReq,
+        ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq,
+        ProtoOaTraderRes, TradeRequest,
     },
     ticks::{SideTicks, Tick},
-    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents},
+    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents, TradeEvents, TradeSent},
 };
 use super::fill_catalog;
 
@@ -209,6 +211,91 @@ impl IcHistory {
         let mut deals: Vec<ProtoOaDeal> = deals.into_values().collect();
         deals.sort_by_key(|d| (d.execution_timestamp, d.deal_id));
         Ok(deals)
+    }
+
+    /// Sends `request`, a trade request of the account, under
+    /// `client_msg_id`; its outcome comes as trade events under that id (see
+    /// `trade_events`). The answer says whether it was sent.
+    pub(crate) fn trade<Req: TradeRequest>(
+        &self,
+        mut request: Req,
+        client_msg_id: String,
+    ) -> TradeSent {
+        request.set_account(self.account_id.get());
+        self.client.trade(&request, client_msg_id)
+    }
+
+    /// The account's trade events from now on (see `IcWebSocketClient::trade_events`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is closed.
+    pub(crate) fn trade_events(&self) -> anyhow::Result<TradeEvents> {
+        Ok(self.client.trade_events()?)
+    }
+
+    /// The order `order_id` and the deals that filled it, open or not.
+    ///
+    /// # Errors
+    ///
+    /// Returns cTrader's error for an order it does not hold
+    /// (`ORDER_NOT_FOUND`), or an error if the request fails.
+    pub(crate) async fn order_details(
+        &self,
+        order_id: i64,
+    ) -> Result<ProtoOaOrderDetailsRes, messages::IcError> {
+        self.client
+            .request(&ProtoOaOrderDetailsReq {
+                ctid_trader_account_id: self.account_id.get(),
+                order_id,
+                ..Default::default()
+            })
+            .await
+    }
+
+    /// The orders updated over `[from_ms, to_ms]`, open or not, each once,
+    /// as `deals` reads deals: a window answered only in part is asked
+    /// again in halves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a request fails, or a single millisecond holds
+    /// more orders than a page.
+    pub(crate) async fn orders(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> anyhow::Result<Vec<ProtoOaOrder>> {
+        if from_ms >= to_ms {
+            return Ok(Vec::new());
+        }
+        let mut windows = vec![(from_ms, to_ms)];
+        let mut orders: HashMap<i64, ProtoOaOrder> = HashMap::new();
+        while let Some((from, to)) = windows.pop() {
+            let page: ProtoOaOrderListRes = self
+                .client
+                .request(&ProtoOaOrderListReq {
+                    ctid_trader_account_id: self.account_id.get(),
+                    from_timestamp: Some(from),
+                    to_timestamp: Some(to),
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| format!("requesting IC's orders over [{from}, {to}] ms"))?;
+            if page.has_more {
+                ensure!(
+                    to - from > 2,
+                    "IC holds more orders over [{from}, {to}] ms than one answer carries"
+                );
+                let middle = from + (to - from) / 2;
+                windows.push((from, middle + 1));
+                windows.push((middle, to));
+            }
+            orders.extend(page.order.into_iter().map(|o| (o.order_id, o)));
+        }
+        let mut orders: Vec<ProtoOaOrder> = orders.into_values().collect();
+        orders.sort_by_key(|o| o.order_id);
+        Ok(orders)
     }
 
     /// The instruments of `ids`, from cTrader's current definitions: the

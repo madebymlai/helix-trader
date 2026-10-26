@@ -3,7 +3,8 @@
 //! gets, warmup and replayed, every fill, and on stop the adjustments of
 //! its positions (funding), and can rest a sell stop on its first replayed
 //! bar or send market orders of its choosing on the first replayed bars,
-//! and on stop its positions. It leaves its `oms_type` unset, so it keeps
+//! close its positions by their ids on given bars, and on stop its
+//! positions. It leaves its `oms_type` unset, so it keeps
 //! positions as the venue does. For the tests that need what the EMA
 //! crossover cannot show: the bars' open, high and low, stop orders, fills
 //! of a given side and size, funding, and positions.
@@ -53,6 +54,9 @@ pub struct Recorder {
     stop: Option<Price>,
     /// The market order sent on each of the first replayed bars, in order.
     market: Vec<(OrderSide, Quantity)>,
+    /// The replayed bars, by index, on which it closes its open positions
+    /// (`close_position`), before any market order of the bar.
+    close_on: Vec<usize>,
     record: Rc<RefCell<Record>>,
 }
 
@@ -75,6 +79,7 @@ impl Recorder {
             warmup: Some(warmup),
             stop,
             market: vec![],
+            close_on: vec![],
             record: Rc::clone(&record),
         };
         (recorder, record)
@@ -113,6 +118,12 @@ impl Recorder {
     ) -> (Self, Rc<RefCell<Record>>) {
         let (recorder, record) = Self::without_warmup(bar_type);
         (Self { market, ..recorder }, record)
+    }
+
+    /// The recorder closing its open positions, each by its id
+    /// (`close_position`), on the replayed bars of `close_on`.
+    pub fn closing_on(self, close_on: Vec<usize>) -> Self {
+        Self { close_on, ..self }
     }
 }
 
@@ -164,6 +175,15 @@ impl DataActor for Recorder {
         let index = self.record.borrow().bars.len();
         let first = index == 0;
         self.record.borrow_mut().bars.push(*bar);
+        if self.close_on.contains(&index) {
+            let instrument_id = bar.bar_type.instrument_id();
+            let open = self
+                .cache()
+                .positions_open(None, Some(&instrument_id), None, None, None);
+            for position in &open {
+                self.close_position(position, None, None, None, None, None, None)?;
+            }
+        }
         if let Some(&(side, quantity)) = self.market.get(index) {
             let order = self.order().market(
                 bar.bar_type.instrument_id(),

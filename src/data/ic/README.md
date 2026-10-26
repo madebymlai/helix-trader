@@ -29,14 +29,15 @@ place in the live node in `live/ic/README.md`.
 ```
 ic/
   mod.rs        IcHistory: connect, instruments, the fill, the account,
-                open positions and deals
+                open positions, deals and orders, trade requests and events
   account.rs    the account checked (hedging, IC_ACCOUNT_ID's) and its state
   config.rs     IcEnvironment, IcCredential and IcConnection, from IC_*
   messages.rs   Spotware's protobuf messages, their payload types, the envelope
   parse.rs      cTrader symbols -> CurrencyPair, ids
   ticks.rs      tick history: decoding, paging, the merge into quotes, their size
   token.rs      the token pair and the token file that keeps the latest one
-  websocket/    the cTrader connection: outer client, handler task, spot subscriptions
+  websocket/    the cTrader connection: outer client, handler task, spot
+                subscriptions, trade requests and events
   testing.rs    a mock cTrader peer (a local WebSocket server) for the tests
   proto/        Spotware's four .proto files, vendored
   testdata/     responses captured from IC's demo, scrubbed, text and wire forms
@@ -162,6 +163,20 @@ On the demo (2026-10-26) cTrader sent no heartbeat of its own in 25 s
 while ours ran, and none is needed: the transport's reconnect handles a
 dropped connection.
 
+Trade requests (a new order, an amendment, a cancel, a close, a position's
+protections amended) go out under the `clientMsgId` their caller chose
+(`IcHistory::trade`, the account filled in); the caller learns only whether
+the frame was written: one waiting when the session fails or the
+connection closes was never sent, and says so. Their answers, and every
+execution event and order error of the account, come as trade events
+(`IcHistory::trade_events`, from the moment it is called), with the
+`clientMsgId` they came under: cTrader answers a request with execution
+events under its id, the server's own (a stop loss hit) under the order's
+`clientOrderId` (demo, 2026-10-26). A session nobody listens to (the data
+client's) drops them. A trade request in flight at a reconnect gets no
+answer: its outcome is left to the execution client's reconciliation
+(`../../live/ic/README.md`, "Orders").
+
 ### Nautilus primitives
 
 `docs/ARCHITECTURE.md` asks for plain Nautilus API: each primitive the
@@ -191,6 +206,9 @@ OKX and AX adapters use them:
 | Data client tasks | Nautilus' `TaskGroup`s, session and command | `TaskGroup` (`live/src/task.rs`) | already native | |
 | Quote emission filter | ours: a `subscribed` flag per instrument in `live/ic/spots.rs`, the merge kept for all | `DataClientAdapter::subscriptions_quotes` (`data/src/client.rs`) | keep: no native equivalent | That set is the data engine's, held by the adapter wrapping our `DataClient`, out of its reach. The guide asks for this split: "Update the full private cache even when emissions are filtered to active subscriptions". |
 | Deal deduplication | ours: deals kept once by id across the halves of a split window | `FifoCache` (`common/src/cache/fifo.rs`) | keep: no native equivalent | `FifoCache` bounds replay deduplication of a stream; this is one request's complete set, which a bounded cache could truncate. |
+| Trade event deduplication | Nautilus' `FifoCache` of the last 10,000 deal ids (`live/ic/dispatch.rs`) | `FifoCache` (`common/src/cache/fifo.rs`; guide, "Event ordering and deduplication") | already native | |
+| Order identity of trade events | Nautilus' `OrderIdentity`, in the dispatch's tracked orders with their shape and bracket role | `OrderIdentity`, `OrderContext` (`live/src/execution/context.rs`; guide, "Tracked and external execution updates") | already native | The shape kept is the bracket's (legs, the position they protect), which `OrderContext` does not hold. |
+| Unresolved submissions | `ExecutionClient::retain_unresolved_submissions` true | the same (`common/src/clients/execution.rs`) | already native | An order sent and unanswered stays in flight until venue evidence resolves it. |
 
 ## Instruments
 
@@ -242,8 +260,9 @@ without burst: one every 200 ms was refused on the demo
 (`BLOCKED_PAYLOAD_TYPE`, "You are being rate limited"). BID and ASK are
 fetched side by side, so the fill runs at the limiter's pace: a week of
 XAUUSD (727,000 ticks a side, about 150 requests) in about 38 s, of EURUSD
-(210,000 and 222,000) in about 12 s. Deal requests share the limiter (see
-`../../live/ic/README.md`, "Reconciliation"); other requests are not limited.
+(210,000 and 222,000) in about 12 s. Deal and order list requests share
+the limiter (see `../../live/ic/README.md`, "Reconciliation"); other
+requests, trade requests included, are not limited.
 
 ### Units
 
@@ -375,9 +394,15 @@ ticks of five seconds (2026-10-21 14:00:00-14:00:05 UTC); the answers to a
 spot subscription and unsubscription and four spot events (2026-10-26:
 the first of XAUUSD and of EURUSD, an EURUSD bid alone and an ask alone);
 the answers to a trader request (the login scrubbed too), a reconcile
-request and a deal list request on the demo account, which holds nothing.
-Positions, orders and deals are synthetic in the tests: no order may be
-placed to capture them.
+request and a deal list request on the demo account, which holds nothing;
+and the trade events of 1 oz orders of XAUUSD on the demo (2026-10-26,
+`execution_*`, `order_error_*`): a market buy with protections accepted
+and filled, its position's protection order accepted, amended and
+cancelled when the position was closed by its id; a limit buy accepted,
+amended and cancelled; a stop loss hit; a volume below the minimum, a
+cancel of an order already cancelled and a close of a position already
+closed refused. Their `.txtpb` say what each is. The positions, orders and
+deals of the reconciliation tests are synthetic.
 
 ## Tests
 
@@ -410,7 +435,9 @@ placed to capture them.
     account refused, malformed and unknown frames skipped,
     re-authentication after a reconnect, requests failing once cTrader
     ends the client's session; tick requests at most 5 a second, others
-    unlimited;
+    unlimited; a trade request sent under its id, its answer and an event
+    of the account coming as trade events, and one cTrader's ended session
+    never sent;
   - `websocket/` (renewal), against a peer keeping one token pair as
     cTrader does (a renewal replaces it and ends the sessions of the old
     one): a pair of unknown expiry, or expiring within a day, renewed and
@@ -445,7 +472,8 @@ placed to capture them.
     a reconnect the subscriptions are sent again, an unsubscribed one not;
   - `mod.rs` (account): the captured hedged account passes the check; a
     netting account and another account's trader refused, naming why;
-  - `messages.rs`: tick and deal requests are historical, others not.
+  - `messages.rs`: tick, deal and order list requests are historical,
+    others not.
 - `tests/ic_demo.rs`, on IC's cTrader demo (gated by `NAUTILUS_IC_RUN=1`,
   demo only; it places no order): the execution client, from its factory,
   connects on the hedged account, publishes its state (1,000,000.00 EUR, no

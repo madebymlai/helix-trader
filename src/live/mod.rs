@@ -2,7 +2,7 @@
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
 //! those of the instruments' venues: OKX's for OKX instruments (`okx/`),
-//! IC's for IC instruments (`ic/`, no order yet), IB's for the others
+//! IC's for IC instruments (`ic/`, a hedging account), IB's for the others
 //! (`ib/`), several if the instruments span several. The start brings the
 //! catalog up to now for the IB and IC instruments, and the node serves
 //! their warmup from it, IC's data client the rest up to now. OKX's data
@@ -52,8 +52,8 @@ use crate::{
 /// One live run: the strategy trades its IB instruments in `account`
 /// through IB with `client_id`, and its OKX instruments on the OKX
 /// environment `OKX_ENVIRONMENT` names at `leverage`; it gets the data of
-/// its IC instruments on the IC environment `IC_ENVIRONMENT` names, its IC
-/// account reconciled but no IC order placed yet; on bars the node builds,
+/// trades its IC instruments on the IC environment `IC_ENVIRONMENT` names,
+/// a hedging account; on bars the node builds,
 /// warmed up from the
 /// catalog and the venues.
 #[derive(Debug, Clone)]

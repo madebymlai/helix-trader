@@ -38,12 +38,13 @@ fn without_a_session_every_bar_counts_across_midnight() {
 
     // The slow EMA after the warmup, the partial 21:00 bar dropped, is
     // 600.60. 23:00: 620.60 above it, long: buy 10 at 620.65, the EMA going
-    // to 613.93. 00:00: 580.60 below, short: sell 20 at 580.55, the EMA
-    // going to 591.71. 01:00: 600.60 above, long: buy 20 at 600.65. The 10
-    // shares bought lose 40.10 each, the 10 sold short 20.10. Had the bar
-    // closing at midnight been dropped, as a session of 00:00 to 23:59
-    // drops it, 01:00 would be below the EMA of 613.93: a single sell, two
+    // to 613.93. 00:00: 580.60 below, short: close the long (sell 10) and
+    // sell 10 at 580.55, the EMA going to 591.71. 01:00: 600.60 above,
+    // long: close the short (buy 10) and buy 10 at 600.65. The 10 shares
+    // bought lose 40.10 each, the 10 sold short 20.10. Had the bar closing
+    // at midnight been dropped, as a session of 00:00 to 23:59 drops it,
+    // 01:00 would be below the EMA of 613.93: a single crossing, three
     // orders.
-    assert_eq!(result.total_orders, 3);
+    assert_eq!(result.total_orders, 5);
     assert_eq!(common::balance(&result), "9398.00 EUR");
 }
