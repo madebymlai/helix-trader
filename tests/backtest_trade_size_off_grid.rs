@@ -6,7 +6,10 @@
 mod common;
 
 use common::wave;
-use helix_trader::strategy::ema::{EmaCross, EmaCrossConfig};
+use helix_trader::strategy::{
+    BarsConfig,
+    ema::{EmaCross, EmaCrossConfig},
+};
 use nautilus_model::{
     data::BarSpecification,
     enums::{BarAggregation, PriceType},
@@ -16,18 +19,21 @@ use nautilus_model::{
 
 #[test]
 fn a_trade_size_off_the_share_grid_trades_the_rounded_size_and_the_run_completes() {
-    let config = EmaCrossConfig::builder()
+    let bars = BarsConfig::builder()
         .instrument_ids(vec![InstrumentId::from(common::INSTRUMENT_ID)])
         .bar_spec(BarSpecification::new(
             1,
             BarAggregation::Hour,
             PriceType::Mid,
         ))
+        .warmup(wave::WARMUP)
+        .session(common::session())
+        .build();
+    let config = EmaCrossConfig::builder()
+        .bars(bars)
         .fast_period(5)
         .slow_period(15)
         .trade_size(Quantity::from("10.5"))
-        .warmup(wave::WARMUP)
-        .session(common::session())
         .build();
     let catalog = wave::catalog();
     let result = wave::backtest(catalog.path(), "3 EUR")

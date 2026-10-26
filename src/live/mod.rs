@@ -13,6 +13,7 @@ mod ib;
 mod ic;
 mod node;
 mod okx;
+mod redis;
 
 pub use ic::{
     IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
@@ -36,7 +37,7 @@ use nautilus_common::{
 use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Data, NautilusDataType},
-    identifiers::InstrumentId,
+    identifiers::{InstrumentId, TraderId},
     instruments::InstrumentAny,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -57,6 +58,9 @@ use crate::{
 /// catalog and the venues.
 #[derive(Debug, Clone)]
 pub struct Live {
+    /// The node's trader. The node's cache in Redis is the trader's, so a
+    /// restart under the same trader loads what the last run left.
+    pub trader_id: TraderId,
     /// The catalog directory: the start fills it up to now with the IB
     /// history, and the node serves the warmup from it, asking the
     /// venues for what it misses.
@@ -107,7 +111,7 @@ impl Live {
         // keeps it. The adapter's `tracing` output joins it.
         let file_config = self.logging.file_config.clone().unwrap_or_default();
         let _log_guard = init_logging(
-            node::trader_id(),
+            self.trader_id,
             UUID4::new(),
             self.logging.clone(),
             file_config,
@@ -153,6 +157,7 @@ impl Live {
         fs::create_dir_all(&self.catalog)
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         node::run(
+            self.trader_id,
             &self.catalog,
             self.logging.clone(),
             cache,

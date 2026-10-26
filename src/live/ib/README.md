@@ -130,7 +130,10 @@ adapter stamps it at open + bar size, half an hour after its real close (see
 `InteractiveBrokersExecutionClientConfig`: `host`, `port`, `client_id` as
 above, `account_id: Option<String>` (see "The account"), timeouts,
 `instrument_provider`. The factory fixes `OmsType::Netting` and
-`AccountType::Margin`, so leave the strategy's `oms_type` unset or `Netting`.
+`AccountType::Margin`; a strategy leaves its `oms_type` unset and nets.
+Nautilus' `bracket()` makes its exits reduce-only and the IB execution
+client denies reduce-only orders (`UNSUPPORTED_REDUCE_ONLY`), so a bracket
+is denied on IB.
 The exec `client_id` must not be a multiple of 1000: the adapter partitions
 order ids by `client_id % 1000` and rejects one. Since data and exec share the
 client id, `mod.rs` refuses it before any gateway starts.
@@ -185,13 +188,18 @@ catalog must use the same symbology and venue; the venue rules (never
   history starting or reusing it, `fill_catalog` through it, and `Live` on a
   paper account, stopped by SIGINT, with a session that holds no bar so the
   strategy never trades.
+- End to end, `tests/ib_restart.rs`, placing orders on the paper account:
+  the node's cache in Redis across restarts, each node in a child process,
+  1 or 2 EXS1 at a time, then IB read back flat (live README, "Cache in
+  Redis", for what it shows). Xetra must be open.
 
 The end-to-end tests are gated as the IB crate's `node_data_tester` and
 `node_exec_tester` examples are: each returns at once, saying it was skipped,
-unless `NAUTILUS_IB_RUN=1` is set in the shell (not in `.env`). Anything
-placing orders would also need `NAUTILUS_IB_LIVE_ORDERS=1` (none does). The
-account comes from `NAUTILUS_IB_ACCOUNT_ID` and must be a paper one.
+unless `NAUTILUS_IB_RUN=1` is set in the shell (not in `.env`). Those placing
+orders, `ib_restart.rs`, also need `NAUTILUS_IB_LIVE_ORDERS=1`. The account
+comes from `NAUTILUS_IB_ACCOUNT_ID` and must be a paper one.
 
 ```sh
 NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
+NAUTILUS_IB_RUN=1 NAUTILUS_IB_LIVE_ORDERS=1 cargo test --test ib_restart -- --test-threads=1
 ```

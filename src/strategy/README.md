@@ -24,6 +24,20 @@ strategy/<name>/
 The folder exposes only the config and the constructor. `ema/` is the
 reference strategy.
 
+What most strategies need, whatever their position mode or order style,
+lives in `strategy/` itself, as a config struct and functions, never a base
+type or trait:
+
+```
+strategy/
+  config.rs     BarsConfig: the bars traded, their warmup and session
+  session.rs    Session: the hours traded
+  warmup.rs     the warmup calls and the node configs it needs
+```
+
+Orders stay in each strategy, on Nautilus' own API (see "Orders and
+positions"): there are no shared trading helpers.
+
 ## Config
 
 The strategy config is the universe: the single source of the instruments
@@ -31,12 +45,39 @@ and the bar spec, which are config values, never constants in code. Nautilus
 has no universe type; `fill_catalog`, backtest and live get the instruments
 and the warmup from this config, through `main`, as Nautilus types.
 
-It is a plain struct holding the Nautilus `StrategyConfig` (field `base`)
-plus every parameter of the strategy, model hyperparameters included
-(`ema/config.rs`, `EmaCrossConfig`). It derives `serde::Deserialize` with
+It is a plain struct holding the Nautilus `StrategyConfig` (field `base`),
+the shared `strategy::BarsConfig` (field `bars`), and every parameter of the
+strategy, model hyperparameters included (`ema/config.rs`,
+`EmaCrossConfig`). It derives `serde::Deserialize` with
 `#[serde(deny_unknown_fields)]` and is loaded from a TOML file given on the
 command line; it also derives `bon::Builder` for tests, so a defaulted field
 carries both `#[serde(default = ...)]` and `#[builder(default = ...)]`.
+
+```rust
+#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[serde(deny_unknown_fields)]
+pub struct TrendConfig {
+    #[serde(default = "default_base")]
+    #[builder(default = default_base())]
+    pub base: StrategyConfig,
+    #[serde(flatten)]
+    pub bars: BarsConfig,
+    pub lookback: usize,
+}
+```
+
+- `base` stays in each strategy: its default carries the strategy's own
+  id and order tag (`EMA_CROSS-001`), and leaves `oms_type` unset (see
+  "Position mode: the venue's").
+- `bars` is flattened, so its keys (`instrument_ids`, `bar_spec`,
+  `composite`, `warmup`, `session`) sit at the top of the TOML with the
+  strategy's own. serde then buffers the keys the strategy config does not
+  name and hands them to `BarsConfig`, which takes those it knows; the
+  strategy config's `deny_unknown_fields` rejects any key left over, so a
+  typo such as `sesion` still fails at load (serde_derive's
+  `collected_deny_unknown_fields`). `BarsConfig` itself does not deny
+  unknown fields: flattened, it only ever sees its own keys.
+- `validate` checks the strategy's own fields after `self.bars.validate()`.
 
 ```toml
 instrument_ids = ["ESH4.CME", "ESM4.CME"]
@@ -52,11 +93,13 @@ session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
   "MINUTE"` fails at load. The enums parse case-insensitively.
 - `SignedDuration` (`jiff`, with its `serde` feature) parses a duration
   string such as `"720h"`.
-- Loading then validates what serde cannot: at least one instrument, all on
-  one venue; a bar spec aggregated on time (the session needs the bar's
-  length) and, when built from quotes, priced `BID`, `ASK` or `MID` (`LAST`
-  fails at load); a session, if any, opening before it closes; and no
-  session together with `composite` (see "Session").
+- Loading then validates what serde cannot, `BarsConfig::validate`: at
+  least one instrument, all on one venue; a bar spec aggregated on time (the
+  session needs the bar's length) and, when built from quotes, priced
+  `BID`, `ASK` or `MID` (`LAST` fails at load); composite source bars
+  Nautilus accepts (`BarType::new_composite_checked`); a positive warmup; a
+  session, if any, opening before it closes; and no session together with
+  `composite` (see "Session").
 
 ### Bar types
 
@@ -76,11 +119,11 @@ gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
 bars of OKX's 1-minute candles, any price type (the source's), warmed up on
 those candles (see "Warmup and training").
 
-The config states what the strategy needs from data as one
+`BarsConfig` states what the strategy needs from data as one
 `strategy::DataRequirements`: its bar types and its warmup, its instruments
 derived from the bar types (`DataRequirements::instrument_ids`).
-`fill_catalog`, backtest and live read them from it, never from the config's
-fields:
+`fill_catalog`, backtest and live read them from it (`main` calls
+`config.bars.data_requirements()`), never from the config's fields:
 
 ```rust
 pub fn data_requirements(&self) -> DataRequirements {
@@ -93,8 +136,7 @@ pub fn data_requirements(&self) -> DataRequirements {
 
 ### Session
 
-`Session` (`ema/session.rs`, in the EMA folder until a second strategy needs
-it) holds a `jiff::tz::TimeZone`, read from its IANA name with
+`Session` (`strategy/session.rs`, the `session` field of `BarsConfig`) holds a `jiff::tz::TimeZone`, read from its IANA name with
 `#[serde(with = "jiff::fmt::serde::tz::required")]` because `TimeZone` has
 no plain `Deserialize` (an unknown name fails at load), and `open` and
 `close` as `jiff::civil::Time` (`"08:30"`).
@@ -148,17 +190,21 @@ nautilus_strategy!(Trend);
 
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let (bar_types, warmup) = (self.config.bar_types(), self.config.warmup);
+        let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
         warmup::start(self, &bar_types, warmup)
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        self.book.warm_up(&warmup::bars(self, quotes));
+        for bar in warmup::bars(self, quotes) {
+            self.book.update(&bar);
+        }
         Ok(())
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        self.book.warm_up(&warmup::bars(self, bars));
+        for bar in warmup::bars(self, bars) {
+            self.book.update(&bar);
+        }
         Ok(())
     }
 
@@ -182,6 +228,11 @@ impl DataActor for Trend {
   `manage_gtd_expiry` is set); the Rust runtime does not call it, so a
   strategy that wants it calls `Strategy::on_start` from its
   `DataActor::on_start`.
+- The warmup is shared as function calls, not as a hook implementation:
+  `on_start` hands `warmup::start` the bar types and warmup of `bars`, and
+  the two `on_historical_*` handlers feed the bars `warmup::bars` returns to
+  the strategy's own state (see "Warmup and training"). Each strategy writes
+  these three handlers itself, so its `DataActor` impl stays plain Nautilus.
 
 ### Orders and positions
 
@@ -208,6 +259,21 @@ self.submit_order(order, None, None, None)?;
   `on_order_rejected(&mut self, event: OrderRejected)`,
   `on_position_opened(&mut self, event: PositionOpened)`, and so on. The
   fill hook takes a reference; most others take the event by value.
+
+#### Position mode: the venue's
+
+A strategy leaves `oms_type` unset in its `StrategyConfig`. Nautilus then
+keeps its positions as the execution client of the venue does (the
+execution engine's `resolve_oms_type_for_client`; Concepts › Execution,
+"OMS configuration"): IB and OKX in net mode are netting, so trades on an
+instrument add into one position at a blended price; on a hedging venue
+each trade is a position of its own. The same strategy code runs on both.
+Strategy and venue modes always match, so Nautilus keeps no virtual
+positions. A strategy that set `HEDGING` on a netting venue could not
+restart with overlapping trades: the venue reports one position at the
+blended average, which differs from the cached per-trade positions, and
+Nautilus refuses the start. The backtest's venue keeps positions the same
+way (backtest README, "Venue").
 
 The EMA strategy decides on each bar's close and sends a market order to
 reach its target position. Limit and stop orders backtest less faithfully:
@@ -335,19 +401,26 @@ same code and nothing passes from backtest to live.
 
 ## Adding a strategy
 
-1. Create `strategy/<name>/` following the layout above.
+1. Create `strategy/<name>/` following the layout above: a config embedding
+   `BarsConfig` (see "Config"), the wiring calling `warmup` (see "Wiring"),
+   and the strategy's own decision and orders.
 2. Declare it in `strategy/mod.rs`.
 3. In `main.rs`, add a variant to `enum Strategy` and an arm to each `match`
-   on it (fill-catalog, backtest, live).
+   on it (fill-catalog, backtest, live), reading the data requirements from
+   `config.bars.data_requirements()`.
 
 ## Tests
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
-  each file. `warmup::cache_config` is unit tested.
+  each file. `BarsConfig` and `Session` are unit tested where they live,
+  `warmup::cache_config` too; a strategy's config tests cover only its own
+  fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through
   `Backtest::run` on a small fixture catalog of 1-minute quotes, one run per
   file (one node per process). They test the warmup module too: the
   fixture's prices are chosen so that the warmup bars, the partial oldest
   bar, the bar at the run start and the session each change the orders and
   the final balance. A recording strategy in `tests/common` checks what the
-  EMA cannot show: every price of the bars and stop orders.
+  EMA cannot show: every price of the bars, stop orders, and positions on
+  a netting and on a hedging venue (`backtest_netting_venue.rs`,
+  `backtest_hedging_venue.rs`).

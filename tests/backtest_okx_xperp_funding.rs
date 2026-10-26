@@ -15,14 +15,14 @@ mod common;
 use std::path::Path;
 
 use common::{recorder::Recorder, ts};
-use helix_trader::backtest::{Backtest, commission_rate};
+use helix_trader::backtest::{Backtest, commission_rate, venue_oms_type};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, FundingRateUpdate},
     enums::{OrderSide, PositionAdjustmentType},
-    identifiers::{InstrumentId, Symbol},
+    identifiers::{InstrumentId, Symbol, Venue},
     instruments::{CryptoFuture, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
@@ -146,6 +146,7 @@ fn backtest(dir: &Path) -> Backtest {
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("100000 USD"),
         leverage: Decimal::ONE,
+        oms_type: venue_oms_type(Venue::from("OKX")),
         logging: LoggerConfig::default(),
     }
 }

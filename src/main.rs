@@ -150,6 +150,10 @@ struct LiveArgs {
     /// instrument at another one.
     #[arg(long, default_value = "1")]
     leverage: Decimal,
+    /// The node's trader: its cache in Redis is the trader's, which each run
+    /// loads. Live processes running at once each need their own.
+    #[arg(long, default_value = "HELIX-001", value_parser = parse_trader_id)]
+    trader_id: TraderId,
 }
 
 /// The strategies, by command-line name.
@@ -164,6 +168,12 @@ fn parse_time(s: &str) -> Result<Timestamp, String> {
     s.parse::<UnixNanos>()
         .map(Timestamp::from)
         .map_err(|e| e.to_string())
+}
+
+/// A Nautilus trader id, a name and a tag joined by a hyphen, checked by
+/// Nautilus.
+fn parse_trader_id(s: &str) -> Result<TraderId, String> {
+    TraderId::new_checked(s).map_err(|e| e.to_string())
 }
 
 /// An amount and a currency code, for example "3 EUR". Explicit, since
@@ -222,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
-        Strategy::Ema => load_ema_config(&args.run.config)?.data_requirements(),
+        Strategy::Ema => load_ema_config(&args.run.config)?.bars.data_requirements(),
     };
     // No node runs in this process, so no node installs Nautilus' logger:
     // install it here, as a node would, so the `log` output of this crate and
@@ -285,21 +295,31 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let fee_model = args.commission.fee_model();
-    let backtest = |requirements: DataRequirements| Backtest {
-        catalog: args.run.catalog.clone(),
-        bar_types: requirements.bar_types,
-        start,
-        end,
-        warmup: requirements.warmup,
-        fee_model,
-        balance: args.balance,
-        leverage: args.leverage,
-        logging,
+    let backtest = |requirements: DataRequirements| -> anyhow::Result<Backtest> {
+        // The simulated venue keeps positions as the instruments' venue
+        // does; `Backtest::run` refuses instruments on several venues.
+        let venue = requirements
+            .instrument_ids()
+            .first()
+            .context("the strategy trades no instrument")?
+            .venue;
+        Ok(Backtest {
+            catalog: args.run.catalog.clone(),
+            bar_types: requirements.bar_types,
+            start,
+            end,
+            warmup: requirements.warmup,
+            fee_model,
+            balance: args.balance,
+            leverage: args.leverage,
+            oms_type: backtest::venue_oms_type(venue),
+            logging,
+        })
     };
     let outcome = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            backtest(config.data_requirements()).run(EmaCross::new(config)?)?
+            backtest(config.bars.data_requirements())?.run(EmaCross::new(config)?)?
         }
     };
     print!("{}", backtest::report(&outcome));
@@ -309,6 +329,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 /// Builds the strategy from its config and runs it live until Ctrl-C.
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
+        trader_id: args.trader_id,
         catalog: args.catalog,
         account: args.account,
         client_id: args.client_id,
@@ -318,7 +339,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     match args.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.config)?;
-            live.run(&config.data_requirements(), EmaCross::new(config)?)
+            live.run(&config.bars.data_requirements(), EmaCross::new(config)?)
                 .await
         }
     }
@@ -459,6 +480,21 @@ mod tests {
             Command::Live(args) => args,
             command => panic!("{command:?}"),
         })
+    }
+
+    #[test]
+    fn live_runs_as_trader_helix_001_unless_given_another() {
+        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+        assert_eq!(args.trader_id, TraderId::from("HELIX-001"));
+        let args =
+            parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX-002"]).unwrap();
+        assert_eq!(args.trader_id, TraderId::from("HELIX-002"));
+    }
+
+    #[test]
+    fn rejects_a_trader_id_nautilus_refuses() {
+        // Nautilus' trader id is a name and a tag joined by a hyphen.
+        assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
     }
 
     #[test]

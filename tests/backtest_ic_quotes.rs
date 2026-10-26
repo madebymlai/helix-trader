@@ -14,7 +14,7 @@ mod common;
 
 use common::{recorder::Recorder, ts};
 use helix_trader::{
-    backtest::{Backtest, commission_rate, report},
+    backtest::{Backtest, commission_rate, report, venue_oms_type},
     data::fill_catalog,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -129,6 +129,7 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
         balance: Money::from("2000000 USD"),
         // IC's leverage on the demo account, 1:30.
         leverage: Decimal::from(30),
+        oms_type: venue_oms_type(InstrumentId::from(INSTRUMENT_ID).venue),
         logging: LoggerConfig::default(),
     };
     let (recorder, record) = Recorder::trading_without_warmup(

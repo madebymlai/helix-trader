@@ -479,7 +479,9 @@ placed to capture them.
   re-auth: subscriptions survive a re-auth on the same connection, so the
   handler no longer sends them again then.
 - `tests/ic_live_demo.rs`, on the demo (same gate, no order; the node
-  reconciles the account through the execution client at start): `Live` on XAUUSD fills the catalog over a 30-minute warmup,
+  reconciles the account through the execution client at start, its cache
+  in Redis under trader `HELIXTEST-101`, deleted at the end): `Live` on
+  XAUUSD fills the catalog over a 30-minute warmup,
   then a recording strategy gets its 1-minute MID bars warmed up from the
   catalog and the data client, then live quotes (at the spot's
   millisecond, sized 10,000, after the stored ones) and the bars built from

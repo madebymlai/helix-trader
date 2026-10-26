@@ -12,11 +12,15 @@
 //! Gated as `ic_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_IC_RUN=1` is set in the shell. The strategy
 //! sends no order; IC's execution client reconciles the account. One node per
-//! process, hence its own file. Run it with:
+//! process, hence its own file. The node keeps its cache in Redis
+//! (`live::redis`) under the test's trader, `HELIXTEST-101`, whose records
+//! the test deletes once the node has stopped cleanly. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_IC_RUN=1 cargo test --test ic_live_demo -- --nocapture
 //! ```
+
+mod common;
 
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
@@ -28,7 +32,7 @@ use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};
 use nautilus_model::{
     data::{Bar, BarType, NautilusDataType, QuoteTick},
-    identifiers::{InstrumentId, StrategyId},
+    identifiers::{InstrumentId, StrategyId, TraderId},
     types::Quantity,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -132,6 +136,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     };
     let catalog = tempfile::tempdir().unwrap();
     let live = Live {
+        trader_id: TraderId::from("HELIXTEST-101"),
         catalog: catalog.path().to_path_buf(),
         account: None,
         client_id: 1,
@@ -159,6 +164,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
     assert!(interrupted, "the node stopped before SIGINT");
+    // The node's records in Redis, under the test's trader.
+    common::cache::delete_trader("HELIXTEST-101").await;
     let record = record.borrow();
     let (warmup_bars, bars, quotes) = (&record.warmup, &record.bars, &record.quotes);
     println!(

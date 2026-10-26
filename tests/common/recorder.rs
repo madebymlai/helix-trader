@@ -2,10 +2,11 @@
 //! strategy does, or only subscribes to its bars, records every bar it
 //! gets, warmup and replayed, every fill, and on stop the adjustments of
 //! its positions (funding), and can rest a sell stop on its first replayed
-//! bar or send market orders of its choosing on the first replayed bars.
-//! For the tests that need what the EMA crossover cannot show: the bars'
-//! open, high and low, stop orders, fills of a given side and size, and
-//! funding.
+//! bar or send market orders of its choosing on the first replayed bars,
+//! and on stop its positions. It leaves its `oms_type` unset, so it keeps
+//! positions as the venue does. For the tests that need what the EMA
+//! crossover cannot show: the bars' open, high and low, stop orders, fills
+//! of a given side and size, funding, and positions.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -18,6 +19,7 @@ use nautilus_model::{
     enums::OrderSide,
     events::{OrderFilled, PositionAdjusted},
     identifiers::StrategyId,
+    position::Position,
     types::{Price, Quantity},
 };
 use nautilus_trading::{
@@ -36,6 +38,8 @@ pub struct Record {
     pub fills: Vec<(OrderSide, Price, UnixNanos)>,
     /// The adjustments of its positions in the cache when it stops.
     pub adjustments: Vec<PositionAdjusted>,
+    /// Its positions in the cache when it stops, oldest first.
+    pub positions: Vec<Position>,
 }
 
 #[derive(Debug)]
@@ -132,12 +136,15 @@ impl DataActor for Recorder {
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
-        let positions = self.cache().positions(None, None, None, None, None);
-        self.record.borrow_mut().adjustments.extend(
+        let mut positions = self.cache().positions(None, None, None, None, None);
+        positions.sort_by_key(|position| position.ts_opened);
+        let mut record = self.record.borrow_mut();
+        record.adjustments.extend(
             positions
-                .into_iter()
-                .flat_map(|position| position.adjustments),
+                .iter()
+                .flat_map(|position| position.adjustments.iter().cloned()),
         );
+        record.positions = positions;
         Ok(())
     }
 

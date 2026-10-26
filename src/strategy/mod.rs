@@ -11,12 +11,22 @@
 //! is the pure core that turns bars into the target book, tested without an
 //! engine.
 //!
+//! What most strategies share is a config struct and functions, never a
+//! base type or trait: `BarsConfig`, embedded in each strategy config with
+//! `#[serde(flatten)]`, holds the bars traded, their warmup and their
+//! `Session`.
+//!
 //! Strategies trade on bars Nautilus builds from quotes; `warmup` asks for
 //! their history and hands it back, so that no strategy knows how. The
 //! catalog stores what their bars are built from (see `catalog_series`).
 
+mod config;
 pub mod ema;
+mod session;
 pub mod warmup;
+
+pub use config::{BarsConfig, CompositeSource};
+pub use session::Session;
 
 use jiff::SignedDuration;
 use nautilus_model::{

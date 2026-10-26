@@ -23,7 +23,9 @@ per process. Each takes the strategy name and its TOML config.
 
 Requires Rust 1.99+, `clang` and `mold` (the linker set in
 `.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
-Podman for the IB Gateway.
+Podman for the IB Gateway and for the Redis that holds the live node's cache
+(`docker pull docker.io/library/redis:7.4.11-alpine` once; see
+`src/live/README.md`).
 
 ```sh
 cp .env.example .env    # IB paper login, OKX API key, IC cTrader app

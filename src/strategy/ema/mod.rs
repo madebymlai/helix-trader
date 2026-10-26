@@ -6,10 +6,8 @@
 
 mod book;
 mod config;
-mod session;
 
-pub use config::{CompositeSource, EmaCrossConfig};
-pub use session::Session;
+pub use config::EmaCrossConfig;
 
 use nautilus_common::actor::DataActor;
 use nautilus_model::{
@@ -102,7 +100,7 @@ nautilus_strategy!(EmaCross);
 
 impl DataActor for EmaCross {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let (bar_types, warmup) = (self.config.bar_types(), self.config.warmup);
+        let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
         warmup::start(self, &bar_types, warmup)
     }
 

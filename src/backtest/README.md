@@ -185,7 +185,7 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | Field | Value |
 |---|---|
 | `name` | the instruments' venue, for example `"IBIS"` |
-| `oms_type` | `OmsType::Netting` |
+| `oms_type` | `Backtest::oms_type`: the real venue's, `venue_oms_type` (see below) |
 | `account_type` | `AccountType::Margin` (the EMA strategy goes short) |
 | `book_type` | `BookType::L1_MBP` (`new` rejects L2 or L3 books without book data) |
 | `starting_balances: Vec<String>` | the balance, `Money::to_string()`, for example `"10000.00 EUR"` |
@@ -194,6 +194,19 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
 | `bar_execution` | Nautilus' default, `true`: only `EXTERNAL` bars drive fills, which are OKX's minute candles; an IB catalog holds none, so quotes alone move its book |
 | `bar_adaptive_high_low_ordering` | Nautilus' default, `false`: a bar replays open, high, low, close (see Fills on candles) |
+
+The simulated venue keeps positions as the real one does, so that a
+strategy, its `oms_type` unset, trades as it does live (strategy README,
+"Position mode: the venue's"). `venue_oms_type` declares each venue's mode
+in one place, as Nautilus' execution clients declare it live: `Hedging`
+for the venues in `HEDGING_VENUES` (none yet; a cTrader hedging account
+will be one), `Netting` for every other, IB's exchanges (Nautilus' IB
+execution client nets) and OKX (its client nets derivatives, in the net
+position mode `live` requires). `main` sets `oms_type` from the strategy's
+venue. With an unset strategy OMS, Nautilus takes the venue's: two
+overlapping buys make one position at their average on a netting venue,
+two positions on a hedging one (`backtest_netting_venue.rs`,
+`backtest_hedging_venue.rs`).
 
 Defaults left alone: `liquidity_consumption` `false` (every order sees the
 full quote or bar size), `use_reduce_only` `true`, `allow_cash_borrowing`
