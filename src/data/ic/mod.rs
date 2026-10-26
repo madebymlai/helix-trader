@@ -30,11 +30,12 @@ use self::{
     config::{IcAccountId, IcCredential},
     messages::{
         ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
-        ProtoOaDealListRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaOrder,
-        ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderListReq, ProtoOaOrderListRes,
-        ProtoOaQuoteType, ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaSymbolByIdReq,
-        ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq,
-        ProtoOaTraderRes, TradeRequest,
+        ProtoOaDealListRes, ProtoOaDynamicLeverage, ProtoOaGetDynamicLeverageByIdReq,
+        ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
+        ProtoOaOrder, ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderListReq,
+        ProtoOaOrderListRes, ProtoOaQuoteType, ProtoOaReconcileReq, ProtoOaReconcileRes,
+        ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
+        ProtoOaTraderReq, ProtoOaTraderRes, TradeRequest,
     },
     ticks::{SideTicks, Tick},
     websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents, TradeEvents, TradeSent},
@@ -300,7 +301,9 @@ impl IcHistory {
 
     /// The instruments of `ids`, from cTrader's current definitions: the
     /// assets, the symbol list (each id's symbol name to its `symbolId` on
-    /// this server) and the details of those symbols (see `parse`).
+    /// this server), the details of those symbols, and the leverage IC
+    /// applies to each, from the account's and the symbol's dynamic
+    /// leverage, which sets its margins (see `parse`).
     ///
     /// # Errors
     ///
@@ -366,6 +369,35 @@ impl IcHistory {
             .await
             .context("requesting the details of IC's symbols")?;
         let details: HashMap<i64, _> = details.symbol.iter().map(|s| (s.symbol_id, s)).collect();
+        let account_leverage = self
+            .client
+            .request::<_, ProtoOaTraderRes>(&ProtoOaTraderReq {
+                ctid_trader_account_id: account,
+                ..Default::default()
+            })
+            .await
+            .context("requesting IC's account")?
+            .trader
+            .leverage_in_cents;
+        let mut leverages: HashMap<i64, ProtoOaDynamicLeverage> = HashMap::new();
+        for leverage_id in light
+            .iter()
+            .filter_map(|s| details.get(&s.symbol_id)?.leverage_id)
+        {
+            if leverages.contains_key(&leverage_id) {
+                continue;
+            }
+            let answer: ProtoOaGetDynamicLeverageByIdRes = self
+                .client
+                .request(&ProtoOaGetDynamicLeverageByIdReq {
+                    ctid_trader_account_id: account,
+                    leverage_id,
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| format!("requesting IC's leverage {leverage_id}"))?;
+            leverages.insert(leverage_id, answer.leverage);
+        }
         let assets = parse::assets_by_id(assets.asset);
         let ts_init = get_atomic_clock_realtime().get_time_ns();
         light
@@ -375,7 +407,9 @@ impl IcHistory {
                 let symbol = details
                     .get(&light.symbol_id)
                     .with_context(|| format!("IC returned no details of {name}"))?;
-                let pair = parse::currency_pair(light, symbol, &assets, ts_init)?;
+                let symbol_leverage = symbol.leverage_id.and_then(|id| leverages.get(&id));
+                let margin = parse::margin(name, account_leverage, symbol_leverage)?;
+                let pair = parse::currency_pair(light, symbol, &assets, margin, ts_init)?;
                 Ok(IcSymbol {
                     instrument: InstrumentAny::CurrencyPair(pair),
                     symbol_id: light.symbol_id,
@@ -618,11 +652,28 @@ pub(crate) fn quotes_of(
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{
-        instruments::Instrument,
-        types::{Currency, Quantity},
+    use std::{cell::RefCell, rc::Rc};
+
+    use nautilus_common::{
+        cache::Cache,
+        clock::{Clock, VirtualClock},
+        messages::execution::{SubmitOrder, TradingCommand},
+        msgbus::{self, MessagingSwitchboard, stubs::get_typed_into_message_saving_handler},
     };
+    use nautilus_core::UUID4;
+    use nautilus_model::{
+        accounts::{AccountAny, MarginAccount},
+        enums::{AccountType, OrderSide, OrderType},
+        events::{AccountState, OrderEventAny},
+        identifiers::AccountId,
+        instruments::{CurrencyPair, Instrument},
+        orders::{Order, OrderTestBuilder},
+        types::{AccountBalance, Currency, Money, Price, Quantity},
+    };
+    use nautilus_portfolio::Portfolio;
+    use nautilus_risk::engine::{RiskEngine, config::RiskEngineConfig};
     use prost::Message as _;
+    use rust_decimal::Decimal;
 
     use super::{
         messages::{Payload, ProtoMessage},
@@ -672,6 +723,10 @@ mod tests {
             }
             t if t == ProtoOaSymbolByIdReq::TYPE => {
                 replay::<ProtoOaSymbolByIdRes>(request, SYMBOL_BY_ID_RES)
+            }
+            t if t == ProtoOaTraderReq::TYPE => replay::<ProtoOaTraderRes>(request, TRADER_RES),
+            t if t == ProtoOaGetDynamicLeverageByIdReq::TYPE => {
+                testing::dynamic_leverage_answer(request)
             }
             other => panic!("unexpected request {other}"),
         };
@@ -727,11 +782,39 @@ mod tests {
         assert_eq!(eur.price_precision, 5);
         let requests = requests(&received);
         let types: Vec<u32> = requests.iter().map(|f| f.payload_type).collect();
-        assert_eq!(types, [2112, 2114, 2116]);
+        assert_eq!(types, [2112, 2114, 2116, 2121, 2177, 2177]);
         let details =
             ProtoOaSymbolByIdReq::decode(requests[2].payload.as_deref().unwrap()).unwrap();
         assert_eq!(details.ctid_trader_account_id, ACCOUNT_ID);
         assert_eq!(details.symbol_id, [41, 1]);
+        let leverages: Vec<(i64, i64)> = requests[4..]
+            .iter()
+            .map(|f| {
+                let asked = ProtoOaGetDynamicLeverageByIdReq::decode(f.payload.as_deref().unwrap())
+                    .unwrap();
+                (asked.ctid_trader_account_id, asked.leverage_id)
+            })
+            .collect();
+        assert_eq!(leverages, [(ACCOUNT_ID, 52_543), (ACCOUNT_ID, 52_531)]);
+        history.disconnect().await;
+    }
+
+    /// The demo's leverages: the account 1:30, gold 1:200 and EUR/USD
+    /// 1:1000; IC applies the account's to both.
+    #[tokio::test]
+    async fn instruments_carry_ic_s_margin_at_the_account_s_leverage() {
+        let (history, _) = connected().await;
+        let ids = [
+            InstrumentId::from("XAUUSD.ICMARKETS"),
+            InstrumentId::from("EURUSD.ICMARKETS"),
+        ];
+
+        let instruments = history.instruments(&ids).await.unwrap();
+
+        for instrument in &instruments {
+            assert_eq!(instrument.margin_init(), Decimal::ONE / Decimal::from(30));
+            assert_eq!(instrument.margin_maint(), instrument.margin_init());
+        }
         history.disconnect().await;
     }
 
@@ -1152,6 +1235,147 @@ mod tests {
             .await
             .expect("no spot event in time")
             .expect("the spot events ended")
+    }
+
+    /// What Nautilus' risk engine makes of a market buy of 1 oz of gold,
+    /// `xau` here, on a margin account of 1,000 EUR, at the demo's first
+    /// captured spots (`testdata/spot_event_*_first`): XAUUSD 4017.96 /
+    /// 4018.01, EURUSD 1.11964 / 1.11965 (the account is in EUR, gold in
+    /// USD). The order's value, about 3,590 EUR, is above the balance; IC's
+    /// margin at 1:30, about 120 EUR, is below it. The order events the
+    /// engine sends back, and whether it passed the order on.
+    fn risk_check_of_one_ounce(
+        xau: CurrencyPair,
+        eur: InstrumentAny,
+    ) -> (Vec<OrderEventAny>, usize) {
+        let (events, saved_events) = get_typed_into_message_saving_handler::<OrderEventAny>(None);
+        msgbus::register_order_event_endpoint(MessagingSwitchboard::exec_engine_process(), events);
+        let (commands, saved_commands) =
+            get_typed_into_message_saving_handler::<TradingCommand>(None);
+        msgbus::register_trading_command_endpoint(
+            MessagingSwitchboard::exec_engine_queue_execute(),
+            commands,
+        );
+        let gold = xau.id;
+        let mut cache = Cache::default();
+        let quote = |id: InstrumentId, bid: &str, ask: &str| {
+            QuoteTick::new(
+                id,
+                Price::from(bid),
+                Price::from(ask),
+                Quantity::from(10_000),
+                Quantity::from(10_000),
+                UnixNanos::default(),
+                UnixNanos::default(),
+            )
+        };
+        cache
+            .add_quote(quote(xau.id, "4017.96", "4018.01"))
+            .unwrap();
+        cache
+            .add_quote(quote(eur.id(), "1.11964", "1.11965"))
+            .unwrap();
+        cache
+            .add_instrument(InstrumentAny::CurrencyPair(xau))
+            .unwrap();
+        cache.add_instrument(eur).unwrap();
+        let account = AccountState::new(
+            AccountId::from("ICMARKETS-DEMO"),
+            AccountType::Margin,
+            vec![AccountBalance::new(
+                Money::from("1000 EUR"),
+                Money::from("0 EUR"),
+                Money::from("1000 EUR"),
+            )],
+            vec![],
+            true,
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+            Some(Currency::EUR()),
+        );
+        cache
+            .add_account(AccountAny::Margin(MarginAccount::new(account, true)))
+            .unwrap();
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(gold)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(1))
+            .build();
+        cache.add_order(order.clone(), None, None, false).unwrap();
+        let cache = Rc::new(RefCell::new(cache));
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        let portfolio = Portfolio::new(
+            Rc::clone(&clock) as Rc<RefCell<dyn Clock>>,
+            Rc::clone(&cache),
+            None,
+        );
+        let mut engine = RiskEngine::new(RiskEngineConfig::default(), portfolio, clock, cache);
+
+        engine.execute(TradingCommand::SubmitOrder(SubmitOrder::from_order(
+            &order,
+            order.trader_id(),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+        )));
+
+        (
+            saved_events.get_messages(),
+            saved_commands.get_messages().len(),
+        )
+    }
+
+    /// XAUUSD and EURUSD as the live clients load them from the captured
+    /// details and leverages.
+    async fn gold_and_euro_dollar() -> (CurrencyPair, InstrumentAny) {
+        let (history, _) = connected().await;
+        let mut instruments = history
+            .instruments(&[
+                InstrumentId::from("XAUUSD.ICMARKETS"),
+                InstrumentId::from("EURUSD.ICMARKETS"),
+            ])
+            .await
+            .unwrap();
+        history.disconnect().await;
+        let eur = instruments.pop().unwrap();
+        let Some(InstrumentAny::CurrencyPair(xau)) = instruments.pop() else {
+            panic!("no gold")
+        };
+        (xau, eur)
+    }
+
+    #[tokio::test]
+    async fn an_ounce_of_gold_worth_more_than_the_balance_passes_on_ic_s_margin() {
+        let (xau, eur) = gold_and_euro_dollar().await;
+
+        let (events, sent) = risk_check_of_one_ounce(xau, eur);
+
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(sent, 1);
+    }
+
+    /// The same order on gold carrying margins of 1, as before IC's margin:
+    /// denied, so the check above turns on the margin.
+    #[tokio::test]
+    async fn an_ounce_of_gold_at_margins_of_one_is_denied() {
+        let (mut xau, eur) = gold_and_euro_dollar().await;
+        xau.margin_init = Decimal::ONE;
+        xau.margin_maint = Decimal::ONE;
+
+        let (events, sent) = risk_check_of_one_ounce(xau, eur);
+
+        let [OrderEventAny::Denied(denied)] = events.as_slice() else {
+            panic!("{events:?}")
+        };
+        assert!(
+            denied
+                .reason
+                .starts_with("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE"),
+            "{denied:?}"
+        );
+        assert_eq!(sent, 0);
     }
 
     /// End to end on IC's cTrader demo, gated as `tests/ic_demo.rs` is

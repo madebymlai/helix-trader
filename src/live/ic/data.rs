@@ -402,16 +402,18 @@ mod tests {
     use super::*;
     use crate::data::ic::{
         messages::{
-            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaGetTickDataReq,
-            ProtoOaRefreshTokenReq, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
-            ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
-            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaUnsubscribeSpotsReq,
+            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes,
+            ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
+            ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
+            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
+            ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq,
             ProtoOaUnsubscribeSpotsRes,
         },
         testing::{
             self, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
             SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            UNSUBSCRIBE_SPOTS_RES, accept_auth, replay, reply, tick_answer,
+            TRADER_RES, UNSUBSCRIBE_SPOTS_RES, accept_auth, dynamic_leverage_answer, replay, reply,
+            tick_answer,
         },
         ticks::Tick,
     };
@@ -459,6 +461,12 @@ mod tests {
                 }
                 t if t == ProtoOaSymbolByIdReq::TYPE => {
                     vec![replay::<ProtoOaSymbolByIdRes>(request, SYMBOL_BY_ID_RES)]
+                }
+                t if t == ProtoOaTraderReq::TYPE => {
+                    vec![replay::<ProtoOaTraderRes>(request, TRADER_RES)]
+                }
+                t if t == ProtoOaGetDynamicLeverageByIdReq::TYPE => {
+                    vec![dynamic_leverage_answer(request)]
                 }
                 t if t == ProtoOaGetTickDataReq::TYPE => {
                     let asked = ProtoOaGetTickDataReq::decode(payload).unwrap();

@@ -1,0 +1,17 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the dynamic leverage of EURUSD (its leverageId 52531): one tier, 1:1000
+# (leverage in cents, as ProtoOATrader.leverageInCents), up to 1,000,000 USD
+# (volume in cents) and, being the last, above it too.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; the payload
+# re-encoded from its decoded form (every field is in the vendored .proto).
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAGetDynamicLeverageByIDRes OpenApiMessages.proto < dynamic_leverage_eurusd_res.bin
+# Message: ProtoOAGetDynamicLeverageByIDRes
+ctidTraderAccountId: 1000001
+leverage {
+  leverageId: 52531
+  tiers {
+    volume: 100000000
+    leverage: 100000
+  }
+}

@@ -14,8 +14,11 @@
 //!   unit, so `stepVolume` / 100 is the size increment (and its decimals
 //!   the size precision), `minVolume`, `maxVolume` and `lotSize` / 100 the
 //!   minimum, maximum and lot (XAUUSD: 100 oz a lot);
-//! - margins of 1, as OKX's: a position locks its value divided by the
-//!   backtest's leverage (backtest README, "Leverage");
+//! - margins IC's own (`margin`): initial and maintenance 1 / the leverage
+//!   IC applies to the symbol on the account, the lower of the account's
+//!   (`ProtoOATrader.leverageInCents`) and the symbol's first dynamic
+//!   leverage tier (`ProtoOASymbol.leverageId`), as Nautilus' AX adapter
+//!   takes its venue's margin rates (`adapters/architect_ax/src/http/parse.rs`);
 //! - stamped at receipt: a symbol carries no time.
 //!
 //! Anything else (an index, a share) is refused, naming the symbol.
@@ -31,7 +34,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use super::messages::{ProtoOaAsset, ProtoOaLightSymbol, ProtoOaSymbol};
+use super::messages::{ProtoOaAsset, ProtoOaDynamicLeverage, ProtoOaLightSymbol, ProtoOaSymbol};
 
 /// The venue of IC's instruments.
 pub(crate) const IC_VENUE: &str = "ICMARKETS";
@@ -53,12 +56,53 @@ pub(super) fn instrument_id(name: &str) -> anyhow::Result<InstrumentId> {
     Ok(InstrumentId::new(symbol, Venue::new(IC_VENUE)))
 }
 
+/// The margin rate of the symbol `name` on the account, initial and
+/// maintenance alike: 1 / the leverage IC applies to it, the lower of the
+/// account's, `account_leverage` (`ProtoOATrader.leverageInCents`), and
+/// the symbol's dynamic leverage, `symbol_leverage` (its `leverageId`'s),
+/// if it has one (cTrader's help, "Dynamic leverage": "the account leverage
+/// acts as an upper limit"). Both are in cents of a ratio: 3000 is 1:30.
+///
+/// The symbol's leverage is its first tier's, which covers the smallest
+/// positions. A position whose USD value passes that tier gets the next
+/// tiers' lower leverage on the excess at IC, so IC's margin is then above
+/// this rate's; IC's demo symbols have one tier, which covers every size.
+/// cTrader states no maintenance or stop-out rate of a symbol (the stop-out
+/// level is the broker's, on the account's margin level), so maintenance
+/// is the initial rate.
+pub(super) fn margin(
+    name: &str,
+    account_leverage: Option<u32>,
+    symbol_leverage: Option<&ProtoOaDynamicLeverage>,
+) -> anyhow::Result<Decimal> {
+    let account = account_leverage
+        .filter(|cents| *cents > 0)
+        .with_context(|| format!("{name}: IC states no leverage of the account"))?;
+    let applied = match symbol_leverage {
+        None => i64::from(account),
+        Some(leverage) => {
+            let tier = leverage.tiers.first().with_context(|| {
+                format!("{name}: IC's leverage {} has no tier", leverage.leverage_id)
+            })?;
+            ensure!(
+                tier.leverage > 0,
+                "{name}: IC's leverage {} is not positive",
+                leverage.leverage_id
+            );
+            i64::from(account).min(i64::from(tier.leverage))
+        }
+    };
+    Ok(Decimal::ONE_HUNDRED / Decimal::from(applied))
+}
+
 /// The `CurrencyPair` of the symbol listed as `light`, with the details
-/// `symbol`; `assets` name the asset ids.
+/// `symbol`, at the margin rate `margin` (see `margin`); `assets` name the
+/// asset ids.
 pub(super) fn currency_pair(
     light: &ProtoOaLightSymbol,
     symbol: &ProtoOaSymbol,
     assets: &HashMap<i64, ProtoOaAsset>,
+    margin: Decimal,
     ts_init: UnixNanos,
 ) -> anyhow::Result<CurrencyPair> {
     let name = light
@@ -131,8 +175,8 @@ pub(super) fn currency_pair(
         .maybe_lot_size(quantity(symbol.lot_size, "lotSize")?)
         .maybe_min_quantity(quantity(symbol.min_volume, "minVolume")?)
         .maybe_max_quantity(quantity(symbol.max_volume, "maxVolume")?)
-        .margin_init(Decimal::ONE)
-        .margin_maint(Decimal::ONE)
+        .margin_init(margin)
+        .margin_maint(margin)
         .ts_event(ts_init)
         .ts_init(ts_init)
         .build()
@@ -163,8 +207,15 @@ mod tests {
 
     use super::*;
     use crate::data::ic::{
-        messages::{ProtoOaAssetListRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes},
-        testing::{ASSET_LIST_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES},
+        messages::{
+            ProtoOaAssetListRes, ProtoOaDynamicLeverageTier, ProtoOaExpectedMarginRes,
+            ProtoOaGetDynamicLeverageByIdRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes,
+            ProtoOaTraderRes,
+        },
+        testing::{
+            ASSET_LIST_RES, DYNAMIC_LEVERAGE_EURUSD_RES, DYNAMIC_LEVERAGE_XAUUSD_RES,
+            EXPECTED_MARGIN_EURUSD_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES, TRADER_RES,
+        },
     };
 
     /// The captured symbols, assets and details (see `testdata/`).
@@ -199,8 +250,97 @@ mod tests {
             light,
             &fixtures.details[&light.symbol_id],
             &fixtures.assets,
+            d("0.05"),
             UnixNanos::from(7),
         )
+    }
+
+    fn d(value: &str) -> Decimal {
+        value.parse().unwrap()
+    }
+
+    /// The demo account's leverage, in cents: 1:30.
+    fn account_leverage() -> Option<u32> {
+        ProtoOaTraderRes::decode(TRADER_RES)
+            .unwrap()
+            .trader
+            .leverage_in_cents
+    }
+
+    fn gold_leverage() -> ProtoOaDynamicLeverage {
+        ProtoOaGetDynamicLeverageByIdRes::decode(DYNAMIC_LEVERAGE_XAUUSD_RES)
+            .unwrap()
+            .leverage
+    }
+
+    #[test]
+    fn gold_on_the_demo_takes_the_account_s_1_30_under_its_own_1_200() {
+        let margin = margin("XAUUSD", account_leverage(), Some(&gold_leverage())).unwrap();
+
+        assert_eq!(margin, Decimal::ONE / Decimal::from(30));
+    }
+
+    /// Synthetic: gold's tier at 1:20, under the demo account's 1:30.
+    #[test]
+    fn a_symbol_leverage_below_the_account_s_sets_the_margin() {
+        let mut leverage = gold_leverage();
+        leverage.tiers[0].leverage = 2_000;
+
+        let margin = margin("XAUUSD", account_leverage(), Some(&leverage)).unwrap();
+
+        assert_eq!(margin, d("0.05"));
+    }
+
+    /// Synthetic: gold's leverage with a second tier, 1:20 above 1,000,000 USD.
+    #[test]
+    fn the_first_tier_applies_whatever_the_tiers_above_it() {
+        let mut leverage = gold_leverage();
+        leverage.tiers.push(ProtoOaDynamicLeverageTier {
+            volume: 1_000_000_000,
+            leverage: 2_000,
+        });
+
+        let margin = margin("XAUUSD", Some(50_000), Some(&leverage)).unwrap();
+
+        assert_eq!(margin, d("0.005"));
+    }
+
+    /// Synthetic: a symbol without a dynamic leverage.
+    #[test]
+    fn a_symbol_without_a_leverage_of_its_own_takes_the_account_s() {
+        let margin = margin("XAUUSD", Some(2_000), None).unwrap();
+
+        assert_eq!(margin, d("0.05"));
+    }
+
+    /// Synthetic: gold's leverage without tiers, and a trader without
+    /// leverage.
+    #[test]
+    fn a_leverage_missing_is_refused_naming_the_symbol() {
+        let mut leverage = gold_leverage();
+        leverage.tiers.clear();
+
+        let err = margin("XAUUSD", account_leverage(), Some(&leverage)).unwrap_err();
+        assert!(err.to_string().contains("XAUUSD"), "{err}");
+        let err = margin("XAUUSD", None, Some(&gold_leverage())).unwrap_err();
+        assert!(err.to_string().contains("XAUUSD"), "{err}");
+    }
+
+    /// IC's own estimate on the demo: 1,000 EUR of EURUSD locks 33.33 EUR.
+    #[test]
+    fn the_margin_of_1000_euros_is_ic_s_estimate() {
+        let leverage = ProtoOaGetDynamicLeverageByIdRes::decode(DYNAMIC_LEVERAGE_EURUSD_RES)
+            .unwrap()
+            .leverage;
+        let estimate = ProtoOaExpectedMarginRes::decode(EXPECTED_MARGIN_EURUSD_RES).unwrap();
+        let ic = Decimal::new(
+            estimate.margin[0].buy_margin,
+            estimate.money_digits.unwrap(),
+        );
+
+        let margin = margin("EURUSD", account_leverage(), Some(&leverage)).unwrap();
+
+        assert_eq!((Decimal::from(1000) * margin).round_dp(2), ic);
     }
 
     #[test]
@@ -219,8 +359,8 @@ mod tests {
         assert_eq!(xau.min_quantity, Some(Quantity::from(1)));
         assert_eq!(xau.max_quantity, Some(Quantity::from(10_000)));
         assert_eq!(xau.multiplier, Quantity::from(1));
-        assert_eq!(xau.margin_init, Decimal::ONE);
-        assert_eq!(xau.margin_maint, Decimal::ONE);
+        assert_eq!(xau.margin_init, d("0.05"));
+        assert_eq!(xau.margin_maint, d("0.05"));
         assert_eq!(
             (xau.ts_event, xau.ts_init),
             (UnixNanos::from(7), UnixNanos::from(7))
@@ -310,7 +450,7 @@ mod tests {
         let eur = &fixtures.light["EURUSD"];
         let xau = &fixtures.details[&fixtures.light["XAUUSD"].symbol_id];
 
-        let err = currency_pair(eur, xau, &fixtures.assets, UnixNanos::default())
+        let err = currency_pair(eur, xau, &fixtures.assets, d("0.05"), UnixNanos::default())
             .unwrap_err()
             .to_string();
 

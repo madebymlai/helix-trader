@@ -1,7 +1,8 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
 //! strategy does, or only subscribes to its bars, records every bar it
 //! gets, warmup and replayed, every fill, and on stop the adjustments of
-//! its positions (funding), and can rest a sell stop on its first replayed
+//! its positions (funding), the orders denied and its account's margins,
+//! and can rest a sell stop on its first replayed
 //! bar or send market orders of its choosing on the first replayed bars,
 //! close its positions by their ids on given bars, and on stop its
 //! positions. It leaves its `oms_type` unset, so it keeps
@@ -16,12 +17,13 @@ use jiff::SignedDuration;
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
+    accounts::AccountAny,
     data::{Bar, BarType, QuoteTick},
     enums::OrderSide,
-    events::{OrderFilled, PositionAdjusted},
+    events::{OrderDenied, OrderFilled, PositionAdjusted},
     identifiers::StrategyId,
     position::Position,
-    types::{Price, Quantity},
+    types::{MarginBalance, Price, Quantity},
 };
 use nautilus_trading::{
     nautilus_strategy,
@@ -41,6 +43,11 @@ pub struct Record {
     pub adjustments: Vec<PositionAdjusted>,
     /// Its positions in the cache when it stops, oldest first.
     pub positions: Vec<Position>,
+    /// The reasons of the orders the risk engine denied.
+    pub denials: Vec<String>,
+    /// The margins of its venue's account when it stops, if a margin
+    /// account.
+    pub margins: Vec<MarginBalance>,
 }
 
 #[derive(Debug)]
@@ -134,6 +141,13 @@ nautilus_strategy!(Recorder, {
             .fills
             .push((event.order_side, event.last_px, event.ts_event));
     }
+
+    fn on_order_denied(&mut self, event: OrderDenied) {
+        self.record
+            .borrow_mut()
+            .denials
+            .push(event.reason.to_string());
+    }
 });
 
 impl DataActor for Recorder {
@@ -149,7 +163,13 @@ impl DataActor for Recorder {
     fn on_stop(&mut self) -> anyhow::Result<()> {
         let mut positions = self.cache().positions(None, None, None, None, None);
         positions.sort_by_key(|position| position.ts_opened);
+        let venue = self.bar_type.instrument_id().venue;
+        let margins = match self.cache().account_for_venue(&venue) {
+            Some(AccountAny::Margin(account)) => account.margins.into_values().collect(),
+            _ => vec![],
+        };
         let mut record = self.record.borrow_mut();
+        record.margins = margins;
         record.adjustments.extend(
             positions
                 .iter()

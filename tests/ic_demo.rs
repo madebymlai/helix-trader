@@ -1,5 +1,6 @@
 //! End to end on IC Markets' cTrader demo: the session authenticates the
-//! app and the demo account, XAU/USD and EUR/USD load as currency pairs,
+//! app and the demo account, XAU/USD and EUR/USD load as currency pairs at
+//! IC's margins,
 //! a day of XAU/USD's quotes fills a temporary catalog, in one fill and
 //! resumed, and the execution client reads the account: its state and its
 //! startup reconciliation. It needs the app's `IC_CLIENT_ID` and `IC_CLIENT_SECRET`, the
@@ -36,6 +37,7 @@ use nautilus_model::{
     types::{Currency, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rust_decimal::Decimal;
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
 /// that the file cannot opt in.
@@ -88,6 +90,12 @@ async fn the_demo_account_loads_gold_and_euro_dollar_as_currency_pairs() {
     assert_eq!(eur.quote_currency, Currency::from("USD"));
     assert_eq!(eur.lot_size, Some(Quantity::from(100_000)));
     assert_eq!(eur.price_precision, 5);
+    // IC's margins on the demo account (2026-10-26): the account's 1:30
+    // under the symbols' own 1:200 and 1:1000.
+    let margin = Decimal::ONE / Decimal::from(30);
+    for pair in [xau, eur] {
+        assert_eq!((pair.margin_init, pair.margin_maint), (margin, margin));
+    }
 }
 
 const XAUUSD: &str = "XAUUSD.ICMARKETS";

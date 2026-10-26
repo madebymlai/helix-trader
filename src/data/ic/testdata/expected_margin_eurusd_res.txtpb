@@ -1,0 +1,16 @@
+# Captured from IC Markets' cTrader demo (2026-10-26, 18:03 UTC), protobuf
+# port 5035: IC's margin estimate (ProtoOAExpectedMarginReq) for 1,000 EUR of
+# EURUSD (volume 100000 cents) on the demo account (1:30, in EUR): 33.33 EUR
+# each side, 1,000 / 30: the account's 1:30, not the symbol's 1:1000.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; the payload
+# re-encoded from its decoded form (every field is in the vendored .proto).
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExpectedMarginRes OpenApiMessages.proto < expected_margin_eurusd_res.bin
+# Message: ProtoOAExpectedMarginRes
+ctidTraderAccountId: 1000001
+margin {
+  volume: 100000
+  buyMargin: 3333
+  sellMargin: 3333
+}
+moneyDigits: 2

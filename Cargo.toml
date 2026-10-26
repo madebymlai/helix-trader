@@ -58,6 +58,9 @@ futures = "0.3"
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"] }
 nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["test-support"] }
+# Nautilus' risk engine and the portfolio it takes, for the IC margin check.
+nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 tokio = { version = "1", features = ["test-util"] }
 # The mock cTrader peer of the IC adapter's tests.
 tungstenite = "0.30"
