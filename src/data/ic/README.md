@@ -1,12 +1,11 @@
-# IC Markets history, live data and account
+# IC Markets history and the cTrader session
 
 `data/ic/` fetches IC Markets' forex and metals instruments and their
 quotes, merged from cTrader's BID and ASK tick history, for `fill_catalog`,
-and holds the live node's clients: the data client (`IcDataClient`, live
-quotes from cTrader's spot events, quote requests from the tick history)
-and the execution client (`IcExecutionClient`, the account state and the
-reconciliation of a hedging account; no order yet). All of it goes
-through Spotware's cTrader Open API: binary protobuf frames over Nautilus'
+and holds what the live node's clients in `live/ic/` share with it: the
+cTrader session (`IcHistory`), its connection, messages and credential,
+the tick merge and the account check. All of it goes through Spotware's
+cTrader Open API: binary protobuf frames over Nautilus'
 `WebSocketClient`, on `wss://demo.ctraderapi.com:5035` or
 `wss://live.ctraderapi.com:5035`. `fill-catalog` routes `….ICMARKETS` ids
 here (`../README.md`, "Choosing the source"), and so does `live`
@@ -19,7 +18,8 @@ files, vendored in `proto/` (the commit is in `build.rs`) and compiled with
 prost; `build.rs` needs `protoc`.
 
 Neighbouring docs: the fill algorithm (resume, coverage, writing) is in
-`data/README.md`, "fill_catalog.rs"; the clients' factories, configs and
+`data/README.md`, "fill_catalog.rs"; the data and execution clients (live
+quotes, quote requests, reconciliation), their factories, configs and
 place in the live node in `live/ic/README.md`.
 
 ## Layout
@@ -30,12 +30,8 @@ ic/
                 open positions and deals
   account.rs    the account checked (hedging, IC_ACCOUNT_ID's) and its state
   config.rs     IcEnvironment, IcCredential and IcConnection, from IC_*
-  data.rs       IcDataClient: Nautilus' DataClient on a cTrader session
-  execution.rs  IcExecutionClient: Nautilus' ExecutionClient, up to orders
-  reports.rs    positions, orders and deals as reconciliation reports
   messages.rs   Spotware's protobuf messages, their payload types, the envelope
   parse.rs      cTrader symbols -> CurrencyPair, ids
-  spots.rs      live quotes: spot events merged into quotes, held during a request
   ticks.rs      tick history: decoding, paging, the merge into quotes, their size
   token.rs      the token pair and the token file that keeps the latest one
   websocket/    the cTrader connection: outer client, handler task, spot subscriptions
@@ -56,9 +52,6 @@ history.fill(&mut catalog, series, start, end).await      // instruments, then q
 history.check_account().await -> anyhow::Result<()>       // hedging, IC_ACCOUNT_ID's
 history.disconnect().await
 connection.account_id() -> AccountId                      // ICMARKETS-DEMO or ICMARKETS-LIVE
-
-IcDataClient::new(client_id, &connection, instrument_ids) // a DataClient; the node connects it
-IcExecutionClient::new(core, &connection, instrument_ids) // an ExecutionClient; the node connects it
 ```
 
 `fill` refuses a series other than quotes before any request, then fills
@@ -208,7 +201,7 @@ without burst: one every 200 ms was refused on the demo
 fetched side by side, so the fill runs at the limiter's pace: a week of
 XAUUSD (727,000 ticks a side, about 150 requests) in about 38 s, of EURUSD
 (210,000 and 222,000) in about 12 s. Deal requests share the limiter (see
-"Reconciliation"); other requests are not limited.
+`../../live/ic/README.md`, "Reconciliation"); other requests are not limited.
 
 ### Units
 
@@ -292,51 +285,6 @@ One connection, requests one after another, before the fill existed:
   side, about 6 h at the density of the week above, less for the sparser
   early years (an estimate, not run).
 
-## Live quotes: spot events
-
-`IcDataClient::subscribe_quotes` subscribes to a symbol's spot events
-(`ProtoOASubscribeSpotsReq`, `subscribeToSpotTimestamp: true`); the
-handler keeps the subscription for the session and sends it again after a
-reconnect. `unsubscribe_quotes` ends it (`ProtoOAUnsubscribeSpotsReq`);
-spots cTrader still sends after it are dropped. cTrader's answer comes
-after the call returns, so a refusal is logged, not returned.
-
-A spot event (`ProtoOASpotEvent`) carries the bid and the ask in
-1/100,000, each only when it changed, and the time of the change in Unix
-ms. The first one after a subscription carries both sides and the last
-session close, even with the market closed.
-
-- **Measured on the demo (2026-10-26, 60 s, XAUUSD and EURUSD):** the spot
-  events were the ticks the tick history serves for the same minute, side
-  for side and millisecond for millisecond (XAUUSD 123 BID and 122 ASK,
-  EURUSD 36 and 47). Spots arrived about 20 ms after their time.
-- **The merge** is the history's (`ticks::QuoteMerge`, see "The merge"):
-  the other side carried, none before both are known, a crossed quote
-  dropped, a locked one kept, sizes as in "Quote size" (XAUUSD 10,000 oz,
-  EURUSD 100,000 EUR). So a live run gets the quotes a fill stores, and the
-  bars Nautilus builds from them are the backtest's.
-- **Stamps**: `ts_event` the spot's time, `ts_init` its receipt (the fill
-  stamps both with the tick's time).
-- **Bars**: none from cTrader (live trendbars are not used); Nautilus
-  builds the strategy's internal bars from the quotes.
-
-## Warmup: quote requests
-
-`IcDataClient::request_quotes` answers with the quotes over `[start, end]`
-(`end` absent: now) from the tick history, merged as a fill merges them, the
-newest `limit` if one is given; a request without `start` is refused. With
-the catalog registered, the node asks the client only for what the catalog
-misses: `live` fills the catalog up to its start, so that is the few
-seconds since (`../../live/README.md`, "Start sequence").
-
-While a request of an instrument is answered (four rate-limited tick
-requests, about a second), its live quotes are held, then sent after the
-response, under one lock, without those at or before the response's last
-quote. So the node never gets a live quote before the warmup response,
-which would panic it (nautilus_trader#5393, `../../live/README.md`, "Known
-limits"), nor a quote twice. A failed request is logged; the node gets no
-response, and the held quotes go out.
-
 ## Account
 
 `ProtoOATraderReq` answers with the account (`ProtoOATrader`); with the
@@ -367,64 +315,6 @@ The Nautilus account is `ICMARKETS-DEMO` or `ICMARKETS-LIVE`, named after
 the environment: the account's id and login are credential identity, never
 logged. The demo account (2026-10-26): `HEDGED`, EUR, balance 1,000,000.00,
 leverage 1:30, nothing open, no deal.
-
-## Reconciliation
-
-`IcExecutionClient` reports the account to Nautilus' reconciliation
-(`reports.rs`, Nautilus' `concepts/execution/reconciliation.md`):
-
-- **Positions** (`ProtoOAReconcileReq`, open positions): one
-  `PositionStatusReport` per cTrader position, its `positionId` the venue
-  position id, `price` (the VWAP of its executions) the entry average,
-  unrounded. Two positions of one symbol are two reports. The request lists
-  every open position, so an instrument without one is flat.
-- **Stop loss and take profit**: cTrader holds them on the position
-  (`stopLoss`, `takeProfit`, amended by position id), so the reconcile
-  request is sent with `returnProtectionOrders` false and each becomes an
-  open reduce-only GTC order of the position, its venue order id the
-  position's with `-SL` or `-TP`: a stop market order at the stop loss
-  (trigger `TRADE` as `BID_ASK`, `DOUBLE_TRADE` as `DOUBLE_BID_ASK`, the
-  `OPPOSITE` methods, which Nautilus lacks, as `DEFAULT`), a limit order at
-  the take profit, for the position's volume.
-- **Pending orders** (the same request): an `OrderStatusReport` each, by
-  `orderId`, with its `clientOrderId` and the position it opens into or
-  closes. Market, limit and stop orders; a stop limit (its limit a
-  slippage in points) is an error, so the start fails rather than drop it.
-- **Fills** (`ProtoOADealListReq`): a `FillReport` per filled deal, by
-  `dealId`, of order `orderId` and position `positionId`, at
-  `executionPrice`, the commission cTrader states (negative, a charge) as a
-  positive cost in the deposit currency, no liquidity side. Nautilus builds
-  the orders of these fills (`generate_missing_orders`), each with its
-  position id; closed orders are not listed (`ProtoOAOrderListReq` unused).
-- **The window.** The startup mass status reads the deals since the
-  earliest of: the node's lookback, the opening of a position open at IC,
-  the opening of a position the node's cache holds open. So a fresh start
-  gets every deal of the open positions, and a restart on a persisted cache
-  the closing deals of a position closed while it was down. A position's
-  deals go in only when they add up to it (to its volume, or to nothing for
-  a closed one); else its history starts before the window and applying
-  them would open a position IC does not hold: they are left out, logged,
-  and the report window is marked incomplete. The window's start, in whole
-  ms, is the declared `lookback_start`.
-- **Deal pages.** A window cTrader answers only in part (`hasMore`) is asked
-  again in two halves overlapping by 1 ms, deals kept once by id: neither
-  the page size nor the order of the deals is documented. A window not
-  ending after its start is refused by cTrader (`INCORRECT_BOUNDARIES`,
-  demo, 2026-10-26), so none is asked. Deal requests go through the
-  historical limiter (see "Rate").
-- **Scope.** Records of a symbol the run did not load are dropped, logged at
-  debug (the margin of their positions still counts in the account state).
-- **Prices** come as doubles: a deal's, an order's, a stop loss and a take
-  profit are read at the instrument's precision, a finer one an error.
-  Volumes are in cents of a unit, as the instruments'.
-- **Periodic checks**: open orders and positions from the reconcile request
-  each time; fills from the deal list over the asked window. A single-order
-  query finds open orders only, and answers an error, not an absence, for
-  any other.
-
-The same positions come back whether the node starts from a persisted cache
-or from scratch: cTrader positions carry their own ids, which are the
-Nautilus position ids either way.
 
 ## Verified runs
 
@@ -505,40 +395,12 @@ placed to capture them.
     a `start` before the stored quotes refused before any tick request, a
     first window without ticks naming the series and the window, a week
     without ticks no error and a long fill stored a week at a time.
-  - `spots.rs`: the captured spot events into quotes (both sides at their
-    time and receipt, sized as history; one side carried; none before both
-    sides; crossed dropped; nothing when unsubscribed, the sides kept);
-    quotes held by requests and released after them without those
-    answered; a spot of a symbol not loaded refused;
   - `websocket/` (spots): a subscription asks for timestamps and its
     events come through; a symbol subscribed twice is asked for once; after
     a reconnect the subscriptions are sent again, an unsubscribed one not;
   - `mod.rs` (account): the captured hedged account passes the check; a
     netting account and another account's trader refused, naming why;
-  - `execution.rs`, the `ExecutionClient` against the mock peer: the
-    captured account state published at connect (EUR, the balance, no
-    margin), connected once the node registers it; the margin of open
-    positions locked; a netting account, an expired token cTrader refuses
-    to renew and another account refused at connect, nothing published; on two open XAUUSD
-    positions (a long with stop loss and take profit, a short of two deals
-    reduced once, with a double-trade stop loss), a US500 position out of
-    scope and a pending EURUSD limit: one position report per position by
-    its id, side, volume and VWAP; the stop losses and the take profit as
-    reduce-only orders of their positions; the pending order; the deals as
-    fills by position with the commission as a cost; the deals of a
-    position opened before the window left out and the window incomplete;
-    the deals read from the lookback's start, and from the opening of a
-    position the cache holds open; the captured empty account reporting
-    nothing; the periodic checks of one instrument; an order denied, no
-    frame sent;
-  - `messages.rs`: tick and deal requests are historical, others not;
-  - `data.rs`, the `DataClient` against the mock peer: the instruments sent
-    at connect on venue `ICMARKETS`; subscribed quotes from the captured
-    spot events; an unsubscription sent; a quote request answered from the
-    tick history of its window, and its limit; a live quote arriving during
-    a request sent after the response; after the peer closes the
-    connection, the quotes subscribed again and flowing; a request without
-    start and an instrument not loaded refused.
+  - `messages.rs`: tick and deal requests are historical, others not.
 - `tests/ic_demo.rs`, on IC's cTrader demo (gated by `NAUTILUS_IC_RUN=1`,
   demo only; it places no order): the execution client, from its factory,
   connects on the hedged account, publishes its state (1,000,000.00 EUR, no

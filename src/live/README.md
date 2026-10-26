@@ -24,8 +24,9 @@ live/
   node.rs   builds and runs the LiveNode, broker-agnostic
   ib/       IB client factories and configs, on the gateway `data`'s IB
             part starts; README.md: IB live
-  ic/       IC's client factories and configs (the clients are in
-            data/ic/); README.md: IC live
+  ic/       IC's data and execution clients, their factories and
+            configs, on the cTrader session `data`'s IC part holds;
+            README.md: IC live
   okx/      OKX client factories and configs, and the account checks;
             README.md: OKX live
 ```
