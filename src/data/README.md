@@ -6,10 +6,8 @@ series their bars are built from, and the funding of OKX swaps and X-Perps,
 which backtests settle. The strategies' bars themselves are internal, built
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
 quotes"): for a composite bar type from its source bars (IB's 1-minute
-bars, OKX's 1-minute candles), otherwise from quotes. Beside IB's source
-bars the catalog holds IB's BID and ASK 1-minute bars, which the backtest
-fills orders on. The module adds what Nautilus lacks: filling the catalog
-from a historical source.
+TRADES bars, OKX's 1-minute candles), otherwise from quotes. The module
+adds what Nautilus lacks: filling the catalog from a historical source.
 
 APIs were read in the `nautilus-*` crates at `0.66.0` and their signatures
 and engine checks rechecked at the `develop` commit the build pins (see
@@ -23,7 +21,7 @@ data/
   mod.rs           declares the modules, exposes only what others call
   fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write
   ib/
-    mod.rs         Interactive Brokers history: instruments, 1-minute bars
+    mod.rs         Interactive Brokers history: instruments, 1-minute TRADES bars
     gateway.rs     the IB account and the Docker gateway, started and logged in
     README.md      IB history: requests, the gateway, depths, tests
   okx/
@@ -63,18 +61,16 @@ keys it:
 
 | Strategy bar type | Series stored |
 |---|---|
-| `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `SXR8.IBIS-1-MINUTE-MID-EXTERNAL`, `…-BID-EXTERNAL` and `…-ASK-EXTERNAL` |
+| `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `SXR8.IBIS-1-MINUTE-LAST-EXTERNAL` |
 | `X.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `X.OKX-1-MINUTE-LAST-EXTERNAL` |
 | `X.OKX-1-MINUTE-LAST-EXTERNAL` | bars of that bar type |
 | `SXR8.IBIS-1-HOUR-MID-INTERNAL` | quotes of `SXR8.IBIS` (no source serves them) |
 | `X.OKX-1-HOUR-LAST-INTERNAL` | trades of `X.OKX` (no source serves them yet) |
 
 The rule is the data engine's: a composite bar type is built from its source
-bars, an internal one priced LAST from trades, any other from quotes. And
-the matching engine's: external bars priced other than LAST come with the
-BID and ASK bars of their spec, which a backtest pairs into the quotes
-orders fill on (a MID bar holds no bid or ask). `ib/` serves only IB's
-`EXTERNAL` 1-MINUTE bars, stored as IB gives them; `okx/` only the bars of
+bars, an internal one priced LAST from trades, any other from quotes.
+`ib/` serves only IB's `EXTERNAL` 1-MINUTE-LAST bars (its TRADES bars),
+stored as IB gives them; `okx/` only the bars of
 `X.OKX-1-MINUTE-LAST-EXTERNAL`, OKX's 1-minute candles.
 
 ### Bar type format
@@ -143,8 +139,8 @@ decade, or a symbol rewrite that breaks the match with the live broker.
 ## fill_catalog.rs
 
 Fills the catalog over one window with the instruments and the series their
-bars are built from and orders fill on (Nautilus `Data`: bars for a
-composite bar type, or quotes; the backtest builds the strategies' bars from
+bars are built from (Nautilus `Data`: bars for a composite bar type, or
+quotes; the backtest builds the strategies' bars from
 them and fills orders on them, see `src/backtest/README.md`). A source's historical client is a plain
 async call returning Nautilus types, the pattern the Nautilus docs use for
 every source (a client or loader, then `catalog.write_*`). Filling the
@@ -188,7 +184,7 @@ closures with canned data. A fetch over `[from, to]` returns the items of
 the series whose `ts_init` lies in it, the closed interval stored
 (Nautilus' catalog intervals are closed, the next contiguous when it starts
 1 ns after the end). The series' bar type states its cadence; `ib/`
-serves 1-MINUTE bars only and checks `end` against the minute in progress
+serves 1-MINUTE-LAST bars only and checks `end` against the minute in progress
 before starting the gateway (see `ib/README.md`). A source refuses a series
 it does not serve.
 
@@ -281,7 +277,7 @@ Layout on disk:
 
 ```
 {catalog}/data/quotes/ESM4.CME/{start}_{end}.parquet
-{catalog}/data/bars/{bar type}/{start}_{end}.parquet      // composite sources, their BID and ASK bars
+{catalog}/data/bars/{bar type}/{start}_{end}.parquet      // composite bar types' sources only
 {catalog}/data/futures_contract/ESM4.CME/{ts}_{ts}.parquet
 ```
 
@@ -301,7 +297,7 @@ catalog.query_last_timestamp(..)                     // the stored end a re-run 
 venue. A config may hold both; IB's gateway starts only if an IB instrument
 is in it.
 
-- `ib/` fills IB instruments' 1-minute bars through the Docker IB Gateway
+- `ib/` fills IB instruments' 1-minute TRADES bars through the Docker IB Gateway
   it starts: see [`ib/README.md`](ib/README.md).
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).

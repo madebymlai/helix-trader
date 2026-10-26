@@ -46,7 +46,7 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 
-const COMPOSITE: &str = "SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL";
+const COMPOSITE: &str = "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 const TRADER: &str = "HELIXTEST-046";
 const WARMUP: SignedDuration = SignedDuration::from_hours(2);
 /// The live minute bars the probe waits for before it stops the node.

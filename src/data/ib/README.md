@@ -1,10 +1,10 @@
 # Interactive Brokers history
 
-`data/ib/` fetches IB instruments and IB's own 1-MINUTE bars for
+`data/ib/` fetches IB instruments and IB's own 1-MINUTE TRADES bars for
 `fill_catalog` (the `fill-catalog` command), stored as IB gives them: the
-source bars of the strategies' composite bar types and the BID and ASK
-bars orders fill on (`strategy::catalog_series`). IB serves nothing else
-to the catalog. Every request goes through the Docker paper gateway this
+source bars of the strategies' composite bar types
+(`strategy::catalog_series`), as OKX's candles are. IB serves nothing
+else to the catalog. Every request goes through the Docker paper gateway this
 module starts or reuses. A live node fills nothing: IB's data client
 serves its warmup (`live/README.md`).
 
@@ -16,7 +16,7 @@ their config and the gateway container are in `live/ib/README.md`.
 
 ```
 ib/
-  mod.rs       IbHistory: connect, instruments, bars; the data client config
+  mod.rs       IbHistory: connect, instruments, TRADES bars; the data client config
   gateway.rs   IbAccount and IbGateway: the Docker gateway, started or reused
 ```
 
@@ -46,7 +46,7 @@ IbHistory::latest_end(now: Timestamp) -> anyhow::Result<Timestamp>  // now − 1
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
 history.data(&data_type, identifier, start, end)
     .await -> anyhow::Result<Vec<Data>>        // the fetch of fill_catalog: the bars of
-                                               // an EXTERNAL 1-MINUTE bar type over
+                                               // an EXTERNAL 1-MINUTE-LAST bar type over
                                                // [start, end], sorted; any other series
                                                // is an error
 ```
@@ -115,28 +115,33 @@ the provider`; up to 0.65.0 its bars came out at a fallback precision
 `XCEC`, `XFXS`, `GLBX`), so the venue can change from one process to the
 next.
 
-## Bars as IB gives them
+## TRADES bars as IB gives them
 
-`data` serves the bars of an `EXTERNAL` 1-MINUTE bar type of any price
-type (`served_bar_type`), fetched by walking back (`bars`, see "Walking
-back, not segments"), and refuses any other series, quotes included. IB
-has no usable quote history, and no quote is made here from bars.
+`data` serves the bars of an `EXTERNAL` `1-MINUTE-LAST` bar type
+(`served_bar_type`), which the adapter requests from IB as TRADES bars
+(`price_type_to_ib_what_to_show`, `data/convert.rs`), fetched by walking
+back (`bars`, see "Walking back, not segments"). It refuses any other
+series: quotes (IB has no usable quote history, and no quote is made here
+from bars), other bar sizes, and BID, ASK and MID bars, whose volume IB
+does not give (-1, which the adapter's `ib_bar_to_nautilus_bar` turns into
+0; a backtest finds no market in them, see `backtest/README.md`, "Fills on
+BID and ASK bars").
 
-For a strategy on `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL`,
-`strategy::catalog_series` asks for three series, each stored as IB gives
-it:
+A strategy on `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` needs one
+series, `SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, IB's 1-minute TRADES bars:
+open, high, low and close of the trades, and the traded volume. The
+backtest builds the hour bars from them and fills orders on them at the
+trade price, with no spread, as on OKX's candles (`backtest/README.md`,
+"Fills on candles"): slightly optimistic. Live, the same bars come from
+IB's data client.
 
-- `SXR8.IBIS-1-MINUTE-MID-EXTERNAL`, the bars the hour bars are built
-  from;
-- `SXR8.IBIS-1-MINUTE-BID-EXTERNAL` and `…-ASK-EXTERNAL`, which a
-  backtest's matching engine pairs, same `ts_init`, into the quotes orders
-  fill on (`execution/src/matching_engine/mod.rs`, `process_bar` and
-  `process_quote_ticks_from_bar`).
+### Instruments without TRADES bars
 
-IB's BID, ASK and MID bars all have volume 0 (IB gives -1, "not
-available", which the adapter's `ib_bar_to_nautilus_bar` turns into 0),
-so the matching engine finds no market in them: see
-`backtest/README.md`, "Fills on BID and ASK bars".
+IB serves no TRADES bars for some instruments, so this path does not
+support them: IDEALPRO forex (`EUR/USD.IDEALPRO`; IB serves MIDPOINT,
+BID, ASK and BID_ASK there) and CMDTY spot metals (`XAUUSD`; no trades
+either). Per IB's documentation; not tried on the gateway. A strategy on
+them needs another source and is not supported.
 
 ### 1-MINUTE bars only
 
@@ -149,9 +154,9 @@ for it. A strategy's bars are built from them (see `strategy/README.md`,
 ## Bar requests
 
 Bar spec strings are `"{step}-{aggregation}-{price_type}"`, e.g.
-`"1-MINUTE-BID"`, the `Display` of `BarSpecification`, which the historical
+`"1-MINUTE-LAST"`, the `Display` of `BarSpecification`, which the historical
 client splits on `-`. It parses SECOND, MINUTE, HOUR, DAY and WEEK only
-(no MONTH). `ib/` asks only for 1-MINUTE bars (`served_spec`).
+(no MONTH). `ib/` asks only for 1-MINUTE-LAST bars (`served_spec`).
 
 ### Walking back, not segments
 
@@ -189,9 +194,8 @@ duration for 1-MINUTE bars. Seconds, not `1 D`: `D` counts whole trading
 days, so a `1 D` request ending in a session's first minute answers that
 one bar and the walk back stops there; `86400 S` answers the 1,440 bars
 before the end, across sessions and weekends. That is about 165 requests
-per series for a year (about 252 sessions), so for the three series of a
-MID composite bar type (MID, BID, ASK) about 41 requests per
-instrument-month and 495 per instrument-year.
+per series for a year (about 252 sessions), so about 14 requests per
+instrument-month and 165 per instrument-year.
 
 ### Pacing
 
@@ -208,9 +212,9 @@ ASK: September and August 2026 back to back, 84 requests in about six
 minutes, no pacing error and no slowdown (3-4 s per request, 1,440 bars
 each), each month complete (930 bars a session); about 3.5 minutes per
 instrument-month for the three types, so about 40 minutes per
-instrument-year; three series (MID, BID, ASK) cost the same. An
-instrument-month of Xetra is about 20,000 bars per series (930 minutes a
-session).
+instrument-year, about 1.2 minutes per instrument-month for TRADES
+alone. An instrument-month of Xetra is at most about 20,000 bars (930
+minutes a session; a minute without a trade has no TRADES bar).
 
 ### Timestamps
 
@@ -342,16 +346,17 @@ stored quotes made from the BID and ASK closes, which it no longer does.
   nothing. A backtest over September (EMA 5/15, Xetra's session) filled all
   14 market orders at the bid (sells) or ask (buys) of the quote stamped
   1 ns before the decision bar's close, the previous quote 60 s earlier.
-- **Minute bars** (2026-10-26, SXR8.IBIS, `fill-catalog` from 2026-09-04
-  to 09-12 for `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL`): 5,580
-  MID, 5,580 BID and 5,580 ASK bars (930 a session, six sessions), every
-  one with volume 0; the whole fill took 44 s. The backtest on them is in
-  `backtest/README.md`, "Verified on IB data".
+- **MID, BID and ASK minute bars** (2026-10-26, SXR8.IBIS, 2026-09-04 to
+  09-12, before `data` served TRADES bars only): 5,580 bars of each (930 a
+  session, six sessions), every one with volume 0; the whole fill took
+  44 s. A backtest on them found no market for any order
+  (`backtest/README.md`, "Verified on IB data").
 
 ## Tests
 
-- `ib/mod.rs`: the series IB serves (its own 1-MINUTE bars of any price
-  type) and those it refuses (quotes, other bar sizes, internal bars); the
+- `ib/mod.rs`: the series IB serves (its own 1-MINUTE TRADES bars) and
+  those it refuses (quotes, MID and BID bars, other bar sizes, internal
+  bars); the
   latest end a minute before now, and an `end` within a minute of now
   rejected before the gateway starts; the walk back over canned answers (no
   hole at the joins, stops at start, on an empty answer and on no
@@ -363,5 +368,5 @@ stored quotes made from the BID and ASK closes, which it no longer does.
   container, a failed status).
 - `tests/ib_gateway.rs`, against the Docker paper gateway (gated by
   `NAUTILUS_IB_RUN=1`, see `live/ib/README.md`, "IB tests"): starting or
-  reusing it, and a day of SXR8.IBIS MID, BID and ASK minute bars filled
-  through it.
+  reusing it, and a day of SXR8.IBIS 1-minute TRADES bars filled through
+  it.

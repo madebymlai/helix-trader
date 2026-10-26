@@ -187,8 +187,8 @@ catalog must use the same symbology and venue; the venue rules (never
   (account forms and mode, the container config, the login wait on fake
   statuses).
 - End to end, `tests/ib_gateway.rs`, against the Docker paper container:
-  history starting or reusing it, `fill_catalog` of the MID, BID and ASK
-  minute bars through it, and `Live` on a paper account, stopped by SIGINT,
+  history starting or reusing it, `fill_catalog` of the 1-minute TRADES
+  bars through it, and `Live` on a paper account, stopped by SIGINT,
   with an EMA crossover never warm enough to trade.
 - End to end, `tests/ib_minute_bars.rs`: a probe on `Live` warming up a
   composite bar type from IB's `request_bars`, then getting the live minute

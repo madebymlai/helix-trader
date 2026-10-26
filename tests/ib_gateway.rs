@@ -112,12 +112,11 @@ async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
     let instruments = ib.instruments(&[sxr8()]).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-    // The MID bars the hour bars are built from, and the BID and ASK bars
-    // orders fill on.
+    // IB's 1-minute TRADES bars, which the hour bars are built from.
     let series = catalog_series(&[BarType::from(
-        "SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL",
+        "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
     )]);
-    assert_eq!(series.len(), 3);
+    assert_eq!(series.len(), 1);
     fill_catalog(
         &mut catalog,
         instruments,
@@ -143,7 +142,7 @@ fn never_trading_ema_cross() -> EmaCrossConfig {
     let config: EmaCrossConfig = toml::from_str(
         r#"
         instrument_ids = ["SXR8.IBIS"]
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+        bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
         composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
         trade_size = "1"
         warmup = "2h"

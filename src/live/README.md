@@ -90,10 +90,10 @@ node's cache (see "Cache in Redis").
 ### Warmup and live bars on IB
 
 A strategy on IB trades composite bars of IB's 1-minute bars, such as
-`SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL` (`strategy/README.md`,
+`SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (`strategy/README.md`,
 "Bar types"). Its warmup request (`strategy::warmup`) asks for
-`SXR8.IBIS-1-MINUTE-MID-EXTERNAL` from `now - warmup`, with no end. With no
-catalog registered, the data engine passes it to IB's data client
+`SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars, from
+`now - warmup`, with no end. With no catalog registered, the data engine passes it to IB's data client
 (`request_bars`, `adapters/interactive_brokers/src/data/core.rs`), which
 splits the window into IB durations (`calculate_duration_segments`) and
 answers with IB's bars up to now, stamped at their close. The subscription
@@ -102,6 +102,12 @@ seconds runs a keepUpToDate historical request (`streams.rs`,
 `handle_historical_bars_subscription`): it starts at the subscription and
 publishes each minute once, when IB's update after its close arrives, or
 2 s after the close at the latest (`HistoricalBarCompletion`).
+
+A market order needs no quote subscription: the risk engine prices it from
+the latest cached external LAST bar (`risk/src/engine/mod.rs`,
+`market_order_price`), here IB's last minute bar, as it does in a
+backtest (`backtest_ib_minute_bars.rs`). It would deny the order
+(`MARKET_PRICE_UNAVAILABLE`) on MID bars alone.
 
 Measured on paper (`tests/ib_minute_bars.rs`, three runs on 2026-10-26
 between 15:29 and 15:43 UTC, SXR8.IBIS, 2-hour warmup): the warmup answer

@@ -118,19 +118,21 @@ composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" 
 gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
 bars of OKX's 1-minute candles, any price type (the source's), warmed up on
 those candles (see "Warmup and training"). On IB the bars are built the
-same way from IB's own 1-minute bars, priced `MID`:
+same way from IB's 1-minute TRADES bars:
 
 ```toml
 instrument_ids = ["SXR8.IBIS"]
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
 composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
 ```
 
-gives `SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL`. A bar type carries
-one price type, so MID bars lose the spread: a strategy that needs it, or a
-price for its market orders live (Nautilus' risk engine prices a market
-order from a quote, a trade or an external BID, ASK or LAST bar, never a MID
-bar), subscribes to the instrument's quotes itself.
+gives `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. Nautilus' risk
+engine prices a market order from the cached external LAST bar, so the
+strategy needs no quotes to trade. A bar type carries one price type, so
+LAST bars carry no spread: a strategy that needs it subscribes to the
+instrument's quotes itself. Instruments IB serves no TRADES bars for
+(IDEALPRO forex, CMDTY spot metals) are not supported
+(`data/ib/README.md`).
 
 `BarsConfig` states what the strategy needs from data as one
 `strategy::DataRequirements`: its bar types and its warmup, its instruments

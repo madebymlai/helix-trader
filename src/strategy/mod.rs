@@ -19,8 +19,7 @@
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from quotes; `warmup` asks for their
 //! history and hands it back, so that no strategy knows how. The catalog
-//! stores what their bars are built from and orders fill on (see
-//! `catalog_series`).
+//! stores what their bars are built from (see `catalog_series`).
 
 mod config;
 pub mod ema;
@@ -32,8 +31,8 @@ pub use session::Session;
 
 use jiff::SignedDuration;
 use nautilus_model::{
-    data::{BarSpecification, BarType, NautilusDataType},
-    enums::{AggregationSource, PriceType},
+    data::{BarType, NautilusDataType},
+    enums::PriceType,
     identifiers::InstrumentId,
 };
 
@@ -80,25 +79,15 @@ impl DataRequirements {
 }
 
 /// The catalog series the bars of `bar_types` are built from, as Nautilus'
-/// data engine builds them, and the bars orders fill on: a series is a
-/// Nautilus data type and its catalog identifier, the instrument id for
-/// ticks and the bar type for bars. External bars are their own series; a
-/// composite bar type is built from its source bars (`BarType::composite`),
-/// and internal bars from the trades of their instrument if priced LAST,
-/// from its quotes otherwise. External bars priced other than LAST come
-/// with the BID and ASK bars of their spec: a backtest's matching engine
-/// pairs those into the quotes orders fill on, and takes no bid or ask from
-/// a MID bar. Each series comes once, sorted by instrument, then
-/// identifier.
+/// data engine builds them: a series is a Nautilus data type and its
+/// catalog identifier, the instrument id for ticks and the bar type for
+/// bars. External bars are their own series; a composite bar type is built
+/// from its source bars (`BarType::composite`), and internal bars from the
+/// trades of their instrument if priced LAST, from its quotes otherwise.
+/// Each series comes once, sorted by instrument, then identifier.
 #[must_use]
 pub fn catalog_series(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
     let mut series: Vec<(InstrumentId, NautilusDataType, String)> = Vec::new();
-    let mut add = |instrument_id: InstrumentId, data_type, identifier: String| {
-        let entry = (instrument_id, data_type, identifier);
-        if !series.contains(&entry) {
-            series.push(entry);
-        }
-    };
     for bar_type in bar_types {
         let source = if bar_type.is_composite() {
             bar_type.composite()
@@ -106,28 +95,16 @@ pub fn catalog_series(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> 
             *bar_type
         };
         let instrument_id = source.instrument_id();
-        let spec = source.spec();
-        if source.is_externally_aggregated() {
-            add(instrument_id, NautilusDataType::Bar, source.to_string());
-            if spec.price_type != PriceType::Last {
-                for price_type in [PriceType::Bid, PriceType::Ask] {
-                    let quoted = BarSpecification { price_type, ..spec };
-                    let bars = BarType::new(instrument_id, quoted, AggregationSource::External);
-                    add(instrument_id, NautilusDataType::Bar, bars.to_string());
-                }
-            }
-        } else if spec.price_type == PriceType::Last {
-            add(
-                instrument_id,
-                NautilusDataType::TradeTick,
-                instrument_id.to_string(),
-            );
+        let (data_type, identifier) = if source.is_externally_aggregated() {
+            (NautilusDataType::Bar, source.to_string())
+        } else if source.spec().price_type == PriceType::Last {
+            (NautilusDataType::TradeTick, instrument_id.to_string())
         } else {
-            add(
-                instrument_id,
-                NautilusDataType::QuoteTick,
-                instrument_id.to_string(),
-            );
+            (NautilusDataType::QuoteTick, instrument_id.to_string())
+        };
+        let entry = (instrument_id, data_type, identifier);
+        if !series.contains(&entry) {
+            series.push(entry);
         }
     }
     series.sort_by(|(a, _, a_id), (b, _, b_id)| (a, a_id).cmp(&(b, b_id)));
@@ -209,65 +186,6 @@ mod tests {
                 NautilusDataType::Bar,
                 "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
             )]
-        );
-    }
-
-    /// The bar series of each bar type string, as `(Bar, identifier)`.
-    fn bars(bar_types: &[&str]) -> Vec<(NautilusDataType, String)> {
-        bar_types
-            .iter()
-            .map(|&s| (NautilusDataType::Bar, s.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn composite_bars_of_mid_source_bars_also_need_the_bid_and_ask_bars_orders_fill_on() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL"]),
-            bars(&[
-                "SXR8.IBIS-1-MINUTE-ASK-EXTERNAL",
-                "SXR8.IBIS-1-MINUTE-BID-EXTERNAL",
-                "SXR8.IBIS-1-MINUTE-MID-EXTERNAL",
-            ])
-        );
-    }
-
-    #[test]
-    fn composite_bars_of_bid_source_bars_need_the_ask_bars_beside_them() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-1-HOUR-BID-INTERNAL@1-MINUTE-EXTERNAL"]),
-            bars(&[
-                "SXR8.IBIS-1-MINUTE-ASK-EXTERNAL",
-                "SXR8.IBIS-1-MINUTE-BID-EXTERNAL",
-            ])
-        );
-    }
-
-    #[test]
-    fn external_mid_bars_also_need_the_bid_and_ask_bars_of_their_spec() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-5-MINUTE-MID-EXTERNAL"]),
-            bars(&[
-                "SXR8.IBIS-5-MINUTE-ASK-EXTERNAL",
-                "SXR8.IBIS-5-MINUTE-BID-EXTERNAL",
-                "SXR8.IBIS-5-MINUTE-MID-EXTERNAL",
-            ])
-        );
-    }
-
-    #[test]
-    fn the_bid_and_ask_bars_of_one_source_come_once() {
-        assert_eq!(
-            series_of(&[
-                "SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL",
-                "SXR8.IBIS-4-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL",
-                "SXR8.IBIS-1-HOUR-BID-INTERNAL@1-MINUTE-EXTERNAL",
-            ]),
-            bars(&[
-                "SXR8.IBIS-1-MINUTE-ASK-EXTERNAL",
-                "SXR8.IBIS-1-MINUTE-BID-EXTERNAL",
-                "SXR8.IBIS-1-MINUTE-MID-EXTERNAL",
-            ])
         );
     }
 

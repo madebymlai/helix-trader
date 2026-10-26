@@ -1,7 +1,7 @@
 //! Interactive Brokers connection and history: the account, the gateway
 //! (see `gateway`), the data client config, and instruments and bars for
 //! `fill_catalog`, which asks for series of any data type: IB serves its
-//! 1-MINUTE bars only (see `IbHistory::data`).
+//! 1-MINUTE TRADES bars only (see `IbHistory::data`).
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
@@ -87,7 +87,7 @@ impl IbHistory {
     ///
     /// Returns an error if that end is out of range.
     pub fn latest_end(now: Timestamp) -> anyhow::Result<Timestamp> {
-        Ok(now.checked_sub(served_spec(PriceType::Bid).timedelta())?)
+        Ok(now.checked_sub(served_spec().timedelta())?)
     }
 
     /// The instruments of `ids`, as IB defines them. A future IB does not
@@ -126,8 +126,8 @@ impl IbHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error if the series is not one of IB's 1-MINUTE bars (see
-    /// `served_bar_type`), or as `bars`.
+    /// Returns an error if the series is not IB's 1-MINUTE TRADES bars of
+    /// an instrument (see `served_bar_type`), or as `bars`.
     pub async fn data(
         &self,
         data_type: &NautilusDataType,
@@ -172,27 +172,27 @@ impl IbHistory {
 }
 
 /// The bar type of the series of `data_type` and `identifier`, which must
-/// be bars IB serves: its own (`EXTERNAL`) 1-MINUTE bars (see
-/// `served_spec`), of any price type.
+/// be bars IB serves: its own (`EXTERNAL`) 1-MINUTE TRADES bars (see
+/// `served_spec`).
 fn served_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<BarType> {
     ensure!(
         *data_type == NautilusDataType::Bar,
         "IB's history serves bars, not {data_type} ({identifier})"
     );
     let bar_type = BarType::from_str(identifier)?;
-    let spec = bar_type.spec();
     ensure!(
-        bar_type.is_externally_aggregated() && spec == served_spec(spec.price_type),
-        "IB's history serves its own 1-MINUTE bars, not {identifier}"
+        bar_type.is_externally_aggregated() && bar_type.spec() == served_spec(),
+        "IB's history serves its own 1-MINUTE-LAST bars, not {identifier}"
     );
     Ok(bar_type)
 }
 
-/// The spec of the bars IB's history serves, priced on `price_type`:
-/// 1-MINUTE, the finest bars IB paces softly. Its string (`1-MINUTE-BID`)
-/// is IB's bar spec string.
-fn served_spec(price_type: PriceType) -> BarSpecification {
-    BarSpecification::new(1, BarAggregation::Minute, price_type)
+/// The spec of the bars IB's history serves: 1-MINUTE, the finest bars IB
+/// paces softly, priced LAST, IB's TRADES bars, the only ones with a
+/// volume. Its string (`1-MINUTE-LAST`) is IB's bar spec string, which the
+/// adapter requests as TRADES.
+fn served_spec() -> BarSpecification {
+    BarSpecification::new(1, BarAggregation::Minute, PriceType::Last)
 }
 
 /// The IB duration of one bar request: within IB's maximum duration for
@@ -503,17 +503,15 @@ mod tests {
     }
 
     #[test]
-    fn ib_serves_its_own_one_minute_bars_of_any_price_type() {
-        for (identifier, spec) in [
-            ("SXR8.IBIS-1-MINUTE-MID-EXTERNAL", "1-MINUTE-MID"),
-            ("SXR8.IBIS-1-MINUTE-BID-EXTERNAL", "1-MINUTE-BID"),
-            ("SXR8.IBIS-1-MINUTE-ASK-EXTERNAL", "1-MINUTE-ASK"),
-            ("ESZ6.CME-1-MINUTE-LAST-EXTERNAL", "1-MINUTE-LAST"),
+    fn ib_serves_its_own_one_minute_trades_bars() {
+        for identifier in [
+            "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
+            "ESZ6.CME-1-MINUTE-LAST-EXTERNAL",
         ] {
             let served = served_bar_type(&NautilusDataType::Bar, identifier).unwrap();
             assert_eq!(served, bar_type(identifier));
             // IB's bar spec string, as `bars` requests it.
-            assert_eq!(served.spec().to_string(), spec);
+            assert_eq!(served.spec().to_string(), "1-MINUTE-LAST");
         }
     }
 
@@ -521,9 +519,11 @@ mod tests {
     fn ib_serves_no_other_series() {
         for (data_type, identifier) in [
             (NautilusDataType::QuoteTick, "SXR8.IBIS"),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-HOUR-MID-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-5-MINUTE-MID-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-MID-INTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-MID-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-BID-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-HOUR-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-5-MINUTE-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
         ] {
             let err = served_bar_type(&data_type, identifier).unwrap_err();
             assert!(err.to_string().contains(identifier), "{err}");
