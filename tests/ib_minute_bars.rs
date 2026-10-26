@@ -1,16 +1,11 @@
 //! IB's 1-minute bars on the live node, end to end on the Docker paper
 //! gateway: the warmup of a composite bar type is IB's answer to the
 //! source bars' `request_bars`, the live minute bars come from
-//! `subscribe_bars`, and the two meet with no gap. Prints how long after
-//! its close each live minute bar arrived, which `SOURCE_BAR_DELAY_MICROS`
-//! in `strategy::warmup` must exceed.
-//!
-//! The warmup request runs to now with no end (`end: None`), and IB's
-//! answer ends with the minute still in progress, a bar closing after the
-//! request; nothing trims it (the response has no end to trim to). The
-//! live stream then sends that minute again, complete: the hand-off
-//! repeats one minute. Pinned here as observed at the pinned Nautilus
-//! commit, not as wanted.
+//! `subscribe_bars`, and the two meet with no gap and no duplicate: the
+//! warmup request ends at now, so the data engine drops the minute still
+//! in progress from IB's answer, and the live stream starts with it.
+//! Prints how long after its close each live minute bar arrived, which
+//! `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must exceed.
 //!
 //! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped,
 //! unless `NAUTILUS_IB_RUN=1` is set in the shell. It places no order. It
@@ -123,7 +118,7 @@ fn interrupt() {
 const MINUTE_NS: i64 = 60_000_000_000;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_repeat_the_minute_in_progress() {
+async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     if !std::env::var("NAUTILUS_IB_RUN").is_ok_and(|value| value == "1") {
         println!("skipped; set NAUTILUS_IB_RUN=1 to run it against IB");
         return;
@@ -180,27 +175,23 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_repeat_the_minut
         live.windows(2).all(|pair| pair[1] - pair[0] == MINUTE_NS),
         "the live minute bars are not one a minute: {live:?}"
     );
-    let (partial, last_closed) = (warmup[warmup.len() - 1], warmup[warmup.len() - 2]);
-    let (in_warmup, again) = (record.warmup[warmup.len() - 1], record.live[0].0);
+    let last_warmup = warmup[warmup.len() - 1];
     println!(
-        "PROBE hand-off: warmup requested {}, its last bars close {} and {}; \
+        "PROBE hand-off: warmup requested {}, its last bar closes {}; \
          the first live bar closes {}",
         record.requested_at,
-        UnixNanos::from(last_closed as u64),
-        UnixNanos::from(partial as u64),
+        UnixNanos::from(last_warmup as u64),
         UnixNanos::from(live[0] as u64),
     );
-    println!("PROBE the minute in progress in the warmup: {in_warmup}");
-    println!("PROBE the same minute live:                 {again}");
     assert!(
-        partial > record.requested_at.as_i64(),
-        "the warmup ends on a closed minute"
+        last_warmup <= record.requested_at.as_i64(),
+        "the warmup holds the minute in progress"
     );
     assert_eq!(
-        live[0], partial,
-        "the live bars do not repeat the minute in progress"
+        live[0] - last_warmup,
+        MINUTE_NS,
+        "a gap or a duplicate at the hand-off"
     );
-    assert_eq!(live[0] - last_closed, MINUTE_NS, "a gap at the hand-off");
     for (bar, arrived) in &record.live {
         let latency = arrived.as_i64() - bar.ts_event.as_i64();
         assert!(

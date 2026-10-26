@@ -192,9 +192,9 @@ catalog must use the same symbology and venue; the venue rules (never
   with an EMA crossover never warm enough to trade.
 - End to end, `tests/ib_minute_bars.rs`: a probe on `Live` warming up a
   composite bar type from IB's `request_bars`, then getting the live minute
-  bars from `subscribe_bars`: no gap at the hand-off, the minute in
-  progress repeated (`live/README.md`, "Known limits"), and how long after
-  its close each live minute arrives. No order; SXR8 must be quoted.
+  bars from `subscribe_bars`: no gap and no duplicate at the hand-off
+  (`live/README.md`, "Warmup and live bars on IB"), and how long after its
+  close each live minute arrives. No order; SXR8 must be quoted.
 - End to end, `tests/ib_restart.rs`, placing orders on the paper account:
   the node's cache in Redis across restarts, each node in a child process,
   1 or 2 EXS1 at a time, then IB read back flat (live README, "Cache in

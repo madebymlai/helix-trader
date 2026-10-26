@@ -3,10 +3,19 @@
 //!
 //! Owns Nautilus' protocol, so that no strategy names it. The request is
 //! chosen from the bar type alone: a composite bar type is built from its
-//! source bars, so their bars since `now - warmup` are requested
+//! source bars, so their bars over `[now - warmup, now]` are requested
 //! (`request_bars` of `BarType::composite`); any other bar type is built
 //! from quotes (BID, ASK or MID), so the quotes of its instrument are
-//! requested (`request_quotes`). Each request carries the params
+//! requested (`request_quotes`), over the same window.
+//!
+//! The window ends at `now`, given, not left open: the data engine trims a
+//! response to its request's bounds (`DataResponse::trim_to_bounds`), so
+//! the warmup ends on the last bar closed by `now`, and the live stream,
+//! which starts at the subscription, continues with the bar in progress.
+//! Left open, IB's answer holds that bar too, partial (stamped at its
+//! close, after `now`), and the live stream sends it again, complete.
+//!
+//! Each request carries the params
 //! `bar_types` (the data engine aggregates the response into those bars),
 //! `update_subscriptions` (the aggregator goes on with the live data, so
 //! the bar spanning the warmup end comes out once and complete; without it
@@ -50,8 +59,8 @@ use nautilus_model::{
 };
 use serde_json::json;
 
-/// Requests the warmup of `bar_types`, internal bar types, over `warmup`
-/// before now, then subscribes `actor` to them. The bars of a composite bar
+/// Requests the warmup of `bar_types`, internal bar types, over
+/// `[now - warmup, now]`, then subscribes `actor` to them. The bars of a composite bar
 /// type are built from its source bars, requested per source bar type; the
 /// others from quotes, requested per instrument. The warmup of each request
 /// arrives in `on_historical_bars` or `on_historical_quotes`, where `bars`
@@ -65,7 +74,8 @@ pub fn start<A>(actor: &mut A, bar_types: &[BarType], warmup: SignedDuration) ->
 where
     A: DataActor + DataActorNative + Debug + 'static,
 {
-    let start = actor.clock().utc_now().checked_sub(warmup)?;
+    let now = actor.clock().utc_now();
+    let start = now.checked_sub(warmup)?;
     let (composites, of_quotes): (Vec<BarType>, Vec<BarType>) = bar_types
         .iter()
         .partition(|bar_type| bar_type.is_composite());
@@ -79,7 +89,14 @@ where
         let built = composites
             .iter()
             .filter(|bar_type| bar_type.composite() == source);
-        actor.request_bars(source, Some(start), None, None, None, Some(params(built)))?;
+        actor.request_bars(
+            source,
+            Some(start),
+            Some(now),
+            None,
+            None,
+            Some(params(built)),
+        )?;
     }
     let instruments: BTreeSet<InstrumentId> =
         of_quotes.iter().map(BarType::instrument_id).collect();
@@ -90,7 +107,7 @@ where
         actor.request_quotes(
             instrument_id,
             Some(start),
-            None,
+            Some(now),
             None,
             None,
             Some(params(built)),

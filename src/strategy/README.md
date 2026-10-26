@@ -377,8 +377,11 @@ instrument, oldest first.
   are refused (nothing stores them to request). `request_bars` of an
   internal bar type does not build bars from quotes; only a request of
   their source with `bar_types` does.
-- **The params.** Each request runs from `now - warmup`, where `now` is
-  `self.clock().utc_now()`, the simulated time in backtest. It carries three
+- **The params.** Each request runs over `[now - warmup, now]`, where
+  `now` is `self.clock().utc_now()`, the simulated time in backtest. The
+  end is given so that the data engine trims a bar closing after `now`
+  from the response: IB answers an open-ended request with the minute in
+  progress, which the live stream then sends again. It carries three
   params: `bar_types`, the internal bar types to aggregate the response into
   (Nautilus' `request_bars` refuses a composite bar type and points to this
   param); `update_subscriptions = true`, so that the aggregator goes on with

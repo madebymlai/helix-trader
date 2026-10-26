@@ -92,16 +92,29 @@ node's cache (see "Cache in Redis").
 A strategy on IB trades composite bars of IB's 1-minute bars, such as
 `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (`strategy/README.md`,
 "Bar types"). Its warmup request (`strategy::warmup`) asks for
-`SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars, from
-`now - warmup`, with no end. With no catalog registered, the data engine passes it to IB's data client
-(`request_bars`, `adapters/interactive_brokers/src/data/core.rs`), which
-splits the window into IB durations (`calculate_duration_segments`) and
-answers with IB's bars up to now, stamped at their close. The subscription
+`SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars, over
+`[now - warmup, now]`. With no catalog registered, the data engine passes
+it to IB's data client (`request_bars`,
+`adapters/interactive_brokers/src/data/core.rs`), which splits the window
+into IB durations (`calculate_duration_segments`) and answers with IB's
+bars up to now, stamped at their close. The subscription
 to the bars then goes to IB's `subscribe_bars`, which for any bar size but 5
 seconds runs a keepUpToDate historical request (`streams.rs`,
 `handle_historical_bars_subscription`): it starts at the subscription and
 publishes each minute once, when IB's update after its close arrives, or
 2 s after the close at the latest (`HistoricalBarCompletion`).
+
+The hand-off has no gap and no duplicate because the request ends at
+`now`. IB's answer ends with the minute still in progress, a partial bar
+stamped at its close, after `now`; the data engine trims the response to
+the request's `[start, end]` (`DataResponse::trim_to_bounds`), so the
+warmup ends on the last closed minute, and the live stream, which starts
+at the subscription, sends the minute in progress once, complete. With no
+end (as until 2026-10-26) nothing was trimmed and that minute came twice:
+partial in the warmup, complete live. The same end keeps the window a
+whole number of seconds: open-ended, the client's own later `now` added a
+`1 S` segment to a warmup of a day or more, which IB refused (error 321,
+logged, the bars of the other segments kept).
 
 A market order needs no quote subscription: the risk engine prices it from
 the latest cached external LAST bar (`risk/src/engine/mod.rs`,
@@ -109,12 +122,17 @@ the latest cached external LAST bar (`risk/src/engine/mod.rs`,
 backtest (`backtest_ib_minute_bars.rs`). It would deny the order
 (`MARKET_PRICE_UNAVAILABLE`) on MID bars alone.
 
-Measured on paper (`tests/ib_minute_bars.rs`, three runs on 2026-10-26
-between 15:29 and 15:43 UTC, SXR8.IBIS, 2-hour warmup): the warmup answer
-came 0.1 to 0.2 s after the request, 120 or 121 bars; the 12 live minute
-bars arrived 0.4 to 1.3 s after their close, under the 5 s the node waits
-before building a bar of source bars (`strategy/README.md`, "Composite
-bars"). The hand-off repeats one minute (see "Known limits").
+Measured on paper (`tests/ib_minute_bars.rs`, SXR8.IBIS, 2-hour warmup):
+four runs on 2026-10-26 between 15:29 and 16:35 UTC, three on MID bars,
+the last on the TRADES bars. The warmup answer came 0.1 to 0.2 s after the
+request, 120 or 121 bars; the 16 live minute bars arrived 0.4 to 1.3 s
+after their close, under the 5 s the node waits before building a bar of
+source bars (`strategy/README.md`, "Composite bars"). In the last run,
+with the warmup ending at now, the warmup requested at 16:31:23 ended on
+the bar closing 16:31:00 and the first live bar closed 16:32:00: no gap,
+no duplicate. Without the end, two runs had the minute in progress
+(closing 15:30 and 15:40) in both the warmup, partial, and the live
+stream.
 
 Without a catalog, `fill-catalog` and `live` share nothing: `live` never
 reads the catalog, and a node registering it would serve the warmup from
@@ -203,19 +221,6 @@ database, every trader's keys.
 Observed at the pinned `develop` commit; the code keeps the documented
 usage.
 
-- **The hand-off repeats the minute in progress.** IB's answer to the
-  warmup's `request_bars` ends with the minute still in progress at the
-  request, a bar closing after it, and the response, which has no end,
-  keeps it (`DataResponse::trim_to_bounds` trims only to a given end). The
-  live stream then publishes that minute again, complete. The composite
-  aggregator takes both into the bar spanning the hand-off: its open,
-  high, low and close are those it would have without the repeat (the
-  partial minute lies within the complete one, which comes last), but its
-  volume counts the partial minute too (nothing on MID bars, whose volume
-  is 0). Requesting the warmup with an explicit `end` of now drops it
-  (Nautilus trims the response to `[start, end]`): measured, the warmup
-  then ended on the last closed minute and the live bars followed it with
-  no gap and no duplicate.
 - **A live start can panic during the warmup.** `warmup::start` requests
   the source bars with `update_subscriptions` and then subscribes to the
   bars, as the Nautilus docs show. A live bar that arrives before the
@@ -228,14 +233,6 @@ usage.
   2026-09-26 < `from_time_ns` 2026-10-26 15:49). On IB a warmup must be
   answered within the minute: hours, not weeks. Upstream:
   [nautilus_trader#5393](https://github.com/nautechsystems/nautilus_trader/issues/5393).
-- **A warmup request fails its last, 1-second segment.** The window runs
-  from `now - warmup` to the client's own `now`, a moment later, and
-  `calculate_duration_segments` rounds the fraction of a second up into a
-  `1 S` segment, which IB refuses (error 321, "Historical data requested
-  duration is invalid"). The data client logs a warning and answers with
-  the bars of the earlier segments; the `1 S` segment holds none anyway.
-  Seen with the 720-hour warmup above (its `30 D` segment raised no
-  error).
 - **A warmup of a day or more may miss bars.** The data client splits the
   window into years, days and seconds (`calculate_duration_segments`), and
   IB counts `D` in trading sessions, not 24 h, so bars between the days and
