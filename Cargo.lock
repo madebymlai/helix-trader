@@ -2149,6 +2149,7 @@ dependencies = [
  "nautilus-network",
  "nautilus-okx",
  "nautilus-persistence",
+ "nautilus-portfolio",
  "nautilus-serialization",
  "nautilus-trading",
  "prost",
