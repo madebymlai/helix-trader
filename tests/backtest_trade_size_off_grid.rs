@@ -43,5 +43,5 @@ fn a_trade_size_off_the_share_grid_trades_the_rounded_size_and_the_run_completes
 
     // The orders and the balance of 10 shares (backtest_ema_cross.rs).
     assert_eq!(result.total_orders, wave::EMA_ORDERS);
-    assert_eq!(common::balance(&result), "9754.00 EUR");
+    assert_eq!(common::balance(&result), "9745.00 EUR");
 }

@@ -374,11 +374,6 @@ does when the catalog ends before the node starts.
   closed in part).
 - **IC with IB.** A strategy trading IC instruments with IB ones is
   refused at the start.
-- **The EMA crossover on IC.** Its orders net: a crossing sends one order
-  for the difference, which on IC's hedging account opens a position
-  beside the one it should reduce. Closing by id first (`close_position`)
-  sends two orders a crossing, which changes its netting backtests (a
-  commission per order charged twice): not done here.
 - **Market closed over the whole warmup** (a weekend with a short warmup):
   the start's fill fails, naming the series and the window, as
   `fill-catalog` does.

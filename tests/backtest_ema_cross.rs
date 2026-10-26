@@ -21,7 +21,7 @@ fn the_ema_crossover_trades_on_internal_bars_and_pays_the_commission_per_order()
     let pnl = &result.stats_pnls["EUR"];
     let commission = wave::EMA_PNL_WITHOUT_COMMISSION - pnl["PnL (total)"];
     assert_eq!(commission, wave::EMA_ORDERS as f64 * 3.0);
-    // 10,000 EUR, less the 234 of the run without commission and the 12 of
-    // commission.
-    assert_eq!(common::balance(&result), "9754.00 EUR");
+    // 10,000 EUR, less the 234 of the run without commission and the 21 of
+    // commission: 3 EUR on each of the 7 orders.
+    assert_eq!(common::balance(&result), "9745.00 EUR");
 }

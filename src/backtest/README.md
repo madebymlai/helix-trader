@@ -54,8 +54,9 @@ Nautilus refuses one that is not positive before the run.
 
 On the wave of the tests (EMA 5/15 on 1-HOUR-MID internal bars, 10
 shares, warmup 48h, Xetra's session, 3 EUR commission) it prints
-`Orders: 4`, `PnL (total): -246.000000` (the wave's -234.00 without
-commission, less 4 × 3 EUR) and a final balance of `9754.00 EUR`.
+`Orders: 7` (an opening, then each of three crossings a close by id and
+an opening), `PnL (total): -255.000000` (the wave's -234.00 without
+commission, less 7 × 3 EUR) and a final balance of `9745.00 EUR`.
 
 ## The entry point
 
@@ -1009,7 +1010,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     commission` than in `backtest_ema_cross_free.rs`, and its final
     balance; `backtest_max_drawdown.rs` that the result's `stats_returns`
     hold `Max Drawdown`, the largest fall from a peak of the equity
-    compounded over its returns series;
+    compounded over its returns series; `backtest_ema_hedging.rs` that on
+    a hedging venue it sends the same 7 orders and makes the same PnL as
+    on the netting one, closing before it turns;
   - steps, a level per hour chosen so that the shortest crossover (1/2)
     trades at hours worked out by hand, and so that what is tested changes
     the orders and the final balance: `backtest_warmup.rs` (a run off an

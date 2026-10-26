@@ -45,11 +45,12 @@ fn bars_outside_the_session_neither_move_the_emas_nor_trade() {
 
     // The slow EMA after the warmup is 600.60. 15:00: 590.60 below it,
     // short: sell 10 at 590.55, the EMA going to 593.93. 16:00: 700.60
-    // above, long: buy 20 at 700.65, the EMA going to 665.04. Thursday
-    // 09:00: 650.60 below, short: sell 20 at 650.55. The 10 shares sold
-    // short lose 110.10 each, the 10 bought 50.10. Had the bars outside the
-    // session counted, the slow EMA would be 518.87 on Thursday 09:00:
-    // still long, no third order.
-    assert_eq!(result.total_orders, 3);
+    // above, long: close the short (buy 10) and buy 10 at 700.65, the EMA
+    // going to 665.04. Thursday 09:00: 650.60 below, short: close the long
+    // (sell 10) and sell 10 at 650.55. The 10 shares sold short lose
+    // 110.10 each, the 10 bought 50.10. Had the bars outside the session
+    // counted, the slow EMA would be 518.87 on Thursday 09:00: still long,
+    // no third crossing, three orders.
+    assert_eq!(result.total_orders, 5);
     assert_eq!(common::balance(&result), "8398.00 EUR");
 }
