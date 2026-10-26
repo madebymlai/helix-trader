@@ -14,8 +14,8 @@
 //! on the position; an order naming a position closes it, in part or
 //! whole, or adds to it. A modification amends a pending order, or moves a
 //! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
-//! one left out); a cancel cancels a pending order, or removes a
-//! protection. A request the session never sent is rejected; one sent but
+//! one left out, the other as last asked); a cancel cancels a pending
+//! order, or removes a protection. A request the session never sent is rejected; one sent but
 //! unanswered stays in flight (`retain_unresolved_submissions`) until its
 //! events, a query or reconciliation resolve it.
 //!
@@ -62,7 +62,7 @@ use nautilus_model::{
 };
 
 use super::{
-    dispatch::{Dispatch, Output, Role},
+    dispatch::{Dispatch, Output, Role, Want},
     orders::{self, Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
@@ -556,9 +556,10 @@ impl IcExecutionClient {
         self.core.cache().order_owned(id)
     }
 
-    /// The price of the open protection `leg` of `position` in the node's
-    /// cache, else none.
-    fn cached_protection(&self, position: i64, leg: Leg) -> Option<Price> {
+    /// The price of the protection `leg` of `position` as last asked: none
+    /// if it is not open in the node's cache, else the dispatch's wanted
+    /// change of it, else its price in the cache.
+    fn asked_protection(&self, session: &Session, position: i64, leg: Leg) -> Option<Price> {
         let venue = orders::protection_id(position, leg);
         let cache = self.core.cache();
         let id = cache.client_order_id(&venue)?;
@@ -566,29 +567,21 @@ impl IcExecutionClient {
         if order.is_closed() {
             return None;
         }
-        match leg {
-            Leg::StopLoss => order.trigger_price(),
-            Leg::TakeProfit => order.price(),
+        match session.dispatch().wanted(*id) {
+            Some(Want::Move(price)) => Some(price),
+            Some(Want::Remove) => None,
+            None => match leg {
+                Leg::StopLoss => order.trigger_price(),
+                Leg::TakeProfit => order.price(),
+            },
         }
     }
 
-    /// The request moving or removing protections of `position`: `changes`
-    /// the legs set (`Some` price) or removed (`None`), the others kept as
-    /// the cache holds them, since cTrader drops a price left out.
-    fn amend_protections(
-        &self,
-        position: i64,
-        changes: &[(Leg, Option<Price>)],
-    ) -> ProtoOaAmendPositionSltpReq {
-        let price = |leg: Leg| {
-            changes
-                .iter()
-                .find(|(changed, _)| *changed == leg)
-                .map_or_else(
-                    || self.cached_protection(position, leg),
-                    |(_, price)| *price,
-                )
-        };
+    /// The request setting the protections of `position` as last asked
+    /// (see `asked_protection`): both prices, since cTrader drops a price
+    /// left out.
+    fn amend_protections(&self, session: &Session, position: i64) -> ProtoOaAmendPositionSltpReq {
+        let price = |leg| self.asked_protection(session, position, leg);
         ProtoOaAmendPositionSltpReq {
             position_id: position,
             stop_loss: price(Leg::StopLoss).map(|p| p.as_f64()),
@@ -646,8 +639,11 @@ impl IcExecutionClient {
                 Leg::StopLoss => cmd.trigger_price,
                 Leg::TakeProfit => cmd.price,
             };
-            let request =
-                self.amend_protections(position, &[(leg, price.or(leg_price(&order, leg)))]);
+            let price = price
+                .or(leg_price(&order, leg))
+                .ok_or("no price to move to")?;
+            session.dispatch().want(id, Want::Move(price));
+            let request = self.amend_protections(session, position);
             self.send(session, request, Tag::Protect(id));
             return Ok(());
         }
@@ -665,9 +661,8 @@ impl IcExecutionClient {
             let price = price
                 .or(leg_price(&order, leg))
                 .ok_or("no price to move to")?;
-            let protection = session
-                .dispatch()
-                .protection(entry, None, Some((id, price)));
+            session.dispatch().want(id, Want::Move(price));
+            let protection = session.dispatch().protection(entry);
             let request = Self::amend_order(
                 &entry_order,
                 entry_venue,
@@ -681,7 +676,7 @@ impl IcExecutionClient {
             return Ok(());
         }
         let venue = pending_venue_id(&order)?;
-        let protection = session.dispatch().protection(id, None, None);
+        let protection = session.dispatch().protection(id);
         let request = Self::amend_order(
             &order,
             venue,
@@ -699,26 +694,27 @@ impl IcExecutionClient {
     /// one amendment of their position each, a pending entry's by its
     /// amendment. Refuses those it cannot cancel.
     fn cancel(&self, session: &Session, ids: &[ClientOrderId]) {
-        let mut protections: HashMap<i64, Vec<(Leg, ClientOrderId)>> = HashMap::new();
+        let mut protections: HashMap<i64, Vec<ClientOrderId>> = HashMap::new();
         for &id in ids {
             let outcome = (|| {
                 let order = self
                     .cached_order(&id)
                     .ok_or_else(|| format!("{id} is not in the cache"))?;
                 session.dispatch().adopt(&order);
-                if let Some((position, leg)) = order.venue_order_id().and_then(parse_protection_id)
-                {
-                    protections.entry(position).or_default().push((leg, id));
+                if let Some((position, _)) = order.venue_order_id().and_then(parse_protection_id) {
+                    session.dispatch().want(id, Want::Remove);
+                    protections.entry(position).or_default().push(id);
                     return Ok(());
                 }
-                if let Some(Role::Leg { entry, .. }) =
-                    session.dispatch().tracked(id).map(|t| t.role)
-                {
+                // Bound first: the dispatch's lock must not outlive it.
+                let tracked_role = session.dispatch().tracked(id).map(|t| t.role);
+                if let Some(Role::Leg { entry, .. }) = tracked_role {
                     let entry_order = self
                         .cached_order(&entry)
                         .ok_or_else(|| format!("the entry {entry} is not in the cache"))?;
                     let venue = pending_venue_id(&entry_order)?;
-                    let protection = session.dispatch().protection(entry, Some(id), None);
+                    session.dispatch().want(id, Want::Remove);
+                    let protection = session.dispatch().protection(entry);
                     let request = Self::amend_order(
                         &entry_order,
                         venue,
@@ -744,10 +740,8 @@ impl IcExecutionClient {
             }
         }
         for (position, legs) in protections {
-            let changes: Vec<(Leg, Option<Price>)> =
-                legs.iter().map(|(leg, _)| (*leg, None)).collect();
-            let request = self.amend_protections(position, &changes);
-            self.send(session, request, Tag::Unprotect(legs[0].1));
+            let request = self.amend_protections(session, position);
+            self.send(session, request, Tag::Unprotect(legs[0]));
         }
     }
 

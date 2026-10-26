@@ -159,15 +159,22 @@ submitted and sends it.
   limit or stop price, and the bracket's protections, which an amendment
   otherwise drops: the demo's amended limit lost its own); a protection is
   moved on its position (`ProtoOAAmendPositionSLTPReq`) with the other
-  protection's price as the cache holds it, since cTrader drops a price
-  left out (the demo: amending the stop loss alone removed the take
-  profit). A leg of a bracket whose entry is pending is moved on the entry.
+  protection as last asked, since cTrader drops a price left out (the
+  demo: amending the stop loss alone removed the take profit). A leg of a
+  bracket whose entry is pending is moved on the entry.
   A protection's quantity is the position's: a modification of it is
   rejected.
 - **Cancel**: a pending order by its `orderId` (`ProtoOACancelOrderReq`); a
   protection by amending its position without it, the other kept (both
   legs of one position cancelled together go in one amendment); a leg of a
-  pending entry by amending the entry.
+  pending entry by amending the entry. A refused removal rejects the
+  cancel of each protection it removed.
+- **Protections as last asked**: a move or a cancel of a protection is
+  held by the dispatch until cTrader's protection shows it done, or it is
+  refused, and every amendment of the same position or pending entry
+  carries it. So a cancel of the take profit followed, before IC answers,
+  by a move of the stop loss sends the stop loss alone, and two moves in a
+  row (stop loss, then take profit) send both new prices.
 - **Unknown outcomes**: a request is sent under a `clientMsgId` naming the
   operation and the order (`N:`, `A:`, `X:`, `C:`, `P:`, `U:` and the
   client order id). One the session never sent (it failed, or the

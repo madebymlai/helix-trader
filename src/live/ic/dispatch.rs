@@ -27,8 +27,12 @@
 //! - **Refusals**: an order error or an error answer, under the request's
 //!   `clientMsgId` (`Tag`), rejects a new order or a close, and the legs of
 //!   a bracket entry; rejects the modification of an amendment; rejects the
-//!   cancel of a cancellation. The reason is cTrader's code and
+//!   cancel of a cancellation, of each protection of the position for a
+//!   removal of protections. The reason is cTrader's code and
 //!   description.
+//! - **Protections asked**: a move or removal of a protection is recorded
+//!   (`want`) until cTrader's protection shows it done, or it is refused:
+//!   an amendment, which sets both protections, carries the other's.
 //!
 //! A terminal order's repeated events are suppressed; a fill with a new
 //! `dealId` after it goes as a report.
@@ -53,7 +57,7 @@ use nautilus_model::{
 use ustr::Ustr;
 
 use super::{
-    orders::{Leg, Protection, Tag, protection_id},
+    orders::{Leg, Protection, Tag, parse_protection_id, protection_id},
     reports::{self, Reports},
 };
 use crate::data::ic::{
@@ -92,6 +96,31 @@ pub(super) struct Tracked {
     pub(super) accepted: bool,
     pub(super) closed: bool,
     pub(super) role: Role,
+    /// The latest change of this protection asked of IC and not yet seen
+    /// done, if any.
+    pub(super) want: Option<Want>,
+}
+
+/// A change of a protection (a bracket's leg, or a position's stop loss
+/// or take profit) asked of IC: until IC shows it done, each amendment of
+/// the other protection carries it, since an amendment sets both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Want {
+    /// Moved to this price.
+    Move(Price),
+    /// Removed: a cancel.
+    Remove,
+}
+
+impl Want {
+    /// Whether IC holding the protection at `price` (none: removed) shows
+    /// this change done.
+    fn done(self, price: Option<Price>) -> bool {
+        match self {
+            Self::Move(wanted) => price == Some(wanted),
+            Self::Remove => price.is_none(),
+        }
+    }
 }
 
 /// What a tracked order is to a bracket.
@@ -152,6 +181,7 @@ impl Dispatch {
                 accepted: order.venue_order_id().is_some(),
                 closed: order.is_closed(),
                 role,
+                want: None,
             },
         );
     }
@@ -170,15 +200,23 @@ impl Dispatch {
         self.orders.get(&id)
     }
 
-    /// The protections of the bracket `entry` as they stand, without
-    /// `except` (a leg being removed), `moved` (a leg and its new price)
-    /// applied: the stop loss and take profit an amendment carries.
-    pub(super) fn protection(
-        &self,
-        entry: ClientOrderId,
-        except: Option<ClientOrderId>,
-        moved: Option<(ClientOrderId, Price)>,
-    ) -> Protection {
+    /// Records `want`, the latest change asked of the protection `id`.
+    pub(super) fn want(&mut self, id: ClientOrderId, want: Want) {
+        if let Some(tracked) = self.orders.get_mut(&id) {
+            tracked.want = Some(want);
+        }
+    }
+
+    /// The latest change asked of the protection `id` and not yet seen
+    /// done.
+    pub(super) fn wanted(&self, id: ClientOrderId) -> Option<Want> {
+        self.orders.get(&id).and_then(|t| t.want)
+    }
+
+    /// The protections of the bracket `entry` as last asked: each open
+    /// leg's wanted change, else its price; the stop loss and take profit
+    /// an amendment carries.
+    pub(super) fn protection(&self, entry: ClientOrderId) -> Protection {
         let Some(Tracked {
             role:
                 Role::Entry {
@@ -192,16 +230,33 @@ impl Dispatch {
             return Protection::default();
         };
         let price = |leg: Option<ClientOrderId>, of: fn(&Tracked) -> Option<Price>| {
-            let id = leg.filter(|id| Some(*id) != except)?;
-            let tracked = self.orders.get(&id).filter(|t| !t.closed)?;
-            match moved {
-                Some((moved, price)) if moved == id => Some(price),
-                _ => of(tracked),
+            let tracked = self.orders.get(&leg?).filter(|t| !t.closed)?;
+            match tracked.want {
+                Some(Want::Move(price)) => Some(price),
+                Some(Want::Remove) => None,
+                None => of(tracked),
             }
         };
         Protection {
             stop_loss: price(*stop_loss, |t| t.trigger_price),
             take_profit: price(*take_profit, |t| t.price),
+        }
+    }
+
+    /// Forgets the changes of the protections of `position` that IC now
+    /// holds at `(stop loss, take profit)`.
+    fn settle(&mut self, position: i64, (stop_loss, take_profit): (Option<Price>, Option<Price>)) {
+        for tracked in self.orders.values_mut() {
+            let Some((of, leg)) = tracked.venue_order_id.and_then(parse_protection_id) else {
+                continue;
+            };
+            let held = match leg {
+                Leg::StopLoss => stop_loss,
+                Leg::TakeProfit => take_profit,
+            };
+            if of == position && tracked.want.is_some_and(|w| w.done(held)) {
+                tracked.want = None;
+            }
         }
     }
 
@@ -231,7 +286,9 @@ impl Dispatch {
     /// The outputs of the request `tag` refused for `reason`, or never
     /// sent: a new order or a close rejected (a bracket entry's legs with
     /// it), an amendment's modification rejected, a cancellation's cancel
-    /// rejected.
+    /// rejected (a removal of protections: the cancel of each protection of
+    /// the position being removed). The changes of protections it asked
+    /// are forgotten.
     pub(super) fn refuse(&mut self, tag: Tag, reason: &str, ts: UnixNanos) -> Vec<Output> {
         let id = tag.client_order_id();
         let Some(tracked) = self.orders.get(&id).filter(|t| !t.closed).cloned() else {
@@ -256,37 +313,81 @@ impl Dispatch {
                 }
                 out
             }
-            Tag::Amend(_) | Tag::Protect(_) => vec![Output::Event(OrderEventAny::ModifyRejected(
-                OrderModifyRejected::new(
-                    self.trader_id,
-                    tracked.identity.strategy_id,
-                    tracked.identity.instrument_id,
-                    id,
-                    reason,
-                    UUID4::new(),
-                    ts,
-                    ts,
-                    false,
-                    tracked.venue_order_id,
-                    Some(self.account_id),
-                ),
-            ))],
-            Tag::Cancel(_) | Tag::Unprotect(_) => vec![Output::Event(
-                OrderEventAny::CancelRejected(OrderCancelRejected::new(
-                    self.trader_id,
-                    tracked.identity.strategy_id,
-                    tracked.identity.instrument_id,
-                    id,
-                    reason,
-                    UUID4::new(),
-                    ts,
-                    ts,
-                    false,
-                    tracked.venue_order_id,
-                    Some(self.account_id),
-                )),
-            )],
+            Tag::Amend(_) | Tag::Protect(_) => {
+                if let Some(t) = self.orders.get_mut(&id) {
+                    t.want = None;
+                }
+                vec![Output::Event(OrderEventAny::ModifyRejected(
+                    OrderModifyRejected::new(
+                        self.trader_id,
+                        tracked.identity.strategy_id,
+                        tracked.identity.instrument_id,
+                        id,
+                        reason,
+                        UUID4::new(),
+                        ts,
+                        ts,
+                        false,
+                        tracked.venue_order_id,
+                        Some(self.account_id),
+                    ),
+                ))]
+            }
+            Tag::Cancel(_) => vec![self.cancel_rejected(id, &tracked, reason, ts)],
+            // One amendment removes every protection of a position being
+            // cancelled.
+            Tag::Unprotect(_) => {
+                let position_of = |t: &Tracked| {
+                    t.venue_order_id
+                        .and_then(parse_protection_id)
+                        .map(|(p, _)| p)
+                };
+                let position = position_of(&tracked);
+                let others: Vec<(ClientOrderId, Tracked)> = self
+                    .orders
+                    .iter()
+                    .filter(|(other, t)| {
+                        **other != id
+                            && !t.closed
+                            && t.want == Some(Want::Remove)
+                            && position.is_some()
+                            && position_of(t) == position
+                    })
+                    .map(|(other, t)| (*other, t.clone()))
+                    .collect();
+                let mut out = vec![self.cancel_rejected(id, &tracked, reason, ts)];
+                for (leg, leg_tracked) in others {
+                    out.push(self.cancel_rejected(leg, &leg_tracked, reason, ts));
+                }
+                out
+            }
         }
+    }
+
+    /// The rejection of the cancel of `id`, its wanted removal forgotten.
+    fn cancel_rejected(
+        &mut self,
+        id: ClientOrderId,
+        tracked: &Tracked,
+        reason: Ustr,
+        ts: UnixNanos,
+    ) -> Output {
+        if let Some(t) = self.orders.get_mut(&id) {
+            t.want = None;
+        }
+        Output::Event(OrderEventAny::CancelRejected(OrderCancelRejected::new(
+            self.trader_id,
+            tracked.identity.strategy_id,
+            tracked.identity.instrument_id,
+            id,
+            reason,
+            UUID4::new(),
+            ts,
+            ts,
+            false,
+            tracked.venue_order_id,
+            Some(self.account_id),
+        )))
     }
 
     /// The open tracked order `id`.
@@ -675,6 +776,11 @@ impl Dispatch {
                 .filter(|p| *p > 0.0)
                 .map(|p| reports::price(instrument, p))
                 .transpose()?;
+            if tracked.want.is_some_and(|w| w.done(now))
+                && let Some(t) = self.orders.get_mut(&id)
+            {
+                t.want = None;
+            }
             let held = match leg {
                 Leg::StopLoss => tracked.trigger_price,
                 Leg::TakeProfit => tracked.price,
@@ -839,14 +945,26 @@ impl Dispatch {
         let reports = self.reports(ts_init);
         let out = match event.execution_type() {
             ProtoOaExecutionType::OrderAccepted | ProtoOaExecutionType::OrderReplaced => {
-                match &event.position {
-                    Some(position) => reports
-                        .protections(position)?
-                        .into_iter()
-                        .map(|r| Output::Report(ExecutionReport::Order(Box::new(r))))
-                        .collect(),
-                    None => Vec::new(),
-                }
+                let Some(position) = &event.position else {
+                    return Ok(Vec::new());
+                };
+                let legs = reports.protections(position)?;
+                let held = |leg: Leg| {
+                    let venue = protection_id(position.position_id, leg);
+                    legs.iter()
+                        .find(|r| r.venue_order_id == venue)
+                        .and_then(|r| match leg {
+                            Leg::StopLoss => r.trigger_price,
+                            Leg::TakeProfit => r.price,
+                        })
+                };
+                let prices = (held(Leg::StopLoss), held(Leg::TakeProfit));
+                let out = legs
+                    .into_iter()
+                    .map(|r| Output::Report(ExecutionReport::Order(Box::new(r))))
+                    .collect();
+                self.settle(position.position_id, prices);
+                out
             }
             ProtoOaExecutionType::OrderFilled | ProtoOaExecutionType::OrderPartialFill => {
                 let Some(deal) = event.deal.as_ref().filter(|d| reports::fills(d)) else {
