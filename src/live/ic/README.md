@@ -115,8 +115,8 @@ of gold are two positions, each at its price; a sell does not reduce a
 long, it opens a short beside it. A strategy reduces a position by naming
 it: `close_position` (a market order on the closing side with the
 position's id), or any order with `position_id` set. The EMA crossover
-closes its position that way before it turns (`strategy/README.md`,
-"Position mode: the venue's").
+closes each trade's position that way at the end of its hold
+(`strategy/README.md`, "Orders and positions").
 
 ## Orders
 

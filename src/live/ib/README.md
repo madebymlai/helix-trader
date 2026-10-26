@@ -135,7 +135,9 @@ above, `account_id: Option<String>` (see "The account"), timeouts,
 `AccountType::Margin`; a strategy leaves its `oms_type` unset and nets.
 Nautilus' `bracket()` makes its exits reduce-only and the IB execution
 client denies reduce-only orders (`UNSUPPORTED_REDUCE_ONLY`), so a bracket
-is denied on IB.
+is denied on IB (`adapters/interactive_brokers/src/execution/core.rs`): the
+EMA crossover, which trades in brackets, cannot trade live on IB. Its
+backtests on IB data are unaffected.
 The exec `client_id` must not be a multiple of 1000: the adapter partitions
 order ids by `client_id % 1000` and rejects one. Since data and exec share the
 client id, `mod.rs` refuses it before any gateway starts.

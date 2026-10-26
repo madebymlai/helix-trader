@@ -40,9 +40,13 @@ fn x_perp_ema_cross() -> EmaCrossConfig {
     let config: EmaCrossConfig = toml::from_str(
         r#"
         instrument_ids = ["BTC-USD_UM_XPERP-310328.OKX"]
+        trade_instrument_id = "BTC-USD_UM_XPERP-310328.OKX"
         bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
         composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
         trade_size = "1"
+        stop_loss_bps = 100
+        take_profit_bps = 100
+        hold = "1h"
         warmup = "30m"
 
         [base]

@@ -17,7 +17,8 @@ Each strategy is one folder, and everything about it lives there:
 strategy/<name>/
   mod.rs        Nautilus wiring, kept thin
   config.rs     the config: every parameter of the strategy
-  book.rs       the pure core: from state to the target book
+  book.rs       the pure core: from bars to decisions (the EMA's signal.rs
+                and bracket.rs)
   ...           more pure modules as needed (features.rs, tree.rs, ...)
 ```
 
@@ -30,7 +31,7 @@ type or trait:
 
 ```
 strategy/
-  config.rs     BarsConfig: the bars traded, their warmup and session
+  config.rs     BarsConfig: the bars read, their warmup and session
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
 ```
@@ -43,7 +44,10 @@ positions"): there are no shared trading helpers.
 The strategy config is the universe: the single source of the instruments
 and the bar spec, which are config values, never constants in code. Nautilus
 has no universe type; `fill_catalog`, backtest and live get the instruments
-and the warmup from this config, through `main`, as Nautilus types.
+and the warmup from this config, through `main`, as Nautilus types. The
+instruments are those the strategy reads; which of them it trades is the
+strategy's own parameter (the EMA's `trade_instrument_id`), which nothing
+outside the strategy reads.
 
 It is a plain struct holding the Nautilus `StrategyConfig` (field `base`),
 the shared `strategy::BarsConfig` (field `bars`), and every parameter of the
@@ -160,8 +164,8 @@ A bar counts only if its whole span, `[ts_event - bar length, ts_event]`,
 lies inside `[open, close]` on the local day of its close, in the session's
 time zone, so daylight saving keeps the local hours. With hourly bars and
 09:00-17:30, the bars closing 10:00 to 17:00 count. Bars outside are
-ignored: they do not move the indicators, warmup included, and get no
-target, so no order. The pure core applies the rule on the bar's timestamp,
+ignored: they do not move the indicators, warmup included, and send no
+order. The pure core applies the rule on the bar's timestamp,
 never the clock, so backtest and live agree.
 
 The `session` line is optional, and without it every bar counts, the one
@@ -226,8 +230,8 @@ impl DataActor for Trend {
     }
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        // Ask the pure core for the target book, then submit the orders
-        // that move the current positions to it.
+        // Feed the bar to the pure core, then submit the orders it
+        // decides.
         Ok(())
     }
 }
@@ -253,8 +257,8 @@ impl DataActor for Trend {
 
 ### Orders and positions
 
-On each bar, compute the target for every instrument and rebalance the whole
-book towards it; no other strategy shares the account.
+A strategy places its orders on the factory of `self.order()` and submits
+them itself; no other strategy shares the account.
 
 ```rust
 let order = self.order().market(instrument_id, side, quantity,
@@ -268,6 +272,19 @@ self.submit_order(order, None, None, None)?;
   types are on the same `self.order()` factory.
 - `submit_order(order, position_id, client_id, params)`: all `Option` but
   the order.
+- A bracket is `self.order().bracket()`, a `bon` builder finished by
+  `.call()` (`OrderFactory::bracket`, `common/src/factories/order.rs`): a
+  market entry by default, its stop loss a stop market at
+  `sl_trigger_price`, its take profit a limit at `tp_price`, post-only by
+  default. It returns `[entry, stop loss, take profit]`: the entry `OTO`
+  with the two legs linked, the legs `OUO` and reduce-only. Submit them
+  together with `submit_order_list(orders, None, None, None)`.
+- `close_position(&position, ..)` sends a reduce-only market order on the
+  position's closing side naming its id; `cancel_orders(ids, None, None)`
+  cancels orders of one instrument in one command.
+- Time alerts: `self.clock().set_time_alert(name, at, None, None)` fires
+  `DataActor::on_time_event` at `at` (simulated time in a backtest); a
+  name used again replaces the alert, `cancel_timer(name)` drops it.
 - `self.portfolio().net_position(&instrument_id)` returns a signed
   `rust_decimal::Decimal`, zero when flat; `is_net_long`, `is_net_short`,
   `is_net_flat` take the same argument.
@@ -292,19 +309,54 @@ blended average, which differs from the cached per-trade positions, and
 Nautilus refuses the start. The backtest's venue keeps positions the same
 way (backtest README, "Venue").
 
-The EMA strategy decides on each bar's close and moves to its target
-position with market orders. A target on the other side of the position
-first closes the open position by its id (`close_position`), then a market
-order opens the target; a target on the same side gets the difference. So
-it reduces the same way on a netting venue and on a hedging one such as
-IC's, where an opposite order would open a second position beside the
-first: a crossing is two orders, the close and the opening, on both
-(`backtest_ema_hedging.rs`). Limit and stop orders backtest less faithfully:
-see `docs/ARCHITECTURE.md`, "Orders", and the backtest README, "Fills".
+#### The EMA crossover
+
+The example strategy (`ema/`) trades one instrument, `trade_instrument_id`,
+which must be one of `instrument_ids`; the others are read only: their bars
+are subscribed and warmed up like the traded one's, and the EMA ignores
+them, as a strategy reading a signal instrument would read them.
+
+- **Entry.** On each bar of the traded instrument inside the session, the
+  fast EMA above the slow one is long, otherwise short; a bar changing the
+  side is a cross (`signal.rs`), the first warm bar setting the side
+  without one. A cross sends one bracket in its direction: a market entry
+  of `trade_size`, its stop loss `stop_loss_bps` and its take profit
+  `take_profit_bps` from the decision bar's close (`bracket.rs`), rounded
+  to the instrument's prices.
+- **Exit.** The stop loss or the take profit, the venue cancelling the
+  other leg; or the hold: the entry's first fill sets a time alert `hold`
+  later, named after the entry, which cancels the trade's legs still open
+  and closes its position by id (`close_position`). A leg's fill cancels
+  the alert.
+- **Overlap.** Each cross is a new trade, whatever is open. On a hedging
+  venue (IC) each trade is a position of its own, closed by its own alert
+  (`backtest_ema_overlap.rs`). On a netting venue (IB, OKX) trades add into
+  the venue's one position: an opposite cross reduces or reverses it, and
+  a trade's time exit closes the whole position, the other trades' share
+  included. Nothing is done about it: the EMA is an example.
+- **IB.** Nautilus' brackets have reduce-only legs, which the IB execution
+  client denies (`live/ib/README.md`): the EMA cannot trade live on IB.
+  Backtests on IB data are unaffected.
+
+```toml
+instrument_ids = ["XAUUSD.ICMARKETS", "EURUSD.ICMARKETS"]
+trade_instrument_id = "XAUUSD.ICMARKETS"
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+fast_period = 10
+slow_period = 30
+trade_size = "1"
+stop_loss_bps = 50
+take_profit_bps = 100
+hold = "4h"
+warmup = "72h"
+```
+
+Limit and stop orders backtest less faithfully: see
+`docs/ARCHITECTURE.md`, "Orders", and the backtest README, "Fills".
 
 ## The pure core
 
-All decisions live in pure modules: features, models, the target book. They
+All decisions live in pure modules: features, models, signals. They
 take bars and state and return values, do no I/O and know no engine, so unit
 tests cover them without running Nautilus.
 
@@ -453,7 +505,9 @@ same code and nothing passes from backtest to live.
   file (one node per process). They test the warmup module too: the
   fixture's prices are chosen so that the warmup bars, the partial oldest
   bar, the bar at the run start and the session each change the orders and
-  the final balance. A recording strategy in `tests/common` checks what the
-  EMA cannot show: every price of the bars, stop orders, and positions on
-  a netting and on a hedging venue (`backtest_netting_venue.rs`,
-  `backtest_hedging_venue.rs`).
+  the final balance. The EMA's own tests run it on fixtures where each
+  cross, stop loss, take profit and hold is worked out by hand
+  (`backtest_ema_*.rs`, backtest README, "Tests"). A recording strategy in
+  `tests/common` checks what the EMA cannot show: every price of the bars,
+  orders of a given side and size, and positions on a netting and on a
+  hedging venue (`backtest_netting_venue.rs`, `backtest_hedging_venue.rs`).

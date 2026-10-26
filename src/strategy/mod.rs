@@ -7,13 +7,13 @@
 //! Each strategy is its own submodule and exposes only its constructor and
 //! config. Inside, `mod.rs` is the thin Nautilus wiring: a struct holding a
 //! `StrategyCore`, wired with `nautilus_strategy!`, implementing `DataActor`
-//! (`on_start`, `on_bar`) and placing orders with `submit_order`. `book.rs`
-//! is the pure core that turns bars into the target book, tested without an
-//! engine.
+//! (`on_start`, `on_bar`) and placing orders with Nautilus' own API. Pure
+//! modules beside it (the EMA's `signal.rs` and `bracket.rs`) turn bars
+//! into decisions, tested without an engine.
 //!
 //! What most strategies share is a config struct and functions, never a
 //! base type or trait: `BarsConfig`, embedded in each strategy config with
-//! `#[serde(flatten)]`, holds the bars traded, their warmup and their
+//! `#[serde(flatten)]`, holds the bars read, their warmup and their
 //! `Session`.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
@@ -40,8 +40,8 @@ use nautilus_model::{
 /// catalog, backtesting and going live all read it from here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
-    /// The internal bar types the strategy trades and warms up on: their
-    /// instruments are those traded (see `instrument_ids`), and the node
+    /// The internal bar types the strategy reads and warms up on: their
+    /// instruments are those it reads (see `instrument_ids`), and the node
     /// sizes its cache to hold their warmup (see `warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// How far back before the run the warmup history starts.
@@ -49,7 +49,7 @@ pub struct DataRequirements {
 }
 
 impl DataRequirements {
-    /// The instruments traded, whose history the catalog stores: those of
+    /// The instruments read, whose history the catalog stores: those of
     /// the bar types, each once, in the order of the bar types.
     #[must_use]
     pub fn instrument_ids(&self) -> Vec<InstrumentId> {

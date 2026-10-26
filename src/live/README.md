@@ -222,9 +222,8 @@ database, every trader's keys.
   and its open-order check resolves an order missing at the venue only in
   full-history mode (`open_check_open_only = false`), not in the default
   open-only mode (Concepts › Execution › Reconciliation, "Full-history
-  checks"). A strategy that waits for no order in flight on the instrument,
-  as the EMA does, then never trades it: reset the cache, or delete that
-  order's keys.
+  checks"). A strategy that waits for no order in flight on the instrument
+  then never trades it: reset the cache, or delete that order's keys.
 - **Empty cache** (a new trader). Reconciliation rebuilds from the
   executions IB reports, the current day's: the strategy's own orders come
   back by their order reference, others as external orders claimed by the

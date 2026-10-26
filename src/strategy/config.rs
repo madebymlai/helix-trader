@@ -9,14 +9,15 @@ use serde::Deserialize;
 
 use super::{DataRequirements, session::Session};
 
-/// The config every strategy shares: the bars it trades on, their warmup
+/// The config every strategy shares: the bars it reads, their warmup
 /// and their session. A strategy config embeds it with
 /// `#[serde(flatten)]`, so its fields sit at the top of the strategy's TOML,
 /// and the strategy config's `#[serde(deny_unknown_fields)]` rejects any key
 /// that neither takes.
 #[derive(Debug, Clone, Deserialize, bon::Builder)]
 pub struct BarsConfig {
-    /// The contracts traded and stored in the catalog.
+    /// The instruments whose bars the strategy reads, stored in the catalog;
+    /// which of them it trades is the strategy's own choice.
     pub instrument_ids: Vec<InstrumentId>,
     /// The bars, the same for every instrument: time bars Nautilus builds
     /// from the quotes, so priced BID, ASK or MID, or, with `composite`,
