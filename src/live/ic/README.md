@@ -56,8 +56,8 @@ fails the start naming the variable, never a value. The config carries the
 connection; `Debug` redacts the credential.
 
 Renewal is automatic: the access token (about 30 days) is renewed by
-every session, the start's fill and the node's data and execution clients
-alike, at start when due, a day before it expires while the node runs, and
+every session, the start's account check and the node's data and
+execution clients alike, at start when due, a day before it expires while the node runs, and
 when cTrader refuses or invalidates it, re-authenticating the account on
 the open connection. The latest pair lives in the token file
 (`~/.local/state/helix-trader/ic-token.json`, mode 0600), seeded once from
@@ -66,9 +66,13 @@ the open connection. The latest pair lives in the token file
 
 ## Refused before the node runs
 
-The start's catalog fill opens a cTrader session before the node is built,
-and checks the account there (`IcHistory::check_account`), so each of these
-fails `Live::run` with its reason, before any node or strategy:
+`ic::clients` refuses a bar type not built from the quotes of an IC
+instrument ("IC serves quotes only": a composite bar type, external bars,
+LAST bars), before anything connects. The start then opens a cTrader
+session of its own before the node is built, checks the account there
+(`IcClients::check_account`, on `IcHistory::check_account`) and closes it,
+so each of these fails `Live::run` with its reason, before any node or
+strategy:
 
 - a token pair cTrader no longer renews (revoked, or lost): `cTrader
   refused to renew the access token (CH_ACCESS_TOKEN_INVALID): generate a
@@ -287,7 +291,7 @@ Nautilus position ids either way.
 - **Bars**: built by Nautilus from the quotes (internal bar types such as
   `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`). `request_bars` and
   `subscribe_bars` of external bars are not served, so composite bar types
-  are refused at the start's fill ("IC serves quotes only").
+  are refused at the start (`ic::clients`, "IC serves quotes only").
 - **Reconnect**: the transport reconnects, the session authenticates again
   and subscribes again to every symbol subscribed.
 - **Heartbeat**: a `ProtoHeartbeatEvent` every 10 s.
@@ -324,10 +328,9 @@ session close, even with the market closed.
 
 `IcDataClient::request_quotes` answers with the quotes over `[start, end]`
 (`end` absent: now) from the tick history, merged as a fill merges them, the
-newest `limit` if one is given; a request without `start` is refused. With
-the catalog registered, the node asks the client only for what the catalog
-misses: `live` fills the catalog up to its start, so that is the few
-seconds since (`live/README.md`, "Start sequence").
+newest `limit` if one is given; a request without `start` is refused. The
+node registers no catalog, so the data engine passes the strategy's whole
+warmup request to the client (see "Warmup").
 
 While a request of an instrument is answered (four rate-limited tick
 requests, about a second), its live quotes are held, then sent after the
@@ -339,15 +342,24 @@ response, and the held quotes go out.
 
 ## Warmup
 
-The start fills the catalog with the IC instruments' quotes over `[now -
-warmup, now]` (`IcHistory::fill`, as `fill-catalog`). The strategy's warmup
-request is then served by the catalog, and the data engine asks the data
-client for the seconds since the fill. Unlike IB's (`live/README.md`, "Known
-limits"), those quotes are stamped with the tick's time and kept. The
-client sends no live quote of an instrument before the response to its
-quote request, which keeps the warmup panic of nautilus_trader#5393 away as
-long as the data engine asks the client for a part of the warmup, as it
-does when the catalog ends before the node starts.
+The strategy's warmup request (`strategy::warmup`) asks for the quotes of
+each IC instrument over `[now - warmup, now]`. The node registers no
+catalog (`live/README.md`, "Warmup and live bars on IB", for why), so the
+data engine passes it to the data client, which answers from cTrader's
+tick history, as `fill-catalog` fetches it (`IcHistory::quote_ticks`):
+both sides side by side, about 2 pages a second, 312 pages a side for a
+month of gold (`data/ic/README.md`, "Probe"), so a warmup of hours takes
+seconds and one of a month minutes.
+
+The hand-off has no gap and no duplicate. The request ends at `now`, the
+tick history up to it; the spot subscription, sent after the request,
+starts at the subscription, and its first spot carries both sides, so the
+quote at the hand-off is the current one. The client holds the
+instrument's live quotes from the request until its response is sent,
+then sends them without those at or before the response's last quote.
+The node never gets a live quote before the warmup response, which keeps
+the warmup panic of nautilus_trader#5393 (`live/README.md`, "Known
+limits") away from IC, however long the history takes.
 
 ## Known limits
 
@@ -375,8 +387,7 @@ does when the catalog ends before the node starts.
 - **IC with IB.** A strategy trading IC instruments with IB ones is
   refused at the start.
 - **Market closed over the whole warmup** (a weekend with a short warmup):
-  the start's fill fails, naming the series and the window, as
-  `fill-catalog` does.
+  the warmup response is empty and the strategy starts cold; nothing fails.
 - **The first spot** after a subscription is the last price, even with the
   market closed; when the warmup response already holds it, it is dropped.
 
@@ -384,7 +395,8 @@ does when the catalog ends before the node starts.
 
 - Unit tests in `mod.rs`: a missing or unknown `IC_ENVIRONMENT` and a missing
   credential variable refused before anything connects, an instrument of
-  another venue refused, the factories creating unconnected clients on
+  another venue and bars not built from quotes refused, the clients loading
+  the instruments of the bars, the factories creating unconnected clients on
   `ICMARKETS` (the execution client hedging, on `ICMARKETS-DEMO`), IC's
   execution client in the node's clients.
 - Against the mock cTrader peer of `data/ic/testing.rs`, on the responses
@@ -437,9 +449,14 @@ does when the catalog ends before the node starts.
 - End to end, `tests/ic_live_demo.rs`: `Live` on the demo's XAUUSD, a
   recording strategy getting its warmup, live quotes and the minute bars
   built from them, the node reconciling the account through IC's execution
-  client at start; no order. Passed again on 2026-10-26 (13:15-13:17 UTC,
-  155 s): account state 1,000,000.00 EUR, no margin; mass status empty,
-  reconciled; 29 warmup bars, 2 live bars. Skipped unless `NAUTILUS_IC_RUN=1` is set in
+  client at start; no order. With no catalog, it checks that the warmup
+  is one response of the data client starting within a minute of
+  `now - warmup`, and that the first live quote comes after its last.
+  Passed on 2026-10-26 (16:50-16:53 UTC, 155 s): the account checked
+  before the node was built; account state 999,997.27 EUR, no margin; mass
+  status empty, reconciled; the warmup answered in 0.87 s (3,472 quotes),
+  29 warmup bars, 3 live bars, the first the minute after the last warmup
+  bar (`data/ic/README.md`, "Tests"). Skipped unless `NAUTILUS_IC_RUN=1` is set in
   the shell:
 
   ```sh

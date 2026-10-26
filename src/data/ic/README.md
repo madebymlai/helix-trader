@@ -349,8 +349,8 @@ One connection, requests one after another, before the fill existed:
 ## Account
 
 `ProtoOATraderReq` answers with the account (`ProtoOATrader`); with the
-asset list, it is checked (`account.rs`), at the start's catalog fill and
-at the execution client's connect:
+asset list, it is checked (`account.rs`), at the start of `live`, before
+the node is built, and at the execution client's connect:
 
 - **Hedging only.** `accountType` must be `HEDGED`, IC's default: each
   cTrader position is one Nautilus position, its `positionId` the venue
@@ -509,15 +509,16 @@ deals of the reconciliation tests are synthetic.
 - `tests/ic_live_demo.rs`, on the demo (same gate, no order; the node
   reconciles the account through the execution client at start, its cache
   in Redis under trader `HELIXTEST-101`, deleted at the end): `Live` on
-  XAUUSD fills the catalog over a 30-minute warmup,
-  then a recording strategy gets its 1-minute MID bars warmed up from the
-  catalog and the data client, then live quotes (at the spot's
-  millisecond, sized 10,000, after the stored ones) and the bars built from
-  them, the first the minute after the last warmup bar, until SIGINT.
-  Passed on 2026-10-26 (12:35-12:38 UTC, about 150 s): 29 warmup bars, the
-  data client asked for the 2.3 s since the fill (5 quotes), 340 live
-  quotes and 3 live bars. Both demo files passed again on the subscriptions
-  tracked in `SubscriptionState` (2026-10-26: 3/3 in about 20 s; 29 warmup
-  bars, 364 live quotes, 3 live bars in about 156 s).
+  XAUUSD checks the account, then a recording strategy gets its 1-minute
+  MID bars warmed up over 30 minutes from IC's data client (no catalog),
+  then live quotes (at the spot's millisecond, sized 10,000, after the
+  warmup's last) and the bars built from them, the first the minute after
+  the last warmup bar, until SIGINT. Passed on 2026-10-26 (16:50-16:53
+  UTC, 155 s): the data client answered the request over
+  `[16:20:48.710, 16:50:48.710]` in 0.87 s, 3,472 quotes from 3,430 BID and
+  3,442 ASK ticks; the last warmup quote at 16:50:48.457, the first live
+  one at 16:50:48.808; 29 warmup bars, the last closing 16:50, 3 live bars
+  from 16:51, 281 live quotes. Earlier runs on a catalog filled at the
+  start (until 2026-10-26) passed with 29 warmup bars too.
 - `tests/backtest_ic_quotes.rs`: a backtest on IC gold quotes written
   through `fill_catalog`; see `../../backtest/README.md`, "IC on ticks".

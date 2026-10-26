@@ -589,7 +589,10 @@ async fn fill_quotes(
 
 /// The IC instrument whose quotes the series of `data_type` and
 /// `identifier` is; an error for any other series.
-fn quotes_of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<InstrumentId> {
+pub(crate) fn quotes_of(
+    data_type: &NautilusDataType,
+    identifier: &str,
+) -> anyhow::Result<InstrumentId> {
     ensure!(
         *data_type == NautilusDataType::QuoteTick,
         "IC serves quotes only, not the {data_type:?} of {identifier}"

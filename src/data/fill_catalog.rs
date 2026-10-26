@@ -705,8 +705,8 @@ mod tests {
 
     const MINUTE_NS: u64 = 60_000_000_000;
 
-    /// A source of one quote a minute, as IB's are made: the quotes of
-    /// `id` stamped 1 ns before each minute's close over `[from, to]`.
+    /// A source of one quote a minute: the quotes of `id` stamped 1 ns
+    /// before each minute's close over `[from, to]`.
     fn minute_quotes(id: InstrumentId, from: u64, to: u64) -> Vec<QuoteTick> {
         (from / MINUTE_NS + 1..=to / MINUTE_NS + 1)
             .map(|minute| quote_at(id, minute * MINUTE_NS - 1))

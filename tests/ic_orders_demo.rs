@@ -248,10 +248,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         rate_known: false,
         sent: false,
     };
-    let catalog = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
-        catalog: catalog.path().to_path_buf(),
         account: None,
         client_id: 1,
         leverage: Decimal::ONE,

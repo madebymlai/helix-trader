@@ -9,7 +9,7 @@
 //! Gated as Nautilus' IB examples (`node_exec_tester`, `node_data_tester`)
 //! are: each test returns at once, saying it was skipped, unless
 //! `NAUTILUS_IB_RUN=1` is set in the shell. None places an order (the live
-//! run's session holds no bar, so the strategy never trades), so none needs
+//! run's strategy is never warm, so it never trades), so none needs
 //! `NAUTILUS_IB_LIVE_ORDERS=1`. Run them with:
 //!
 //! ```sh
@@ -32,12 +32,15 @@ use std::{
 use helix_trader::{
     data::{IbAccount, IbHistory, fill_catalog},
     live::Live,
-    strategy::ema::{EmaCross, EmaCrossConfig},
+    strategy::{
+        catalog_series,
+        ema::{EmaCross, EmaCrossConfig},
+    },
 };
 use jiff::{Timestamp, ToSpan};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
-    data::NautilusDataType,
+    data::BarType,
     identifiers::{InstrumentId, TraderId},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -94,25 +97,30 @@ async fn history_starts_or_reuses_the_paper_gateway_and_a_second_connection_reus
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fill_catalog_stores_quotes_through_the_paper_gateway() {
-    if !opted_in("fill_catalog_stores_quotes_through_the_paper_gateway") {
+async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
+    if !opted_in("fill_catalog_stores_minute_bars_through_the_paper_gateway") {
         return;
     }
     let _gateway = GATEWAY.lock().await;
     load_env();
     let now = Timestamp::now();
-    // A day back, so the window holds Xetra quotes whenever the test runs
-    // on a trading day's evening or the next morning.
+    // A day back, so the window holds Xetra bars whenever the test runs on
+    // a trading day's evening or the next morning.
     let end = IbHistory::latest_end(now).unwrap();
     let start = end - 24.hours();
     let ib = IbHistory::connect(42, end, now).await.unwrap();
     let instruments = ib.instruments(&[sxr8()]).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    // IB's 1-minute TRADES bars, which the hour bars are built from.
+    let series = catalog_series(&[BarType::from(
+        "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+    )]);
+    assert_eq!(series.len(), 1);
     fill_catalog(
         &mut catalog,
         instruments,
-        &[(NautilusDataType::QuoteTick, sxr8().to_string())],
+        &series,
         start,
         end,
         async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
@@ -120,22 +128,24 @@ async fn fill_catalog_stores_quotes_through_the_paper_gateway() {
     .await
     .unwrap();
     assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 1);
-    let quotes = catalog
-        .quote_ticks(Some(vec![sxr8().to_string()]), None, None)
-        .unwrap();
-    println!("{} quotes of SXR8.IBIS over the last day", quotes.len());
+    for (_, bar_type) in series {
+        let bars = catalog
+            .bars(Some(vec![bar_type.clone()]), None, None)
+            .unwrap();
+        println!("{} bars of {bar_type} over the last day", bars.len());
+    }
 }
 
-/// The EMA crossover on SXR8.IBIS whose session, half an hour, holds no
-/// hour bar: it never trades.
+/// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars, warmed
+/// up over two hours: its slow EMA needs 30 bars, so it never trades.
 fn never_trading_ema_cross() -> EmaCrossConfig {
     let config: EmaCrossConfig = toml::from_str(
         r#"
         instrument_ids = ["SXR8.IBIS"]
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+        bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+        composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
         trade_size = "1"
         warmup = "2h"
-        session = { time_zone = "Europe/Berlin", open = "03:00", close = "03:30" }
         "#,
     )
     .unwrap();
@@ -143,7 +153,7 @@ fn never_trading_ema_cross() -> EmaCrossConfig {
     config
 }
 
-/// Long enough for the gateway, the catalog fill and the node to start.
+/// Long enough for the gateway and the node to start.
 const LIVE_RUN: Duration = Duration::from_secs(90);
 
 #[tokio::test(flavor = "multi_thread")]
@@ -161,12 +171,10 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
         account.to_string().starts_with('D'),
         "{account} is not a paper account"
     );
-    let catalog = tempfile::tempdir().unwrap();
     let config = never_trading_ema_cross();
     let requirements = config.bars.data_requirements();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-043"),
-        catalog: catalog.path().to_path_buf(),
         account: Some(account),
         client_id: 43,
         leverage: Decimal::ONE,

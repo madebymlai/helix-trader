@@ -47,9 +47,8 @@ enum Command {
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node with Interactive Brokers or IC
-    /// Markets (after filling the catalog up to now; IC's data only, no
-    /// orders yet) or OKX; stops on Ctrl-C.
+    /// Runs the strategy on a live node with Interactive Brokers, IC
+    /// Markets or OKX; stops on Ctrl-C.
     Live(LiveArgs),
 }
 
@@ -135,9 +134,6 @@ struct LiveArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The catalog directory, filled up to now at start.
-    #[arg(long, default_value = "catalog")]
-    catalog: PathBuf,
     /// The IB account traded, for example DU1234567 (paper); needed only
     /// for IB instruments.
     #[arg(long, env = "NAUTILUS_IB_ACCOUNT_ID")]
@@ -330,7 +326,6 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
-        catalog: args.catalog,
         account: args.account,
         client_id: args.client_id,
         leverage: args.leverage,
@@ -502,7 +497,6 @@ mod tests {
         let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
         assert_eq!(args.strategy, Strategy::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
-        assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.account, Some("DU1234567".parse().unwrap()));
         assert_eq!(args.client_id, 1);
         assert_eq!(args.leverage, Decimal::ONE);

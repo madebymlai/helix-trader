@@ -1,7 +1,7 @@
 //! Live node: builds and runs it.
 //!
-//! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since catalogs
-//! are a `LiveNodeConfig` field, with the data and execution clients of
+//! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since the
+//! engine configs are `LiveNodeConfig` fields, with the data and execution clients of
 //! each adapter the instruments need, each with its routing, and the cache
 //! persisted to Redis (`with_cache_database_factory`, see `redis`), adds
 //! the strategy (`add_strategy`), claims its instruments' external
@@ -10,7 +10,7 @@
 //! `node_exec_tester` example.
 //! Never names a broker.
 
-use std::{fmt::Debug, path::Path};
+use std::fmt::Debug;
 
 use anyhow::Context;
 use nautilus_common::{
@@ -26,7 +26,6 @@ use nautilus_live::{
     config::{LiveDataEngineConfig, LiveExecutionEngineConfig, LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
-use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::redis;
@@ -42,8 +41,8 @@ pub(super) struct Clients {
 }
 
 /// Builds the live node of `trader_id` on the clients of each adapter in
-/// `clients`, routed as each says, with the catalog at `catalog` serving historical requests,
-/// `cache` configuring the cache (sized for the warmup) and `data_engine`
+/// `clients`, routed as each says, with `cache` configuring the cache
+/// (sized for the warmup) and `data_engine`
 /// the data engine (see `warmup::live_data_engine_config`), adds
 /// `strategy` claiming the external orders of `instrument_ids`, and runs it
 /// until SIGINT or SIGTERM.
@@ -52,8 +51,9 @@ pub(super) struct Clients {
 /// `redis::start`), under `trader_id`'s keys: the node loads the orders,
 /// positions and accounts of its earlier runs at start, then reconciles
 /// them with the venues, and checks open orders and positions as it runs.
-/// With the catalog registered, the data engine answers a request from it
-/// and asks the data client only for the intervals it misses.
+/// No catalog is registered: the data clients answer the historical
+/// requests, and a subscription to external bars starts at the
+/// subscription, not where a catalog would end.
 ///
 /// # Errors
 ///
@@ -61,10 +61,8 @@ pub(super) struct Clients {
 /// (two clients claiming the same route included), fails to load its cache, the strategy cannot be
 /// added or claim its instruments, or the node fails to start, run or stop
 /// (orders still unresolved after the post-stop delay included).
-#[expect(clippy::too_many_arguments, reason = "the parts of one node")]
 pub(super) async fn run<S>(
     trader_id: TraderId,
-    catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
     data_engine: LiveDataEngineConfig,
@@ -75,7 +73,7 @@ pub(super) async fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let config = config(trader_id, catalog, logging, cache, data_engine)?;
+    let config = config(trader_id, logging, cache, data_engine);
     let cache_database = redis::start().await?;
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
@@ -119,28 +117,20 @@ where
 const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
-/// The config of the live node: `trader_id`, `logging`, `cache`, the
-/// catalog at `catalog`, `data_engine` and the execution engine's
-/// reconciliation and checks, after loading the cache from its database
-/// (`load_cache`, Nautilus' default), and its purges (`PURGE_INTERVAL_MINS`).
+/// The config of the live node: `trader_id`, `logging`, `cache`,
+/// `data_engine` and the execution engine's reconciliation and checks,
+/// after loading the cache from its database (`load_cache`, Nautilus'
+/// default), and its purges (`PURGE_INTERVAL_MINS`). No catalog.
 fn config(
     trader_id: TraderId,
-    catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
     data_engine: LiveDataEngineConfig,
-) -> anyhow::Result<LiveNodeConfig> {
-    // Absolute: the node's DataFusion reader finds no object store for a
-    // relative path ("file://catalog/...").
-    let catalog = std::path::absolute(catalog)?;
-    let catalog = catalog
-        .to_str()
-        .with_context(|| format!("catalog path {} is not UTF-8", catalog.display()))?;
-    Ok(LiveNodeConfig {
+) -> LiveNodeConfig {
+    LiveNodeConfig {
         environment: Environment::Live,
         trader_id,
         logging,
-        catalogs: vec![DataCatalogConfig::new(catalog.to_string(), None, None)],
         cache: Some(cache),
         data_engine,
         exec_engine: LiveExecutionEngineConfig {
@@ -156,26 +146,25 @@ fn config(
             ..Default::default()
         },
         ..Default::default()
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
-    #[test]
-    fn closed_orders_positions_and_account_events_are_purged_hourly_after_a_week() {
-        let config = config(
+    fn node_config() -> LiveNodeConfig {
+        config(
             TraderId::from("HELIX-001"),
-            &PathBuf::from("/data/catalog"),
             LoggerConfig::default(),
             CacheConfig::default(),
             LiveDataEngineConfig::default(),
         )
-        .unwrap();
-        let exec = config.exec_engine;
+    }
+
+    #[test]
+    fn closed_orders_positions_and_account_events_are_purged_hourly_after_a_week() {
+        let exec = node_config().exec_engine;
         let week = Some(7 * 24 * 60);
         assert_eq!(exec.purge_closed_orders_interval_mins, Some(60));
         assert_eq!(exec.purge_closed_orders_buffer_mins, week);
@@ -186,30 +175,10 @@ mod tests {
         assert!(!exec.purge_from_database);
     }
 
-    fn catalog_of(catalog: &Path) -> String {
-        let config = config(
-            TraderId::from("HELIX-001"),
-            catalog,
-            LoggerConfig::default(),
-            CacheConfig::default(),
-            LiveDataEngineConfig::default(),
-        )
-        .unwrap();
-        assert_eq!(config.catalogs.len(), 1);
-        config.catalogs[0].path().to_string()
-    }
-
+    /// A catalog would serve the warmup instead of the data clients, and
+    /// start the subscription to a source bar type at its end.
     #[test]
-    fn the_catalog_is_registered_for_warmup() {
-        assert_eq!(catalog_of(&PathBuf::from("/data/catalog")), "/data/catalog");
-    }
-
-    #[test]
-    fn a_relative_catalog_is_made_absolute() {
-        let absolute = std::env::current_dir().unwrap().join("catalog");
-        assert_eq!(
-            catalog_of(&PathBuf::from("catalog")),
-            absolute.to_str().unwrap()
-        );
+    fn no_catalog_is_registered() {
+        assert!(node_config().catalogs.is_empty());
     }
 }

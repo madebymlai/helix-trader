@@ -117,7 +117,22 @@ composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" 
 
 gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
 bars of OKX's 1-minute candles, any price type (the source's), warmed up on
-those candles (see "Warmup and training").
+those candles (see "Warmup and training"). On IB the bars are built the
+same way from IB's 1-minute TRADES bars:
+
+```toml
+instrument_ids = ["SXR8.IBIS"]
+bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
+composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
+```
+
+gives `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. Nautilus' risk
+engine prices a market order from the cached external LAST bar, so the
+strategy needs no quotes to trade. A bar type carries one price type, so
+LAST bars carry no spread: a strategy that needs it subscribes to the
+instrument's quotes itself. Instruments IB serves no TRADES bars for
+(IDEALPRO forex, CMDTY spot metals) are not supported
+(`data/ib/README.md`).
 
 `BarsConfig` states what the strategy needs from data as one
 `strategy::DataRequirements`: its bar types and its warmup, its instruments
@@ -158,7 +173,9 @@ and maintenance windows still yield no bar (see "Hours without quotes").
 
 A session is refused with `composite`: live composite bars are stamped 5 s
 after their close (see "Bars built from quotes"), so the session would drop
-their last bar live but not in a backtest.
+their last bar live but not in a backtest. Bars on IB are composite, so a
+strategy on IB has no session: hours without IB bars (nights, weekends,
+holidays) build no bar (see "Hours without quotes").
 
 ## Wiring
 
@@ -299,25 +316,27 @@ tests cover them without running Nautilus.
 
 ## Bars built from quotes
 
-Strategies trade on bars Nautilus builds from quotes: internally aggregated
-time bars priced `BID`, `ASK` or `MID`, such as
-`SXR8.IBIS-1-HOUR-MID-INTERNAL`. Subscribing to one makes the data engine
-aggregate the instrument's quotes into it, the replayed quotes in a backtest
-and the broker's quotes live, so the same bar definition runs in both.
+Strategies trade on bars Nautilus builds: internally aggregated time bars,
+from quotes (priced `BID`, `ASK` or `MID`, such as
+`SXR8.IBIS-1-HOUR-MID-INTERNAL`) or, for a composite bar type, from source
+bars (see "Composite bars"; the venues serve no quote history, so this is
+how IB and OKX bars are built). Subscribing to one makes the data engine
+aggregate the replayed data into it in a backtest and the broker's data
+live, so the same bar definition runs in both.
 
 - A bar closes at the end of its period and is stamped there (`ts_event`);
   it holds the quotes stamped in `(open, close]`.
 - Quote-built bars sum the quoted sizes, not traded volume: nothing reads
   it.
-- In a backtest the bars come from 1-minute quotes, so their high and low
-  can be slightly narrower than live bars built from every quote; opens and
-  closes match.
+- A composite bar of 1-minute source bars sees the market a minute at a
+  time, in a backtest as live: its high and low are those of the minutes.
 
 ### Hours without quotes
 
-An hour with no quote at all yields no bar. IB sends quotes all through the
-trading day, even for illiquid instruments, so an hour without any means the
-market is closed: a night, a weekend, a holiday. By default Nautilus would
+An hour with no quote at all, or no source bar, yields no bar. IB sends
+quotes, hence 1-minute bars, all through the trading day, even for illiquid
+instruments, so an hour without any means the market is closed: a night, a
+weekend, a holiday. By default Nautilus would
 still build a bar, flat at the last close (`time_bars_build_with_no_updates
 = true`), and since the session checks the time of day only, on a Saturday
 the strategy would trade on Friday's last quote. The backtest and the live
@@ -328,14 +347,16 @@ Warmup bars follow the same rule.
 ### Composite bars
 
 Bars of a composite bar type are built the same way from source bars instead
-of quotes (OKX's candles; backtest README, "OKX on candles"). Live, a venue
-sends a source bar only once it has closed: OKX's confirmed 1-minute candles
-arrived 0.3 to 1.5 s after their close on 2026-10-22. So the live node
-builds time bars 5 s after their close when the strategy has a composite bar
-type (`warmup::live_data_engine_config`, Nautilus'
-`time_bars_build_delay`); otherwise the last minute would land in the next
-bar. Such a live bar is stamped 5 s after its close, its backtest twin on
-the close. Bars built from quotes keep no delay.
+of quotes: OKX's candles (backtest README, "OKX on candles") and IB's
+1-minute bars. Live, a venue sends a source bar only once it has closed:
+OKX's confirmed 1-minute candles arrived 0.3 to 1.5 s after their close on
+2026-10-22, IB's keepUpToDate 1-minute bars 0.4 to 1.3 s after on
+2026-10-26 (`tests/ib_minute_bars.rs`). So the live node builds time bars
+5 s after their close when the strategy has a composite bar type
+(`warmup::live_data_engine_config`, Nautilus' `time_bars_build_delay`);
+otherwise the last minute would land in the next bar. Such a live bar is
+stamped 5 s after its close, its backtest twin on the close. Bars built
+from quotes keep no delay.
 
 ## Warmup and training
 
@@ -362,8 +383,11 @@ instrument, oldest first.
   are refused (nothing stores them to request). `request_bars` of an
   internal bar type does not build bars from quotes; only a request of
   their source with `bar_types` does.
-- **The params.** Each request runs from `now - warmup`, where `now` is
-  `self.clock().utc_now()`, the simulated time in backtest. It carries three
+- **The params.** Each request runs over `[now - warmup, now]`, where
+  `now` is `self.clock().utc_now()`, the simulated time in backtest. The
+  end is given so that the data engine trims a bar closing after `now`
+  from the response: IB answers an open-ended request with the minute in
+  progress, which the live stream then sends again. It carries three
   params: `bar_types`, the internal bar types to aggregate the response into
   (Nautilus' `request_bars` refuses a composite bar type and points to this
   param); `update_subscriptions = true`, so that the aggregator goes on with
@@ -396,9 +420,12 @@ instrument, oldest first.
   catalog and asks the data client only for the intervals the catalog
   lacks. In backtest the client answers nothing, so the catalog must be
   registered and cover the whole window, or no response comes (see the
-  backtest README). In live it can be a catalog, the adapter, or both (see
-  the live README). OKX's adapter serves its candles up to now; it serves no
-  quote history, so on OKX only composite bar types get a warmup.
+  backtest README). Live, no catalog is registered and the data client
+  answers (see the live README): OKX's adapter serves its candles up to
+  now, IB's its 1-minute bars up to now (`request_bars`), IC's its quotes
+  up to now from cTrader's tick history (`request_quotes`). Neither OKX nor
+  IB serves quote history, so on them only composite bar types get a
+  warmup; on IC only bar types built from quotes do.
 
 A model is trained by the strategy itself, retrained on a rolling window of
 the bars received in `on_bar`, every N bars as the config says. The model

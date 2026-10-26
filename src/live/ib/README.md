@@ -3,8 +3,9 @@
 `live/ib/mod.rs` builds the IB data and execution clients of the live node,
 from `nautilus_interactive_brokers::{config, factories}`, on the Docker
 gateway of the account's mode. The node, the start sequence and the routing
-between venues are in `live/README.md`; the IB history the catalog is filled
-from is in `data/ib/README.md`.
+between venues are in `live/README.md`, with how the warmup and the live
+bars come from IB's 1-minute bars ("Warmup and live bars on IB"); the IB
+history the catalog is filled from is in `data/ib/README.md`.
 
 ```rust
 InteractiveBrokersDataClientFactory::new()       // name() == "IB"
@@ -59,9 +60,9 @@ or `--port`: an IB Gateway or TWS run by hand is not used.
   the environment (or `.env`); they never enter our configs or logs.
   `DOCKER_HOST` points the adapter's Docker client (bollard) at a socket other
   than `/var/run/docker.sock`, such as the user's podman socket.
-- **History always on paper**: the catalog fill uses the paper container even
-  for a live account, so it never needs a live login. A paper `live` thus uses
-  one container for both.
+- **History always on paper**: `fill-catalog` uses the paper container, so
+  it never needs a live login. A paper `live` uses the same container; a
+  live node's warmup comes from its own data client, on the live gateway.
 - **`read_only_api: false`** on every container, overriding the adapter's
   default `true`, because the paper container `fill-catalog` starts also
   serves a paper `live`, whose orders a read-only API would block (see
@@ -101,10 +102,11 @@ venues.
 ### Data client config
 
 `InteractiveBrokersDataClientConfig` is the history's config
-(`data::data_client_config`) with `batch_quotes: false`: quotes are
-subscribed tick by tick (`reqTickByTickData` BID_ASK), so internal bars are
-built from every quote change. The adapter falls back to `reqMktData` where
-IB refuses, and always uses it for BAG spreads. Adapter defaults:
+(`data::data_client_config`), so the 1-minute bars the node requests and
+subscribes to are those `fill-catalog` stores, with `batch_quotes: false`:
+quotes a strategy subscribes to come tick by tick (`reqTickByTickData`
+BID_ASK). The adapter falls back to `reqMktData` where IB refuses, and
+always uses it for BAG spreads. Adapter defaults:
 
 | Field | Default |
 | --- | --- |
@@ -185,9 +187,14 @@ catalog must use the same symbology and venue; the venue rules (never
   (account forms and mode, the container config, the login wait on fake
   statuses).
 - End to end, `tests/ib_gateway.rs`, against the Docker paper container:
-  history starting or reusing it, `fill_catalog` through it, and `Live` on a
-  paper account, stopped by SIGINT, with a session that holds no bar so the
-  strategy never trades.
+  history starting or reusing it, `fill_catalog` of the 1-minute TRADES
+  bars through it, and `Live` on a paper account, stopped by SIGINT,
+  with an EMA crossover never warm enough to trade.
+- End to end, `tests/ib_minute_bars.rs`: a probe on `Live` warming up a
+  composite bar type from IB's `request_bars`, then getting the live minute
+  bars from `subscribe_bars`: no gap and no duplicate at the hand-off
+  (`live/README.md`, "Warmup and live bars on IB"), and how long after its
+  close each live minute arrives. No order; SXR8 must be quoted.
 - End to end, `tests/ib_restart.rs`, placing orders on the paper account:
   the node's cache in Redis across restarts, each node in a child process,
   1 or 2 EXS1 at a time, then IB read back flat (live README, "Cache in
@@ -201,5 +208,6 @@ comes from `NAUTILUS_IB_ACCOUNT_ID` and must be a paper one.
 
 ```sh
 NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
+NAUTILUS_IB_RUN=1 cargo test --test ib_minute_bars -- --nocapture
 NAUTILUS_IB_RUN=1 NAUTILUS_IB_LIVE_ORDERS=1 cargo test --test ib_restart -- --test-threads=1
 ```

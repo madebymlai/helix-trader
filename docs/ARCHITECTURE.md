@@ -17,9 +17,10 @@ Nautilus lacks.
   internally and rebalances itself. No allocator, no sleeves.
 - **Orders.** The EMA strategy decides on each bar's close and sends a
   market order to reach its target position. Other strategies may use limit
-  or stop orders; the backtest checks those against each 1-minute quote, so
-  a price touched and left within the same minute is missed, and simulating
-  them well needs tick quotes.
+  or stop orders; the backtest checks those against each 1-minute bar's
+  open, high, low and close (or each 1-minute quote), so the order of
+  prices within a minute is guessed, and simulating them well needs tick
+  quotes.
 - **One cadence.** A strategy runs on one bar cadence, which can be
   intraday.
 - **The strategy config is the universe.** Instruments and cadence live in

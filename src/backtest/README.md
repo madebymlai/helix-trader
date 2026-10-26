@@ -84,10 +84,10 @@ A relative catalog path is made absolute: with a relative one, the node's
 DataFusion reader finds no object store for `file://catalog/...`.
 
 The run replays the series the strategy's bars are built from
-(`strategy::catalog_series`, `data/README.md`): the quotes of their
-instruments, or the source bars of a composite bar type
-(`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
-`...-1-MINUTE-LAST-EXTERNAL`). The data engine builds the strategy's
+(`strategy::catalog_series`, `data/README.md`): the source bars of a
+composite bar type (`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
+`...-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars or OKX's candles), or the
+quotes of their instruments. The data engine builds the strategy's
 internal bars from them, and orders fill on them (see Fills). It also
 replays the funding of each instrument whose catalog stores funding
 (`Backtest::series`; see OKX on candles), and nothing else.
@@ -156,8 +156,10 @@ only logged, the run is skipped and `node.run()` returns `Ok` with no
 result; we set it `true` so the error is returned.
 
 **The engine start.** The engine starts 1 ns before `start`
-(`Backtest::engine_start`). It skips data before its start, and a minute's
-quote is stamped 1 ns before the minute's close: a run starting exactly on
+(`Backtest::engine_start`). It skips data before its start, and in a
+catalog of quotes (the test fixtures; `fill-catalog` stored IB's that way
+until 2026-10-26) a minute's quote is stamped 1 ns before the minute's
+close: a run starting exactly on
 a bar's close would otherwise skip the quote closing that bar and reject an
 order sent on the bar (`No market`). The strategy's clock, and so its
 warmup request, starts there too: the warmup covers `[start − 1 ns −
@@ -193,7 +195,7 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 | `default_leverage: Option<Decimal>` | `--leverage` (see Leverage) |
 | `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
-| `bar_execution` | Nautilus' default, `true`: only `EXTERNAL` bars drive fills, which are OKX's minute candles; an IB catalog holds none, so quotes alone move its book |
+| `bar_execution` | Nautilus' default, `true`: only `EXTERNAL` bars drive fills, which are IB's minute TRADES bars and OKX's minute candles |
 | `bar_adaptive_high_low_ordering` | Nautilus' default, `false`: a bar replays open, high, low, close (see Fills on candles) |
 
 The simulated venue keeps positions as the real one does, so that a
@@ -373,19 +375,37 @@ open), so a rate understates IB's fee on orders below EUR 6,000. Pick
 
 ### Fills
 
-An IB run fills on quotes. The instruments' `QuoteTick`s alone set the L1
-book: `bar_execution` is on, but the matching engine skips `INTERNAL`
-bars, and the catalog stores `EXTERNAL` bars only for a composite bar
-type, whose run fills on those bars instead (see Fills on candles). A
-market buy fills at the ask, a sell at the bid, of the last quote replayed
-before the order. The catalog holds a quote a minute stamped 1 ns before
-the minute's close (`data/ib/README.md`), so an order sent in `on_bar`
-fills in full, stamped at the bar's close, on the quote of the bar's last
-minute, the one that closed the bar. The fill model adds nothing on top of
-the quote, so the spread is the cost and there is no slippage constant to
-guess. Verified in Fills on quotes and by the integration tests.
+Orders fill on the `EXTERNAL` bars replayed (`bar_execution` on; the
+matching engine skips `INTERNAL` bars): IB's 1-minute TRADES bars and
+OKX's candles, both LAST, the same way (see Fills on candles). A composite
+hour bar is built after every minute bar closing at its close is replayed
+(the timer of a timestamp fires after its data), so an order sent in
+`on_bar` fills at the close of the hour's last minute, the trade price,
+with no spread: slightly optimistic, accepted while IB is not traded. The
+risk engine prices the market order from the cached LAST bar
+(`risk/src/engine/mod.rs`, `market_order_price`), live as in a backtest.
 
-Known limits:
+On IB the minute's volume limits the fill as on OKX's thin minutes: an
+order fills at most the close's share of the minute's volume at the close
+and the rest one tick worse (0.0001 on SXR8). Outside Xetra's continuous
+trading most TRADES bars have volume 0 (they carry the last trade price):
+such a minute sets only the last price, and an order on it fills against
+the book the last traded minute left. `backtest_ib_minute_bars.rs` and
+Verified on IB data.
+
+IB's BID, ASK and MID bars are not stored: they have volume 0, and the
+matching engine takes a bar quote of size zero for an empty side
+(`process_bar_quote_tick`), so every market order on them was rejected
+`No market` (Verified on IB data).
+
+A catalog of quotes (the test fixtures) fills as before: a market buy at
+the ask, a sell at the bid, of the last quote replayed before the order,
+the quote of the bar's last minute, stamped 1 ns before its close. The
+fill model adds nothing on top of the quote, so the spread is the cost and
+there is no slippage constant to guess. Verified in Fills on quotes and by
+the integration tests.
+
+Known limits of fills on quotes:
 
 - **Resting orders** (stop, limit) are checked once per quote, every
   minute, never against the bars: a stop fills on the first minute quote
@@ -420,8 +440,10 @@ unseeded; ours stays explicit, by the rule to seed all randomness (Rules).
 
 ### Fills on BID and ASK bars
 
-Probe, 2026-10-08: can the matching engine charge the real spread from
-IB's BID and ASK bars? A throwaway strategy bought on one decision bar and
+Probe, 2026-10-08 (on `0.65.0`; the engine's bar handling below is
+unchanged at the pinned commit): can the matching engine charge the real
+spread from IB's BID and ASK bars? A throwaway strategy bought on one
+decision bar and
 sold on a later one, six orders over 2026-09-01 to 09-03, over a scratch
 catalog of SXR8 1-HOUR LAST, BID, ASK and MID bars (`data/ib/README.md`).
 Answer: **not with IB's bars as stored**.
@@ -466,9 +488,14 @@ bar type only, every bar in order, whatever else was replayed. Fills on
 IB's bars would need LAST out of the replay, a volume on the BID and ASK
 bars, the strategy deciding on MID (or BID) bars added after them, and
 control of the tie order. Turning each BID and ASK pair into one quote
-tick works instead: Fills on quotes.
+tick worked instead (Fills on quotes), until 2026-10-26: the catalog now
+stores IB's TRADES bars and no quote is made from bars (see Fills).
 
 ### Fills on quotes
+
+This is how IB runs filled while `fill-catalog` made a quote a minute from
+IB's BID and ASK closes (until 2026-10-26); it still holds for a catalog
+of quotes.
 
 Probe, 2026-10-08 (a scratch crate on the `nautilus-*` crates, nothing
 kept): can orders fill on quotes while bars drive the strategy? Answer:
@@ -825,9 +852,9 @@ two inputs:
   stamped at or before it: the quote it filled on (see Fills).
 
 The spread rule is by data, not by venue: a fill of an instrument the run
-replayed no quote of has no spread (a run on OKX's candles prints `Spread:
-n/a (no quotes)`, with the cost per trade and the gross PnL on the
-commission alone); a fill of one with quotes and none before it is an
+replayed no quote of has no spread (a run on OKX's candles, or on IB's
+minute TRADES bars, prints `Spread: n/a (no quotes)`, with the cost per
+trade and the gross PnL on the commission alone); a fill of one with quotes and none before it is an
 error. An inverse instrument is refused: its value is not linear in the
 price.
 
@@ -845,6 +872,37 @@ that loss is not realized yet; the gross PnL adds it back anyway, so it is
 too high by the open position's size times half the spread.
 
 ## Verified on IB data
+
+The runs on internal MID bars further below filled on quotes
+`fill-catalog` made from IB's BID and ASK closes until 2026-10-26; a
+catalog filled since holds IB's 1-minute TRADES bars as they are.
+
+**IB's minute TRADES bars**, 2026-10-26: the catalog of SXR8.IBIS
+`1-MINUTE-LAST-EXTERNAL` bars filled from the paper gateway over
+2026-09-04 to 09-12 (5,524 bars, 2,659 of them with volume 0, nearly all
+outside Xetra's continuous trading), EMA 5/15 on
+`1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bars, `trade_size = 10`,
+`warmup = "48h"`, no session (refused with composite bars), 2026-09-07 to
+09-12, 3 EUR an order:
+
+```
+helix-trader fill-catalog ema --config sxr8.toml --catalog sxr8-cat \
+  --start 2026-09-04 --end 2026-09-12
+helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
+  --start 2026-09-07 --end 2026-09-12 --commission "3 EUR" --balance "10000 EUR"
+```
+
+It printed `Orders: 4`, `PnL (total): 24.200000`, commission 12.00, gross
+PnL 36.20, `Spread: n/a (no quotes)` and a final balance of `10024.20 EUR`.
+Every order filled at the close of the minute closing at its decision bar's
+close (714.32, 714.88, 713.68, 708.30). The flips of 20 met thin or empty
+minutes: on 09-08 12:00 (4 shares traded) and 09-11 07:00 (none) 1 share
+filled at the close and 19 one tick higher.
+
+The same window on IB's MID, BID and ASK minute bars instead (13,950 bars,
+every one with volume 0, 4,650 of each series, MID composite bars) sent 66
+orders, all rejected `No market for SXR8.IBIS`, and ended at
+`10000.00 EUR`.
 
 **LAST bars, bar execution.** Paper gateway, 2026-10-08, SXR8.IBIS
 1-HOUR-LAST, EMA 10/30 (the defaults), `trade_size = 5`, `warmup =
@@ -1052,6 +1110,12 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
     in one hour of the warmup and one of the replay): neither hour yields
     a bar; every other bar is as worked out from its hour's quotes.
+  - `backtest_ib_minute_bars.rs`: `fill_catalog` stores the one series
+    `catalog_series` lists for a composite
+    `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, minute bars stamped
+    at their close with a volume, as IB gives TRADES bars; the hour bars
+    have the prices of their minutes, and two market orders fill in full at
+    the close of the minute closing their decision bar (see Fills).
   - `backtest_composite_bars.rs`: `fill_catalog` stores the external
     minute bars a fake source returns for a composite
     `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, and a recorder

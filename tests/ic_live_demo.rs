@@ -1,8 +1,8 @@
-//! End to end on IC Markets' cTrader demo: `Live` on XAU/USD fills the
-//! catalog up to now, builds a node with IC's clients, and a recording
-//! strategy gets its minute bars warmed up from the catalog and the data
-//! client up to now, then live quotes and the bars Nautilus builds from
-//! them, until SIGINT. It needs the app's `IC_CLIENT_ID` and
+//! End to end on IC Markets' cTrader demo: `Live` on XAU/USD checks the
+//! account, builds a node with IC's clients and no catalog, and a
+//! recording strategy gets its minute bars warmed up from IC's data client
+//! up to now, then live quotes and the bars Nautilus builds from them,
+//! until SIGINT. It needs the app's `IC_CLIENT_ID` and
 //! `IC_CLIENT_SECRET`, the demo account's `IC_ACCESS_TOKEN`,
 //! `IC_REFRESH_TOKEN` (they seed the token file, which then holds the
 //! latest pair) and `IC_ACCOUNT_ID`, and `IC_ENVIRONMENT=demo`, from the environment or
@@ -31,11 +31,10 @@ use helix_trader::{
 use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};
 use nautilus_model::{
-    data::{Bar, BarType, NautilusDataType, QuoteTick},
+    data::{Bar, BarType, QuoteTick},
     identifiers::{InstrumentId, StrategyId, TraderId},
     types::Quantity,
 };
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
@@ -67,6 +66,7 @@ const XAUUSD: &str = "XAUUSD.ICMARKETS";
 /// What the recorder got, in order.
 #[derive(Debug, Default)]
 struct Record {
+    warmup_quotes: Vec<QuoteTick>,
     warmup: Vec<Bar>,
     bars: Vec<Bar>,
     quotes: Vec<QuoteTick>,
@@ -93,7 +93,9 @@ impl DataActor for Recorder {
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
         let bars = warmup::bars(self, quotes);
-        self.record.borrow_mut().warmup.extend(bars);
+        let mut record = self.record.borrow_mut();
+        record.warmup_quotes.extend_from_slice(quotes);
+        record.warmup.extend(bars);
         Ok(())
     }
 
@@ -108,7 +110,7 @@ impl DataActor for Recorder {
     }
 }
 
-/// Long enough for the fill, the node's start and two minute bars.
+/// Long enough for the node's start, the warmup and two minute bars.
 const LIVE_RUN: Duration = Duration::from_secs(150);
 
 #[tokio::test(flavor = "multi_thread")]
@@ -134,10 +136,9 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         warmup,
         record: Rc::clone(&record),
     };
-    let catalog = tempfile::tempdir().unwrap();
+    let started = jiff::Timestamp::now();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
-        catalog: catalog.path().to_path_buf(),
         account: None,
         client_id: 1,
         leverage: Decimal::ONE,
@@ -167,9 +168,18 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     // The node's records in Redis, under the test's trader.
     common::cache::delete_trader("HELIXTEST-101").await;
     let record = record.borrow();
-    let (warmup_bars, bars, quotes) = (&record.warmup, &record.bars, &record.quotes);
+    let (warmup_quotes, warmup_bars, bars, quotes) = (
+        &record.warmup_quotes,
+        &record.warmup,
+        &record.bars,
+        &record.quotes,
+    );
     println!(
-        "{} warmup bars, last {:?}\n{} live bars: {bars:?}\n{} live quotes, first {:?}, last {:?}",
+        "{} warmup quotes, first {:?}, last {:?}\n{} warmup bars, last {:?}\n\
+         {} live bars: {bars:?}\n{} live quotes, first {:?}, last {:?}",
+        warmup_quotes.len(),
+        warmup_quotes.first(),
+        warmup_quotes.last(),
         warmup_bars.len(),
         warmup_bars.last(),
         bars.len(),
@@ -177,18 +187,19 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         quotes.first(),
         quotes.last()
     );
-    // The fill stored the warmup's quotes.
-    let mut catalog = ParquetDataCatalog::new(catalog.path(), None, None, None, None);
-    let stored = catalog
-        .quote_ticks(Some(vec![XAUUSD.to_owned()]), None, None)
-        .unwrap();
-    assert!(!stored.is_empty(), "the start stored no quote");
+    // The whole warmup came from IC's data client, one response over
+    // `[now - warmup, now]`: no catalog is registered.
+    assert!(!warmup_quotes.is_empty(), "no warmup quote");
+    let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
+        - started.checked_sub(warmup).unwrap().as_nanosecond();
     assert!(
-        catalog
-            .get_intervals(&NautilusDataType::QuoteTick.into(), Some(XAUUSD))
-            .unwrap()
-            .len()
-            == 1
+        (0..120_000_000_000).contains(&from_window_start),
+        "the warmup starts {from_window_start} ns after the run's start - warmup"
+    );
+    assert!(
+        warmup_quotes
+            .windows(2)
+            .all(|w| w[0].ts_event <= w[1].ts_event)
     );
     // Warm, up to now: the first live bar is the minute after the last
     // warmup bar.
@@ -214,5 +225,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     assert!(quotes.iter().all(|q| q.ts_event.as_u64() % 1_000_000 == 0));
     assert!(quotes.windows(2).all(|w| w[0].ts_event <= w[1].ts_event));
     assert!(quotes.iter().all(|q| q.bid_size == Quantity::from(10_000)));
-    assert!(quotes[0].ts_event > stored.last().unwrap().ts_event);
+    // The hand-off: no live quote repeats the warmup's last.
+    assert!(quotes[0].ts_event > warmup_quotes.last().unwrap().ts_event);
 }
