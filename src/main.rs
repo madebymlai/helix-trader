@@ -550,8 +550,12 @@ mod tests {
             &path,
             r#"
             instrument_ids = []
+            trade_instrument_id = "ESM4.CME"
             bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
             trade_size = "1"
+            stop_loss_bps = 50
+            take_profit_bps = 50
+            hold = "1h"
             warmup = "720h"
             session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
             "#,

@@ -52,11 +52,12 @@ or negative one (`--commission="-3 EUR"`, `--commission-rate=-0.0005`)
 fails there. `--leverage` is a `Decimal`, 1 (no leverage) if not given;
 Nautilus refuses one that is not positive before the run.
 
-On the wave of the tests (EMA 5/15 on 1-HOUR-MID internal bars, 10
-shares, warmup 48h, Xetra's session, 3 EUR commission) it prints
-`Orders: 7` (an opening, then each of three crossings a close by id and
-an opening), `PnL (total): -255.000000` (the wave's -234.00 without
-commission, less 7 × 3 EUR) and a final balance of `9745.00 EUR`.
+On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
+1-HOUR-MID internal bars, 10 shares, stop loss and take profit 100 bps,
+held an hour, warmup 3h, Xetra's session, 3 EUR commission) it prints
+`Orders: 4` (the entry, its two legs, the close), `PnL (total):
+33.000000` (39.00 without commission, less 2 filled orders × 3 EUR) and a
+final balance of `10033.00 EUR` (`backtest_commission_per_order.rs`).
 
 ## The entry point
 
@@ -363,10 +364,10 @@ let fill = FillModelAny::Default(DefaultFillModel::new(1.0, 0.0, Some(FILL_SEED)
 The other variants are for options and outcome shares. A fixed fee matches
 IB Fixed pricing on Xetra below EUR 6,000 an order, where the EUR 3
 minimum always applies. Above it the fee understates IB's: a strategy that
-flips from short to long sends twice its trade size, so EMA with
-`trade_size = 5` on SXR8 (EUR 590-745) sends orders of EUR 5,900-7,300
-(see Verified on IB data), where a rate of 0.0005 (IB's 0.05%) matches
-instead. A rate has no minimum, and IB's EUR 3 an order cannot be
+flips from short to long sends twice its trade size, as the EMA did when it
+rebalanced, so with `trade_size = 5` on SXR8 (EUR 590-745) it sent orders
+of EUR 5,900-7,300 (see Verified on IB data), where a rate of 0.0005 (IB's
+0.05%) matches instead. A rate has no minimum, and IB's EUR 3 an order cannot be
 expressed on a `BacktestNode` until Nautilus adds one
 ([nautilus_trader#5398](https://github.com/nautechsystems/nautilus_trader/issues/5398),
 open), so a rate understates IB's fee on orders below EUR 6,000. Pick
@@ -707,7 +708,8 @@ already uses.
   (`bar_adaptive_high_low_ordering` off). The adaptive order visits the
   extreme nearer the open first; Nautilus calls it a heuristic with no
   general accuracy rate, and it only decides which of a stop and a target
-  inside one minute fills first, which the EMA's market orders never meet.
+  inside one minute fills first, as a bracket's stop loss and take profit
+  can.
 - **Fill model unchanged**: no slippage. LAST bars carry no bid or ask, so
   the run pays no spread and the report prints `Spread: n/a (no quotes)`.
   On BTC the book is one tick (0.1) wide nearly all the time: the
@@ -872,6 +874,11 @@ that loss is not realized yet; the gross PnL adds it back anyway, so it is
 too high by the open position's size times half the spread.
 
 ## Verified on IB data
+
+The runs below, and those on OKX data above, were made with the EMA as it
+was then: a rebalancer, long or short `trade_size` on every listed
+instrument, turning at each cross with no stop loss, take profit or hold.
+Their configs predate `trade_instrument_id` and the exits.
 
 The runs on internal MID bars further below filled on quotes
 `fill-catalog` made from IB's BID and ASK closes until 2026-10-26; a
@@ -1062,30 +1069,38 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
   ± 0.05 EUR, stamped 1 ns before each minute's close, written with
   `ParquetDataCatalog::write_to_parquet`). The strategy trades on
-  1-HOUR-MID internal bars. Two kinds of quotes:
-  - a wave over days, on which the EMA 5/15 crosses several times:
-    `backtest_ema_cross.rs` checks that its PnL is lower by `orders ×
-    commission` than in `backtest_ema_cross_free.rs`, and its final
-    balance; `backtest_max_drawdown.rs` that the result's `stats_returns`
-    hold `Max Drawdown`, the largest fall from a peak of the equity
-    compounded over its returns series; `backtest_ema_hedging.rs` that on
-    a hedging venue it sends the same 7 orders and makes the same PnL as
-    on the netting one, closing before it turns;
-  - steps, a level per hour chosen so that the shortest crossover (1/2)
-    trades at hours worked out by hand, and so that what is tested changes
-    the orders and the final balance: `backtest_warmup.rs` (a run off an
-    hour: warmup from the cache, the partial oldest bar dropped, the first
-    bar of the run traded, buys at the ask and sells at the bid of the
-    quote 1 ns before the bar's close), `backtest_start_on_close.rs` (the
-    same on a run starting exactly on an hour's close: the one-quote oldest
-    bar dropped, the bar at the start traded on its closing quote),
-    `backtest_session.rs` (bars outside the session neither move the EMAs
-    nor trade; overnight, without quotes, there are no bars),
+  1-HOUR-MID internal bars, the shortest crossover (1/2) on steps, a level
+  per hour chosen so that every cross, exit and fill is worked out by hand
+  (`common::trades`, three hours of warmup, the run from 12:30), and so
+  that what is tested changes the orders and the final balance:
+  - the EMA's trades: `backtest_ema_entries.rs` (one bracket per cross, in
+    its direction, none on a bar keeping the side), `backtest_ema_exits.rs`
+    (a long ended by its take profit, a short by its stop loss, each on
+    the first minute quote reaching it, the other leg cancelled),
+    `backtest_ema_time_exit.rs` (a trade closed its hold after the entry
+    filled, at the market then), `backtest_ema_overlap.rs` (on a hedging
+    venue a short opened beside a long still held, each closed by its own
+    alert), `backtest_ema_read_only_instrument.rs` (a second instrument
+    read, its bars crossing every hour, sends no order);
+  - the warmup: `backtest_warmup.rs` (a run off an hour: warmup from the
+    cache, the partial oldest bar dropped, the bar spanning the warmup end
+    traded, buys at the ask and sells at the bid of the quote 1 ns before
+    the bar's close), `backtest_start_on_close.rs` (the same on a run
+    starting exactly on an hour's close: the one-quote oldest bar dropped,
+    the bar at the start traded on its closing quote);
+  - the session: `backtest_session.rs` (bars outside the session neither
+    move the EMAs nor trade; overnight, without quotes, there are no bars),
     `backtest_without_session.rs` (without a session every bar counts, the
-    one spanning midnight included), `backtest_commission_rate.rs` (the
-    orders of a run without commission, each fill charged the rate on its
-    value, and the report's costs: the half spread of each fill, the gross
-    PnL).
+    one spanning midnight included);
+  - the costs: `backtest_commission_per_order.rs` (charged on each filled
+    order, not on the legs cancelled), `backtest_commission_rate.rs` (each
+    fill charged the rate on its value, and the report's costs: the half
+    spread of each fill, the gross PnL), `backtest_trade_size_off_grid.rs`
+    (10.5 shares trade as 10);
+  - a wave over days, on which the EMA 5/15 crosses several times:
+    `backtest_max_drawdown.rs` checks that the result's `stats_returns`
+    hold `Max Drawdown`, the largest fall from a peak of the equity
+    compounded over its returns series.
   - `backtest_coverage.rs`: a warmup longer than the stored quotes, or a
     catalog without quotes, is refused before the node is built, naming
     the instrument's quotes and the missing interval.
@@ -1093,7 +1108,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     end, is refused before the node is built.
 
   The EMA reads bar closes only, so the bars' opens, highs and lows, and
-  stops, are tested with a recording strategy (`tests/common/recorder.rs`)
+  orders of a chosen side and size, are tested with a recording strategy
+  (`tests/common/recorder.rs`)
   that warms up through `strategy::warmup` like a real one, records every
   bar it gets and can rest a sell stop or send market orders:
   - `backtest_bars.rs` and `backtest_bars_on_close.rs` (noise, a mid of

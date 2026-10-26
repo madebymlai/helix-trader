@@ -33,9 +33,13 @@ cargo build --release
 
 cat > ema.toml <<'EOF'
 instrument_ids = ["BTC-USDT-SWAP.OKX"]
+trade_instrument_id = "BTC-USDT-SWAP.OKX"
 bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
 composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
 trade_size = "0.01"
+stop_loss_bps = 100
+take_profit_bps = 200
+hold = "24h"
 warmup = "720h"
 EOF
 
