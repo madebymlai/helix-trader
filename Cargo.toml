@@ -37,6 +37,8 @@ prost = "0.14"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The fingerprint of the IC token pair that seeded the token file.
+sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "1"

@@ -2,10 +2,12 @@
 //! credential, both read from the environment (or `.env`) once.
 //!
 //! The app's client id and secret come from Spotware's Open API portal;
-//! the access token, and the account it grants, from the portal's
-//! playground (see `ic/README.md`, "Credentials"). The secret and
-//! the token are secret material, the client id and the account id
-//! credential identity: none of them appears in `Debug`, errors or logs.
+//! the first token pair (access and refresh token), and the account it
+//! grants, from the portal's playground (see `ic/README.md`,
+//! "Credentials"); the pair seeds the token file, which keeps the latest
+//! one (see `token`). The secret and the tokens are secret material, the
+//! client id and the account id credential identity: none of them appears
+//! in `Debug`, errors or logs.
 
 use std::fmt;
 
@@ -13,11 +15,14 @@ use anyhow::{Context, bail};
 use nautilus_core::string::secret::{REDACTED, SecretString};
 use nautilus_model::identifiers::AccountId;
 
+use super::token::{TokenPair, TokenStore};
+
 /// The variable naming the environment, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "IC_ENVIRONMENT";
 const CLIENT_ID_VAR: &str = "IC_CLIENT_ID";
 const CLIENT_SECRET_VAR: &str = "IC_CLIENT_SECRET";
 const ACCESS_TOKEN_VAR: &str = "IC_ACCESS_TOKEN";
+const REFRESH_TOKEN_VAR: &str = "IC_REFRESH_TOKEN";
 const ACCOUNT_ID_VAR: &str = "IC_ACCOUNT_ID";
 
 /// cTrader's demo or live servers, fully separate: an account
@@ -74,24 +79,27 @@ impl fmt::Debug for IcAccountId {
     }
 }
 
-/// The app's client id and secret, and the access token with the account
-/// it authenticates.
+/// The app's client id and secret, the account, and the token file with
+/// the pair that seeds it.
 #[derive(Debug, Clone)]
 pub(super) struct IcCredential {
     pub(super) client_id: SecretString,
     pub(super) client_secret: SecretString,
-    pub(super) access_token: SecretString,
     pub(super) account_id: IcAccountId,
+    pub(super) tokens: TokenStore,
 }
 
 impl IcCredential {
     /// The credential from `IC_CLIENT_ID`, `IC_CLIENT_SECRET`,
-    /// `IC_ACCESS_TOKEN` and `IC_ACCOUNT_ID`, through `var`.
+    /// `IC_ACCESS_TOKEN`, `IC_REFRESH_TOKEN` and `IC_ACCOUNT_ID`, its token
+    /// file under the user's state directory (`XDG_STATE_HOME` or `HOME`),
+    /// through `var`. Nothing is read from the token file yet.
     ///
     /// # Errors
     ///
-    /// Returns an error naming every variable missing or empty, or if the
-    /// account id is not an integer; never a value.
+    /// Returns an error naming every variable missing or empty, if the
+    /// account id is not an integer, or if there is no state directory;
+    /// never a value.
     pub(super) fn from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
         // Each value is read once, straight into a zeroizing owner.
         let read = |name| SecretString::from(var(name).unwrap_or_default());
@@ -99,6 +107,7 @@ impl IcCredential {
             (CLIENT_ID_VAR, read(CLIENT_ID_VAR)),
             (CLIENT_SECRET_VAR, read(CLIENT_SECRET_VAR)),
             (ACCESS_TOKEN_VAR, read(ACCESS_TOKEN_VAR)),
+            (REFRESH_TOKEN_VAR, read(REFRESH_TOKEN_VAR)),
             (ACCOUNT_ID_VAR, read(ACCOUNT_ID_VAR)),
         ];
         let missing: Vec<&str> = values
@@ -117,16 +126,22 @@ impl IcCredential {
             (_, client_id),
             (_, client_secret),
             (_, access_token),
+            (_, refresh_token),
             (_, account_id),
         ] = values;
         let account_id = account_id.expose_secret().parse().ok().with_context(|| {
             format!("{ACCOUNT_ID_VAR} must be an integer, the account's ctidTraderAccountId")
         })?;
+        let seed = TokenPair {
+            access_token,
+            refresh_token,
+            expires_at: None,
+        };
         Ok(Self {
             client_id,
             client_secret,
-            access_token,
             account_id: IcAccountId::new(account_id),
+            tokens: TokenStore::new(TokenStore::path_from_vars(&var)?, seed),
         })
     }
 }
@@ -140,8 +155,9 @@ pub struct IcConnection {
 
 impl IcConnection {
     /// The environment `IC_ENVIRONMENT` names and the credential from
-    /// `IC_CLIENT_ID`, `IC_CLIENT_SECRET`, `IC_ACCESS_TOKEN` and
-    /// `IC_ACCOUNT_ID`, from the environment (or `.env`, once read).
+    /// `IC_CLIENT_ID`, `IC_CLIENT_SECRET`, `IC_ACCESS_TOKEN`,
+    /// `IC_REFRESH_TOKEN` and `IC_ACCOUNT_ID`, from the environment (or
+    /// `.env`, once read).
     ///
     /// # Errors
     ///
@@ -192,11 +208,13 @@ mod tests {
         move |name| map.get(name).cloned()
     }
 
-    const FULL: [(&str, &str); 4] = [
+    const FULL: [(&str, &str); 6] = [
         ("IC_CLIENT_ID", "12345_clientIdValue"),
         ("IC_CLIENT_SECRET", "clientSecretValue"),
         ("IC_ACCESS_TOKEN", "accessTokenValue"),
+        ("IC_REFRESH_TOKEN", "refreshTokenValue"),
         ("IC_ACCOUNT_ID", "1000001"),
+        ("HOME", "/home/u"),
     ];
 
     #[test]
@@ -236,15 +254,33 @@ mod tests {
             credential.client_secret.expose_secret(),
             "clientSecretValue"
         );
-        assert_eq!(credential.access_token.expose_secret(), "accessTokenValue");
         assert_eq!(credential.account_id.get(), 1_000_001);
+        assert_eq!(
+            credential.tokens.path(),
+            std::path::Path::new("/home/u/.local/state/helix-trader/ic-token.json")
+        );
+    }
+
+    #[test]
+    fn the_env_pair_seeds_the_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().to_str().unwrap();
+        let mut pairs = FULL.to_vec();
+        pairs.push(("XDG_STATE_HOME", state));
+        let credential = IcCredential::from_vars(vars(&pairs)).unwrap();
+
+        let pair = credential.tokens.load().unwrap();
+
+        assert_eq!(pair.access_token.expose_secret(), "accessTokenValue");
+        assert_eq!(pair.refresh_token.expose_secret(), "refreshTokenValue");
+        assert!(credential.tokens.path().starts_with(dir.path()));
     }
 
     #[test]
     fn debug_shows_no_credential_value() {
         let debug = format!("{:?}", IcCredential::from_vars(vars(&FULL)).unwrap());
 
-        for (_, value) in FULL {
+        for (_, value) in FULL.iter().filter(|(name, _)| name.starts_with("IC_")) {
             assert!(!debug.contains(value), "{debug}");
         }
         assert!(debug.contains(REDACTED), "{debug}");
@@ -255,7 +291,9 @@ mod tests {
         let pairs = [
             ("IC_CLIENT_ID", "12345_clientIdValue"),
             ("IC_CLIENT_SECRET", ""),
+            ("IC_ACCESS_TOKEN", "accessTokenValue"),
             ("IC_ACCOUNT_ID", "1000001"),
+            ("HOME", "/home/u"),
         ];
 
         let err = IcCredential::from_vars(vars(&pairs))
@@ -263,7 +301,7 @@ mod tests {
             .to_string();
 
         assert!(
-            err.contains("set IC_CLIENT_SECRET, IC_ACCESS_TOKEN in .env"),
+            err.contains("set IC_CLIENT_SECRET, IC_REFRESH_TOKEN in .env"),
             "{err}"
         );
         assert!(
@@ -296,7 +334,7 @@ mod tests {
     #[test]
     fn an_account_id_not_an_integer_is_refused_without_its_value() {
         let mut pairs = FULL;
-        pairs[3] = ("IC_ACCOUNT_ID", "acct-77");
+        pairs[4] = ("IC_ACCOUNT_ID", "acct-77");
 
         let err = IcCredential::from_vars(vars(&pairs))
             .unwrap_err()

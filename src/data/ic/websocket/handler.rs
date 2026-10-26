@@ -3,12 +3,33 @@
 //! a `clientMsgId` and routes each response back to its caller. It keeps
 //! the spot subscriptions, sends them again on each new session, and
 //! passes spot events on.
+//!
+//! It renews the access token (see `token`): at start when the token is
+//! due (its expiry unknown or within `RENEW_BEFORE`), on schedule while
+//! the session runs, and when cTrader refuses the token at the account
+//! auth. The renewal goes under the token file's lock: the file first,
+//! since another session may have renewed the pair already (then the
+//! handler takes that pair), else `ProtoOARefreshTokenReq`. Its answer
+//! holds the only copy of the new pair, the old one spent: it is written
+//! to the file before anything else, whatever the session went through
+//! meanwhile (the answer is known by its `clientMsgId` or its payload
+//! type), and a disconnect waits for it, up to `AUTH_TIMEOUT`. Then the
+//! account is authenticated again on the open connection. When cTrader
+//! ends the account session (`ProtoOAAccountsTokenInvalidatedEvent` or
+//! `ProtoOAAccountDisconnectEvent`: the token was renewed, by this session
+//! or another, or expired), the account is authenticated again with the
+//! file's pair, renewed first if refused; during a renewal or an auth such
+//! an event is the old token's, and ignored. Meanwhile new requests wait;
+//! those in flight keep awaiting their response, and the spot
+//! subscriptions are sent again once ready.
 
 use std::{
     collections::{BTreeSet, HashMap},
     time::Duration,
 };
 
+use jiff::Timestamp;
+use nautilus_core::string::secret::SecretString;
 use nautilus_network::{
     Message, RECONNECTED,
     websocket::{AuthTracker, WebSocketClient},
@@ -22,13 +43,27 @@ use super::super::{
     config::IcCredential,
     messages::{
         IcError, Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
-        ProtoOaAccountAuthRes, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-        ProtoOaPayloadType, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
-        ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame, is_historical, open,
-        payload_name, secret_frame,
+        ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent, ProtoOaAccountsTokenInvalidatedEvent,
+        ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaClientDisconnectEvent,
+        ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+        ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame,
+        is_historical, open, payload_name, secret_frame,
     },
+    token::{TokenLock, TokenPair},
 };
-use super::HISTORICAL_KEY;
+use super::{AUTH_TIMEOUT, HISTORICAL_KEY};
+
+/// How often a renewal tries the token file's lock while another session
+/// holds it.
+const LOCK_RETRY: Duration = Duration::from_millis(100);
+
+/// cTrader's error codes of an access token it does not take.
+const TOKEN_REFUSED: [&str; 2] = ["CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"];
+
+/// Where to get a new pair once cTrader refuses to renew it.
+const PLAYGROUND: &str = "generate a new token pair in the Playground of the app on \
+                          openapi.ctrader.com and set IC_ACCESS_TOKEN and IC_REFRESH_TOKEN in \
+                          .env (see src/data/ic/README.md, \"Credentials\")";
 
 /// Where a response goes: the caller awaiting it.
 pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, IcError>>;
@@ -48,6 +83,9 @@ pub(super) enum HandlerCommand {
     SubscribeSpots(i64),
     /// No more spot events of a symbol.
     UnsubscribeSpots(i64),
+    /// Renews the access token now, as on schedule.
+    #[cfg(test)]
+    RenewToken,
     Disconnect,
 }
 
@@ -57,6 +95,11 @@ enum Session {
     Unconnected,
     /// The application auth request with this `clientMsgId` is out.
     ApplicationAuth(String),
+    /// A renewal waits for the token file's lock, which another session
+    /// holds.
+    TokenLock,
+    /// The renewal request is out (see `IcWsHandler::renewal`).
+    Renewal,
     /// The account auth request with this `clientMsgId` is out.
     AccountAuth(String),
     Ready,
@@ -76,6 +119,14 @@ enum Pending {
     },
 }
 
+/// A renewal request out, under the token file's lock.
+struct Renewal {
+    client_msg_id: String,
+    lock: TokenLock,
+    /// Until when its answer is awaited.
+    deadline: tokio::time::Instant,
+}
+
 /// A request waiting for the session to be ready.
 struct Queued {
     payload_type: u32,
@@ -86,6 +137,17 @@ struct Queued {
 pub(super) struct IcWsHandler {
     client: Option<WebSocketClient>,
     credential: IcCredential,
+    /// The token pair the account authenticates with.
+    tokens: TokenPair,
+    /// The renewal awaiting its answer: kept whatever happens to the
+    /// session, until answered, the connection replaced or closed.
+    renewal: Option<Renewal>,
+    /// Whether the session renewed the pair since it was last ready: a
+    /// token refused even then is not renewed again.
+    renewed: bool,
+    /// When to act without a message: renew on schedule (ready), try the
+    /// lock again, or give up on an unanswered renewal.
+    wake: Option<tokio::time::Instant>,
     auth: AuthTracker,
     cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: mpsc::UnboundedReceiver<Message>,
@@ -102,6 +164,7 @@ pub(super) struct IcWsHandler {
 impl IcWsHandler {
     pub(super) fn new(
         credential: IcCredential,
+        tokens: TokenPair,
         auth: AuthTracker,
         cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
         raw_rx: mpsc::UnboundedReceiver<Message>,
@@ -111,6 +174,10 @@ impl IcWsHandler {
         Self {
             client: None,
             credential,
+            tokens,
+            renewal: None,
+            renewed: false,
+            wake: None,
             auth,
             cmd_rx,
             raw_rx,
@@ -150,7 +217,16 @@ impl IcWsHandler {
                             self.send_spots(false, vec![symbol_id]).await;
                         }
                     }
-                    Some(HandlerCommand::Disconnect) | None => break,
+                    #[cfg(test)]
+                    Some(HandlerCommand::RenewToken) => {
+                        if matches!(self.session, Session::Ready) {
+                            self.renew().await;
+                        }
+                    }
+                    Some(HandlerCommand::Disconnect) | None => {
+                        self.finish_renewal().await;
+                        break;
+                    }
                 },
                 message = self.raw_rx.recv() => match message {
                     Some(message) => self.receive(message).await,
@@ -160,12 +236,38 @@ impl IcWsHandler {
                     }
                 },
                 _ = heartbeat.tick() => self.send_heartbeat().await,
+                () = sleep_until(self.wake), if self.wake.is_some() => {
+                    self.wake = None;
+                    self.woken().await;
+                }
             }
         }
         self.close().await;
     }
 
+    /// Before closing: a renewal out gets until its deadline for its
+    /// answer, which is saved.
+    async fn finish_renewal(&mut self) {
+        while let Some(deadline) = self.renewal.as_ref().map(|r| r.deadline) {
+            match tokio::time::timeout_at(deadline, self.raw_rx.recv()).await {
+                Ok(Some(message)) => self.receive(message).await,
+                Ok(None) | Err(_) => break,
+            }
+        }
+    }
+
+    /// Gives up the renewal out, if any: its answer can no longer come.
+    fn abandon_renewal(&mut self, why: &str) {
+        if self.renewal.take().is_some() {
+            log::error!(
+                "the cTrader access token renewal got no answer ({why}): its new pair is lost \
+                 if cTrader made it; if the next run is refused, {PLAYGROUND}"
+            );
+        }
+    }
+
     async fn close(&mut self) {
+        self.abandon_renewal("the connection closed");
         if let Some(client) = self.client.take() {
             client.disconnect().await;
         }
@@ -211,8 +313,11 @@ impl IcWsHandler {
     }
 
     /// Starts the session: application auth, then account auth on its
-    /// response (see `receive`).
+    /// response (see `receive`), the token renewed first if due.
     async fn authenticate(&mut self) {
+        // A new session: whatever the last one was renewing is over.
+        self.renewed = false;
+        self.wake = None;
         let id = self.next_id();
         let mut request = ProtoOaApplicationAuthReq {
             client_id: self.credential.client_id.expose_secret().to_owned(),
@@ -228,11 +333,140 @@ impl IcWsHandler {
         }
     }
 
+    /// The application is authenticated: the account next, with the
+    /// file's pair (another session may have renewed it), renewed first if
+    /// due.
+    async fn application_ready(&mut self) {
+        self.adopt_stored();
+        let due = self
+            .tokens
+            .renew_at()
+            .is_none_or(|at| at <= Timestamp::now());
+        if due {
+            self.renew().await;
+        } else {
+            self.authenticate_account().await;
+        }
+    }
+
+    /// Takes the file's pair if it is another than the session's, which
+    /// another session renewed; whether it did. The session keeps its
+    /// pair if the file cannot be read.
+    fn adopt_stored(&mut self) -> bool {
+        match self.credential.tokens.read() {
+            Ok(stored) if !stored.same_access_token(&self.tokens) => {
+                log::info!("cTrader token pair renewed by another session: taken from the file");
+                self.tokens = stored;
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                log::warn!("{e:#}: the session keeps its token pair");
+                false
+            }
+        }
+    }
+
+    /// Renews the access token under the token file's lock, or takes the
+    /// pair another session renewed meanwhile; while another session holds
+    /// the lock, tries again every `LOCK_RETRY`.
+    async fn renew(&mut self) {
+        let lock = match self.credential.tokens.try_lock() {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                self.session = Session::TokenLock;
+                self.wake = Some(tokio::time::Instant::now() + LOCK_RETRY);
+                return;
+            }
+            Err(e) => {
+                self.fail_session(format!("renewing the access token: {e:#}"));
+                return;
+            }
+        };
+        if self.adopt_stored() {
+            drop(lock);
+            self.authenticate_account().await;
+            return;
+        }
+        let id = self.next_id();
+        let mut request = ProtoOaRefreshTokenReq {
+            refresh_token: self.tokens.refresh_token.expose_secret().to_owned(),
+            ..Default::default()
+        };
+        let frame = secret_frame(&request, Some(id.clone()));
+        request.refresh_token.zeroize();
+        match self.send(frame, None).await {
+            Ok(()) => {
+                log::info!("renewing the cTrader access token");
+                let deadline = tokio::time::Instant::now() + AUTH_TIMEOUT;
+                self.session = Session::Renewal;
+                self.renewal = Some(Renewal {
+                    client_msg_id: id,
+                    lock,
+                    deadline,
+                });
+                self.wake = Some(deadline);
+            }
+            Err(e) => self.fail_session(format!("sending the token renewal: {e}")),
+        }
+    }
+
+    /// Whether `envelope` answers the renewal out: by its `clientMsgId`,
+    /// or, whatever its id, as the renewal's answer message.
+    fn answers_renewal(&self, envelope: &ProtoMessage) -> bool {
+        self.renewal.as_ref().is_some_and(|renewal| {
+            envelope.client_msg_id.as_deref() == Some(renewal.client_msg_id.as_str())
+                || envelope.payload_type == ProtoOaRefreshTokenRes::TYPE
+        })
+    }
+
+    /// cTrader's answer to the renewal out: the new pair, written to the
+    /// token file before anything else, then the account auth with it.
+    async fn renewal_answered(&mut self, envelope: &ProtoMessage) {
+        let Some(Renewal { lock, .. }) = self.renewal.take() else {
+            return;
+        };
+        let mut renewed = match open::<ProtoOaRefreshTokenRes>(envelope) {
+            Ok(renewed) => renewed,
+            Err(e) => {
+                drop(lock);
+                self.fail_session(renewal_failure(&e));
+                return;
+            }
+        };
+        let tokens = TokenPair::renewed(
+            SecretString::from(std::mem::take(&mut renewed.access_token)),
+            SecretString::from(std::mem::take(&mut renewed.refresh_token)),
+            renewed.expires_in,
+            Timestamp::now(),
+        );
+        match lock.save(&tokens) {
+            Ok(()) => log::info!(
+                "cTrader access token renewed, valid until {}; saved to {}",
+                tokens
+                    .expires_at
+                    .map_or_else(String::new, |t| t.to_string()),
+                self.credential.tokens.path().display()
+            ),
+            // The old pair is spent: this session goes on with the new one,
+            // which no later run will find.
+            Err(e) => log::error!(
+                "cTrader access token renewed but not saved ({e:#}): this session goes on \
+                 with it; once it ends, {PLAYGROUND}"
+            ),
+        }
+        drop(lock);
+        self.tokens = tokens;
+        self.renewed = true;
+        self.authenticate_account().await;
+    }
+
     async fn authenticate_account(&mut self) {
+        self.wake = None;
         let id = self.next_id();
         let mut request = ProtoOaAccountAuthReq {
             ctid_trader_account_id: self.credential.account_id.get(),
-            access_token: self.credential.access_token.expose_secret().to_owned(),
+            access_token: self.tokens.access_token.expose_secret().to_owned(),
             ..Default::default()
         };
         let frame = secret_frame(&request, Some(id.clone()));
@@ -243,9 +477,32 @@ impl IcWsHandler {
         }
     }
 
+    /// Acts on the time `wake` set.
+    async fn woken(&mut self) {
+        match self.session {
+            Session::Ready | Session::TokenLock => self.renew().await,
+            // The renewal stays out: a late answer is still saved.
+            Session::Renewal => self.fail_session(format!(
+                "cTrader did not answer the access token renewal within {AUTH_TIMEOUT:?}: if \
+                 the next run is refused, {PLAYGROUND}"
+            )),
+            Session::Unconnected
+            | Session::ApplicationAuth(_)
+            | Session::AccountAuth(_)
+            | Session::Failed(_) => {}
+        }
+    }
+
     async fn ready(&mut self) {
         log::info!("cTrader session authenticated");
         self.session = Session::Ready;
+        self.renewed = false;
+        self.wake = self.tokens.renew_at().map(|at| {
+            let wait = at
+                .duration_since(Timestamp::now())
+                .max(jiff::SignedDuration::ZERO);
+            tokio::time::Instant::now() + wait.unsigned_abs()
+        });
         self.auth.succeed();
         // A new session holds no subscription: send them all again.
         if !self.spots.is_empty() {
@@ -266,6 +523,7 @@ impl IcWsHandler {
         for queued in self.queued.drain(..) {
             let _ = queued.reply.send(Err(IcError::Session(reason.clone())));
         }
+        self.wake = None;
         self.session = Session::Failed(reason);
     }
 
@@ -320,7 +578,11 @@ impl IcWsHandler {
             Session::Failed(reason) => {
                 let _ = request.reply.send(Err(IcError::Session(reason.clone())));
             }
-            Session::Unconnected | Session::ApplicationAuth(_) | Session::AccountAuth(_) => {
+            Session::Unconnected
+            | Session::ApplicationAuth(_)
+            | Session::TokenLock
+            | Session::Renewal
+            | Session::AccountAuth(_) => {
                 self.queued.push(request);
             }
         }
@@ -372,6 +634,7 @@ impl IcWsHandler {
     /// before serving the requests that wait.
     async fn reconnected(&mut self) {
         log::warn!("cTrader reconnected: authenticating again");
+        self.abandon_renewal("the connection was replaced");
         self.fail_pending(&IcError::ConnectionLost);
         drop(self.auth.begin());
         self.authenticate().await;
@@ -381,11 +644,15 @@ impl IcWsHandler {
         if envelope.payload_type == ProtoHeartbeatEvent::TYPE {
             return;
         }
+        if self.answers_renewal(&envelope) {
+            self.renewal_answered(&envelope).await;
+            return;
+        }
         let id = envelope.client_msg_id.as_deref();
         match &self.session {
             Session::ApplicationAuth(auth_id) if id == Some(auth_id.as_str()) => {
                 match open::<ProtoOaApplicationAuthRes>(&envelope) {
-                    Ok(_) => self.authenticate_account().await,
+                    Ok(_) => self.application_ready().await,
                     Err(e) => self.fail_session(auth_failure("application", &e)),
                 }
                 return;
@@ -398,6 +665,10 @@ impl IcWsHandler {
                     Ok(_) => self.fail_session(
                         "cTrader authenticated another account than IC_ACCOUNT_ID".to_owned(),
                     ),
+                    Err(e) if is_token_refused(&e) && !self.renewed => {
+                        log::warn!("cTrader refused the access token: renewing it");
+                        self.renew().await;
+                    }
                     Err(e) => self.fail_session(auth_failure("account", &e)),
                 }
                 return;
@@ -412,17 +683,36 @@ impl IcWsHandler {
                 subscribe,
                 symbol_ids,
             }) => log_spots(subscribe, &symbol_ids, &envelope),
-            None => self.event(&envelope),
+            None => self.event(&envelope).await,
         }
     }
 
+    /// cTrader ended the account session (`name`), its token renewed or
+    /// expired: the account authenticates again, with the file's pair
+    /// (renewed if refused). During a renewal or an auth the event is the
+    /// old token's, already replaced.
+    async fn account_ended(&mut self, name: &str) {
+        if !matches!(self.session, Session::Ready) {
+            log::info!("cTrader ended the previous account session ({name})");
+            return;
+        }
+        log::warn!("cTrader ended the account session ({name}): authenticating it again");
+        self.adopt_stored();
+        self.authenticate_account().await;
+    }
+
     /// A message no request awaits: an event, or a late response.
-    fn event(&mut self, envelope: &ProtoMessage) {
-        let ended = [
-            ProtoOaPayloadType::ProtoOaAccountsTokenInvalidatedEvent,
-            ProtoOaPayloadType::ProtoOaAccountDisconnectEvent,
-            ProtoOaPayloadType::ProtoOaClientDisconnectEvent,
-        ];
+    async fn event(&mut self, envelope: &ProtoMessage) {
+        if [
+            ProtoOaAccountsTokenInvalidatedEvent::TYPE,
+            ProtoOaAccountDisconnectEvent::TYPE,
+        ]
+        .contains(&envelope.payload_type)
+        {
+            self.account_ended(&payload_name(envelope.payload_type))
+                .await;
+            return;
+        }
         if envelope.payload_type == ProtoOaSpotEvent::TYPE {
             let payload = envelope.payload.as_deref().unwrap_or_default();
             match ProtoOaSpotEvent::decode(payload) {
@@ -435,11 +725,34 @@ impl IcWsHandler {
             return;
         }
         let name = payload_name(envelope.payload_type);
-        if ended.iter().any(|t| *t as u32 == envelope.payload_type) {
+        if envelope.payload_type == ProtoOaClientDisconnectEvent::TYPE {
             self.fail_session(format!("cTrader ended the session ({name})"));
         } else {
             log::debug!("cTrader {name} not awaited");
         }
+    }
+}
+
+/// Waits until `at`, or forever without one.
+async fn sleep_until(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Whether `error` is cTrader refusing the access token.
+fn is_token_refused(error: &IcError) -> bool {
+    matches!(error, IcError::Venue { code, .. } if TOKEN_REFUSED.contains(&code.as_str()))
+}
+
+/// The error of a refused renewal: the code only, as for an auth.
+fn renewal_failure(error: &IcError) -> String {
+    match error {
+        IcError::Venue { code, .. } => {
+            format!("cTrader refused to renew the access token ({code}): {PLAYGROUND}")
+        }
+        other => format!("renewing the access token: {other}"),
     }
 }
 
@@ -474,7 +787,10 @@ fn auth_failure(stage: &str, error: &IcError) -> String {
             "check IC_CLIENT_ID and IC_CLIENT_SECRET"
         }
         "CH_ACCESS_TOKEN_INVALID" | "OA_AUTH_TOKEN_EXPIRED" => {
-            "the access token is invalid or expired: renew IC_ACCESS_TOKEN"
+            return format!(
+                "cTrader refused the {stage} authentication ({code}) even with a renewed \
+                 access token: {PLAYGROUND}"
+            );
         }
         "CH_CTID_TRADER_ACCOUNT_NOT_FOUND" | "ACCOUNT_NOT_AUTHORIZED" | "RET_NO_SUCH_LOGIN" => {
             "check IC_ACCOUNT_ID, and IC_ENVIRONMENT: an account authenticates only on its own \

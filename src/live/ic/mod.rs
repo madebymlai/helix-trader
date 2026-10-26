@@ -212,11 +212,13 @@ mod tests {
         move |name| map.get(name).cloned()
     }
 
-    const CREDENTIAL: [(&str, &str); 4] = [
+    const CREDENTIAL: [(&str, &str); 6] = [
         ("IC_CLIENT_ID", "12345_clientIdValue"),
         ("IC_CLIENT_SECRET", "clientSecretValue"),
         ("IC_ACCESS_TOKEN", "accessTokenValue"),
+        ("IC_REFRESH_TOKEN", "refreshTokenValue"),
         ("IC_ACCOUNT_ID", "1000001"),
+        ("HOME", "/home/u"),
     ];
 
     fn demo() -> Vec<(&'static str, &'static str)> {

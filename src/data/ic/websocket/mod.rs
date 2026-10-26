@@ -56,8 +56,9 @@ const HISTORICAL_KEY: &str = "historical";
 /// One historical request per this period: cTrader allows 5 a second.
 const HISTORICAL_PERIOD: Duration = Duration::from_millis(250);
 
-/// How long `disconnect` waits for the handler to close the transport.
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `disconnect` waits for the handler to close the transport:
+/// the answer of a token renewal out first, up to `AUTH_TIMEOUT`.
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// The spot events of the symbols subscribed, as cTrader sends them.
 pub(super) type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
@@ -71,19 +72,26 @@ pub(super) struct IcWebSocketClient {
 
 impl IcWebSocketClient {
     /// Connects to `url`, then authenticates the application and the
-    /// account of `credential`, sending the heartbeat every `heartbeat`;
-    /// with the spot events of the symbols `subscribe_spots` subscribes.
+    /// account of `credential` with the token file's pair (seeded from
+    /// `.env` the first time, renewed first if due), sending the heartbeat
+    /// every `heartbeat`; with the spot events of the symbols
+    /// `subscribe_spots` subscribes.
     ///
     /// # Errors
     ///
-    /// Returns an error if the connection fails, or cTrader refuses an
-    /// authentication (naming its error code and what to check, never a
-    /// credential) or does not answer within `AUTH_TIMEOUT`.
+    /// Returns an error if the token file cannot be read or written, the
+    /// connection fails, or cTrader refuses an authentication or the
+    /// renewal (naming its error code and what to do, never a credential)
+    /// or does not answer within `AUTH_TIMEOUT`.
     pub(super) async fn connect(
         url: &str,
         credential: IcCredential,
         heartbeat: Duration,
     ) -> anyhow::Result<(Self, SpotEvents)> {
+        let store = credential.tokens.clone();
+        let tokens = tokio::task::spawn_blocking(move || store.load())
+            .await
+            .context("loading IC's token file")??;
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Message>();
         let message_handler: MessageHandler = Arc::new(move |message| {
             // The receiver is gone only once the handler has stopped.
@@ -111,8 +119,15 @@ impl IcWebSocketClient {
             .ok()
             .context("the cTrader handler is gone")?;
         let (spot_tx, spot_rx) = mpsc::unbounded_channel();
-        let handler =
-            IcWsHandler::new(credential, auth.clone(), cmd_rx, raw_rx, spot_tx, heartbeat);
+        let handler = IcWsHandler::new(
+            credential,
+            tokens,
+            auth.clone(),
+            cmd_rx,
+            raw_rx,
+            spot_tx,
+            heartbeat,
+        );
         let connected = Self {
             cmd_tx,
             handler: tokio::spawn(handler.run()),
@@ -181,7 +196,16 @@ impl IcWebSocketClient {
             .map_err(|_| IcError::ConnectionLost)
     }
 
-    /// Closes the connection; requests still waiting fail.
+    /// Renews the access token now, as on schedule, if the session is
+    /// ready.
+    #[cfg(test)]
+    pub(super) fn renew_token(&self) {
+        let _ = self.cmd_tx.send(HandlerCommand::RenewToken);
+    }
+
+    /// Closes the connection, once a token renewal out is answered (and
+    /// its pair saved) or `AUTH_TIMEOUT` passed; requests still waiting
+    /// fail.
     pub(super) async fn disconnect(self) {
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
         let mut handler = self.handler;
@@ -199,22 +223,27 @@ impl IcWebSocketClient {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use jiff::Timestamp;
     use prost::Message as _;
 
     use super::*;
     use crate::data::ic::{
         messages::{
             ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
-            ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaErrorRes,
-            ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaSpotEvent,
+            ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq, ProtoOaClientDisconnectEvent,
+            ProtoOaErrorRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType,
+            ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent,
             ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol,
             ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaUnsubscribeSpotsReq,
             ProtoOaUnsubscribeSpotsRes,
         },
         testing::{
-            self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED, Action,
-            Received, SYMBOL_BY_ID_UNKNOWN, accept_auth, credential, replay, reply,
+            self, ACCESS_TOKEN, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED,
+            Action, EXPIRES_IN, REFRESH_TOKEN, Received, SYMBOL_BY_ID_UNKNOWN, SharedVenue,
+            TokenVenue, accept_auth, credential_expiring, renewed_access, replay, reply,
+            token_peer,
         },
+        token::{RENEW_BEFORE, TokenStore},
     };
 
     const SLOW_HEARTBEAT: Duration = Duration::from_secs(3600);
@@ -271,7 +300,8 @@ mod tests {
     async fn the_session_authenticates_the_application_then_the_account() {
         let (url, received) = testing::start(symbols_peer);
 
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         let frames = received.lock().unwrap().clone();
         assert_eq!(frames.len(), 2, "{frames:?}");
@@ -288,7 +318,8 @@ mod tests {
     #[tokio::test]
     async fn the_heartbeat_is_a_binary_heartbeat_event() {
         let (url, received) = testing::start(symbols_peer);
-        let client = connect(&url, credential(), Duration::from_millis(50))
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, Duration::from_millis(50))
             .await
             .unwrap();
 
@@ -330,7 +361,8 @@ mod tests {
                 |r: &ProtoMessage| reply(r, &symbols(&decode::<ProtoOaSymbolByIdReq>(r).symbol_id));
             vec![answer(request), answer(&first)]
         });
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         let (first, second) = (symbol_request(1), symbol_request(2));
         let (one, two) = tokio::join!(
@@ -350,7 +382,8 @@ mod tests {
             accept_auth(request)
                 .unwrap_or_else(|| vec![replay::<ProtoOaErrorRes>(request, SYMBOL_BY_ID_UNKNOWN)])
         });
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         let error = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(987_654_321))
@@ -364,39 +397,56 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// The token error is the fixture `account_auth_token_invalid`.
+    /// The token error is the fixture `account_auth_token_invalid`; the
+    /// renewal answer is synthetic, as OpenApiMessages.proto defines it.
     #[tokio::test]
-    async fn a_rejected_token_fails_the_connection_naming_the_code_never_the_token() {
-        let (url, _) = testing::start(|_, request| {
-            if request.payload_type == ProtoOaAccountAuthReq::TYPE {
-                return vec![replay::<ProtoOaErrorRes>(
-                    request,
-                    ACCOUNT_AUTH_TOKEN_INVALID,
-                )];
+    async fn a_token_refused_even_renewed_fails_naming_the_code_and_the_playground() {
+        let (url, received) = testing::start(|_, request| match request.payload_type {
+            t if t == ProtoOaAccountAuthReq::TYPE => vec![replay::<ProtoOaErrorRes>(
+                request,
+                ACCOUNT_AUTH_TOKEN_INVALID,
+            )],
+            t if t == ProtoOaRefreshTokenReq::TYPE => {
+                let renewed = ProtoOaRefreshTokenRes {
+                    access_token: "renewedAccessValue".to_owned(),
+                    token_type: "bearer".to_owned(),
+                    expires_in: EXPIRES_IN,
+                    refresh_token: "renewedRefreshValue".to_owned(),
+                    ..Default::default()
+                };
+                vec![reply(request, &renewed)]
             }
-            accept_auth(request).unwrap_or_default()
+            _ => accept_auth(request).unwrap_or_default(),
         });
 
-        let err = connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap_err();
+        let (credential, _tokens) = testing::credential();
+        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
 
         let err = format!("{err:#} {err:?}");
         assert!(
             err.contains(
-                "cTrader refused the account authentication (CH_ACCESS_TOKEN_INVALID): the \
-                 access token is invalid or expired: renew IC_ACCESS_TOKEN"
+                "cTrader refused the account authentication (CH_ACCESS_TOKEN_INVALID) even with \
+                 a renewed access token"
             ),
             "{err}"
         );
+        assert!(err.contains("Playground"), "{err}");
         for secret in [
-            "accessTokenValue",
+            ACCESS_TOKEN,
+            REFRESH_TOKEN,
+            "renewedAccessValue",
+            "renewedRefreshValue",
             "clientSecretValue",
             "12345_clientIdValue",
             "1000001",
         ] {
             assert!(!err.contains(secret), "{err}");
         }
+        assert_eq!(
+            payload_types(&received, 0),
+            [2100, 2102, 2173, 2102],
+            "renewed once"
+        );
     }
 
     /// The refusal is the fixture `application_auth_refused`.
@@ -406,9 +456,8 @@ mod tests {
             vec![replay::<ProtoOaErrorRes>(request, APPLICATION_AUTH_REFUSED)]
         });
 
-        let err = connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap_err();
+        let (credential, _tokens) = testing::credential();
+        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
 
         assert!(
             format!("{err:#}").contains(
@@ -440,9 +489,8 @@ mod tests {
             accept_auth(request).unwrap_or_default()
         });
 
-        let err = connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap_err();
+        let (credential, _tokens) = testing::credential();
+        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
 
         assert!(
             format!("{err:#}").contains("cTrader authenticated another account than IC_ACCOUNT_ID"),
@@ -469,7 +517,8 @@ mod tests {
                 ]
             })
         });
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         let response = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(7))
@@ -492,7 +541,8 @@ mod tests {
                 (_, None) => symbols_peer(connection, request),
             }
         });
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         testing::wait_until(&received, |frames| {
             frames
                 .iter()
@@ -543,7 +593,8 @@ mod tests {
             }
             symbols_peer(0, request)
         });
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         let request = tick_request();
 
         let answers = futures::future::join_all(
@@ -567,7 +618,8 @@ mod tests {
     #[tokio::test]
     async fn other_requests_are_not_held_to_the_historical_limit() {
         let (url, _) = testing::start(symbols_peer);
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         let start = std::time::Instant::now();
 
         for id in 0..7 {
@@ -590,15 +642,15 @@ mod tests {
     async fn requests_fail_once_ctrader_ends_the_session() {
         let (url, _) = testing::start(|_, request| {
             accept_auth(request).unwrap_or_else(|| {
-                let event = ProtoOaAccountsTokenInvalidatedEvent {
-                    ctid_trader_account_ids: vec![ACCOUNT_ID],
-                    reason: Some("Access Token is expired or recalled".to_owned()),
+                let event = ProtoOaClientDisconnectEvent {
+                    reason: Some("Server maintenance".to_owned()),
                     ..Default::default()
                 };
                 vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
             })
         });
-        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         let in_flight = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
@@ -608,7 +660,7 @@ mod tests {
             .await;
 
         let ended = IcError::Session(
-            "cTrader ended the session (PROTO_OA_ACCOUNTS_TOKEN_INVALIDATED_EVENT)".to_owned(),
+            "cTrader ended the session (PROTO_OA_CLIENT_DISCONNECT_EVENT)".to_owned(),
         );
         assert_eq!(in_flight, Err(ended.clone()));
         assert_eq!(next, Err(ended));
@@ -681,7 +733,8 @@ mod tests {
     #[tokio::test]
     async fn a_spot_subscription_asks_for_timestamps_and_its_spot_events_come_through() {
         let (url, received) = testing::start(spots_peer);
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -699,7 +752,8 @@ mod tests {
     #[tokio::test]
     async fn a_symbol_subscribed_twice_is_asked_for_once() {
         let (url, received) = testing::start(spots_peer);
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -733,7 +787,8 @@ mod tests {
     #[tokio::test]
     async fn after_a_reconnect_the_spot_subscriptions_are_sent_again() {
         let (url, received) = testing::start(closing_peer(ProtoOaSubscribeSpotsReq::TYPE));
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -758,7 +813,8 @@ mod tests {
     #[tokio::test]
     async fn an_unsubscribed_symbol_is_not_subscribed_again_after_a_reconnect() {
         let (url, received) = testing::start(closing_peer(ProtoOaUnsubscribeSpotsReq::TYPE));
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
         client.subscribe_spots(41).unwrap();
@@ -783,6 +839,508 @@ mod tests {
             .map(|r| r.symbol_id)
             .collect();
         assert_eq!(again, [vec![1]]);
+        client.disconnect().await;
+    }
+
+    /// The payload types received on `connection`, heartbeats aside.
+    fn payload_types(received: &Received, connection: usize) -> Vec<u32> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, f)| *c == connection && f.payload_type != ProtoHeartbeatEvent::TYPE)
+            .map(|(_, f)| f.payload_type)
+            .collect()
+    }
+
+    /// The access tokens of the account auths received on `connection`.
+    fn account_auths(received: &Received, connection: usize) -> Vec<String> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, f)| *c == connection && f.payload_type == ProtoOaAccountAuthReq::TYPE)
+            .map(|(_, f)| decode::<ProtoOaAccountAuthReq>(f).access_token)
+            .collect()
+    }
+
+    /// The refresh tokens of the renewals received.
+    fn renewals(received: &Received) -> Vec<String> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, f)| f.payload_type == ProtoOaRefreshTokenReq::TYPE)
+            .map(|(_, f)| decode::<ProtoOaRefreshTokenReq>(f).refresh_token)
+            .collect()
+    }
+
+    /// The pair the token file holds: the tokens and the expiry.
+    fn stored(tokens: &TokenStore) -> (String, String, Option<Timestamp>) {
+        let pair = tokens.read().unwrap();
+        (
+            pair.access_token.expose_secret().to_owned(),
+            pair.refresh_token.expose_secret().to_owned(),
+            pair.expires_at,
+        )
+    }
+
+    /// A peer on `venue` serving symbols and spots.
+    fn venue_peer(
+        venue: &SharedVenue,
+    ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
+        token_peer(Arc::clone(venue), |connection, request| {
+            if request.payload_type == ProtoOaSymbolByIdReq::TYPE {
+                symbols_peer(connection, request)
+            } else {
+                spots_peer(connection, request)
+            }
+        })
+    }
+
+    /// A token file whose access token is due for renewal `after` from now.
+    fn due_after(after: Duration) -> Option<Timestamp> {
+        Some(Timestamp::now() + RENEW_BEFORE + jiff::SignedDuration::try_from(after).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_token_of_unknown_expiry_is_renewed_and_saved_before_the_account_auth() {
+        let venue = TokenVenue::new();
+        let (url, received) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = credential_expiring(None);
+        let tokens = credential.tokens.clone();
+        let before = Timestamp::now();
+
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        assert_eq!(payload_types(&received, 0), [2100, 2173, 2102]);
+        assert_eq!(renewals(&received), [REFRESH_TOKEN]);
+        assert_eq!(account_auths(&received, 0), [renewed_access(1)]);
+        let (access, refresh, expires_at) = stored(&tokens);
+        assert_eq!(
+            (access, refresh),
+            (renewed_access(1), "renewedRefresh1".into())
+        );
+        let lifetime = jiff::SignedDuration::from_secs(EXPIRES_IN);
+        let expires_at = expires_at.unwrap();
+        assert!(before + lifetime <= expires_at && expires_at <= Timestamp::now() + lifetime);
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_token_expiring_within_a_day_is_renewed_at_start() {
+        let venue = TokenVenue::new();
+        let (url, received) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = credential_expiring(Some(
+            Timestamp::now() + jiff::SignedDuration::from_hours(23),
+        ));
+
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        assert_eq!(payload_types(&received, 0), [2100, 2173, 2102]);
+        assert_eq!(account_auths(&received, 0), [renewed_access(1)]);
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_token_expiring_later_than_a_day_is_not_renewed_at_start() {
+        let venue = TokenVenue::new();
+        let (url, received) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = credential_expiring(Some(
+            Timestamp::now() + jiff::SignedDuration::from_hours(25),
+        ));
+
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        assert_eq!(payload_types(&received, 0), [2100, 2102]);
+        assert_eq!(account_auths(&received, 0), [ACCESS_TOKEN]);
+        client.disconnect().await;
+    }
+
+    /// The symbol request is answered only once the renewed session
+    /// subscribed its spots again: it was in flight across the renewal.
+    #[tokio::test]
+    async fn a_running_session_renews_on_schedule_keeping_spots_and_requests_in_flight() {
+        let venue = TokenVenue::new();
+        let held = Arc::new(Mutex::new(None::<ProtoMessage>));
+        let renewed = Arc::clone(&venue);
+        let mut peer = venue_peer(&venue);
+        let (url, received) = testing::start(move |connection, request| {
+            if request.payload_type == ProtoOaSymbolByIdReq::TYPE
+                && renewed.lock().unwrap().renewals() == 0
+            {
+                *held.lock().unwrap() = Some(request.clone());
+                return vec![];
+            }
+            let mut actions = peer(connection, request);
+            let resubscribed = request.payload_type == ProtoOaSubscribeSpotsReq::TYPE
+                && renewed.lock().unwrap().renewals() == 1;
+            if let Some(request) = held.lock().unwrap().take_if(|_| resubscribed) {
+                actions.extend(symbols_peer(connection, &request));
+            }
+            actions
+        });
+        let (credential, _dir) = credential_expiring(due_after(Duration::from_secs(1)));
+        let tokens = credential.tokens.clone();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        client.subscribe_spots(41).unwrap();
+        next_spot(&mut spots).await;
+
+        let in_flight = client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(3))
+            .await;
+
+        assert_eq!(in_flight, Ok(symbols(&[3])));
+        assert_eq!(next_spot(&mut spots).await, spot_event(41));
+        assert_eq!(renewals(&received), [REFRESH_TOKEN]);
+        assert_eq!(
+            account_auths(&received, 0),
+            [ACCESS_TOKEN.to_owned(), renewed_access(1)]
+        );
+        assert_eq!(spot_subscriptions(&received, 0).len(), 2);
+        assert_eq!(stored(&tokens).0, renewed_access(1));
+        assert_eq!(
+            client
+                .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(4))
+                .await,
+            Ok(symbols(&[4]))
+        );
+        client.disconnect().await;
+    }
+
+    /// The event comes with the next request, whose answer follows it.
+    #[tokio::test]
+    async fn an_invalidated_token_is_renewed_and_the_account_authenticated_again() {
+        let venue = TokenVenue::new();
+        let (url, received) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = testing::credential();
+        let tokens = credential.tokens.clone();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        venue.lock().unwrap().expire();
+
+        let in_flight = client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+            .await;
+        testing::wait_until(&received, |_| venue.lock().unwrap().renewals() == 1).await;
+        let next = client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(2))
+            .await;
+
+        assert_eq!(in_flight, Ok(symbols(&[1])));
+        assert_eq!(next, Ok(symbols(&[2])));
+        assert_eq!(
+            account_auths(&received, 0),
+            [
+                ACCESS_TOKEN.to_owned(),
+                ACCESS_TOKEN.to_owned(),
+                renewed_access(1)
+            ]
+        );
+        assert_eq!(stored(&tokens).0, renewed_access(1));
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_token_refused_as_expired_at_start_is_renewed() {
+        let venue = TokenVenue::new();
+        venue.lock().unwrap().expire();
+        let (url, received) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = testing::credential();
+
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        assert_eq!(payload_types(&received, 0), [2100, 2102, 2173, 2102]);
+        assert_eq!(
+            account_auths(&received, 0),
+            [ACCESS_TOKEN.to_owned(), renewed_access(1)]
+        );
+        assert_eq!(
+            client
+                .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+                .await,
+            Ok(symbols(&[1]))
+        );
+        client.disconnect().await;
+    }
+
+    /// The refusal is synthetic: an error as OpenApiMessages.proto defines it.
+    #[tokio::test]
+    async fn a_refused_renewal_fails_naming_the_playground_and_keeps_the_pair() {
+        let venue = TokenVenue::refusing();
+        let (url, _) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = credential_expiring(None);
+        let tokens = credential.tokens.clone();
+
+        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
+
+        let err = format!("{err:#} {err:?}");
+        assert!(
+            err.contains("cTrader refused to renew the access token (CH_ACCESS_TOKEN_INVALID)"),
+            "{err}"
+        );
+        assert!(err.contains("Playground"), "{err}");
+        assert!(
+            !err.contains(ACCESS_TOKEN) && !err.contains(REFRESH_TOKEN),
+            "{err}"
+        );
+        assert_eq!(
+            stored(&tokens),
+            (ACCESS_TOKEN.into(), REFRESH_TOKEN.into(), None)
+        );
+    }
+
+    /// `peer`, the renewals answered `delay` late: the renewing session
+    /// holds the lock that long.
+    fn slow_renewal(
+        delay: Duration,
+        mut peer: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
+    ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
+        move |connection, request| {
+            if request.payload_type == ProtoOaRefreshTokenReq::TYPE {
+                std::thread::sleep(delay);
+            }
+            peer(connection, request)
+        }
+    }
+
+    #[tokio::test]
+    async fn sessions_starting_together_on_one_token_file_renew_it_once() {
+        let venue = TokenVenue::new();
+        let slow = Duration::from_millis(300);
+        let (one_url, one) = testing::start(slow_renewal(slow, venue_peer(&venue)));
+        let (other_url, other) = testing::start(slow_renewal(slow, venue_peer(&venue)));
+        let (credential, _dir) = credential_expiring(None);
+        let tokens = credential.tokens.clone();
+
+        let (one_client, other_client) = tokio::join!(
+            connect(&one_url, credential.clone(), SLOW_HEARTBEAT),
+            connect(&other_url, credential, SLOW_HEARTBEAT),
+        );
+
+        let (one_client, other_client) = (one_client.unwrap(), other_client.unwrap());
+        assert_eq!(venue.lock().unwrap().renewals(), 1);
+        assert_eq!(renewals(&one).len() + renewals(&other).len(), 1);
+        assert_eq!(account_auths(&one, 0).last(), Some(&renewed_access(1)));
+        assert_eq!(account_auths(&other, 0).last(), Some(&renewed_access(1)));
+        assert_eq!(stored(&tokens).0, renewed_access(1));
+        for client in [&one_client, &other_client] {
+            assert_eq!(
+                client
+                    .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+                    .await,
+                Ok(symbols(&[1]))
+            );
+        }
+        one_client.disconnect().await;
+        other_client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn running_sessions_due_together_renew_once_and_both_go_on() {
+        let venue = TokenVenue::new();
+        let slow = Duration::from_millis(300);
+        let (one_url, one) = testing::start(slow_renewal(slow, venue_peer(&venue)));
+        let (other_url, other) = testing::start(slow_renewal(slow, venue_peer(&venue)));
+        let (credential, _dir) = credential_expiring(due_after(Duration::from_millis(500)));
+        let one_client = connect(&one_url, credential.clone(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        let other_client = connect(&other_url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        testing::wait_until(&one, |_| {
+            [&one, &other]
+                .iter()
+                .all(|r| account_auths(r, 0).last() == Some(&renewed_access(1)))
+        })
+        .await;
+
+        assert_eq!(venue.lock().unwrap().renewals(), 1);
+        for client in [&one_client, &other_client] {
+            assert_eq!(
+                client
+                    .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+                    .await,
+                Ok(symbols(&[1]))
+            );
+        }
+        one_client.disconnect().await;
+        other_client.disconnect().await;
+    }
+
+    /// One session renews; the other, its token invalidated, takes the
+    /// renewed pair from the file instead of spending a refresh token.
+    #[tokio::test]
+    async fn a_session_whose_token_another_renewed_takes_the_new_pair_from_the_file() {
+        let venue = TokenVenue::new();
+        let (one_url, one) = testing::start(venue_peer(&venue));
+        let (other_url, other) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = testing::credential();
+        let one_client = connect(&one_url, credential.clone(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        let other_client = connect(&other_url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        one_client.renew_token();
+        testing::wait_until(&one, |_| {
+            account_auths(&one, 0).last() == Some(&renewed_access(1))
+        })
+        .await;
+        let in_flight = other_client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+            .await;
+        let next = other_client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(2))
+            .await;
+
+        assert_eq!(in_flight, Ok(symbols(&[1])));
+        assert_eq!(next, Ok(symbols(&[2])));
+        assert_eq!(venue.lock().unwrap().renewals(), 1);
+        assert!(renewals(&other).is_empty());
+        assert_eq!(
+            account_auths(&other, 0),
+            [ACCESS_TOKEN.to_owned(), renewed_access(1)]
+        );
+        one_client.disconnect().await;
+        other_client.disconnect().await;
+    }
+
+    /// Synthetic, as OpenApiMessages.proto defines it: the event of the
+    /// account session cTrader dropped.
+    fn account_dropped() -> Action {
+        let event = ProtoOaAccountDisconnectEvent {
+            ctid_trader_account_id: ACCOUNT_ID,
+            ..Default::default()
+        };
+        Action::Send(crate::data::ic::messages::frame(&event, None))
+    }
+
+    /// Synthetic: the renewal's answer as OpenApiMessages.proto defines it.
+    fn renewal_answer() -> ProtoOaRefreshTokenRes {
+        ProtoOaRefreshTokenRes {
+            access_token: "renewedAccessValue".to_owned(),
+            token_type: "bearer".to_owned(),
+            expires_in: EXPIRES_IN,
+            refresh_token: "renewedRefreshValue".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A cTrader taking any token and serving symbols, whose renewal
+    /// answers are `renewal`'s.
+    fn renewing_peer(
+        mut renewal: impl FnMut(&ProtoMessage) -> Vec<Action> + Send + 'static,
+    ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
+        move |connection, request| {
+            if request.payload_type == ProtoOaRefreshTokenReq::TYPE {
+                return renewal(request);
+            }
+            symbols_peer(connection, request)
+        }
+    }
+
+    /// Waits until the account authenticated with the renewed token.
+    async fn reauthenticated(received: &Received) {
+        testing::wait_until(received, |_| {
+            account_auths(received, 0).last().map(String::as_str) == Some("renewedAccessValue")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_renewal_answered_after_ctrader_drops_the_account_session_is_saved_and_used() {
+        let (url, received) = testing::start(renewing_peer(|request| {
+            vec![account_dropped(), reply(request, &renewal_answer())]
+        }));
+        let (credential, _dir) = testing::credential();
+        let tokens = credential.tokens.clone();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        client.renew_token();
+        reauthenticated(&received).await;
+
+        assert_eq!(stored(&tokens).0, "renewedAccessValue");
+        assert_eq!(
+            client
+                .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+                .await,
+            Ok(symbols(&[1]))
+        );
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_renewal_answer_without_its_client_msg_id_is_saved_and_used() {
+        let (url, received) = testing::start(renewing_peer(|_| {
+            vec![Action::Send(crate::data::ic::messages::frame(
+                &renewal_answer(),
+                None,
+            ))]
+        }));
+        let (credential, _dir) = testing::credential();
+        let tokens = credential.tokens.clone();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        client.renew_token();
+        reauthenticated(&received).await;
+
+        assert_eq!(stored(&tokens).0, "renewedAccessValue");
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_waits_for_the_renewal_in_flight_and_saves_its_pair() {
+        let (url, received) = testing::start(renewing_peer(|request| {
+            std::thread::sleep(Duration::from_millis(300));
+            vec![reply(request, &renewal_answer())]
+        }));
+        let (credential, _dir) = testing::credential();
+        let tokens = credential.tokens.clone();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        client.renew_token();
+        testing::wait_until(&received, |frames| {
+            frames
+                .iter()
+                .any(|(_, f)| f.payload_type == ProtoOaRefreshTokenReq::TYPE)
+        })
+        .await;
+
+        client.disconnect().await;
+
+        assert_eq!(stored(&tokens).0, "renewedAccessValue");
+    }
+
+    #[tokio::test]
+    async fn an_account_session_ctrader_drops_is_authenticated_again() {
+        let dropped = Arc::new(Mutex::new(false));
+        let (url, received) = testing::start(move |connection, request| {
+            let mut actions = symbols_peer(connection, request);
+            let mut dropped = dropped.lock().unwrap();
+            if request.payload_type == ProtoOaSymbolByIdReq::TYPE && !*dropped {
+                *dropped = true;
+                actions.insert(0, account_dropped());
+            }
+            actions
+        });
+        let (credential, _dir) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        let in_flight = client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+            .await;
+        testing::wait_until(&received, |_| account_auths(&received, 0).len() == 2).await;
+        let next = client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(2))
+            .await;
+
+        assert_eq!(in_flight, Ok(symbols(&[1])));
+        assert_eq!(next, Ok(symbols(&[2])));
+        assert_eq!(account_auths(&received, 0), [ACCESS_TOKEN, ACCESS_TOKEN]);
         client.disconnect().await;
     }
 }

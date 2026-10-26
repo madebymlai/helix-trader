@@ -2,22 +2,27 @@
 //! that records every frame it receives and answers through a script.
 
 use std::{
+    collections::HashSet,
     net::TcpListener,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use jiff::{SignedDuration, Timestamp};
 use nautilus_core::string::secret::SecretString;
 use prost::Message as _;
+use tempfile::TempDir;
 use tungstenite::Message;
 
 use super::config::{IcAccountId, IcCredential};
 use super::messages::{
     Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
-    ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaGetTickDataReq,
-    ProtoOaGetTickDataRes, ProtoOaTickData, frame,
+    ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
+    ProtoOaErrorRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq,
+    ProtoOaRefreshTokenRes, ProtoOaTickData, frame,
 };
 use super::ticks::Tick;
+use super::token::{TokenPair, TokenStore};
 
 /// The fake account the tests authenticate: the `ctidTraderAccountId` the
 /// captured responses were scrubbed to.
@@ -163,13 +168,210 @@ pub(super) async fn wait_until(
     }
 }
 
-/// A credential of made-up values, for account `ACCOUNT_ID`.
-pub(super) fn credential() -> IcCredential {
-    IcCredential {
+/// The made-up token pair of `credential`, as `.env` would hold it.
+pub(super) const ACCESS_TOKEN: &str = "accessTokenValue";
+pub(super) const REFRESH_TOKEN: &str = "refreshTokenValue";
+
+/// A credential of made-up values, for account `ACCOUNT_ID`, its token
+/// file in the directory returned, holding the pair of `ACCESS_TOKEN`
+/// and `REFRESH_TOKEN`, valid for 30 days.
+pub(super) fn credential() -> (IcCredential, TempDir) {
+    credential_expiring(Some(Timestamp::now() + SignedDuration::from_hours(30 * 24)))
+}
+
+/// As `credential`, the access token expiring at `expires_at` (`None`:
+/// unknown, as when `.env` seeded it).
+pub(super) fn credential_expiring(expires_at: Option<Timestamp>) -> (IcCredential, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = TokenPair {
+        access_token: SecretString::from(ACCESS_TOKEN),
+        refresh_token: SecretString::from(REFRESH_TOKEN),
+        expires_at: None,
+    };
+    let tokens = TokenStore::new(dir.path().join("ic-token.json"), seed.clone());
+    tokens.load().unwrap();
+    let stored = TokenPair { expires_at, ..seed };
+    tokens.try_lock().unwrap().unwrap().save(&stored).unwrap();
+    let credential = IcCredential {
         client_id: SecretString::from("12345_clientIdValue"),
         client_secret: SecretString::from("clientSecretValue"),
-        access_token: SecretString::from("accessTokenValue"),
         account_id: IcAccountId::new(ACCOUNT_ID),
+        tokens,
+    };
+    (credential, dir)
+}
+
+/// The access token renewals hand out: `ACCESS_TOKEN` then
+/// `renewedAccess1`, `renewedAccess2`, ...
+pub(super) fn renewed_access(renewal: usize) -> String {
+    format!("renewedAccess{renewal}")
+}
+
+/// How long a renewed access token lasts, as cTrader's docs give it.
+pub(super) const EXPIRES_IN: i64 = 2_628_000;
+
+/// cTrader's tokens as the docs describe them: one pair at a time; a
+/// renewal with the current refresh token replaces both, the old pair
+/// invalidated. Shared by the peers of sessions on the same account.
+#[derive(Debug)]
+pub(super) struct TokenVenue {
+    renewals: usize,
+    refuse_renewal: bool,
+    /// Whether the access token expired: refused, until renewed.
+    expired: bool,
+    /// The peers created on the venue.
+    peers: usize,
+    /// The connections (peer, connection) whose account session is
+    /// authenticated.
+    authenticated: HashSet<(usize, usize)>,
+    /// The connections whose account session ended, told so with their
+    /// next request.
+    ended: HashSet<(usize, usize)>,
+}
+
+pub(super) type SharedVenue = Arc<Mutex<TokenVenue>>;
+
+impl TokenVenue {
+    /// A venue holding the pair of `credential`.
+    pub(super) fn new() -> SharedVenue {
+        Arc::new(Mutex::new(Self {
+            renewals: 0,
+            refuse_renewal: false,
+            expired: false,
+            peers: 0,
+            authenticated: HashSet::new(),
+            ended: HashSet::new(),
+        }))
+    }
+
+    /// A venue that refuses every renewal, as for a revoked refresh token.
+    pub(super) fn refusing() -> SharedVenue {
+        let venue = Self::new();
+        venue.lock().unwrap().refuse_renewal = true;
+        venue
+    }
+
+    pub(super) fn renewals(&self) -> usize {
+        self.renewals
+    }
+
+    fn access(&self) -> String {
+        match self.renewals {
+            0 => ACCESS_TOKEN.to_owned(),
+            n => renewed_access(n),
+        }
+    }
+
+    fn refresh(&self) -> String {
+        match self.renewals {
+            0 => REFRESH_TOKEN.to_owned(),
+            n => format!("renewedRefresh{n}"),
+        }
+    }
+
+    /// Ends the account session of every connection, the access token
+    /// invalidated: it expired, or was renewed.
+    fn invalidate(&mut self) {
+        self.ended.extend(self.authenticated.drain());
+    }
+
+    /// The access token expires: the sessions end, and it is refused
+    /// until renewed.
+    pub(super) fn expire(&mut self) {
+        self.expired = true;
+        self.invalidate();
+    }
+}
+
+/// Synthetic: cTrader's answer to a token it does not hold.
+pub(super) fn token_refused(request: &ProtoMessage) -> Action {
+    let error = ProtoOaErrorRes {
+        error_code: "CH_ACCESS_TOKEN_INVALID".to_owned(),
+        description: Some("Invalid access token".to_owned()),
+        ..Default::default()
+    };
+    reply(request, &error)
+}
+
+/// Synthetic: the event of an account session cTrader ended because its
+/// token was refreshed or expired.
+pub(super) fn token_invalidated() -> Action {
+    let event = ProtoOaAccountsTokenInvalidatedEvent {
+        ctid_trader_account_ids: vec![ACCOUNT_ID],
+        reason: Some("Access Token is expired or recalled".to_owned()),
+        ..Default::default()
+    };
+    Action::Send(frame(&event, None))
+}
+
+/// A peer on `venue`: it answers the auth and the renewals as `venue`
+/// does, the account auth with an access token it does not hold with the
+/// captured `CH_ACCESS_TOKEN_INVALID`. A renewal sends the event ending
+/// the renewing session, then the new pair; a session whose token is no
+/// longer valid gets the event with its next request, which `other` then
+/// answers, as any other request.
+pub(super) fn token_peer(
+    venue: SharedVenue,
+    mut other: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
+) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
+    let peer = {
+        let mut venue = venue.lock().unwrap();
+        venue.peers += 1;
+        venue.peers
+    };
+    move |connection, request| {
+        let session = (peer, connection);
+        let mut venue = venue.lock().unwrap();
+        match request.payload_type {
+            t if t == ProtoOaApplicationAuthReq::TYPE => vec![replay::<ProtoOaApplicationAuthRes>(
+                request,
+                APPLICATION_AUTH_RES,
+            )],
+            t if t == ProtoOaAccountAuthReq::TYPE => {
+                let asked =
+                    ProtoOaAccountAuthReq::decode(request.payload.as_deref().unwrap()).unwrap();
+                if asked.access_token == venue.access() && !venue.expired {
+                    venue.authenticated.insert(session);
+                    venue.ended.remove(&session);
+                    vec![replay::<ProtoOaAccountAuthRes>(request, ACCOUNT_AUTH_RES)]
+                } else {
+                    vec![replay::<ProtoOaErrorRes>(
+                        request,
+                        ACCOUNT_AUTH_TOKEN_INVALID,
+                    )]
+                }
+            }
+            t if t == ProtoOaRefreshTokenReq::TYPE => {
+                let asked =
+                    ProtoOaRefreshTokenReq::decode(request.payload.as_deref().unwrap()).unwrap();
+                if venue.refuse_renewal || asked.refresh_token != venue.refresh() {
+                    return vec![token_refused(request)];
+                }
+                venue.renewals += 1;
+                venue.expired = false;
+                venue.invalidate();
+                let ended = venue.ended.remove(&session);
+                let renewed = ProtoOaRefreshTokenRes {
+                    access_token: venue.access(),
+                    token_type: "bearer".to_owned(),
+                    expires_in: EXPIRES_IN,
+                    refresh_token: venue.refresh(),
+                    ..Default::default()
+                };
+                let mut actions: Vec<Action> = ended.then(token_invalidated).into_iter().collect();
+                actions.push(reply(request, &renewed));
+                actions
+            }
+            _ => {
+                let mut actions = Vec::new();
+                if venue.ended.remove(&session) {
+                    actions.push(token_invalidated());
+                }
+                drop(venue);
+                actions.extend(other(connection, request));
+                actions
+            }
+        }
     }
 }
 
