@@ -153,6 +153,10 @@ struct LiveArgs {
     /// loads. Live processes running at once each need their own.
     #[arg(long, default_value = "HELIX-001", value_parser = parse_trader_id)]
     trader_id: TraderId,
+    /// The catalog directory, fill-catalog's and the backtests': the warmup
+    /// is read from it first, and IC's history is written back to it.
+    #[arg(long, default_value = "catalog")]
+    catalog: PathBuf,
 }
 
 /// The strategies, by command-line name.
@@ -343,6 +347,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         client_id: args.client_id,
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
+        catalog: args.catalog,
     };
     match args.strategy {
         Strategy::Ema => {
@@ -513,6 +518,7 @@ mod tests {
         assert_eq!(args.account, Some("DU1234567".parse().unwrap()));
         assert_eq!(args.client_id, 1);
         assert_eq!(args.leverage, Decimal::ONE);
+        assert_eq!(args.catalog, PathBuf::from("catalog"));
     }
 
     #[test]

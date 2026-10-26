@@ -299,11 +299,14 @@ ignored; so the command passes the `NAUTILUS_LOG` config through
 
 Warmup itself is in `strategy/README.md`, "Warmup and training". On the
 backtest side the catalog is registered in
-`BacktestEngineConfig::catalogs`:
+`BacktestEngineConfig::catalogs`, read-only, so that no answer is ever
+written back to it (the warmup asks for write-back, which live IC
+answers take):
 
 ```rust
 DataCatalogConfig::new(path: String, fs_protocol: Option<String>,
                        catalog_backend: Option<CatalogBackendType>) -> DataCatalogConfig
+config.with_read_only(true)    // rejects response write-back
 ```
 
 The request window is clamped to simulated now, the engine start
@@ -313,9 +316,11 @@ start; later bars are built from the replay. What the strategy receives:
 - **Catalog covers the window** (the stored intervals of every series span
   `[start − 1 ns − warmup, start − 1 ns]`): one `on_historical_quotes`
   (`on_historical_bars` for source bars) per instrument before the first
-  `on_bar`, the warmup bars in the cache, the partial oldest one dropped.
-  The bar spanning the warmup end and the run start comes once, complete,
-  in `on_bar`.
+  `on_bar`, the warmup bars in the cache, the partial oldest one dropped,
+  then the warmup's request group ends complete in `on_data_response`
+  (`backtest_long_warmup.rs`, `backtest_composite_warmup.rs`). The bar
+  spanning the warmup end and the run start comes once, complete, in
+  `on_bar`.
 - **Catalog not registered, or a gap in the window**: the data engine asks
   the venue's backtest data client for the missing part, which answers
   nothing (seen with bar requests, before quotes: no response ever came,

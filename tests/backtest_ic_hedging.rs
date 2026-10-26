@@ -12,6 +12,7 @@ use nautilus_model::{
     enums::{OrderSide, PositionSide},
     types::Quantity,
 };
+use rust_decimal::Decimal;
 
 #[test]
 fn two_overlapping_ic_trades_are_two_positions_at_their_own_prices() {
@@ -35,6 +36,6 @@ fn two_overlapping_ic_trades_are_two_positions_at_their_own_prices() {
         assert_eq!(position.side, PositionSide::Long);
         assert_eq!(position.quantity, Quantity::from(10));
     }
-    assert_eq!(first.avg_px_open, 4006.10);
-    assert_eq!(second.avg_px_open, 4012.15);
+    assert_eq!(first.avg_px_open, Decimal::new(400_610, 2));
+    assert_eq!(second.avg_px_open, Decimal::new(401_215, 2));
 }

@@ -6,7 +6,10 @@
 //! (`ib/`), several if the instruments span several. Each venue's data
 //! client serves the warmup of its instruments up to now: OKX's candles
 //! (see `okx/`), IC's quotes from cTrader's tick history (see `ic/`), IB's
-//! 1-minute bars (see `ib/`). The node registers no catalog.
+//! 1-minute bars (see `ib/`). The node registers the catalog fill-catalog
+//! fills and backtests read: the warmup comes from it first, from the
+//! venues for what it lacks, and IC's answers are written back to it (see
+//! `strategy::warmup`).
 
 mod ib;
 mod ic;
@@ -20,7 +23,7 @@ pub use ic::{
 
 pub use crate::data::IbAccount;
 
-use std::fmt::Debug;
+use std::{fmt::Debug, path::PathBuf};
 
 use anyhow::{Context, ensure};
 use nautilus_common::{
@@ -30,11 +33,12 @@ use nautilus_common::{
 };
 use nautilus_core::UUID4;
 use nautilus_model::identifiers::{InstrumentId, TraderId};
+use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    data::{IcHistory, OkxHistory},
+    data::{IcHistory, OkxHistory, catalog_path},
     strategy::{DataRequirements, warmup},
 };
 
@@ -58,6 +62,10 @@ pub struct Live {
     pub leverage: Decimal,
     /// The Nautilus logger, installed for the start and kept by the node.
     pub logging: LoggerConfig,
+    /// The catalog directory, fill-catalog's and the backtests': it serves
+    /// the warmup, and keeps the history the venues certify complete (see
+    /// `node::run`). Created if missing.
+    pub catalog: PathBuf,
 }
 
 impl Live {
@@ -68,7 +76,8 @@ impl Live {
     /// # Errors
     ///
     /// Returns an error if the cache cannot hold the warmup bars of a bar
-    /// type (see `warmup::cache_config`), if the strategy trades IC
+    /// type (see `warmup::cache_config`), if the catalog cannot be created
+    /// or its path is not UTF-8, if the strategy trades IC
     /// instruments with IB ones, if an IC bar type is not built from
     /// quotes or IC's environment or credential is missing (see
     /// `ic::clients`, checked before anything connects), if
@@ -83,6 +92,9 @@ impl Live {
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
         let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
+        std::fs::create_dir_all(&self.catalog)
+            .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
+        let catalog = DataCatalogConfig::new(catalog_path(&self.catalog)?, None, None);
         let data_engine = warmup::live_data_engine_config(&requirements.bar_types);
         let instrument_ids = requirements.instrument_ids();
         // The node would install the logger when built, after the clients
@@ -137,6 +149,7 @@ impl Live {
             self.logging.clone(),
             cache,
             data_engine,
+            catalog,
             clients,
             &instrument_ids,
             strategy,

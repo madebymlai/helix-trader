@@ -185,9 +185,11 @@ answer: its outcome is left to the execution client's reconciliation
 
 `docs/ARCHITECTURE.md` asks for plain Nautilus API: each primitive the
 adapter needs is Nautilus' own unless Nautilus has none for cTrader's
-protocol. Audited 2026-10-26 against the pinned sources
-(`~/.cargo/git/checkouts/nautilus_trader-*/a51ae01/crates/`, paths below
-relative to it), the adapter guide (`docs/developer_guide/adapters.md`,
+protocol. Audited 2026-10-26 against the sources then pinned (`a51ae01`)
+and checked again at the pin `04f766b`, which changed none of the files
+below but a test of `network/src/websocket/client.rs` and the PnL of
+`model/src/accounts/margin.rs` (paths relative to
+`~/.cargo/git/checkouts/nautilus_trader-*/04f766b/crates/`), the adapter guide (`docs/developer_guide/adapters.md`,
 "Shared baseline", "WebSocket client patterns", "Task management") and the
 networking guide (`docs/concepts/networking.md`), and how the Binance,
 OKX and AX adapters use them:

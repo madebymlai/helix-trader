@@ -40,6 +40,8 @@ fn a_warmup_longer_than_the_default_cache_gets_every_bar() {
     assert_eq!(closes.len(), 8 * 24 * 60 - 1);
     assert_eq!(closes.first(), Some(&ts("2026-01-05T00:31:00Z")));
     assert_eq!(closes.last(), Some(&ts("2026-01-13T00:29:00Z")));
+    // Its one request answered, the warmup's request group completes.
+    assert_eq!(record.warmup_end, Some(Ok(())));
 }
 
 #[test]

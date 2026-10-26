@@ -28,7 +28,7 @@ use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
-use crate::strategy::warmup;
+use crate::{data::catalog_path, strategy::warmup};
 
 /// The id of the one run of the node.
 const RUN_ID: &str = "backtest";
@@ -40,7 +40,8 @@ const RUN_ID: &str = "backtest";
 /// the catalog (the only data replayed: the data engine builds the
 /// strategy's bars from them, the venue settles the funding; see
 /// `Backtest::series` and `data_config`), and the catalog registered in the
-/// engine so that it serves the strategy's warmup requests, with a cache
+/// engine, read-only, so that it serves the strategy's warmup requests and
+/// takes no write-back, with a cache
 /// holding the warmup bars (`warmup::cache_config`) and a data engine
 /// building no bar for an hour without quotes
 /// (`warmup::data_engine_config`). The engine starts
@@ -56,13 +57,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         "backtest start {start} must be before its end {end}"
     );
     let venue = venue(&backtest.instruments())?;
-    // Absolute: the node's DataFusion reader finds no object store for a
-    // relative path ("file://catalog/...").
-    let catalog = std::path::absolute(&backtest.catalog)?;
-    let catalog = catalog
-        .to_str()
-        .with_context(|| format!("catalog path {} is not UTF-8", catalog.display()))?
-        .to_string();
+    let catalog = catalog_path(&backtest.catalog)?;
     let venue_config = BacktestVenueConfig::builder()
         .name(venue.as_str())
         .oms_type(backtest.oms_type)
@@ -82,7 +77,9 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
     let engine_config = BacktestEngineConfig::builder()
         .cache(cache)
         .data_engine(warmup::data_engine_config())
-        .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
+        .catalogs(vec![
+            DataCatalogConfig::new(catalog, None, None).with_read_only(true),
+        ])
         .logging(backtest.logging.clone())
         .build();
     Ok(BacktestRunConfig::builder()
@@ -325,6 +322,13 @@ mod tests {
         let absolute = absolute.to_str().unwrap();
         assert_eq!(config.data()[0].catalog_path(), absolute);
         assert_eq!(config.engine().catalogs[0].path(), absolute);
+    }
+
+    #[test]
+    fn the_catalog_is_registered_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert!(config.engine().catalogs[0].read_only());
     }
 
     #[test]

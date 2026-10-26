@@ -14,8 +14,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use helix_trader::strategy::warmup;
 use jiff::SignedDuration;
-use nautilus_common::actor::DataActor;
-use nautilus_core::UnixNanos;
+use nautilus_common::{actor::DataActor, messages::data::DataResponseEnvelope};
+use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
     accounts::AccountAny,
     data::{Bar, BarType, QuoteTick},
@@ -35,6 +35,9 @@ use nautilus_trading::{
 pub struct Record {
     /// The warmup bars `warmup::bars` returned.
     pub warmup: Vec<Bar>,
+    /// How the warmup ended (`warmup::finished`): `Ok` complete, or the
+    /// error; `None` while pending or without a warmup.
+    pub warmup_end: Option<Result<(), String>>,
     /// The bars of `on_bar`.
     pub bars: Vec<Bar>,
     /// Side, price and time of every fill.
@@ -57,6 +60,8 @@ pub struct Recorder {
     /// The warmup through `strategy::warmup`; without one, it only
     /// subscribes to the bars.
     warmup: Option<SignedDuration>,
+    /// The request group of the warmup.
+    warmup_group: UUID4,
     /// The trigger of the sell stop of 10 shares sent on the first bar.
     stop: Option<Price>,
     /// The market order sent on each of the first replayed bars, in order.
@@ -84,6 +89,7 @@ impl Recorder {
             }),
             bar_type,
             warmup: Some(warmup),
+            warmup_group: UUID4::new(),
             stop,
             market: vec![],
             close_on: vec![],
@@ -157,7 +163,17 @@ impl DataActor for Recorder {
             return Ok(());
         };
         let bar_types = [self.bar_type];
-        warmup::start(self, &bar_types, warmup)
+        warmup::start(self, &bar_types, warmup, self.warmup_group)
+    }
+
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        let end = match warmup::finished(self.warmup_group, response) {
+            Ok(false) => return Ok(()),
+            Ok(true) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        self.record.borrow_mut().warmup_end = Some(end);
+        Ok(())
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {

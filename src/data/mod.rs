@@ -17,3 +17,23 @@ mod okx;
 pub use ic::{IcConnection, IcHistory};
 pub(crate) use okx::Contract as OkxContract;
 pub use okx::OkxHistory;
+
+use std::path::Path;
+
+use anyhow::Context;
+
+/// The path of the catalog directory `dir` as a node takes it: absolute,
+/// since the node's DataFusion reader finds no object store for a relative
+/// path ("file://catalog/...").
+///
+/// # Errors
+///
+/// Returns an error if the working directory is unknown or the path is not
+/// UTF-8.
+pub(crate) fn catalog_path(dir: &Path) -> anyhow::Result<String> {
+    let absolute = std::path::absolute(dir)?;
+    absolute
+        .to_str()
+        .map(str::to_owned)
+        .with_context(|| format!("catalog path {} is not UTF-8", absolute.display()))
+}

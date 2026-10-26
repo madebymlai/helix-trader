@@ -80,7 +80,7 @@ enum Step {
 struct Saved {
     position_id: Option<String>,
     quantity: Option<String>,
-    avg_px_open: Option<f64>,
+    avg_px_open: Option<Decimal>,
     orders: Vec<String>,
     /// `Observe`: the open positions of the instrument, its open or
     /// in-flight orders, and the status of each of `orders`.
@@ -104,12 +104,15 @@ async fn phase() {
         )],
         warmup: SignedDuration::from_mins(10),
     };
+    // An empty catalog of its own: the venue answers the whole warmup.
+    let catalog = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
         account: Some(account()),
         client_id: CLIENT_ID,
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
+        catalog: catalog.path().to_path_buf(),
     };
     let probe = Probe::new(step, PathBuf::from(std::env::var(STATE).unwrap()));
     let ran = tokio::time::timeout(Duration::from_secs(300), live.run(&requirements, probe)).await;

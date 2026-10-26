@@ -88,6 +88,7 @@ fn a_composite_bar_type_warms_up_on_the_hours_of_its_source_bars() {
     // the hour closing 09:00 lacks the minutes before 08:29 and is dropped.
     let warmup: Vec<_> = record.warmup.iter().map(ohlc).collect();
     assert_eq!(warmup, [hour_bar(at("10:00"))]);
+    assert_eq!(record.warmup_end, Some(Ok(())));
     let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
     assert_eq!(replay, [hour_bar(at("11:00")), hour_bar(at("12:00"))]);
 }

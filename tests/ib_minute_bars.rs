@@ -1,49 +1,65 @@
 //! IB's 1-minute bars on the live node, end to end on the Docker paper
-//! gateway: the warmup of a composite bar type is IB's answer to the
-//! source bars' `request_bars`, the live minute bars come from
-//! `subscribe_bars`, and the two meet with no gap and no duplicate: the
-//! warmup request ends at now, so the data engine drops the minute still
-//! in progress from IB's answer, and the live stream starts with it.
-//! Prints how long after its close each live minute bar arrived, which
-//! `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must exceed.
+//! gateway, with a catalog already holding the instrument's minute bars up
+//! to `CATALOG_BEHIND` before now, as fill-catalog leaves it: the warmup of
+//! a composite bar type is the catalog's bars, then IB's answer to the
+//! source bars' `request_bars` for the rest, the live minute bars come
+//! from `subscribe_bars`, and the two meet with no gap and no duplicate:
+//! the warmup request ends at now, so the data engine drops the minute
+//! still in progress from IB's answer, and the live stream starts with it,
+//! not at the catalog's end (no replay: the subscription's `start_ns` is
+//! now). Prints how long after its close each live minute bar arrived,
+//! which `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must exceed.
 //!
 //! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped,
 //! unless `NAUTILUS_IB_RUN=1` is set in the shell. It places no order. It
 //! needs SXR8.IBIS quoted on IB (Xetra's full session, 07:30-22:00
-//! Frankfurt time, on a trading day) and takes about five minutes:
+//! Frankfurt time, on a trading day), or the instrument
+//! `NAUTILUS_IB_INSTRUMENT` names, trading then, and takes about five
+//! minutes:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test ib_minute_bars -- --nocapture
 //! ```
 //!
 //! The node's cache in Redis is under the test's trader, `HELIXTEST-046`,
-//! whose records the test deletes once the node has stopped. Client id 46.
+//! whose records the test deletes once the node has stopped. Client id 46
+//! for the node, 47 for filling the catalog.
 
 mod common;
 
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::IbAccount,
+    data::{IbAccount, IbHistory, fill_catalog},
     live::Live,
-    strategy::{DataRequirements, warmup},
+    strategy::{DataRequirements, catalog_series, warmup},
 };
 use jiff::{SignedDuration, Timestamp};
-use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};
-use nautilus_core::UnixNanos;
+use nautilus_common::{
+    actor::DataActor, logging::logger::LoggerConfig, messages::data::DataResponseEnvelope,
+};
+use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
     data::{Bar, BarType},
     identifiers::{StrategyId, TraderId},
 };
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
 use rust_decimal::Decimal;
 
-const COMPOSITE: &str = "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
+/// The hour bars of the instrument, built from IB's minute bars.
+fn composite() -> BarType {
+    let instrument =
+        std::env::var("NAUTILUS_IB_INSTRUMENT").unwrap_or_else(|_| "SXR8.IBIS".to_string());
+    BarType::from(format!("{instrument}-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL").as_str())
+}
 const TRADER: &str = "HELIXTEST-046";
 const WARMUP: SignedDuration = SignedDuration::from_hours(2);
+/// How far before now the catalog's minute bars end.
+const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(30);
 /// The live minute bars the probe waits for before it stops the node.
 const LIVE_MINUTES: usize = 4;
 
@@ -54,6 +70,8 @@ struct Record {
     /// When the warmup was requested.
     requested_at: UnixNanos,
     warmup: Vec<Bar>,
+    /// How the warmup ended: `Ok` complete, or the error.
+    warmup_end: Option<Result<(), String>>,
     live: Vec<(Bar, UnixNanos)>,
 }
 
@@ -63,6 +81,7 @@ struct Record {
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
+    warmup: UUID4,
     record: Rc<RefCell<Record>>,
 }
 
@@ -70,10 +89,20 @@ nautilus_strategy!(Probe);
 
 impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let composite = BarType::from(COMPOSITE);
+        let composite = composite();
         self.record.borrow_mut().requested_at = self.clock().timestamp_ns();
-        warmup::start(self, &[composite], WARMUP)?;
+        warmup::start(self, &[composite], WARMUP, self.warmup)?;
         self.subscribe_bars(composite.composite(), None, None);
+        Ok(())
+    }
+
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        let end = match warmup::finished(self.warmup, response) {
+            Ok(false) => return Ok(()),
+            Ok(true) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        self.record.borrow_mut().warmup_end = Some(end);
         Ok(())
     }
 
@@ -136,18 +165,41 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
+        warmup: UUID4::new(),
         record: Rc::clone(&record),
     };
     let requirements = DataRequirements {
-        bar_types: vec![BarType::from(COMPOSITE)],
+        bar_types: vec![composite()],
         warmup: WARMUP,
     };
+    // The catalog: the instrument and its minute bars over
+    // [now - WARMUP, now - CATALOG_BEHIND], as fill-catalog stores them.
+    let catalog = tempfile::tempdir().unwrap();
+    let now = Timestamp::now();
+    let catalog_end = now - CATALOG_BEHIND;
+    {
+        let ib = IbHistory::connect(47, catalog_end, now).await.unwrap();
+        let composite = composite();
+        let instruments = ib.instruments(&[composite.instrument_id()]).await.unwrap();
+        let mut parquet = ParquetDataCatalog::new(catalog.path(), None, None, None, None);
+        fill_catalog(
+            &mut parquet,
+            instruments,
+            &catalog_series(&[composite]),
+            now - WARMUP,
+            catalog_end,
+            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
+        )
+        .await
+        .unwrap();
+    }
     let live = Live {
         trader_id: TraderId::from(TRADER),
         account: Some(account),
         client_id: 46,
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
+        catalog: catalog.path().to_path_buf(),
     };
     let started = Timestamp::now();
     let ran = tokio::time::timeout(Duration::from_secs(600), live.run(&requirements, probe)).await;
@@ -170,6 +222,24 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         warmup[0] >= (started - WARMUP).as_nanosecond() as i64 - MINUTE_NS,
         "the warmup starts before its window"
     );
+    assert_eq!(
+        record.warmup_end,
+        Some(Ok(())),
+        "the warmup did not complete"
+    );
+    // Both the catalog and IB served it: bars on either side of the
+    // catalog's end, and the largest step between two bars.
+    let catalog_end = catalog_end.as_nanosecond() as i64;
+    let from_catalog = warmup.iter().filter(|&&ts| ts <= catalog_end).count();
+    let largest_step = warmup.windows(2).map(|pair| pair[1] - pair[0]).max();
+    println!(
+        "PROBE warmup: {} bars, {from_catalog} up to the catalog's end {}, \
+         the largest step {largest_step:?} ns",
+        warmup.len(),
+        UnixNanos::from(catalog_end as u64),
+    );
+    assert!(from_catalog > 0, "no warmup bar from the catalog");
+    assert!(from_catalog < warmup.len(), "no warmup bar from IB");
     assert_eq!(live.len(), LIVE_MINUTES);
     assert!(
         live.windows(2).all(|pair| pair[1] - pair[0] == MINUTE_NS),
@@ -186,6 +256,12 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     assert!(
         last_warmup <= record.requested_at.as_i64(),
         "the warmup holds the minute in progress"
+    );
+    // No replay: IB sends no bar from the catalog's end as live.
+    assert!(
+        live[0] > record.requested_at.as_i64(),
+        "a live bar closing {} before the start: replayed",
+        live[0]
     );
     assert_eq!(
         live[0] - last_warmup,

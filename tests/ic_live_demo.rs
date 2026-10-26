@@ -1,8 +1,10 @@
 //! End to end on IC Markets' cTrader demo: `Live` on XAU/USD checks the
-//! account, builds a node with IC's clients and no catalog, and a
-//! recording strategy gets its minute bars warmed up from IC's data client
-//! up to now, then live quotes and the bars Nautilus builds from them,
-//! until SIGINT. It needs the app's `IC_CLIENT_ID` and
+//! account, builds a node with IC's clients and a catalog already holding
+//! gold's quotes up to `CATALOG_BEHIND` before now (filled as fill-catalog
+//! fills it), and a recording strategy gets its minute bars warmed up from
+//! the catalog, then from IC's data client up to now, then live quotes and
+//! the bars Nautilus builds from them, until SIGINT; IC's answer is written
+//! back to the catalog. It needs the app's `IC_CLIENT_ID` and
 //! `IC_CLIENT_SECRET`, the demo account's `IC_ACCESS_TOKEN`,
 //! `IC_REFRESH_TOKEN` (they seed the token file, which then holds the
 //! latest pair) and `IC_ACCOUNT_ID`, and `IC_ENVIRONMENT=demo`, from the environment or
@@ -25,16 +27,21 @@ mod common;
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
+    data::IcHistory,
     live::Live,
-    strategy::{DataRequirements, warmup},
+    strategy::{DataRequirements, catalog_series, warmup},
 };
 use jiff::SignedDuration;
-use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};
+use nautilus_common::{
+    actor::DataActor, logging::logger::LoggerConfig, messages::data::DataResponseEnvelope,
+};
+use nautilus_core::UUID4;
 use nautilus_model::{
-    data::{Bar, BarType, QuoteTick},
+    data::{Bar, BarType, NautilusDataType, QuoteTick},
     identifiers::{InstrumentId, StrategyId, TraderId},
     types::Quantity,
 };
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
@@ -63,11 +70,16 @@ fn demo_only() {
 
 const XAUUSD: &str = "XAUUSD.ICMARKETS";
 
+/// How far before now the catalog's quotes end.
+const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(10);
+
 /// What the recorder got, in order.
 #[derive(Debug, Default)]
 struct Record {
     warmup_quotes: Vec<QuoteTick>,
     warmup: Vec<Bar>,
+    /// How the warmup ended: `Ok` complete, or the error.
+    warmup_end: Option<Result<(), String>>,
     bars: Vec<Bar>,
     quotes: Vec<QuoteTick>,
 }
@@ -79,6 +91,7 @@ struct Recorder {
     core: StrategyCore,
     bar_type: BarType,
     warmup: SignedDuration,
+    warmup_group: UUID4,
     record: Rc<RefCell<Record>>,
 }
 
@@ -86,8 +99,18 @@ nautilus_strategy!(Recorder);
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        warmup::start(self, &[self.bar_type], self.warmup)?;
+        warmup::start(self, &[self.bar_type], self.warmup, self.warmup_group)?;
         self.subscribe_quotes(self.bar_type.instrument_id(), None, None);
+        Ok(())
+    }
+
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        let end = match warmup::finished(self.warmup_group, response) {
+            Ok(false) => return Ok(()),
+            Ok(true) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        self.record.borrow_mut().warmup_end = Some(end);
         Ok(())
     }
 
@@ -134,8 +157,28 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         }),
         bar_type,
         warmup,
+        warmup_group: UUID4::new(),
         record: Rc::clone(&record),
     };
+    // The catalog: gold and its quotes over [now - warmup, now -
+    // CATALOG_BEHIND], as fill-catalog stores them.
+    let catalog = tempfile::tempdir().unwrap();
+    let now = jiff::Timestamp::now();
+    let catalog_end = now - CATALOG_BEHIND;
+    {
+        let mut parquet = ParquetDataCatalog::new(catalog.path(), None, None, None, None);
+        let ic = IcHistory::connect().await.unwrap();
+        let filled = ic
+            .fill(
+                &mut parquet,
+                &catalog_series(&[bar_type]),
+                now - warmup,
+                catalog_end,
+            )
+            .await;
+        ic.disconnect().await;
+        filled.unwrap();
+    }
     let started = jiff::Timestamp::now();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
@@ -143,6 +186,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         client_id: 1,
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
+        catalog: catalog.path().to_path_buf(),
     };
     // As Ctrl-C would, once the node runs: its signal handler stops it.
     let interrupt = tokio::spawn(async {
@@ -187,9 +231,37 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         quotes.first(),
         quotes.last()
     );
-    // The whole warmup came from IC's data client, one response over
-    // `[now - warmup, now]`: no catalog is registered.
+    // One response over `[now - warmup, now]`, the catalog's quotes, then
+    // IC's for the rest, written back to the catalog.
+    assert_eq!(
+        record.warmup_end,
+        Some(Ok(())),
+        "the warmup did not complete"
+    );
     assert!(!warmup_quotes.is_empty(), "no warmup quote");
+    let catalog_end_ns = catalog_end.as_nanosecond();
+    let from_catalog = warmup_quotes
+        .iter()
+        .filter(|q| i128::from(q.ts_event.as_u64()) <= catalog_end_ns)
+        .count();
+    let parquet = ParquetDataCatalog::new(catalog.path(), None, None, None, None);
+    let stored_to = parquet
+        .query_last_timestamp(&NautilusDataType::QuoteTick.into(), Some(XAUUSD))
+        .unwrap()
+        .unwrap();
+    println!(
+        "{from_catalog} warmup quotes up to the catalog's end {catalog_end}; \
+         the catalog's quotes now end at {stored_to}"
+    );
+    assert!(from_catalog > 0, "no warmup quote from the catalog");
+    assert!(
+        from_catalog < warmup_quotes.len(),
+        "no warmup quote from IC"
+    );
+    assert!(
+        i128::from(stored_to) >= started.as_nanosecond(),
+        "IC's answer was not written back: the catalog ends at {stored_to}"
+    );
     let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
         - started.checked_sub(warmup).unwrap().as_nanosecond();
     assert!(

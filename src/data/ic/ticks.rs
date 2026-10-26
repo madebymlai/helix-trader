@@ -84,26 +84,32 @@ pub(super) fn decode(tick_data: &[ProtoOaTickData]) -> anyhow::Result<Vec<Tick>>
 /// holds all of them, so ticks sharing a millisecond across a page boundary
 /// are neither lost nor doubled.
 ///
-/// # Errors
-///
-/// Returns an error if a request fails, or if a page with more after it
-/// holds a single millisecond (no progress).
+/// A failed request, or a page with more after it holding a single
+/// millisecond (no progress), ends the walk: the ticks then cover the
+/// window from where it stopped, with the error.
 pub(super) async fn side_ticks<Page>(
     from_ms: i64,
     to_ms: i64,
     mut page: impl FnMut(i64, i64) -> Page,
-) -> anyhow::Result<Vec<Tick>>
+) -> Pages
 where
     Page: Future<Output = anyhow::Result<(Vec<Tick>, bool)>>,
 {
     // Newest first until reversed at the end.
     let mut ticks = Vec::new();
     let mut window_to = to_ms;
-    while window_to > from_ms {
+    let mut failure = None;
+    'windows: while window_to > from_ms {
         let window_from = from_ms.max(window_to - WEEK_MS);
         let mut to = window_to;
         loop {
-            let (answer, more) = page(window_from, to).await?;
+            let (answer, more) = match page(window_from, to).await {
+                Ok(answer) => answer,
+                Err(e) => {
+                    failure = Some((to, e));
+                    break 'windows;
+                }
+            };
             let (Some(newest), Some(oldest)) = (answer.first(), answer.last()) else {
                 break;
             };
@@ -111,11 +117,14 @@ where
                 ticks.extend(answer);
                 break;
             }
-            ensure!(
-                newest.ms > oldest.ms,
-                "cTrader answered a full page of ticks all at {} ms: no way to page past it",
-                oldest.ms
-            );
+            if newest.ms == oldest.ms {
+                let e = anyhow::anyhow!(
+                    "cTrader answered a full page of ticks all at {} ms: no way to page past it",
+                    oldest.ms
+                );
+                failure = Some((to, e));
+                break 'windows;
+            }
             let oldest = oldest.ms;
             ticks.extend(answer.into_iter().filter(|t| t.ms > oldest));
             to = oldest + 1;
@@ -123,7 +132,28 @@ where
         window_to = window_from;
     }
     ticks.reverse();
-    Ok(ticks)
+    match failure {
+        None => Pages {
+            ticks,
+            from_ms,
+            failure: None,
+        },
+        Some((to, e)) => Pages {
+            ticks,
+            from_ms: to,
+            failure: Some(e),
+        },
+    }
+}
+
+/// The ticks of one side `side_ticks` got: those of `[from_ms, to_ms)`,
+/// oldest first, `from_ms` the window's start unless `failure` cut the
+/// walk short.
+#[derive(Debug)]
+pub(super) struct Pages {
+    pub(super) ticks: Vec<Tick>,
+    pub(super) from_ms: i64,
+    pub(super) failure: Option<anyhow::Error>,
 }
 
 /// The last tick of one side before `ms`, if any in the week before, as
@@ -143,12 +173,26 @@ where
     Ok(answer.first().copied())
 }
 
-/// One side's ticks for `merge`: the last one before the window, and those
-/// in it, oldest first.
+/// One side's ticks for `merge`: those from `from_ms` on, oldest first,
+/// and the last one before `from_ms`, if known.
 #[derive(Debug, Default)]
 pub(super) struct SideTicks {
     pub(super) before: Option<Tick>,
     pub(super) ticks: Vec<Tick>,
+    pub(super) from_ms: i64,
+}
+
+impl SideTicks {
+    /// The last tick before `ms`, at or after `from_ms`: the newest of the
+    /// ticks before it, or `before` if none.
+    fn before(&self, ms: i64) -> Option<Tick> {
+        self.ticks
+            .iter()
+            .rev()
+            .find(|t| t.ms < ms)
+            .copied()
+            .or(self.before)
+    }
 }
 
 /// The quotes merged from a BID and an ASK series, and what was dropped.
@@ -166,6 +210,8 @@ pub(super) struct MergedQuotes {
 /// with a tick of either side, ticks of the same millisecond combined (the
 /// last of each side wins), by the rule of `QuoteMerge`, the ticks before
 /// the window seeding it. `ts_event = ts_init` = the tick's millisecond.
+/// The quotes start where both sides' ticks do: the ticks of the side
+/// reaching further back before that only seed it.
 ///
 /// # Errors
 ///
@@ -175,15 +221,20 @@ pub(super) fn merge(
     bid: &SideTicks,
     ask: &SideTicks,
 ) -> anyhow::Result<MergedQuotes> {
+    let from_ms = bid.from_ms.max(ask.from_ms);
     let mut rule = QuoteMerge::new(instrument)?;
-    rule.bid = bid.before.map(|t| t.price);
-    rule.ask = ask.before.map(|t| t.price);
+    rule.bid = bid.before(from_ms).map(|t| t.price);
+    rule.ask = ask.before(from_ms).map(|t| t.price);
     let mut merged = MergedQuotes {
         quotes: Vec::with_capacity(bid.ticks.len().max(ask.ticks.len())),
         one_sided: 0,
         crossed: 0,
     };
-    let (mut bids, mut asks) = (bid.ticks.iter().peekable(), ask.ticks.iter().peekable());
+    let in_window = |t: &&Tick| t.ms >= from_ms;
+    let (mut bids, mut asks) = (
+        bid.ticks.iter().filter(in_window).peekable(),
+        ask.ticks.iter().filter(in_window).peekable(),
+    );
     loop {
         let ms = match (bids.peek(), asks.peek()) {
             (None, None) => break,
@@ -339,6 +390,12 @@ mod tests {
         Tick { ms, price }
     }
 
+    /// The ticks of `pages`, which no failure cut short.
+    fn complete(pages: Pages) -> Vec<Tick> {
+        assert!(pages.failure.is_none(), "{:?}", pages.failure);
+        pages.ticks
+    }
+
     #[test]
     fn a_captured_response_decodes_newest_first_from_its_differences() {
         let res = ProtoOaGetTickDataRes::decode(TICK_DATA_BID_RES).unwrap();
@@ -391,7 +448,7 @@ mod tests {
         ];
         let mut asked = vec![];
 
-        let ticks = side_ticks(0, 20, venue(&all, &mut asked)).await.unwrap();
+        let ticks = complete(side_ticks(0, 20, venue(&all, &mut asked)).await);
 
         assert_eq!(ticks, all);
         assert_eq!(asked, [(0, 20), (0, 10), (0, 8), (0, 4)]);
@@ -401,7 +458,7 @@ mod tests {
     async fn only_ticks_in_the_window_come_back_from_its_first_millisecond_to_before_its_end() {
         let all = [tick(9, 1), tick(10, 2), tick(19, 3), tick(20, 4)];
 
-        let ticks = side_ticks(10, 20, venue(&all, &mut vec![])).await.unwrap();
+        let ticks = complete(side_ticks(10, 20, venue(&all, &mut vec![])).await);
 
         assert_eq!(ticks, [tick(10, 2), tick(19, 3)]);
     }
@@ -412,7 +469,7 @@ mod tests {
         let mut asked = vec![];
         let end = 2 * WEEK_MS + 100;
 
-        let ticks = side_ticks(0, end, venue(&all, &mut asked)).await.unwrap();
+        let ticks = complete(side_ticks(0, end, venue(&all, &mut asked)).await);
 
         assert_eq!(ticks, all);
         assert_eq!(
@@ -427,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_window_without_ticks_is_empty_not_an_error() {
-        let ticks = side_ticks(0, 20, venue(&[], &mut vec![])).await.unwrap();
+        let ticks = complete(side_ticks(0, 20, venue(&[], &mut vec![])).await);
 
         assert_eq!(ticks, []);
     }
@@ -437,11 +494,43 @@ mod tests {
     async fn a_full_page_of_one_millisecond_is_an_error() {
         let all = [tick(5, 1), tick(5, 2), tick(5, 3), tick(5, 4)];
 
-        let err = side_ticks(0, 20, venue(&all, &mut vec![]))
-            .await
-            .unwrap_err();
+        let pages = side_ticks(0, 20, venue(&all, &mut vec![])).await;
 
+        let err = pages.failure.unwrap();
         assert!(err.to_string().contains("5"), "{err}");
+        assert_eq!(pages.ticks, []);
+        assert_eq!(pages.from_ms, 20);
+    }
+
+    /// Synthetic: the venue fails the third page.
+    #[tokio::test]
+    async fn a_failed_page_keeps_the_ticks_before_it_and_where_they_start() {
+        let all = [
+            tick(1, 10),
+            tick(3, 11),
+            tick(7, 12),
+            tick(9, 14),
+            tick(12, 15),
+            tick(15, 16),
+            tick(16, 17),
+        ];
+        let mut pages_asked = 0;
+        let page = |from, to| {
+            pages_asked += 1;
+            std::future::ready(if pages_asked == 3 {
+                Err(anyhow::anyhow!("page timed out"))
+            } else {
+                Ok(venue_page(&all, from, to, 2))
+            })
+        };
+
+        let pages = side_ticks(0, 20, page).await;
+
+        // Pages of 2, the oldest millisecond of each asked again: 16, 15 |
+        // 15, 12 | failed over [0, 13).
+        assert_eq!(pages.ticks, [tick(15, 16), tick(16, 17)]);
+        assert_eq!(pages.from_ms, 13);
+        assert!(pages.failure.unwrap().to_string().contains("timed out"));
     }
 
     #[tokio::test]
@@ -470,6 +559,7 @@ mod tests {
         SideTicks {
             before,
             ticks: ticks.to_vec(),
+            from_ms: 0,
         }
     }
 
@@ -529,6 +619,31 @@ mod tests {
             ]
         );
         assert_eq!(merged.one_sided, 0);
+    }
+
+    #[test]
+    fn quotes_start_where_both_sides_ticks_do_the_side_reaching_further_seeding() {
+        let bid = side(
+            Some(tick(-5, 116_000)),
+            &[tick(1, 116_010), tick(3, 116_020), tick(5, 116_030)],
+        );
+        // Cut short at 4 ms: the last ask before is unknown.
+        let ask = SideTicks {
+            before: None,
+            ticks: vec![tick(4, 116_050), tick(6, 116_060)],
+            from_ms: 4,
+        };
+
+        let merged = merge(&instrument(), &bid, &ask).unwrap();
+
+        assert_eq!(
+            prices(&merged),
+            [
+                quote(4, "1.16020", "1.16050"),
+                quote(5, "1.16030", "1.16050"),
+                quote(6, "1.16030", "1.16060"),
+            ]
+        );
     }
 
     #[test]

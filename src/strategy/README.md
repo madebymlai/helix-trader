@@ -194,6 +194,8 @@ pub struct Trend {
     core: StrategyCore,
     config: TrendConfig,
     book: Book,
+    /// The request group of the warmup of the last start.
+    warmup: UUID4,
 }
 
 impl Trend {
@@ -203,6 +205,7 @@ impl Trend {
             core: StrategyCore::new_checked(config.base.clone())?,
             book: Book::new(&config),
             config,
+            warmup: UUID4::new(),
         })
     }
 }
@@ -212,7 +215,15 @@ nautilus_strategy!(Trend);
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
-        warmup::start(self, &bar_types, warmup)
+        self.warmup = UUID4::new();
+        warmup::start(self, &bar_types, warmup, self.warmup)
+    }
+
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        if warmup::finished(self.warmup, response)? {
+            log::info!("Warmup complete");
+        }
+        Ok(())
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
@@ -250,10 +261,12 @@ impl DataActor for Trend {
   strategy that wants it calls `Strategy::on_start` from its
   `DataActor::on_start`.
 - The warmup is shared as function calls, not as a hook implementation:
-  `on_start` hands `warmup::start` the bar types and warmup of `bars`, and
-  the two `on_historical_*` handlers feed the bars `warmup::bars` returns to
-  the strategy's own state (see "Warmup and training"). Each strategy writes
-  these three handlers itself, so its `DataActor` impl stays plain Nautilus.
+  `on_start` hands `warmup::start` the bar types and warmup of `bars` and a
+  new request group id, stored first; the two `on_historical_*` handlers
+  feed the bars `warmup::bars` returns to the strategy's own state; and
+  `on_data_response` asks `warmup::finished` whether the warmup ended (see
+  "Warmup and training"). Each strategy writes these four handlers itself,
+  so its `DataActor` impl stays plain Nautilus.
 
 ### Orders and positions
 
@@ -425,11 +438,13 @@ Warmup is the history a strategy needs before it trades: indicators to
 initialise and models to train. The module `strategy::warmup` is the one
 place that knows Nautilus' warmup protocol for the bars it builds; no
 strategy names the request params or reads the cache for its warmup. A
-strategy makes the two calls shown in Wiring: `warmup::start(self,
-&bar_types, warmup)` in `on_start`, which requests the warmup and subscribes
-to the bars, and `warmup::bars(self, response)` in `on_historical_quotes`
-and `on_historical_bars`, which returns the warmup bars of the response's
-instrument, oldest first.
+strategy makes the three calls shown in Wiring: `warmup::start(self,
+&bar_types, warmup, group)` in `on_start`, which requests the warmup as the
+request group `group` and subscribes to the bars; `warmup::bars(self,
+response)` in `on_historical_quotes` and `on_historical_bars`, which
+returns the warmup bars of the response's instrument, oldest first; and
+`warmup::finished(group, response)` in `on_data_response`, which tells
+whether the warmup ended, complete or not.
 
 - **What `start` requests** is chosen from the bar type alone, never the
   venue. A composite bar type is built from its source bars: `start`
@@ -453,13 +468,35 @@ instrument, oldest first.
   out once, complete, in `on_bar` (without it that bar comes out partial, or
   as a one-update bar when the run starts on a bar's close);
   `skip_first_non_full_bar = true`, so that the oldest bar, missing the data
-  before `now - warmup`, is dropped. Then `start` subscribes to the bar
-  types. `backtest_bars.rs`, `backtest_bars_on_close.rs` and
+  before `now - warmup`, is dropped; `update_catalog = true`, so that an
+  answer the data client certifies complete is written back to the
+  catalog (IC's, live; a backtest registers its catalog read-only). Then
+  `start` subscribes to the bar types, one `subscribe_bars` of a list per
+  venue, with the param `start_ns` = `now`: the live stream starts where
+  the warmup ends. Without it, a data engine with a catalog starts a
+  subscription to external bars 1 ns after the catalog's last bar
+  (`subscribe_command_with_prefilled_start_ns`,
+  `data/src/engine/streaming.rs`), which IB's data client honours by
+  sending every bar since as live (`parse_start_ns`,
+  `adapters/interactive_brokers/src/data/core.rs`).
+  `backtest_bars.rs`, `backtest_bars_on_close.rs` and
   `backtest_composite_warmup.rs` pin this.
+- **The request group.** The requests form one group
+  (`DataActor::request_group`, with the strategy's id): once every request
+  is answered, Nautilus calls `on_data_response` with a payload-free
+  envelope of the group, carrying the first failure reason if a request
+  failed (its data received up to then delivered anyway).
+  `warmup::finished` returns `Ok(true)` then, or an error naming the
+  reason, which Nautilus logs; `Ok(false)` for any other response. A group
+  whose requests are all answered at once, as a backtest's catalog does,
+  ends inside `start`, hence the id stored before the call.
 - **What `bars` does.** The bars a request builds go to the cache only;
   they are there when the response arrives. `bars` reads the internal bars
   of the response's instrument from the cache (newest first there) and
-  returns them oldest first.
+  returns them oldest first. Nautilus has no native equivalent: the
+  response carries what was requested, never the bars built from it
+  (`process_engine_bar` in `data/src/engine/bar.rs` publishes no
+  historical bar).
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
   warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
@@ -469,21 +506,23 @@ instrument, oldest first.
   Past the cache's maximum of 1,000,000 it fails, naming the bar type, the
   bars needed and the capacity, and the run does not start. The backtest
   sets it on `BacktestEngineConfig::cache`, live on `LiveNodeConfig::cache`.
-- **Response.** One response per request, usually before the first
-  `on_bar`. An `Err` returned from `on_historical_quotes` or
-  `on_historical_bars` is logged, not propagated: a failed warmup does not
-  stop the run. An unanswered request never calls them. Do not trade until
-  warmup has actually arrived.
+- **Response.** One response per request, the catalog's part and the data
+  client's merged, usually before the first `on_bar`. An `Err` returned
+  from `on_historical_quotes`, `on_historical_bars` or `on_data_response`
+  is logged, not propagated: a failed warmup does not stop the run. An
+  unanswered request never calls them, and its group never ends. Do not
+  trade until warmup has actually arrived.
 - **Who answers.** The data engine serves the request from a registered
   catalog and asks the data client only for the intervals the catalog
   lacks. In backtest the client answers nothing, so the catalog must be
   registered and cover the whole window, or no response comes (see the
-  backtest README). Live, no catalog is registered and the data client
-  answers (see the live README): OKX's adapter serves its candles up to
-  now, IB's its 1-minute bars up to now (`request_bars`), IC's its quotes
-  up to now from cTrader's tick history (`request_quotes`). Neither OKX nor
-  IB serves quote history, so on them only composite bar types get a
-  warmup; on IC only bar types built from quotes do.
+  backtest README). Live, the node registers the same catalog, and the
+  data client answers the rest (see the live README): OKX's adapter serves
+  its candles up to now, IB's its 1-minute bars up to now
+  (`request_bars`), IC's its quotes up to now from cTrader's tick history
+  (`request_quotes`), written back. Neither OKX nor IB serves quote
+  history, so on them only composite bar types get a warmup; on IC only
+  bar types built from quotes do.
 
 A model is trained by the strategy itself, retrained on a rolling window of
 the bars received in `on_bar`, every N bars as the config says. The model

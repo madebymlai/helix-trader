@@ -22,7 +22,8 @@ pub use bracket::Bps;
 pub use config::EmaCrossConfig;
 
 use jiff::Timestamp;
-use nautilus_common::{actor::DataActor, timer::TimeEvent};
+use nautilus_common::{actor::DataActor, messages::data::DataResponseEnvelope, timer::TimeEvent};
+use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Bar, QuoteTick},
     enums::{ContingencyType, OrderSide},
@@ -48,6 +49,8 @@ pub struct EmaCross {
     core: StrategyCore,
     config: EmaCrossConfig,
     signal: Signal,
+    /// The request group of the warmup of the last start.
+    warmup: UUID4,
 }
 
 impl EmaCross {
@@ -60,6 +63,7 @@ impl EmaCross {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal: Signal::new(&config),
             config,
+            warmup: UUID4::new(),
         })
     }
 
@@ -213,7 +217,16 @@ impl DataActor for EmaCross {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.arm_open_trades()?;
         let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
-        warmup::start(self, &bar_types, warmup)
+        self.warmup = UUID4::new();
+        warmup::start(self, &bar_types, warmup, self.warmup)
+    }
+
+    /// Logs the end of the warmup; Nautilus logs a failed one as an error.
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        if warmup::finished(self.warmup, response)? {
+            log::info!("Warmup complete");
+        }
+        Ok(())
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {

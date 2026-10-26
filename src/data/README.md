@@ -181,14 +181,18 @@ request id (an empty response arrives as an empty slice), and an `Err` from
 it is only logged, so a failed fill would still exit cleanly. The historical
 clients return the data and propagate errors with `?`.
 
-### Nautilus does not persist responses
+### Nautilus persists only certified responses
 
-In Rust, Nautilus never writes a requested response to a catalog. The data
-engine serves a request from a registered catalog and asks the adapter for
-the missing intervals, but writes nothing back; the `update_catalog` param
-only routes a request to the client. The streaming writer records published
-live data only, and history responses are not published. Filling the
-catalog is ours.
+The data engine serves a request from a registered catalog and asks the
+adapter for the missing intervals; with the `update_catalog` param it
+writes an adapter's answer back to the catalog, over the request's window,
+but only an answer the adapter sends as an explicit completed response
+envelope without a failure (`DataResponseEnvelope`; the engine's
+`update_catalog_from_response`, `data/src/engine/streaming.rs`): IC's data
+client does (`live/ic/README.md`), IB's and OKX's reply with the payload
+alone, which Nautilus does not take as complete coverage. So a live node
+fills the catalog with IC's quotes as its warmups fetch them, and nothing
+else; filling it with a window of history, from any source, is ours.
 
 ### Interface
 
