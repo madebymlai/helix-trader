@@ -1,9 +1,11 @@
 //! IC Markets clients for the live node.
 //!
-//! Provides the data and execution client factories and configs of the
-//! adapter in `data/ic` (`IcDataClient`, `IcExecutionClient`), on the
-//! environment `IC_ENVIRONMENT` names, `demo` or `live`, required, with the
-//! credential from `IC_*`, both read before anything connects. The data
+//! Provides the data client (`data`, its live quotes in `spots`), the
+//! execution client (`execution`, its reconciliation reports in `reports`)
+//! and their factories and configs, on the cTrader session of `data/ic`
+//! (`IcHistory`), on the environment `IC_ENVIRONMENT` names, `demo` or
+//! `live`, required, with the credential from `IC_*`, both read before
+//! anything connects. The data
 //! client loads the run's instruments at connect; the execution client
 //! checks the account (hedging, the configured one), publishes its state
 //! and reconciles it. It places no order yet: IC orders are denied.
@@ -23,8 +25,14 @@ use nautilus_model::{
     identifiers::{ClientId, InstrumentId, TraderId, Venue},
 };
 
+use self::{data::IcDataClient, execution::IcExecutionClient};
 use super::node::Clients;
-use crate::data::{IcConnection, IcDataClient, IcExecutionClient, IcHistory};
+use crate::data::{IcConnection, IcHistory};
+
+mod data;
+mod execution;
+mod reports;
+mod spots;
 
 /// The name of IC's clients, and so their `ClientId`.
 const NAME: &str = "ICMARKETS";

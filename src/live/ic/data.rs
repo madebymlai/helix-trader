@@ -37,11 +37,11 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
-use super::{
+use super::spots::SpotQuotes;
+use crate::data::ic::{
     IcHistory, IcSymbol,
     config::{IcConnection, IcCredential},
     parse::IC_VENUE,
-    spots::SpotQuotes,
     websocket::HEARTBEAT_INTERVAL,
 };
 
@@ -52,7 +52,7 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 /// IC's data client: quotes live and historical of the instruments it
 /// loads, on venue `ICMARKETS`.
 #[derive(Debug)]
-pub struct IcDataClient {
+pub(super) struct IcDataClient {
     client_id: ClientId,
     url: String,
     credential: IcCredential,
@@ -81,7 +81,7 @@ impl IcDataClient {
     /// Panics if the node's data event sender is not set on this thread,
     /// as it is when the node's factory creates the client.
     #[must_use]
-    pub fn new(
+    pub(super) fn new(
         client_id: ClientId,
         connection: &IcConnection,
         instrument_ids: Vec<InstrumentId>,

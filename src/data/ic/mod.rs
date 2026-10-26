@@ -1,18 +1,16 @@
-//! IC Markets history, live data and account, over Spotware's cTrader Open
-//! API: the instruments of IC's forex and metals, filled into the catalog,
-//! and the live node's data and execution clients.
+//! IC Markets history and account, over Spotware's cTrader Open API: the
+//! instruments of IC's forex and metals, filled into the catalog, and the
+//! cTrader session the live node's clients (`live/ic`) share.
 //!
-//! Nautilus has no cTrader adapter, so this module is one, laid out as
-//! Nautilus' adapters are (`docs/developer_guide/adapters.md`): Spotware's
-//! protobuf messages (`messages`, from the vendored `proto/`), the
-//! environment and credential (`config`), the connection (`websocket`, an
-//! outer client and its handler task) and the parsing of symbols into
+//! Nautilus has no cTrader adapter, so this module and `live/ic` are one,
+//! laid out as Nautilus' adapters are (`docs/developer_guide/adapters.md`):
+//! Spotware's protobuf messages (`messages`, from the vendored `proto/`),
+//! the environment and credential (`config`), the connection (`websocket`,
+//! an outer client and its handler task) and the parsing of symbols into
 //! instruments (`parse`), the tick history merged into quotes (`ticks`),
-//! the spot events merged the same way (`spots`), the data client
-//! (`data`), the account (`account`), the reconciliation reports
-//! (`reports`), the execution client (`execution`) and the token pair with
-//! the token file that keeps it renewed (`token`). IC's instruments are on
-//! venue `ICMARKETS` (`XAUUSD.ICMARKETS`).
+//! the account (`account`) and the token pair with the token file that
+//! keeps it renewed (`token`). IC's instruments are on venue `ICMARKETS`
+//! (`XAUUSD.ICMARKETS`).
 
 use std::{collections::HashMap, str::FromStr};
 
@@ -26,6 +24,7 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
+pub use self::config::IcConnection;
 use self::{
     account::IcAccount,
     config::{IcAccountId, IcCredential},
@@ -38,22 +37,17 @@ use self::{
     ticks::{SideTicks, Tick},
     websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents},
 };
-pub use self::{config::IcConnection, data::IcDataClient, execution::IcExecutionClient};
 use super::fill_catalog;
 
-mod account;
-mod config;
-mod data;
-mod execution;
-mod messages;
-mod parse;
-mod reports;
-mod spots;
+pub(crate) mod account;
+pub(crate) mod config;
+pub(crate) mod messages;
+pub(crate) mod parse;
 #[cfg(test)]
-mod testing;
-mod ticks;
+pub(crate) mod testing;
+pub(crate) mod ticks;
 mod token;
-mod websocket;
+pub(crate) mod websocket;
 
 /// A cTrader session on IC's account: history, the spot subscriptions of
 /// the data client, and the account, open positions and deals of the
@@ -100,7 +94,7 @@ impl IcHistory {
 
     /// Connects to `url` as `credential`, with the spot events of the
     /// symbols `subscribe_spots` subscribes.
-    async fn connect_to(
+    pub(crate) async fn connect_to(
         url: &str,
         credential: IcCredential,
         heartbeat: std::time::Duration,
@@ -128,7 +122,7 @@ impl IcHistory {
 
     /// The account, from the trader and the assets, checked (see
     /// `IcAccount::check`).
-    async fn account(&self) -> anyhow::Result<IcAccount> {
+    pub(crate) async fn account(&self) -> anyhow::Result<IcAccount> {
         let account = self.account_id.get();
         let (trader, assets) = tokio::try_join!(
             async {
@@ -159,7 +153,7 @@ impl IcHistory {
 
     /// The open positions and pending orders, their stop loss and take
     /// profit in the positions' fields.
-    async fn reconcile(&self) -> anyhow::Result<ProtoOaReconcileRes> {
+    pub(crate) async fn reconcile(&self) -> anyhow::Result<ProtoOaReconcileRes> {
         self.client
             .request(&ProtoOaReconcileReq {
                 ctid_trader_account_id: self.account_id.get(),
@@ -180,7 +174,7 @@ impl IcHistory {
     ///
     /// Returns an error if a request fails, or a single millisecond holds
     /// more deals than a page.
-    async fn deals(&self, from_ms: i64, to_ms: i64) -> anyhow::Result<Vec<ProtoOaDeal>> {
+    pub(crate) async fn deals(&self, from_ms: i64, to_ms: i64) -> anyhow::Result<Vec<ProtoOaDeal>> {
         // cTrader refuses a window not ending after its start
         // (`INCORRECT_BOUNDARIES`, demo, 2026-10-26); it holds no deal.
         if from_ms >= to_ms {
@@ -232,7 +226,7 @@ impl IcHistory {
     }
 
     /// The symbols of `ids`, as `instruments`.
-    async fn symbols(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<IcSymbol>> {
+    pub(crate) async fn symbols(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<IcSymbol>> {
         for &id in ids {
             parse::ensure_ic(id)?;
         }
@@ -350,7 +344,7 @@ impl IcHistory {
     /// and ASK ticks of those milliseconds and the last tick of each before
     /// them (see `ticks::merge`), the two sides fetched side by side.
     /// Logs the counts.
-    async fn quote_ticks(
+    pub(crate) async fn quote_ticks(
         &self,
         symbol: &IcSymbol,
         from: Timestamp,
@@ -431,12 +425,12 @@ impl IcHistory {
 
     /// Subscribes to the spot events of `symbol_id` for the rest of the
     /// session (see `IcWebSocketClient::subscribe_spots`).
-    fn subscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
+    pub(crate) fn subscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
         Ok(self.client.subscribe_spots(symbol_id)?)
     }
 
     /// Ends the spot subscription of `symbol_id`.
-    fn unsubscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
+    pub(crate) fn unsubscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
         Ok(self.client.unsubscribe_spots(symbol_id)?)
     }
 
@@ -448,9 +442,9 @@ impl IcHistory {
 
 /// An IC instrument and its cTrader `symbolId` on this server.
 #[derive(Debug, Clone)]
-struct IcSymbol {
-    instrument: InstrumentAny,
-    symbol_id: i64,
+pub(crate) struct IcSymbol {
+    pub(crate) instrument: InstrumentAny,
+    pub(crate) symbol_id: i64,
 }
 
 /// How much of a fill `fill_quotes` writes at once: a week of XAUUSD is

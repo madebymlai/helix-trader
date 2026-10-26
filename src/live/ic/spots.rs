@@ -1,5 +1,5 @@
 //! Live quotes: cTrader's spot events merged into quotes by the rule of the
-//! tick history (`ticks::QuoteMerge`).
+//! tick history (`ticks::QuoteMerge` in `data/ic`).
 //!
 //! A spot event carries a side only when it changed, and the time of the
 //! change (`subscribeToSpotTimestamp`); the first one after a subscription
@@ -24,7 +24,7 @@ use nautilus_model::{
     instruments::{Instrument, InstrumentAny},
 };
 
-use super::{
+use crate::data::ic::{
     messages::ProtoOaSpotEvent,
     ticks::{Merged, QuoteMerge},
 };

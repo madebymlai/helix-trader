@@ -28,7 +28,7 @@ const ACCOUNT_ID_VAR: &str = "IC_ACCOUNT_ID";
 /// cTrader's demo or live servers, fully separate: an account
 /// authenticates only on its own environment's server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum IcEnvironment {
+pub(crate) enum IcEnvironment {
     Demo,
     Live,
 }
@@ -49,7 +49,7 @@ impl IcEnvironment {
 
     /// The protobuf endpoint (port 5035) over WebSocket with TLS
     /// (help.ctrader.com/open-api, "Proxies and endpoints").
-    pub(super) fn url(self) -> &'static str {
+    pub(crate) fn url(self) -> &'static str {
         match self {
             Self::Demo => "wss://demo.ctraderapi.com:5035",
             Self::Live => "wss://live.ctraderapi.com:5035",
@@ -82,7 +82,7 @@ impl fmt::Debug for IcAccountId {
 /// The app's client id and secret, the account, and the token file with
 /// the pair that seeds it.
 #[derive(Debug, Clone)]
-pub(super) struct IcCredential {
+pub(crate) struct IcCredential {
     pub(super) client_id: SecretString,
     pub(super) client_secret: SecretString,
     pub(super) account_id: IcAccountId,
@@ -149,8 +149,8 @@ impl IcCredential {
 /// Where and as whom to connect: the environment and the credential.
 #[derive(Debug, Clone)]
 pub struct IcConnection {
-    pub(super) environment: IcEnvironment,
-    pub(super) credential: IcCredential,
+    pub(crate) environment: IcEnvironment,
+    pub(crate) credential: IcCredential,
 }
 
 impl IcConnection {

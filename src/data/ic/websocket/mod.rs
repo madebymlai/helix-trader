@@ -42,7 +42,7 @@ use super::{
 };
 
 /// cTrader's heartbeat interval.
-pub(super) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How long the application and account authentication may take.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
