@@ -21,11 +21,11 @@
 //! oldest beyond it, so the node running the strategy takes its cache
 //! config from `cache_config`, which holds the whole warmup.
 //!
-//! An hour with no quote at all means the market is closed (a night, a
-//! weekend, a holiday): the data engine builds no bar for it, in the
-//! warmup as after it. Nautilus' default builds one, flat at the last
-//! close, which a session on the time of day alone would trade on. So the
-//! node running the strategy takes its data engine config from
+//! An hour with no quote or source bar at all means the market is closed
+//! (a night, a weekend, a holiday): the data engine builds no bar for it,
+//! in the warmup as after it. Nautilus' default builds one, flat at the
+//! last close, which a session on the time of day alone would trade on. So
+//! the node running the strategy takes its data engine config from
 //! `data_engine_config` (backtest) or `live_data_engine_config` (live),
 //! which turn `time_bars_build_with_no_updates` off.
 //!
@@ -187,7 +187,8 @@ pub fn data_engine_config() -> DataEngineConfig {
 /// How long, in microseconds, a live node waits after a bar's close before
 /// building a bar of source bars: a venue sends a source bar once it has
 /// closed, so its last source bar arrives after the bar's close (OKX's
-/// confirmed 1-minute candles: 0.3 to 1.5 s, measured 2026-10-22).
+/// confirmed 1-minute candles: 0.3 to 1.5 s, measured 2026-10-22; IB's
+/// keepUpToDate 1-minute bars: 0.4 to 1.3 s, measured 2026-10-26).
 const SOURCE_BAR_DELAY_MICROS: u64 = 5_000_000;
 
 /// The data engine config of a live node running a strategy on

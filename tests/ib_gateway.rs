@@ -9,7 +9,7 @@
 //! Gated as Nautilus' IB examples (`node_exec_tester`, `node_data_tester`)
 //! are: each test returns at once, saying it was skipped, unless
 //! `NAUTILUS_IB_RUN=1` is set in the shell. None places an order (the live
-//! run's session holds no bar, so the strategy never trades), so none needs
+//! run's strategy is never warm, so it never trades), so none needs
 //! `NAUTILUS_IB_LIVE_ORDERS=1`. Run them with:
 //!
 //! ```sh
@@ -137,16 +137,16 @@ async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
     }
 }
 
-/// The EMA crossover on SXR8.IBIS whose session, half an hour, holds no
-/// hour bar: it never trades.
+/// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars, warmed
+/// up over two hours: its slow EMA needs 30 bars, so it never trades.
 fn never_trading_ema_cross() -> EmaCrossConfig {
     let config: EmaCrossConfig = toml::from_str(
         r#"
         instrument_ids = ["SXR8.IBIS"]
         bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+        composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
         trade_size = "1"
         warmup = "2h"
-        session = { time_zone = "Europe/Berlin", open = "03:00", close = "03:30" }
         "#,
     )
     .unwrap();
@@ -154,7 +154,7 @@ fn never_trading_ema_cross() -> EmaCrossConfig {
     config
 }
 
-/// Long enough for the gateway, the catalog fill and the node to start.
+/// Long enough for the gateway and the node to start.
 const LIVE_RUN: Duration = Duration::from_secs(90);
 
 #[tokio::test(flavor = "multi_thread")]
@@ -172,12 +172,10 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
         account.to_string().starts_with('D'),
         "{account} is not a paper account"
     );
-    let catalog = tempfile::tempdir().unwrap();
     let config = never_trading_ema_cross();
     let requirements = config.bars.data_requirements();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-043"),
-        catalog: catalog.path().to_path_buf(),
         account: Some(account),
         client_id: 43,
         leverage: Decimal::ONE,
