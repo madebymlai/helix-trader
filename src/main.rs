@@ -307,6 +307,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 /// Builds the strategy from its config and runs it live until Ctrl-C.
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
+        // One trader: each run loads the cache in Redis the last one left.
+        trader_id: TraderId::from("HELIX-001"),
         catalog: args.catalog,
         account: args.account,
         client_id: args.client_id,

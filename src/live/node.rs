@@ -2,7 +2,8 @@
 //!
 //! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since catalogs
 //! are a `LiveNodeConfig` field, with the data and execution clients of
-//! each adapter the instruments need, each with its routing, adds the
+//! each adapter the instruments need, each with its routing, and the cache
+//! persisted to Redis (`with_cache_database_factory`, see `redis`), adds the
 //! strategy (`add_strategy`),
 //! claims its instruments' external orders, and calls `run`, which stops on
 //! SIGINT or SIGTERM. Follows the IB adapter's `node_exec_tester` example.
@@ -27,11 +28,7 @@ use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
-/// The trader of the node, also on the log lines written before the node
-/// exists.
-pub(super) fn trader_id() -> TraderId {
-    TraderId::from("HELIX-001")
-}
+use super::redis;
 
 /// One adapter's data and execution client factories and configs, and
 /// how Nautilus routes data and orders to them.
@@ -43,24 +40,29 @@ pub(super) struct Clients {
     pub(super) routing: RoutingConfig,
 }
 
-/// Builds a live node on the clients of each adapter in `clients`, routed
-/// as each says, with the catalog at `catalog` serving historical requests,
+/// Builds the live node of `trader_id` on the clients of each adapter in
+/// `clients`, routed as each says, with the catalog at `catalog` serving historical requests,
 /// `cache` configuring the cache (sized for the warmup) and `data_engine`
 /// the data engine (see `warmup::live_data_engine_config`), adds
 /// `strategy` claiming the external orders of `instrument_ids`, and runs it
 /// until SIGINT or SIGTERM.
 ///
-/// Reconciles at startup and checks open orders and positions as it runs.
+/// The cache is persisted to Redis, started or reused first (see
+/// `redis::start`), under `trader_id`'s keys: the node loads the orders,
+/// positions and accounts of its earlier runs at start, then reconciles
+/// them with the venues, and checks open orders and positions as it runs.
 /// With the catalog registered, the data engine answers a request from it
 /// and asks the data client only for the intervals it misses.
 ///
 /// # Errors
 ///
-/// Returns an error if the node fails to build (two clients claiming the
-/// same route included), the strategy cannot be
+/// Returns an error if Redis cannot be started, if the node fails to build
+/// (two clients claiming the same route included), fails to load its cache, the strategy cannot be
 /// added or claim its instruments, or the node fails to start, run or stop
 /// (orders still unresolved after the post-stop delay included).
+#[expect(clippy::too_many_arguments, reason = "the parts of one node")]
 pub(super) async fn run<S>(
+    trader_id: TraderId,
     catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
@@ -72,9 +74,11 @@ pub(super) async fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let config = config(catalog, logging, cache, data_engine)?;
+    let config = config(trader_id, catalog, logging, cache, data_engine)?;
+    let cache_database = redis::start().await?;
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
+        .with_cache_database_factory(Box::new(cache_database))
         .with_delay_post_stop_secs(5);
     for clients in clients {
         builder = builder
@@ -107,10 +111,12 @@ where
     node.run().await
 }
 
-/// The config of the live node: the trader, `logging`, `cache`, the catalog
-/// at `catalog`, `data_engine` and the execution engine's reconciliation
-/// and checks.
+/// The config of the live node: `trader_id`, `logging`, `cache`, the
+/// catalog at `catalog`, `data_engine` and the execution engine's
+/// reconciliation and checks, after loading the cache from its database
+/// (`load_cache`, Nautilus' default).
 fn config(
+    trader_id: TraderId,
     catalog: &Path,
     logging: LoggerConfig,
     cache: CacheConfig,
@@ -124,7 +130,7 @@ fn config(
         .with_context(|| format!("catalog path {} is not UTF-8", catalog.display()))?;
     Ok(LiveNodeConfig {
         environment: Environment::Live,
-        trader_id: trader_id(),
+        trader_id,
         logging,
         catalogs: vec![DataCatalogConfig::new(catalog.to_string(), None, None)],
         cache: Some(cache),
@@ -147,6 +153,7 @@ mod tests {
 
     fn catalog_of(catalog: &Path) -> String {
         let config = config(
+            TraderId::from("HELIX-001"),
             catalog,
             LoggerConfig::default(),
             CacheConfig::default(),

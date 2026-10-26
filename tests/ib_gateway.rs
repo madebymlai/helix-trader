@@ -16,8 +16,12 @@
 //! NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
 //! ```
 //!
-//! The container is left running: the next run reuses it. Client ids 40 to
+//! The live node keeps its cache in Redis (`live::redis`) under the
+//! test's trader, `HELIXTEST-043`, whose records the test deletes. The
+//! container is left running: the next run reuses it. Client ids 40 to
 //! 43, apart from `fill-catalog`'s 10 and `live`'s 1.
+
+mod common;
 
 use std::{
     process::Command,
@@ -31,7 +35,10 @@ use helix_trader::{
 };
 use jiff::{Timestamp, ToSpan};
 use nautilus_common::logging::logger::LoggerConfig;
-use nautilus_model::{data::NautilusDataType, identifiers::InstrumentId};
+use nautilus_model::{
+    data::NautilusDataType,
+    identifiers::{InstrumentId, TraderId},
+};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 use tokio::sync::Mutex;
@@ -157,6 +164,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     let config = never_trading_ema_cross();
     let requirements = config.data_requirements();
     let live = Live {
+        trader_id: TraderId::from("HELIXTEST-043"),
         catalog: catalog.path().to_path_buf(),
         account: Some(account),
         client_id: 43,
@@ -181,6 +189,8 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     .await;
     let interrupted = interrupt.is_finished();
     interrupt.abort();
+    // The node's records in Redis, under the test's trader.
+    common::cache::delete_trader("HELIXTEST-043").await;
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
     assert!(interrupted, "the node stopped before SIGINT");

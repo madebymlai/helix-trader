@@ -10,6 +10,7 @@
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
 
+pub mod cache;
 pub mod recorder;
 
 use std::path::Path;
