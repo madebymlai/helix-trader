@@ -5,7 +5,7 @@
 A systematic trading system in Rust, built on
 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same
 strategy type runs in backtest, paper and live, on Interactive Brokers and
-OKX. Nautilus owns data, simulation, execution and the portfolio; this repo
+OKX; IC Markets (cTrader) has history and live data, execution to come. Nautilus owns data, simulation, execution and the portfolio; this repo
 adds only what Nautilus lacks.
 
 ## Commands
@@ -17,7 +17,7 @@ per process. Each takes the strategy name and its TOML config.
 |---|---|
 | `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, IC Markets' cTrader for IC instruments (tick quotes), Interactive Brokers for the rest. |
 | `backtest` | Runs the strategy over a window of the catalog, with commissions, leverage and funding, and prints the results. |
-| `live` | Runs the strategy on a live node against IB or OKX until Ctrl-C. |
+| `live` | Runs the strategy on a live node against IB or OKX, or on IC Markets' live data (no orders yet), until Ctrl-C. |
 
 ## Quick start
 
@@ -66,7 +66,7 @@ IB paper gateway, `NAUTILUS_OKX_RUN=1` for the OKX demo account,
 | [src/data/README.md](src/data/README.md) | Filling the catalog; IB, IC and OKX history in `ib/`, `ic/` and `okx/` |
 | [src/strategy/README.md](src/strategy/README.md) | Writing a strategy, its config, warmup |
 | [src/backtest/README.md](src/backtest/README.md) | The backtest run, costs, fills, leverage, results |
-| [src/live/README.md](src/live/README.md) | Live nodes; IB and OKX clients in `ib/` and `okx/` |
+| [src/live/README.md](src/live/README.md) | Live nodes; IB, IC and OKX clients in `ib/`, `ic/` and `okx/` |
 | [docs/research/](docs/research/README.md) | Desk research on strategies, costs and brokers |
 
 ## Disclaimer

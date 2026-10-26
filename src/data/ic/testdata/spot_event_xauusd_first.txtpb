@@ -1,0 +1,13 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the first XAUUSD (41) spot event after the subscription: both sides, the
+# last session close and the time (Unix ms).
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOASpotEvent OpenApiMessages.proto < spot_event_xauusd_first.bin
+# Message: ProtoOASpotEvent
+ctidTraderAccountId: 1000001
+symbolId: 41
+bid: 401796000
+ask: 401801000
+sessionClose: 399708000
+timestamp: 1793017475790

@@ -28,14 +28,16 @@ data/
   ic/
     mod.rs         IC Markets history: the session, instruments, the fill
     config.rs      the environment and the credential, from IC_*
+    data.rs        IcDataClient, the live node's data client: spot quotes, quote requests
     messages.rs    Spotware's protobuf messages, their payload types, the envelope
     parse.rs       cTrader symbols -> CurrencyPair, ids
+    spots.rs       live quotes: spot events merged into quotes as the history's
     ticks.rs       tick history: decoding, paging, the merge into quotes, their size
-    websocket/     the cTrader connection: outer client, handler task
+    websocket/     the cTrader connection: outer client, handler task, spot subscriptions
     testing.rs     a mock cTrader peer (a local WebSocket server) for the tests
     proto/         Spotware's four .proto files, vendored (build.rs compiles them)
     testdata/      responses captured from IC's demo, scrubbed, text and wire forms
-    README.md      IC history: the cTrader session, credentials, instruments, tick quotes, tests
+    README.md      IC history and live data: the cTrader session, credentials, instruments, tick quotes, spots, tests
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates

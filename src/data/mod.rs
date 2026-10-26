@@ -12,6 +12,6 @@ pub use ib::{IbAccount, IbHistory};
 pub(crate) use ib::{IbGateway, data_client_config};
 mod ic;
 mod okx;
-pub use ic::IcHistory;
+pub use ic::{IcConnection, IcDataClient, IcHistory};
 pub(crate) use okx::Contract as OkxContract;
 pub use okx::OkxHistory;

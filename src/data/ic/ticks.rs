@@ -10,6 +10,7 @@ use anyhow::{Context, ensure};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::QuoteTick,
+    identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
     types::{Price, Quantity},
 };
@@ -75,6 +76,8 @@ pub(super) fn decode(tick_data: &[ProtoOaTickData]) -> anyhow::Result<Vec<Tick>>
 /// `page(from, to)`, which answers cTrader's tick request over `[from,
 /// to)`: the newest ticks first, at most a page, and whether there are
 /// more. Requests span at most `WEEK_MS`, walking back from `to_ms`.
+/// `page` returns a future rather than being an async closure, whose
+/// futures the compiler cannot prove `Send` for a spawned request.
 ///
 /// Within a window, the next page ends 1 ms after the oldest tick of the
 /// page before, whose ticks of that millisecond are dropped: the next page
@@ -85,11 +88,14 @@ pub(super) fn decode(tick_data: &[ProtoOaTickData]) -> anyhow::Result<Vec<Tick>>
 ///
 /// Returns an error if a request fails, or if a page with more after it
 /// holds a single millisecond (no progress).
-pub(super) async fn side_ticks(
+pub(super) async fn side_ticks<Page>(
     from_ms: i64,
     to_ms: i64,
-    mut page: impl AsyncFnMut(i64, i64) -> anyhow::Result<(Vec<Tick>, bool)>,
-) -> anyhow::Result<Vec<Tick>> {
+    mut page: impl FnMut(i64, i64) -> Page,
+) -> anyhow::Result<Vec<Tick>>
+where
+    Page: Future<Output = anyhow::Result<(Vec<Tick>, bool)>>,
+{
     // Newest first until reversed at the end.
     let mut ticks = Vec::new();
     let mut window_to = to_ms;
@@ -126,10 +132,13 @@ pub(super) async fn side_ticks(
 /// # Errors
 ///
 /// Returns an error if the request fails.
-pub(super) async fn last_before(
+pub(super) async fn last_before<Page>(
     ms: i64,
-    mut page: impl AsyncFnMut(i64, i64) -> anyhow::Result<(Vec<Tick>, bool)>,
-) -> anyhow::Result<Option<Tick>> {
+    mut page: impl FnMut(i64, i64) -> Page,
+) -> anyhow::Result<Option<Tick>>
+where
+    Page: Future<Output = anyhow::Result<(Vec<Tick>, bool)>>,
+{
     let (answer, _) = page(ms - WEEK_MS, ms).await?;
     Ok(answer.first().copied())
 }
@@ -155,14 +164,8 @@ pub(super) struct MergedQuotes {
 
 /// The quotes of `instrument` from `bid` and `ask`: one per millisecond
 /// with a tick of either side, ticks of the same millisecond combined (the
-/// last of each side wins); the side without a tick then is carried from
-/// its last tick, its tick before the window included. No quote before
-/// both sides are known. A crossed quote (ask below bid) is dropped and
-/// counted, so an order fills on the quote before it; a locked one (ask =
-/// bid) is kept.
-///
-/// Prices at the instrument's price precision; sizes `quote_size`;
-/// `ts_event = ts_init` = the tick's millisecond.
+/// last of each side wins), by the rule of `QuoteMerge`, the ticks before
+/// the window seeding it. `ts_event = ts_init` = the tick's millisecond.
 ///
 /// # Errors
 ///
@@ -172,14 +175,14 @@ pub(super) fn merge(
     bid: &SideTicks,
     ask: &SideTicks,
 ) -> anyhow::Result<MergedQuotes> {
-    let precision = instrument.price_precision();
-    let size = quote_size(instrument)?;
+    let mut rule = QuoteMerge::new(instrument)?;
+    rule.bid = bid.before.map(|t| t.price);
+    rule.ask = ask.before.map(|t| t.price);
     let mut merged = MergedQuotes {
         quotes: Vec::with_capacity(bid.ticks.len().max(ask.ticks.len())),
         one_sided: 0,
         crossed: 0,
     };
-    let (mut last_bid, mut last_ask) = (bid.before, ask.before);
     let (mut bids, mut asks) = (bid.ticks.iter().peekable(), ask.ticks.iter().peekable());
     loop {
         let ms = match (bids.peek(), asks.peek()) {
@@ -188,38 +191,105 @@ pub(super) fn merge(
             (None, Some(a)) => a.ms,
             (Some(b), Some(a)) => b.ms.min(a.ms),
         };
-        let mut ticks = 0;
+        let (mut last_bid, mut last_ask, mut ticks) = (None, None, 0);
         while let Some(b) = bids.next_if(|b| b.ms == ms) {
-            last_bid = Some(*b);
+            last_bid = Some(b.price);
             ticks += 1;
         }
         while let Some(a) = asks.next_if(|a| a.ms == ms) {
-            last_ask = Some(*a);
+            last_ask = Some(a.price);
             ticks += 1;
         }
-        let (Some(b), Some(a)) = (last_bid, last_ask) else {
-            merged.one_sided += ticks;
-            continue;
-        };
-        if a.price < b.price {
-            merged.crossed += 1;
-            continue;
+        match rule.next(ms, last_bid, last_ask, None)? {
+            Merged::Quote(quote) => merged.quotes.push(quote),
+            Merged::OneSided => merged.one_sided += ticks,
+            Merged::Crossed => merged.crossed += 1,
         }
-        let ts = UnixNanos::from(
+    }
+    Ok(merged)
+}
+
+/// The rule making an instrument's quotes of its BID and ASK ticks, one
+/// millisecond at a time, the same for history and live spots: the side
+/// without a tick is carried from its last one; no quote before both sides
+/// are known; a crossed quote (ask below bid) is dropped, so an order fills
+/// on the quote before it; a locked one (ask = bid) is kept. Prices at the
+/// instrument's precision, sizes `quote_size`.
+#[derive(Debug)]
+pub(super) struct QuoteMerge {
+    instrument_id: InstrumentId,
+    precision: u8,
+    size: Quantity,
+    /// The last price of each side, in 1/100000.
+    bid: Option<i64>,
+    ask: Option<i64>,
+}
+
+/// What a millisecond of ticks made.
+#[derive(Debug, PartialEq)]
+pub(super) enum Merged {
+    Quote(QuoteTick),
+    /// No quote: a side is not known yet.
+    OneSided,
+    /// No quote: the ask is below the bid.
+    Crossed,
+}
+
+impl QuoteMerge {
+    /// The rule for `instrument`, no side known yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the quote size is not on the instrument's size
+    /// precision.
+    pub(super) fn new(instrument: &InstrumentAny) -> anyhow::Result<Self> {
+        Ok(Self {
+            instrument_id: instrument.id(),
+            precision: instrument.price_precision(),
+            size: quote_size(instrument)?,
+            bid: None,
+            ask: None,
+        })
+    }
+
+    /// The quote at millisecond `ms` after its last `bid` and `ask` ticks
+    /// (in 1/100000), either of them absent when that side has no tick
+    /// then; stamped `ts_event` = `ms` and `ts_init` = `ts_init`, or `ms`
+    /// without one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a price is not on the instrument's precision, or
+    /// `ms` is before 1970.
+    pub(super) fn next(
+        &mut self,
+        ms: i64,
+        bid: Option<i64>,
+        ask: Option<i64>,
+        ts_init: Option<UnixNanos>,
+    ) -> anyhow::Result<Merged> {
+        self.bid = bid.or(self.bid);
+        self.ask = ask.or(self.ask);
+        let (Some(b), Some(a)) = (self.bid, self.ask) else {
+            return Ok(Merged::OneSided);
+        };
+        if a < b {
+            return Ok(Merged::Crossed);
+        }
+        let ts_event = UnixNanos::from(
             u64::try_from(ms).with_context(|| format!("a tick at {ms} ms, before 1970"))?
                 * NANOS_PER_MS,
         );
-        merged.quotes.push(QuoteTick::new(
-            instrument.id(),
-            price(b.price, precision)?,
-            price(a.price, precision)?,
-            size,
-            size,
-            ts,
-            ts,
-        ));
+        Ok(Merged::Quote(QuoteTick::new(
+            self.instrument_id,
+            price(b, self.precision)?,
+            price(a, self.precision)?,
+            self.size,
+            self.size,
+            ts_event,
+            ts_init.unwrap_or(ts_event),
+        )))
     }
-    Ok(merged)
 }
 
 /// The size of both sides of `instrument`'s quotes: cTrader's ticks have
@@ -299,10 +369,10 @@ mod tests {
     fn venue(
         ticks: &[Tick],
         asked: &mut Vec<(i64, i64)>,
-    ) -> impl AsyncFnMut(i64, i64) -> anyhow::Result<(Vec<Tick>, bool)> {
-        async move |from, to| {
+    ) -> impl FnMut(i64, i64) -> std::future::Ready<anyhow::Result<(Vec<Tick>, bool)>> {
+        move |from, to| {
             asked.push((from, to));
-            Ok(venue_page(ticks, from, to, 3))
+            std::future::ready(Ok(venue_page(ticks, from, to, 3)))
         }
     }
 
