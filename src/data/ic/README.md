@@ -548,7 +548,7 @@ synthetic.
     netting account and another account's trader refused, naming why;
   - `messages.rs`: tick, deal and order list requests are historical,
     others not.
-- `tests/ic_demo.rs`, on IC's cTrader demo (gated by `NAUTILUS_IC_RUN=1`,
+- `tests/live/ic_demo.rs`, on IC's cTrader demo (gated by `NAUTILUS_IC_RUN=1`,
   demo only; it places no order): the execution client, from its factory,
   connects on the hedged account, publishes its state (1,000,000.00 EUR, no
   margin) and reconciles it over a week's lookback (nothing open, no deal,
@@ -578,11 +578,11 @@ synthetic.
   handler now keeps it (see "Token file and renewal"). With a new pair
   from the Playground it passed on 2026-10-26: two renewals saved to the
   file (mode 0600), quotes flowing on through the renewal, and
-  `tests/ic_demo.rs` passing 3/3 from the file. Its log showed cTrader
+  `tests/live/ic_demo.rs` passing 3/3 from the file. Its log showed cTrader
   answering `ALREADY_SUBSCRIBED` to the subscription sent again after the
   re-auth: subscriptions survive a re-auth on the same connection, so the
   handler no longer sends them again then.
-- `tests/ic_live_demo.rs`, on the demo (same gate, no order; the node
+- `tests/live/ic_live_demo.rs`, on the demo (same gate, no order; the node
   reconciles the account through the execution client at start, its cache
   in Redis under trader `HELIXTEST-101`, deleted at the end): `Live` on
   XAUUSD checks the account, then a recording strategy gets its 1-minute
@@ -596,5 +596,5 @@ synthetic.
   one at 16:50:48.808; 29 warmup bars, the last closing 16:50, 3 live bars
   from 16:51, 281 live quotes. Earlier runs on a catalog filled at the
   start (until 2026-10-26) passed with 29 warmup bars too.
-- `tests/backtest_ic_quotes.rs`: a backtest on IC gold quotes written
+- `tests/backtest/backtest_ic_quotes.rs`: a backtest on IC gold quotes written
   through `fill_catalog`; see `../../backtest/README.md`, "IC on ticks".

@@ -1137,7 +1137,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   refused. The command line is tested in
   `main.rs`: required flags, exactly one commission flag, malformed
   `Money`, the window check, `--leverage` 1 unless given.
-- Integration tests in `tests/`, one node per file, run the real EMA
+- Integration tests in `tests/backtest/`, one node per test, run the real EMA
   strategy through `Backtest::run` on a fixture catalog (`tests/common`:
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
   ± 0.05 EUR, stamped 1 ns before each minute's close, written with

@@ -1419,7 +1419,7 @@ mod tests {
         assert_eq!(sent, 0);
     }
 
-    /// End to end on IC's cTrader demo, gated as `tests/ic_demo.rs` is
+    /// End to end on IC's cTrader demo, gated as `tests/live/ic_demo.rs` is
     /// (`NAUTILUS_IC_RUN=1` from the shell; demo only; no order): a forced
     /// renewal of the access token on a running session, which goes on
     /// receiving quotes and answering requests; then a fresh session

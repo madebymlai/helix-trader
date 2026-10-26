@@ -69,3 +69,12 @@ nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev
 tokio = { version = "1", features = ["test-util"] }
 # The mock cTrader peer of the IC adapter's tests.
 tungstenite = "0.30"
+
+# Line tables only for this crate, enough for file:line in backtraces, and no
+# debug info for dependencies: Nautilus and DataFusion's full debug info made
+# each test binary about 1.8 GB.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

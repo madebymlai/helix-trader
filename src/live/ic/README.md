@@ -520,7 +520,7 @@ limits") away from IC, however long the history takes.
     connection, the quotes subscribed again and flowing; a token renewal in
     flight at `stop` saved by the `disconnect` that follows; a request
     without start and an instrument not loaded refused.
-- End to end, `tests/ic_live_demo.rs`: `Live` on the demo's XAUUSD, a
+- End to end, `tests/live/ic_live_demo.rs`: `Live` on the demo's XAUUSD, a
   recording strategy getting its warmup, live quotes and the minute bars
   built from them, the node reconciling the account through IC's execution
   client at start; no order. With no catalog, it checks that the warmup
@@ -534,9 +534,9 @@ limits") away from IC, however long the history takes.
   the shell:
 
   ```sh
-  NAUTILUS_IC_RUN=1 cargo test --test ic_live_demo -- --nocapture
+  NAUTILUS_IC_RUN=1 cargo test --test live ic_live_demo:: -- --nocapture
   ```
-- End to end with orders, `tests/ic_orders_demo.rs` (same gate, demo only):
+- End to end with orders, `tests/live/ic_orders_demo.rs` (same gate, demo only):
   `Live` on XAUUSD and EURUSD, a strategy sending, on gold's first quote
   after a EUR/USD one, one bracket of 1 oz (a market buy, its stop loss
   30.00 under the bid, its take profit 30.00 over the ask) and closing the
@@ -548,5 +548,5 @@ limits") away from IC, however long the history takes.
   position, each fill charged 0.11 EUR; the account flat after.
 
   ```sh
-  NAUTILUS_IC_RUN=1 cargo test --test ic_orders_demo -- --nocapture
+  NAUTILUS_IC_RUN=1 cargo test --test live ic_orders_demo:: -- --nocapture
   ```

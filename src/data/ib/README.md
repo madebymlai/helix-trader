@@ -351,7 +351,7 @@ stored quotes made from the BID and ASK closes, which it no longer does.
   5,524 bars of six sessions, 2,659 of them with volume 0 (nearly all
   outside continuous trading, 09:00-17:30 Frankfurt time, where IB still
   gives a bar at the last price); the backtest on them is in
-  `backtest/README.md`, "Verified on IB data". `tests/ib_gateway.rs`
+  `backtest/README.md`, "Verified on IB data". `tests/live/ib_gateway.rs`
   filled 605 over the day before 16:35 UTC.
 - **MID, BID and ASK minute bars** (2026-10-26, SXR8.IBIS, 2026-09-04 to
   09-12, before `data` served TRADES bars only): 5,580 bars of each (930 a
@@ -373,7 +373,7 @@ stored quotes made from the BID and ASK closes, which it no longer does.
   mode, the API open to orders), the login wait on fake statuses (ready at
   once, ready after a wait, the deadline naming the last status, a vanished
   container, a failed status).
-- `tests/ib_gateway.rs`, against the Docker paper gateway (gated by
+- `tests/live/ib_gateway.rs`, against the Docker paper gateway (gated by
   `NAUTILUS_IB_RUN=1`, see `live/ib/README.md`, "IB tests"): starting or
   reusing it, and a day of SXR8.IBIS 1-minute TRADES bars filled through
   it.
