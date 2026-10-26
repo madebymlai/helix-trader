@@ -2,14 +2,19 @@
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
 //! those of the instruments' venues: OKX's for OKX instruments (`okx/`),
-//! IB's for the others (`ib/`), both if the instruments span both. The
-//! start brings the catalog up to now for the IB instruments, and the node
-//! serves their warmup from it. OKX's data client serves the warmup of the
-//! OKX instruments, OKX's candles up to now (see `okx/`).
+//! IC's data client for IC instruments (`ic/`), IB's for the others
+//! (`ib/`), several if the instruments span several. The start brings the
+//! catalog up to now for the IB and IC instruments, and the node serves
+//! their warmup from it, IC's data client the rest up to now. OKX's data
+//! client serves the warmup of the OKX instruments, OKX's candles up to now
+//! (see `okx/`).
 
 mod ib;
+mod ic;
 mod node;
 mod okx;
+
+pub use ic::{IcDataClientConfig, IcDataClientFactory};
 
 pub use crate::data::IbAccount;
 
@@ -19,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use jiff::Timestamp;
 use nautilus_common::{
     actor::DataActorNative,
@@ -37,14 +42,16 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    data::{IbHistory, OkxHistory, fill_catalog},
+    data::{IbHistory, IcConnection, IcHistory, OkxHistory, fill_catalog},
     strategy::{DataRequirements, catalog_series, warmup},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
 /// through IB with `client_id`, and its OKX instruments on the OKX
-/// environment `OKX_ENVIRONMENT` names at `leverage`; on bars the node
-/// builds, warmed up from the catalog and the venues.
+/// environment `OKX_ENVIRONMENT` names at `leverage`; it gets the data of
+/// its IC instruments on the IC environment `IC_ENVIRONMENT` names, with no
+/// execution client yet; on bars the node builds, warmed up from the
+/// catalog and the venues.
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The catalog directory: the start fills it up to now with the IB
@@ -65,23 +72,25 @@ pub struct Live {
 }
 
 impl Live {
-    /// Sets up the clients of the instruments of `requirements`, OKX's then
-    /// IB's, fills
-    /// the catalog with the quotes of the IB ones up to now, from
-    /// `now - warmup` or from where the catalog ends, then runs `strategy`
-    /// on a live node until SIGINT or SIGTERM. The node asks IB only for
-    /// the quotes since the fill.
+    /// Sets up the clients of the instruments of `requirements`, OKX's, IC's
+    /// then IB's, fills the catalog with the quotes of the IC and IB ones up
+    /// to now, from `now - warmup` or from where the catalog ends, then runs
+    /// `strategy` on a live node until SIGINT or SIGTERM. The node asks IC
+    /// and IB only for the quotes since the fill.
     ///
     /// # Errors
     ///
     /// Returns an error if the cache cannot hold the warmup bars of a bar
-    /// type (see `warmup::cache_config`), if OKX's clients cannot be set up
-    /// or the OKX account does not suit the run (see `okx::clients`), if
-    /// the strategy trades IB instruments and no account is given, if IB's
-    /// clients cannot be set up (see `ib::clients`), if the catalog cannot
-    /// be filled (IB unreachable, an instrument IB does not know, a catalog
-    /// starting after `now - warmup`), or if the node fails (see
-    /// `node::run`).
+    /// type (see `warmup::cache_config`), if the strategy trades IC
+    /// instruments with IB ones, or IC's environment or credential is
+    /// missing (see `ic::clients`, checked before anything connects), if
+    /// OKX's clients cannot be set up or the OKX account does not suit the
+    /// run (see `okx::clients`), if the strategy trades IB instruments and
+    /// no account is given, if IB's clients cannot be set up (see
+    /// `ib::clients`), if the catalog cannot be filled (IC or IB
+    /// unreachable, an instrument they do not know, a catalog starting after
+    /// `now - warmup`, IC's market closed over the whole warmup), or if the
+    /// node fails (see `node::run`).
     pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -100,13 +109,31 @@ impl Live {
             file_config,
         )?;
         init_tracing()?;
-        let (okx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = instrument_ids
+        let (okx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = instrument_ids
             .iter()
             .partition(|&&id| OkxHistory::serves(id));
+        let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
+            others.into_iter().partition(|&id| IcHistory::serves(id));
+        // Read before anything connects.
+        let ic = if ic_ids.is_empty() {
+            None
+        } else {
+            ensure!(
+                ib_ids.is_empty(),
+                "IC instruments cannot be traded with IB ones yet: IB's execution client is \
+                 the default route, so it would get IC's orders until IC has its own"
+            );
+            Some(ic::clients(&ic_ids, |name| std::env::var(name).ok())?)
+        };
         let mut clients = Vec::new();
         if !okx_ids.is_empty() {
             let okx = okx::clients(&okx_ids, self.leverage).await?;
             clients.push(okx.into_node_clients());
+        }
+        if let Some(ic) = ic {
+            self.fill_ic_catalog(ic.connection(), &requirements.of_instruments(&ic_ids))
+                .await?;
+            clients.push(ic.into_node_clients());
         }
         if !ib_ids.is_empty() {
             let account = self.account.as_ref().context(
@@ -131,6 +158,34 @@ impl Live {
             strategy,
         )
         .await
+    }
+
+    /// Fills the catalog up to now from IC's history, as `fill-catalog`
+    /// does, over `[now - warmup, now]`; the node asks IC's data client for
+    /// the quotes since.
+    async fn fill_ic_catalog(
+        &self,
+        connection: &IcConnection,
+        requirements: &DataRequirements,
+    ) -> anyhow::Result<()> {
+        let now = Timestamp::now();
+        let start = now
+            .checked_sub(requirements.warmup)
+            .with_context(|| format!("no warmup start {} before {now}", requirements.warmup))?;
+        fs::create_dir_all(&self.catalog)
+            .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
+        let mut catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+        let ic = IcHistory::connect_as(connection).await?;
+        let filled = ic
+            .fill(
+                &mut catalog,
+                &catalog_series(&requirements.bar_types),
+                start,
+                now,
+            )
+            .await;
+        ic.disconnect().await;
+        filled
     }
 
     /// Fills the catalog up to now from IB history, as `fill-catalog` does,

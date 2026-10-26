@@ -3,9 +3,12 @@
 The `live` module builds and runs a Nautilus `LiveNode` for the strategy, on
 a paper then a real account (build step 3). It adds no trading logic: it
 sets up the clients of the instruments' venues, fills the catalog up to now
-for the IB instruments, then wires the clients, the strategy and the node.
-Clients go by venue: OKX instruments to OKX's clients, all others to IB's,
-and a strategy trading both gets both, routed by Nautilus.
+for the IB and IC instruments, then wires the clients, the strategy and the
+node. Clients go by venue: OKX instruments to OKX's clients, IC instruments
+(`….ICMARKETS`) to IC's data client, all others to IB's, and a strategy
+trading several venues gets their clients, routed by Nautilus. IC has no
+execution client yet, and IC instruments with IB ones are refused (see
+`ic/README.md`, "Known limits").
 
 APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
 `develop` commit in `docs/ARCHITECTURE.md` (Version), which also holds the
@@ -21,13 +24,15 @@ live/
   node.rs   builds and runs the LiveNode, broker-agnostic
   ib/       IB client factories and configs, on the gateway `data`'s IB
             part starts; README.md: IB live
+  ic/       IC's data client factory and config (the client is in
+            data/ic/); README.md: IC live
   okx/      OKX client factories and configs, and the account checks;
             README.md: OKX live
 ```
 
 Each broker gets its own folder next to `ib/`, returning the same shape: a
-data factory and config, an exec factory and config, and their routing
-(`node::Clients`). `node.rs` takes a list of them as `Box<dyn
+data factory and config, an exec factory and config (none for IC yet), and
+their routing (`node::Clients`). `node.rs` takes a list of them as `Box<dyn
 DataClientFactory>` and friends and never names a broker.
 
 ## The command
@@ -48,8 +53,8 @@ gateway itself, so it needs no prior `fill-catalog` run. In code:
   gateway (`ib/README.md`, "Gateway").
 - `--leverage` (default 1) is the leverage the run expects, as in a
   backtest, and only a check: OKX applies the account's leverage and the
-  start refuses an OKX instrument at another one (`okx/README.md`); IB does
-  not check it.
+  start refuses an OKX instrument at another one (`okx/README.md`); IB and
+  IC do not check it.
 - `--client-id` defaults to the adapter's 1, so `fill-catalog` (10) can run
   at the same time; a multiple of 1000 is refused before any gateway starts.
 - `NAUTILUS_LOG` configures the logger as for the other commands.
@@ -67,22 +72,28 @@ gateway itself, so it needs no prior `fill-catalog` run. In code:
    check the account (net position mode, each instrument's leverage equal
    to `--leverage`). Nothing is filled: OKX's data client serves the warmup
    (`okx/README.md`).
-3. IB instruments, if any: check the client id, start or reuse the Docker
+3. IC instruments, if any: refuse IB instruments alongside them, read
+   `IC_ENVIRONMENT` (`demo` or `live`) and the IC credential (all read
+   before anything connects, step 2's OKX included), then fill the catalog
+   with their quotes over `[now - warmup, now]` (`IcHistory::fill`, as
+   `fill-catalog`), resuming after what the catalog holds, and build IC's
+   data client config (`ic/README.md`).
+4. IB instruments, if any: check the client id, start or reuse the Docker
    gateway of the account's mode, wait for its login, and build the IB
    client configs on it.
-4. Fill the catalog for the IB instruments' data requirements, with the
+5. Fill the catalog for the IB instruments' data requirements, with the
    same `IbHistory` and `fill_catalog` as `fill-catalog`: instruments, then
    each instrument's quotes over `[now - warmup, now - 1 minute]`, resuming
    after what the catalog holds, through the paper gateway (started or
    reused). The end stops a minute short because IB history refuses an end
    within the minute still in progress. The history connection closes here,
    so the node can connect with the same client id.
-5. Build the node (`node.rs`) with the catalog in `LiveNodeConfig::catalogs`,
-   the clients of each venue (IB's routed by default, OKX's routed by
-   Nautilus as the only clients of venue OKX), reconciliation on, open-order
+6. Build the node (`node.rs`) with the catalog in `LiveNodeConfig::catalogs`,
+   the clients of each venue (IB's routed by default, OKX's and IC's routed
+   by Nautilus as the only clients of their venue), reconciliation on, open-order
    and position checks every 10 and 30 s (as the adapter's
    `node_exec_tester`), and a 5 s post-stop delay.
-6. Add the strategy, claim the external orders of its instruments that its
+7. Add the strategy, claim the external orders of its instruments that its
    config does not claim already (`register_external_order_claims`), then
    `run()`.
 
@@ -90,7 +101,10 @@ The strategy's warmup request of an IB instrument (`strategy::warmup`) is
 then served by the catalog; the data engine sends IB only the interval the
 catalog misses, from the fill's end to now, as historical BID_ASK ticks.
 Only the catalog part reaches the internal bars: the IB ticks are dropped
-(see "Known limits").
+(see "Known limits"). An IC instrument's request is served the same way,
+the data engine asking IC's data client for the seconds since the fill;
+those quotes are kept, and its live quotes wait for that response
+(`ic/README.md`, "Warmup").
 
 ## Known limits
 
@@ -292,6 +306,11 @@ logs written through `tracing` into the same output.
 `ib/`: the IB clients on the Docker gateway, the account and its tests: see
 [`ib/README.md`](ib/README.md).
 
+## IC Markets
+
+`ic/`: IC's data client, its environment and credential, the warmup and
+its tests: see [`ic/README.md`](ic/README.md).
+
 ## OKX
 
 `okx/`: the OKX clients, the EEA environment, the account checks and their
@@ -302,13 +321,13 @@ tests: see [`okx/README.md`](okx/README.md).
 - Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file,
   for what needs no node and no broker.
 - No integration test runs a live node without a broker yet (the venue
-  tests below run `Live` against IB and OKX). One would sit in `tests/`, one
+  tests below run `Live` against IB, OKX and IC's demo). One would sit in `tests/`, one
   node per file: a node with no broker client or a test data client, the
   strategy added, stopped through `handle().stop()` from a spawned task,
   asserting on the result of `run()`, under
   `#[tokio::test(flavor = "current_thread")]`.
-- Venue end-to-end tests are under "IB tests" and "OKX tests" in the venue
-  READMEs.
+- Venue end-to-end tests are under "IB tests", "OKX tests" and "IC tests"
+  in the venue READMEs.
 
 ## Unverified
 
