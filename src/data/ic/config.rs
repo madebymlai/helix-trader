@@ -130,6 +130,40 @@ impl IcCredential {
     }
 }
 
+/// Where and as whom to connect: the environment and the credential.
+#[derive(Debug, Clone)]
+pub struct IcConnection {
+    pub(super) environment: IcEnvironment,
+    pub(super) credential: IcCredential,
+}
+
+impl IcConnection {
+    /// The environment `IC_ENVIRONMENT` names and the credential from
+    /// `IC_CLIENT_ID`, `IC_CLIENT_SECRET`, `IC_ACCESS_TOKEN` and
+    /// `IC_ACCOUNT_ID`, from the environment (or `.env`, once read).
+    ///
+    /// # Errors
+    ///
+    /// As `from_vars`.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// As `from_env`, through `var`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the environment is not `demo` or `live`, or if a
+    /// credential variable is missing or invalid (see
+    /// `IcCredential::from_vars`); never a value.
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
+        Ok(Self {
+            environment: IcEnvironment::from_vars(&var)?,
+            credential: IcCredential::from_vars(&var)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -221,6 +255,26 @@ mod tests {
         assert!(
             !err.contains("12345_clientIdValue") && !err.contains("1000001"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn a_connection_needs_the_environment_and_the_whole_credential() {
+        let mut full = FULL.to_vec();
+        full.push(("IC_ENVIRONMENT", "demo"));
+
+        let connection = IcConnection::from_vars(vars(&full)).unwrap();
+        let no_environment = IcConnection::from_vars(vars(&FULL)).unwrap_err();
+        let no_token = IcConnection::from_vars(vars(&[("IC_ENVIRONMENT", "demo")])).unwrap_err();
+
+        assert_eq!(connection.environment, IcEnvironment::Demo);
+        assert!(
+            no_environment.to_string().contains("IC_ENVIRONMENT"),
+            "{no_environment}"
+        );
+        assert!(
+            no_token.to_string().contains("IC_ACCESS_TOKEN"),
+            "{no_token}"
         );
     }
 

@@ -1,0 +1,11 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# an EURUSD (1) spot event 9,603 ms after spot_event_eurusd_first: the ask
+# alone.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOASpotEvent OpenApiMessages.proto < spot_event_eurusd_ask.bin
+# Message: ProtoOASpotEvent
+ctidTraderAccountId: 1000001
+symbolId: 1
+ask: 111960
+timestamp: 1793017485964

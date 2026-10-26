@@ -1,0 +1,7 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to the spot unsubscription of XAUUSD (41) and EURUSD (1).
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAUnsubscribeSpotsRes OpenApiMessages.proto < unsubscribe_spots_res.bin
+# Message: ProtoOAUnsubscribeSpotsRes
+ctidTraderAccountId: 1000001

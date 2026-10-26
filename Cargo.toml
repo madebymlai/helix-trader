@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+# The `DataClient` trait of the IC data client.
+async-trait = "0.1"
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
@@ -15,7 +17,7 @@ jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
 nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["streaming"] }
-nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["tracing-bridge"] }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["live", "tracing-bridge"] }
 nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }

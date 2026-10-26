@@ -9,6 +9,10 @@
 //! authenticates the new session before serving waiting requests.
 //! Requests in flight at a reconnect fail: their session is gone.
 //!
+//! Spot subscriptions are the session's too: the handler keeps the symbols
+//! subscribed, sends their subscription once the session is ready, and
+//! again after each reconnect, and passes their spot events on.
+//!
 //! Historical requests go through the transport's rate limiter, keyed
 //! `HISTORICAL_KEY`: one every 250 ms, without burst, so fewer than
 //! cTrader's 5 in any second, even after an idle spell (a burst of 5 then
@@ -34,7 +38,7 @@ use tokio::sync::{mpsc, oneshot};
 use self::handler::{HandlerCommand, IcWsHandler};
 use super::{
     config::IcCredential,
-    messages::{IcError, Payload, open},
+    messages::{IcError, Payload, ProtoOaSpotEvent, open},
 };
 
 /// cTrader's heartbeat interval.
@@ -55,6 +59,9 @@ const HISTORICAL_PERIOD: Duration = Duration::from_millis(250);
 /// How long `disconnect` waits for the handler to close the transport.
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The spot events of the symbols subscribed, as cTrader sends them.
+pub(super) type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
+
 /// An authenticated cTrader session on one account.
 #[derive(Debug)]
 pub(super) struct IcWebSocketClient {
@@ -64,7 +71,8 @@ pub(super) struct IcWebSocketClient {
 
 impl IcWebSocketClient {
     /// Connects to `url`, then authenticates the application and the
-    /// account of `credential`, sending the heartbeat every `heartbeat`.
+    /// account of `credential`, sending the heartbeat every `heartbeat`;
+    /// with the spot events of the symbols `subscribe_spots` subscribes.
     ///
     /// # Errors
     ///
@@ -75,7 +83,7 @@ impl IcWebSocketClient {
         url: &str,
         credential: IcCredential,
         heartbeat: Duration,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, SpotEvents)> {
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Message>();
         let message_handler: MessageHandler = Arc::new(move |message| {
             // The receiver is gone only once the handler has stopped.
@@ -102,7 +110,9 @@ impl IcWebSocketClient {
             .send(HandlerCommand::SetClient(client))
             .ok()
             .context("the cTrader handler is gone")?;
-        let handler = IcWsHandler::new(credential, auth.clone(), cmd_rx, raw_rx, heartbeat);
+        let (spot_tx, spot_rx) = mpsc::unbounded_channel();
+        let handler =
+            IcWsHandler::new(credential, auth.clone(), cmd_rx, raw_rx, spot_tx, heartbeat);
         let connected = Self {
             cmd_tx,
             handler: tokio::spawn(handler.run()),
@@ -111,7 +121,7 @@ impl IcWebSocketClient {
             .wait_for_result::<String>(AUTH_TIMEOUT, authenticated)
             .await
         {
-            Ok(()) => Ok(connected),
+            Ok(()) => Ok((connected, spot_rx)),
             Err(reason) => {
                 connected.disconnect().await;
                 anyhow::bail!("authenticating on cTrader: {reason}")
@@ -145,6 +155,32 @@ impl IcWebSocketClient {
         open(&envelope)
     }
 
+    /// Subscribes to the spot events of `symbol_id`, with their
+    /// timestamps, for the rest of the session, reconnects included. A
+    /// symbol already subscribed is left as it is. cTrader's refusal is
+    /// logged: its answer comes after this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is closed.
+    pub(super) fn subscribe_spots(&self, symbol_id: i64) -> Result<(), IcError> {
+        self.cmd_tx
+            .send(HandlerCommand::SubscribeSpots(symbol_id))
+            .map_err(|_| IcError::ConnectionLost)
+    }
+
+    /// Ends the spot subscription of `symbol_id`, if any. cTrader may
+    /// still send a few of its spot events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is closed.
+    pub(super) fn unsubscribe_spots(&self, symbol_id: i64) -> Result<(), IcError> {
+        self.cmd_tx
+            .send(HandlerCommand::UnsubscribeSpots(symbol_id))
+            .map_err(|_| IcError::ConnectionLost)
+    }
+
     /// Closes the connection; requests still waiting fail.
     pub(super) async fn disconnect(self) {
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
@@ -170,16 +206,28 @@ mod tests {
         messages::{
             ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaErrorRes,
-            ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaSymbol,
-            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaSpotEvent,
+            ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol,
+            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaUnsubscribeSpotsReq,
+            ProtoOaUnsubscribeSpotsRes,
         },
         testing::{
             self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED, Action,
-            SYMBOL_BY_ID_UNKNOWN, accept_auth, credential, replay, reply,
+            Received, SYMBOL_BY_ID_UNKNOWN, accept_auth, credential, replay, reply,
         },
     };
 
     const SLOW_HEARTBEAT: Duration = Duration::from_secs(3600);
+
+    /// A session whose spot events nobody reads.
+    async fn connect(
+        url: &str,
+        credential: IcCredential,
+        heartbeat: Duration,
+    ) -> anyhow::Result<IcWebSocketClient> {
+        let (client, _) = IcWebSocketClient::connect(url, credential, heartbeat).await?;
+        Ok(client)
+    }
 
     fn decode<M: Payload>(frame: &ProtoMessage) -> M {
         assert_eq!(frame.payload_type, M::TYPE);
@@ -223,9 +271,7 @@ mod tests {
     async fn the_session_authenticates_the_application_then_the_account() {
         let (url, received) = testing::start(symbols_peer);
 
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
 
         let frames = received.lock().unwrap().clone();
         assert_eq!(frames.len(), 2, "{frames:?}");
@@ -242,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn the_heartbeat_is_a_binary_heartbeat_event() {
         let (url, received) = testing::start(symbols_peer);
-        let client = IcWebSocketClient::connect(&url, credential(), Duration::from_millis(50))
+        let client = connect(&url, credential(), Duration::from_millis(50))
             .await
             .unwrap();
 
@@ -284,9 +330,7 @@ mod tests {
                 |r: &ProtoMessage| reply(r, &symbols(&decode::<ProtoOaSymbolByIdReq>(r).symbol_id));
             vec![answer(request), answer(&first)]
         });
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
 
         let (first, second) = (symbol_request(1), symbol_request(2));
         let (one, two) = tokio::join!(
@@ -306,9 +350,7 @@ mod tests {
             accept_auth(request)
                 .unwrap_or_else(|| vec![replay::<ProtoOaErrorRes>(request, SYMBOL_BY_ID_UNKNOWN)])
         });
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
 
         let error = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(987_654_321))
@@ -335,7 +377,7 @@ mod tests {
             accept_auth(request).unwrap_or_default()
         });
 
-        let err = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let err = connect(&url, credential(), SLOW_HEARTBEAT)
             .await
             .unwrap_err();
 
@@ -364,7 +406,7 @@ mod tests {
             vec![replay::<ProtoOaErrorRes>(request, APPLICATION_AUTH_REFUSED)]
         });
 
-        let err = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let err = connect(&url, credential(), SLOW_HEARTBEAT)
             .await
             .unwrap_err();
 
@@ -398,7 +440,7 @@ mod tests {
             accept_auth(request).unwrap_or_default()
         });
 
-        let err = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+        let err = connect(&url, credential(), SLOW_HEARTBEAT)
             .await
             .unwrap_err();
 
@@ -427,9 +469,7 @@ mod tests {
                 ]
             })
         });
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
 
         let response = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(7))
@@ -452,9 +492,7 @@ mod tests {
                 (_, None) => symbols_peer(connection, request),
             }
         });
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
         testing::wait_until(&received, |frames| {
             frames
                 .iter()
@@ -505,9 +543,7 @@ mod tests {
             }
             symbols_peer(0, request)
         });
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
         let request = tick_request();
 
         let answers = futures::future::join_all(
@@ -531,9 +567,7 @@ mod tests {
     #[tokio::test]
     async fn other_requests_are_not_held_to_the_historical_limit() {
         let (url, _) = testing::start(symbols_peer);
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
         let start = std::time::Instant::now();
 
         for id in 0..7 {
@@ -564,9 +598,7 @@ mod tests {
                 vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
             })
         });
-        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let client = connect(&url, credential(), SLOW_HEARTBEAT).await.unwrap();
 
         let in_flight = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
@@ -580,6 +612,177 @@ mod tests {
         );
         assert_eq!(in_flight, Err(ended.clone()));
         assert_eq!(next, Err(ended));
+        client.disconnect().await;
+    }
+
+    /// Synthetic: a spot event of `symbol_id` as OpenApiMessages.proto
+    /// defines it, both sides and the time.
+    fn spot_event(symbol_id: i64) -> ProtoOaSpotEvent {
+        ProtoOaSpotEvent {
+            ctid_trader_account_id: ACCOUNT_ID,
+            symbol_id,
+            bid: Some(412_847_000),
+            ask: Some(412_852_000),
+            timestamp: Some(1_792_591_204_967),
+            ..Default::default()
+        }
+    }
+
+    /// A cTrader that accepts the auth, answers a spot subscription and
+    /// sends a spot event of each symbol, and answers an unsubscription.
+    fn spots_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
+        let _ = connection;
+        if let Some(actions) = accept_auth(request) {
+            return actions;
+        }
+        let answered = |account| ProtoOaSubscribeSpotsRes {
+            ctid_trader_account_id: account,
+            ..Default::default()
+        };
+        match request.payload_type {
+            t if t == ProtoOaSubscribeSpotsReq::TYPE => {
+                let asked: ProtoOaSubscribeSpotsReq = decode(request);
+                let mut actions = vec![reply(request, &answered(asked.ctid_trader_account_id))];
+                actions.extend(asked.symbol_id.iter().map(|&id| {
+                    Action::Send(crate::data::ic::messages::frame(&spot_event(id), None))
+                }));
+                actions
+            }
+            t if t == ProtoOaUnsubscribeSpotsReq::TYPE => {
+                let asked: ProtoOaUnsubscribeSpotsReq = decode(request);
+                let res = ProtoOaUnsubscribeSpotsRes {
+                    ctid_trader_account_id: asked.ctid_trader_account_id,
+                    ..Default::default()
+                };
+                vec![reply(request, &res)]
+            }
+            other => panic!("unexpected request {other}"),
+        }
+    }
+
+    /// The spot subscriptions received on `connection`.
+    fn spot_subscriptions(received: &Received, connection: usize) -> Vec<ProtoOaSubscribeSpotsReq> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, f)| *c == connection && f.payload_type == ProtoOaSubscribeSpotsReq::TYPE)
+            .map(|(_, f)| decode(f))
+            .collect()
+    }
+
+    async fn next_spot(spots: &mut SpotEvents) -> ProtoOaSpotEvent {
+        tokio::time::timeout(Duration::from_secs(10), spots.recv())
+            .await
+            .expect("no spot event within 10 s")
+            .expect("the spot events ended")
+    }
+
+    #[tokio::test]
+    async fn a_spot_subscription_asks_for_timestamps_and_its_spot_events_come_through() {
+        let (url, received) = testing::start(spots_peer);
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+
+        assert_eq!(next_spot(&mut spots).await, spot_event(41));
+        let asked = spot_subscriptions(&received, 0);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].ctid_trader_account_id, ACCOUNT_ID);
+        assert_eq!(asked[0].symbol_id, [41]);
+        assert_eq!(asked[0].subscribe_to_spot_timestamp, Some(true));
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_symbol_subscribed_twice_is_asked_for_once() {
+        let (url, received) = testing::start(spots_peer);
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+        client.subscribe_spots(41).unwrap();
+        client.subscribe_spots(1).unwrap();
+        next_spot(&mut spots).await;
+        next_spot(&mut spots).await;
+
+        let asked: Vec<Vec<i64>> = spot_subscriptions(&received, 0)
+            .into_iter()
+            .map(|r| r.symbol_id)
+            .collect();
+        assert_eq!(asked, [vec![41], vec![1]]);
+        client.disconnect().await;
+    }
+
+    /// The peer closes the first connection once it has answered `close_on`.
+    fn closing_peer(
+        close_on: u32,
+    ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
+        move |connection, request| {
+            let mut actions = spots_peer(connection, request);
+            if connection == 0 && request.payload_type == close_on {
+                actions.push(Action::Close);
+            }
+            actions
+        }
+    }
+
+    #[tokio::test]
+    async fn after_a_reconnect_the_spot_subscriptions_are_sent_again() {
+        let (url, received) = testing::start(closing_peer(ProtoOaSubscribeSpotsReq::TYPE));
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+
+        assert_eq!(next_spot(&mut spots).await, spot_event(41));
+        assert_eq!(next_spot(&mut spots).await, spot_event(41));
+        let again = spot_subscriptions(&received, 1);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].symbol_id, [41]);
+        assert_eq!(again[0].subscribe_to_spot_timestamp, Some(true));
+        let frames = received.lock().unwrap().clone();
+        let second: Vec<u32> = frames
+            .iter()
+            .filter(|(c, f)| *c == 1 && f.payload_type != ProtoHeartbeatEvent::TYPE)
+            .map(|(_, f)| f.payload_type)
+            .collect();
+        assert_eq!(second, [2100, 2102, 2127]);
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn an_unsubscribed_symbol_is_not_subscribed_again_after_a_reconnect() {
+        let (url, received) = testing::start(closing_peer(ProtoOaUnsubscribeSpotsReq::TYPE));
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        client.subscribe_spots(41).unwrap();
+        client.subscribe_spots(1).unwrap();
+        next_spot(&mut spots).await;
+        next_spot(&mut spots).await;
+
+        client.unsubscribe_spots(41).unwrap();
+
+        assert_eq!(next_spot(&mut spots).await, spot_event(1));
+        let unsubscribed: Vec<ProtoOaUnsubscribeSpotsReq> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, f)| f.payload_type == ProtoOaUnsubscribeSpotsReq::TYPE)
+            .map(|(_, f)| decode(f))
+            .collect();
+        assert_eq!(unsubscribed.len(), 1);
+        assert_eq!(unsubscribed[0].symbol_id, [41]);
+        let again: Vec<Vec<i64>> = spot_subscriptions(&received, 1)
+            .into_iter()
+            .map(|r| r.symbol_id)
+            .collect();
+        assert_eq!(again, [vec![1]]);
         client.disconnect().await;
     }
 }

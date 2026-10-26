@@ -1,8 +1,13 @@
 //! The handler task: the one owner of the `WebSocketClient`. It
 //! authenticates each connection, sends the heartbeat, tags requests with
-//! a `clientMsgId` and routes each response back to its caller.
+//! a `clientMsgId` and routes each response back to its caller. It keeps
+//! the spot subscriptions, sends them again on each new session, and
+//! passes spot events on.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Duration,
+};
 
 use nautilus_network::{
     Message, RECONNECTED,
@@ -18,7 +23,9 @@ use super::super::{
     messages::{
         IcError, Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
         ProtoOaAccountAuthRes, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-        ProtoOaPayloadType, frame, is_historical, open, payload_name, secret_frame,
+        ProtoOaPayloadType, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
+        ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame, is_historical, open,
+        payload_name, secret_frame,
     },
 };
 use super::HISTORICAL_KEY;
@@ -37,6 +44,10 @@ pub(super) enum HandlerCommand {
         payload: Vec<u8>,
         reply: Reply,
     },
+    /// Spot events of a symbol, from now on.
+    SubscribeSpots(i64),
+    /// No more spot events of a symbol.
+    UnsubscribeSpots(i64),
     Disconnect,
 }
 
@@ -53,6 +64,18 @@ enum Session {
     Failed(String),
 }
 
+/// Who awaits a response.
+enum Pending {
+    /// A caller of the outer client.
+    Caller(Reply),
+    /// The handler's own spot (un)subscription of these symbols, whose
+    /// outcome is logged.
+    Spots {
+        subscribe: bool,
+        symbol_ids: Vec<i64>,
+    },
+}
+
 /// A request waiting for the session to be ready.
 struct Queued {
     payload_type: u32,
@@ -66,11 +89,14 @@ pub(super) struct IcWsHandler {
     auth: AuthTracker,
     cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: mpsc::UnboundedReceiver<Message>,
+    spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
     heartbeat: Duration,
     session: Session,
     next_id: u64,
-    pending: HashMap<String, Reply>,
+    pending: HashMap<String, Pending>,
     queued: Vec<Queued>,
+    /// The symbols whose spot events the session subscribes to.
+    spots: BTreeSet<i64>,
 }
 
 impl IcWsHandler {
@@ -79,6 +105,7 @@ impl IcWsHandler {
         auth: AuthTracker,
         cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
         raw_rx: mpsc::UnboundedReceiver<Message>,
+        spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
         heartbeat: Duration,
     ) -> Self {
         Self {
@@ -87,11 +114,13 @@ impl IcWsHandler {
             auth,
             cmd_rx,
             raw_rx,
+            spot_tx,
             heartbeat,
             session: Session::Unconnected,
             next_id: 0,
             pending: HashMap::new(),
             queued: Vec::new(),
+            spots: BTreeSet::new(),
         }
     }
 
@@ -110,6 +139,16 @@ impl IcWsHandler {
                     }
                     Some(HandlerCommand::Request { payload_type, payload, reply }) => {
                         self.request(Queued { payload_type, payload, reply }).await;
+                    }
+                    Some(HandlerCommand::SubscribeSpots(symbol_id)) => {
+                        if self.spots.insert(symbol_id) && matches!(self.session, Session::Ready) {
+                            self.send_spots(true, vec![symbol_id]).await;
+                        }
+                    }
+                    Some(HandlerCommand::UnsubscribeSpots(symbol_id)) => {
+                        if self.spots.remove(&symbol_id) && matches!(self.session, Session::Ready) {
+                            self.send_spots(false, vec![symbol_id]).await;
+                        }
                     }
                     Some(HandlerCommand::Disconnect) | None => break,
                 },
@@ -208,6 +247,11 @@ impl IcWsHandler {
         log::info!("cTrader session authenticated");
         self.session = Session::Ready;
         self.auth.succeed();
+        // A new session holds no subscription: send them all again.
+        if !self.spots.is_empty() {
+            let symbol_ids = self.spots.iter().copied().collect();
+            self.send_spots(true, symbol_ids).await;
+        }
         for queued in std::mem::take(&mut self.queued) {
             self.dispatch(queued).await;
         }
@@ -225,9 +269,48 @@ impl IcWsHandler {
         self.session = Session::Failed(reason);
     }
 
+    /// Fails the callers awaiting a response. The handler's own spot
+    /// requests are dropped: the next session sends them again.
     fn fail_pending(&mut self, error: &IcError) {
-        for (_, reply) in self.pending.drain() {
-            let _ = reply.send(Err(error.clone()));
+        for (_, pending) in self.pending.drain() {
+            if let Pending::Caller(reply) = pending {
+                let _ = reply.send(Err(error.clone()));
+            }
+        }
+    }
+
+    /// Subscribes to the spot events of `symbol_ids`, with their
+    /// timestamps, or unsubscribes from them; the outcome is logged.
+    async fn send_spots(&mut self, subscribe: bool, symbol_ids: Vec<i64>) {
+        let id = self.next_id();
+        let account = self.credential.account_id.get();
+        let frame = if subscribe {
+            let request = ProtoOaSubscribeSpotsReq {
+                ctid_trader_account_id: account,
+                symbol_id: symbol_ids.clone(),
+                subscribe_to_spot_timestamp: Some(true),
+                ..Default::default()
+            };
+            frame(&request, Some(id.clone()))
+        } else {
+            let request = ProtoOaUnsubscribeSpotsReq {
+                ctid_trader_account_id: account,
+                symbol_id: symbol_ids.clone(),
+                ..Default::default()
+            };
+            frame(&request, Some(id.clone()))
+        };
+        match self.send(frame, None).await {
+            Ok(()) => {
+                self.pending.insert(
+                    id,
+                    Pending::Spots {
+                        subscribe,
+                        symbol_ids,
+                    },
+                );
+            }
+            Err(e) => log::error!("cTrader spot subscription of {symbol_ids:?} not sent: {e}"),
         }
     }
 
@@ -256,8 +339,11 @@ impl IcWsHandler {
         match self.send(frame, keys).await {
             Ok(()) => {
                 // Callers that timed out left their replies closed.
-                self.pending.retain(|_, reply| !reply.is_closed());
-                self.pending.insert(id, request.reply);
+                self.pending.retain(|_, pending| match pending {
+                    Pending::Caller(reply) => !reply.is_closed(),
+                    Pending::Spots { .. } => true,
+                });
+                self.pending.insert(id, Pending::Caller(request.reply));
             }
             Err(e) => {
                 let _ = request.reply.send(Err(e));
@@ -318,11 +404,16 @@ impl IcWsHandler {
             }
             _ => {}
         }
-        if let Some(reply) = id.and_then(|id| self.pending.remove(id)) {
-            let _ = reply.send(Ok(envelope));
-            return;
+        match id.and_then(|id| self.pending.remove(id)) {
+            Some(Pending::Caller(reply)) => {
+                let _ = reply.send(Ok(envelope));
+            }
+            Some(Pending::Spots {
+                subscribe,
+                symbol_ids,
+            }) => log_spots(subscribe, &symbol_ids, &envelope),
+            None => self.event(&envelope),
         }
-        self.event(&envelope);
     }
 
     /// A message no request awaits: an event, or a late response.
@@ -332,12 +423,42 @@ impl IcWsHandler {
             ProtoOaPayloadType::ProtoOaAccountDisconnectEvent,
             ProtoOaPayloadType::ProtoOaClientDisconnectEvent,
         ];
+        if envelope.payload_type == ProtoOaSpotEvent::TYPE {
+            let payload = envelope.payload.as_deref().unwrap_or_default();
+            match ProtoOaSpotEvent::decode(payload) {
+                // The receiver is gone once the client stopped listening.
+                Ok(spot) => {
+                    let _ = self.spot_tx.send(spot);
+                }
+                Err(e) => log::warn!("malformed cTrader spot event: {e}"),
+            }
+            return;
+        }
         let name = payload_name(envelope.payload_type);
         if ended.iter().any(|t| *t as u32 == envelope.payload_type) {
             self.fail_session(format!("cTrader ended the session ({name})"));
         } else {
             log::debug!("cTrader {name} not awaited");
         }
+    }
+}
+
+/// Logs cTrader's answer to the handler's spot (un)subscription of
+/// `symbol_ids`.
+fn log_spots(subscribe: bool, symbol_ids: &[i64], envelope: &ProtoMessage) {
+    let outcome = if subscribe {
+        open::<ProtoOaSubscribeSpotsRes>(envelope).map(|_| ())
+    } else {
+        open::<ProtoOaUnsubscribeSpotsRes>(envelope).map(|_| ())
+    };
+    let action = if subscribe {
+        "subscription"
+    } else {
+        "unsubscription"
+    };
+    match outcome {
+        Ok(()) => log::debug!("cTrader spot {action} of symbols {symbol_ids:?} done"),
+        Err(e) => log::error!("cTrader refused the spot {action} of symbols {symbol_ids:?}: {e}"),
     }
 }
 

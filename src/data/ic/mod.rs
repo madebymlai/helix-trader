@@ -1,13 +1,15 @@
-//! IC Markets history, over Spotware's cTrader Open API: the instruments
-//! of IC's forex and metals, filled into the catalog.
+//! IC Markets history and live data, over Spotware's cTrader Open API: the
+//! instruments of IC's forex and metals, filled into the catalog, and the
+//! live node's data client.
 //!
 //! Nautilus has no cTrader adapter, so this module is one, laid out as
 //! Nautilus' adapters are (`docs/developer_guide/adapters.md`): Spotware's
 //! protobuf messages (`messages`, from the vendored `proto/`), the
 //! environment and credential (`config`), the connection (`websocket`, an
 //! outer client and its handler task) and the parsing of symbols into
-//! instruments (`parse`), and the tick history merged into quotes
-//! (`ticks`). IC's instruments are on venue `ICMARKETS`
+//! instruments (`parse`), the tick history merged into quotes (`ticks`),
+//! the spot events merged the same way (`spots`) and the data client
+//! (`data`). IC's instruments are on venue `ICMARKETS`
 //! (`XAUUSD.ICMARKETS`).
 
 use std::{collections::HashMap, str::FromStr};
@@ -16,33 +18,37 @@ use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    data::{Data, NautilusDataType},
+    data::{Data, NautilusDataType, QuoteTick},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
+pub use self::{config::IcConnection, data::IcDataClient};
 use self::{
-    config::{IcAccountId, IcCredential, IcEnvironment},
+    config::{IcAccountId, IcCredential},
     messages::{
         ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
         ProtoOaQuoteType, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
         ProtoOaSymbolsListRes,
     },
     ticks::{SideTicks, Tick},
-    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient},
+    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents},
 };
 use super::fill_catalog;
 
 mod config;
+mod data;
 mod messages;
 mod parse;
+mod spots;
 #[cfg(test)]
 mod testing;
 mod ticks;
 mod websocket;
 
-/// A cTrader session on IC's account, for history.
+/// A cTrader session on IC's account: history, and the spot
+/// subscriptions of the data client.
 #[derive(Debug)]
 pub struct IcHistory {
     client: IcWebSocketClient,
@@ -61,22 +67,37 @@ impl IcHistory {
     /// missing or invalid (before connecting), if cTrader cannot be
     /// reached, or if it refuses the credential (naming its error code).
     pub async fn connect() -> anyhow::Result<Self> {
-        let var = |name: &str| std::env::var(name).ok();
-        let environment = IcEnvironment::from_vars(var)?;
-        let credential = IcCredential::from_vars(var)?;
-        let history = Self::connect_to(environment.url(), credential, HEARTBEAT_INTERVAL).await?;
+        Self::connect_as(&IcConnection::from_env()?).await
+    }
+
+    /// Connects as `connection` says and authenticates its credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cTrader cannot be reached, or if it refuses the
+    /// credential (naming its error code).
+    pub async fn connect_as(connection: &IcConnection) -> anyhow::Result<Self> {
+        let environment = connection.environment;
+        let (history, _) = Self::connect_to(
+            environment.url(),
+            connection.credential.clone(),
+            HEARTBEAT_INTERVAL,
+        )
+        .await?;
         log::info!("connected to IC's cTrader {environment:?} server");
         Ok(history)
     }
 
+    /// Connects to `url` as `credential`, with the spot events of the
+    /// symbols `subscribe_spots` subscribes.
     async fn connect_to(
         url: &str,
         credential: IcCredential,
         heartbeat: std::time::Duration,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, SpotEvents)> {
         let account_id = credential.account_id;
-        let client = IcWebSocketClient::connect(url, credential, heartbeat).await?;
-        Ok(Self { client, account_id })
+        let (client, spots) = IcWebSocketClient::connect(url, credential, heartbeat).await?;
+        Ok((Self { client, account_id }, spots))
     }
 
     /// Whether `id` is IC's, so its history comes from here.
@@ -202,16 +223,28 @@ impl IcHistory {
         Ok(())
     }
 
-    /// The quotes of `symbol` stamped in `[from, to]`, merged from its BID
-    /// and ASK ticks of those milliseconds and the last tick of each before
-    /// them (see `ticks::merge`), the two sides fetched side by side.
-    /// Logs the counts.
+    /// The quotes of `symbol` stamped in `[from, to]`, as data (see
+    /// `quote_ticks`).
     async fn quotes(
         &self,
         symbol: &IcSymbol,
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<Vec<Data>> {
+        let quotes = self.quote_ticks(symbol, from, to).await?;
+        Ok(quotes.into_iter().map(Data::Quote).collect())
+    }
+
+    /// The quotes of `symbol` stamped in `[from, to]`, merged from its BID
+    /// and ASK ticks of those milliseconds and the last tick of each before
+    /// them (see `ticks::merge`), the two sides fetched side by side.
+    /// Logs the counts.
+    async fn quote_ticks(
+        &self,
+        symbol: &IcSymbol,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> anyhow::Result<Vec<QuoteTick>> {
         // [from, to] in ns holds the ticks of [from_ms, to_ms) in ms.
         let ms = |ns: i128| i64::try_from(ns.div_euclid(1_000_000)).context("a time out of range");
         let from_ms = ms(from.as_nanosecond() + 999_999)?;
@@ -234,7 +267,7 @@ impl IcHistory {
             merged.one_sided,
             merged.crossed,
         );
-        Ok(merged.quotes.into_iter().map(Data::Quote).collect())
+        Ok(merged.quotes)
     }
 
     /// The `side` ticks of `symbol` over `[from_ms, to_ms)` and its last
@@ -246,7 +279,9 @@ impl IcHistory {
         from_ms: i64,
         to_ms: i64,
     ) -> anyhow::Result<SideTicks> {
-        let page = async |from, to| self.tick_page(symbol, side, from, to).await;
+        // A closure returning the future, not an async closure: the latter
+        // makes the future of a quote request not `Send`.
+        let page = move |from, to| self.tick_page(symbol, side, from, to);
         Ok(SideTicks {
             before: ticks::last_before(from_ms, page).await?,
             ticks: ticks::side_ticks(from_ms, to_ms, page).await?,
@@ -283,6 +318,17 @@ impl IcHistory {
         Ok((ticks::decode(&response.tick_data)?, response.has_more))
     }
 
+    /// Subscribes to the spot events of `symbol_id` for the rest of the
+    /// session (see `IcWebSocketClient::subscribe_spots`).
+    fn subscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
+        Ok(self.client.subscribe_spots(symbol_id)?)
+    }
+
+    /// Ends the spot subscription of `symbol_id`.
+    fn unsubscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
+        Ok(self.client.unsubscribe_spots(symbol_id)?)
+    }
+
     /// Closes the session.
     pub async fn disconnect(self) {
         self.client.disconnect().await;
@@ -290,6 +336,7 @@ impl IcHistory {
 }
 
 /// An IC instrument and its cTrader `symbolId` on this server.
+#[derive(Debug, Clone)]
 struct IcSymbol {
     instrument: InstrumentAny,
     symbol_id: i64,
@@ -431,7 +478,7 @@ mod tests {
         peer: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
     ) -> (IcHistory, Received) {
         let (url, received) = testing::start(peer);
-        let history = IcHistory::connect_to(&url, credential(), HEARTBEAT_INTERVAL)
+        let (history, _) = IcHistory::connect_to(&url, credential(), HEARTBEAT_INTERVAL)
             .await
             .unwrap();
         (history, received)

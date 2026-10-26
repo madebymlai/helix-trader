@@ -22,9 +22,10 @@ pub(super) use proto::{
     ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
     ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaGetTickDataReq,
-    ProtoOaGetTickDataRes, ProtoOaLightSymbol, ProtoOaPayloadType, ProtoOaQuoteType, ProtoOaSymbol,
+    ProtoOaGetTickDataRes, ProtoOaLightSymbol, ProtoOaPayloadType, ProtoOaQuoteType,
+    ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol,
     ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
-    ProtoOaTickData, ProtoPayloadType,
+    ProtoOaTickData, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
 };
 
 /// A message and the payload type it travels under.
@@ -58,6 +59,11 @@ payload! {
     ProtoOaSymbolByIdRes => ProtoOaPayloadType::ProtoOaSymbolByIdRes,
     ProtoOaGetTickDataReq => ProtoOaPayloadType::ProtoOaGetTickdataReq,
     ProtoOaGetTickDataRes => ProtoOaPayloadType::ProtoOaGetTickdataRes,
+    ProtoOaSubscribeSpotsReq => ProtoOaPayloadType::ProtoOaSubscribeSpotsReq,
+    ProtoOaSubscribeSpotsRes => ProtoOaPayloadType::ProtoOaSubscribeSpotsRes,
+    ProtoOaUnsubscribeSpotsReq => ProtoOaPayloadType::ProtoOaUnsubscribeSpotsReq,
+    ProtoOaUnsubscribeSpotsRes => ProtoOaPayloadType::ProtoOaUnsubscribeSpotsRes,
+    ProtoOaSpotEvent => ProtoOaPayloadType::ProtoOaSpotEvent,
 }
 
 /// Whether a request of `payload_type` counts against cTrader's limit of

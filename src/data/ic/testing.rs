@@ -37,6 +37,17 @@ pub(super) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("testdata/symbol_by_id
 pub(super) const SYMBOL_BY_ID_UNKNOWN: &[u8] = include_bytes!("testdata/symbol_by_id_unknown.bin");
 pub(super) const TICK_DATA_BID_RES: &[u8] = include_bytes!("testdata/tick_data_bid_res.bin");
 pub(super) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("testdata/tick_data_ask_res.bin");
+pub(super) const SUBSCRIBE_SPOTS_RES: &[u8] = include_bytes!("testdata/subscribe_spots_res.bin");
+pub(super) const UNSUBSCRIBE_SPOTS_RES: &[u8] =
+    include_bytes!("testdata/unsubscribe_spots_res.bin");
+pub(super) const SPOT_EVENT_EURUSD_FIRST: &[u8] =
+    include_bytes!("testdata/spot_event_eurusd_first.bin");
+pub(super) const SPOT_EVENT_EURUSD_BID: &[u8] =
+    include_bytes!("testdata/spot_event_eurusd_bid.bin");
+pub(super) const SPOT_EVENT_EURUSD_ASK: &[u8] =
+    include_bytes!("testdata/spot_event_eurusd_ask.bin");
+pub(super) const SPOT_EVENT_XAUUSD_FIRST: &[u8] =
+    include_bytes!("testdata/spot_event_xauusd_first.bin");
 
 /// What the peer does after a frame.
 pub(super) enum Action {

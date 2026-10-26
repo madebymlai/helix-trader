@@ -2075,6 +2075,7 @@ name = "helix-trader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bon",
  "clap",
  "csv",
