@@ -1,0 +1,86 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# that closing order filled at 4023.56 by deal 953555151, the position
+# closed, charged 0.11 EUR.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_close_filled.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_FILLED
+position {
+  positionId: 690004734
+  tradeData {
+    symbolId: 41
+    volume: 0
+    tradeSide: BUY
+    openTimestamp: 1793027466285
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_CREATED
+  swap: 0
+  price: 0
+  stopLoss: 3982.78
+  takeProfit: 4062.78
+  utcLastUpdateTimestamp: 1793027475436
+  commission: 0
+  marginRate: 0
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 0
+  stopLossTriggerMethod: TRADE
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1031776330
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1793027475144
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1793027475436
+  }
+  orderType: MARKET
+  orderStatus: ORDER_STATUS_FILLED
+  executionPrice: 4023.56
+  executedVolume: 100
+  utcLastUpdateTimestamp: 1793027475436
+  closingOrder: true
+  clientOrderId: "C:PROBE-1"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 690004734
+}
+deal {
+  dealId: 953555151
+  orderId: 1031776330
+  positionId: 690004734
+  volume: 100
+  filledVolume: 100
+  symbolId: 41
+  createTimestamp: 1793027475144
+  executionTimestamp: 1793027475436
+  utcLastUpdateTimestamp: 1793027475436
+  executionPrice: 4023.56
+  tradeSide: SELL
+  dealStatus: FILLED
+  marginRate: 3597.85
+  commission: -11
+  baseToUsdConversionRate: 4023.49
+  closePositionDetail {
+    entryPrice: 4022.78
+    grossProfit: 70
+    swap: 0
+    commission: -22
+    balance: 100000048
+    quoteToDepositConversionRate: 0.89422242888696135
+    closedVolume: 100
+    balanceVersion: 2
+    moneyDigits: 2
+    pnlConversionFee: 0
+  }
+  moneyDigits: 2
+}
+isServerEvent: false

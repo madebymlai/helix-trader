@@ -1,0 +1,74 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# that order filled at 4022.78 by deal 953555124 into position 690004734,
+# charged 0.11 EUR.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_filled.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_FILLED
+position {
+  positionId: 690004734
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1793027466285
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_OPEN
+  swap: 0
+  price: 4022.78
+  utcLastUpdateTimestamp: 1793027466285
+  commission: -11
+  marginRate: 3597.44
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 11991
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1031776265
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1793027466064
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1793027466285
+  }
+  orderType: MARKET
+  orderStatus: ORDER_STATUS_FILLED
+  executionPrice: 4022.78
+  executedVolume: 100
+  utcLastUpdateTimestamp: 1793027466285
+  closingOrder: false
+  clientOrderId: "PROBE-1"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 690004734
+  relativeStopLoss: 3000000
+  relativeTakeProfit: 3000000
+  trailingStopLoss: false
+}
+deal {
+  dealId: 953555124
+  orderId: 1031776265
+  positionId: 690004734
+  volume: 100
+  filledVolume: 100
+  symbolId: 41
+  createTimestamp: 1793027466065
+  executionTimestamp: 1793027466285
+  utcLastUpdateTimestamp: 1793027466285
+  executionPrice: 4022.78
+  tradeSide: BUY
+  dealStatus: FILLED
+  marginRate: 3597.44
+  commission: -11
+  baseToUsdConversionRate: 4022.78
+  moneyDigits: 2
+}
+isServerEvent: false

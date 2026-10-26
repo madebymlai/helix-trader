@@ -1,0 +1,10 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a cancel of an order already cancelled.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAOrderErrorEvent OpenApiMessages.proto < order_error_order_not_found.bin
+# Message: ProtoOAOrderErrorEvent
+errorCode: "ORDER_NOT_FOUND"
+orderId: 1031776354
+ctidTraderAccountId: 1000001
+description: "Order not found with id 1031776354"

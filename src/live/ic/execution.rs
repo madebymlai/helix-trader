@@ -1,20 +1,34 @@
 //! IC's execution client for the live node: Nautilus' `ExecutionClient`
-//! on a cTrader session, up to order flow.
+//! on a cTrader session.
 //!
 //! On connect it authenticates, checks the account (hedging,
-//! `IC_ACCOUNT_ID`'s, see `data/ic/account.rs`), loads its instruments, and
-//! publishes the account state: the balance, and the margin the open
-//! positions use.
+//! `IC_ACCOUNT_ID`'s, see `data/ic/account.rs`), loads its instruments,
+//! listens to the account's trade events (see `dispatch`), and publishes
+//! the account state: the balance, and the margin the open positions use.
 //! It reports connected once the node's cache holds the account. The venue
 //! is hedging (`OmsType::Hedging`): each cTrader position is one Nautilus
 //! position, its `positionId` the venue position id (see `reports`).
 //!
+//! Orders (see `orders`): a submission is checked, tracked, reported
+//! submitted and sent; a bracket's protections go on its entry, then live
+//! on the position; an order naming a position closes it, in part or
+//! whole, or adds to it. A modification amends a pending order, or moves a
+//! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
+//! one left out); a cancel cancels a pending order, or removes a
+//! protection. A request the session never sent is rejected; one sent but
+//! unanswered stays in flight (`retain_unresolved_submissions`) until its
+//! events, a query or reconciliation resolve it.
+//!
 //! Reconciliation reads the reconcile request (open positions, their stop
-//! loss and take profit, pending orders) and the deal list (fills). No order
-//! reaches IC yet: a submission is denied, a modification or a cancel
-//! rejected.
+//! loss and take profit, pending orders), the deal list (fills), and for a
+//! single order its details or the order list.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Duration,
+};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -26,43 +40,55 @@ use nautilus_common::{
     messages::execution::{
         BatchCancelOrders, CancelAllOrders, CancelOrder, GenerateFillReports,
         GenerateOrderStatusReport, GenerateOrderStatusReports, GeneratePositionStatusReports,
-        ModifyOrder, SubmitOrder, SubmitOrderList,
+        ModifyOrder, QueryOrder, SubmitOrder, SubmitOrderList,
     },
 };
 use nautilus_core::{
     DurationNanos, Params, UUID4, UnixNanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
+use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter, task::TaskGroup};
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{AccountType, OmsType},
-    events::{AccountState, OrderEventAny},
-    identifiers::{AccountId, ClientId, InstrumentId, Venue},
-    instruments::InstrumentAny,
+    enums::{AccountType, ContingencyType, OmsType, OrderType},
+    events::{AccountState, OrderDeniedReason},
+    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, Venue, VenueOrderId},
+    instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
-    types::{AccountBalance, MarginBalance},
+    types::{AccountBalance, MarginBalance, Price},
 };
 
-use super::reports::{Reports, explained, open_volumes};
+use super::{
+    dispatch::{Dispatch, Output, Role},
+    orders::{self, Leg, Placement, Protection, Tag, parse_protection_id},
+    reports::{Reports, explained, open_volumes},
+};
 use crate::data::ic::{
     IcHistory,
     account::IcAccount,
     config::{IcConnection, IcCredential},
-    messages::ProtoOaReconcileRes,
+    messages::{
+        ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
+        ProtoOaReconcileRes, TradeRequest,
+    },
     parse::IC_VENUE,
-    websocket::HEARTBEAT_INTERVAL,
+    websocket::{HEARTBEAT_INTERVAL, TradeSent},
 };
 
 /// How long connect waits for the node's cache to hold the account.
 const ACCOUNT_REGISTERED_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Why an order command is refused: IC's order flow is a later slice.
-const NO_ORDER_FLOW: &str = "IC's execution client places no order yet";
+/// How long tasks get to finish at a disconnect, then to abort.
+const TASK_GRACE: Duration = Duration::from_secs(1);
+const TASK_FORCE: Duration = Duration::from_secs(2);
 
-/// IC's execution client: the account state and reconciliation reports
-/// of the account, on venue `ICMARKETS`.
+/// How far before an order's creation a query looks for it in the order
+/// list: the venue's clock and the node's may differ.
+const QUERY_MARGIN_MS: i64 = 60_000;
+
+/// IC's execution client: orders, the account state and reconciliation
+/// reports of the account, on venue `ICMARKETS`.
 #[derive(Debug)]
 pub(super) struct IcExecutionClient {
     core: ExecutionClientCore,
@@ -72,15 +98,25 @@ pub(super) struct IcExecutionClient {
     emitter: ExecutionEventEmitter,
     clock: &'static AtomicTime,
     session: Option<Session>,
+    session_tasks: TaskGroup,
+    command_tasks: TaskGroup,
 }
 
 /// A connected session, the instruments it loaded by cTrader `symbolId`,
-/// and the account it checked.
+/// the account it checked, and the orders it tracks.
 #[derive(Debug)]
 struct Session {
-    history: IcHistory,
+    history: Arc<IcHistory>,
     instruments: HashMap<i64, InstrumentAny>,
+    symbols: HashMap<InstrumentId, i64>,
     account: IcAccount,
+    dispatch: Arc<Mutex<Dispatch>>,
+}
+
+impl Session {
+    fn dispatch(&self) -> MutexGuard<'_, Dispatch> {
+        self.dispatch.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl IcExecutionClient {
@@ -124,6 +160,8 @@ impl IcExecutionClient {
             emitter,
             clock,
             session: None,
+            session_tasks: TaskGroup::new(),
+            command_tasks: TaskGroup::new(),
         }
     }
 
@@ -133,20 +171,22 @@ impl IcExecutionClient {
             .with_context(|| format!("{} is not connected", self.core.client_id))
     }
 
-    /// Connects, checks the account, loads the instruments and reads the
-    /// account state; the session closes again on a failure.
+    /// Connects, checks the account, loads the instruments, starts
+    /// dispatching the trade events and reads the account state; the
+    /// session closes again on a failure.
     async fn open_session(&self) -> anyhow::Result<(Session, AccountState)> {
         let (history, _spots) =
             IcHistory::connect_to(&self.url, self.credential.clone(), HEARTBEAT_INTERVAL).await?;
         let opened = async {
+            let trades = history.trade_events()?;
             let account = history.account().await?;
             let symbols = history.symbols(&self.instrument_ids).await?;
             let open = history.reconcile().await?;
             let (balances, margins) = account.state(&open.position)?;
-            Ok::<_, anyhow::Error>((account, symbols, balances, margins))
+            Ok::<_, anyhow::Error>((trades, account, symbols, balances, margins))
         }
         .await;
-        let (account, symbols, balances, margins) = match opened {
+        let (mut trades, account, symbols, balances, margins) = match opened {
             Ok(opened) => opened,
             Err(e) => {
                 history.disconnect().await;
@@ -154,13 +194,42 @@ impl IcExecutionClient {
             }
         };
         let state = self.account_state(&account, balances, margins, true, self.now());
+        let instruments: HashMap<i64, InstrumentAny> = symbols
+            .into_iter()
+            .map(|s| (s.symbol_id, s.instrument))
+            .collect();
+        let dispatch = Arc::new(Mutex::new(Dispatch::new(
+            self.core.trader_id,
+            self.core.account_id,
+            account.currency,
+            instruments.clone(),
+        )));
+        let stream = Arc::clone(&dispatch);
+        let emitter = self.emitter.clone();
+        let clock = self.clock;
+        let cancelled = self.session_tasks.cancellation_token();
+        self.session_tasks.spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    () = cancelled.cancelled() => return,
+                    event = trades.recv() => match event {
+                        Some(event) => event,
+                        None => return,
+                    },
+                };
+                let outputs = stream
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .handle(event, clock.get_time_ns());
+                emit(&emitter, outputs);
+            }
+        })?;
         let session = Session {
-            history,
-            instruments: symbols
-                .into_iter()
-                .map(|s| (s.symbol_id, s.instrument))
-                .collect(),
+            history: Arc::new(history),
+            symbols: instruments.iter().map(|(id, i)| (i.id(), *id)).collect(),
+            instruments,
             account,
+            dispatch,
         };
         Ok((session, state))
     }
@@ -273,21 +342,488 @@ impl IcExecutionClient {
             .min()
     }
 
-    /// Denies `order`: nothing reaches IC.
-    fn deny(&self, order: &OrderAny) {
-        log::warn!("{} denied: {NO_ORDER_FLOW}", order.client_order_id());
-        self.emitter.emit_order_denied(order, NO_ORDER_FLOW);
+    fn spawn_command<F>(&self, description: &'static str, future: F)
+    where
+        F: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let cancelled = self.command_tasks.cancellation_token();
+        let future = async move {
+            tokio::select! {
+                () = cancelled.cancelled() => {}
+                result = future => {
+                    if let Err(e) = result {
+                        log::error!("{description} failed: {e:#}");
+                    }
+                }
+            }
+        };
+        if let Err(e) = self.command_tasks.spawn(future) {
+            log::warn!("{description} skipped after shutdown began: {e}");
+        }
     }
 
-    fn reject_cancel(&self, cmd: &CancelOrder) {
-        self.emitter.emit_order_cancel_rejected_event(
-            cmd.strategy_id,
-            cmd.instrument_id,
-            cmd.client_order_id,
-            cmd.venue_order_id,
-            NO_ORDER_FLOW,
-            self.now(),
+    fn begin_shutdown(&self) {
+        self.session_tasks.begin_shutdown();
+        self.command_tasks.begin_shutdown();
+    }
+
+    async fn finish_shutdown(&self) -> anyhow::Result<()> {
+        let (session, command) = tokio::join!(
+            self.session_tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
+            self.command_tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
         );
+        session.map_err(|e| anyhow::anyhow!("stopping the IC trade event task: {e}"))?;
+        command.map_err(|e| anyhow::anyhow!("stopping the IC command tasks: {e}"))?;
+        Ok(())
+    }
+
+    /// Sends `request` under `tag`; if the session never sends it, the
+    /// order's command is refused (see `Dispatch::refuse`).
+    fn send<Req: TradeRequest>(&self, session: &Session, request: Req, tag: Tag) {
+        let sent = session.history.trade(request, tag.to_string());
+        self.refuse_unsent(session, tag, sent);
+    }
+
+    fn refuse_unsent(&self, session: &Session, tag: Tag, sent: TradeSent) {
+        let dispatch = Arc::clone(&session.dispatch);
+        let emitter = self.emitter.clone();
+        let clock = self.clock;
+        self.spawn_command("IC trade request", async move {
+            let refused = match sent.await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) => format!("not sent to IC: {e}"),
+                Err(_) => "not sent to IC: the session closed".to_owned(),
+            };
+            log::warn!("{tag} {refused}");
+            let outputs = dispatch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .refuse(tag, &refused, clock.get_time_ns());
+            emit(&emitter, outputs);
+            Ok(())
+        });
+    }
+
+    /// Refuses `tag` at once: its request was never sent.
+    fn refuse_now(&self, session: &Session, tag: Tag, reason: &str) {
+        log::warn!("{tag} not sent: {reason}");
+        let outputs = session.dispatch().refuse(tag, reason, self.now());
+        emit(&self.emitter, outputs);
+    }
+
+    /// The cTrader symbol of `instrument_id`, if loaded.
+    fn symbol_id(session: &Session, instrument_id: InstrumentId) -> Result<i64, OrderDeniedReason> {
+        session
+            .symbols
+            .get(&instrument_id)
+            .copied()
+            .ok_or(OrderDeniedReason::InstrumentNotFound { instrument_id })
+    }
+
+    /// Places `order`, into the position `cmd_position` names if any, with
+    /// `protection`: denied if it cannot be, else tracked as `role`,
+    /// submitted and sent.
+    fn place(
+        &self,
+        session: &Session,
+        order: &OrderAny,
+        cmd_position: Option<nautilus_model::identifiers::PositionId>,
+        protection: Protection,
+        role: Role,
+    ) -> Result<(), OrderDeniedReason> {
+        let symbol_id = Self::symbol_id(session, order.instrument_id())?;
+        let position = match cmd_position {
+            Some(id) => Some(
+                self.core
+                    .cache()
+                    .position_owned(&id)
+                    .ok_or(OrderDeniedReason::PositionNotFound { position_id: id })?,
+            ),
+            None => None,
+        };
+        let placement = orders::placement(order, symbol_id, position.as_ref(), protection)?;
+        session.dispatch().track(order, role);
+        self.emitter.emit_order_submitted(order);
+        let id = order.client_order_id();
+        match placement {
+            Placement::New(request) => self.send(session, request, Tag::New(id)),
+            Placement::Close(request) => self.send(session, request, Tag::Close(id)),
+        }
+        Ok(())
+    }
+
+    /// Submits the bracket of `orders`: an entry (market, limit or stop
+    /// market) whose protections are its children, a stop market stop
+    /// loss and a limit take profit, each for the entry's quantity on the
+    /// other side.
+    fn submit_bracket(
+        &self,
+        session: &Session,
+        orders: &[OrderAny],
+        cmd_position: Option<nautilus_model::identifiers::PositionId>,
+    ) -> Result<(), OrderDeniedReason> {
+        let unsupported = |detail: &str| OrderDeniedReason::UnsupportedOrderList {
+            detail: detail.to_owned(),
+        };
+        let [entry] = orders
+            .iter()
+            .filter(|o| o.contingency_type() == Some(ContingencyType::Oto))
+            .collect::<Vec<_>>()[..]
+        else {
+            return Err(unsupported("IC takes a bracket of one entry"));
+        };
+        let mut protection = Protection::default();
+        let (mut stop_loss, mut take_profit) = (None, None);
+        for leg in orders
+            .iter()
+            .filter(|o| o.client_order_id() != entry.client_order_id())
+        {
+            let protects = leg.parent_order_id() == Some(entry.client_order_id())
+                && leg.order_side() != entry.order_side()
+                && leg.quantity() == entry.quantity();
+            match leg.order_type() {
+                OrderType::StopMarket if protects && stop_loss.is_none() => {
+                    stop_loss = Some(leg.client_order_id());
+                    protection.stop_loss = leg.trigger_price();
+                }
+                OrderType::Limit if protects && take_profit.is_none() => {
+                    take_profit = Some(leg.client_order_id());
+                    protection.take_profit = leg.price();
+                }
+                _ => {
+                    return Err(unsupported(
+                        "IC protects an entry with one stop market stop loss and one limit \
+                         take profit, for its quantity, on the other side",
+                    ));
+                }
+            }
+        }
+        let role = Role::Entry {
+            stop_loss,
+            take_profit,
+            position: None,
+        };
+        // The legs first: the entry's events may come before this returns.
+        for leg in orders
+            .iter()
+            .filter(|o| o.client_order_id() != entry.client_order_id())
+        {
+            let kind = if Some(leg.client_order_id()) == stop_loss {
+                Leg::StopLoss
+            } else {
+                Leg::TakeProfit
+            };
+            session.dispatch().track(
+                leg,
+                Role::Leg {
+                    entry: entry.client_order_id(),
+                    leg: kind,
+                },
+            );
+        }
+        let placed = self.place(session, entry, cmd_position, protection, role);
+        if placed.is_ok() {
+            for leg in orders
+                .iter()
+                .filter(|o| o.client_order_id() != entry.client_order_id())
+            {
+                self.emitter.emit_order_submitted(leg);
+            }
+        }
+        placed
+    }
+
+    /// The order of `id` in the node's cache.
+    fn cached_order(&self, id: &ClientOrderId) -> Option<OrderAny> {
+        self.core.cache().order_owned(id)
+    }
+
+    /// The price of the open protection `leg` of `position` in the node's
+    /// cache, else none.
+    fn cached_protection(&self, position: i64, leg: Leg) -> Option<Price> {
+        let venue = orders::protection_id(position, leg);
+        let cache = self.core.cache();
+        let id = cache.client_order_id(&venue)?;
+        let order = cache.order(id)?;
+        if order.is_closed() {
+            return None;
+        }
+        match leg {
+            Leg::StopLoss => order.trigger_price(),
+            Leg::TakeProfit => order.price(),
+        }
+    }
+
+    /// The request moving or removing protections of `position`: `changes`
+    /// the legs set (`Some` price) or removed (`None`), the others kept as
+    /// the cache holds them, since cTrader drops a price left out.
+    fn amend_protections(
+        &self,
+        position: i64,
+        changes: &[(Leg, Option<Price>)],
+    ) -> ProtoOaAmendPositionSltpReq {
+        let price = |leg: Leg| {
+            changes
+                .iter()
+                .find(|(changed, _)| *changed == leg)
+                .map_or_else(
+                    || self.cached_protection(position, leg),
+                    |(_, price)| *price,
+                )
+        };
+        ProtoOaAmendPositionSltpReq {
+            position_id: position,
+            stop_loss: price(Leg::StopLoss).map(|p| p.as_f64()),
+            take_profit: price(Leg::TakeProfit).map(|p| p.as_f64()),
+            ..Default::default()
+        }
+    }
+
+    /// The amendment of the pending order `entry` (its venue order id
+    /// `venue`) to `quantity`, `price` and `trigger_price`, carrying the
+    /// bracket's `protection`.
+    fn amend_order(
+        order: &OrderAny,
+        venue: i64,
+        quantity: nautilus_model::types::Quantity,
+        price: Option<Price>,
+        trigger_price: Option<Price>,
+        protection: Protection,
+    ) -> Result<ProtoOaAmendOrderReq, OrderDeniedReason> {
+        let mut request = ProtoOaAmendOrderReq {
+            order_id: venue,
+            volume: Some(orders::volume(quantity)?),
+            stop_loss: protection.stop_loss.map(|p| p.as_f64()),
+            take_profit: protection.take_profit.map(|p| p.as_f64()),
+            ..Default::default()
+        };
+        match order.order_type() {
+            OrderType::Limit => request.limit_price = price.or(order.price()).map(|p| p.as_f64()),
+            OrderType::StopMarket => {
+                request.stop_price = trigger_price.or(order.trigger_price()).map(|p| p.as_f64());
+                request.set_stop_trigger_method(orders::trigger_method(order.trigger_type())?);
+            }
+            _ => {}
+        }
+        Ok(request)
+    }
+
+    /// Modifies the order of `cmd`, or refuses it with the reason.
+    fn modify(&self, session: &Session, cmd: &ModifyOrder) -> Result<(), String> {
+        let id = cmd.client_order_id;
+        let order = self
+            .cached_order(&id)
+            .ok_or_else(|| format!("{id} is not in the cache"))?;
+        let venue = cmd.venue_order_id.or(order.venue_order_id());
+        if let Some((position, leg)) = venue.and_then(parse_protection_id) {
+            if cmd.quantity.is_some_and(|q| q != order.quantity()) {
+                return Err(
+                    "a protection covers its whole position: its quantity is the \
+                            position's"
+                        .to_owned(),
+                );
+            }
+            let price = match leg {
+                Leg::StopLoss => cmd.trigger_price,
+                Leg::TakeProfit => cmd.price,
+            };
+            let request =
+                self.amend_protections(position, &[(leg, price.or(leg_price(&order, leg)))]);
+            self.send(session, request, Tag::Protect(id));
+            return Ok(());
+        }
+        let tracked_role = session.dispatch().tracked(id).map(|t| t.role);
+        if let Some(Role::Leg { entry, leg }) = tracked_role {
+            // The entry is pending: the protection lives on it.
+            let entry_order = self
+                .cached_order(&entry)
+                .ok_or_else(|| format!("the entry {entry} is not in the cache"))?;
+            let entry_venue = pending_venue_id(&entry_order)?;
+            let price = match leg {
+                Leg::StopLoss => cmd.trigger_price,
+                Leg::TakeProfit => cmd.price,
+            };
+            let price = price
+                .or(leg_price(&order, leg))
+                .ok_or("no price to move to")?;
+            let protection = session
+                .dispatch()
+                .protection(entry, None, Some((id, price)));
+            let request = Self::amend_order(
+                &entry_order,
+                entry_venue,
+                entry_order.quantity(),
+                None,
+                None,
+                protection,
+            )
+            .map_err(|e| e.to_string())?;
+            self.send(session, request, Tag::Protect(id));
+            return Ok(());
+        }
+        let venue = pending_venue_id(&order)?;
+        let protection = session.dispatch().protection(id, None, None);
+        let request = Self::amend_order(
+            &order,
+            venue,
+            cmd.quantity.unwrap_or(order.quantity()),
+            cmd.price,
+            cmd.trigger_price,
+            protection,
+        )
+        .map_err(|e| e.to_string())?;
+        self.send(session, request, Tag::Amend(id));
+        Ok(())
+    }
+
+    /// Cancels the orders `ids`: a pending order by its id, protections by
+    /// one amendment of their position each, a pending entry's by its
+    /// amendment. Refuses those it cannot cancel.
+    fn cancel(&self, session: &Session, ids: &[ClientOrderId]) {
+        let mut protections: HashMap<i64, Vec<(Leg, ClientOrderId)>> = HashMap::new();
+        for &id in ids {
+            let outcome = (|| {
+                let order = self
+                    .cached_order(&id)
+                    .ok_or_else(|| format!("{id} is not in the cache"))?;
+                if let Some((position, leg)) = order.venue_order_id().and_then(parse_protection_id)
+                {
+                    protections.entry(position).or_default().push((leg, id));
+                    return Ok(());
+                }
+                if let Some(Role::Leg { entry, .. }) =
+                    session.dispatch().tracked(id).map(|t| t.role)
+                {
+                    let entry_order = self
+                        .cached_order(&entry)
+                        .ok_or_else(|| format!("the entry {entry} is not in the cache"))?;
+                    let venue = pending_venue_id(&entry_order)?;
+                    let protection = session.dispatch().protection(entry, Some(id), None);
+                    let request = Self::amend_order(
+                        &entry_order,
+                        venue,
+                        entry_order.quantity(),
+                        None,
+                        None,
+                        protection,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.send(session, request, Tag::Unprotect(id));
+                    return Ok(());
+                }
+                let venue = pending_venue_id(&order)?;
+                let request = ProtoOaCancelOrderReq {
+                    order_id: venue,
+                    ..Default::default()
+                };
+                self.send(session, request, Tag::Cancel(id));
+                Ok::<_, String>(())
+            })();
+            if let Err(reason) = outcome {
+                self.refuse_cancel(session, id, &reason);
+            }
+        }
+        for (position, legs) in protections {
+            let changes: Vec<(Leg, Option<Price>)> =
+                legs.iter().map(|(leg, _)| (*leg, None)).collect();
+            let request = self.amend_protections(position, &changes);
+            self.send(session, request, Tag::Unprotect(legs[0].1));
+        }
+    }
+
+    /// Rejects the cancel of `id`, tracked or only cached, for `reason`:
+    /// nothing was sent.
+    fn refuse_cancel(&self, session: &Session, id: ClientOrderId, reason: &str) {
+        if session.dispatch().tracked(id).is_some() {
+            self.refuse_now(session, Tag::Cancel(id), reason);
+        } else if let Some(order) = self.cached_order(&id) {
+            self.emitter.emit_order_cancel_rejected(
+                &order,
+                order.venue_order_id(),
+                reason,
+                self.now(),
+            );
+        }
+    }
+
+    /// The order `id` (venue order id `venue`, sent at the earliest at
+    /// `since`) as IC holds it, open or not, with its fills; `None` if IC
+    /// holds no such order since then.
+    async fn find_order(
+        history: &IcHistory,
+        reports: &Reports<'_>,
+        id: ClientOrderId,
+        venue: Option<VenueOrderId>,
+        since: UnixNanos,
+        now: UnixNanos,
+    ) -> anyhow::Result<Option<(OrderStatusReport, Vec<FillReport>)>> {
+        let order_id = match venue.and_then(|v| v.as_str().parse::<i64>().ok()) {
+            Some(order_id) => Some(order_id),
+            None => {
+                let close = Tag::Close(id).to_string();
+                let orders = history
+                    .orders(
+                        millis(since) - QUERY_MARGIN_MS,
+                        millis(now) + QUERY_MARGIN_MS,
+                    )
+                    .await?;
+                orders
+                    .iter()
+                    .find(|o| is_order(o, id, &close))
+                    .map(|o| o.order_id)
+            }
+        };
+        let Some(order_id) = order_id else {
+            return Ok(None);
+        };
+        let details = history
+            .order_details(order_id)
+            .await
+            .with_context(|| format!("requesting IC's order {order_id}"))?;
+        let Some(mut status) = reports.order(&details.order)? else {
+            return Ok(None);
+        };
+        status.client_order_id = Some(id);
+        let mut fills = Vec::new();
+        for deal in &details.deal {
+            fills.extend(reports.fill(deal)?);
+        }
+        Ok(Some((status, fills)))
+    }
+}
+
+/// Whether cTrader's `order` is the Nautilus order `id`: its client order
+/// id, or the tag `close` cTrader gave a closing order.
+fn is_order(order: &ProtoOaOrder, id: ClientOrderId, close: &str) -> bool {
+    order
+        .client_order_id
+        .as_deref()
+        .is_some_and(|c| c == id.as_str() || c == close)
+}
+
+/// The price of `leg` an order of that leg holds.
+fn leg_price(order: &OrderAny, leg: Leg) -> Option<Price> {
+    match leg {
+        Leg::StopLoss => order.trigger_price(),
+        Leg::TakeProfit => order.price(),
+    }
+}
+
+/// The cTrader id of a pending `order`, accepted under it.
+fn pending_venue_id(order: &OrderAny) -> Result<i64, String> {
+    order
+        .venue_order_id()
+        .and_then(|v| v.as_str().parse().ok())
+        .ok_or_else(|| format!("{} is not yet accepted by IC", order.client_order_id()))
+}
+
+/// Sends `outputs` to the node.
+fn emit(emitter: &ExecutionEventEmitter, outputs: Vec<Output>) {
+    for output in outputs {
+        match output {
+            Output::Event(event) => emitter.send_order_event(event),
+            Output::Report(report) => emitter.send_execution_report(report),
+        }
     }
 }
 
@@ -315,6 +851,12 @@ impl ExecutionClient for IcExecutionClient {
 
     fn get_account(&self) -> Option<AccountAny> {
         self.core.cache().account_owned(&self.core.account_id)
+    }
+
+    /// An order sent without an answer (a disconnect) stays in flight
+    /// until IC's events, a query or reconciliation tell its outcome.
+    fn retain_unresolved_submissions(&self) -> bool {
+        true
     }
 
     /// Publishes an account state of `balances` and `margins` in the
@@ -350,7 +892,8 @@ impl ExecutionClient for IcExecutionClient {
     fn stop(&mut self) -> anyhow::Result<()> {
         self.core.set_stopped();
         self.core.set_disconnected();
-        // The session closes once dropped.
+        self.begin_shutdown();
+        // The session closes once its last handle, here or in a task, goes.
         self.session = None;
         Ok(())
     }
@@ -369,10 +912,21 @@ impl ExecutionClient for IcExecutionClient {
         }
         log::info!("Connecting {}", self.core.client_id);
         // The node logs a failed connect without its reason: log it here.
+        let client_id = self.core.client_id;
         let failed = |e: anyhow::Error| {
-            log::error!("{} failed to connect: {e:#}", self.core.client_id);
+            log::error!("{client_id} failed to connect: {e:#}");
             e
         };
+        if !self.session_tasks.is_open() || !self.command_tasks.is_open() {
+            self.begin_shutdown();
+            self.finish_shutdown().await.map_err(failed)?;
+            self.session_tasks
+                .start_generation()
+                .map_err(|e| failed(anyhow::anyhow!("reopening the IC trade event task: {e}")))?;
+            self.command_tasks
+                .start_generation()
+                .map_err(|e| failed(anyhow::anyhow!("reopening the IC command tasks: {e}")))?;
+        }
         let (session, state) = self.open_session().await.map_err(failed)?;
         self.session = Some(session);
         let ready = async {
@@ -381,9 +935,7 @@ impl ExecutionClient for IcExecutionClient {
         }
         .await;
         if let Err(e) = ready {
-            if let Some(session) = self.session.take() {
-                session.history.disconnect().await;
-            }
+            self.disconnect().await?;
             return Err(failed(e));
         }
         self.core.set_connected();
@@ -393,81 +945,161 @@ impl ExecutionClient for IcExecutionClient {
 
     async fn disconnect(&mut self) -> anyhow::Result<()> {
         self.core.set_disconnected();
+        self.begin_shutdown();
+        let finished = self.finish_shutdown().await;
         if let Some(session) = self.session.take() {
-            session.history.disconnect().await;
+            // The tasks are done, so this is the last handle.
+            if let Ok(history) = Arc::try_unwrap(session.history) {
+                history.disconnect().await;
+            }
         }
         log::info!("Disconnected {}", self.core.client_id);
-        Ok(())
+        finished
     }
 
     fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
-        let order = OrderAny::from_events(vec![OrderEventAny::Initialized(cmd.order_init)])?;
-        self.deny(&order);
+        let session = self.session()?;
+        let order = self.core.cache().try_order_owned(&cmd.client_order_id)?;
+        if order.is_closed() {
+            log::warn!("{} is closed: not submitted", order.client_order_id());
+            return Ok(());
+        }
+        if let Err(denied) = self.place(
+            session,
+            &order,
+            cmd.position_id,
+            Protection::default(),
+            Role::Order,
+        ) {
+            self.emitter.emit_order_denied(&order, &denied.to_string());
+        }
         Ok(())
     }
 
+    /// A bracket (an entry and its protections) as one order carrying its
+    /// stop loss and take profit; a list without contingencies as its
+    /// orders, one by one. Any other list is denied.
     fn submit_order_list(&self, cmd: SubmitOrderList) -> anyhow::Result<()> {
-        for init in cmd.order_inits {
-            self.deny(&OrderAny::from_events(vec![OrderEventAny::Initialized(
-                init,
-            )])?);
+        let session = self.session()?;
+        let orders: Vec<OrderAny> = {
+            let cache = self.core.cache();
+            cmd.order_list
+                .client_order_ids
+                .iter()
+                .map(|id| cache.try_order_owned(id).map_err(anyhow::Error::from))
+                .collect::<anyhow::Result<_>>()?
+        };
+        if orders.iter().all(|o| o.contingency_type().is_none()) {
+            for order in &orders {
+                if let Err(denied) = self.place(
+                    session,
+                    order,
+                    cmd.position_id,
+                    Protection::default(),
+                    Role::Order,
+                ) {
+                    self.emitter.emit_order_denied(order, &denied.to_string());
+                }
+            }
+            return Ok(());
+        }
+        if let Err(denied) = self.submit_bracket(session, &orders, cmd.position_id) {
+            let reason = denied.to_string();
+            for order in &orders {
+                self.emitter.emit_order_denied(order, &reason);
+            }
         }
         Ok(())
     }
 
     fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {
-        self.emitter.emit_order_modify_rejected_event(
-            cmd.strategy_id,
-            cmd.instrument_id,
-            cmd.client_order_id,
-            cmd.venue_order_id,
-            NO_ORDER_FLOW,
-            self.now(),
-        );
-        Ok(())
-    }
-
-    fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
-        self.reject_cancel(&cmd);
-        Ok(())
-    }
-
-    fn cancel_all_orders(&self, cmd: CancelAllOrders) -> anyhow::Result<()> {
-        let orders: Vec<OrderAny> = {
-            let cache = self.core.cache();
-            cache
-                .orders_open(
-                    None,
-                    Some(&cmd.instrument_id),
-                    Some(&cmd.strategy_id),
-                    None,
-                    cmd.order_side,
-                )
-                .iter()
-                .map(|order| (**order).clone())
-                .collect()
-        };
-        for order in orders {
-            self.emitter.emit_order_cancel_rejected(
-                &order,
-                order.venue_order_id(),
-                NO_ORDER_FLOW,
+        let session = self.session()?;
+        if let Err(reason) = self.modify(session, &cmd) {
+            log::warn!("modify of {} not sent: {reason}", cmd.client_order_id);
+            self.emitter.emit_order_modify_rejected_event(
+                cmd.strategy_id,
+                cmd.instrument_id,
+                cmd.client_order_id,
+                cmd.venue_order_id,
+                &reason,
                 self.now(),
             );
         }
         Ok(())
     }
 
-    fn batch_cancel_orders(&self, cmd: BatchCancelOrders) -> anyhow::Result<()> {
-        for cancel in &cmd.cancels {
-            self.reject_cancel(cancel);
-        }
+    fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
+        let session = self.session()?;
+        self.cancel(session, &[cmd.client_order_id]);
         Ok(())
     }
 
-    /// The open order of the query, from the reconcile request: IC is asked
-    /// for open orders only, so an order not open there is an error, not an
-    /// absence.
+    fn cancel_all_orders(&self, cmd: CancelAllOrders) -> anyhow::Result<()> {
+        let session = self.session()?;
+        let ids: Vec<ClientOrderId> = self
+            .core
+            .cache()
+            .orders_open(
+                None,
+                Some(&cmd.instrument_id),
+                Some(&cmd.strategy_id),
+                None,
+                cmd.order_side,
+            )
+            .iter()
+            .map(|order| order.client_order_id())
+            .collect();
+        self.cancel(session, &ids);
+        Ok(())
+    }
+
+    fn batch_cancel_orders(&self, cmd: BatchCancelOrders) -> anyhow::Result<()> {
+        let session = self.session()?;
+        let ids: Vec<ClientOrderId> = cmd.cancels.iter().map(|c| c.client_order_id).collect();
+        self.cancel(session, &ids);
+        Ok(())
+    }
+
+    /// Sends the report of the order of `cmd` as IC holds it, open or not,
+    /// with its fills; logs it if IC holds none.
+    fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
+        let session = self.session()?;
+        let since = self
+            .cached_order(&cmd.client_order_id)
+            .map_or(UnixNanos::default(), |o| o.ts_init());
+        let venue = cmd
+            .venue_order_id
+            .filter(|v| parse_protection_id(*v).is_none());
+        let history = Arc::clone(&session.history);
+        let account_id = self.core.account_id;
+        let instruments = session.instruments.clone();
+        let currency = session.account.currency;
+        let emitter = self.emitter.clone();
+        let clock = self.clock;
+        self.spawn_command("IC order query", async move {
+            let now = clock.get_time_ns();
+            let reports = Reports {
+                account_id,
+                instruments: &instruments,
+                currency,
+                ts_init: now,
+            };
+            let found =
+                Self::find_order(&history, &reports, cmd.client_order_id, venue, since, now)
+                    .await?;
+            match found {
+                Some((status, fills)) => emitter.send_order_with_fills(status, fills),
+                None => log::warn!("IC holds no order {} since {since}", cmd.client_order_id),
+            }
+            Ok(())
+        });
+        Ok(())
+    }
+
+    /// The order of the query: open, from the reconcile request; else, by
+    /// its venue order id or among the orders IC updated since the cached
+    /// order was created, from its details. `None` once IC answered it
+    /// holds no such order.
     async fn generate_order_status_report(
         &self,
         cmd: &GenerateOrderStatusReport,
@@ -479,12 +1111,22 @@ impl ExecutionClient for IcExecutionClient {
             cmd.venue_order_id == Some(r.venue_order_id)
                 || (cmd.client_order_id.is_some() && cmd.client_order_id == r.client_order_id)
         });
-        found.map(Some).with_context(|| {
-            format!(
-                "{:?} ({:?}) is not open at IC; closed orders are not queried",
-                cmd.client_order_id, cmd.venue_order_id
-            )
-        })
+        if found.is_some() {
+            return Ok(found);
+        }
+        let Some(id) = cmd.client_order_id else {
+            return Ok(None);
+        };
+        let since = self
+            .cached_order(&id)
+            .map(|o| o.ts_init())
+            .with_context(|| format!("{id} is not in the cache: no window to look for it in"))?;
+        let venue = cmd
+            .venue_order_id
+            .filter(|v| parse_protection_id(*v).is_none());
+        let found =
+            Self::find_order(&session.history, &reports, id, venue, since, self.now()).await?;
+        Ok(found.map(|(status, _)| status))
     }
 
     /// The open orders (the pending orders, the positions' stop loss and
@@ -666,8 +1308,12 @@ mod tests {
     /// 2026-10-26T10:00:00Z, in ms.
     const T0: i64 = 1_792_922_400_000;
 
+    /// How the peer answers trade requests and order queries.
+    type Answers = Arc<dyn Fn(&ProtoMessage) -> Vec<Action> + Send + Sync>;
+
     /// What the peer answers to the account, the open positions and the
-    /// deals: the captured responses unless a test sets others.
+    /// deals: the captured responses unless a test sets others; trade
+    /// requests and order queries as `trades` does.
     #[derive(Clone, Default)]
     struct Script {
         trader: Option<ProtoOaTraderRes>,
@@ -675,7 +1321,10 @@ mod tests {
         deals: Option<Vec<ProtoOaDeal>>,
         refuse_token: bool,
         other_account: bool,
+        trades: Option<Answers>,
     }
+
+    mod order_flow;
 
     /// A cTrader serving `venue`, and the captured assets, symbols and
     /// details.
@@ -702,6 +1351,13 @@ mod tests {
             }
             if let Some(actions) = accept_auth(request) {
                 return actions;
+            }
+            if let Some(trades) = venue
+                .trades
+                .as_ref()
+                .filter(|_| order_flow::answered(request))
+            {
+                return trades(request);
             }
             let answer = match request.payload_type {
                 t if t == ProtoOaAssetListReq::TYPE => {
@@ -1299,7 +1955,7 @@ mod tests {
     #[tokio::test]
     async fn the_deals_are_read_from_the_opening_of_a_position_the_cache_holds_open() {
         use nautilus_model::{
-            instruments::Instrument,
+            events::OrderEventAny,
             orders::{OrderTestBuilder, stubs::TestOrderEventStubs},
             position::Position,
         };
@@ -1396,47 +2052,6 @@ mod tests {
             .collect();
         ids.sort();
         assert_eq!(ids, ["101-SL", "101-TP", "102-SL"]);
-        client.disconnect().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn an_order_is_denied_and_nothing_reaches_ic() {
-        use nautilus_model::orders::OrderTestBuilder;
-
-        let (mut client, cache, mut events, received, _tokens) = started(Script::default());
-        connect(&mut client, &mut events, &cache).await;
-        let order = OrderTestBuilder::new(OrderType::Market)
-            .instrument_id(InstrumentId::from(XAUUSD))
-            .side(OrderSide::Buy)
-            .quantity(Quantity::from(1))
-            .build();
-        let OrderAny::Market(market) = &order else {
-            panic!("not a market order");
-        };
-        let frames = received.lock().unwrap().len();
-
-        client
-            .submit_order(SubmitOrder::from_order(
-                &order,
-                TraderId::from("HELIX-001"),
-                Some(ClientId::from("ICMARKETS")),
-                None,
-                UUID4::new(),
-                client.now(),
-            ))
-            .unwrap();
-
-        let event = events.try_recv().unwrap();
-        let ExecutionEvent::Order(OrderEventAny::Denied(denied)) = event else {
-            panic!("not a denial: {event:?}");
-        };
-        assert_eq!(denied.client_order_id, market.client_order_id);
-        let after: Vec<u32> = received.lock().unwrap()[frames..]
-            .iter()
-            .map(|(_, f)| f.payload_type)
-            .filter(|t| *t != crate::data::ic::messages::ProtoHeartbeatEvent::TYPE)
-            .collect();
-        assert_eq!(after, Vec::<u32>::new());
         client.disconnect().await.unwrap();
     }
 }

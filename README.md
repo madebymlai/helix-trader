@@ -5,7 +5,7 @@
 A systematic trading system in Rust, built on
 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same
 strategy type runs in backtest, paper and live, on Interactive Brokers and
-OKX; IC Markets (cTrader) has history, live data and its account reconciled, orders to come. Nautilus owns data, simulation, execution and the portfolio; this repo
+OKX and IC Markets (cTrader, a hedging account). Nautilus owns data, simulation, execution and the portfolio; this repo
 adds only what Nautilus lacks.
 
 ## Commands
@@ -17,7 +17,7 @@ per process. Each takes the strategy name and its TOML config.
 |---|---|
 | `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, IC Markets' cTrader for IC instruments (tick quotes), Interactive Brokers for the rest. |
 | `backtest` | Runs the strategy over a window of the catalog, with commissions, leverage and funding, and prints the results. |
-| `live` | Runs the strategy on a live node against IB or OKX, or on IC Markets' live data and account (no orders yet), until Ctrl-C. |
+| `live` | Runs the strategy on a live node against IB, OKX or IC Markets, until Ctrl-C. |
 
 ## Quick start
 

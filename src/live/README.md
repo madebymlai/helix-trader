@@ -6,9 +6,10 @@ sets up the clients of the instruments' venues, fills the catalog up to now
 for the IB and IC instruments, then wires the clients, the strategy and the
 node. Clients go by venue: OKX instruments to OKX's clients, IC instruments
 (`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
-venues gets their clients, routed by Nautilus. IC's execution client reads
-and reconciles the account but places no order yet, and IC instruments with
-IB ones are refused (see `ic/README.md`, "Known limits").
+venues gets their clients, routed by Nautilus. IC's account is hedging:
+an order opens a position of its own unless it names one (see
+`ic/README.md`, "Hedging positions"); IC instruments with IB ones are
+refused (see `ic/README.md`, "Known limits").
 
 APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
 `develop` commit in `docs/ARCHITECTURE.md` (Version), which also holds the

@@ -16,6 +16,11 @@
 //! fail them, sends them all again after each reconnect
 //! (`reset_after_reconnect`), and passes their spot events on.
 //!
+//! Trade requests go out under the `clientMsgId` their caller chose
+//! (`trade`), which learns whether the frame was sent; their outcome, as
+//! every execution event and order error of the account, comes on the
+//! trade events (`trade_events`), with its `clientMsgId`.
+//!
 //! Historical requests go through the transport's rate limiter, keyed
 //! `HISTORICAL_KEY`: one every 250 ms, without burst, so fewer than
 //! cTrader's 5 in any second, even after an idle spell (a burst of 5 then
@@ -45,7 +50,9 @@ use ustr::Ustr;
 use self::handler::{HandlerCommand, IcWsHandler};
 use super::{
     config::IcCredential,
-    messages::{IcError, Payload, ProtoOaSpotEvent, open},
+    messages::{
+        IcError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent, open,
+    },
 };
 
 /// cTrader's heartbeat interval.
@@ -97,6 +104,38 @@ fn spot_symbol(topic: &str) -> i64 {
 
 /// The spot events of the symbols subscribed, as cTrader sends them.
 pub(super) type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
+
+/// The trade events of the account, as cTrader sends them.
+pub(crate) type TradeEvents = mpsc::UnboundedReceiver<TradeEvent>;
+
+/// A trade event: what cTrader sent, and the `clientMsgId` it came under,
+/// the trade request's when it answers one.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TradeEvent {
+    pub(crate) client_msg_id: Option<String>,
+    pub(crate) message: TradeMessage,
+}
+
+/// What a trade event holds.
+#[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "each event goes through the channel once, to the one listener"
+)]
+pub(crate) enum TradeMessage {
+    /// An order accepted, filled, replaced, cancelled, expired or
+    /// rejected, or a position's protection changed.
+    Execution(ProtoOaExecutionEvent),
+    /// An order the server refused.
+    OrderError(ProtoOaOrderErrorEvent),
+    /// cTrader's error answer to a trade request (`IcError::Venue`).
+    Refused(IcError),
+}
+
+/// Whether a trade request was sent: `Ok` once its frame is written, an
+/// error if it never was (the session failed, the connection closed, or
+/// the frame could not be written).
+pub(crate) type TradeSent = oneshot::Receiver<Result<(), IcError>>;
 
 /// An authenticated cTrader session on one account.
 pub(super) struct IcWebSocketClient {
@@ -248,6 +287,39 @@ impl IcWebSocketClient {
         self.cmd_tx
             .send(HandlerCommand::UnsubscribeSpots(symbol_id))
             .map_err(|_| IcError::ConnectionLost)
+    }
+
+    /// Sends `request`, a trade request, under `client_msg_id`, once the
+    /// session is ready; its outcome comes as trade events under that id.
+    /// The answer says whether it was sent.
+    pub(super) fn trade<Req: Payload>(&self, request: &Req, client_msg_id: String) -> TradeSent {
+        let (sent, sending) = oneshot::channel();
+        let command = HandlerCommand::Trade {
+            payload_type: Req::TYPE,
+            payload: request.encode_to_vec(),
+            client_msg_id,
+            sent,
+        };
+        if let Err(mpsc::error::SendError(HandlerCommand::Trade { sent, .. })) =
+            self.cmd_tx.send(command)
+        {
+            let _ = sent.send(Err(IcError::ConnectionLost));
+        }
+        sending
+    }
+
+    /// The trade events of the account from now on: those of the trade
+    /// requests, and every other execution event and order error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is closed.
+    pub(super) fn trade_events(&self) -> Result<TradeEvents, IcError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.cmd_tx
+            .send(HandlerCommand::TradeEvents(tx))
+            .map_err(|_| IcError::ConnectionLost)?;
+        Ok(rx)
     }
 
     /// Renews the access token now, as on schedule, if the session is
@@ -718,6 +790,104 @@ mod tests {
         );
         assert_eq!(in_flight, Err(ended.clone()));
         assert_eq!(next, Err(ended));
+        client.disconnect().await;
+    }
+
+    /// The order and the answers are synthetic, as OpenApiMessages.proto
+    /// defines them; the `clientMsgId` of the order's events is the
+    /// request's, as on the demo (2026-10-26).
+    #[tokio::test]
+    async fn a_trade_request_goes_under_its_id_and_its_answers_come_as_trade_events() {
+        use crate::data::ic::messages::{
+            ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaNewOrderReq, ProtoOaOrderErrorEvent,
+        };
+        let accepted = ProtoOaExecutionEvent {
+            ctid_trader_account_id: ACCOUNT_ID,
+            execution_type: ProtoOaExecutionType::OrderAccepted as i32,
+            ..Default::default()
+        };
+        let error = ProtoOaOrderErrorEvent {
+            ctid_trader_account_id: ACCOUNT_ID,
+            error_code: "TRADING_BAD_VOLUME".to_owned(),
+            ..Default::default()
+        };
+        let (answer, other) = (accepted.clone(), error.clone());
+        let (url, received) = testing::start(move |_, request| {
+            accept_auth(request).unwrap_or_else(|| {
+                vec![
+                    reply(request, &answer),
+                    Action::Send(crate::data::ic::messages::frame(&other, None)),
+                ]
+            })
+        });
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let mut trades = client.trade_events().unwrap();
+        let order = ProtoOaNewOrderReq {
+            ctid_trader_account_id: ACCOUNT_ID,
+            volume: 100,
+            ..Default::default()
+        };
+
+        let sent = client.trade(&order, "N:O-1".to_owned()).await;
+
+        assert_eq!(sent, Ok(Ok(())));
+        let first = tokio::time::timeout(Duration::from_secs(10), trades.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            TradeEvent {
+                client_msg_id: Some("N:O-1".to_owned()),
+                message: TradeMessage::Execution(accepted),
+            }
+        );
+        let frames = received.lock().unwrap().clone();
+        let request = frames
+            .iter()
+            .map(|(_, f)| f)
+            .find(|f| f.payload_type == ProtoOaNewOrderReq::TYPE)
+            .unwrap();
+        assert_eq!(request.client_msg_id.as_deref(), Some("N:O-1"));
+        assert_eq!(decode::<ProtoOaNewOrderReq>(request), order);
+        let event = tokio::time::timeout(Duration::from_secs(10), trades.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event,
+            TradeEvent {
+                client_msg_id: None,
+                message: TradeMessage::OrderError(error),
+            }
+        );
+        client.disconnect().await;
+    }
+
+    /// Synthetic: the event as OpenApiMessages.proto defines it.
+    #[tokio::test]
+    async fn a_trade_request_once_ctrader_ended_the_session_is_not_sent() {
+        let (url, _) = testing::start(|_, request| {
+            accept_auth(request).unwrap_or_else(|| {
+                let event = ProtoOaClientDisconnectEvent::default();
+                vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
+            })
+        });
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let _ = client
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+            .await;
+
+        let sent = client
+            .trade(
+                &crate::data::ic::messages::ProtoOaCancelOrderReq::default(),
+                "X:O-1".to_owned(),
+            )
+            .await;
+
+        assert!(matches!(sent, Ok(Err(IcError::Session(_)))), "{sent:?}");
         client.disconnect().await;
     }
 
