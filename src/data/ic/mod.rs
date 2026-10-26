@@ -521,6 +521,19 @@ impl IcHistory {
         Ok(self.client.unsubscribe_spots(symbol_id)?)
     }
 
+    /// Renews the access token now, as on schedule.
+    #[cfg(test)]
+    pub(crate) fn renew_token(&self) {
+        self.client.renew_token();
+    }
+
+    /// Asks the session to close, as `disconnect` does, without waiting:
+    /// a token renewal out is still answered and saved, if `disconnect`
+    /// then awaits it.
+    pub(crate) fn begin_shutdown(&self) {
+        self.client.begin_shutdown();
+    }
+
     /// Closes the session.
     pub async fn disconnect(self) {
         self.client.disconnect().await;

@@ -12,12 +12,12 @@ use std::{
     collections::HashMap,
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
 };
 
 use anyhow::Context;
 use async_trait::async_trait;
 use jiff::Timestamp;
+use nautilus_common::live::dst::time::Duration;
 use nautilus_common::{
     clients::{DataClient, execute_instrument_subscriptions},
     live::{runner::get_data_event_sender, sender::EventSender},
@@ -155,6 +155,7 @@ impl IcDataClient {
         self.session_tasks.spawn(async move {
             loop {
                 let spot = tokio::select! {
+                    biased;
                     () = cancelled.cancelled() => return,
                     spot = spots.recv() => match spot {
                         Some(spot) => spot,
@@ -186,6 +187,7 @@ impl IcDataClient {
         let cancelled = self.command_tasks.cancellation_token();
         let future = async move {
             tokio::select! {
+                biased;
                 () = cancelled.cancelled() => {}
                 result = future => {
                     if let Err(e) = result {
@@ -199,16 +201,30 @@ impl IcDataClient {
         }
     }
 
-    fn begin_shutdown(&mut self) {
+    /// Closes admission and cancels the tasks, and asks the session to
+    /// close: `teardown` awaits both.
+    fn begin_shutdown(&self) {
         self.session_tasks.begin_shutdown();
         self.command_tasks.begin_shutdown();
+        if let Some(session) = &self.session {
+            session.history.begin_shutdown();
+        }
     }
 
-    async fn finish_shutdown(&self) -> anyhow::Result<()> {
+    /// Drains the tasks, then closes the session, so a token renewal out
+    /// at `stop` is still saved.
+    async fn teardown(&mut self) -> anyhow::Result<()> {
+        self.begin_shutdown();
         let (session, command) = tokio::join!(
             self.session_tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
             self.command_tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
         );
+        if let Some(open) = self.session.take() {
+            // The tasks are done, so this is the last handle.
+            if let Ok(history) = Arc::try_unwrap(open.history) {
+                history.disconnect().await;
+            }
+        }
         session.map_err(|e| anyhow::anyhow!("stopping the IC spot task: {e}"))?;
         command.map_err(|e| anyhow::anyhow!("stopping the IC request tasks: {e}"))?;
         Ok(())
@@ -230,11 +246,11 @@ impl DataClient for IcDataClient {
         Ok(())
     }
 
+    /// Begins the shutdown; `disconnect`, or the next `connect`, finishes
+    /// it.
     fn stop(&mut self) -> anyhow::Result<()> {
         log::debug!("Stopping {}", self.client_id);
         self.begin_shutdown();
-        // The session closes once its last handle, here or in a task, goes.
-        self.session = None;
         Ok(())
     }
 
@@ -246,22 +262,23 @@ impl DataClient for IcDataClient {
         self.stop()
     }
 
+    /// Connected: a session, and its tasks not shut down.
     fn is_connected(&self) -> bool {
-        self.session.is_some()
+        self.session.is_some() && self.session_tasks.is_open()
     }
 
     fn is_disconnected(&self) -> bool {
-        self.session.is_none()
+        !self.is_connected()
     }
 
     async fn connect(&mut self) -> anyhow::Result<()> {
-        if self.session.is_some() {
+        if self.is_connected() {
             return Ok(());
         }
         log::info!("Connecting {}", self.client_id);
-        if !self.session_tasks.is_open() || !self.command_tasks.is_open() {
-            self.begin_shutdown();
-            self.finish_shutdown().await?;
+        if self.session.is_some() || !self.session_tasks.is_open() || !self.command_tasks.is_open()
+        {
+            self.teardown().await?;
             self.session_tasks
                 .start_generation()
                 .map_err(|e| anyhow::anyhow!("reopening the IC spot task: {e}"))?;
@@ -276,14 +293,7 @@ impl DataClient for IcDataClient {
 
     async fn disconnect(&mut self) -> anyhow::Result<()> {
         log::info!("Disconnecting {}", self.client_id);
-        self.begin_shutdown();
-        let finished = self.finish_shutdown().await;
-        if let Some(session) = self.session.take() {
-            // The tasks are done, so this is the last handle.
-            if let Ok(history) = Arc::try_unwrap(session.history) {
-                history.disconnect().await;
-            }
-        }
+        let finished = self.teardown().await;
         log::info!("Disconnected {}", self.client_id);
         finished
     }
@@ -393,9 +403,10 @@ mod tests {
     use crate::data::ic::{
         messages::{
             Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaGetTickDataReq,
-            ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
-            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
-            ProtoOaSymbolsListRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
+            ProtoOaRefreshTokenReq, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+            ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaUnsubscribeSpotsReq,
+            ProtoOaUnsubscribeSpotsRes,
         },
         testing::{
             self, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
@@ -804,6 +815,47 @@ mod tests {
             .collect();
         assert_eq!(again, [vec![XAUUSD_SYMBOL_ID]]);
         client.disconnect().await.unwrap();
+    }
+
+    /// The renewal is answered 300 ms after its request, after `stop`.
+    #[tokio::test]
+    async fn a_token_renewal_in_flight_at_stop_is_saved_by_the_disconnect() {
+        let mut answer = peer(vec![], vec![]);
+        let (url, received) = testing::start(move |connection, request| {
+            if request.payload_type == ProtoOaRefreshTokenReq::TYPE {
+                return vec![testing::slow_renewal_answer(
+                    request,
+                    Duration::from_millis(300),
+                )];
+            }
+            answer(connection, request)
+        });
+        let (tx, _events) = mpsc::unbounded_channel();
+        replace_data_event_sender(tx);
+        let (credential, _dir) = testing::credential();
+        let mut client = IcDataClient::with_endpoint(
+            ClientId::from("ICMARKETS"),
+            url,
+            credential.clone(),
+            vec![InstrumentId::from(XAUUSD)],
+        );
+        client.connect().await.unwrap();
+        client.session().unwrap().history.renew_token();
+        testing::wait_until(&received, |frames| {
+            frames
+                .iter()
+                .any(|(_, f)| f.payload_type == ProtoOaRefreshTokenReq::TYPE)
+        })
+        .await;
+
+        client.stop().unwrap();
+        client.disconnect().await.unwrap();
+
+        assert_eq!(
+            testing::stored_access_token(&credential),
+            testing::renewed_access(1)
+        );
+        assert!(client.is_disconnected());
     }
 
     #[tokio::test]
