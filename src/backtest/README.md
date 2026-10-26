@@ -548,6 +548,35 @@ bar at `start`, which the replay delivered again: both are why the engine
 starts 1 ns earlier (see The engine start). How the quotes are built from
 IB's bars is in `data/ib/README.md`.
 
+## IC on ticks
+
+An IC Markets instrument (`XAUUSD.ICMARKETS`, `EURUSD.ICMARKETS`)
+backtests through the same code as IB's, on its quotes: the catalog holds a
+`CurrencyPair` with margins of 1 and one quote per tick time, merged from
+cTrader's BID and ASK ticks (`data/ic/README.md`). The strategy trades
+internal bars built from them, such as `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`.
+
+- **Fills.** A market order sent in `on_bar` fills at the ask (buy) or bid
+  (sell) of the last quote at or before the bar's close, as on IB's
+  quotes: a tick stamped exactly on the close reaches the venue before the
+  order (checked by hand on `backtest_ic_quotes.rs` with a quote at
+  10:00:00.000: the buy filled at its ask). Ticks keep their own
+  milliseconds; nothing is stamped 1 ns early.
+- **Size.** Quotes are 100,000 units, or the instrument's maximum order if
+  smaller (XAUUSD 10,000 oz): an XAUUSD order always fills whole at the
+  quote, an EURUSD order above one lot fills the excess one tick worse,
+  and a bar holds at most 18,446,744,073 / size quotes, beyond which
+  Nautilus panics building its volume (`data/ic/README.md`, "Quote size").
+- **Commission.** IC's Raw account charges 30 USD per million USD traded
+  a side on XAUUSD and EURUSD: `--commission-rate 0.00003`, charged on
+  each fill's value in USD.
+- **Venue and balance.** Named `ICMARKETS`; the balance in USD
+  (`--balance "10000 USD"`), the leverage the account's (`--leverage 30`
+  on the demo).
+
+`backtest_ic_quotes.rs` checks the fills, the commission and the spread in
+the report on gold quotes written through `fill_catalog`.
+
 ## OKX on candles
 
 An OKX swap (`BTC-USDT-SWAP.OKX`) or X-Perp (`BTC-USD_UM_XPERP-310404.OKX`,
@@ -1024,3 +1053,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     settled in USD, with margins of 1: 200 contracts bought and 300 sold,
     the commission and PnL in USD at two decimals, at 10x the short left
     open locking a tenth of its value.
+  - `backtest_ic_quotes.rs`: XAUUSD.ICMARKETS, a `CurrencyPair` with
+    margins of 1, on irregular millisecond quotes sized 10,000 as IC's fill
+    stores them, written through `fill_catalog`. A recorder without warmup
+    on hour MID bars buys 10,000 oz on the first bar and sells them on the
+    second: each fills whole at the ask, then the bid, of the last quote
+    before the bar's close, 30 USD per million is charged on each fill's
+    value, and the report shows the spread paid (half each quote's spread
+    on 10,000 oz) and the gross PnL (the mids' move).

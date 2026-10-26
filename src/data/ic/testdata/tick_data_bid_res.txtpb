@@ -1,0 +1,66 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the XAUUSD BID ticks of [2026-10-21T14:00:00Z, 14:00:05Z) (fromTimestamp
+# 1792591200000, toTimestamp 1792591205000), newest first, the first tick
+# absolute (Unix ms, price x 100000), the others differences from the one before.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAGetTickDataRes OpenApiMessages.proto < tick_data_bid_res.bin
+# Message: ProtoOAGetTickDataRes
+ctidTraderAccountId: 1000001
+tickData {
+  timestamp: 1792591204967
+  tick: 412847000
+}
+tickData {
+  timestamp: -350
+  tick: 15000
+}
+tickData {
+  timestamp: -351
+  tick: 22000
+}
+tickData {
+  timestamp: -352
+  tick: -1000
+}
+tickData {
+  timestamp: -352
+  tick: -3000
+}
+tickData {
+  timestamp: -350
+  tick: 5000
+}
+tickData {
+  timestamp: -350
+  tick: -7000
+}
+tickData {
+  timestamp: -702
+  tick: -1000
+}
+tickData {
+  timestamp: -355
+  tick: 11000
+}
+tickData {
+  timestamp: -355
+  tick: 5000
+}
+tickData {
+  timestamp: -352
+  tick: -1000
+}
+tickData {
+  timestamp: -351
+  tick: -3000
+}
+tickData {
+  timestamp: -352
+  tick: 9000
+}
+tickData {
+  timestamp: -355
+  tick: 31000
+}
+hasMore: false

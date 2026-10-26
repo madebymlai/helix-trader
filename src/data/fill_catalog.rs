@@ -43,7 +43,8 @@ use nautilus_persistence::{
 /// in it: the closed interval stored, as all of Nautilus' catalog intervals
 /// (the next is contiguous when it starts 1 ns after the end). Any error
 /// stops the run; series filled before it stay stored. An empty response on
-/// a series' first fill, or an item of another series, is an error. Once a
+/// a series' first fill (naming the series and the window asked for), or an
+/// item of another series, is an error. Once a
 /// series is stored, an empty response, or one of only already stored
 /// items, means nothing new: nothing is written and the next series run.
 /// Items are stored sorted by `ts_init`, one per `ts_init`.
@@ -109,7 +110,7 @@ pub async fn fill_catalog(
             .await
             .with_context(|| format!("fetching {}", named()))?;
         if items.is_empty() && resume_point.is_none() {
-            bail!("empty response for {}", named());
+            bail!("empty response for {} over [{from}, {end}]", named());
         }
         if let Some(foreign) = items
             .iter()
@@ -513,6 +514,18 @@ mod tests {
         let (r, _) = fill(&mut catalog, vec![instrument()], 0, 100, |_| Ok(vec![])).await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn empty_first_response_names_the_window_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (r, _) = fill(&mut catalog, vec![instrument()], 0, 100, |_| Ok(vec![])).await;
+        let err = r.unwrap_err().to_string();
+        assert!(
+            err.ends_with("over [1970-01-01T00:00:00Z, 1970-01-01T00:00:00.0000001Z]"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

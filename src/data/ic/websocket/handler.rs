@@ -10,6 +10,7 @@ use nautilus_network::{
 };
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
+use ustr::Ustr;
 use zeroize::Zeroize;
 
 use super::super::{
@@ -17,9 +18,10 @@ use super::super::{
     messages::{
         IcError, Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
         ProtoOaAccountAuthRes, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-        ProtoOaPayloadType, frame, open, payload_name, secret_frame,
+        ProtoOaPayloadType, frame, is_historical, open, payload_name, secret_frame,
     },
 };
+use super::HISTORICAL_KEY;
 
 /// Where a response goes: the caller awaiting it.
 pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, IcError>>;
@@ -140,16 +142,17 @@ impl IcWsHandler {
         self.next_id.to_string()
     }
 
-    /// Sends one frame. No frame content is logged: auth frames hold the
-    /// secret and the token. The transport takes the frame; its copies are
-    /// out of the adapter's reach.
-    async fn send(&self, frame: Vec<u8>) -> Result<(), IcError> {
+    /// Sends one frame, first waiting for the rate limit of `keys`. No
+    /// frame content is logged: auth frames hold the secret and the token.
+    /// The transport takes the frame; its copies are out of the adapter's
+    /// reach.
+    async fn send(&self, frame: Vec<u8>, keys: Option<&[Ustr]>) -> Result<(), IcError> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| IcError::Transport("no connection".to_owned()))?;
         client
-            .send_bytes(frame, None)
+            .send_bytes(frame, keys)
             .await
             .map_err(|e| IcError::Transport(e.to_string()))
     }
@@ -161,7 +164,7 @@ impl IcWsHandler {
             return;
         }
         if let Err(e) = self
-            .send(frame(&ProtoHeartbeatEvent::default(), None))
+            .send(frame(&ProtoHeartbeatEvent::default(), None), None)
             .await
         {
             log::warn!("cTrader heartbeat not sent: {e}");
@@ -180,7 +183,7 @@ impl IcWsHandler {
         let frame = secret_frame(&request, Some(id.clone()));
         request.client_id.zeroize();
         request.client_secret.zeroize();
-        match self.send(frame).await {
+        match self.send(frame, None).await {
             Ok(()) => self.session = Session::ApplicationAuth(id),
             Err(e) => self.fail_session(format!("sending the application auth: {e}")),
         }
@@ -195,7 +198,7 @@ impl IcWsHandler {
         };
         let frame = secret_frame(&request, Some(id.clone()));
         request.access_token.zeroize();
-        match self.send(frame).await {
+        match self.send(frame, None).await {
             Ok(()) => self.session = Session::AccountAuth(id),
             Err(e) => self.fail_session(format!("sending the account auth: {e}")),
         }
@@ -242,13 +245,15 @@ impl IcWsHandler {
 
     async fn dispatch(&mut self, request: Queued) {
         let id = self.next_id();
+        let historical = [Ustr::from(HISTORICAL_KEY)];
+        let keys = is_historical(request.payload_type).then_some(historical.as_slice());
         let frame = ProtoMessage {
             payload_type: request.payload_type,
             payload: Some(request.payload),
             client_msg_id: Some(id.clone()),
         }
         .encode_to_vec();
-        match self.send(frame).await {
+        match self.send(frame, keys).await {
             Ok(()) => {
                 // Callers that timed out left their replies closed.
                 self.pending.retain(|_, reply| !reply.is_closed());

@@ -21,9 +21,10 @@ mod proto {
 pub(super) use proto::{
     ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-    ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaLightSymbol,
-    ProtoOaPayloadType, ProtoOaSymbol, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
-    ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoPayloadType,
+    ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaGetTickDataReq,
+    ProtoOaGetTickDataRes, ProtoOaLightSymbol, ProtoOaPayloadType, ProtoOaQuoteType, ProtoOaSymbol,
+    ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
+    ProtoOaTickData, ProtoPayloadType,
 };
 
 /// A message and the payload type it travels under.
@@ -55,6 +56,15 @@ payload! {
     ProtoOaSymbolsListRes => ProtoOaPayloadType::ProtoOaSymbolsListRes,
     ProtoOaSymbolByIdReq => ProtoOaPayloadType::ProtoOaSymbolByIdReq,
     ProtoOaSymbolByIdRes => ProtoOaPayloadType::ProtoOaSymbolByIdRes,
+    ProtoOaGetTickDataReq => ProtoOaPayloadType::ProtoOaGetTickdataReq,
+    ProtoOaGetTickDataRes => ProtoOaPayloadType::ProtoOaGetTickdataRes,
+}
+
+/// Whether a request of `payload_type` counts against cTrader's limit of
+/// historical requests (5 a second per connection): the tick requests,
+/// the only historical ones the adapter sends.
+pub(super) fn is_historical(payload_type: u32) -> bool {
+    payload_type == ProtoOaGetTickDataReq::TYPE
 }
 
 /// The name of a payload type, as the `.proto` files spell it, or its

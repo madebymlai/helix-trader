@@ -38,6 +38,8 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "1"
+# The rate-limit keys of Nautilus' WebSocketClient.
+ustr = "1"
 zeroize = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
@@ -45,6 +47,7 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 prost-build = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+futures = "0.3"
 nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 # The mock cTrader peer of the IC adapter's tests.

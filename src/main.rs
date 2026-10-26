@@ -42,7 +42,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX's
-    /// archive (OKX instruments) or Interactive Brokers (the others).
+    /// archive (OKX instruments), IC Markets' cTrader (IC instruments) or
+    /// Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
