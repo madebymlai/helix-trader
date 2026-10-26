@@ -293,7 +293,13 @@ Nautilus position ids either way.
   `subscribe_bars` of external bars are not served, so composite bar types
   are refused at the start (`ic::clients`, "IC serves quotes only").
 - **Reconnect**: the transport reconnects, the session authenticates again
-  and subscribes again to every symbol subscribed.
+  and subscribes again to every symbol subscribed; after cTrader ends the
+  session (`ProtoOAClientDisconnectEvent`) the session asks the transport
+  for the reconnect (`data/ic/README.md`, "Session").
+- **Stop**: `stop` begins the shutdown (the tasks cancelled, the session
+  told to close) and `disconnect`, or the next `connect`, finishes it: the
+  tasks drained, the session's handler joined, a token renewal in flight
+  answered and saved first.
 - **Heartbeat**: a `ProtoHeartbeatEvent` every 10 s.
 
 ## Live quotes: spot events
@@ -376,7 +382,9 @@ limits") away from IC, however long the history takes.
   engine checks an order's margin as its notional / the account's leverage
   in Nautilus (1 unless set), 30 times IC's, so it may deny an order IC
   would take when the free balance is short. The backtest applies
-  `--leverage` (backtest README, "Leverage"). Not changed here.
+  `--leverage` (backtest README, "Leverage"). Not changed: a live client
+  cannot set the account's leverage natively (`data/ic/README.md`,
+  "Nautilus primitives", "Venue leverage on the margin account").
 - **Account state after fills.** The account state is published at
   connect; balances and margins are not read again after a fill (the
   closing deal's `balance` is not used).
@@ -444,8 +452,9 @@ limits") away from IC, however long the history takes.
     spot events; an unsubscription sent; a quote request answered from the
     tick history of its window, and its limit; a live quote arriving during
     a request sent after the response; after the peer closes the
-    connection, the quotes subscribed again and flowing; a request without
-    start and an instrument not loaded refused.
+    connection, the quotes subscribed again and flowing; a token renewal in
+    flight at `stop` saved by the `disconnect` that follows; a request
+    without start and an instrument not loaded refused.
 - End to end, `tests/ic_live_demo.rs`: `Live` on the demo's XAUUSD, a
   recording strategy getting its warmup, live quotes and the minute bars
   built from them, the node reconciling the account through IC's execution

@@ -146,44 +146,52 @@ pub(crate) fn accept_auth(request: &ProtoMessage) -> Option<Vec<Action>> {
 pub(crate) type Received = Arc<Mutex<Vec<(usize, ProtoMessage)>>>;
 
 /// Starts the peer; `script` answers each frame received on a connection,
-/// heartbeats aside, which cTrader does not answer. Serves connections one
-/// after another, until the test ends.
+/// heartbeats aside, which cTrader does not answer. Serves each connection
+/// on its own thread, numbered in the order they come, until the test ends:
+/// the transport opens a replacement before it drops the connection it
+/// replaces.
 pub(crate) fn start(
-    mut script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
+    script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
 ) -> (String, Received) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let received: Received = Arc::default();
     let log = Arc::clone(&received);
+    let script = Arc::new(Mutex::new(script));
     std::thread::spawn(move || {
         for (connection, stream) in listener.incoming().enumerate() {
-            let Ok(mut socket) = tungstenite::accept(stream.unwrap()) else {
-                continue;
-            };
-            'frames: while let Ok(message) = socket.read() {
-                let Message::Binary(bytes) = message else {
-                    continue;
+            let log = Arc::clone(&log);
+            let script = Arc::clone(&script);
+            std::thread::spawn(move || {
+                let Ok(mut socket) = tungstenite::accept(stream.unwrap()) else {
+                    return;
                 };
-                let request = ProtoMessage::decode(&bytes[..]).unwrap();
-                log.lock().unwrap().push((connection, request.clone()));
-                if request.payload_type == ProtoHeartbeatEvent::TYPE {
-                    continue;
-                }
-                for action in script(connection, &request) {
-                    match action {
-                        Action::Send(bytes) => {
-                            if socket.send(Message::Binary(bytes.into())).is_err() {
+                'frames: while let Ok(message) = socket.read() {
+                    let Message::Binary(bytes) = message else {
+                        continue;
+                    };
+                    let request = ProtoMessage::decode(&bytes[..]).unwrap();
+                    log.lock().unwrap().push((connection, request.clone()));
+                    if request.payload_type == ProtoHeartbeatEvent::TYPE {
+                        continue;
+                    }
+                    let actions = (script.lock().unwrap())(connection, &request);
+                    for action in actions {
+                        match action {
+                            Action::Send(bytes) => {
+                                if socket.send(Message::Binary(bytes.into())).is_err() {
+                                    break 'frames;
+                                }
+                            }
+                            Action::Close => {
+                                let _ = socket.close(None);
+                                let _ = socket.flush();
                                 break 'frames;
                             }
                         }
-                        Action::Close => {
-                            let _ = socket.close(None);
-                            let _ = socket.flush();
-                            break 'frames;
-                        }
                     }
                 }
-            }
+            });
         }
     });
     (url, received)
@@ -229,7 +237,7 @@ pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (IcCredentia
         expires_at: None,
     };
     let tokens = TokenStore::new(dir.path().join("ic-token.json"), seed.clone());
-    tokens.load().unwrap();
+    tokens.try_load().unwrap().unwrap();
     let stored = TokenPair { expires_at, ..seed };
     tokens.try_lock().unwrap().unwrap().save(&stored).unwrap();
     let credential = IcCredential {
@@ -239,6 +247,32 @@ pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (IcCredentia
         tokens,
     };
     (credential, dir)
+}
+
+/// The access token the token file of `credential` holds.
+pub(crate) fn stored_access_token(credential: &IcCredential) -> String {
+    credential
+        .tokens
+        .read()
+        .unwrap()
+        .access_token
+        .expose_secret()
+        .to_owned()
+}
+
+/// cTrader's answer to `request`, a renewal, `delay` late: a new pair
+/// whose access token is `renewed_access(1)` (synthetic, as
+/// OpenApiMessages.proto defines it).
+pub(crate) fn slow_renewal_answer(request: &ProtoMessage, delay: Duration) -> Action {
+    std::thread::sleep(delay);
+    let renewed = ProtoOaRefreshTokenRes {
+        access_token: renewed_access(1),
+        token_type: "bearer".to_owned(),
+        expires_in: EXPIRES_IN,
+        refresh_token: "renewedRefresh1".to_owned(),
+        ..Default::default()
+    };
+    reply(request, &renewed)
 }
 
 /// The access token renewals hand out: `ACCESS_TOKEN` then

@@ -34,13 +34,11 @@
 //! them (`TradeEvents`). A trade request still waiting when the session
 //! fails or the connection closes was never sent, and says so.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use jiff::Timestamp;
-use nautilus_core::string::secret::SecretString;
+use nautilus_common::live::dst::time::{self, Duration, Instant, MissedTickBehavior};
+use nautilus_core::{string::secret::SecretString, time::get_atomic_clock_realtime};
 use nautilus_network::{
     Message, RECONNECTED,
     websocket::{AuthTracker, SubscriptionState, WebSocketClient},
@@ -68,9 +66,9 @@ use super::{
     spot_topic,
 };
 
-/// How often a renewal tries the token file's lock while another session
+/// How often a session tries the token file's lock while another session
 /// holds it.
-const LOCK_RETRY: Duration = Duration::from_millis(100);
+pub(super) const LOCK_RETRY: Duration = Duration::from_millis(100);
 
 /// cTrader's error codes of an access token it does not take.
 const TOKEN_REFUSED: [&str; 2] = ["CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"];
@@ -155,7 +153,7 @@ struct Renewal {
     client_msg_id: String,
     lock: TokenLock,
     /// Until when its answer is awaited.
-    deadline: tokio::time::Instant,
+    deadline: Instant,
 }
 
 /// A request waiting for the session to be ready.
@@ -200,7 +198,7 @@ pub(super) struct IcWsHandler {
     renewed: bool,
     /// When to act without a message: renew on schedule (ready), try the
     /// lock again, or give up on an unanswered renewal.
-    wake: Option<tokio::time::Instant>,
+    wake: Option<Instant>,
     auth: AuthTracker,
     cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: mpsc::UnboundedReceiver<Message>,
@@ -268,11 +266,12 @@ impl IcWsHandler {
     /// Runs until disconnected, the outer client dropped, or the
     /// transport closed for good.
     pub(super) async fn run(mut self) {
-        let start = tokio::time::Instant::now() + self.heartbeat;
-        let mut heartbeat = tokio::time::interval_at(start, self.heartbeat);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let start = Instant::now() + self.heartbeat;
+        let mut heartbeat = time::interval_at(start, self.heartbeat);
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                biased;
                 command = self.cmd_rx.recv() => match command {
                     Some(HandlerCommand::SetClient(client)) => {
                         self.client = Some(client);
@@ -327,7 +326,8 @@ impl IcWsHandler {
     /// answer, which is saved.
     async fn finish_renewal(&mut self) {
         while let Some(deadline) = self.renewal.as_ref().map(|r| r.deadline) {
-            match tokio::time::timeout_at(deadline, self.raw_rx.recv()).await {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match time::timeout(left, self.raw_rx.recv()).await {
                 Ok(Some(message)) => self.receive(message).await,
                 Ok(None) | Err(_) => break,
             }
@@ -422,10 +422,7 @@ impl IcWsHandler {
     /// due.
     async fn application_ready(&mut self) {
         self.adopt_stored();
-        let due = self
-            .tokens
-            .renew_at()
-            .is_none_or(|at| at <= Timestamp::now());
+        let due = self.tokens.renew_at().is_none_or(|at| at <= wall_clock());
         if due {
             self.renew().await;
         } else {
@@ -459,7 +456,7 @@ impl IcWsHandler {
             Ok(Some(lock)) => lock,
             Ok(None) => {
                 self.session = Session::TokenLock;
-                self.wake = Some(tokio::time::Instant::now() + LOCK_RETRY);
+                self.wake = Some(Instant::now() + LOCK_RETRY);
                 return;
             }
             Err(e) => {
@@ -482,7 +479,7 @@ impl IcWsHandler {
         match self.send(frame, None).await {
             Ok(()) => {
                 log::info!("renewing the cTrader access token");
-                let deadline = tokio::time::Instant::now() + AUTH_TIMEOUT;
+                let deadline = Instant::now() + AUTH_TIMEOUT;
                 self.session = Session::Renewal;
                 self.renewal = Some(Renewal {
                     client_msg_id: id,
@@ -522,7 +519,7 @@ impl IcWsHandler {
             SecretString::from(std::mem::take(&mut renewed.access_token)),
             SecretString::from(std::mem::take(&mut renewed.refresh_token)),
             renewed.expires_in,
-            Timestamp::now(),
+            wall_clock(),
         );
         match lock.save(&tokens) {
             Ok(()) => log::info!(
@@ -583,9 +580,9 @@ impl IcWsHandler {
         self.renewed = false;
         self.wake = self.tokens.renew_at().map(|at| {
             let wait = at
-                .duration_since(Timestamp::now())
+                .duration_since(wall_clock())
                 .max(jiff::SignedDuration::ZERO);
-            tokio::time::Instant::now() + wait.unsigned_abs()
+            Instant::now() + wait.unsigned_abs()
         });
         self.auth.succeed();
         // The connection's subscriptions brought in line with the state: all
@@ -945,6 +942,25 @@ impl IcWsHandler {
         self.authenticate_account().await;
     }
 
+    /// cTrader ended the client's session (`name`): the transport is asked
+    /// to replace the connection, and requests wait for the new session,
+    /// which authenticates again (see `reconnected`). Those in flight fail
+    /// then. If the transport takes no reconnect (closing), the session
+    /// fails.
+    fn client_ended(&mut self, name: &str) {
+        if self
+            .client
+            .as_ref()
+            .is_some_and(WebSocketClient::request_reconnect)
+        {
+            log::warn!("cTrader ended the session ({name}): reconnecting");
+            self.wake = None;
+            self.session = Session::Unconnected;
+        } else {
+            self.fail_session(format!("cTrader ended the session ({name})"));
+        }
+    }
+
     /// A message no request awaits: an event, or a late response.
     async fn event(&mut self, envelope: &ProtoMessage) {
         if [
@@ -984,17 +1000,22 @@ impl IcWsHandler {
         }
         let name = payload_name(envelope.payload_type);
         if envelope.payload_type == ProtoOaClientDisconnectEvent::TYPE {
-            self.fail_session(format!("cTrader ended the session ({name})"));
+            self.client_ended(&name);
         } else {
             log::debug!("cTrader {name} not awaited");
         }
     }
 }
 
+/// The wall clock, through Nautilus' seam (`nautilus_core::time`).
+fn wall_clock() -> Timestamp {
+    Timestamp::from(get_atomic_clock_realtime().get_time_ns())
+}
+
 /// Waits until `at`, or forever without one.
-async fn sleep_until(at: Option<tokio::time::Instant>) {
+async fn sleep_until(at: Option<Instant>) {
     match at {
-        Some(at) => tokio::time::sleep_until(at).await,
+        Some(at) => time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }

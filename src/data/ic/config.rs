@@ -269,7 +269,7 @@ mod tests {
         pairs.push(("XDG_STATE_HOME", state));
         let credential = IcCredential::from_vars(vars(&pairs)).unwrap();
 
-        let pair = credential.tokens.load().unwrap();
+        let pair = credential.tokens.try_load().unwrap().unwrap();
 
         assert_eq!(pair.access_token.expose_secret(), "accessTokenValue");
         assert_eq!(pair.refresh_token.expose_secret(), "refreshTokenValue");

@@ -7,8 +7,16 @@
 //! requests as commands and awaits
 //! each response. The handler sends the binary heartbeat, correlates
 //! responses by `clientMsgId` and, after the transport reconnects,
-//! authenticates the new session before serving waiting requests.
-//! Requests in flight at a reconnect fail: their session is gone.
+//! authenticates the new session before serving waiting requests. When
+//! cTrader ends the client's session, the handler asks the transport for
+//! that reconnect (`WebSocketClient::request_reconnect`). Requests in
+//! flight at a reconnect fail: their session is gone.
+//!
+//! The handler task is held in Nautilus' `TaskSlot`: `begin_shutdown`
+//! tells it to close, `disconnect` joins it (`finish_task`), a token
+//! renewal out answered and saved first. Time goes through Nautilus'
+//! simulation seams (`nautilus_common::live::dst`, and the wall clock
+//! through `nautilus_core::time`).
 //!
 //! Spot subscriptions are the session's too, tracked in Nautilus'
 //! `SubscriptionState` (topics `spot:<symbolId>`): the handler marks them,
@@ -36,6 +44,8 @@ mod handler;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
+use nautilus_common::live::dst::time;
+use nautilus_live::task::{TaskJoinOutcome, TaskSlot, finish_task};
 use nautilus_network::{
     Message,
     ratelimiter::quota::Quota,
@@ -47,7 +57,7 @@ use nautilus_network::{
 use tokio::sync::{mpsc, oneshot};
 use ustr::Ustr;
 
-use self::handler::{HandlerCommand, IcWsHandler};
+use self::handler::{HandlerCommand, IcWsHandler, LOCK_RETRY};
 use super::{
     config::IcCredential,
     messages::{
@@ -73,6 +83,9 @@ const HISTORICAL_PERIOD: Duration = Duration::from_millis(250);
 /// How long `disconnect` waits for the handler to close the transport:
 /// the answer of a token renewal out first, up to `AUTH_TIMEOUT`.
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// How long `disconnect` waits for the handler once aborted.
+const ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The channel of the spot subscriptions' topics in their
 /// `SubscriptionState`: `spot:<symbolId>`.
@@ -140,7 +153,8 @@ pub(crate) type TradeSent = oneshot::Receiver<Result<(), IcError>>;
 /// An authenticated cTrader session on one account.
 pub(super) struct IcWebSocketClient {
     cmd_tx: mpsc::UnboundedSender<HandlerCommand>,
-    handler: tokio::task::JoinHandle<()>,
+    /// The handler task, explicitly singular: `disconnect` joins it.
+    handler: TaskSlot<()>,
     /// The spot subscriptions, which the handler marks, confirms and fails.
     subscriptions: SubscriptionState,
 }
@@ -171,10 +185,13 @@ impl IcWebSocketClient {
         credential: IcCredential,
         heartbeat: Duration,
     ) -> anyhow::Result<(Self, SpotEvents)> {
-        let store = credential.tokens.clone();
-        let tokens = tokio::task::spawn_blocking(move || store.load())
-            .await
-            .context("loading IC's token file")??;
+        // While another session renews the pair, its new one is awaited.
+        let tokens = loop {
+            if let Some(tokens) = credential.tokens.try_load()? {
+                break tokens;
+            }
+            time::sleep(LOCK_RETRY).await;
+        };
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Message>();
         let message_handler: MessageHandler = Arc::new(move |message| {
             // The receiver is gone only once the handler has stopped.
@@ -219,9 +236,13 @@ impl IcWebSocketClient {
             spot_tx,
             heartbeat,
         );
+        let mut handler_task = TaskSlot::new();
+        handler_task
+            .spawn(handler.run())
+            .map_err(|e| anyhow::anyhow!("starting the cTrader handler: {e}"))?;
         let connected = Self {
             cmd_tx,
-            handler: tokio::spawn(handler.run()),
+            handler: handler_task,
             subscriptions,
         };
         match auth
@@ -255,7 +276,7 @@ impl IcWebSocketClient {
                 reply,
             })
             .map_err(|_| IcError::ConnectionLost)?;
-        let envelope = tokio::time::timeout(REQUEST_TIMEOUT, response)
+        let envelope = time::timeout(REQUEST_TIMEOUT, response)
             .await
             .map_err(|_| IcError::Timeout)?
             .map_err(|_| IcError::ConnectionLost)??;
@@ -329,18 +350,27 @@ impl IcWebSocketClient {
         let _ = self.cmd_tx.send(HandlerCommand::RenewToken);
     }
 
-    /// Closes the connection, once a token renewal out is answered (and
-    /// its pair saved) or `AUTH_TIMEOUT` passed; requests still waiting
-    /// fail.
-    pub(super) async fn disconnect(self) {
+    /// Asks the handler to close the connection, once a token renewal out
+    /// is answered (and its pair saved) or `AUTH_TIMEOUT` passed; requests
+    /// still waiting fail. `disconnect` awaits it.
+    pub(super) fn begin_shutdown(&self) {
+        // The handler is gone once it has stopped.
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
-        let mut handler = self.handler;
-        if tokio::time::timeout(DISCONNECT_TIMEOUT, &mut handler)
-            .await
-            .is_err()
-        {
-            log::warn!("the cTrader handler did not stop in time: aborted");
-            handler.abort();
+    }
+
+    /// Closes the connection as `begin_shutdown` asks, and joins the
+    /// handler within `DISCONNECT_TIMEOUT`, then aborts it.
+    pub(super) async fn disconnect(mut self) {
+        self.begin_shutdown();
+        match finish_task(&mut self.handler, DISCONNECT_TIMEOUT, ABORT_TIMEOUT).await {
+            None | Some(TaskJoinOutcome::Completed(())) => {}
+            Some(TaskJoinOutcome::Aborted) => {
+                log::warn!("the cTrader handler did not stop in time: aborted");
+            }
+            Some(TaskJoinOutcome::Failed(e)) => log::error!("the cTrader handler failed: {e}"),
+            Some(TaskJoinOutcome::Incomplete) => {
+                log::error!("the cTrader handler did not stop after its abort");
+            }
         }
     }
 }
@@ -763,18 +793,26 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Synthetic: the event as OpenApiMessages.proto defines it.
+    /// A cTrader that, on connection 0, answers the first request after the
+    /// auth with the end of the client's session (synthetic, as
+    /// OpenApiMessages.proto defines the event), keeping the socket open;
+    /// connection 1 serves symbols.
+    fn ending_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
+        if connection > 0 {
+            return symbols_peer(connection, request);
+        }
+        accept_auth(request).unwrap_or_else(|| {
+            let event = ProtoOaClientDisconnectEvent {
+                reason: Some("Server maintenance".to_owned()),
+                ..Default::default()
+            };
+            vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
+        })
+    }
+
     #[tokio::test]
-    async fn requests_fail_once_ctrader_ends_the_session() {
-        let (url, _) = testing::start(|_, request| {
-            accept_auth(request).unwrap_or_else(|| {
-                let event = ProtoOaClientDisconnectEvent {
-                    reason: Some("Server maintenance".to_owned()),
-                    ..Default::default()
-                };
-                vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
-            })
-        });
+    async fn once_ctrader_ends_the_session_the_client_reconnects_and_authenticates_again() {
+        let (url, received) = testing::start(ending_peer);
         let (credential, _tokens) = testing::credential();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
@@ -785,11 +823,16 @@ mod tests {
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(2))
             .await;
 
-        let ended = IcError::Session(
-            "cTrader ended the session (PROTO_OA_CLIENT_DISCONNECT_EVENT)".to_owned(),
+        assert_eq!(in_flight, Err(IcError::ConnectionLost));
+        assert_eq!(next, Ok(symbols(&[2])));
+        assert_eq!(
+            payload_types(&received, 1),
+            [
+                ProtoOaApplicationAuthReq::TYPE,
+                ProtoOaAccountAuthReq::TYPE,
+                ProtoOaSymbolByIdReq::TYPE
+            ]
         );
-        assert_eq!(in_flight, Err(ended.clone()));
-        assert_eq!(next, Err(ended));
         client.disconnect().await;
     }
 
@@ -865,15 +908,9 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Synthetic: the event as OpenApiMessages.proto defines it.
     #[tokio::test]
-    async fn a_trade_request_once_ctrader_ended_the_session_is_not_sent() {
-        let (url, _) = testing::start(|_, request| {
-            accept_auth(request).unwrap_or_else(|| {
-                let event = ProtoOaClientDisconnectEvent::default();
-                vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
-            })
-        });
+    async fn a_trade_request_once_ctrader_ended_the_session_goes_out_on_the_next_one() {
+        let (url, received) = testing::start(ending_peer);
         let (credential, _tokens) = testing::credential();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         let _ = client
@@ -887,7 +924,15 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(sent, Ok(Err(IcError::Session(_)))), "{sent:?}");
+        assert!(matches!(sent, Ok(Ok(()))), "{sent:?}");
+        testing::wait_until(&received, |frames| {
+            frames.iter().any(|(c, f)| {
+                *c == 1
+                    && f.payload_type == crate::data::ic::messages::ProtoOaCancelOrderReq::TYPE
+                    && f.client_msg_id.as_deref() == Some("X:O-1")
+            })
+        })
+        .await;
         client.disconnect().await;
     }
 

@@ -152,20 +152,23 @@ impl TokenStore {
 
     /// The latest pair: the file's, or the `.env` pair, written to the
     /// file first, when there is no file or `.env` holds another pair than
-    /// the one that seeded it. Blocks while another session renews.
+    /// the one that seeded it; `None` while another session renews (it
+    /// holds the lock).
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be read, parsed or written;
     /// never a token.
-    pub(super) fn load(&self) -> anyhow::Result<TokenPair> {
-        let lock = self.lock(true)?.expect("a blocking lock is taken");
+    pub(super) fn try_load(&self) -> anyhow::Result<Option<TokenPair>> {
+        let Some(lock) = self.try_lock()? else {
+            return Ok(None);
+        };
         let fingerprint = self.seed.fingerprint();
         match self.stored()? {
-            Some(stored) if stored.seed == fingerprint => Ok(pair_of(&stored)),
+            Some(stored) if stored.seed == fingerprint => Ok(Some(pair_of(&stored))),
             _ => {
                 lock.save(&self.seed)?;
-                Ok(self.seed.clone())
+                Ok(Some(self.seed.clone()))
             }
         }
     }
@@ -189,10 +192,6 @@ impl TokenStore {
     ///
     /// Returns an error if the lock file cannot be opened or locked.
     pub(super) fn try_lock(&self) -> anyhow::Result<Option<TokenLock>> {
-        self.lock(false)
-    }
-
-    fn lock(&self, block: bool) -> anyhow::Result<Option<TokenLock>> {
         let directory = self
             .path
             .parent()
@@ -211,14 +210,10 @@ impl TokenStore {
             .mode(0o600)
             .open(&lock_path)
             .with_context(|| format!("opening {}", Path::new(&lock_path).display()))?;
-        let locked = if block {
-            file.lock().map(|()| true)
-        } else {
-            match file.try_lock() {
-                Ok(()) => Ok(true),
-                Err(TryLockError::WouldBlock) => Ok(false),
-                Err(TryLockError::Error(e)) => Err(e),
-            }
+        let locked = match file.try_lock() {
+            Ok(()) => Ok(true),
+            Err(TryLockError::WouldBlock) => Ok(false),
+            Err(TryLockError::Error(e)) => Err(e),
         };
         let locked =
             locked.with_context(|| format!("locking {}", Path::new(&lock_path).display()))?;
@@ -346,7 +341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
 
-        let loaded = store.load().unwrap();
+        let loaded = store.try_load().unwrap().unwrap();
 
         assert_eq!(
             exposed(&loaded),
@@ -360,7 +355,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
 
-        store.load().unwrap();
+        store.try_load().unwrap().unwrap();
 
         assert_eq!(mode(store.path()), 0o600);
         assert_eq!(mode(store.path().parent().unwrap()), 0o700);
@@ -370,13 +365,16 @@ mod tests {
     fn a_renewed_pair_is_what_the_next_load_finds() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
-        store.load().unwrap();
+        store.try_load().unwrap().unwrap();
         let renewed = pair("newAccess", "newRefresh", Some("2026-11-25T10:00:00Z"));
 
         store.try_lock().unwrap().unwrap().save(&renewed).unwrap();
 
         let next_run = store_in(dir.path(), seed());
-        assert_eq!(exposed(&next_run.load().unwrap()), exposed(&renewed));
+        assert_eq!(
+            exposed(&next_run.try_load().unwrap().unwrap()),
+            exposed(&renewed)
+        );
         assert_eq!(mode(store.path()), 0o600);
     }
 
@@ -384,16 +382,30 @@ mod tests {
     fn another_env_pair_seeds_the_file_again() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
-        store.load().unwrap();
+        store.try_load().unwrap().unwrap();
         let renewed = pair("newAccess", "newRefresh", Some("2026-11-25T10:00:00Z"));
         store.try_lock().unwrap().unwrap().save(&renewed).unwrap();
         let from_playground = pair("playgroundAccess", "playgroundRefresh", None);
 
         let loaded = store_in(dir.path(), from_playground.clone())
-            .load()
+            .try_load()
+            .unwrap()
             .unwrap();
 
         assert_eq!(exposed(&loaded), exposed(&from_playground));
+    }
+
+    #[test]
+    fn no_pair_is_loaded_while_another_session_renews() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, other) = (store_in(dir.path(), seed()), store_in(dir.path(), seed()));
+        one.try_load().unwrap().unwrap();
+
+        let renewing = one.try_lock().unwrap();
+
+        assert!(other.try_load().unwrap().is_none());
+        drop(renewing);
+        assert!(other.try_load().unwrap().is_some());
     }
 
     #[test]
@@ -416,7 +428,7 @@ mod tests {
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), pair("seedaccess", "seedrefresh", None));
-        store.load().unwrap();
+        store.try_load().unwrap().unwrap();
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
             let (store, done) = (store.clone(), Arc::clone(&done));
@@ -465,7 +477,7 @@ mod tests {
     fn a_file_not_a_token_file_is_an_error_naming_it_not_its_content() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
-        store.load().unwrap();
+        store.try_load().unwrap().unwrap();
         fs::write(store.path(), r#"{"access_token": 7, "x": "leakedValue"}"#).unwrap();
 
         let err = format!("{:#}", store.read().unwrap_err());
@@ -497,7 +509,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
 
-        let debug = format!("{store:?} {:?}", store.load().unwrap());
+        let debug = format!("{store:?} {:?}", store.try_load().unwrap().unwrap());
 
         assert!(!debug.contains("envAccessToken"), "{debug}");
         assert!(!debug.contains("envRefreshToken"), "{debug}");

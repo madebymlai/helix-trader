@@ -156,8 +156,12 @@ connection, which sends it again), and `reset_after_reconnect` gives what
 a new connection subscribes. Changes asked while the account
 authenticates again on the same connection wait, the last of each symbol,
 and are sent once it is authenticated if they change the state. cTrader ending the client's session
-(`ProtoOAClientDisconnectEvent`) fails every request until a reconnect;
-an account session ended is authenticated again (see above).
+(`ProtoOAClientDisconnectEvent`) has the handler ask the transport for a
+new connection (`WebSocketClient::request_reconnect`, as Lighter's handler
+does on its venue's shutdown frame): requests wait for the new session,
+which authenticates again, and those in flight fail. Should the transport
+take no reconnect (it is closing), the session fails. An account session
+ended is authenticated again (see above).
 
 On the demo (2026-10-26) cTrader sent no heartbeat of its own in 25 s
 while ours ran, and none is needed: the transport's reconnect handles a
@@ -200,14 +204,15 @@ OKX and AX adapters use them:
 | Retries | none | `RetryManager` (`network/src/retry.rs`) | keep: nothing to migrate | No retry loop: the deal window split in halves and the renewal after a refused token are protocol steps, not retries of a transient failure. |
 | Token renewal | ours: refresh token request, token file under `flock`, schedule a day before expiry | none (guide, "Authentication": "Refreshable tokens ... need adapter-specific state") | keep: no native equivalent | |
 | Secrets | Nautilus' `SecretString`; plaintext copies wiped with `zeroize` | `SecretString` (`core/src/string/secret.rs`; guide, "Credentials and secret handling") | already native | `zeroize` is the guide's "Bound plaintext lifetime". |
-| Handler task | ours: a `tokio::spawn`ed `JoinHandle`, at `disconnect` awaited 40 s then aborted | `TaskSlot` and `finish_task` (`live/src/task.rs`; guide, "Task management", "explicitly singular"), as Binance's and AX's handlers | migrate in follow-up | A `TaskSlot` aborts its task when dropped. The data and execution clients' synchronous `stop` drop the session and rely on the handler outliving it to save a token renewal's answer (the only copy of the new pair): moving to `TaskSlot` needs `stop` to hand the session to an awaited `disconnect` first. |
-| Reconnect on cTrader's end of the session | none: after `ProtoOAClientDisconnectEvent` requests fail until the transport reconnects | `WebSocketClient::request_reconnect` (`network/src/websocket/client.rs`; guide, "Reconnect ownership") | migrate in follow-up | Whether cTrader closes the socket after that event is not observed; if it does not, the session stays failed. Requesting a reconnect there is a behaviour change, tested on its own. |
-| Time, tasks and wall clock (DST seams) | `tokio::time`, `tokio::spawn`, `tokio::task::spawn_blocking` (token file), `jiff::Timestamp::now` for the token's expiry | `nautilus_common::live::dst` (`common/src/live/dst.rs`), `duration_since_unix_epoch` (`core/src/time.rs`; `docs/concepts/dst.md`) | migrate in follow-up | Outside a madsim build the `dst` paths are tokio's own, so only the whole DST contract (biased `select!`, no `spawn_blocking`, wall clock through `nautilus_core`) makes the adapter simulable; it spans the token file and the live clients, beyond this websocket change. |
+| Handler task | Nautilus' `TaskSlot`, spawned gated, joined by `finish_task` at `disconnect` (40 s, then aborted, 2 s) | `TaskSlot` and `finish_task` (`live/src/task.rs`; guide, "Task management", "explicitly singular"), as Binance's spot streams client (`adapters/binance/src/spot/websocket/streams/client.rs`) | migrated | A `TaskSlot` aborts its task when dropped, so the clients' `stop` no longer drops the session: it begins the shutdown (`begin_shutdown`: task groups closed, the handler told to close, as Binance's `stop` does), and `disconnect`, or the next `connect`, drains the tasks and joins the handler, which saves a token renewal's answer first (the only copy of the new pair). |
+| Reconnect on cTrader's end of the session | Nautilus': after `ProtoOAClientDisconnectEvent` the handler calls `WebSocketClient::request_reconnect` | `WebSocketClient::request_reconnect` (`network/src/websocket/client.rs`; guide, "Reconnect ownership"), as Lighter's handler on its venue's shutdown frame (`adapters/lighter/src/websocket/handler.rs`) | migrated | Accepted: requests wait for the new session, authenticated again on `RECONNECTED`; refused (the transport closing), the session fails as before. The transport opens the new connection before it drops the old one (`reconnect_with_outcome`), so cTrader need not close the socket. |
+| Time, tasks and wall clock (DST seams) | Nautilus': timers, intervals and timeouts from `nautilus_common::live::dst::time`, `biased;` on every `select!`, the wall clock through `nautilus_core::time` (`get_atomic_clock_realtime`), no `spawn_blocking`: the token file is loaded with a non-blocking lock, retried every 100 ms | `nautilus_common::live::dst` (`common/src/live/dst.rs`), `duration_since_unix_epoch` (`core/src/time.rs`; `docs/concepts/dst.md`, "Required conditions"), as OKX's handler and clients (`adapters/okx/src/websocket/handler.rs`, `adapters/okx/src/data.rs`) | migrated | Across the session, the token file and the live clients. Tests keep tokio's own. The crate exposes no `simulation` feature and no madsim build: the seams are in place, a madsim run of the adapter is not claimed. |
 | Data client tasks | Nautilus' `TaskGroup`s, session and command | `TaskGroup` (`live/src/task.rs`) | already native | |
 | Quote emission filter | ours: a `subscribed` flag per instrument in `live/ic/spots.rs`, the merge kept for all | `DataClientAdapter::subscriptions_quotes` (`data/src/client.rs`) | keep: no native equivalent | That set is the data engine's, held by the adapter wrapping our `DataClient`, out of its reach. The guide asks for this split: "Update the full private cache even when emissions are filtered to active subscriptions". |
 | Deal deduplication | ours: deals kept once by id across the halves of a split window | `FifoCache` (`common/src/cache/fifo.rs`) | keep: no native equivalent | `FifoCache` bounds replay deduplication of a stream; this is one request's complete set, which a bounded cache could truncate. |
 | Trade event deduplication | Nautilus' `FifoCache` of the last 10,000 deal ids (`live/ic/dispatch.rs`) | `FifoCache` (`common/src/cache/fifo.rs`; guide, "Event ordering and deduplication") | already native | |
 | Order identity of trade events | Nautilus' `OrderIdentity`, in the dispatch's tracked orders with their shape and bracket role | `OrderIdentity`, `OrderContext` (`live/src/execution/context.rs`; guide, "Tracked and external execution updates") | already native | The shape kept is the bracket's (legs, the position they protect), which `OrderContext` does not hold. |
+| Venue leverage on the margin account | none: Nautilus' account for IC keeps leverage 1, so its risk check reserves the full notional (IC instruments' margins are 1) | `MarginAccount::set_default_leverage` / `set_leverage` (`model/src/accounts/margin.rs`), applied to the cached account only by simulated venues: the sandbox (`adapters/sandbox/src/execution.rs`, `sync_cached_account_config`, through `SimulatedExecutionClientFactory`'s `Rc<RefCell<Cache>>`) and the backtest exchange (`backtest/src/exchange.rs`) | not done: no native path for a live client | A live execution client gets a `CacheView` (`common/src/cache/view.rs`: "so cache writes stay owned by the data and execution engines"), and `AccountState` carries no leverage (`model/src/events/account/state.rs`), so no live adapter at this commit sets it; Binance's and Bybit's set the venue's leverage over HTTP only. The native route for live margins is the instrument's `margin_init` (`docs/concepts/accounting.md`, "set `instrument.margin_init` and `margin_maint` so the percentage recovers the desired dollar amount"; AX parses its venue's margin rates into it, `adapters/architect_ax/src/http/parse.rs`), which would change the catalog's instruments and the backtest's margins too: a decision left open. |
 | Unresolved submissions | `ExecutionClient::retain_unresolved_submissions` true | the same (`common/src/clients/execution.rs`) | already native | An order sent and unanswered stays in flight until venue evidence resolves it. |
 
 ## Instruments
@@ -413,7 +418,8 @@ deals of the reconciliation tests are synthetic.
     never in `Debug` or errors, the `.env` pair seeding the token file;
   - `token.rs`: the file seeded from `.env` (expiry unknown), mode 0600 in
     a 0700 directory, a renewed pair found by the next load, another `.env`
-    pair seeding it again; the lock one session at a time; two writers and
+    pair seeding it again; no pair loaded while another session renews;
+    the lock one session at a time; two writers and
     a reader at once never leaving a partial pair, the last writer's kept;
     a file that is no token file named, never its content; the expiry from
     `expiresIn` and the renewal a day before; the path under
@@ -433,11 +439,12 @@ deals of the reconciliation tests are synthetic.
     two requests answered in reverse order each getting its own, a venue
     error, a refused app (naming the code, never a credential), another
     account refused, malformed and unknown frames skipped,
-    re-authentication after a reconnect, requests failing once cTrader
-    ends the client's session; tick requests at most 5 a second, others
-    unlimited; a trade request sent under its id, its answer and an event
-    of the account coming as trade events, and one cTrader's ended session
-    never sent;
+    re-authentication after a reconnect; once cTrader ends the client's
+    session, a reconnect requested, the request in flight failing and the
+    next served on the new, re-authenticated connection; tick requests at
+    most 5 a second, others unlimited; a trade request sent under its id,
+    its answer and an event of the account coming as trade events, and one
+    asked after cTrader ended the session sent on the next one;
   - `websocket/` (renewal), against a peer keeping one token pair as
     cTrader does (a renewal replaces it and ends the sessions of the old
     one): a pair of unknown expiry, or expiring within a day, renewed and

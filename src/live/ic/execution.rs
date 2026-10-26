@@ -27,7 +27,6 @@ use std::{
     collections::HashMap,
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -35,7 +34,10 @@ use async_trait::async_trait;
 use nautilus_common::{
     clients::ExecutionClient,
     enums::LogLevel,
-    live::runner::{get_exec_event_sender, try_get_exec_event_sender},
+    live::{
+        dst::time::{self, Duration, Instant},
+        runner::{get_exec_event_sender, try_get_exec_event_sender},
+    },
     logging::map_log_level_to_filter,
     messages::execution::{
         BatchCancelOrders, CancelAllOrders, CancelOrder, GenerateFillReports,
@@ -211,6 +213,7 @@ impl IcExecutionClient {
         self.session_tasks.spawn(async move {
             loop {
                 let event = tokio::select! {
+                    biased;
                     () = cancelled.cancelled() => return,
                     event = trades.recv() => match event {
                         Some(event) => event,
@@ -265,14 +268,14 @@ impl IcExecutionClient {
     /// goes to the node asynchronously.
     async fn await_account_registered(&self) -> anyhow::Result<()> {
         let account_id = self.core.account_id;
-        let deadline = tokio::time::Instant::now() + ACCOUNT_REGISTERED_TIMEOUT;
+        let deadline = Instant::now() + ACCOUNT_REGISTERED_TIMEOUT;
         while self.core.cache().account(&account_id).is_none() {
             anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
+                Instant::now() < deadline,
                 "the node did not register the account {account_id} within {}s",
                 ACCOUNT_REGISTERED_TIMEOUT.as_secs()
             );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            time::sleep(Duration::from_millis(10)).await;
         }
         Ok(())
     }
@@ -349,6 +352,7 @@ impl IcExecutionClient {
         let cancelled = self.command_tasks.cancellation_token();
         let future = async move {
             tokio::select! {
+                biased;
                 () = cancelled.cancelled() => {}
                 result = future => {
                     if let Err(e) = result {
@@ -362,16 +366,30 @@ impl IcExecutionClient {
         }
     }
 
+    /// Closes admission and cancels the tasks, and asks the session to
+    /// close: `teardown` awaits both.
     fn begin_shutdown(&self) {
         self.session_tasks.begin_shutdown();
         self.command_tasks.begin_shutdown();
+        if let Some(session) = &self.session {
+            session.history.begin_shutdown();
+        }
     }
 
-    async fn finish_shutdown(&self) -> anyhow::Result<()> {
+    /// Drains the tasks, then closes the session, so a token renewal out
+    /// at `stop` is still saved.
+    async fn teardown(&mut self) -> anyhow::Result<()> {
+        self.begin_shutdown();
         let (session, command) = tokio::join!(
             self.session_tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
             self.command_tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
         );
+        if let Some(open) = self.session.take() {
+            // The tasks are done, so this is the last handle.
+            if let Ok(history) = Arc::try_unwrap(open.history) {
+                history.disconnect().await;
+            }
+        }
         session.map_err(|e| anyhow::anyhow!("stopping the IC trade event task: {e}"))?;
         command.map_err(|e| anyhow::anyhow!("stopping the IC command tasks: {e}"))?;
         Ok(())
@@ -889,12 +907,12 @@ impl ExecutionClient for IcExecutionClient {
         Ok(())
     }
 
+    /// Begins the shutdown; `disconnect`, or the next `connect`, finishes
+    /// it.
     fn stop(&mut self) -> anyhow::Result<()> {
         self.core.set_stopped();
         self.core.set_disconnected();
         self.begin_shutdown();
-        // The session closes once its last handle, here or in a task, goes.
-        self.session = None;
         Ok(())
     }
 
@@ -917,9 +935,9 @@ impl ExecutionClient for IcExecutionClient {
             log::error!("{client_id} failed to connect: {e:#}");
             e
         };
-        if !self.session_tasks.is_open() || !self.command_tasks.is_open() {
-            self.begin_shutdown();
-            self.finish_shutdown().await.map_err(failed)?;
+        if self.session.is_some() || !self.session_tasks.is_open() || !self.command_tasks.is_open()
+        {
+            self.teardown().await.map_err(failed)?;
             self.session_tasks
                 .start_generation()
                 .map_err(|e| failed(anyhow::anyhow!("reopening the IC trade event task: {e}")))?;
@@ -945,14 +963,7 @@ impl ExecutionClient for IcExecutionClient {
 
     async fn disconnect(&mut self) -> anyhow::Result<()> {
         self.core.set_disconnected();
-        self.begin_shutdown();
-        let finished = self.finish_shutdown().await;
-        if let Some(session) = self.session.take() {
-            // The tasks are done, so this is the last handle.
-            if let Ok(history) = Arc::try_unwrap(session.history) {
-                history.disconnect().await;
-            }
-        }
+        let finished = self.teardown().await;
         log::info!("Disconnected {}", self.core.client_id);
         finished
     }
