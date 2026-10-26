@@ -12,6 +12,8 @@ bollard = { version = "0.21.1", default-features = false, features = ["http", "p
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
+# The DBN version of nautilus-databento, for its record types and file metadata.
+dbn = "=0.71.0"
 dotenvy = "0.15"
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
@@ -20,6 +22,8 @@ nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader",
 nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", features = ["tracing-bridge"] }
 nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
+# Keep Nautilus' 64-bit prices, as for nautilus-okx; the loader needs no live feature.
+nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a", default-features = false }
 nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }
 nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a51ae015c150ef68f62d9295e3efa9534f492a4a" }

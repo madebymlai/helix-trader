@@ -20,6 +20,11 @@ did not confirm. Examples use the future `ESM4.CME`.
 data/
   mod.rs           declares the modules, exposes only what others call
   fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write
+  databento/
+    mod.rs         Databento DBN files -> book depth and trades, with Nautilus' loader
+    publishers.json Nautilus' Databento publishers, read by the loader
+    testdata/      Nautilus' DBN fixtures
+    README.md      Databento files: schemas, instrument ids, coverage, tests
   ib/
     mod.rs         Interactive Brokers history: instruments, 1-minute TRADES bars
     gateway.rs     the IB account and the Docker gateway, started and logged in
@@ -44,7 +49,8 @@ strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiv
 ```
 
 Only Nautilus types cross this module: no parallel `Symbol` or `Bar`
-types. `fill_catalog` is the only writer of the catalog.
+types. `fill_catalog` writes the catalog, except Databento files, which
+`databento/` writes file by file (see "Other sources").
 
 ## Instruments and bar types
 
@@ -304,7 +310,16 @@ is in it.
 
 ### Other sources
 
-Databento (`nautilus-databento`, not used yet) has the same shape:
+`databento/` loads downloaded Databento DBN files (MBP-10 as
+`OrderBookDepth`, trades as `TradeTick`) with Nautilus' file loader: see
+[`databento/README.md`](databento/README.md). It writes the catalog itself
+rather than through `fill_catalog`, which drops items sharing a `ts_init`
+(several book updates and trades share one) and holds a whole window in
+memory (a day of MBP-10 is about 7 GB decoded). Each file is stored over
+its metadata window, so a stored file is skipped.
+
+Databento's historical API (`nautilus-databento`, not used yet) has the
+`fill_catalog` shape:
 `DatabentoHistoricalClient::get_range_instruments(RangeQueryParams)` returns
 `Vec<InstrumentAny>`, and
 `get_range_quotes(RangeQueryParams, Some("bbo-1m".into()))` returns the
@@ -331,4 +346,4 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   - a failure keeps the instruments filled before it;
   - a minute-cadence source stored every minute and resumed with only the
     new minutes.
-- `ib/`, `ib/gateway.rs` and `okx/`: see their READMEs.
+- `ib/`, `ib/gateway.rs`, `okx/` and `databento/`: see their READMEs.
