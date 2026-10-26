@@ -88,7 +88,7 @@ svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{
     <text x="{W/2}" y="{CY+22}" text-anchor="middle" font-family="ui-sans-serif, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="68" font-weight="700" letter-spacing="2">
       <tspan fill="#c084fc">helix</tspan><tspan fill="#67e8f9" dx="18">trader</tspan>
     </text>
-    <text x="{W/2}" y="{CY+62}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#a5b4c8" letter-spacing="3">SYSTEMATIC TRADING ON NAUTILUSTRADER · RUST</text>
+    <text x="{W/2}" y="{CY+62}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#a5b4c8" letter-spacing="1">Systematic trading on NautilusTrader, in Rust</text>
   </g>
 </svg>
 '''
