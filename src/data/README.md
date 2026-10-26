@@ -1,9 +1,10 @@
 # The data module
 
 `data` is build step 1. It fills the Nautilus Parquet catalog that backtest
-reads, with three things only: the instruments the strategies trade, the
-series their bars are built from, and the funding of OKX swaps and X-Perps,
-which backtests settle. The strategies' bars themselves are internal, built
+reads, with four things only: the instruments the strategies trade, the
+series their bars are built from, the funding of OKX swaps and X-Perps,
+which backtests settle, and the book and trades of CME instruments read as
+signals (Databento's MBP-10 and trades). The strategies' bars themselves are internal, built
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
 quotes"): for a composite bar type from its source bars (IB's 1-minute
 TRADES bars, OKX's 1-minute candles), otherwise from quotes. The module
@@ -20,6 +21,10 @@ did not confirm. Examples use the future `ESM4.CME`.
 data/
   mod.rs           declares the modules, exposes only what others call
   fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write
+  databento/
+    mod.rs         Databento history of GLBX instruments: definitions, MBP-10, trades, a day per request
+    publishers.json Nautilus' Databento publishers, read by the client
+    README.md      Databento history: schemas, instrument ids, resume, cost, tests
   ib/
     mod.rs         Interactive Brokers history: instruments, 1-minute TRADES bars
     gateway.rs     the IB account and the Docker gateway, started and logged in
@@ -44,7 +49,8 @@ strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiv
 ```
 
 Only Nautilus types cross this module: no parallel `Symbol` or `Bar`
-types. `fill_catalog` is the only writer of the catalog.
+types. `fill_catalog` writes the catalog, except Databento's history,
+which `databento/` writes day by day (see "Choosing the source").
 
 ## Instruments and bar types
 
@@ -293,24 +299,21 @@ catalog.query_last_timestamp(..)                     // the stored end a re-run 
 ### Choosing the source
 
 `fill-catalog` picks each instrument's source from its venue
-(`OkxHistory::serves`): OKX's archive for `….OKX` ids, IB for every other
-venue. A config may hold both; IB's gateway starts only if an IB instrument
-is in it.
+(`OkxHistory::serves`, `DatabentoHistory::serves`): OKX's archive for
+`….OKX` ids, Databento for `….GLBX` ids, IB for every other venue. A config
+may hold several; IB's gateway starts only if an IB instrument is in it.
 
 - `ib/` fills IB instruments' 1-minute TRADES bars through the Docker IB Gateway
   it starts: see [`ib/README.md`](ib/README.md).
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
-
-### Other sources
-
-Databento (`nautilus-databento`, not used yet) has the same shape:
-`DatabentoHistoricalClient::get_range_instruments(RangeQueryParams)` returns
-`Vec<InstrumentAny>`, and
-`get_range_quotes(RangeQueryParams, Some("bbo-1m".into()))` returns the
-1-minute `QuoteTick`s (the schema defaults to `mbp-1`, so pass it). A `databento.rs` next to `ib/` would supply its
-own `fetch`. Its ids are on `GLBX` unless `use_exchange_as_venue` is set
-(see "Instrument ids across sources").
+- `databento/` fills GLBX instruments' MBP-10 book (`OrderBookDepth`) and
+  trades, with their definitions, from Databento's historical API, one
+  UTC day per request after logging Databento's quote. It writes the
+  catalog itself rather than through `fill_catalog`, which drops items
+  sharing a `ts_init` (book updates and trades often do) and holds a whole
+  window in memory (a day of MBP-10 is about 7 GB decoded): see
+  [`databento/README.md`](databento/README.md).
 
 ## Tests
 
@@ -331,4 +334,4 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   - a failure keeps the instruments filled before it;
   - a minute-cadence source stored every minute and resumed with only the
     new minutes.
-- `ib/`, `ib/gateway.rs` and `okx/`: see their READMEs.
+- `ib/`, `ib/gateway.rs`, `okx/` and `databento/`: see their READMEs.

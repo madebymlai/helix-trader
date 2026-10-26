@@ -5,6 +5,8 @@
 //! Build step 1. Backtest reads what this module writes. The instruments
 //! come from the strategy's data requirements.
 
+mod databento;
+pub use databento::DatabentoHistory;
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
 mod ib;

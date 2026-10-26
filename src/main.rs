@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IbHistory, OkxHistory, fill_catalog},
+    data::{DatabentoHistory, IbHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
         DataRequirements, catalog_series,
@@ -42,7 +42,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX's
-    /// archive (OKX instruments) or Interactive Brokers (the others).
+    /// archive (OKX instruments), Databento (GLBX instruments) or
+    /// Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
@@ -221,8 +222,9 @@ async fn main() -> anyhow::Result<()> {
 /// Checks everything that needs no gateway, then fills the catalog with the
 /// instruments and the series their bars are built from (see
 /// `strategy::catalog_series`) from each instrument's source: OKX's
-/// archive for OKX instruments (their 1-minute candles), IB (connected
-/// only if needed) for the others.
+/// archive for OKX instruments (their 1-minute candles), Databento's
+/// historical API for GLBX instruments (their MBP-10 book and trades, the
+/// cost quoted first), IB (connected only if needed) for the others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -244,15 +246,24 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     // The source of an instrument is its venue's: OKX's archive for OKX,
-    // IB for every other venue.
-    let (okx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
+    // Databento for GLBX, IB for every other venue.
+    let (okx_ids, other_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
         .instrument_ids()
         .into_iter()
         .partition(|&id| OkxHistory::serves(id));
+    let (glbx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = other_ids
+        .into_iter()
+        .partition(|&id| DatabentoHistory::serves(id));
     if !okx_ids.is_empty() {
         let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
         OkxHistory::new()?
             .fill(&mut catalog, &series, start, end)
+            .await?;
+    }
+    if !glbx_ids.is_empty() {
+        let api_key = std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
+        DatabentoHistory::new(&api_key)?
+            .fill(&catalog, &glbx_ids, start, end)
             .await?;
     }
     if !ib_ids.is_empty() {
