@@ -2079,6 +2079,7 @@ dependencies = [
  "clap",
  "csv",
  "dotenvy",
+ "futures",
  "ibapi",
  "jiff",
  "log",
@@ -2106,6 +2107,7 @@ dependencies = [
  "tokio",
  "toml",
  "tungstenite",
+ "ustr",
  "zeroize",
  "zip",
 ]

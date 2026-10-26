@@ -9,6 +9,12 @@
 //! authenticates the new session before serving waiting requests.
 //! Requests in flight at a reconnect fail: their session is gone.
 //!
+//! Historical requests go through the transport's rate limiter, keyed
+//! `HISTORICAL_KEY`: one every 250 ms, without burst, so fewer than
+//! cTrader's 5 in any second, even after an idle spell (a burst of 5 then
+//! the refill could send 9 within one second). One every 200 ms got
+//! `BLOCKED_PAYLOAD_TYPE` ("You are being rate limited") on the demo.
+//!
 //! The transport's own heartbeat is off: cTrader counts its
 //! `ProtoHeartbeatEvent`, which the transport cannot send (it sends Ping
 //! frames or text).
@@ -20,6 +26,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Context;
 use nautilus_network::{
     Message,
+    ratelimiter::quota::Quota,
     websocket::{AuthTracker, MessageHandler, WebSocketClient, WebSocketConfig},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -38,6 +45,12 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a request waits for its response.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The rate-limit key of historical requests.
+const HISTORICAL_KEY: &str = "historical";
+
+/// One historical request per this period: cTrader allows 5 a second.
+const HISTORICAL_PERIOD: Duration = Duration::from_millis(250);
 
 /// How long `disconnect` waits for the handler to close the transport.
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,9 +85,12 @@ impl IcWebSocketClient {
             .url(url.to_owned())
             .build()
             .context("the cTrader WebSocket config")?;
+        let historical = Quota::with_period(HISTORICAL_PERIOD)
+            .context("the historical request period is zero")?;
         let client = WebSocketClient::builder()
             .config(config)
             .message_handler(message_handler)
+            .keyed_quotas(vec![(HISTORICAL_KEY.to_owned(), historical)])
             .connect()
             .await
             .with_context(|| format!("connecting to cTrader at {url}"))?;
@@ -154,7 +170,8 @@ mod tests {
         messages::{
             ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaErrorRes,
-            ProtoOaSymbol, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaSymbol,
+            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
         },
         testing::{
             self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED, Action,
@@ -457,6 +474,80 @@ mod tests {
             .map(|(_, f)| f.payload_type)
             .collect();
         assert_eq!(second, [2100, 2102, 2116]);
+        client.disconnect().await;
+    }
+
+    fn tick_request() -> ProtoOaGetTickDataReq {
+        ProtoOaGetTickDataReq {
+            ctid_trader_account_id: ACCOUNT_ID,
+            symbol_id: 41,
+            r#type: ProtoOaQuoteType::Bid as i32,
+            from_timestamp: Some(0),
+            to_timestamp: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// cTrader allows 5 historical requests a second per connection: in
+    /// any second, at most 5 tick requests reach it, however many wait.
+    #[tokio::test]
+    async fn tick_requests_reach_ctrader_at_most_five_a_second() {
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&arrivals);
+        let (url, _) = testing::start(move |_, request| {
+            if let Some(actions) = accept_auth(request) {
+                return actions;
+            }
+            let at = std::time::Instant::now();
+            if request.payload_type == ProtoOaGetTickDataReq::TYPE {
+                log.lock().unwrap().push(at);
+                return vec![reply(request, &ProtoOaGetTickDataRes::default())];
+            }
+            symbols_peer(0, request)
+        });
+        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        let request = tick_request();
+
+        let answers = futures::future::join_all(
+            (0..7).map(|_| client.request::<_, ProtoOaGetTickDataRes>(&request)),
+        )
+        .await;
+
+        assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+        let arrivals = arrivals.lock().unwrap().clone();
+        assert_eq!(arrivals.len(), 7);
+        for six in arrivals.windows(6) {
+            let span = six[5] - six[0];
+            assert!(
+                span >= Duration::from_millis(900),
+                "6 tick requests within {span:?}"
+            );
+        }
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn other_requests_are_not_held_to_the_historical_limit() {
+        let (url, _) = testing::start(symbols_peer);
+        let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        let start = std::time::Instant::now();
+
+        for id in 0..7 {
+            client
+                .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(id))
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            start.elapsed() < Duration::from_millis(900),
+            "{:?}",
+            start.elapsed()
+        );
         client.disconnect().await;
     }
 
