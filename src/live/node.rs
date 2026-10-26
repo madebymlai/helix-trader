@@ -3,10 +3,11 @@
 //! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since catalogs
 //! are a `LiveNodeConfig` field, with the data and execution clients of
 //! each adapter the instruments need, each with its routing, and the cache
-//! persisted to Redis (`with_cache_database_factory`, see `redis`), adds the
-//! strategy (`add_strategy`),
-//! claims its instruments' external orders, and calls `run`, which stops on
-//! SIGINT or SIGTERM. Follows the IB adapter's `node_exec_tester` example.
+//! persisted to Redis (`with_cache_database_factory`, see `redis`), adds
+//! the strategy (`add_strategy`), claims its instruments' external
+//! orders, calls `run`, which stops on SIGINT or SIGTERM, and disposes the
+//! node, which closes the cache database. Follows the IB adapter's
+//! `node_exec_tester` example.
 //! Never names a broker.
 
 use std::{fmt::Debug, path::Path};
@@ -108,7 +109,10 @@ where
         .collect();
     node.add_strategy(strategy)?;
     node.register_external_order_claims(strategy_id, &unclaimed)?;
-    node.run().await
+    // As Nautilus documents it: disposing closes the cache database.
+    let result = node.run().await;
+    node.dispose();
+    result
 }
 
 /// The config of the live node: `trader_id`, `logging`, `cache`, the

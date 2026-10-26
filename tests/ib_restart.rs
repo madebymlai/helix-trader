@@ -193,8 +193,9 @@ async fn an_order_in_flight_when_the_node_died_that_ib_rejected() {
 }
 
 /// IB's state in EXS1, read directly: a check to run by hand after a
-/// failed run, with `NAUTILUS_IB_RUN=1`.
+/// failed run, with `NAUTILUS_IB_RUN=1` and `--ignored`.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by hand with --ignored"]
 async fn ib_state_in_exs1() {
     if std::env::var("NAUTILUS_IB_RUN").is_err() {
         return;

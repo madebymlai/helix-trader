@@ -35,15 +35,15 @@ DataClientFactory>` and friends and never names a broker.
 
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
-  [--catalog catalog] [--client-id 1] [--leverage 1]
+  [--catalog catalog] [--client-id 1] [--leverage 1] [--trader-id HELIX-001]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
 gateway itself, so it needs no prior `fill-catalog` run. In code:
 `live::Live { trader_id, catalog, account, client_id, leverage, logging
 }.run(&requirements, strategy)`, generic over the strategy like
-`Backtest::run`. The command's trader is `HELIX-001`, whose cache every run
-loads (see "Cache in Redis").
+`Backtest::run`. It starts or reuses the Redis container that holds the
+node's cache (see "Cache in Redis").
 
 
 - `--account` is the bare IB account id, else `NAUTILUS_IB_ACCOUNT_ID`,
@@ -53,6 +53,10 @@ loads (see "Cache in Redis").
   backtest, and only a check: OKX applies the account's leverage and the
   start refuses an OKX instrument at another one (`okx/README.md`); IB does
   not check it.
+- `--trader-id` (default `HELIX-001`, checked by Nautilus: a name and a tag
+  joined by a hyphen) is the node's trader, whose cache in Redis each run
+  loads. Live processes running at the same time each need their own
+  trader id, since the Redis keys are per trader.
 - `--client-id` defaults to the adapter's 1, so `fill-catalog` (10) can run
   at the same time; a multiple of 1000 is refused before any gateway starts.
 - `NAUTILUS_LOG` configures the logger as for the other commands.
@@ -107,7 +111,8 @@ trading, "Cache database configuration"): `RedisCacheConfig` from
 loads it (`LiveExecutionEngineConfig::load_cache`, Nautilus' default) and
 only then connects the clients and reconciles, so reconciliation adds only
 what the venues did since the last run. It is the node's, so it covers every
-venue the node trades.
+venue the node trades. When `run` returns, the node is disposed, which
+closes the cache database, as Nautilus documents.
 
 **What.** Currencies, instruments, accounts, orders and positions, with
 their ids and every event since they opened, and the cache's general
@@ -123,8 +128,8 @@ pull once beforehand; port 6379 on 127.0.0.1 only, so no password; restart
 policy `always`; data in Redis' append-only file on the named volume
 `helix-redis-data`, which outlives the container. Keys are
 `trader-<trader id>:...` (`use_trader_prefix`, without the instance id), so
-a run loads what the last run of the same trader left: the command's trader
-is `HELIX-001`; tests use their own (`HELIXTEST-...`) and delete their keys.
+a run loads what the last run of the same trader left (`--trader-id`);
+tests use their own (`HELIXTEST-...`) and delete their keys.
 
 **Reset.** Stop the node, then delete the trader's keys:
 

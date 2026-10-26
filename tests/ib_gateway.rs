@@ -16,10 +16,11 @@
 //! NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
 //! ```
 //!
-//! The live node keeps its cache in Redis (`live::redis`) under the
-//! test's trader, `HELIXTEST-043`, whose records the test deletes. The
-//! container is left running: the next run reuses it. Client ids 40 to
-//! 43, apart from `fill-catalog`'s 10 and `live`'s 1.
+//! The live node keeps its cache in Redis (`live::redis`)
+//! under the test's trader, `HELIXTEST-043`, whose records the test deletes
+//! once the node has stopped cleanly. The gateway container is left
+//! running: the next run reuses it. Client ids 40 to 43, apart from
+//! `fill-catalog`'s 10 and `live`'s 1.
 
 mod common;
 
@@ -189,9 +190,9 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     .await;
     let interrupted = interrupt.is_finished();
     interrupt.abort();
-    // The node's records in Redis, under the test's trader.
-    common::cache::delete_trader("HELIXTEST-043").await;
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
     assert!(interrupted, "the node stopped before SIGINT");
+    // The node's records in Redis, under the test's trader.
+    common::cache::delete_trader("HELIXTEST-043").await;
 }
