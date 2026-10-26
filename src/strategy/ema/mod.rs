@@ -26,7 +26,7 @@ use nautilus_common::{actor::DataActor, timer::TimeEvent};
 use nautilus_model::{
     data::{Bar, QuoteTick},
     enums::{ContingencyType, OrderSide},
-    events::OrderFilled,
+    events::{OrderEventAny, OrderFilled},
     identifiers::ClientOrderId,
     instruments::Instrument,
     orders::Order,
@@ -127,16 +127,17 @@ impl EmaCross {
         }
     }
 
-    /// Sets the time alert of each open position of the strategy on the
-    /// traded instrument, named after its opening order as on its entry's
-    /// fill: `hold` after its opening, or now if that has passed (the
-    /// clock's `allow_past`).
+    /// Sets the time alert of each trade of the strategy on the traded
+    /// instrument still open, as on its entry's first fill: `hold` after
+    /// it, or now if that has passed (the clock's `allow_past`). A trade
+    /// is a filled bracket entry; it is still open while the position it
+    /// went into is open, not closed since, and no leg of it has filled.
     fn arm_open_trades(&mut self) -> anyhow::Result<()> {
         let open: Vec<(ClientOrderId, Timestamp)> = {
             let strategy_id = self.strategy_id();
             let cache = self.cache();
             cache
-                .positions_open(
+                .orders(
                     None,
                     Some(&self.config.trade_instrument_id),
                     strategy_id.as_ref(),
@@ -144,13 +145,33 @@ impl EmaCross {
                     None,
                 )
                 .iter()
-                .map(|p| (p.opening_order_id, Timestamp::from(p.ts_opened)))
+                .filter(|o| o.contingency_type() == Some(ContingencyType::Oto))
+                .filter_map(|entry| {
+                    let filled = entry.events().into_iter().find_map(|e| match e {
+                        OrderEventAny::Filled(fill) => Some(fill.ts_event),
+                        _ => None,
+                    })?;
+                    let id = entry.client_order_id();
+                    let in_position = cache
+                        .position_for_order(&id)
+                        .is_some_and(|p| p.is_open() && p.ts_opened <= filled);
+                    let ended = entry
+                        .linked_order_ids()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|leg| {
+                            cache
+                                .order(leg)
+                                .is_some_and(|l| l.filled_qty().is_positive())
+                        });
+                    (in_position && !ended).then(|| (id, Timestamp::from(filled)))
+                })
                 .collect()
         };
-        for (entry, opened) in open {
+        for (entry, filled) in open {
             self.clock().set_time_alert(
                 &hold_alert(entry),
-                opened + self.config.hold,
+                filled + self.config.hold,
                 None,
                 None,
             )?;
@@ -238,12 +259,12 @@ mod tests {
     use nautilus_model::{
         enums::{OmsType, OrderType},
         events::OrderEventAny,
-        identifiers::{AccountId, PositionId, StrategyId, TraderId},
+        identifiers::{AccountId, PositionId, StrategyId, TradeId, TraderId, VenueOrderId},
         instruments::{
             InstrumentAny,
             stubs::{audusd_sim, gbpusd_sim},
         },
-        orders::{OrderTestBuilder, stubs::TestOrderEventStubs},
+        orders::{OrderAny, OrderTestBuilder, stubs::TestOrderEventStubs},
         position::Position,
         types::{Price, Quantity},
     };
@@ -269,39 +290,145 @@ mod tests {
     const NOW: u64 = 1_792_922_400_000_000_000;
     const MINUTE: u64 = 60_000_000_000;
 
-    /// Opens in `cache` the position `position` on `instrument` of
-    /// `strategy`, by the entry `entry` filled at `opened`.
-    fn open(
+    /// Fills the cached `order` into `position` at `ts`, as the execution
+    /// engine does: the order, the order's position, the position, kept as
+    /// `oms`; a closed netting position reopened under its id.
+    fn fill_into(
         cache: &Rc<RefCell<Cache>>,
         instrument: &InstrumentAny,
-        strategy: &str,
-        (entry, position): (&str, &str),
-        opened: u64,
+        order: &OrderAny,
+        position: &str,
+        ts: u64,
+        oms: OmsType,
     ) {
-        let order = OrderTestBuilder::new(OrderType::Market)
-            .instrument_id(instrument.id())
-            .strategy_id(StrategyId::from(strategy))
-            .client_order_id(ClientOrderId::from(entry))
-            .side(OrderSide::Buy)
-            .quantity(Quantity::from(100_000))
-            .build();
-        let OrderEventAny::Filled(fill) = TestOrderEventStubs::filled(
-            &order,
+        let account = AccountId::from("SIM-001");
+        let filled = TestOrderEventStubs::filled(
+            order,
             instrument,
-            None,
+            Some(TradeId::from(order.client_order_id().as_str())),
             Some(PositionId::from(position)),
             Some(Price::from("0.70000")),
             None,
             None,
             None,
-            Some(UnixNanos::from(opened)),
-            Some(AccountId::from("SIM-001")),
-        ) else {
+            Some(UnixNanos::from(ts)),
+            Some(account),
+        );
+        let OrderEventAny::Filled(fill) = &filled else {
             panic!("not a fill");
         };
+        let mut cache = cache.borrow_mut();
+        for event in [
+            TestOrderEventStubs::submitted(order, account),
+            TestOrderEventStubs::accepted(
+                order,
+                account,
+                VenueOrderId::from(order.client_order_id().as_str()),
+            ),
+            filled.clone(),
+        ] {
+            cache.update_order(&event).unwrap();
+        }
+        let id = PositionId::from(position);
+        cache
+            .add_position_id(
+                &id,
+                &instrument.id().venue,
+                &fill.client_order_id,
+                &fill.strategy_id,
+            )
+            .unwrap();
+        match cache.position(&id).map(|p| p.is_open()) {
+            Some(true) => {
+                cache.update_position_from_fill(id, fill).unwrap();
+            }
+            _ => cache
+                .add_position(&Position::new(instrument, fill.clone()), oms)
+                .unwrap(),
+        }
+    }
+
+    /// Adds to `cache` a bracket of `strategy` on `instrument`, buying its
+    /// entry `entry`, its legs `<entry>-SL` and `<entry>-TP`, and fills
+    /// the entry into `position` at `filled`.
+    fn trade(
+        cache: &Rc<RefCell<Cache>>,
+        instrument: &InstrumentAny,
+        strategy: &str,
+        (entry, position): (&str, &str),
+        filled: u64,
+        oms: OmsType,
+    ) {
+        let (sl, tp) = (
+            ClientOrderId::from(format!("{entry}-SL").as_str()),
+            ClientOrderId::from(format!("{entry}-TP").as_str()),
+        );
+        let entry_order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(instrument.id())
+            .strategy_id(StrategyId::from(strategy))
+            .client_order_id(ClientOrderId::from(entry))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(100_000))
+            .contingency_type(ContingencyType::Oto)
+            .linked_order_ids(vec![sl, tp])
+            .build();
+        let leg = |id: ClientOrderId, other: ClientOrderId| {
+            OrderTestBuilder::new(OrderType::Market)
+                .instrument_id(instrument.id())
+                .strategy_id(StrategyId::from(strategy))
+                .client_order_id(id)
+                .side(OrderSide::Sell)
+                .quantity(Quantity::from(100_000))
+                .contingency_type(ContingencyType::Oco)
+                .linked_order_ids(vec![other])
+                .parent_order_id(ClientOrderId::from(entry))
+                .reduce_only(true)
+                .build()
+        };
+        for order in [entry_order.clone(), leg(sl, tp), leg(tp, sl)] {
+            cache
+                .borrow_mut()
+                .add_order(order, None, None, false)
+                .unwrap();
+        }
+        fill_into(cache, instrument, &entry_order, position, filled, oms);
+    }
+
+    /// Fills the cached order `id` (a leg, a close) into `position` at
+    /// `ts`.
+    fn fill_order(
+        cache: &Rc<RefCell<Cache>>,
+        instrument: &InstrumentAny,
+        id: &str,
+        position: &str,
+        ts: u64,
+    ) {
+        let order = cache
+            .borrow()
+            .order_owned(&ClientOrderId::from(id))
+            .unwrap();
+        fill_into(cache, instrument, &order, position, ts, OmsType::Netting);
+    }
+
+    /// Adds to `cache` a market order `id` of `strategy` selling 100,000
+    /// AUD, as a time exit closing a long position.
+    fn close_order(
+        cache: &Rc<RefCell<Cache>>,
+        instrument: &InstrumentAny,
+        strategy: &str,
+        id: &str,
+    ) {
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(instrument.id())
+            .strategy_id(StrategyId::from(strategy))
+            .client_order_id(ClientOrderId::from(id))
+            .side(OrderSide::Sell)
+            .quantity(Quantity::from(100_000))
+            .reduce_only(true)
+            .build();
         cache
             .borrow_mut()
-            .add_position(&Position::new(instrument, fill), OmsType::Hedging)
+            .add_order(order, None, None, false)
             .unwrap();
     }
 
@@ -331,8 +458,22 @@ mod tests {
     fn a_restart_sets_the_time_exit_of_each_open_trade_again() {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let aud = InstrumentAny::CurrencyPair(audusd_sim());
-        open(&cache, &aud, STRATEGY, ("O-1", "P-1"), NOW - 20 * MINUTE);
-        open(&cache, &aud, STRATEGY, ("O-2", "P-2"), NOW - 90 * MINUTE);
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-1", "P-1"),
+            NOW - 20 * MINUTE,
+            OmsType::Hedging,
+        );
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-2", "P-2"),
+            NOW - 90 * MINUTE,
+            OmsType::Hedging,
+        );
 
         let (_strategy, clock) = started(cache);
 
@@ -354,12 +495,131 @@ mod tests {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let aud = InstrumentAny::CurrencyPair(audusd_sim());
         let gbp = InstrumentAny::CurrencyPair(gbpusd_sim());
-        open(&cache, &aud, "OTHER-001", ("O-3", "P-3"), NOW - 20 * MINUTE);
-        open(&cache, &gbp, STRATEGY, ("O-4", "P-4"), NOW - 20 * MINUTE);
+        trade(
+            &cache,
+            &aud,
+            "OTHER-001",
+            ("O-3", "P-3"),
+            NOW - 20 * MINUTE,
+            OmsType::Hedging,
+        );
+        trade(
+            &cache,
+            &gbp,
+            STRATEGY,
+            ("O-4", "P-4"),
+            NOW - 20 * MINUTE,
+            OmsType::Hedging,
+        );
 
         let (_strategy, clock) = started(cache);
 
         let names = clock.borrow().timer_names().join(",");
         assert!(!names.contains(HOLD_ALERT), "{names}");
+    }
+
+    /// On a netting venue two crosses, 20 and 50 minutes ago, add into one
+    /// position, which opened with the first.
+    #[test]
+    fn a_restart_sets_the_time_exit_of_each_trade_in_a_netting_position_again() {
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let aud = InstrumentAny::CurrencyPair(audusd_sim());
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-1", "P-NET"),
+            NOW - 50 * MINUTE,
+            OmsType::Netting,
+        );
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-2", "P-NET"),
+            NOW - 20 * MINUTE,
+            OmsType::Netting,
+        );
+
+        let (_strategy, clock) = started(cache);
+
+        let clock = clock.borrow();
+        assert_eq!(
+            clock.next_time_ns("EMA-HOLD:O-1"),
+            Some(UnixNanos::from(NOW + 10 * MINUTE))
+        );
+        assert_eq!(
+            clock.next_time_ns("EMA-HOLD:O-2"),
+            Some(UnixNanos::from(NOW + 40 * MINUTE))
+        );
+    }
+
+    /// The first trade's stop loss filled before the restart: its share of
+    /// the netting position is gone, the second trade's left open.
+    #[test]
+    fn a_restart_sets_no_time_exit_for_a_trade_its_leg_ended() {
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let aud = InstrumentAny::CurrencyPair(audusd_sim());
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-1", "P-NET"),
+            NOW - 50 * MINUTE,
+            OmsType::Netting,
+        );
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-2", "P-NET"),
+            NOW - 20 * MINUTE,
+            OmsType::Netting,
+        );
+        fill_order(&cache, &aud, "O-1-SL", "P-NET", NOW - 10 * MINUTE);
+
+        let (_strategy, clock) = started(cache);
+
+        let clock = clock.borrow();
+        assert_eq!(clock.next_time_ns("EMA-HOLD:O-1"), None);
+        assert_eq!(
+            clock.next_time_ns("EMA-HOLD:O-2"),
+            Some(UnixNanos::from(NOW + 40 * MINUTE))
+        );
+    }
+
+    /// The first trade's time exit closed the netting position; a later
+    /// cross opened it again under the same id.
+    #[test]
+    fn a_restart_sets_no_time_exit_for_a_trade_of_a_netting_position_closed_since() {
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let aud = InstrumentAny::CurrencyPair(audusd_sim());
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-1", "P-NET"),
+            NOW - 90 * MINUTE,
+            OmsType::Netting,
+        );
+        close_order(&cache, &aud, STRATEGY, "C-1");
+        fill_order(&cache, &aud, "C-1", "P-NET", NOW - 30 * MINUTE);
+        trade(
+            &cache,
+            &aud,
+            STRATEGY,
+            ("O-3", "P-NET"),
+            NOW - 20 * MINUTE,
+            OmsType::Netting,
+        );
+
+        let (_strategy, clock) = started(cache);
+
+        let clock = clock.borrow();
+        assert_eq!(clock.next_time_ns("EMA-HOLD:O-1"), None);
+        assert_eq!(
+            clock.next_time_ns("EMA-HOLD:O-3"),
+            Some(UnixNanos::from(NOW + 40 * MINUTE))
+        );
     }
 }
