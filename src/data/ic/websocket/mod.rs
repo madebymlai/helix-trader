@@ -886,16 +886,54 @@ mod tests {
     }
 
     /// A peer on `venue` serving symbols and spots.
+    /// cTrader keeps a connection's spot subscriptions across a new
+    /// account auth on it, and refuses one already held with
+    /// `ALREADY_SUBSCRIBED` (demo, 2026-10-26).
     fn venue_peer(
         venue: &SharedVenue,
     ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
-        token_peer(Arc::clone(venue), |connection, request| {
-            if request.payload_type == ProtoOaSymbolByIdReq::TYPE {
-                symbols_peer(connection, request)
-            } else {
-                spots_peer(connection, request)
-            }
-        })
+        let mut held = std::collections::HashSet::<(usize, i64)>::new();
+        token_peer(
+            Arc::clone(venue),
+            move |connection, request| match request.payload_type {
+                t if t == ProtoOaSymbolByIdReq::TYPE => symbols_peer(connection, request),
+                t if t == ProtoOaSubscribeSpotsReq::TYPE => {
+                    let asked: ProtoOaSubscribeSpotsReq = decode(request);
+                    if asked
+                        .symbol_id
+                        .iter()
+                        .any(|&id| held.contains(&(connection, id)))
+                    {
+                        let error = ProtoOaErrorRes {
+                            error_code: "ALREADY_SUBSCRIBED".to_owned(),
+                            ..Default::default()
+                        };
+                        return vec![reply(request, &error)];
+                    }
+                    held.extend(asked.symbol_id.iter().map(|&id| (connection, id)));
+                    spots_peer(connection, request)
+                }
+                t if t == ProtoOaUnsubscribeSpotsReq::TYPE => {
+                    let asked: ProtoOaUnsubscribeSpotsReq = decode(request);
+                    for id in &asked.symbol_id {
+                        held.remove(&(connection, *id));
+                    }
+                    spots_peer(connection, request)
+                }
+                _ => spots_peer(connection, request),
+            },
+        )
+    }
+
+    /// The symbols of the spot unsubscriptions received on `connection`.
+    fn spot_unsubscriptions(received: &Received, connection: usize) -> Vec<Vec<i64>> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, f)| *c == connection && f.payload_type == ProtoOaUnsubscribeSpotsReq::TYPE)
+            .map(|(_, f)| decode::<ProtoOaUnsubscribeSpotsReq>(f).symbol_id)
+            .collect()
     }
 
     /// A token file whose access token is due for renewal `after` from now.
@@ -957,8 +995,9 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// The symbol request is answered only once the renewed session
-    /// subscribed its spots again: it was in flight across the renewal.
+    /// The symbol request is answered, and a spot sent, only once the
+    /// account authenticated again with the renewed token: the request was
+    /// in flight across the renewal, the subscription kept by cTrader.
     #[tokio::test]
     async fn a_running_session_renews_on_schedule_keeping_spots_and_requests_in_flight() {
         let venue = TokenVenue::new();
@@ -973,10 +1012,14 @@ mod tests {
                 return vec![];
             }
             let mut actions = peer(connection, request);
-            let resubscribed = request.payload_type == ProtoOaSubscribeSpotsReq::TYPE
+            let reauthenticated = request.payload_type == ProtoOaAccountAuthReq::TYPE
                 && renewed.lock().unwrap().renewals() == 1;
-            if let Some(request) = held.lock().unwrap().take_if(|_| resubscribed) {
+            if let Some(request) = held.lock().unwrap().take_if(|_| reauthenticated) {
                 actions.extend(symbols_peer(connection, &request));
+                actions.push(Action::Send(crate::data::ic::messages::frame(
+                    &spot_event(41),
+                    None,
+                )));
             }
             actions
         });
@@ -999,7 +1042,11 @@ mod tests {
             account_auths(&received, 0),
             [ACCESS_TOKEN.to_owned(), renewed_access(1)]
         );
-        assert_eq!(spot_subscriptions(&received, 0).len(), 2);
+        assert_eq!(
+            spot_subscriptions(&received, 0).len(),
+            1,
+            "subscribed again"
+        );
         assert_eq!(stored(&tokens).0, renewed_access(1));
         assert_eq!(
             client
@@ -1341,6 +1388,38 @@ mod tests {
         assert_eq!(in_flight, Ok(symbols(&[1])));
         assert_eq!(next, Ok(symbols(&[2])));
         assert_eq!(account_auths(&received, 0), [ACCESS_TOKEN, ACCESS_TOKEN]);
+        client.disconnect().await;
+    }
+
+    /// The renewal's answer comes late, so the (un)subscriptions arrive
+    /// while the account is not authenticated.
+    #[tokio::test]
+    async fn spots_changed_during_a_renewal_are_sent_once_authenticated_again() {
+        let venue = TokenVenue::new();
+        let (url, received) =
+            testing::start(slow_renewal(Duration::from_millis(300), venue_peer(&venue)));
+        let (credential, _dir) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        client.subscribe_spots(41).unwrap();
+        next_spot(&mut spots).await;
+
+        client.renew_token();
+        client.subscribe_spots(1).unwrap();
+        client.unsubscribe_spots(41).unwrap();
+
+        assert_eq!(next_spot(&mut spots).await, spot_event(1));
+        let subscribed: Vec<Vec<i64>> = spot_subscriptions(&received, 0)
+            .into_iter()
+            .map(|r| r.symbol_id)
+            .collect();
+        assert_eq!(subscribed, [vec![41], vec![1]]);
+        assert_eq!(spot_unsubscriptions(&received, 0), [vec![41]]);
+        assert_eq!(
+            account_auths(&received, 0),
+            [ACCESS_TOKEN.to_owned(), renewed_access(1)]
+        );
         client.disconnect().await;
     }
 }

@@ -1,7 +1,7 @@
 //! The handler task: the one owner of the `WebSocketClient`. It
 //! authenticates each connection, sends the heartbeat, tags requests with
 //! a `clientMsgId` and routes each response back to its caller. It keeps
-//! the spot subscriptions, sends them again on each new session, and
+//! the spot subscriptions, sends them again on each new connection, and
 //! passes spot events on.
 //!
 //! It renews the access token (see `token`): at start when the token is
@@ -20,8 +20,9 @@
 //! or another, or expired), the account is authenticated again with the
 //! file's pair, renewed first if refused; during a renewal or an auth such
 //! an event is the old token's, and ignored. Meanwhile new requests wait;
-//! those in flight keep awaiting their response, and the spot
-//! subscriptions are sent again once ready.
+//! those in flight keep awaiting their response; the spot subscriptions,
+//! which cTrader keeps on the connection, are not sent again, only those
+//! changed meanwhile.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -159,6 +160,11 @@ pub(super) struct IcWsHandler {
     queued: Vec<Queued>,
     /// The symbols whose spot events the session subscribes to.
     spots: BTreeSet<i64>,
+    /// The symbols the connection holds subscribed: cTrader keeps them
+    /// across a new account auth on the same connection, answering
+    /// `ALREADY_SUBSCRIBED` to a subscription sent again (demo,
+    /// 2026-10-26); a new connection holds none.
+    connection_spots: BTreeSet<i64>,
 }
 
 impl IcWsHandler {
@@ -188,6 +194,7 @@ impl IcWsHandler {
             pending: HashMap::new(),
             queued: Vec::new(),
             spots: BTreeSet::new(),
+            connection_spots: BTreeSet::new(),
         }
     }
 
@@ -315,9 +322,11 @@ impl IcWsHandler {
     /// Starts the session: application auth, then account auth on its
     /// response (see `receive`), the token renewed first if due.
     async fn authenticate(&mut self) {
-        // A new session: whatever the last one was renewing is over.
+        // A new connection: whatever the last one was renewing, or held
+        // subscribed, is over.
         self.renewed = false;
         self.wake = None;
+        self.connection_spots.clear();
         let id = self.next_id();
         let mut request = ProtoOaApplicationAuthReq {
             client_id: self.credential.client_id.expose_secret().to_owned(),
@@ -504,10 +513,24 @@ impl IcWsHandler {
             tokio::time::Instant::now() + wait.unsigned_abs()
         });
         self.auth.succeed();
-        // A new session holds no subscription: send them all again.
-        if !self.spots.is_empty() {
-            let symbol_ids = self.spots.iter().copied().collect();
-            self.send_spots(true, symbol_ids).await;
+        // The connection's subscriptions brought in line with the session's:
+        // all of them on a new connection, those changed meanwhile after a
+        // new account auth on the same one.
+        let subscribe: Vec<i64> = self
+            .spots
+            .difference(&self.connection_spots)
+            .copied()
+            .collect();
+        if !subscribe.is_empty() {
+            self.send_spots(true, subscribe).await;
+        }
+        let unsubscribe: Vec<i64> = self
+            .connection_spots
+            .difference(&self.spots)
+            .copied()
+            .collect();
+        if !unsubscribe.is_empty() {
+            self.send_spots(false, unsubscribe).await;
         }
         for queued in std::mem::take(&mut self.queued) {
             self.dispatch(queued).await;
@@ -560,6 +583,13 @@ impl IcWsHandler {
         };
         match self.send(frame, None).await {
             Ok(()) => {
+                for symbol_id in &symbol_ids {
+                    if subscribe {
+                        self.connection_spots.insert(*symbol_id);
+                    } else {
+                        self.connection_spots.remove(symbol_id);
+                    }
+                }
                 self.pending.insert(
                     id,
                     Pending::Spots {

@@ -127,8 +127,11 @@ the file before anything else, whatever the session went through while
 it was out (an event ending the account session, an expired wait), known
 by its `clientMsgId` or its payload type; a disconnect waits for it up to
 30 s. Then the account authenticates again on the open connection:
-requests in flight keep awaiting their answers, new ones wait, the spot
-subscriptions are sent again.
+requests in flight keep awaiting their answers, new ones wait. The spot
+subscriptions stay: cTrader keeps them on the connection across a new
+account auth, and answers `ALREADY_SUBSCRIBED` to one sent again (demo,
+2026-10-26); only those subscribed or unsubscribed meanwhile are sent. A
+new connection subscribes them all again.
 
 A refused renewal fails the session naming the code and the remedy:
 generate a new pair in the Playground, set `IC_ACCESS_TOKEN` and
@@ -488,7 +491,11 @@ placed to capture them.
     together, renewing once; a session whose token another renewed taking
     the new pair from the file; the renewal's answer saved after cTrader
     drops the account session, without its `clientMsgId`, and at a
-    disconnect; an account session dropped authenticated again;
+    disconnect; an account session dropped authenticated again; against a
+    peer keeping the connection's subscriptions across a new account auth
+    and refusing one held (`ALREADY_SUBSCRIBED`, as the demo), none sent
+    again after a renewal, those changed during it sent once authenticated
+    again;
   - `mod.rs`: the instruments from assets, symbol list and details; an
     unlisted symbol and another venue refused; a series other than quotes
     refused before any request; a fill, against a peer serving ticks as
@@ -557,8 +564,13 @@ placed to capture them.
   refused, renewal refused, `CH_ACCESS_TOKEN_INVALID`). That handler
   dropped a renewal out when an event ended the session, the likely cause
   (cTrader ending the account session as the token is refreshed); the
-  handler now keeps it (see "Token file and renewal"). Not yet passed:
-  it needs a new pair from the Playground.
+  handler now keeps it (see "Token file and renewal"). With a new pair
+  from the Playground it passed on 2026-10-26: two renewals saved to the
+  file (mode 0600), quotes flowing on through the renewal, and
+  `tests/ic_demo.rs` passing 3/3 from the file. Its log showed cTrader
+  answering `ALREADY_SUBSCRIBED` to the subscription sent again after the
+  re-auth: subscriptions survive a re-auth on the same connection, so the
+  handler no longer sends them again then.
 - `tests/ic_live_demo.rs`, on the demo (same gate, no order; the node
   reconciles the account through the execution client at start): `Live` on XAUUSD fills the catalog over a 30-minute warmup,
   then a recording strategy gets its 1-minute MID bars warmed up from the
