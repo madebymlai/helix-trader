@@ -1,5 +1,5 @@
 //! End to end on IC Markets' cTrader demo: `Live` on XAU/USD fills the
-//! catalog up to now, builds a node with IC's data client, and a recording
+//! catalog up to now, builds a node with IC's clients, and a recording
 //! strategy gets its minute bars warmed up from the catalog and the data
 //! client up to now, then live quotes and the bars Nautilus builds from
 //! them, until SIGINT. It needs the app's `IC_CLIENT_ID` and
@@ -10,7 +10,7 @@
 //!
 //! Gated as `ic_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_IC_RUN=1` is set in the shell. The strategy
-//! sends no order, and the node has no IC execution client. One node per
+//! sends no order; IC's execution client reconciles the account. One node per
 //! process, hence its own file. Run it with:
 //!
 //! ```sh

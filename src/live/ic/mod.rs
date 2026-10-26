@@ -1,26 +1,30 @@
 //! IC Markets clients for the live node.
 //!
-//! Provides the data client factory and config of the adapter in `data/ic`
-//! (`IcDataClient`), on the environment `IC_ENVIRONMENT` names, `demo` or
-//! `live`, required, with the credential from `IC_*`, both read before
-//! anything connects. The data client loads the run's instruments at
-//! connect. IC has no execution client yet: its orders find no client and
-//! are denied.
+//! Provides the data and execution client factories and configs of the
+//! adapter in `data/ic` (`IcDataClient`, `IcExecutionClient`), on the
+//! environment `IC_ENVIRONMENT` names, `demo` or `live`, required, with the
+//! credential from `IC_*`, both read before anything connects. The data
+//! client loads the run's instruments at connect; the execution client
+//! checks the account (hedging, the configured one), publishes its state
+//! and reconciles it. It places no order yet: IC orders are denied.
 
 use std::{any::Any, cell::RefCell, rc::Rc};
 
 use anyhow::Context;
 use nautilus_common::{
     cache::CacheView,
-    clients::DataClient,
+    clients::{DataClient, ExecutionClient},
     clock::Clock,
-    factories::{ClientConfig, DataClientFactory},
+    factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
 };
-use nautilus_live::config::RoutingConfig;
-use nautilus_model::identifiers::{ClientId, InstrumentId};
+use nautilus_live::{ExecutionClientCore, config::RoutingConfig};
+use nautilus_model::{
+    enums::{AccountType, OmsType},
+    identifiers::{ClientId, InstrumentId, TraderId, Venue},
+};
 
 use super::node::Clients;
-use crate::data::{IcConnection, IcDataClient, IcHistory};
+use crate::data::{IcConnection, IcDataClient, IcExecutionClient, IcHistory};
 
 /// The name of IC's clients, and so their `ClientId`.
 const NAME: &str = "ICMARKETS";
@@ -73,10 +77,72 @@ impl DataClientFactory for IcDataClientFactory {
     }
 }
 
+/// The config of IC's execution client: where it connects, as whom, and
+/// the instruments whose reports it reads.
+#[derive(Debug, Clone)]
+pub struct IcExecutionClientConfig {
+    pub connection: IcConnection,
+    pub instrument_ids: Vec<InstrumentId>,
+}
+
+impl ClientConfig for IcExecutionClientConfig {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Creates `IcExecutionClient`s from an `IcExecutionClientConfig`: a
+/// hedging venue (each cTrader position one Nautilus position), a margin
+/// account named after the environment (`IcConnection::account_id`).
+#[derive(Debug, Default)]
+pub struct IcExecutionClientFactory;
+
+impl ExecutionClientFactory for IcExecutionClientFactory {
+    fn create(
+        &self,
+        trader_id: TraderId,
+        name: &str,
+        config: &dyn ClientConfig,
+        cache: CacheView,
+        _clock: Rc<RefCell<dyn Clock>>,
+    ) -> anyhow::Result<Box<dyn ExecutionClient>> {
+        let config = config
+            .as_any()
+            .downcast_ref::<IcExecutionClientConfig>()
+            .with_context(|| {
+                format!("IcExecutionClientFactory takes an IcExecutionClientConfig, not {config:?}")
+            })?;
+        let core = ExecutionClientCore::new(
+            trader_id,
+            ClientId::from(name),
+            Venue::new(NAME),
+            OmsType::Hedging,
+            config.connection.account_id(),
+            AccountType::Margin,
+            None,
+            cache,
+        );
+        Ok(Box::new(IcExecutionClient::new(
+            core,
+            &config.connection,
+            config.instrument_ids.clone(),
+        )))
+    }
+
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn config_type(&self) -> &str {
+        "IcExecutionClientConfig"
+    }
+}
+
 /// The IC client configs of a node trading IC instruments.
 #[derive(Debug, Clone)]
 pub(super) struct IcClients {
     pub(super) data: IcDataClientConfig,
+    pub(super) exec: IcExecutionClientConfig,
 }
 
 /// The client configs of `instrument_ids` on the connection `var` reads
@@ -93,9 +159,14 @@ pub(super) fn clients(
     for &id in instrument_ids {
         anyhow::ensure!(IcHistory::serves(id), "{id} is not an IC instrument");
     }
+    let connection = IcConnection::from_vars(var)?;
     Ok(IcClients {
         data: IcDataClientConfig {
-            connection: IcConnection::from_vars(var)?,
+            connection: connection.clone(),
+            instrument_ids: instrument_ids.to_vec(),
+        },
+        exec: IcExecutionClientConfig {
+            connection,
             instrument_ids: instrument_ids.to_vec(),
         },
     })
@@ -107,14 +178,14 @@ impl IcClients {
         &self.data.connection
     }
 
-    /// The factory and config, for the node, with no execution client.
-    /// The data client is on venue `ICMARKETS`, so Nautilus routes it
-    /// there without a route of ours.
+    /// The factories and configs, for the node. Both clients are on venue
+    /// `ICMARKETS`, so Nautilus routes IC's data and orders to them without
+    /// a route of ours.
     pub(super) fn into_node_clients(self) -> Clients {
         Clients {
             data_factory: Box::new(IcDataClientFactory),
             data_config: Box::new(self.data),
-            exec: None,
+            exec: Some((Box::new(IcExecutionClientFactory), Box::new(self.exec))),
             routing: RoutingConfig::default(),
         }
     }
@@ -125,9 +196,11 @@ mod tests {
     use std::collections::HashMap;
 
     use nautilus_common::{
-        cache::Cache, clock::VirtualClock, live::runner::replace_data_event_sender,
+        cache::Cache,
+        clock::VirtualClock,
+        live::runner::{replace_data_event_sender, replace_exec_event_sender},
     };
-    use nautilus_model::identifiers::Venue;
+    use nautilus_model::identifiers::AccountId;
 
     use super::*;
 
@@ -200,9 +273,36 @@ mod tests {
     }
 
     #[test]
-    fn the_node_gets_no_execution_client_for_ic() {
+    fn the_factory_creates_an_unconnected_hedging_execution_client_on_icmarkets() {
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        replace_exec_event_sender(tx);
+        let config = clients(&[xauusd()], vars(&demo())).unwrap().exec;
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+
+        let client = IcExecutionClientFactory
+            .create(
+                TraderId::from("HELIX-001"),
+                NAME,
+                &config,
+                cache.into(),
+                clock,
+            )
+            .unwrap();
+
+        assert_eq!(client.client_id(), ClientId::from("ICMARKETS"));
+        assert_eq!(client.venue(), Venue::new("ICMARKETS"));
+        assert_eq!(client.oms_type(), OmsType::Hedging);
+        assert_eq!(client.account_id(), AccountId::from("ICMARKETS-DEMO"));
+        assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn the_node_gets_ic_s_execution_client() {
         let clients = clients(&[xauusd()], vars(&demo())).unwrap();
 
-        assert!(clients.into_node_clients().exec.is_none());
+        let (factory, _) = clients.into_node_clients().exec.unwrap();
+
+        assert_eq!(factory.name(), "ICMARKETS");
     }
 }
