@@ -3,15 +3,18 @@
 //!
 //! The outer client starts the handler with `SetClient`, waits for the
 //! session to authenticate (application, then account, tracked by
-//! Nautilus' `AuthTracker`), then sends requests as commands and awaits
+//! Nautilus' `AuthTracker`, registered with the transport), then sends
+//! requests as commands and awaits
 //! each response. The handler sends the binary heartbeat, correlates
 //! responses by `clientMsgId` and, after the transport reconnects,
 //! authenticates the new session before serving waiting requests.
 //! Requests in flight at a reconnect fail: their session is gone.
 //!
-//! Spot subscriptions are the session's too: the handler keeps the symbols
-//! subscribed, sends their subscription once the session is ready, and
-//! again after each reconnect, and passes their spot events on.
+//! Spot subscriptions are the session's too, tracked in Nautilus'
+//! `SubscriptionState` (topics `spot:<symbolId>`): the handler marks them,
+//! sends them once the session is ready, has cTrader's answers confirm or
+//! fail them, sends them all again after each reconnect
+//! (`reset_after_reconnect`), and passes their spot events on.
 //!
 //! Historical requests go through the transport's rate limiter, keyed
 //! `HISTORICAL_KEY`: one every 250 ms, without burst, so fewer than
@@ -31,9 +34,13 @@ use anyhow::Context;
 use nautilus_network::{
     Message,
     ratelimiter::quota::Quota,
-    websocket::{AuthTracker, MessageHandler, WebSocketClient, WebSocketConfig},
+    websocket::{
+        AuthTracker, MessageHandler, SubscriptionState, WebSocketClient, WebSocketConfig,
+        split_topic,
+    },
 };
 use tokio::sync::{mpsc, oneshot};
+use ustr::Ustr;
 
 use self::handler::{HandlerCommand, IcWsHandler};
 use super::{
@@ -60,14 +67,51 @@ const HISTORICAL_PERIOD: Duration = Duration::from_millis(250);
 /// the answer of a token renewal out first, up to `AUTH_TIMEOUT`.
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(40);
 
+/// The channel of the spot subscriptions' topics in their
+/// `SubscriptionState`: `spot:<symbolId>`.
+const SPOT_CHANNEL: &str = "spot";
+
+/// The delimiter of a topic's channel and symbol.
+const TOPIC_DELIMITER: char = ':';
+
+/// The topic of the spot subscription of `symbol_id`.
+fn spot_topic(symbol_id: i64) -> String {
+    format!("{SPOT_CHANNEL}{TOPIC_DELIMITER}{symbol_id}")
+}
+
+/// Whether the spot subscription of `symbol_id` is confirmed or pending.
+fn spot_subscribed(subscriptions: &SubscriptionState, symbol_id: i64) -> bool {
+    subscriptions.is_subscribed(
+        &Ustr::from(SPOT_CHANNEL),
+        &Ustr::from(&symbol_id.to_string()),
+    )
+}
+
+/// The symbol of a topic `spot_topic` made.
+fn spot_symbol(topic: &str) -> i64 {
+    split_topic(topic, TOPIC_DELIMITER)
+        .1
+        .and_then(|symbol| symbol.parse().ok())
+        .expect("a spot topic holds a symbol id")
+}
+
 /// The spot events of the symbols subscribed, as cTrader sends them.
 pub(super) type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
 
 /// An authenticated cTrader session on one account.
-#[derive(Debug)]
 pub(super) struct IcWebSocketClient {
     cmd_tx: mpsc::UnboundedSender<HandlerCommand>,
     handler: tokio::task::JoinHandle<()>,
+    /// The spot subscriptions, which the handler marks, confirms and fails.
+    subscriptions: SubscriptionState,
+}
+
+impl std::fmt::Debug for IcWebSocketClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IcWebSocketClient")
+            .field("confirmed_spots", &self.subscriptions.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl IcWebSocketClient {
@@ -111,7 +155,14 @@ impl IcWebSocketClient {
             .await
             .with_context(|| format!("connecting to cTrader at {url}"))?;
 
+        // The transport invalidates the session's authentication when the
+        // connection drops and fails it once closed. Its reconnect buffer
+        // does not wait for the authentication: the auth frames are binary,
+        // which the transport cannot bind to a connection, so they would
+        // wait behind it.
         let auth = AuthTracker::new();
+        client.set_auth_tracker(auth.clone(), false);
+        let subscriptions = SubscriptionState::new(TOPIC_DELIMITER);
         let authenticated = auth.begin();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         cmd_tx
@@ -123,6 +174,7 @@ impl IcWebSocketClient {
             credential,
             tokens,
             auth.clone(),
+            subscriptions.clone(),
             cmd_rx,
             raw_rx,
             spot_tx,
@@ -131,6 +183,7 @@ impl IcWebSocketClient {
         let connected = Self {
             cmd_tx,
             handler: tokio::spawn(handler.run()),
+            subscriptions,
         };
         match auth
             .wait_for_result::<String>(AUTH_TIMEOUT, authenticated)
@@ -173,7 +226,8 @@ impl IcWebSocketClient {
     /// Subscribes to the spot events of `symbol_id`, with their
     /// timestamps, for the rest of the session, reconnects included. A
     /// symbol already subscribed is left as it is. cTrader's refusal is
-    /// logged: its answer comes after this returns.
+    /// logged and marks the subscription failed, kept for the next
+    /// connection: its answer comes after this returns.
     ///
     /// # Errors
     ///
@@ -768,6 +822,86 @@ mod tests {
             .map(|r| r.symbol_id)
             .collect();
         assert_eq!(asked, [vec![41], vec![1]]);
+        client.disconnect().await;
+    }
+
+    /// Waits until `condition` holds, up to 10 s.
+    async fn eventually(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("not within 10 s");
+    }
+
+    /// Synthetic, as OpenApiModelMessages.proto defines the code: cTrader
+    /// refusing the spot subscription of a symbol it does not list.
+    #[tokio::test]
+    async fn a_refused_spot_subscription_is_marked_failed() {
+        let (url, _received) = testing::start(|connection, request| {
+            if request.payload_type == ProtoOaSubscribeSpotsReq::TYPE
+                && decode::<ProtoOaSubscribeSpotsReq>(request).symbol_id == [41]
+            {
+                let error = ProtoOaErrorRes {
+                    error_code: "SYMBOL_NOT_FOUND".to_owned(),
+                    ..Default::default()
+                };
+                return vec![reply(request, &error)];
+            }
+            spots_peer(connection, request)
+        });
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+        client.subscribe_spots(1).unwrap();
+        assert_eq!(next_spot(&mut spots).await, spot_event(1));
+        eventually(|| client.subscriptions.len() == 1).await;
+
+        assert_eq!(client.subscriptions.pending_subscribe_topics(), ["spot:41"]);
+        assert_eq!(client.subscriptions.all_topics(), ["spot:1", "spot:41"]);
+        client.disconnect().await;
+    }
+
+    /// Synthetic, as above; the peer refuses on the first connection only,
+    /// which it closes once it has answered the subscription of symbol 1.
+    #[tokio::test]
+    async fn a_refused_spot_subscription_is_sent_again_on_the_next_connection() {
+        let (url, received) = testing::start(|connection, request| {
+            if request.payload_type != ProtoOaSubscribeSpotsReq::TYPE || connection > 0 {
+                return spots_peer(connection, request);
+            }
+            let asked: ProtoOaSubscribeSpotsReq = decode(request);
+            if asked.symbol_id == [41] {
+                let error = ProtoOaErrorRes {
+                    error_code: "SYMBOL_NOT_FOUND".to_owned(),
+                    ..Default::default()
+                };
+                return vec![reply(request, &error)];
+            }
+            let mut actions = spots_peer(connection, request);
+            actions.push(Action::Close);
+            actions
+        });
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+        client.subscribe_spots(1).unwrap();
+        next_spot(&mut spots).await;
+        testing::wait_until(&received, |_| !spot_subscriptions(&received, 1).is_empty()).await;
+
+        let again: Vec<Vec<i64>> = spot_subscriptions(&received, 1)
+            .into_iter()
+            .map(|r| r.symbol_id)
+            .collect();
+        assert_eq!(again, [vec![1, 41]]);
         client.disconnect().await;
     }
 

@@ -13,7 +13,9 @@ here (`../README.md`, "Choosing the source"), and so does `live`
 
 Nautilus has no cTrader adapter; this one follows its adapter guide
 (`docs/developer_guide/adapters.md`: outer client and handler task,
-`SetClient` first, `AuthTracker`). The messages are Spotware's `.proto`
+`SetClient` first, `AuthTracker`, `SubscriptionState`) and uses Nautilus'
+own primitives wherever one fits cTrader's protocol (see "Nautilus
+primitives"). The messages are Spotware's `.proto`
 files, vendored in `proto/` (the commit is in `build.rs`) and compiled with
 prost; `build.rs` needs `protoc`.
 
@@ -123,8 +125,9 @@ by its `clientMsgId` or its payload type; a disconnect waits for it up to
 requests in flight keep awaiting their answers, new ones wait. The spot
 subscriptions stay: cTrader keeps them on the connection across a new
 account auth, and answers `ALREADY_SUBSCRIBED` to one sent again (demo,
-2026-10-26); only those subscribed or unsubscribed meanwhile are sent. A
-new connection subscribes them all again.
+2026-10-26); only those subscribed or unsubscribed meanwhile are sent,
+once the account is authenticated again. A new connection subscribes them
+all again.
 
 A refused renewal fails the session naming the code and the remedy:
 generate a new pair in the Playground, set `IC_ACCESS_TOKEN` and
@@ -142,13 +145,52 @@ the response that echoes it.
 
 After a reconnect the session authenticates again, then subscribes again
 to the spots of every symbol subscribed, before serving the requests that
-waited; requests in flight fail. cTrader ending the client's session
+waited; requests in flight fail.
+
+The spot subscriptions are tracked in Nautilus' `SubscriptionState`
+(`nautilus_network::websocket`), topics `spot:<symbolId>`: a subscription
+or unsubscription is marked when asked, cTrader's answer confirms it, a
+refused subscription is marked failed (logged, and kept for the next
+connection, which sends it again), and `reset_after_reconnect` gives what
+a new connection subscribes. Changes asked while the account
+authenticates again on the same connection wait, the last of each symbol,
+and are sent once it is authenticated if they change the state. cTrader ending the client's session
 (`ProtoOAClientDisconnectEvent`) fails every request until a reconnect;
 an account session ended is authenticated again (see above).
 
 On the demo (2026-10-26) cTrader sent no heartbeat of its own in 25 s
 while ours ran, and none is needed: the transport's reconnect handles a
 dropped connection.
+
+### Nautilus primitives
+
+`docs/ARCHITECTURE.md` asks for plain Nautilus API: each primitive the
+adapter needs is Nautilus' own unless Nautilus has none for cTrader's
+protocol. Audited 2026-10-26 against the pinned sources
+(`~/.cargo/git/checkouts/nautilus_trader-*/a51ae01/crates/`, paths below
+relative to it), the adapter guide (`docs/developer_guide/adapters.md`,
+"Shared baseline", "WebSocket client patterns", "Task management") and the
+networking guide (`docs/concepts/networking.md`), and how the Binance,
+OKX and AX adapters use them:
+
+| Primitive | Ours today | Nautilus native equivalent (path) | Verdict | Reason |
+| --- | --- | --- | --- | --- |
+| Spot subscription tracking | Nautilus' (before: two symbol sets in the handler, wanted and held on the connection) | `SubscriptionState` (`network/src/websocket/subscription.rs`; guide, "Subscription management") | migrated | Marked when asked, confirmed or failed by cTrader's answer, `reset_after_reconnect` for a new connection. The changes asked during a new account auth on the same connection wait in the handler, last of each symbol: cTrader keeps the connection's subscriptions then (`ALREADY_SUBSCRIBED`), and the state has no "not yet sent" mark. |
+| Authentication state | Nautilus' `AuthTracker`, begun per connection, succeeded or failed on cTrader's answers | `AuthTracker` and `WebSocketClient::set_auth_tracker` (`network/src/websocket/auth.rs`, `network/src/websocket/client.rs`; networking guide, "Liveness and recovery") | migrated | Now registered with the transport, which invalidates it when the connection drops and fails it at disconnect (the handler's own failure at close removed). Registered with `reconnect_buffer_waits_for_auth` false: the auth frames are binary, and the transport binds only text sends to a connection (`send_text_on_connection`), so they would wait behind the buffer they unblock. |
+| Reconnection | Nautilus' handler-mode `WebSocketClient` (backoff, `RECONNECTED`) | `WebSocketClient` (`network/src/websocket/client.rs`; networking guide, "Connection modes") | already native | The handler re-authenticates and replays on `RECONNECTED`, as the guide's "Reconnection and shutdown" asks. |
+| Rate limiting | Nautilus' keyed quota on the transport, `historical`, one per 250 ms | `Quota` and `keyed_quotas` (`network/src/ratelimiter/quota.rs`, `network/src/websocket/client.rs`) | already native | |
+| Application heartbeat | ours: a `ProtoHeartbeatEvent` every 10 s from the handler | `WebSocketConfig::heartbeat_interval_secs` / `heartbeat_payload` (`network/src/websocket/config.rs`) | keep: no native equivalent | The transport's heartbeat is a Ping or a text frame; cTrader counts only its binary protobuf `ProtoHeartbeatEvent`. The guide: "Keep application heartbeat messages in the venue handler". |
+| Request correlation | ours: `clientMsgId` per request, a map to its caller, requests waiting while the session authenticates | none (guide, "Subscription management": "The adapter provides the wire correlation"; "Tracked and external execution updates") | keep: no native equivalent | Nautilus leaves wire correlation to the adapter. |
+| Request timeout | ours: `tokio::time::timeout` of 60 s around a response | `RetryManager` (`network/src/retry.rs`) times out retried operations only | keep: no native equivalent | No request is retried, so there is no retry operation to bound; OKX's WebSocket client bounds its waits with a plain timeout too (`adapters/okx/src/websocket/client.rs`). |
+| Retries | none | `RetryManager` (`network/src/retry.rs`) | keep: nothing to migrate | No retry loop: the deal window split in halves and the renewal after a refused token are protocol steps, not retries of a transient failure. |
+| Token renewal | ours: refresh token request, token file under `flock`, schedule a day before expiry | none (guide, "Authentication": "Refreshable tokens ... need adapter-specific state") | keep: no native equivalent | |
+| Secrets | Nautilus' `SecretString`; plaintext copies wiped with `zeroize` | `SecretString` (`core/src/string/secret.rs`; guide, "Credentials and secret handling") | already native | `zeroize` is the guide's "Bound plaintext lifetime". |
+| Handler task | ours: a `tokio::spawn`ed `JoinHandle`, at `disconnect` awaited 40 s then aborted | `TaskSlot` and `finish_task` (`live/src/task.rs`; guide, "Task management", "explicitly singular"), as Binance's and AX's handlers | migrate in follow-up | A `TaskSlot` aborts its task when dropped. The data and execution clients' synchronous `stop` drop the session and rely on the handler outliving it to save a token renewal's answer (the only copy of the new pair): moving to `TaskSlot` needs `stop` to hand the session to an awaited `disconnect` first. |
+| Reconnect on cTrader's end of the session | none: after `ProtoOAClientDisconnectEvent` requests fail until the transport reconnects | `WebSocketClient::request_reconnect` (`network/src/websocket/client.rs`; guide, "Reconnect ownership") | migrate in follow-up | Whether cTrader closes the socket after that event is not observed; if it does not, the session stays failed. Requesting a reconnect there is a behaviour change, tested on its own. |
+| Time, tasks and wall clock (DST seams) | `tokio::time`, `tokio::spawn`, `tokio::task::spawn_blocking` (token file), `jiff::Timestamp::now` for the token's expiry | `nautilus_common::live::dst` (`common/src/live/dst.rs`), `duration_since_unix_epoch` (`core/src/time.rs`; `docs/concepts/dst.md`) | migrate in follow-up | Outside a madsim build the `dst` paths are tokio's own, so only the whole DST contract (biased `select!`, no `spawn_blocking`, wall clock through `nautilus_core`) makes the adapter simulable; it spans the token file and the live clients, beyond this websocket change. |
+| Data client tasks | Nautilus' `TaskGroup`s, session and command | `TaskGroup` (`live/src/task.rs`) | already native | |
+| Quote emission filter | ours: a `subscribed` flag per instrument in `live/ic/spots.rs`, the merge kept for all | `DataClientAdapter::subscriptions_quotes` (`data/src/client.rs`) | keep: no native equivalent | That set is the data engine's, held by the adapter wrapping our `DataClient`, out of its reach. The guide asks for this split: "Update the full private cache even when emissions are filtered to active subscriptions". |
+| Deal deduplication | ours: deals kept once by id across the halves of a split window | `FifoCache` (`common/src/cache/fifo.rs`) | keep: no native equivalent | `FifoCache` bounds replay deduplication of a stream; this is one request's complete set, which a bounded cache could truncate. |
 
 ## Instruments
 
@@ -386,6 +428,9 @@ placed to capture them.
     and refusing one held (`ALREADY_SUBSCRIBED`, as the demo), none sent
     again after a renewal, those changed during it sent once authenticated
     again;
+  - `websocket/` (subscription state): a refused spot subscription marked
+    failed (pending, not confirmed, the accepted one confirmed) and sent
+    again on the next connection;
   - `mod.rs`: the instruments from assets, symbol list and details; an
     unlisted symbol and another venue refused; a series other than quotes
     refused before any request; a fill, against a peer serving ticks as
@@ -441,6 +486,8 @@ placed to capture them.
   them, the first the minute after the last warmup bar, until SIGINT.
   Passed on 2026-10-26 (12:35-12:38 UTC, about 150 s): 29 warmup bars, the
   data client asked for the 2.3 s since the fill (5 quotes), 340 live
-  quotes and 3 live bars.
+  quotes and 3 live bars. Both demo files passed again on the subscriptions
+  tracked in `SubscriptionState` (2026-10-26: 3/3 in about 20 s; 29 warmup
+  bars, 364 live quotes, 3 live bars in about 156 s).
 - `tests/backtest_ic_quotes.rs`: a backtest on IC gold quotes written
   through `fill_catalog`; see `../../backtest/README.md`, "IC on ticks".
