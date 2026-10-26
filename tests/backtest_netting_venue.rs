@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 
 #[test]
 fn two_overlapping_trades_add_into_one_position_at_their_average_price() {
-    let record = overlap::run(OmsType::Netting);
+    let record = overlap::run(|_| OmsType::Netting);
 
     let record = record.borrow();
     let [position] = record.positions.as_slice() else {

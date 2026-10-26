@@ -22,7 +22,9 @@ use nautilus_model::{
     identifiers::{InstrumentId, Venue},
     types::Money,
 };
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
+};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
@@ -37,16 +39,17 @@ use crate::strategy::catalog_series;
 #[derive(Debug, Clone)]
 pub struct Backtest {
     /// The catalog directory: instruments, the series the bars are built
-    /// from and the instruments' funding are read from it, and it serves
-    /// the strategy's warmup requests.
+    /// from, the instruments' book and funding are read from it, and it
+    /// serves the strategy's warmup requests.
     pub catalog: PathBuf,
     /// The internal bar types the strategy trades and warms up on. Their
-    /// instruments are all on one venue, which the venue of the run derives
-    /// from. The series Nautilus builds the bars from (see
-    /// `strategy::catalog_series`: the quotes of their instrument, or the
-    /// source bars of a composite bar type) are those replayed. The
-    /// engine's cache is sized to hold their warmup bars, which reach the
-    /// strategy only through it.
+    /// instruments are those the strategy reads, on one venue or several,
+    /// each a simulated venue of the run. The series Nautilus builds the
+    /// bars from (see `strategy::catalog_series`: the quotes of their
+    /// instrument, or the source bars of a composite bar type) are
+    /// replayed, as is the book of each instrument the catalog stores one
+    /// of (see `series`). The engine's cache is sized to hold their warmup
+    /// bars, which reach the strategy only through it.
     pub bar_types: Vec<BarType>,
     pub start: Timestamp,
     pub end: Timestamp,
@@ -55,17 +58,16 @@ pub struct Backtest {
     pub warmup: SignedDuration,
     /// The commission: `commission_per_order` or `commission_rate`.
     pub fee_model: FeeModelAny,
-    /// The starting balance of the account.
+    /// The starting balance of the account of each venue.
     pub balance: Money,
-    /// The account's leverage on every instrument, positive: a position
-    /// locks its value / leverage times the instrument's margin (Nautilus'
-    /// default margin model). 1 is no leverage.
+    /// The leverage of each venue's account on every instrument, positive:
+    /// a position locks its value / leverage times the instrument's margin
+    /// (Nautilus' default margin model). 1 is no leverage.
     pub leverage: Decimal,
-    /// How the simulated venue keeps positions: as the real venue does,
-    /// `venue_oms_type` of the instruments' venue. A strategy leaving its
-    /// `oms_type` unset follows it, as it follows the execution client's
-    /// live.
-    pub oms_type: OmsType,
+    /// How each simulated venue keeps positions: as the real venue does,
+    /// `venue_oms_type`. A strategy leaving its `oms_type` unset follows
+    /// it, as it follows the execution client's live.
+    pub venue_oms: fn(Venue) -> OmsType,
     /// The Nautilus logger: the node installs it, so nothing else may.
     pub logging: LoggerConfig,
 }
@@ -94,8 +96,8 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error if the inputs are inconsistent (no instruments,
-    /// several venues, a negative warmup, `start` not before
+    /// Returns an error if the inputs are inconsistent (no instruments, a
+    /// negative warmup, `start` not before
     /// `end`, a leverage not positive), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of a series
     /// over `[start - 1 ns - warmup, end]`, if the node fails to build
@@ -127,25 +129,57 @@ impl Backtest {
     }
 
     /// The catalog series the run replays: those the bars are built from
-    /// (see `strategy::catalog_series`), then the funding of each traded
-    /// instrument whose catalog stores funding, keyed by its id, which the
-    /// venue settles on open positions.
+    /// (see `strategy::catalog_series`), then the book depth of each
+    /// instrument whose catalog stores one, then the funding of each
+    /// instrument whose catalog stores funding, which the venue settles on
+    /// open positions; the book and the funding keyed by the instrument id.
+    /// An instrument read for its book alone, none of the series its bars
+    /// are built from stored (CME gold's book without its quotes), has its
+    /// book replayed and its bars left out: no bar is built of it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the stored funding cannot be read.
+    /// Returns an error if what the catalog stores cannot be read.
     fn series(&self) -> anyhow::Result<Vec<(NautilusDataType, String)>> {
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
-        let mut series = catalog_series(&self.bar_types);
+        let stored = |(data_type, identifier): &(NautilusDataType, String)| {
+            catalog
+                .query_last_timestamp(&data_type.clone().into(), Some(identifier))
+                .map(|last| last.is_some())
+                .with_context(|| {
+                    format!(
+                        "reading the stored range of the {} of {identifier}",
+                        data_path_prefix(data_type)
+                    )
+                })
+        };
+        let mut books = Vec::new();
+        let mut funding = Vec::new();
         for id in self.instruments() {
-            let funding = (NautilusDataType::FundingRateUpdate, id.to_string());
-            let stored = catalog
-                .query_last_timestamp(&funding.0.clone().into(), Some(&funding.1))
-                .with_context(|| format!("reading the stored funding of {id}"))?;
-            if stored.is_some() {
-                series.push(funding);
+            let book = (NautilusDataType::OrderBookDepth, id.to_string());
+            if stored(&book)? {
+                books.push(book);
+            }
+            let rate = (NautilusDataType::FundingRateUpdate, id.to_string());
+            if stored(&rate)? {
+                funding.push(rate);
             }
         }
+        let mut built = Vec::new();
+        for bar_type in &self.bar_types {
+            let id = bar_type.instrument_id().to_string();
+            let has_book = books.iter().any(|(_, book_of)| *book_of == id);
+            let mut has_source = false;
+            for source in catalog_series(&[*bar_type]) {
+                has_source |= stored(&source)?;
+            }
+            if has_source || !has_book {
+                built.push(*bar_type);
+            }
+        }
+        let mut series = catalog_series(&built);
+        series.extend(books);
+        series.extend(funding);
         Ok(series)
     }
 }
@@ -155,7 +189,10 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_core::UnixNanos;
-    use nautilus_model::{data::FundingRateUpdate, types::Money};
+    use nautilus_model::{
+        data::{FundingRateUpdate, QuoteTick, stubs::stub_depth10},
+        types::{Money, Price, Quantity},
+    };
 
     use super::*;
 
@@ -178,7 +215,7 @@ mod tests {
             fee_model: commission_rate(Decimal::ZERO).unwrap(),
             balance: Money::from("10000 USDT"),
             leverage: Decimal::ONE,
-            oms_type: OmsType::Netting,
+            venue_oms: venue_oms_type,
             logging: LoggerConfig::default(),
         }
     }
@@ -224,6 +261,64 @@ mod tests {
         let mut expected = catalog_series(&backtest.bar_types);
         expected.push((NautilusDataType::FundingRateUpdate, SWAP.to_string()));
         assert_eq!(backtest.series().unwrap(), expected);
+    }
+
+    const GOLD: &str = "GC.v.0.GLBX";
+
+    /// A catalog holding a book depth snapshot of CME gold, and its quotes
+    /// if `quoted`; a backtest on its MID hour bars.
+    fn gold(dir: &std::path::Path, quoted: bool) -> Backtest {
+        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        let id = InstrumentId::from(GOLD);
+        let ts = UnixNanos::from(1_788_192_000_000_000_000);
+        let mut depth = stub_depth10();
+        (depth.instrument_id, depth.ts_event, depth.ts_init) = (id, ts, ts);
+        catalog
+            .write_to_parquet(&[depth], None, None, None)
+            .unwrap();
+        if quoted {
+            let quote = QuoteTick::new(
+                id,
+                Price::from("4000.0"),
+                Price::from("4000.1"),
+                Quantity::from(1),
+                Quantity::from(1),
+                ts,
+                ts,
+            );
+            catalog
+                .write_to_parquet(&[quote], None, None, None)
+                .unwrap();
+        }
+        Backtest {
+            bar_types: vec![BarType::from(
+                format!("{GOLD}-1-HOUR-MID-INTERNAL").as_str(),
+            )],
+            ..backtest(dir, &[])
+        }
+    }
+
+    #[test]
+    fn an_instrument_read_for_its_book_alone_replays_its_book_and_no_bar_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = gold(dir.path(), false);
+        assert_eq!(
+            backtest.series().unwrap(),
+            [(NautilusDataType::OrderBookDepth, GOLD.to_string())]
+        );
+    }
+
+    #[test]
+    fn the_book_of_an_instrument_is_replayed_beside_the_source_of_its_bars() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = gold(dir.path(), true);
+        assert_eq!(
+            backtest.series().unwrap(),
+            [
+                (NautilusDataType::QuoteTick, GOLD.to_string()),
+                (NautilusDataType::OrderBookDepth, GOLD.to_string()),
+            ]
+        );
     }
 
     #[test]

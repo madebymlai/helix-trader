@@ -19,7 +19,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType},
     enums::OrderSide,
-    identifiers::{InstrumentId, Symbol, Venue},
+    identifiers::{InstrumentId, Symbol},
     instruments::{CryptoFuture, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
@@ -137,7 +137,7 @@ fn an_okx_x_perp_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commi
         balance: Money::from("10000 USD"),
         // OKX Europe's cap for retail accounts.
         leverage: Decimal::TEN,
-        oms_type: venue_oms_type(Venue::from("OKX")),
+        venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
     };
     let (recorder, record) = Recorder::trading_without_warmup(

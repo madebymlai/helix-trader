@@ -343,7 +343,9 @@ in it.
   catalog itself rather than through `fill_catalog`, which drops items
   sharing a `ts_init` (book updates and trades often do) and holds a whole
   window in memory (a day of MBP-10 is about 7 GB decoded): see
-  [`databento/README.md`](databento/README.md).
+  [`databento/README.md`](databento/README.md). A backtest replays the
+  book of each instrument the strategy lists, from the catalog
+  (`backtest/README.md`, "Book data").
 
 ## Tests
 

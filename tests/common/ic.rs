@@ -135,7 +135,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("2000000 USD"),
         leverage: Decimal::ONE,
-        oms_type: venue_oms_type(InstrumentId::from(INSTRUMENT_ID).venue),
+        venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
     }
 }

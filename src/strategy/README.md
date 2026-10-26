@@ -329,6 +329,18 @@ which must be one of `instrument_ids`; the others are read only: their bars
 are subscribed and warmed up like the traded one's, and the EMA ignores
 them, as a strategy reading a signal instrument would read them.
 
+A strategy reading an instrument's book lists it in `instrument_ids` too
+(CME gold, `GC.v.0.GLBX`, beside `XAUUSD.ICMARKETS`), no other config: a
+backtest replays the book depth the catalog stores of it, on a simulated
+venue of its own (backtest README, "Book data", "Several venues"), and
+leaves its bars out if the catalog stores no source of them (gold has no
+quotes). The strategy subscribes to the book itself: a backtest's
+snapshots come to `subscribe_book_depth` (`on_book_depth`); live, IB's
+data client offers `subscribe_book_deltas` alone. Only a managed
+subscription of the kind the data arrives as keeps the cache's book
+(`cache.order_book`): depth snapshots in a backtest, deltas from IB, and
+`subscribe_book_at_interval` keeps it from deltas only.
+
 - **Entry.** On each bar of the traded instrument inside the session, the
   fast EMA above the slow one is long, otherwise short; a bar changing the
   side is a cross (`signal.rs`), the first warm bar setting the side
