@@ -30,7 +30,7 @@ data/
     parse.rs       cTrader symbols -> CurrencyPair, ids
     websocket/     the cTrader connection: outer client, handler task
     proto/         Spotware's four .proto files, vendored (build.rs compiles them)
-    testdata/      synthetic responses, text and wire forms
+    testdata/      responses captured from IC's demo, scrubbed, text and wire forms
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
@@ -787,16 +787,34 @@ history.disconnect().await
   refused, naming the symbol.
 - **Quotes: not served yet.** A fill stores the instruments, then fails
   on the first quote series, naming it.
+- **Verified on the demo** (2026-10-26, `fill-catalog` on XAUUSD and
+  EURUSD into a scratch catalog): both stored as above. IC's symbol names
+  are `XAUUSD`, `EURUSD`, `US500`; volumes are in cents of a unit
+  (`lotSize` 10,000 is XAUUSD's 100 oz, 10,000,000 EURUSD's 100,000 EUR,
+  IC's published lots). The details carry the commission:
+  `USD_PER_MILLION_USD`, `preciseTradingCommissionRate` 3,000,000,000 (30
+  USD per million, on both). cTrader sent no heartbeat of its own in 25 s
+  while ours ran. `ic/testdata/` holds those responses, scrubbed: the
+  account id replaced by a fake one, the lists trimmed to three symbols.
 
-**Unverified** until a demo run: IC's symbol names, the cents unit on
-`lotSize` and `stepVolume`, whether cTrader sends heartbeats of its own.
-The test fixtures are synthetic (from the `.proto` schemas), to be
-replaced by scrubbed captures.
+**Tick history probe** (demo, 2026-10-26, one connection, requests one
+after another):
 
-**Tick history probe: not run** (no demo credentials yet). To record
-here: ticks per page, the time to fetch one month of XAUUSD BID and ASK
-ticks, the oldest tick served against the oldest M1 bar, and from them
-the choice of ticks or the M1 BID fallback.
+- **Encoding.** `ProtoOAGetTickDataRes.tickData` is newest first; the
+  first tick is absolute (Unix ms, price × 100,000), each following one
+  the difference in time and in price from the one before. A full page
+  is 10,000 ticks with `hasMore`; requests spanned a week each.
+- **Speed.** About 2 pages a second, bound by latency (the limit is 5
+  historical requests a second). One month of XAUUSD: 3.09 M BID and
+  3.09 M ASK ticks, 312 pages and about 150 s a side; of EURUSD: 0.88 M
+  and 0.91 M, about 40 s a side.
+- **Depth.** Ticks from 2015 on both (none in January 2014); M1 bars from
+  2013 on XAUUSD, 2012 on EURUSD.
+- **Decision: ticks**, BID and ASK merged into quotes, not the M1 BID
+  fallback: about 11 years of ticks, the whole of XAUUSD's in about 6-7 h.
+- **Open.** Whether `toTimestamp` is inclusive: paging back to the oldest
+  tick's time minus 1 ms could drop ticks sharing a millisecond across a
+  page boundary.
 
 ### Other sources
 
@@ -996,20 +1014,22 @@ bar after a roll behaves when the new contract has not ticked yet is
     window the stored funding covers asking for nothing; the funding
     filled before the bars, a failed one (a swap's unpublished first
     month, an X-Perp's window older than OKX keeps) storing no bars.
-  - `ic/`, on synthetic fixtures and a mock cTrader peer (a local
-    WebSocket server): the environment required, the credential read
-    whole and never in `Debug` or errors; envelopes, error responses and
-    malformed payloads; XAUUSD and EURUSD to `CurrencyPair`s, an index,
-    a missing step, a minimum finer than the step, digits out of range
-    and an unlisted asset refused, ids round trip; the session's exact
-    auth frames, the binary heartbeat, two requests answered in reverse
-    order each getting its own, a venue error, a refused token or app
-    (naming the code, never a credential), another account refused,
-    malformed and unknown frames skipped, re-authentication after a
-    reconnect, requests failing once cTrader ends the session; the
-    instruments from assets, symbol list and details, an unlisted symbol
-    and another venue refused, a fill storing the instruments then naming
-    the quotes, a series other than quotes refused before any request.
+  - `ic/`, on responses captured from IC's demo (synthetic only where no
+    capture can be had: another account, a token invalidated, malformed
+    frames) and a mock cTrader peer (a local WebSocket server): the
+    environment required, the credential read whole and never in `Debug`
+    or errors; envelopes, error responses and malformed payloads; XAUUSD
+    and EURUSD to `CurrencyPair`s, an index, a missing step, a minimum
+    finer than the step, digits out of range and an unlisted asset
+    refused, ids round trip; the session's exact auth frames, the binary
+    heartbeat, two requests answered in reverse order each getting its
+    own, a venue error, a refused token or app (naming the code, never a
+    credential), another account refused, malformed and unknown frames
+    skipped, re-authentication after a reconnect, requests failing once
+    cTrader ends the session; the instruments from assets, symbol list and
+    details, an unlisted symbol and another venue refused, a fill storing
+    the instruments then naming the quotes, a series other than quotes
+    refused before any request.
   - `ib/gateway.rs`: account forms and their mode, the container config
     (the mode, the API open to orders), the login wait on fake statuses
     (ready at once, ready after a wait, the deadline naming the last
@@ -1018,7 +1038,8 @@ bar after a roll behaves when the new contract has not ticked yet is
   continuous future over a fixture catalog and roll params, which also
   proves the engine accepts our params.
 - On IC's cTrader demo, `tests/ic_demo.rs` (gated by `NAUTILUS_IC_RUN=1`,
-  demo only): XAUUSD and EURUSD loaded as currency pairs. **Not run yet.**
+  demo only): XAUUSD and EURUSD loaded as currency pairs. Passed on
+  2026-10-26.
 - Against the Docker paper gateway, `tests/ib_gateway.rs` (gated by
   `NAUTILUS_IB_RUN=1`, see the live README, "IB tests"): starting or
   reusing it, and a day of SXR8.IBIS quotes filled through it.
