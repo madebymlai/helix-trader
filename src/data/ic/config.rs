@@ -11,6 +11,7 @@ use std::fmt;
 
 use anyhow::{Context, bail};
 use nautilus_core::string::secret::{REDACTED, SecretString};
+use nautilus_model::identifiers::AccountId;
 
 /// The variable naming the environment, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "IC_ENVIRONMENT";
@@ -162,6 +163,19 @@ impl IcConnection {
             credential: IcCredential::from_vars(&var)?,
         })
     }
+
+    /// The Nautilus account of the connection: `ICMARKETS-DEMO` or
+    /// `ICMARKETS-LIVE`. Named after the environment, not the account,
+    /// whose id and login are credential identity, never logged; stable
+    /// across runs, so a persisted cache finds its account again.
+    #[must_use]
+    pub fn account_id(&self) -> AccountId {
+        let environment = match self.environment {
+            IcEnvironment::Demo => "DEMO",
+            IcEnvironment::Live => "LIVE",
+        };
+        AccountId::new(format!("ICMARKETS-{environment}"))
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +282,7 @@ mod tests {
         let no_token = IcConnection::from_vars(vars(&[("IC_ENVIRONMENT", "demo")])).unwrap_err();
 
         assert_eq!(connection.environment, IcEnvironment::Demo);
+        assert_eq!(connection.account_id(), AccountId::from("ICMARKETS-DEMO"));
         assert!(
             no_environment.to_string().contains("IC_ENVIRONMENT"),
             "{no_environment}"

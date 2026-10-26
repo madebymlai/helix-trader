@@ -1,0 +1,8 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a reconcile request on the account with no open position
+# and no pending order.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAReconcileRes OpenApiMessages.proto < reconcile_res_empty.bin
+# Message: ProtoOAReconcileRes
+ctidTraderAccountId: 1000001

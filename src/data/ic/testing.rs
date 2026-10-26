@@ -48,6 +48,9 @@ pub(super) const SPOT_EVENT_EURUSD_ASK: &[u8] =
     include_bytes!("testdata/spot_event_eurusd_ask.bin");
 pub(super) const SPOT_EVENT_XAUUSD_FIRST: &[u8] =
     include_bytes!("testdata/spot_event_xauusd_first.bin");
+pub(super) const TRADER_RES: &[u8] = include_bytes!("testdata/trader_res.bin");
+pub(super) const RECONCILE_RES_EMPTY: &[u8] = include_bytes!("testdata/reconcile_res_empty.bin");
+pub(super) const DEAL_LIST_RES_EMPTY: &[u8] = include_bytes!("testdata/deal_list_res_empty.bin");
 
 /// What the peer does after a frame.
 pub(super) enum Action {

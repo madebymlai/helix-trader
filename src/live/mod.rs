@@ -2,7 +2,7 @@
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
 //! those of the instruments' venues: OKX's for OKX instruments (`okx/`),
-//! IC's data client for IC instruments (`ic/`), IB's for the others
+//! IC's for IC instruments (`ic/`, no order yet), IB's for the others
 //! (`ib/`), several if the instruments span several. The start brings the
 //! catalog up to now for the IB and IC instruments, and the node serves
 //! their warmup from it, IC's data client the rest up to now. OKX's data
@@ -14,7 +14,9 @@ mod ic;
 mod node;
 mod okx;
 
-pub use ic::{IcDataClientConfig, IcDataClientFactory};
+pub use ic::{
+    IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
+};
 
 pub use crate::data::IbAccount;
 
@@ -49,8 +51,9 @@ use crate::{
 /// One live run: the strategy trades its IB instruments in `account`
 /// through IB with `client_id`, and its OKX instruments on the OKX
 /// environment `OKX_ENVIRONMENT` names at `leverage`; it gets the data of
-/// its IC instruments on the IC environment `IC_ENVIRONMENT` names, with no
-/// execution client yet; on bars the node builds, warmed up from the
+/// its IC instruments on the IC environment `IC_ENVIRONMENT` names, its IC
+/// account reconciled but no IC order placed yet; on bars the node builds,
+/// warmed up from the
 /// catalog and the venues.
 #[derive(Debug, Clone)]
 pub struct Live {
@@ -89,7 +92,8 @@ impl Live {
     /// no account is given, if IB's clients cannot be set up (see
     /// `ib::clients`), if the catalog cannot be filled (IC or IB
     /// unreachable, an instrument they do not know, a catalog starting after
-    /// `now - warmup`, IC's market closed over the whole warmup), or if the
+    /// `now - warmup`, IC's market closed over the whole warmup), if the IC
+    /// account is not hedging or not `IC_ACCOUNT_ID`'s, or if the
     /// node fails (see `node::run`).
     pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
     where
@@ -176,14 +180,20 @@ impl Live {
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         let mut catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
         let ic = IcHistory::connect_as(connection).await?;
-        let filled = ic
-            .fill(
-                &mut catalog,
-                &catalog_series(&requirements.bar_types),
-                start,
-                now,
-            )
-            .await;
+        // The account is checked before the node exists, so a netting or
+        // another account fails the start with its reason.
+        let filled = match ic.check_account().await {
+            Ok(()) => {
+                ic.fill(
+                    &mut catalog,
+                    &catalog_series(&requirements.bar_types),
+                    start,
+                    now,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
         ic.disconnect().await;
         filled
     }

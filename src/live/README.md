@@ -5,10 +5,10 @@ a paper then a real account (build step 3). It adds no trading logic: it
 sets up the clients of the instruments' venues, fills the catalog up to now
 for the IB and IC instruments, then wires the clients, the strategy and the
 node. Clients go by venue: OKX instruments to OKX's clients, IC instruments
-(`….ICMARKETS`) to IC's data client, all others to IB's, and a strategy
-trading several venues gets their clients, routed by Nautilus. IC has no
-execution client yet, and IC instruments with IB ones are refused (see
-`ic/README.md`, "Known limits").
+(`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
+venues gets their clients, routed by Nautilus. IC's execution client reads
+and reconciles the account but places no order yet, and IC instruments with
+IB ones are refused (see `ic/README.md`, "Known limits").
 
 APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
 `develop` commit in `docs/ARCHITECTURE.md` (Version), which also holds the
@@ -24,14 +24,14 @@ live/
   node.rs   builds and runs the LiveNode, broker-agnostic
   ib/       IB client factories and configs, on the gateway `data`'s IB
             part starts; README.md: IB live
-  ic/       IC's data client factory and config (the client is in
+  ic/       IC's client factories and configs (the clients are in
             data/ic/); README.md: IC live
   okx/      OKX client factories and configs, and the account checks;
             README.md: OKX live
 ```
 
 Each broker gets its own folder next to `ib/`, returning the same shape: a
-data factory and config, an exec factory and config (none for IC yet), and
+data factory and config, an exec factory and config, and
 their routing (`node::Clients`). `node.rs` takes a list of them as `Box<dyn
 DataClientFactory>` and friends and never names a broker.
 
@@ -308,8 +308,9 @@ logs written through `tracing` into the same output.
 
 ## IC Markets
 
-`ic/`: IC's data client, its environment and credential, the warmup and
-its tests: see [`ic/README.md`](ic/README.md).
+`ic/`: IC's clients, their environment and credential, the account check
+and reconciliation, the warmup and their tests: see
+[`ic/README.md`](ic/README.md).
 
 ## OKX
 
