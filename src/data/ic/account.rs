@@ -21,9 +21,9 @@ use super::{
 /// The account, checked: hedging, the configured one, in a currency
 /// Nautilus knows.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct IcAccount {
+pub(crate) struct IcAccount {
     /// The deposit currency, the account's base currency.
-    pub(super) currency: Currency,
+    pub(crate) currency: Currency,
     /// The balance: deposits and realized PnL, without open positions.
     pub(super) balance: Decimal,
 }
@@ -77,7 +77,7 @@ impl IcAccount {
     /// # Errors
     ///
     /// Returns an error if an amount is out of `Money`'s range.
-    pub(super) fn state(
+    pub(crate) fn state(
         &self,
         positions: &[ProtoOaPosition],
     ) -> anyhow::Result<(Vec<AccountBalance>, Vec<MarginBalance>)> {

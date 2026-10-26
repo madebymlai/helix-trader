@@ -34,7 +34,7 @@ use rust_decimal::Decimal;
 use super::messages::{ProtoOaAsset, ProtoOaLightSymbol, ProtoOaSymbol};
 
 /// The venue of IC's instruments.
-pub(super) const IC_VENUE: &str = "ICMARKETS";
+pub(crate) const IC_VENUE: &str = "ICMARKETS";
 
 /// Whether `id` is on IC's venue.
 pub(super) fn is_ic(id: InstrumentId) -> bool {

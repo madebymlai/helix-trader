@@ -36,7 +36,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use super::messages::{
+use crate::data::ic::messages::{
     ProtoOaDeal, ProtoOaDealStatus, ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod,
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
 };

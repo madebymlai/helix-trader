@@ -2,8 +2,9 @@
 //! on a cTrader session, up to order flow.
 //!
 //! On connect it authenticates, checks the account (hedging,
-//! `IC_ACCOUNT_ID`'s, see `account`), loads its instruments, and publishes
-//! the account state: the balance, and the margin the open positions use.
+//! `IC_ACCOUNT_ID`'s, see `data/ic/account.rs`), loads its instruments, and
+//! publishes the account state: the balance, and the margin the open
+//! positions use.
 //! It reports connected once the node's cache holds the account. The venue
 //! is hedging (`OmsType::Hedging`): each cTrader position is one Nautilus
 //! position, its `positionId` the venue position id (see `reports`).
@@ -44,13 +45,13 @@ use nautilus_model::{
     types::{AccountBalance, MarginBalance},
 };
 
-use super::{
+use super::reports::{Reports, explained, open_volumes};
+use crate::data::ic::{
     IcHistory,
     account::IcAccount,
     config::{IcConnection, IcCredential},
     messages::ProtoOaReconcileRes,
     parse::IC_VENUE,
-    reports::{Reports, explained, open_volumes},
     websocket::HEARTBEAT_INTERVAL,
 };
 
@@ -63,7 +64,7 @@ const NO_ORDER_FLOW: &str = "IC's execution client places no order yet";
 /// IC's execution client: the account state and reconciliation reports
 /// of the account, on venue `ICMARKETS`.
 #[derive(Debug)]
-pub struct IcExecutionClient {
+pub(super) struct IcExecutionClient {
     core: ExecutionClientCore,
     url: String,
     credential: IcCredential,
@@ -87,7 +88,7 @@ impl IcExecutionClient {
     /// loading `instrument_ids`, IC ids, at connect; not connected. `core`
     /// is hedging, on venue `ICMARKETS`, a margin account.
     #[must_use]
-    pub fn new(
+    pub(super) fn new(
         core: ExecutionClientCore,
         connection: &IcConnection,
         instrument_ids: Vec<InstrumentId>,

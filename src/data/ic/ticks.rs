@@ -35,9 +35,9 @@ const QUOTE_SIZE: f64 = 100_000.0;
 /// A tick of one side: its time in Unix milliseconds and its price in
 /// 1/100000.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Tick {
-    pub(super) ms: i64,
-    pub(super) price: i64,
+pub(crate) struct Tick {
+    pub(crate) ms: i64,
+    pub(crate) price: i64,
 }
 
 /// The ticks of `tick_data`, newest first, absolute: the first element
@@ -216,7 +216,7 @@ pub(super) fn merge(
 /// on the quote before it; a locked one (ask = bid) is kept. Prices at the
 /// instrument's precision, sizes `quote_size`.
 #[derive(Debug)]
-pub(super) struct QuoteMerge {
+pub(crate) struct QuoteMerge {
     instrument_id: InstrumentId,
     precision: u8,
     size: Quantity,
@@ -227,7 +227,7 @@ pub(super) struct QuoteMerge {
 
 /// What a millisecond of ticks made.
 #[derive(Debug, PartialEq)]
-pub(super) enum Merged {
+pub(crate) enum Merged {
     Quote(QuoteTick),
     /// No quote: a side is not known yet.
     OneSided,
@@ -242,7 +242,7 @@ impl QuoteMerge {
     ///
     /// Returns an error if the quote size is not on the instrument's size
     /// precision.
-    pub(super) fn new(instrument: &InstrumentAny) -> anyhow::Result<Self> {
+    pub(crate) fn new(instrument: &InstrumentAny) -> anyhow::Result<Self> {
         Ok(Self {
             instrument_id: instrument.id(),
             precision: instrument.price_precision(),
@@ -261,7 +261,7 @@ impl QuoteMerge {
     ///
     /// Returns an error if a price is not on the instrument's precision, or
     /// `ms` is before 1970.
-    pub(super) fn next(
+    pub(crate) fn next(
         &mut self,
         ms: i64,
         bid: Option<i64>,

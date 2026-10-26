@@ -18,7 +18,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/ctrader_open_api.rs"));
 }
 
-pub(super) use proto::{
+pub(crate) use proto::{
     ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountDisconnectEvent, ProtoOaAccountType, ProtoOaAccountsTokenInvalidatedEvent,
     ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaAsset, ProtoOaAssetListReq,
@@ -36,10 +36,10 @@ pub(super) use proto::{
 
 // The synthetic positions and deals of the tests are built from these.
 #[cfg(test)]
-pub(super) use proto::{ProtoOaClosePositionDetail, ProtoOaTradeData};
+pub(crate) use proto::{ProtoOaClosePositionDetail, ProtoOaTradeData};
 
 /// A message and the payload type it travels under.
-pub(super) trait Payload: prost::Message + Default {
+pub(crate) trait Payload: prost::Message + Default {
     /// The `payloadType` of the envelope.
     const TYPE: u32;
 }
