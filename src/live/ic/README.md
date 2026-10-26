@@ -7,7 +7,8 @@ their factories and configs, on the cTrader session of `data/ic/`
 the start sequence and the routing between venues are in
 `live/README.md`; the cTrader session, the credential and token file, the
 tick history and its merge into quotes, and the account check in
-`data/ic/README.md`.
+`data/ic/README.md`, with the audit of the Nautilus primitives both use
+("Nautilus primitives").
 
 ## Layout
 

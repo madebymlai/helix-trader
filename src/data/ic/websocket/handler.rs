@@ -1,8 +1,9 @@
 //! The handler task: the one owner of the `WebSocketClient`. It
 //! authenticates each connection, sends the heartbeat, tags requests with
-//! a `clientMsgId` and routes each response back to its caller. It keeps
-//! the spot subscriptions, sends them again on each new connection, and
-//! passes spot events on.
+//! a `clientMsgId` and routes each response back to its caller. It tracks
+//! the spot subscriptions in Nautilus' `SubscriptionState` (marked when
+//! asked, confirmed or failed by cTrader's answer), sends them all again on
+//! each new connection, and passes spot events on.
 //!
 //! It renews the access token (see `token`): at start when the token is
 //! due (its expiry unknown or within `RENEW_BEFORE`), on schedule while
@@ -21,11 +22,12 @@
 //! file's pair, renewed first if refused; during a renewal or an auth such
 //! an event is the old token's, and ignored. Meanwhile new requests wait;
 //! those in flight keep awaiting their response; the spot subscriptions,
-//! which cTrader keeps on the connection, are not sent again, only those
-//! changed meanwhile.
+//! which cTrader keeps on the connection, are not sent again: the
+//! (un)subscriptions asked meanwhile wait, and are sent once the account
+//! is authenticated again.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     time::Duration,
 };
 
@@ -33,7 +35,7 @@ use jiff::Timestamp;
 use nautilus_core::string::secret::SecretString;
 use nautilus_network::{
     Message, RECONNECTED,
-    websocket::{AuthTracker, WebSocketClient},
+    websocket::{AuthTracker, SubscriptionState, WebSocketClient},
 };
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
@@ -52,7 +54,7 @@ use super::super::{
     },
     token::{TokenLock, TokenPair},
 };
-use super::{AUTH_TIMEOUT, HISTORICAL_KEY};
+use super::{AUTH_TIMEOUT, HISTORICAL_KEY, spot_subscribed, spot_symbol, spot_topic};
 
 /// How often a renewal tries the token file's lock while another session
 /// holds it.
@@ -113,7 +115,7 @@ enum Pending {
     /// A caller of the outer client.
     Caller(Reply),
     /// The handler's own spot (un)subscription of these symbols, whose
-    /// outcome is logged.
+    /// answer confirms or fails it in the subscription state.
     Spots {
         subscribe: bool,
         symbol_ids: Vec<i64>,
@@ -158,20 +160,31 @@ pub(super) struct IcWsHandler {
     next_id: u64,
     pending: HashMap<String, Pending>,
     queued: Vec<Queued>,
-    /// The symbols whose spot events the session subscribes to.
-    spots: BTreeSet<i64>,
-    /// The symbols the connection holds subscribed: cTrader keeps them
-    /// across a new account auth on the same connection, answering
-    /// `ALREADY_SUBSCRIBED` to a subscription sent again (demo,
-    /// 2026-10-26); a new connection holds none.
-    connection_spots: BTreeSet<i64>,
+    /// The spot subscriptions, by `spot_topic`, shared with the outer
+    /// client.
+    subscriptions: SubscriptionState,
+    /// Whether the connection holds none of the subscriptions yet (a new
+    /// one): changes go to `subscriptions` only, and all of them are sent
+    /// once the session is ready. Else changes asked while the session is
+    /// not ready wait in `spot_changes`: cTrader keeps a connection's
+    /// subscriptions across a new account auth, answering
+    /// `ALREADY_SUBSCRIBED` to one sent again (demo, 2026-10-26).
+    replay: bool,
+    /// The spot (un)subscriptions asked during a new account auth on the
+    /// same connection, the last of each symbol: `true` to subscribe.
+    spot_changes: BTreeMap<i64, bool>,
 }
 
 impl IcWsHandler {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handler owns the session's channels, credential and shared state"
+    )]
     pub(super) fn new(
         credential: IcCredential,
         tokens: TokenPair,
         auth: AuthTracker,
+        subscriptions: SubscriptionState,
         cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
         raw_rx: mpsc::UnboundedReceiver<Message>,
         spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
@@ -193,8 +206,9 @@ impl IcWsHandler {
             next_id: 0,
             pending: HashMap::new(),
             queued: Vec::new(),
-            spots: BTreeSet::new(),
-            connection_spots: BTreeSet::new(),
+            subscriptions,
+            replay: true,
+            spot_changes: BTreeMap::new(),
         }
     }
 
@@ -215,14 +229,10 @@ impl IcWsHandler {
                         self.request(Queued { payload_type, payload, reply }).await;
                     }
                     Some(HandlerCommand::SubscribeSpots(symbol_id)) => {
-                        if self.spots.insert(symbol_id) && matches!(self.session, Session::Ready) {
-                            self.send_spots(true, vec![symbol_id]).await;
-                        }
+                        self.change_spots(symbol_id, true).await;
                     }
                     Some(HandlerCommand::UnsubscribeSpots(symbol_id)) => {
-                        if self.spots.remove(&symbol_id) && matches!(self.session, Session::Ready) {
-                            self.send_spots(false, vec![symbol_id]).await;
-                        }
+                        self.change_spots(symbol_id, false).await;
                     }
                     #[cfg(test)]
                     Some(HandlerCommand::RenewToken) => {
@@ -276,9 +286,9 @@ impl IcWsHandler {
     async fn close(&mut self) {
         self.abandon_renewal("the connection closed");
         if let Some(client) = self.client.take() {
+            // Fails the authentication, which the transport tracks.
             client.disconnect().await;
         }
-        self.auth.fail("the cTrader connection is closed");
         self.fail_pending(&IcError::ConnectionLost);
         for queued in self.queued.drain(..) {
             let _ = queued.reply.send(Err(IcError::ConnectionLost));
@@ -322,11 +332,15 @@ impl IcWsHandler {
     /// Starts the session: application auth, then account auth on its
     /// response (see `receive`), the token renewed first if due.
     async fn authenticate(&mut self) {
-        // A new connection: whatever the last one was renewing, or held
-        // subscribed, is over.
+        // A new connection: whatever the last one was renewing is over, and
+        // it holds no subscription: the changes waiting go to the state, all
+        // of whose subscriptions are sent once the session is ready.
         self.renewed = false;
         self.wake = None;
-        self.connection_spots.clear();
+        self.replay = true;
+        for (symbol_id, subscribe) in std::mem::take(&mut self.spot_changes) {
+            self.mark_spots(symbol_id, subscribe);
+        }
         let id = self.next_id();
         let mut request = ProtoOaApplicationAuthReq {
             client_id: self.credential.client_id.expose_secret().to_owned(),
@@ -513,22 +527,31 @@ impl IcWsHandler {
             tokio::time::Instant::now() + wait.unsigned_abs()
         });
         self.auth.succeed();
-        // The connection's subscriptions brought in line with the session's:
-        // all of them on a new connection, those changed meanwhile after a
-        // new account auth on the same one.
-        let subscribe: Vec<i64> = self
-            .spots
-            .difference(&self.connection_spots)
-            .copied()
-            .collect();
+        // The connection's subscriptions brought in line with the state: all
+        // of them on a new connection, those changed meanwhile after a new
+        // account auth on the same one.
+        let mut subscribe = Vec::new();
+        let mut unsubscribe = Vec::new();
+        if std::mem::take(&mut self.replay) {
+            subscribe = self
+                .subscriptions
+                .reset_after_reconnect()
+                .iter()
+                .map(|topic| spot_symbol(topic))
+                .collect();
+        }
+        for (symbol_id, subscribe_it) in std::mem::take(&mut self.spot_changes) {
+            if self.mark_spots(symbol_id, subscribe_it) {
+                if subscribe_it {
+                    subscribe.push(symbol_id);
+                } else {
+                    unsubscribe.push(symbol_id);
+                }
+            }
+        }
         if !subscribe.is_empty() {
             self.send_spots(true, subscribe).await;
         }
-        let unsubscribe: Vec<i64> = self
-            .connection_spots
-            .difference(&self.spots)
-            .copied()
-            .collect();
         if !unsubscribe.is_empty() {
             self.send_spots(false, unsubscribe).await;
         }
@@ -551,7 +574,7 @@ impl IcWsHandler {
     }
 
     /// Fails the callers awaiting a response. The handler's own spot
-    /// requests are dropped: the next session sends them again.
+    /// requests are dropped: the next connection sends them again.
     fn fail_pending(&mut self, error: &IcError) {
         for (_, pending) in self.pending.drain() {
             if let Pending::Caller(reply) = pending {
@@ -560,8 +583,39 @@ impl IcWsHandler {
         }
     }
 
+    /// A spot (un)subscription of `symbol_id` asked by the outer client:
+    /// sent if the session is ready, else marked for the new connection's
+    /// replay, or kept until the account is authenticated again.
+    async fn change_spots(&mut self, symbol_id: i64, subscribe: bool) {
+        if matches!(self.session, Session::Ready) {
+            if self.mark_spots(symbol_id, subscribe) {
+                self.send_spots(subscribe, vec![symbol_id]).await;
+            }
+        } else if self.replay {
+            self.mark_spots(symbol_id, subscribe);
+        } else {
+            self.spot_changes.insert(symbol_id, subscribe);
+        }
+    }
+
+    /// Marks the (un)subscription of `symbol_id` in the state; whether it
+    /// changes it: a subscription of a symbol not yet wanted, an
+    /// unsubscription of one subscribed or pending.
+    fn mark_spots(&self, symbol_id: i64, subscribe: bool) -> bool {
+        let topic = spot_topic(symbol_id);
+        if subscribe {
+            return self.subscriptions.try_mark_subscribe(&topic);
+        }
+        let subscribed = spot_subscribed(&self.subscriptions, symbol_id);
+        if subscribed {
+            self.subscriptions.mark_unsubscribe(&topic);
+        }
+        subscribed
+    }
+
     /// Subscribes to the spot events of `symbol_ids`, with their
-    /// timestamps, or unsubscribes from them; the outcome is logged.
+    /// timestamps, or unsubscribes from them; cTrader's answer confirms or
+    /// fails them (see `spots_answered`).
     async fn send_spots(&mut self, subscribe: bool, symbol_ids: Vec<i64>) {
         let id = self.next_id();
         let account = self.credential.account_id.get();
@@ -583,13 +637,6 @@ impl IcWsHandler {
         };
         match self.send(frame, None).await {
             Ok(()) => {
-                for symbol_id in &symbol_ids {
-                    if subscribe {
-                        self.connection_spots.insert(*symbol_id);
-                    } else {
-                        self.connection_spots.remove(symbol_id);
-                    }
-                }
                 self.pending.insert(
                     id,
                     Pending::Spots {
@@ -598,7 +645,14 @@ impl IcWsHandler {
                     },
                 );
             }
-            Err(e) => log::error!("cTrader spot subscription of {symbol_ids:?} not sent: {e}"),
+            Err(e) => {
+                log::error!("cTrader spot subscription of {symbol_ids:?} not sent: {e}");
+                if subscribe {
+                    for symbol_id in &symbol_ids {
+                        self.subscriptions.mark_failure(&spot_topic(*symbol_id));
+                    }
+                }
+            }
         }
     }
 
@@ -712,8 +766,46 @@ impl IcWsHandler {
             Some(Pending::Spots {
                 subscribe,
                 symbol_ids,
-            }) => log_spots(subscribe, &symbol_ids, &envelope),
+            }) => self.spots_answered(subscribe, &symbol_ids, &envelope),
             None => self.event(&envelope).await,
+        }
+    }
+
+    /// cTrader's answer to the handler's spot (un)subscription of
+    /// `symbol_ids`: an acceptance confirms it in the state, a refused
+    /// subscription is marked failed (kept for the next connection) and
+    /// logged, as is a refused unsubscription.
+    fn spots_answered(&self, subscribe: bool, symbol_ids: &[i64], envelope: &ProtoMessage) {
+        let outcome = if subscribe {
+            open::<ProtoOaSubscribeSpotsRes>(envelope).map(|_| ())
+        } else {
+            open::<ProtoOaUnsubscribeSpotsRes>(envelope).map(|_| ())
+        };
+        let action = if subscribe {
+            "subscription"
+        } else {
+            "unsubscription"
+        };
+        match outcome {
+            Ok(()) => {
+                for symbol_id in symbol_ids {
+                    let topic = spot_topic(*symbol_id);
+                    if subscribe {
+                        self.subscriptions.confirm_subscribe(&topic);
+                    } else {
+                        self.subscriptions.confirm_unsubscribe(&topic);
+                    }
+                }
+                log::debug!("cTrader spot {action} of symbols {symbol_ids:?} done");
+            }
+            Err(e) => {
+                if subscribe {
+                    for symbol_id in symbol_ids {
+                        self.subscriptions.mark_failure(&spot_topic(*symbol_id));
+                    }
+                }
+                log::error!("cTrader refused the spot {action} of symbols {symbol_ids:?}: {e}");
+            }
         }
     }
 
@@ -783,25 +875,6 @@ fn renewal_failure(error: &IcError) -> String {
             format!("cTrader refused to renew the access token ({code}): {PLAYGROUND}")
         }
         other => format!("renewing the access token: {other}"),
-    }
-}
-
-/// Logs cTrader's answer to the handler's spot (un)subscription of
-/// `symbol_ids`.
-fn log_spots(subscribe: bool, symbol_ids: &[i64], envelope: &ProtoMessage) {
-    let outcome = if subscribe {
-        open::<ProtoOaSubscribeSpotsRes>(envelope).map(|_| ())
-    } else {
-        open::<ProtoOaUnsubscribeSpotsRes>(envelope).map(|_| ())
-    };
-    let action = if subscribe {
-        "subscription"
-    } else {
-        "unsubscription"
-    };
-    match outcome {
-        Ok(()) => log::debug!("cTrader spot {action} of symbols {symbol_ids:?} done"),
-        Err(e) => log::error!("cTrader refused the spot {action} of symbols {symbol_ids:?}: {e}"),
     }
 }
 
