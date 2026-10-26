@@ -218,16 +218,11 @@ execution engine's `resolve_oms_type_for_client`; Concepts › Execution,
 instrument add into one position at a blended price; on a hedging venue
 each trade is a position of its own. The same strategy code runs on both.
 Strategy and venue modes always match, so Nautilus keeps no virtual
-positions and a restart reconciles the cached positions with the venue's
-cleanly (see the live README, "Cache in Redis"). A strategy that set
-`HEDGING` on a netting venue could not restart with overlapping trades:
-the venue reports one position at the blended average, which differs from
-the cached per-trade positions, and Nautilus refuses the start. The
-backtest's venue keeps positions the same way (backtest README, "Venue").
-
-A bracket is what a strategy sends: `self.order().bracket()` and
-`submit_order_list`. Whether the venue takes it is the venue's matter (see
-the IB live README, "Brackets").
+positions. A strategy that set `HEDGING` on a netting venue could not
+restart with overlapping trades: the venue reports one position at the
+blended average, which differs from the cached per-trade positions, and
+Nautilus refuses the start. The backtest's venue keeps positions the same
+way (backtest README, "Venue").
 
 The EMA strategy decides on each bar's close and sends a market order to
 reach its target position. Limit and stop orders backtest less faithfully:

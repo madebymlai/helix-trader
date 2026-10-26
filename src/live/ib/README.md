@@ -130,7 +130,10 @@ adapter stamps it at open + bar size, half an hour after its real close (see
 `InteractiveBrokersExecutionClientConfig`: `host`, `port`, `client_id` as
 above, `account_id: Option<String>` (see "The account"), timeouts,
 `instrument_provider`. The factory fixes `OmsType::Netting` and
-`AccountType::Margin`, so leave the strategy's `oms_type` unset or `Netting`.
+`AccountType::Margin`; a strategy leaves its `oms_type` unset and nets.
+Nautilus' `bracket()` makes its exits reduce-only and the IB execution
+client denies reduce-only orders (`UNSUPPORTED_REDUCE_ONLY`), so a bracket
+is denied on IB.
 The exec `client_id` must not be a multiple of 1000: the adapter partitions
 order ids by `client_id % 1000` and rejects one. Since data and exec share the
 client id, `mod.rs` refuses it before any gateway starts.
