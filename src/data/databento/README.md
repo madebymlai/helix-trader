@@ -33,8 +33,8 @@ history.fill(&self, catalog: &ParquetDataCatalog, ids: &[InstrumentId],
 Databento publishers to venues, copied from `crates/adapters/databento/`
 at the pinned commit (the client reads it from a path; Nautilus ships it
 beside its own binaries), and Databento's own client (`databento`, the
-version Nautilus uses) for cost quotes, which Nautilus' client does not
-make.
+version Nautilus uses) for the metadata Nautilus' client does not give:
+cost quotes and the dataset's end.
 
 ## Instrument ids
 
@@ -71,9 +71,12 @@ history backwards is not supported). A covered window asks for nothing: a
 
 Otherwise, before any data request:
 
-1. Databento's quote for each series' missing window is logged
+1. An `end` past the data Databento has (`metadata.get_dataset_range`;
+   GLBX.MDP3 lags real time, on 2026-10-26 at 18:42 UTC it ended at 18:30)
+   is an error: a request over it fails (422, `data_end_after_available_end`).
+2. Databento's quote for each series' missing window is logged
    (`metadata.get_cost`, free).
-2. The definitions over the missing span are fetched (a few kilobytes,
+3. The definitions over the missing span are fetched (a few kilobytes,
    quoted $0.00 for four weeks) and those later than any stored written.
 
 Then each series is fetched one UTC day per request (the window cut at
@@ -103,6 +106,7 @@ Without network:
 - resume window: a series not stored over the whole window; a stored one
   after its range, whatever `start`; a covered window (as the loaded
   weeks) fetching nothing; a `start` before the stored range refused;
+- an `end` past the dataset's end refused;
 - the day split: cut at each UTC midnight, a window inside a day is one
   day, a request's end exclusive;
 - a day's write, on a temp catalog: stored over the day, split into

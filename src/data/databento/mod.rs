@@ -55,8 +55,9 @@ type Window = (u64, u64);
 #[derive(Debug)]
 pub struct DatabentoHistory {
     client: DatabentoHistoricalClient,
-    /// Databento's own client, for the cost quotes Nautilus' does not make.
-    quotes: databento::HistoricalClient,
+    /// Databento's own client, for the metadata Nautilus' does not give:
+    /// cost quotes and the dataset's end.
+    metadata: databento::HistoricalClient,
 }
 
 impl DatabentoHistory {
@@ -73,12 +74,12 @@ impl DatabentoHistory {
             false,
         )
         .context("building Nautilus' Databento historical client")?;
-        let quotes = databento::HistoricalClient::builder()
+        let metadata = databento::HistoricalClient::builder()
             .key(api_key)
             .context("building Databento's client")?
             .build()
             .context("building Databento's client")?;
-        Ok(Self { client, quotes })
+        Ok(Self { client, metadata })
     }
 
     /// Whether `id` is on `GLBX`, the venue Nautilus gives CME Globex
@@ -136,13 +137,21 @@ impl DatabentoHistory {
             (None, None) => {
                 log::info!(
                     "{id}: MBP-10 and trades stored up to {}, nothing to fetch",
-                    UnixNanos::from(end)
+                    at(end)
                 );
                 return Ok(());
             }
             (Some((a, _)), Some((b, _))) => a.min(b),
             (Some((from, _)), None) | (None, Some((from, _))) => from,
         };
+        let available = self
+            .metadata
+            .clone()
+            .metadata()
+            .get_dataset_range(DATASET)
+            .await
+            .with_context(|| format!("requesting the range of {DATASET}"))?;
+        ensure_available(end, nanos_of(available.end.unix_timestamp_nanos())?)?;
         for (schema, window) in [(Schema::Mbp10, depth), (Schema::Trades, trades)] {
             if let Some(window) = window {
                 self.log_cost(id, schema, window).await?;
@@ -184,7 +193,7 @@ impl DatabentoHistory {
             .date_time_range(range(window)?)
             .build();
         let cost = self
-            .quotes
+            .metadata
             .clone()
             .metadata()
             .get_cost(&params)
@@ -192,8 +201,8 @@ impl DatabentoHistory {
             .with_context(|| format!("quoting the {schema} of {id} over {window:?}"))?;
         log::info!(
             "{id}: Databento quotes ${cost:.2} for {schema} over [{}, {}] ({} days)",
-            UnixNanos::from(window.0),
-            UnixNanos::from(window.1),
+            at(window.0),
+            at(window.1),
             days(window).len(),
         );
         Ok(())
@@ -233,6 +242,23 @@ impl DatabentoHistory {
     }
 }
 
+/// Refuses an `end` Databento has no data up to yet: a request over it
+/// would fail.
+fn ensure_available(end: u64, available_end: u64) -> anyhow::Result<()> {
+    ensure!(
+        end < available_end,
+        "{DATASET} has data up to {} only, not up to {}",
+        at(available_end),
+        at(end)
+    );
+    Ok(())
+}
+
+/// Signed Unix nanoseconds `ns` as a `u64`.
+fn nanos_of(ns: i128) -> anyhow::Result<u64> {
+    u64::try_from(ns).with_context(|| format!("{ns} ns is before 1970"))
+}
+
 /// The part of `[start, end]` to fetch for the series of type `T` of `id`,
 /// after its stored range in `catalog` (see `resume`).
 fn missing_window<T: HasCatalogDataType>(
@@ -266,9 +292,9 @@ fn resume(stored: Option<Window>, start: u64, end: u64) -> anyhow::Result<Option
                 start >= first,
                 "stored over [{}, {}] and {} is before it: extending history backwards is \
                  not supported; use a new catalog",
-                UnixNanos::from(first),
-                UnixNanos::from(last),
-                UnixNanos::from(start),
+                at(first),
+                at(last),
+                at(start),
             );
             last + 1
         }
@@ -343,9 +369,9 @@ where
         bail!(
             "{} holds a record at {} outside [{}, {}]",
             named(),
-            UnixNanos::from(outside),
-            UnixNanos::from(from),
-            UnixNanos::from(to)
+            at(outside),
+            at(from),
+            at(to)
         );
     }
     let mut chunk_start = 0;
@@ -371,8 +397,8 @@ where
         "{}: {} rows over [{}, {}]",
         named(),
         items.len(),
-        UnixNanos::from(from),
-        UnixNanos::from(to)
+        at(from),
+        at(to)
     );
     Ok(())
 }
@@ -415,6 +441,11 @@ impl HasInstrumentId for TradeTick {
 /// `ts` in Unix nanoseconds.
 fn nanos(ts: Timestamp) -> u64 {
     UnixNanos::from(ts).as_u64()
+}
+
+/// Unix nanoseconds `ns` as a time, for messages.
+fn at(ns: u64) -> Timestamp {
+    Timestamp::from(UnixNanos::from(ns))
 }
 
 #[cfg(test)]
@@ -489,6 +520,13 @@ mod tests {
     fn a_start_before_the_stored_range_is_refused() {
         let err = format!("{:#}", resume(Some((10, 14)), 9, 20).unwrap_err());
         assert!(err.contains("backwards"), "{err}");
+    }
+
+    #[test]
+    fn an_end_databento_has_no_data_up_to_is_refused() {
+        assert!(ensure_available(MONDAY - 1, MONDAY).is_ok());
+        let err = ensure_available(MONDAY, MONDAY).unwrap_err().to_string();
+        assert!(err.contains("2026-10-26"), "{err}");
     }
 
     #[test]
