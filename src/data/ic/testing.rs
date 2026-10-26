@@ -17,8 +17,22 @@ use super::messages::{
     ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, frame,
 };
 
-/// The fake account the tests authenticate.
+/// The fake account the tests authenticate: the `ctidTraderAccountId` the
+/// captured responses were scrubbed to.
 pub(super) const ACCOUNT_ID: i64 = 1_000_001;
+
+// Responses captured from IC's cTrader demo, scrubbed: the payloads, as
+// served (see the `.txtpb` beside each in `testdata/`).
+pub(super) const APPLICATION_AUTH_RES: &[u8] = include_bytes!("testdata/application_auth_res.bin");
+pub(super) const APPLICATION_AUTH_REFUSED: &[u8] =
+    include_bytes!("testdata/application_auth_refused.bin");
+pub(super) const ACCOUNT_AUTH_RES: &[u8] = include_bytes!("testdata/account_auth_res.bin");
+pub(super) const ACCOUNT_AUTH_TOKEN_INVALID: &[u8] =
+    include_bytes!("testdata/account_auth_token_invalid.bin");
+pub(super) const ASSET_LIST_RES: &[u8] = include_bytes!("testdata/asset_list_res.bin");
+pub(super) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("testdata/symbols_list_res.bin");
+pub(super) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("testdata/symbol_by_id_res.bin");
+pub(super) const SYMBOL_BY_ID_UNKNOWN: &[u8] = include_bytes!("testdata/symbol_by_id_unknown.bin");
 
 /// What the peer does after a frame.
 pub(super) enum Action {
@@ -33,19 +47,33 @@ pub(super) fn reply<M: Payload>(request: &ProtoMessage, response: &M) -> Action 
     Action::Send(frame(response, request.client_msg_id.clone()))
 }
 
-/// The answers of a cTrader that accepts the application and the
+/// The answer to `request`: the captured `payload`, an `M`, under the
+/// request's `clientMsgId`. The bytes go as captured, fields the vendored
+/// `.proto` lacks included.
+pub(super) fn replay<M: Payload>(request: &ProtoMessage, payload: &[u8]) -> Action {
+    Action::Send(
+        ProtoMessage {
+            payload_type: M::TYPE,
+            payload: Some(payload.to_vec()),
+            client_msg_id: request.client_msg_id.clone(),
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// The captured answers of a cTrader that accepts the application and the
 /// account `ACCOUNT_ID`, or `None` for a frame that is no auth request.
 pub(super) fn accept_auth(request: &ProtoMessage) -> Option<Vec<Action>> {
     match request.payload_type {
         t if t == ProtoOaApplicationAuthReq::TYPE => {
-            Some(vec![reply(request, &ProtoOaApplicationAuthRes::default())])
+            Some(vec![replay::<ProtoOaApplicationAuthRes>(
+                request,
+                APPLICATION_AUTH_RES,
+            )])
         }
-        t if t == ProtoOaAccountAuthReq::TYPE => Some(vec![reply(
+        t if t == ProtoOaAccountAuthReq::TYPE => Some(vec![replay::<ProtoOaAccountAuthRes>(
             request,
-            &ProtoOaAccountAuthRes {
-                ctid_trader_account_id: ACCOUNT_ID,
-                ..Default::default()
-            },
+            ACCOUNT_AUTH_RES,
         )]),
         _ => None,
     }

@@ -162,11 +162,12 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::data::ic::messages::{
-        ProtoOaAssetListRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes,
+    use crate::data::ic::{
+        messages::{ProtoOaAssetListRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes},
+        testing::{ASSET_LIST_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES},
     };
 
-    /// The fixtures' symbols, assets and details (see `testdata/`).
+    /// The captured symbols, assets and details (see `testdata/`).
     struct Fixtures {
         light: HashMap<String, ProtoOaLightSymbol>,
         details: HashMap<i64, ProtoOaSymbol>,
@@ -174,15 +175,9 @@ mod tests {
     }
 
     fn fixtures() -> Fixtures {
-        let list =
-            ProtoOaSymbolsListRes::decode(&include_bytes!("testdata/symbols_list_res.bin")[..])
-                .unwrap();
-        let details =
-            ProtoOaSymbolByIdRes::decode(&include_bytes!("testdata/symbol_by_id_res.bin")[..])
-                .unwrap();
-        let assets =
-            ProtoOaAssetListRes::decode(&include_bytes!("testdata/asset_list_res.bin")[..])
-                .unwrap();
+        let list = ProtoOaSymbolsListRes::decode(SYMBOLS_LIST_RES).unwrap();
+        let details = ProtoOaSymbolByIdRes::decode(SYMBOL_BY_ID_RES).unwrap();
+        let assets = ProtoOaAssetListRes::decode(ASSET_LIST_RES).unwrap();
         Fixtures {
             light: list
                 .symbol
@@ -245,7 +240,7 @@ mod tests {
         assert_eq!(eur.size_increment, Quantity::from(1_000));
         assert_eq!(eur.lot_size, Some(Quantity::from(100_000)));
         assert_eq!(eur.min_quantity, Some(Quantity::from(1_000)));
-        assert_eq!(eur.max_quantity, Some(Quantity::from(10_000_000)));
+        assert_eq!(eur.max_quantity, Some(Quantity::from(100_000_000)));
     }
 
     #[test]

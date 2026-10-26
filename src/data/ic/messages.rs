@@ -173,6 +173,7 @@ impl std::error::Error for IcError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::ic::testing::SYMBOL_BY_ID_UNKNOWN;
 
     fn envelope<M: Payload>(message: &M) -> ProtoMessage {
         ProtoMessage::decode(frame(message, Some("7".to_owned())).as_slice()).unwrap()
@@ -207,21 +208,22 @@ mod tests {
         );
     }
 
+    /// The error is the fixture `symbol_by_id_unknown`.
     #[test]
     fn an_error_response_opens_as_the_venue_error() {
-        let error = ProtoOaErrorRes {
-            error_code: "SYMBOL_NOT_FOUND".to_owned(),
-            description: Some("Symbol not found".to_owned()),
-            ..Default::default()
+        let envelope = ProtoMessage {
+            payload_type: ProtoOaErrorRes::TYPE,
+            payload: Some(SYMBOL_BY_ID_UNKNOWN.to_vec()),
+            client_msg_id: Some("7".to_owned()),
         };
 
-        let opened = open::<ProtoOaSymbolByIdRes>(&envelope(&error));
+        let opened = open::<ProtoOaSymbolByIdRes>(&envelope);
 
         assert_eq!(
             opened,
             Err(IcError::Venue {
                 code: "SYMBOL_NOT_FOUND".to_owned(),
-                description: Some("Symbol not found".to_owned()),
+                description: Some("No symbols with requested ID".to_owned()),
             })
         );
     }

@@ -156,7 +156,10 @@ mod tests {
             ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaErrorRes,
             ProtoOaSymbol, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
         },
-        testing::{self, ACCOUNT_ID, Action, accept_auth, credential, reply},
+        testing::{
+            self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED, Action,
+            SYMBOL_BY_ID_UNKNOWN, accept_auth, credential, replay, reply,
+        },
     };
 
     const SLOW_HEARTBEAT: Duration = Duration::from_secs(3600);
@@ -279,32 +282,25 @@ mod tests {
         client.disconnect().await;
     }
 
+    /// The error is the fixture `symbol_by_id_unknown`.
     #[tokio::test]
     async fn a_venue_error_answers_its_request() {
         let (url, _) = testing::start(|_, request| {
-            accept_auth(request).unwrap_or_else(|| {
-                vec![reply(
-                    request,
-                    &ProtoOaErrorRes {
-                        error_code: "SYMBOL_NOT_FOUND".to_owned(),
-                        description: Some("Symbol not found.".to_owned()),
-                        ..Default::default()
-                    },
-                )]
-            })
+            accept_auth(request)
+                .unwrap_or_else(|| vec![replay::<ProtoOaErrorRes>(request, SYMBOL_BY_ID_UNKNOWN)])
         });
         let client = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
             .await
             .unwrap();
 
         let error = client
-            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
+            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(987_654_321))
             .await
             .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "cTrader error SYMBOL_NOT_FOUND: Symbol not found."
+            "cTrader error SYMBOL_NOT_FOUND: No symbols with requested ID"
         );
         client.disconnect().await;
     }
@@ -314,11 +310,10 @@ mod tests {
     async fn a_rejected_token_fails_the_connection_naming_the_code_never_the_token() {
         let (url, _) = testing::start(|_, request| {
             if request.payload_type == ProtoOaAccountAuthReq::TYPE {
-                let error = ProtoOaErrorRes::decode(
-                    &include_bytes!("../testdata/account_auth_token_invalid.bin")[..],
-                )
-                .unwrap();
-                return vec![reply(request, &error)];
+                return vec![replay::<ProtoOaErrorRes>(
+                    request,
+                    ACCOUNT_AUTH_TOKEN_INVALID,
+                )];
             }
             accept_auth(request).unwrap_or_default()
         });
@@ -345,17 +340,11 @@ mod tests {
         }
     }
 
-    /// Synthetic: CH_CLIENT_AUTH_FAILURE, as ProtoOAErrorCode names it.
+    /// The refusal is the fixture `application_auth_refused`.
     #[tokio::test]
     async fn a_refused_application_fails_before_any_account_auth() {
         let (url, received) = testing::start(|_, request| {
-            vec![reply(
-                request,
-                &ProtoOaErrorRes {
-                    error_code: "CH_CLIENT_AUTH_FAILURE".to_owned(),
-                    ..Default::default()
-                },
-            )]
+            vec![replay::<ProtoOaErrorRes>(request, APPLICATION_AUTH_REFUSED)]
         });
 
         let err = IcWebSocketClient::connect(&url, credential(), SLOW_HEARTBEAT)
@@ -378,6 +367,7 @@ mod tests {
         );
     }
 
+    /// Synthetic: the account auth response of another account.
     #[tokio::test]
     async fn another_account_authenticated_is_refused() {
         let (url, _) = testing::start(|_, request| {

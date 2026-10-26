@@ -225,29 +225,31 @@ mod tests {
 
     use super::{
         messages::{Payload, ProtoMessage},
-        testing::{self, ACCOUNT_ID, Action, Received, accept_auth, credential},
+        testing::{
+            self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
+            accept_auth, credential, replay,
+        },
         *,
     };
 
-    /// A cTrader serving the fixtures' assets, symbols and details.
+    /// A cTrader serving the captured assets, symbols and details.
     fn fixtures_peer(_: usize, request: &ProtoMessage) -> Vec<Action> {
         if let Some(actions) = accept_auth(request) {
             return actions;
         }
-        let fixture: &[u8] = match request.payload_type {
-            t if t == ProtoOaAssetListReq::TYPE => include_bytes!("testdata/asset_list_res.bin"),
-            t if t == ProtoOaSymbolsListReq::TYPE => {
-                include_bytes!("testdata/symbols_list_res.bin")
+        let response = match request.payload_type {
+            t if t == ProtoOaAssetListReq::TYPE => {
+                replay::<ProtoOaAssetListRes>(request, ASSET_LIST_RES)
             }
-            t if t == ProtoOaSymbolByIdReq::TYPE => include_bytes!("testdata/symbol_by_id_res.bin"),
+            t if t == ProtoOaSymbolsListReq::TYPE => {
+                replay::<ProtoOaSymbolsListRes>(request, SYMBOLS_LIST_RES)
+            }
+            t if t == ProtoOaSymbolByIdReq::TYPE => {
+                replay::<ProtoOaSymbolByIdRes>(request, SYMBOL_BY_ID_RES)
+            }
             other => panic!("unexpected request {other}"),
         };
-        let response = ProtoMessage {
-            payload_type: request.payload_type + 1,
-            payload: Some(fixture.to_vec()),
-            client_msg_id: request.client_msg_id.clone(),
-        };
-        vec![Action::Send(response.encode_to_vec())]
+        vec![response]
     }
 
     async fn connected() -> (IcHistory, Received) {

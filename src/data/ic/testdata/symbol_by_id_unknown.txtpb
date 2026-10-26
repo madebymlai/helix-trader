@@ -1,0 +1,9 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a symbol-by-id request for symbolId 987654321, which IC does not list.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAErrorRes OpenApiMessages.proto < symbol_by_id_unknown.bin
+# Message: ProtoOAErrorRes
+ctidTraderAccountId: 1000001
+errorCode: "SYMBOL_NOT_FOUND"
+description: "No symbols with requested ID"
