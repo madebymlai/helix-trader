@@ -1,20 +1,27 @@
 # IC Markets live
 
-`live/ic/mod.rs` builds IC's data client for the live node: the factory and
-config of the adapter in `data/ic/` (`IcDataClient`). IC has no execution
-client yet (a later slice of the IC adapter), so the node gets none for
-`ICMARKETS`. The node, the start sequence and the routing between venues are
-in `live/README.md`; the cTrader session, the spot events, the merge into
-quotes and the quote requests in `data/ic/README.md`.
+`live/ic/mod.rs` builds IC's clients for the live node: the factories and
+configs of the adapter in `data/ic/` (`IcDataClient`, `IcExecutionClient`).
+The node, the start sequence and the routing between venues are in
+`live/README.md`; the cTrader session, the spot events, the merge into
+quotes, the quote requests, the account and the reconciliation reports in
+`data/ic/README.md`.
 
 ```rust
 IcDataClientFactory                  // name() == "ICMARKETS", config_type() == "IcDataClientConfig"
 IcDataClientConfig { connection: IcConnection, instrument_ids: Vec<InstrumentId> }
+IcExecutionClientFactory             // name() == "ICMARKETS", config_type() == "IcExecutionClientConfig"
+IcExecutionClientConfig { connection: IcConnection, instrument_ids: Vec<InstrumentId> }
 ```
 
-The factory creates an `IcDataClient` named after the client
-(`ClientId("ICMARKETS")`); its `venue()` is `ICMARKETS`, so the data engine
-routes IC instruments to it with no route of ours (`RoutingConfig::default()`).
+Each factory creates its client named after the client
+(`ClientId("ICMARKETS")`) on venue `ICMARKETS`, so the data and execution
+engines route IC instruments and orders to them with no route of ours
+(`RoutingConfig::default()`). The execution client is hedging
+(`OmsType::Hedging`), a margin account `ICMARKETS-DEMO` or `ICMARKETS-LIVE`:
+named after the environment, since the account's id and login are
+credential identity, never logged; stable, so a persisted cache finds it
+again.
 
 ## Environment and credential
 
@@ -26,8 +33,40 @@ fails the start naming the variable, never a value. The config carries the
 connection; `Debug` redacts the credential.
 
 The access token lasts about 30 days; renewing it is a manual step
-(`data/ic/README.md`, "Credentials"). An expired token fails the start's
-catalog fill, before the node is built.
+(`data/ic/README.md`, "Credentials").
+
+## Refused before the node runs
+
+The start's catalog fill opens a cTrader session before the node is built,
+and checks the account there (`IcHistory::check_account`), so each of these
+fails `Live::run` with its reason, before any node or strategy:
+
+- an expired or invalid token: `cTrader refused the account authentication
+  (CH_ACCESS_TOKEN_INVALID): ... renew IC_ACCESS_TOKEN`;
+- another account than `IC_ACCOUNT_ID` (the account auth or the trader of
+  another account): `... another account than IC_ACCOUNT_ID`;
+- a netting (or spread betting) account: `the IC account is NETTED, not
+  HEDGED: the adapter trades a hedging account only ...`.
+
+The execution client checks the same at connect, and logs the reason of
+a failed connect: the node logs only "connection failed", then times out. On the demo, 2026-10-26: the
+account is `HEDGED`, its deposit currency EUR.
+
+## What the execution client does
+
+- **Connect**: authenticates, checks the account, loads the run's
+  instruments, publishes the account state (balance, and the margin the
+  open positions use, in the deposit currency), then waits until the
+  node's cache holds the account before reporting connected.
+- **Startup reconciliation**: one report per cTrader position, its
+  `positionId` the venue position id; the stop loss and take profit as the
+  position's reduce-only orders; pending orders; the deals as fills (see
+  `data/ic/README.md`, "Reconciliation").
+- **Periodic checks** (open orders every 10 s, positions every 30 s, as the
+  node is configured): the reconcile request each time.
+- **Orders**: none reaches IC yet. A submission is denied (`OrderDenied`,
+  "IC's execution client places no order yet"), a modification or cancel
+  rejected; the next slice of the adapter adds the order flow.
 
 ## What the data client does
 
@@ -63,10 +102,10 @@ does when the catalog ends before the node starts.
 
 ## Known limits
 
-- **No execution client.** An order on an IC instrument finds no client and
-  is denied (`NoExecutionClient`); nothing reaches IC. A strategy trading IC
-  instruments with IB ones is refused at the start, since IB's execution
-  client is the default route and would get IC's orders.
+- **No order flow.** An order on an IC instrument is denied by IC's
+  execution client; nothing reaches IC. A strategy trading IC instruments
+  with IB ones is still refused at the start (kept from before IC had an
+  execution client; IC's client now gets IC's orders by venue).
 - **Market closed over the whole warmup** (a weekend with a short warmup):
   the start's fill fails, naming the series and the window, as
   `fill-catalog` does.
@@ -77,13 +116,17 @@ does when the catalog ends before the node starts.
 
 - Unit tests in `mod.rs`: a missing or unknown `IC_ENVIRONMENT` and a missing
   credential variable refused before anything connects, an instrument of
-  another venue refused, the factory creating an unconnected client on
-  `ICMARKETS`, no execution client for the node.
+  another venue refused, the factories creating unconnected clients on
+  `ICMARKETS` (the execution client hedging, on `ICMARKETS-DEMO`), IC's
+  execution client in the node's clients.
 - The data client against the mock cTrader peer: `data/ic/README.md`,
   "Tests".
 - End to end, `tests/ic_live_demo.rs`: `Live` on the demo's XAUUSD, a
   recording strategy getting its warmup, live quotes and the minute bars
-  built from them; no order. Skipped unless `NAUTILUS_IC_RUN=1` is set in
+  built from them, the node reconciling the account through IC's execution
+  client at start; no order. Passed again on 2026-10-26 (13:15-13:17 UTC,
+  155 s): account state 1,000,000.00 EUR, no margin; mass status empty,
+  reconciled; 29 warmup bars, 2 live bars. Skipped unless `NAUTILUS_IC_RUN=1` is set in
   the shell:
 
   ```sh
