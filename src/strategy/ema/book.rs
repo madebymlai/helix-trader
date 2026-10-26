@@ -8,7 +8,8 @@ use nautilus_indicators::{
 use nautilus_model::{data::Bar, identifiers::InstrumentId};
 use rust_decimal::Decimal;
 
-use super::{config::EmaCrossConfig, session::Session};
+use super::config::EmaCrossConfig;
+use crate::strategy::Session;
 
 /// Target book of the EMA crossover: long `trade_size` while the fast EMA is
 /// above the slow one, short otherwise. With a session, only bars wholly
@@ -24,6 +25,7 @@ pub(super) struct Book {
 impl Book {
     pub(super) fn new(config: &EmaCrossConfig) -> Self {
         let signals = config
+            .bars
             .instrument_ids
             .iter()
             .map(|id| (*id, Crossover::new(config.fast_period, config.slow_period)))
@@ -31,8 +33,8 @@ impl Book {
         Self {
             signals,
             trade_size: config.trade_size.as_decimal(),
-            session: config.session.clone(),
-            bar_length: config.bar_spec.timedelta(),
+            session: config.bars.session.clone(),
+            bar_length: config.bars.bar_spec.timedelta(),
         }
     }
 

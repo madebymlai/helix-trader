@@ -163,7 +163,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     );
     let catalog = tempfile::tempdir().unwrap();
     let config = never_trading_ema_cross();
-    let requirements = config.data_requirements();
+    let requirements = config.bars.data_requirements();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-043"),
         catalog: catalog.path().to_path_buf(),
