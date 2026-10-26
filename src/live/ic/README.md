@@ -202,7 +202,9 @@ order's `clientOrderId`. `dispatch.rs` maps them (captured on the demo,
 An event of an order this client did not send (or sent before a restart)
 becomes reports instead, which Nautilus reconciles: the order's status
 with its fill, or the status of a position's protections under their
-`-SL`/`-TP` ids. A terminal order's repeated events are dropped; a new
+`-SL`/`-TP` ids. A modify or cancel of such an order (a protection
+reconciled after a restart) tracks it before the request goes, so IC's
+refusal rejects the modification or the cancel. A terminal order's repeated events are dropped; a new
 deal after it goes as a report.
 
 **Commission.** A fill carries cTrader's charge of its deal: IC's Raw

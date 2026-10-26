@@ -953,3 +953,65 @@ async fn closing_a_protected_position_cancels_its_protections() {
     );
     node.client.disconnect().await.unwrap();
 }
+
+/// A stop loss reconciliation left in the cache after a restart: an
+/// accepted reduce-only stop market `id` under the venue order id `venue`,
+/// which this session never sent.
+fn reconciled_stop_loss(node: &Node, id: &str, venue: &str) {
+    let mut order = order(OrderType::StopMarket, id, OrderSide::Sell, 1)
+        .trigger_price(Price::from("3992.78"))
+        .reduce_only(true)
+        .build();
+    let account = AccountId::from("ICMARKETS-DEMO");
+    node.add(&[&order]);
+    for event in [
+        TestOrderEventStubs::submitted(&order, account),
+        TestOrderEventStubs::accepted(&order, account, VenueOrderId::from(venue)),
+    ] {
+        order.apply(event.clone()).unwrap();
+        node.cache.borrow_mut().update_order(&event).unwrap();
+    }
+}
+
+/// IC refuses every trade request: the position is gone.
+fn refusing(request: &ProtoMessage) -> Vec<Action> {
+    vec![event(
+        &decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_POSITION_NOT_FOUND),
+        request.client_msg_id.as_deref(),
+    )]
+}
+
+#[tokio::test]
+async fn a_refused_move_of_a_protection_from_before_a_restart_is_rejected() {
+    let mut node = Node::start(refusing).await;
+    reconciled_stop_loss(&node, "O-RECON-SL", "690004734-SL");
+
+    node.modify("O-RECON-SL", None, Some(Price::from("3982.78")));
+
+    let events = node.order_events(1).await;
+    let OrderEventAny::ModifyRejected(rejected) = &events[0] else {
+        panic!("not a modify rejection: {events:?}");
+    };
+    assert_eq!(rejected.client_order_id, ClientOrderId::from("O-RECON-SL"));
+    assert_eq!(
+        rejected.reason.as_str(),
+        "POSITION_NOT_FOUND: Position not found with id 690004734"
+    );
+    node.client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_cancel_of_a_protection_from_before_a_restart_is_rejected() {
+    let mut node = Node::start(refusing).await;
+    reconciled_stop_loss(&node, "O-RECON-SL", "690004734-SL");
+
+    node.cancel("O-RECON-SL");
+
+    let events = node.order_events(1).await;
+    let OrderEventAny::CancelRejected(rejected) = &events[0] else {
+        panic!("not a cancel rejection: {events:?}");
+    };
+    assert_eq!(rejected.client_order_id, ClientOrderId::from("O-RECON-SL"));
+    assert_eq!(node.tags::<ProtoOaAmendPositionSltpReq>(), ["U:O-RECON-SL"]);
+    node.client.disconnect().await.unwrap();
+}

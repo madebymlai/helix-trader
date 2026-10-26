@@ -632,6 +632,7 @@ impl IcExecutionClient {
         let order = self
             .cached_order(&id)
             .ok_or_else(|| format!("{id} is not in the cache"))?;
+        session.dispatch().adopt(&order);
         let venue = cmd.venue_order_id.or(order.venue_order_id());
         if let Some((position, leg)) = venue.and_then(parse_protection_id) {
             if cmd.quantity.is_some_and(|q| q != order.quantity()) {
@@ -704,6 +705,7 @@ impl IcExecutionClient {
                 let order = self
                     .cached_order(&id)
                     .ok_or_else(|| format!("{id} is not in the cache"))?;
+                session.dispatch().adopt(&order);
                 if let Some((position, leg)) = order.venue_order_id().and_then(parse_protection_id)
                 {
                     protections.entry(position).or_default().push((leg, id));
@@ -738,7 +740,7 @@ impl IcExecutionClient {
                 Ok::<_, String>(())
             })();
             if let Err(reason) = outcome {
-                self.refuse_cancel(session, id, &reason);
+                self.refuse_now(session, Tag::Cancel(id), &reason);
             }
         }
         for (position, legs) in protections {
@@ -746,21 +748,6 @@ impl IcExecutionClient {
                 legs.iter().map(|(leg, _)| (*leg, None)).collect();
             let request = self.amend_protections(position, &changes);
             self.send(session, request, Tag::Unprotect(legs[0].1));
-        }
-    }
-
-    /// Rejects the cancel of `id`, tracked or only cached, for `reason`:
-    /// nothing was sent.
-    fn refuse_cancel(&self, session: &Session, id: ClientOrderId, reason: &str) {
-        if session.dispatch().tracked(id).is_some() {
-            self.refuse_now(session, Tag::Cancel(id), reason);
-        } else if let Some(order) = self.cached_order(&id) {
-            self.emitter.emit_order_cancel_rejected(
-                &order,
-                order.venue_order_id(),
-                reason,
-                self.now(),
-            );
         }
     }
 

@@ -22,6 +22,8 @@
 //! - **External**: an event of an order not tracked (placed elsewhere, or
 //!   before a restart) becomes reports, which Nautilus reconciles: the
 //!   order's status with the deal's fill, or the legs' of a protection.
+//!   Such an order is tracked (`adopt`) once a modify or cancel of it is
+//!   sent, so that a refusal reaches it.
 //! - **Refusals**: an order error or an error answer, under the request's
 //!   `clientMsgId` (`Tag`), rejects a new order or a close, and the legs of
 //!   a bracket entry; rejects the modification of an amendment; rejects the
@@ -152,6 +154,15 @@ impl Dispatch {
                 role,
             },
         );
+    }
+
+    /// Tracks `order`, sent before a restart or placed elsewhere, as an
+    /// order of its own, unless tracked: a refusal of a request about it
+    /// then reaches it.
+    pub(super) fn adopt(&mut self, order: &OrderAny) {
+        if !self.orders.contains_key(&order.client_order_id()) {
+            self.track(order, Role::Order);
+        }
     }
 
     /// The tracked order `id`, open or not.
