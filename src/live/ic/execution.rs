@@ -15,9 +15,11 @@
 //! whole, or adds to it. A modification amends a pending order, or moves a
 //! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
 //! one left out, the other as last asked); a cancel cancels a pending
-//! order, or removes a protection. A request the session never sent is rejected; one sent but
-//! unanswered stays in flight (`retain_unresolved_submissions`) until its
-//! events, a query or reconciliation resolve it.
+//! order, or removes a protection. A request the session never sent is
+//! rejected; one sent but unanswered stays in flight
+//! (`retain_unresolved_submissions`) until its events, a query or
+//! reconciliation resolve it; a query finding no such order at IC rejects
+//! it.
 //!
 //! Reconciliation reads the reconcile request (open positions, their stop
 //! loss and take profit, pending orders), the deal list (fills), and for a
@@ -88,6 +90,9 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 /// How far before an order's creation a query looks for it in the order
 /// list: the venue's clock and the node's may differ.
 const QUERY_MARGIN_MS: i64 = 60_000;
+
+/// Why an order IC holds nowhere is rejected.
+const ABSENT: &str = "IC holds no such order: its request never reached IC";
 
 /// IC's execution client: orders, the account state and reconciliation
 /// reports of the account, on venue `ICMARKETS`.
@@ -408,7 +413,13 @@ impl IcExecutionClient {
         let clock = self.clock;
         self.spawn_command("IC trade request", async move {
             let refused = match sent.await {
-                Ok(Ok(())) => return Ok(()),
+                Ok(Ok(())) => {
+                    dispatch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .sent(tag);
+                    return Ok(());
+                }
                 Ok(Err(e)) => format!("not sent to IC: {e}"),
                 Err(_) => "not sent to IC: the session closed".to_owned(),
             };
@@ -746,8 +757,8 @@ impl IcExecutionClient {
     }
 
     /// The order `id` (venue order id `venue`, sent at the earliest at
-    /// `since`) as IC holds it, open or not, with its fills; `None` if IC
-    /// holds no such order since then.
+    /// `since`) as IC holds it, open or not, with its fills: by its venue
+    /// order id, else among the orders IC updated since then.
     async fn find_order(
         history: &IcHistory,
         reports: &Reports<'_>,
@@ -755,7 +766,7 @@ impl IcExecutionClient {
         venue: Option<VenueOrderId>,
         since: UnixNanos,
         now: UnixNanos,
-    ) -> anyhow::Result<Option<(OrderStatusReport, Vec<FillReport>)>> {
+    ) -> anyhow::Result<Held> {
         let order_id = match venue.and_then(|v| v.as_str().parse::<i64>().ok()) {
             Some(order_id) => Some(order_id),
             None => {
@@ -773,22 +784,33 @@ impl IcExecutionClient {
             }
         };
         let Some(order_id) = order_id else {
-            return Ok(None);
+            return Ok(Held::Nothing);
         };
         let details = history
             .order_details(order_id)
             .await
             .with_context(|| format!("requesting IC's order {order_id}"))?;
         let Some(mut status) = reports.order(&details.order)? else {
-            return Ok(None);
+            return Ok(Held::Unreported);
         };
         status.client_order_id = Some(id);
         let mut fills = Vec::new();
         for deal in &details.deal {
             fills.extend(reports.fill(deal)?);
         }
-        Ok(Some((status, fills)))
+        Ok(Held::Order(status, fills))
     }
+}
+
+/// What IC holds of an order a query looks for.
+#[expect(clippy::large_enum_variant, reason = "one per query, consumed at once")]
+enum Held {
+    /// The order as IC holds it, with its fills.
+    Order(OrderStatusReport, Vec<FillReport>),
+    /// No order of its id among those IC updated over its window.
+    Nothing,
+    /// An order the run does not report: of a symbol it did not load.
+    Unreported,
 }
 
 /// Whether cTrader's `order` is the Nautilus order `id`: its client order
@@ -1053,15 +1075,35 @@ impl ExecutionClient for IcExecutionClient {
     }
 
     /// Sends the report of the order of `cmd` as IC holds it, open or not,
-    /// with its fills; logs it if IC holds none.
+    /// with its fills. If IC's order list over its window holds none, its
+    /// request never reached IC: it is reported rejected, with an entry's
+    /// legs, unless the request may still wait in the session's queue (see
+    /// `Dispatch::absent`). A protection (`-SL`, `-TP`) is not queried: the
+    /// open-order check reads it.
     fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let session = self.session()?;
-        let since = self
-            .cached_order(&cmd.client_order_id)
-            .map_or(UnixNanos::default(), |o| o.ts_init());
+        let id = cmd.client_order_id;
+        let order = self.cached_order(&id);
         let venue = cmd
             .venue_order_id
-            .filter(|v| parse_protection_id(*v).is_none());
+            .or(order.as_ref().and_then(OrderAny::venue_order_id));
+        if venue.is_some_and(|v| parse_protection_id(v).is_some()) {
+            log::debug!("{id} is a protection: the open-order check reads it");
+            return Ok(());
+        }
+        let since = order
+            .as_ref()
+            .map_or(UnixNanos::default(), OrderAny::ts_init);
+        // The orders a conclusion of absence rejects: the order, an entry's
+        // legs.
+        let orders: HashMap<ClientOrderId, OrderAny> = order
+            .iter()
+            .flat_map(|o| o.linked_order_ids().unwrap_or_default().to_vec())
+            .filter_map(|leg| self.cached_order(&leg))
+            .chain(order.clone())
+            .map(|o| (o.client_order_id(), o))
+            .collect();
+        let dispatch = Arc::clone(&session.dispatch);
         let history = Arc::clone(&session.history);
         let account_id = self.core.account_id;
         let instruments = session.instruments.clone();
@@ -1076,12 +1118,25 @@ impl ExecutionClient for IcExecutionClient {
                 currency,
                 ts_init: now,
             };
-            let found =
-                Self::find_order(&history, &reports, cmd.client_order_id, venue, since, now)
-                    .await?;
-            match found {
-                Some((status, fills)) => emitter.send_order_with_fills(status, fills),
-                None => log::warn!("IC holds no order {} since {since}", cmd.client_order_id),
+            match Self::find_order(&history, &reports, id, venue, since, now).await? {
+                Held::Order(status, fills) => emitter.send_order_with_fills(status, fills),
+                Held::Nothing => {
+                    let absent = dispatch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .absent(id);
+                    let Some(ids) = absent else {
+                        log::info!("IC holds no order {id} since {since} yet: not concluded");
+                        return Ok(());
+                    };
+                    log::warn!("IC holds no order {id} since {since}: rejected");
+                    for absent in ids.iter().filter_map(|id| orders.get(id)) {
+                        emitter.send_order_status_report(reports.absent(absent, ABSENT));
+                    }
+                }
+                Held::Unreported => {
+                    log::warn!("IC's order {id} is of a symbol the run did not load");
+                }
             }
             Ok(())
         });
@@ -1118,7 +1173,10 @@ impl ExecutionClient for IcExecutionClient {
             .filter(|v| parse_protection_id(*v).is_none());
         let found =
             Self::find_order(&session.history, &reports, id, venue, since, self.now()).await?;
-        Ok(found.map(|(status, _)| status))
+        Ok(match found {
+            Held::Order(status, _) => Some(status),
+            Held::Nothing | Held::Unreported => None,
+        })
     }
 
     /// The open orders (the pending orders, the positions' stop loss and

@@ -99,6 +99,9 @@ pub(super) struct Tracked {
     /// The latest change of this protection asked of IC and not yet seen
     /// done, if any.
     pub(super) want: Option<Want>,
+    /// Whether its own request (a new order or a close) may still wait in
+    /// the session's queue.
+    pub(super) queued: bool,
 }
 
 /// A change of a protection (a bracket's leg, or a position's stop loss
@@ -182,6 +185,7 @@ impl Dispatch {
                 closed: order.is_closed(),
                 role,
                 want: None,
+                queued: true,
             },
         );
     }
@@ -190,9 +194,52 @@ impl Dispatch {
     /// order of its own, unless tracked: a refusal of a request about it
     /// then reaches it.
     pub(super) fn adopt(&mut self, order: &OrderAny) {
-        if !self.orders.contains_key(&order.client_order_id()) {
+        let id = order.client_order_id();
+        if !self.orders.contains_key(&id) {
             self.track(order, Role::Order);
+            if let Some(tracked) = self.orders.get_mut(&id) {
+                tracked.queued = false;
+            }
         }
+    }
+
+    /// Notes that the request `tag` left the session's queue: IC holds a
+    /// new order or a close from then on, if it got it.
+    pub(super) fn sent(&mut self, tag: Tag) {
+        if let Tag::New(id) | Tag::Close(id) = tag
+            && let Some(tracked) = self.orders.get_mut(&id)
+        {
+            tracked.queued = false;
+        }
+    }
+
+    /// The orders rejected once IC holds no order `id` over its window, a
+    /// query found: `id`, and a bracket entry's open legs, now closed.
+    /// `None`, nothing concluded, while its request may still wait in the
+    /// session's queue (IC cannot hold it yet), for a bracket's leg (IC
+    /// holds it on its entry or position, never as an order of its own), or
+    /// for an order closed. An order not tracked was not sent by this
+    /// session: nothing of it waits.
+    pub(super) fn absent(&mut self, id: ClientOrderId) -> Option<Vec<ClientOrderId>> {
+        let Some(tracked) = self.orders.get(&id) else {
+            return Some(vec![id]);
+        };
+        if tracked.closed || tracked.queued || matches!(tracked.role, Role::Leg { .. }) {
+            return None;
+        }
+        let mut ids = vec![id];
+        ids.extend(
+            self.legs(id)
+                .into_iter()
+                .map(|(_, leg)| leg)
+                .filter(|leg| self.open(*leg).is_some()),
+        );
+        for id in &ids {
+            if let Some(t) = self.orders.get_mut(id) {
+                t.closed = true;
+            }
+        }
+        Some(ids)
     }
 
     /// The tracked order `id`, open or not.
@@ -1041,5 +1088,98 @@ fn reason(code: &str, description: Option<&str>) -> String {
     match description.filter(|d| !d.is_empty()) {
         Some(description) => format!("{code}: {description}"),
         None => code.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_model::{
+        enums::{OrderSide, OrderType},
+        identifiers::InstrumentId,
+        orders::OrderTestBuilder,
+        types::Quantity,
+    };
+
+    use super::*;
+
+    fn dispatch() -> Dispatch {
+        Dispatch::new(
+            TraderId::from("HELIX-001"),
+            AccountId::from("ICMARKETS-DEMO"),
+            Currency::from("EUR"),
+            HashMap::new(),
+        )
+    }
+
+    fn order(id: &str, kind: OrderType) -> OrderAny {
+        let mut builder = OrderTestBuilder::new(kind);
+        builder
+            .instrument_id(InstrumentId::from("XAUUSD.ICMARKETS"))
+            .client_order_id(ClientOrderId::from(id))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(1));
+        match kind {
+            OrderType::StopMarket => builder.trigger_price(Price::from("3990.00")),
+            OrderType::Limit => builder.price(Price::from("4050.00")),
+            _ => &mut builder,
+        };
+        builder.build()
+    }
+
+    fn id(id: &str) -> ClientOrderId {
+        ClientOrderId::from(id)
+    }
+
+    #[test]
+    fn an_order_whose_request_may_still_wait_to_go_out_is_not_concluded_absent() {
+        let mut dispatch = dispatch();
+        dispatch.track(&order("O-1", OrderType::Market), Role::Order);
+
+        assert_eq!(dispatch.absent(id("O-1")), None);
+        dispatch.sent(Tag::New(id("O-1")));
+        assert_eq!(dispatch.absent(id("O-1")), Some(vec![id("O-1")]));
+    }
+
+    #[test]
+    fn an_order_this_session_never_sent_is_concluded_absent() {
+        let mut dispatch = dispatch();
+
+        assert_eq!(dispatch.absent(id("O-1")), Some(vec![id("O-1")]));
+    }
+
+    #[test]
+    fn an_absent_entry_takes_its_legs_and_a_leg_alone_is_not_concluded() {
+        let mut dispatch = dispatch();
+        dispatch.track(
+            &order("O-1-SL", OrderType::StopMarket),
+            Role::Leg {
+                entry: id("O-1"),
+                leg: Leg::StopLoss,
+            },
+        );
+        dispatch.track(
+            &order("O-1-TP", OrderType::Limit),
+            Role::Leg {
+                entry: id("O-1"),
+                leg: Leg::TakeProfit,
+            },
+        );
+        dispatch.track(
+            &order("O-1", OrderType::Market),
+            Role::Entry {
+                stop_loss: Some(id("O-1-SL")),
+                take_profit: Some(id("O-1-TP")),
+                position: None,
+            },
+        );
+        dispatch.sent(Tag::New(id("O-1")));
+
+        assert_eq!(dispatch.absent(id("O-1-SL")), None);
+        assert_eq!(
+            dispatch.absent(id("O-1")),
+            Some(vec![id("O-1"), id("O-1-SL"), id("O-1-TP")])
+        );
+        // Concluded: closed, so not again.
+        assert_eq!(dispatch.absent(id("O-1")), None);
     }
 }

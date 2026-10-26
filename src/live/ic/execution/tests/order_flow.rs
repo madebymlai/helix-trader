@@ -1164,3 +1164,53 @@ async fn a_refused_cancel_of_both_protections_rejects_the_cancel_of_each() {
     assert_eq!(node.requests::<ProtoOaAmendPositionSltpReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }
+
+/// The peer never answers the order, and its order list over the order's
+/// window holds none: the request never reached IC, so the query reports
+/// the order rejected.
+#[tokio::test]
+async fn an_unanswered_order_ic_holds_nowhere_is_reported_rejected_by_a_query() {
+    let mut node = Node::start(|request| match request.payload_type {
+        t if t == ProtoOaOrderListReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderListRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                has_more: false,
+                ..Default::default()
+            },
+        )],
+        _ => vec![],
+    })
+    .await;
+    node.submit(&market("PROBE-1", OrderSide::Buy, 1), None);
+    node.order_events(1).await;
+    node.quiet().await;
+
+    node.client
+        .query_order(QueryOrder::new(
+            TraderId::from("HELIX-001"),
+            Some(ClientId::from("ICMARKETS")),
+            StrategyId::from(STRATEGY),
+            InstrumentId::from(XAUUSD),
+            ClientOrderId::from("PROBE-1"),
+            None,
+            UUID4::new(),
+            node.client.now(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let ExecutionEvent::Report(nautilus_common::messages::ExecutionReport::Order(status)) =
+        node.next().await
+    else {
+        panic!("not an order report");
+    };
+    assert_eq!(status.client_order_id, Some(ClientOrderId::from("PROBE-1")));
+    assert_eq!(status.instrument_id, InstrumentId::from(XAUUSD));
+    assert_eq!(status.order_status, OrderStatus::Rejected);
+    assert_eq!(status.filled_qty, Quantity::from(0));
+    let listed: Vec<ProtoOaOrderListReq> = node.requests();
+    assert_eq!(listed.len(), 1);
+    node.client.disconnect().await.unwrap();
+}

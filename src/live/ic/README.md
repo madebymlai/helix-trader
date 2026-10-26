@@ -184,7 +184,18 @@ submitted and sends it.
   declares `retain_unresolved_submissions`, so Nautilus never times it out
   into a rejection; the venue's later events, `query_order` (the order by
   its id or, without one, among the orders cTrader updated since it was
-  created, with its deals) and the periodic checks resolve it.
+  created, with its deals) and the periodic checks resolve it. An order
+  with no venue order id that cTrader's order list over its window
+  (its creation, a minute of margin each side, to now) does not hold never
+  reached IC: `query_order` reports it rejected (an `OrderStatusReport`,
+  `REJECTED`, which Nautilus applies as `OrderRejected`), with a bracket
+  entry's legs, its reason "IC holds no such order: its request never
+  reached IC". Not while its request may still wait in the session's
+  queue (sent only once the session is authenticated): until the session
+  wrote it, the query concludes nothing. A bracket's leg is never
+  concluded on its own (IC holds it on its entry or position), nor is a
+  protection (`-SL`, `-TP`) queried. cTrader's deals carry no client order
+  id, so the deal list cannot find an order the order list lacks.
 
 ## Trade events
 
@@ -277,9 +288,10 @@ the same rate (`commission_rate(0.00003)`) in USD.
   (`ProtoOAOrderListReq`, a minute of margin each side, through the
   historical limiter), from its details (`ProtoOAOrderDetailsReq`, the
   order and its deals). An order cTrader holds nowhere in that window is
-  `None`, an absence; a failed request an error. The protections
-  (`-SL`, `-TP`) are not queried one by one: the open-order check reads
-  them.
+  `None`, an absence, to `generate_order_status_report`, and rejected by
+  `query_order` (see "Unknown outcomes"); a failed request an error. The
+  protections (`-SL`, `-TP`) are not queried one by one: the open-order
+  check reads them.
 
 The same positions come back whether the node starts from a persisted cache
 or from scratch: cTrader positions carry their own ids, which are the
@@ -446,9 +458,14 @@ limits") away from IC, however long the history takes.
     cancelled; a rejection and a refused cancel with IC's reasons; a fill
     before the acceptance and events twice making one acceptance and one
     fill; an unanswered order staying submitted until a query finds it
-    filled; a bracket riding on its entry, its legs accepted as
+    filled; an unanswered order IC's order list lacks reported rejected by
+    a query; a bracket riding on its entry, its legs accepted as
     `690004734-SL` and `-TP`, a moved stop loss sent with the take profit
-    kept, a removed take profit keeping the stop loss; the demo's stop loss
+    kept, a removed take profit keeping the stop loss; a move after an
+    unanswered cancel or move carrying it, on a position and on a pending
+    entry; a refused cancel of both protections rejecting the cancel of
+    each; a refused move and cancel of a protection reconciled before a
+    restart rejected; the demo's stop loss
     hit filling the stop loss and cancelling the take profit, a take profit
     hit the reverse; one of two positions closed by its id, a partial
     close, a close of a position IC no longer holds rejected, a close
@@ -456,6 +473,9 @@ limits") away from IC, however long the history takes.
     its legs;
   - `orders.rs`: tags and protection ids read back; market, bracket entry
     and stop requests; order types and flags cTrader lacks denied;
+  - `dispatch.rs`: an order whose request may still wait to go out not
+    concluded absent, one this session never sent concluded, an absent
+    entry taking its legs, a leg alone not concluded;
   - `data.rs`, the `DataClient` against the mock peer: the instruments sent
     at connect on venue `ICMARKETS`; subscribed quotes from the captured
     spot events; an unsubscription sent; a quote request answered from the
