@@ -17,7 +17,10 @@ use std::path::Path;
 
 use helix_trader::{
     backtest::{Backtest, commission_per_order, venue_oms_type},
-    strategy::ema::{EmaCross, EmaCrossConfig, Session},
+    strategy::{
+        BarsConfig, Session,
+        ema::{EmaCross, EmaCrossConfig},
+    },
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
 use nautilus_common::logging::logger::LoggerConfig;
@@ -222,18 +225,21 @@ pub fn ema_cross(
     warmup: SignedDuration,
     session: Option<Session>,
 ) -> EmaCross {
-    let config = EmaCrossConfig::builder()
+    let bars = BarsConfig::builder()
         .instrument_ids(vec![InstrumentId::from(INSTRUMENT_ID)])
         .bar_spec(BarSpecification::new(
             1,
             BarAggregation::Hour,
             PriceType::Mid,
         ))
+        .warmup(warmup)
+        .maybe_session(session)
+        .build();
+    let config = EmaCrossConfig::builder()
+        .bars(bars)
         .fast_period(fast)
         .slow_period(slow)
         .trade_size(Quantity::from(10))
-        .warmup(warmup)
-        .maybe_session(session)
         .build();
     EmaCross::new(config).unwrap()
 }

@@ -229,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
-        Strategy::Ema => load_ema_config(&args.run.config)?.data_requirements(),
+        Strategy::Ema => load_ema_config(&args.run.config)?.bars.data_requirements(),
     };
     // No node runs in this process, so no node installs Nautilus' logger:
     // install it here, as a node would, so the `log` output of this crate and
@@ -307,7 +307,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let outcome = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            backtest(config.data_requirements())?.run(EmaCross::new(config)?)?
+            backtest(config.bars.data_requirements())?.run(EmaCross::new(config)?)?
         }
     };
     print!("{}", backtest::report(&outcome));
@@ -327,7 +327,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     match args.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.config)?;
-            live.run(&config.data_requirements(), EmaCross::new(config)?)
+            live.run(&config.bars.data_requirements(), EmaCross::new(config)?)
                 .await
         }
     }
