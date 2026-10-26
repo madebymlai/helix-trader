@@ -13,14 +13,13 @@ Nautilus lacks.
   `on_bar`) and places orders with `submit_order`, as the Nautilus docs
   describe. No wrapper layer and no custom vocabulary.
 - **One strategy at a time.** The repo can hold several interchangeable
-  strategies, but a process runs one, which computes the whole book
-  internally and rebalances itself. No allocator, no sleeves.
-- **Orders.** The EMA strategy decides on each bar's close and sends a
-  market order to reach its target position. Other strategies may use limit
-  or stop orders; the backtest checks those against each 1-minute bar's
-  open, high, low and close (or each 1-minute quote), so the order of
-  prices within a minute is guessed, and simulating them well needs tick
-  quotes.
+  strategies, but a process runs one, which decides all its trades
+  internally. No allocator, no sleeves.
+- **Orders.** The EMA strategy decides on a bar's close and sends a
+  bracket: a market entry with a stop loss and a take profit. The backtest
+  checks stop and limit orders against each 1-minute bar's open, high, low
+  and close (or each 1-minute quote), so the order of prices within a
+  minute is guessed, and simulating them well needs tick quotes.
 - **One cadence.** A strategy runs on one bar cadence, which can be
   intraday.
 - **The strategy config is the universe.** Instruments and cadence live in
@@ -70,6 +69,7 @@ Build a thin slice; each step works end to end before the next starts.
 
 ```
 Cargo.toml    crate manifest
+build.rs      compiles Spotware's cTrader protos for src/data/ic/ (needs protoc)
 src/          crate code, unit tests included
 tests/        integration tests: full runs through Nautilus
 docs/         project docs

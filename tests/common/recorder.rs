@@ -1,9 +1,11 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
 //! strategy does, or only subscribes to its bars, records every bar it
 //! gets, warmup and replayed, every fill, and on stop the adjustments of
-//! its positions (funding), and can rest a sell stop on its first replayed
+//! its positions (funding), the orders denied and its account's margins,
+//! and can rest a sell stop on its first replayed
 //! bar or send market orders of its choosing on the first replayed bars,
-//! and on stop its positions. It leaves its `oms_type` unset, so it keeps
+//! close its positions by their ids on given bars, and on stop its
+//! positions. It leaves its `oms_type` unset, so it keeps
 //! positions as the venue does. For the tests that need what the EMA
 //! crossover cannot show: the bars' open, high and low, stop orders, fills
 //! of a given side and size, funding, and positions.
@@ -15,12 +17,13 @@ use jiff::SignedDuration;
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
+    accounts::AccountAny,
     data::{Bar, BarType, QuoteTick},
     enums::OrderSide,
-    events::{OrderFilled, PositionAdjusted},
+    events::{OrderDenied, OrderFilled, PositionAdjusted},
     identifiers::StrategyId,
     position::Position,
-    types::{Price, Quantity},
+    types::{MarginBalance, Price, Quantity},
 };
 use nautilus_trading::{
     nautilus_strategy,
@@ -40,6 +43,11 @@ pub struct Record {
     pub adjustments: Vec<PositionAdjusted>,
     /// Its positions in the cache when it stops, oldest first.
     pub positions: Vec<Position>,
+    /// The reasons of the orders the risk engine denied.
+    pub denials: Vec<String>,
+    /// The margins of its venue's account when it stops, if a margin
+    /// account.
+    pub margins: Vec<MarginBalance>,
 }
 
 #[derive(Debug)]
@@ -53,6 +61,9 @@ pub struct Recorder {
     stop: Option<Price>,
     /// The market order sent on each of the first replayed bars, in order.
     market: Vec<(OrderSide, Quantity)>,
+    /// The replayed bars, by index, on which it closes its open positions
+    /// (`close_position`), before any market order of the bar.
+    close_on: Vec<usize>,
     record: Rc<RefCell<Record>>,
 }
 
@@ -75,6 +86,7 @@ impl Recorder {
             warmup: Some(warmup),
             stop,
             market: vec![],
+            close_on: vec![],
             record: Rc::clone(&record),
         };
         (recorder, record)
@@ -114,6 +126,12 @@ impl Recorder {
         let (recorder, record) = Self::without_warmup(bar_type);
         (Self { market, ..recorder }, record)
     }
+
+    /// The recorder closing its open positions, each by its id
+    /// (`close_position`), on the replayed bars of `close_on`.
+    pub fn closing_on(self, close_on: Vec<usize>) -> Self {
+        Self { close_on, ..self }
+    }
 }
 
 nautilus_strategy!(Recorder, {
@@ -122,6 +140,13 @@ nautilus_strategy!(Recorder, {
             .borrow_mut()
             .fills
             .push((event.order_side, event.last_px, event.ts_event));
+    }
+
+    fn on_order_denied(&mut self, event: OrderDenied) {
+        self.record
+            .borrow_mut()
+            .denials
+            .push(event.reason.to_string());
     }
 });
 
@@ -138,7 +163,13 @@ impl DataActor for Recorder {
     fn on_stop(&mut self) -> anyhow::Result<()> {
         let mut positions = self.cache().positions(None, None, None, None, None);
         positions.sort_by_key(|position| position.ts_opened);
+        let venue = self.bar_type.instrument_id().venue;
+        let margins = match self.cache().account_for_venue(&venue) {
+            Some(AccountAny::Margin(account)) => account.margins.into_values().collect(),
+            _ => vec![],
+        };
         let mut record = self.record.borrow_mut();
+        record.margins = margins;
         record.adjustments.extend(
             positions
                 .iter()
@@ -164,6 +195,15 @@ impl DataActor for Recorder {
         let index = self.record.borrow().bars.len();
         let first = index == 0;
         self.record.borrow_mut().bars.push(*bar);
+        if self.close_on.contains(&index) {
+            let instrument_id = bar.bar_type.instrument_id();
+            let open = self
+                .cache()
+                .positions_open(None, Some(&instrument_id), None, None, None);
+            for position in &open {
+                self.close_position(position, None, None, None, None, None, None)?;
+            }
+        }
         if let Some(&(side, quantity)) = self.market.get(index) {
             let order = self.order().market(
                 bar.bar_type.instrument_id(),

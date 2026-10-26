@@ -1,47 +1,29 @@
-//! The EMA crossover over the wave with a trade size finer than the
-//! instrument's whole shares: 10.5 rounds to the nearest even share count,
-//! so it trades as 10 shares do, and the half share left over is too small
-//! to order. One node per process, so one run per file.
+//! The EMA crossover with a trade size finer than the instrument's whole
+//! shares: 10.5 rounds to the nearest even share count, so it trades as 10
+//! shares do (`common::trades`, `TIME_EXIT`). One node per process, so one
+//! run per file.
 
 mod common;
 
-use common::wave;
-use helix_trader::strategy::{
-    BarsConfig,
-    ema::{EmaCross, EmaCrossConfig},
-};
-use nautilus_model::{
-    data::BarSpecification,
-    enums::{BarAggregation, PriceType},
-    identifiers::InstrumentId,
-    types::Quantity,
-};
+use common::{Exits, trades};
+use helix_trader::strategy::ema::EmaCross;
+use nautilus_model::types::Quantity;
 
 #[test]
 fn a_trade_size_off_the_share_grid_trades_the_rounded_size_and_the_run_completes() {
-    let bars = BarsConfig::builder()
-        .instrument_ids(vec![InstrumentId::from(common::INSTRUMENT_ID)])
-        .bar_spec(BarSpecification::new(
-            1,
-            BarAggregation::Hour,
-            PriceType::Mid,
-        ))
-        .warmup(wave::WARMUP)
-        .session(common::session())
-        .build();
-    let config = EmaCrossConfig::builder()
-        .bars(bars)
-        .fast_period(5)
-        .slow_period(15)
-        .trade_size(Quantity::from("10.5"))
-        .build();
-    let catalog = wave::catalog();
-    let result = wave::backtest(catalog.path(), "3 EUR")
+    let exits: Exits = trades::time_exit();
+    let config = helix_trader::strategy::ema::EmaCrossConfig {
+        trade_size: Quantity::from("10.5"),
+        ..common::ema_config(1, 2, trades::WARMUP, Some(common::session()), exits)
+    };
+    let levels = trades::TIME_EXIT;
+    let catalog = trades::catalog(&levels);
+    let result = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR")
         .run(EmaCross::new(config).unwrap())
         .unwrap()
         .result;
 
-    // The orders and the balance of 10 shares (backtest_ema_cross.rs).
-    assert_eq!(result.total_orders, wave::EMA_ORDERS);
-    assert_eq!(common::balance(&result), "9754.00 EUR");
+    // The orders and the balance of 10 shares (backtest_warmup.rs).
+    assert_eq!(result.total_orders, trades::TIME_EXIT_ORDERS);
+    assert_eq!(common::balance(&result), trades::TIME_EXIT_BALANCE);
 }

@@ -1,0 +1,53 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# a market buy of 1 oz of XAUUSD (volume 100), clientOrderId PROBE-1,
+# with relative stop loss and take profit 30.00 away, accepted: its
+# position created empty.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_accepted.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_ACCEPTED
+position {
+  positionId: 690004734
+  tradeData {
+    symbolId: 41
+    volume: 0
+    tradeSide: BUY
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_CREATED
+  swap: 0
+  price: 0
+  commission: 0
+  marginRate: 0
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 0
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1031776265
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1793027466064
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  orderType: MARKET
+  orderStatus: ORDER_STATUS_ACCEPTED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1793027466064
+  closingOrder: false
+  clientOrderId: "PROBE-1"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 690004734
+  relativeStopLoss: 3000000
+  relativeTakeProfit: 3000000
+  trailingStopLoss: false
+}
+isServerEvent: false

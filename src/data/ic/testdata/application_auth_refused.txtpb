@@ -1,0 +1,8 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to an application auth with the app's client id and a wrong secret.
+# Nothing to scrub: it holds no account id.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAErrorRes OpenApiMessages.proto < application_auth_refused.bin
+# Message: ProtoOAErrorRes
+errorCode: "CH_CLIENT_AUTH_FAILURE"
+description: "wrong clientSecret"

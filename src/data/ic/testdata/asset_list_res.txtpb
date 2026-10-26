@@ -1,0 +1,31 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the account's assets, trimmed to those of the symbols in symbols_list_res.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAAssetListRes OpenApiMessages.proto < asset_list_res.bin
+# Message: ProtoOAAssetListRes
+ctidTraderAccountId: 1000001
+asset {
+  assetId: 5
+  name: "EUR"
+  displayName: "EUR"
+  digits: 2
+}
+asset {
+  assetId: 16
+  name: "USD"
+  displayName: "USD"
+  digits: 2
+}
+asset {
+  assetId: 18
+  name: "XAU"
+  displayName: "XAU"
+  digits: 2
+}
+asset {
+  assetId: 38
+  name: "US500"
+  displayName: "US500"
+  digits: 2
+}

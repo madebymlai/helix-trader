@@ -52,10 +52,12 @@ or negative one (`--commission="-3 EUR"`, `--commission-rate=-0.0005`)
 fails there. `--leverage` is a `Decimal`, 1 (no leverage) if not given;
 Nautilus refuses one that is not positive before the run.
 
-On the wave of the tests (EMA 5/15 on 1-HOUR-MID internal bars, 10
-shares, warmup 48h, Xetra's session, 3 EUR commission) it prints
-`Orders: 4`, `PnL (total): -246.000000` (the wave's -234.00 without
-commission, less 4 × 3 EUR) and a final balance of `9754.00 EUR`.
+On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
+1-HOUR-MID internal bars, 10 shares, stop loss and take profit 100 bps,
+held an hour, warmup 3h, Xetra's session, 3 EUR commission) it prints
+`Orders: 4` (the entry, its two legs, the close), `PnL (total):
+33.000000` (39.00 without commission, less 2 filled orders × 3 EUR) and a
+final balance of `10033.00 EUR` (`backtest_commission_per_order.rs`).
 
 ## The entry point
 
@@ -201,8 +203,9 @@ The simulated venue keeps positions as the real one does, so that a
 strategy, its `oms_type` unset, trades as it does live (strategy README,
 "Position mode: the venue's"). `venue_oms_type` declares each venue's mode
 in one place, as Nautilus' execution clients declare it live: `Hedging`
-for the venues in `HEDGING_VENUES` (none yet; a cTrader hedging account
-will be one), `Netting` for every other, IB's exchanges (Nautilus' IB
+for the venues in `HEDGING_VENUES` (`ICMARKETS`, IC's hedging cTrader
+account, `live/ic/README.md`, "Hedging positions"), `Netting` for every
+other, IB's exchanges (Nautilus' IB
 execution client nets) and OKX (its client nets derivatives, in the net
 position mode `live` requires). `main` sets `oms_type` from the strategy's
 venue. With an unset strategy OMS, Nautilus takes the venue's: two
@@ -218,17 +221,25 @@ full quote or bar size), `use_reduce_only` `true`, `allow_cash_borrowing`
 
 ### Leverage
 
-Leverage is the account's choice, so it is a flag of the run, not part of
-the instrument. The venue gets it as `default_leverage`, for every
+Leverage comes from one source: the venue's, carried by the instrument's
+margins where the venue states them, or the run's `--leverage` where it
+does not. The venue gets `--leverage` as `default_leverage`, for every
 instrument; unset, Nautilus uses 10 on a margin account (1 on a cash one).
+
+- **IC**: its instruments carry IC's own margin (`data/ic/README.md`,
+  "Margins": 1 / the leverage IC applies, 1:30 on the demo), so an IC
+  backtest runs at `--leverage 1`, the default. Another leverage would
+  divide IC's margin again (`--leverage 30` on the demo's 1/30: 1/900).
+- **OKX**: its instruments carry margins of 1, and the leverage is the
+  account's, set by hand per instrument at OKX: `--leverage` says which.
 
 The margin model is Nautilus' default, `LeveragedMarginModel` (Concepts ›
 Accounting, "Margin models"): an order locks notional / leverage × the
 instrument's `margin_init`; an open position locks notional / leverage ×
 `margin_maint`, its value at entry. OKX instruments are stored with both
 margins at 1 (`data/okx/README.md`), so a position locks notional /
-leverage, as on OKX. IB's instruments have margins of 0 and lock nothing at
-any leverage.
+leverage, as on OKX. IC's carry IC's margin and lock, at 1x, what IC
+locks. IB's instruments have margins of 0 and lock nothing at any leverage.
 
 Liquidation is off, so OKX's own maintenance rate (BTC X-Perp: 0.65%),
 which only decides when OKX liquidates, is not modelled: a run never
@@ -361,10 +372,10 @@ let fill = FillModelAny::Default(DefaultFillModel::new(1.0, 0.0, Some(FILL_SEED)
 The other variants are for options and outcome shares. A fixed fee matches
 IB Fixed pricing on Xetra below EUR 6,000 an order, where the EUR 3
 minimum always applies. Above it the fee understates IB's: a strategy that
-flips from short to long sends twice its trade size, so EMA with
-`trade_size = 5` on SXR8 (EUR 590-745) sends orders of EUR 5,900-7,300
-(see Verified on IB data), where a rate of 0.0005 (IB's 0.05%) matches
-instead. A rate has no minimum, and IB's EUR 3 an order cannot be
+flips from short to long sends twice its trade size, as the EMA did when it
+rebalanced, so with `trade_size = 5` on SXR8 (EUR 590-745) it sent orders
+of EUR 5,900-7,300 (see Verified on IB data), where a rate of 0.0005 (IB's
+0.05%) matches instead. A rate has no minimum, and IB's EUR 3 an order cannot be
 expressed on a `BacktestNode` until Nautilus adds one
 ([nautilus_trader#5398](https://github.com/nautechsystems/nautilus_trader/issues/5398),
 open), so a rate understates IB's fee on orders below EUR 6,000. Pick
@@ -588,6 +599,42 @@ bar at `start`, which the replay delivered again: both are why the engine
 starts 1 ns earlier (see The engine start). How the quotes are built from
 IB's bars is in `data/ib/README.md`.
 
+## IC on ticks
+
+An IC Markets instrument (`XAUUSD.ICMARKETS`, `EURUSD.ICMARKETS`)
+backtests through the same code as IB's, on its quotes: the catalog holds a
+`CurrencyPair` with IC's margins (1 / 30 on the demo) and one quote per
+tick time, merged from
+cTrader's BID and ASK ticks (`data/ic/README.md`). The strategy trades
+internal bars built from them, such as `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`.
+
+- **Fills.** A market order sent in `on_bar` fills at the ask (buy) or bid
+  (sell) of the last quote at or before the bar's close, as on IB's
+  quotes: a tick stamped exactly on the close reaches the venue before the
+  order (checked by hand on `backtest_ic_quotes.rs` with a quote at
+  10:00:00.000: the buy filled at its ask). Ticks keep their own
+  milliseconds; nothing is stamped 1 ns early.
+- **Size.** Quotes are 100,000 units, or the instrument's maximum order if
+  smaller (XAUUSD 10,000 oz): an XAUUSD order always fills whole at the
+  quote, an EURUSD order above one lot fills the excess one tick worse,
+  and a bar holds at most 18,446,744,073 / size quotes, beyond which
+  Nautilus panics building its volume (`data/ic/README.md`, "Quote size").
+- **Commission.** IC's Raw account charges 30 USD per million USD traded
+  a side on XAUUSD and EURUSD: `--commission-rate 0.00003`, charged on
+  each fill's value in USD.
+- **Venue and balance.** Named `ICMARKETS`; the balance in USD
+  (`--balance "10000 USD"`), unleveraged (`--leverage 1`, the default):
+  IC's leverage is in the instrument's margins (see Leverage).
+- **Hedging.** The venue keeps positions as IC's hedging account does
+  (`venue_oms_type`): an order opens a position of its own unless it names
+  one, so a strategy reduces with `close_position` (`live/ic/README.md`,
+  "Hedging positions").
+
+`backtest_ic_quotes.rs` checks the fills, the commission and the spread in
+the report on gold quotes written through `fill_catalog`;
+`backtest_ic_hedging.rs` two overlapping trades kept as two positions;
+`backtest_ic_margin.rs` IC's margin locked and an order beyond it denied.
+
 ## OKX on candles
 
 An OKX swap (`BTC-USDT-SWAP.OKX`) or X-Perp (`BTC-USD_UM_XPERP-310404.OKX`,
@@ -671,7 +718,8 @@ already uses.
   (`bar_adaptive_high_low_ordering` off). The adaptive order visits the
   extreme nearer the open first; Nautilus calls it a heuristic with no
   general accuracy rate, and it only decides which of a stop and a target
-  inside one minute fills first, which the EMA's market orders never meet.
+  inside one minute fills first, as a bracket's stop loss and take profit
+  can.
 - **Fill model unchanged**: no slippage. LAST bars carry no bid or ask, so
   the run pays no spread and the report prints `Spread: n/a (no quotes)`.
   On BTC the book is one tick (0.1) wide nearly all the time: the
@@ -836,6 +884,11 @@ that loss is not realized yet; the gross PnL adds it back anyway, so it is
 too high by the open position's size times half the spread.
 
 ## Verified on IB data
+
+The runs below, and those on OKX data above, were made with the EMA as it
+was then: a rebalancer, long or short `trade_size` on every listed
+instrument, turning at each cross with no stop loss, take profit or hold.
+Their configs predate `trade_instrument_id` and the exits.
 
 The runs on internal MID bars further below filled on quotes
 `fill-catalog` made from IB's BID and ASK closes until 2026-10-26; a
@@ -1026,28 +1079,38 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
   ± 0.05 EUR, stamped 1 ns before each minute's close, written with
   `ParquetDataCatalog::write_to_parquet`). The strategy trades on
-  1-HOUR-MID internal bars. Two kinds of quotes:
-  - a wave over days, on which the EMA 5/15 crosses several times:
-    `backtest_ema_cross.rs` checks that its PnL is lower by `orders ×
-    commission` than in `backtest_ema_cross_free.rs`, and its final
-    balance; `backtest_max_drawdown.rs` that the result's `stats_returns`
-    hold `Max Drawdown`, the largest fall from a peak of the equity
-    compounded over its returns series;
-  - steps, a level per hour chosen so that the shortest crossover (1/2)
-    trades at hours worked out by hand, and so that what is tested changes
-    the orders and the final balance: `backtest_warmup.rs` (a run off an
-    hour: warmup from the cache, the partial oldest bar dropped, the first
-    bar of the run traded, buys at the ask and sells at the bid of the
-    quote 1 ns before the bar's close), `backtest_start_on_close.rs` (the
-    same on a run starting exactly on an hour's close: the one-quote oldest
-    bar dropped, the bar at the start traded on its closing quote),
-    `backtest_session.rs` (bars outside the session neither move the EMAs
-    nor trade; overnight, without quotes, there are no bars),
+  1-HOUR-MID internal bars, the shortest crossover (1/2) on steps, a level
+  per hour chosen so that every cross, exit and fill is worked out by hand
+  (`common::trades`, three hours of warmup, the run from 12:30), and so
+  that what is tested changes the orders and the final balance:
+  - the EMA's trades: `backtest_ema_entries.rs` (one bracket per cross, in
+    its direction, none on a bar keeping the side), `backtest_ema_exits.rs`
+    (a long ended by its take profit, a short by its stop loss, each on
+    the first minute quote reaching it, the other leg cancelled),
+    `backtest_ema_time_exit.rs` (a trade closed its hold after the entry
+    filled, at the market then), `backtest_ema_overlap.rs` (on a hedging
+    venue a short opened beside a long still held, each closed by its own
+    alert), `backtest_ema_read_only_instrument.rs` (a second instrument
+    read, its bars crossing every hour, sends no order);
+  - the warmup: `backtest_warmup.rs` (a run off an hour: warmup from the
+    cache, the partial oldest bar dropped, the bar spanning the warmup end
+    traded, buys at the ask and sells at the bid of the quote 1 ns before
+    the bar's close), `backtest_start_on_close.rs` (the same on a run
+    starting exactly on an hour's close: the one-quote oldest bar dropped,
+    the bar at the start traded on its closing quote);
+  - the session: `backtest_session.rs` (bars outside the session neither
+    move the EMAs nor trade; overnight, without quotes, there are no bars),
     `backtest_without_session.rs` (without a session every bar counts, the
-    one spanning midnight included), `backtest_commission_rate.rs` (the
-    orders of a run without commission, each fill charged the rate on its
-    value, and the report's costs: the half spread of each fill, the gross
-    PnL).
+    one spanning midnight included);
+  - the costs: `backtest_commission_per_order.rs` (charged on each filled
+    order, not on the legs cancelled), `backtest_commission_rate.rs` (each
+    fill charged the rate on its value, and the report's costs: the half
+    spread of each fill, the gross PnL), `backtest_trade_size_off_grid.rs`
+    (10.5 shares trade as 10);
+  - a wave over days, on which the EMA 5/15 crosses several times:
+    `backtest_max_drawdown.rs` checks that the result's `stats_returns`
+    hold `Max Drawdown`, the largest fall from a peak of the equity
+    compounded over its returns series.
   - `backtest_coverage.rs`: a warmup longer than the stored quotes, or a
     catalog without quotes, is refused before the node is built, naming
     the instrument's quotes and the missing interval.
@@ -1055,7 +1118,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     end, is refused before the node is built.
 
   The EMA reads bar closes only, so the bars' opens, highs and lows, and
-  stops, are tested with a recording strategy (`tests/common/recorder.rs`)
+  orders of a chosen side and size, are tested with a recording strategy
+  (`tests/common/recorder.rs`)
   that warms up through `strategy::warmup` like a real one, records every
   bar it gets and can rest a sell stop or send market orders:
   - `backtest_bars.rs` and `backtest_bars_on_close.rs` (noise, a mid of
@@ -1101,3 +1165,20 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     settled in USD, with margins of 1: 200 contracts bought and 300 sold,
     the commission and PnL in USD at two decimals, at 10x the short left
     open locking a tenth of its value.
+  - `backtest_ic_quotes.rs`: XAUUSD.ICMARKETS, a `CurrencyPair` with
+    IC's margins on the demo (1 / 30), unleveraged, on irregular millisecond quotes sized 10,000 as IC's fill
+    stores them, written through `fill_catalog` (`common::ic`). A recorder
+    without warmup on hour MID bars buys 10,000 oz on the first bar and
+    closes that position by its id on the second (`close_position`), the
+    venue hedging: each fills whole at the ask, then the bid, of the last quote
+    before the bar's close, 30 USD per million is charged on each fill's
+    value, and the report shows the spread paid (half each quote's spread
+    on 10,000 oz) and the gross PnL (the mids' move).
+  - `backtest_ic_hedging.rs`: on the same quotes, the venue
+    `venue_oms_type(ICMARKETS)`, two buys of 10 oz on two bars are two
+    open positions, at 4006.10 and 4012.15.
+  - `backtest_ic_margin.rs`: on the same quotes and 1,000 USD, a buy of
+    5 oz at 4006.10 (20,030.50 USD) fills, its position locking IC's
+    margin, 667.68 USD; a second of 5 oz at 4012.15 is denied by the risk
+    engine (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=331.72 USD,
+    margin=668.69 USD`).

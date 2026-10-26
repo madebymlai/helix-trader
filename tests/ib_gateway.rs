@@ -142,9 +142,13 @@ fn never_trading_ema_cross() -> EmaCrossConfig {
     let config: EmaCrossConfig = toml::from_str(
         r#"
         instrument_ids = ["SXR8.IBIS"]
+        trade_instrument_id = "SXR8.IBIS"
         bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
         composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
         trade_size = "1"
+        stop_loss_bps = 100
+        take_profit_bps = 100
+        hold = "1h"
         warmup = "2h"
         "#,
     )

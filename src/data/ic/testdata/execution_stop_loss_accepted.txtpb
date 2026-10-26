@@ -1,0 +1,55 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# that position's protection order accepted, its stop loss 4023.15.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_stop_loss_accepted.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_ACCEPTED
+position {
+  positionId: 690004999
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1793027499476
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_OPEN
+  swap: 0
+  price: 4023.51
+  stopLoss: 4023.15
+  utcLastUpdateTimestamp: 1793027499478
+  commission: -11
+  marginRate: 3597.98
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 11993
+  stopLossTriggerMethod: TRADE
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1031776540
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1793027499478
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  orderType: STOP_LOSS_TAKE_PROFIT
+  orderStatus: ORDER_STATUS_ACCEPTED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1793027499478
+  closingOrder: true
+  stopPrice: 4023.15
+  clientOrderId: "PROBE-5"
+  timeInForce: GOOD_TILL_CANCEL
+  positionId: 690004999
+  trailingStopLoss: false
+  stopTriggerMethod: TRADE
+}
+isServerEvent: true

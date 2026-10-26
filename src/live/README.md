@@ -5,8 +5,12 @@ a paper then a real account (build step 3). It adds no trading logic: it
 sets up the clients of the instruments' venues, then wires the clients, the
 strategy and the node. The venues' data clients serve the warmup: the node
 registers no catalog.
-Clients go by venue: OKX instruments to OKX's clients, all others to IB's,
-and a strategy trading both gets both, routed by Nautilus.
+Clients go by venue: OKX instruments to OKX's clients, IC instruments
+(`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
+venues gets their clients, routed by Nautilus. IC's account is hedging:
+an order opens a position of its own unless it names one (see
+`ic/README.md`, "Hedging positions"); IC instruments with IB ones are
+refused (see `ic/README.md`, "Known limits").
 
 APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
 `develop` commit in `docs/ARCHITECTURE.md` (Version), which also holds the
@@ -23,13 +27,16 @@ live/
   redis.rs  the Redis container behind the node's cache
   ib/       IB client factories and configs, on the gateway `data`'s IB
             part starts; README.md: IB live
+  ic/       IC's data and execution clients, their factories and
+            configs, on the cTrader session `data`'s IC part holds;
+            README.md: IC live
   okx/      OKX client factories and configs, and the account checks;
             README.md: OKX live
 ```
 
 Each broker gets its own folder next to `ib/`, returning the same shape: a
-data factory and config, an exec factory and config, and their routing
-(`node::Clients`). `node.rs` takes a list of them as `Box<dyn
+data factory and config, an exec factory and config, and
+their routing (`node::Clients`). `node.rs` takes a list of them as `Box<dyn
 DataClientFactory>` and friends and never names a broker.
 
 ## The command
@@ -52,8 +59,8 @@ node's cache (see "Cache in Redis").
   gateway (`ib/README.md`, "Gateway").
 - `--leverage` (default 1) is the leverage the run expects, as in a
   backtest, and only a check: OKX applies the account's leverage and the
-  start refuses an OKX instrument at another one (`okx/README.md`); IB does
-  not check it.
+  start refuses an OKX instrument at another one (`okx/README.md`); IB and
+  IC do not check it.
 - `--trader-id` (default `HELIX-001`, checked by Nautilus: a name and a tag
   joined by a hyphen) is the node's trader, whose cache in Redis each run
   loads. Live processes running at the same time each need their own
@@ -74,16 +81,23 @@ node's cache (see "Cache in Redis").
    build the OKX client configs on it, check the credentials are set, and
    check the account (net position mode, each instrument's leverage equal
    to `--leverage`). OKX's data client serves the warmup (`okx/README.md`).
-3. IB instruments, if any: check the client id, start or reuse the Docker
+3. IC instruments, if any: refuse IB instruments alongside them, read
+   `IC_ENVIRONMENT` (`demo` or `live`) and the IC credential (all read
+   before anything connects, step 2's OKX included), build IC's client
+   configs on them, then check the account on a session of its own, closed
+   before the node connects: hedging and `IC_ACCOUNT_ID`'s, so a wrong
+   account fails the start with its reason. IC's data client serves the
+   warmup from cTrader's tick history (`ic/README.md`, "Warmup").
+4. IB instruments, if any: check the client id, start or reuse the Docker
    gateway of the account's mode, wait for its login, and build the IB
    client configs on it. IB's data client serves the warmup (below).
-4. Start or reuse the Redis container (`redis.rs`), then build the node
+5. Start or reuse the Redis container (`redis.rs`), then build the node
    (`node.rs`) with its cache persisted there, the clients of each venue
-   (IB's routed by default, OKX's routed by Nautilus as the only clients of
-   venue OKX), reconciliation on, open-order and position checks every 10
+   (IB's routed by default, OKX's and IC's routed by Nautilus as the only
+   clients of their venue), reconciliation on, open-order and position checks every 10
    and 30 s (as the adapter's `node_exec_tester`), and a 5 s post-stop
    delay.
-5. Add the strategy, claim the external orders of its instruments that its
+6. Add the strategy, claim the external orders of its instruments that its
    config does not claim already (`register_external_order_claims`), then
    `run()`.
 
@@ -208,9 +222,8 @@ database, every trader's keys.
   and its open-order check resolves an order missing at the venue only in
   full-history mode (`open_check_open_only = false`), not in the default
   open-only mode (Concepts › Execution › Reconciliation, "Full-history
-  checks"). A strategy that waits for no order in flight on the instrument,
-  as the EMA does, then never trades it: reset the cache, or delete that
-  order's keys.
+  checks"). A strategy that waits for no order in flight on the instrument
+  then never trades it: reset the cache, or delete that order's keys.
 - **Empty cache** (a new trader). Reconciliation rebuilds from the
   executions IB reports, the current day's: the strategy's own orders come
   back by their order reference, others as external orders claimed by the
@@ -398,6 +411,12 @@ logs written through `tracing` into the same output.
 `ib/`: the IB clients on the Docker gateway, the account and its tests: see
 [`ib/README.md`](ib/README.md).
 
+## IC Markets
+
+`ic/`: IC's clients, their environment and credential, the account check
+and reconciliation, the warmup and their tests: see
+[`ic/README.md`](ic/README.md).
+
 ## OKX
 
 `okx/`: the OKX clients, the EEA environment, the account checks and their
@@ -408,14 +427,14 @@ tests: see [`okx/README.md`](okx/README.md).
 - Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file,
   for what needs no node and no broker.
 - No integration test runs a live node without a broker yet (the venue
-  tests below run `Live` against IB and OKX). One would sit in `tests/`, one
+  tests below run `Live` against IB, OKX and IC's demo). One would sit in `tests/`, one
   node per file: a node with no broker client or a test data client, the
   strategy added, stopped through `handle().stop()` from a spawned task,
   asserting on the result of `run()`, under
   `#[tokio::test(flavor = "current_thread")]`.
-- Venue end-to-end tests are under "IB tests" and "OKX tests" in the venue
-  READMEs; `ib_restart.rs` there checks the cache in Redis across
-  restarts.
+- Venue end-to-end tests are under "IB tests", "OKX tests" and "IC tests"
+  in the venue READMEs; `ib_restart.rs` there checks the cache in Redis
+  across restarts.
 
 ## Unverified
 

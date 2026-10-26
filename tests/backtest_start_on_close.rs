@@ -7,17 +7,18 @@
 
 mod common;
 
-use common::steps;
+use common::trades;
 
 #[test]
 fn a_run_starting_on_a_bar_close_trades_on_that_bar_and_its_closing_quote() {
-    let catalog = steps::catalog();
-    let result = steps::backtest(catalog.path(), steps::at("13:00"))
-        .run(common::shortest_ema_cross(steps::WARMUP))
+    let levels = trades::TIME_EXIT;
+    let catalog = trades::catalog(&levels);
+    let result = trades::backtest(catalog.path(), trades::at("13:00"), &levels, "0 EUR")
+        .run(trades::ema_cross(trades::time_exit()))
         .unwrap()
         .result;
 
     // The same orders and fills as a run from 12:30 (backtest_warmup.rs).
-    assert_eq!(result.total_orders, steps::ORDERS);
-    assert_eq!(common::balance(&result), steps::BALANCE);
+    assert_eq!(result.total_orders, trades::TIME_EXIT_ORDERS);
+    assert_eq!(common::balance(&result), trades::TIME_EXIT_BALANCE);
 }

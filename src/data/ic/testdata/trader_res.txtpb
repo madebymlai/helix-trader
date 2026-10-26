@@ -1,0 +1,26 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a trader request: the hedged demo account, in EUR.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001, traderLogin by
+# the fake 2000002.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOATraderRes OpenApiMessages.proto < trader_res.bin
+# Message: ProtoOATraderRes
+ctidTraderAccountId: 1000001
+trader {
+  ctidTraderAccountId: 1000001
+  balance: 100000000
+  balanceVersion: 1
+  nonWithdrawableBonus: 0
+  accessRights: FULL_ACCESS
+  depositAssetId: 5
+  swapFree: false
+  leverageInCents: 3000
+  totalMarginCalculationType: MAX
+  frenchRisk: false
+  traderLogin: 2000002
+  accountType: HEDGED
+  brokerName: "icmarketseu"
+  registrationTimestamp: 1792726178083
+  isLimitedRisk: false
+  moneyDigits: 2
+}

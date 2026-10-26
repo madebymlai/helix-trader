@@ -1,0 +1,8 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to an account auth with the access token "not-a-token".
+# Nothing to scrub: it holds no account id.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAErrorRes OpenApiMessages.proto < account_auth_token_invalid.bin
+# Message: ProtoOAErrorRes
+errorCode: "CH_ACCESS_TOKEN_INVALID"
+description: "Invalid access token"

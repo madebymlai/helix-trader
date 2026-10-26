@@ -12,6 +12,8 @@ pub use fill_catalog::fill_catalog;
 mod ib;
 pub use ib::{IbAccount, IbHistory};
 pub(crate) use ib::{IbGateway, data_client_config};
+pub(crate) mod ic;
 mod okx;
+pub use ic::{IcConnection, IcHistory};
 pub(crate) use okx::Contract as OkxContract;
 pub use okx::OkxHistory;

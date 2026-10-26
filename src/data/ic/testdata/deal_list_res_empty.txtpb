@@ -1,0 +1,9 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a deal list request from 0 to now on the account with no
+# deal.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOADealListRes OpenApiMessages.proto < deal_list_res_empty.bin
+# Message: ProtoOADealListRes
+ctidTraderAccountId: 1000001
+hasMore: false

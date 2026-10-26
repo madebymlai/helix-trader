@@ -7,8 +7,9 @@ which backtests settle, and the book and trades of CME instruments read as
 signals (Databento's MBP-10 and trades). The strategies' bars themselves are internal, built
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
 quotes"): for a composite bar type from its source bars (IB's 1-minute
-TRADES bars, OKX's 1-minute candles), otherwise from quotes. The module
-adds what Nautilus lacks: filling the catalog from a historical source.
+TRADES bars, OKX's 1-minute candles), otherwise from quotes (one per tick
+from IC). The module adds what Nautilus lacks: filling the catalog from a
+historical source.
 
 APIs were read in the `nautilus-*` crates at `0.66.0` and their signatures
 and engine checks rechecked at the `develop` commit the build pins (see
@@ -29,6 +30,19 @@ data/
     mod.rs         Interactive Brokers history: instruments, 1-minute TRADES bars
     gateway.rs     the IB account and the Docker gateway, started and logged in
     README.md      IB history: requests, the gateway, depths, tests
+  ic/
+    mod.rs         IC Markets history: the session, instruments, the fill
+    account.rs     the account checked (hedging, IC_ACCOUNT_ID's) and its state
+    config.rs      the environment and the credential, from IC_*
+    messages.rs    Spotware's protobuf messages, their payload types, the envelope
+    parse.rs       cTrader symbols -> CurrencyPair, ids
+    ticks.rs       tick history: decoding, paging, the merge into quotes, their size
+    token.rs       the token pair and the user-only token file that keeps the latest one
+    websocket/     the cTrader connection: outer client, handler task, spot subscriptions, token renewal
+    testing.rs     a mock cTrader peer (a local WebSocket server) for the tests
+    proto/         Spotware's four .proto files, vendored (build.rs compiles them)
+    testdata/      responses captured from IC's demo, scrubbed, text and wire forms
+    README.md      IC history: the cTrader session, credentials, instruments, tick quotes, the account, tests
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
@@ -40,10 +54,13 @@ The module runs no node and opens no port of its own; the IB part starts the
 Docker IB Gateway it connects to (see `ib/README.md`, "The gateway"). A
 source is an adapter's historical client returning Nautilus types:
 `Vec<InstrumentAny>`, and a series' data as `Vec<Data>` (IB's 1-minute
-bars and OKX's candles, as bars). `ParquetDataCatalog` is the storage.
+bars and OKX's candles, as bars; IC's quotes, merged from ticks). Nautilus
+has no cTrader adapter, so `ic/` is its own client (see `ic/README.md`).
+`ParquetDataCatalog` is the storage.
 
 ```
 strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
+        ├──────────► ic/ ──► fill_catalog ──(cTrader Open API, protobuf over WebSocket)──► IC Markets
         └──────────► okx/ ──► fill_catalog, one call per archive month or day ──(OKX public API, archive files)──► OKX
                          └──► ParquetDataCatalog ──► backtest
 ```
@@ -70,13 +87,15 @@ keys it:
 | `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `SXR8.IBIS-1-MINUTE-LAST-EXTERNAL` |
 | `X.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (composite) | bars of `X.OKX-1-MINUTE-LAST-EXTERNAL` |
 | `X.OKX-1-MINUTE-LAST-EXTERNAL` | bars of that bar type |
+| `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL` | quotes of `XAUUSD.ICMARKETS` |
 | `SXR8.IBIS-1-HOUR-MID-INTERNAL` | quotes of `SXR8.IBIS` (no source serves them) |
 | `X.OKX-1-HOUR-LAST-INTERNAL` | trades of `X.OKX` (no source serves them yet) |
 
 The rule is the data engine's: a composite bar type is built from its source
 bars, an internal one priced LAST from trades, any other from quotes.
 `ib/` serves only IB's `EXTERNAL` 1-MINUTE-LAST bars (its TRADES bars),
-stored as IB gives them; `okx/` only the bars of
+stored as IB gives them; `ic/` quotes only, one per tick time, merged from
+cTrader's BID and ASK ticks; `okx/` only the bars of
 `X.OKX-1-MINUTE-LAST-EXTERNAL`, OKX's 1-minute candles.
 
 ### Bar type format
@@ -185,7 +204,8 @@ pub async fn fill_catalog(
 ```
 
 `fetch` is the seam: `ib/` supplies `IbHistory::data` over the whole window,
-`okx/` one per archive month or day (see `okx/README.md`); tests pass
+`ic/` one per week (see `ic/README.md`, "The fill"), `okx/` one per
+archive month or day (see `okx/README.md`); tests pass
 closures with canned data. A fetch over `[from, to]` returns the items of
 the series whose `ts_init` lies in it, the closed interval stored
 (Nautilus' catalog intervals are closed, the next contiguous when it starts
@@ -210,7 +230,8 @@ bar type instead of the instrument id.
    check. A window already covered (request start at or after `end`) asks
    the source for nothing and is not an error.
 3. **Check.** Refuse an empty response on an instrument's first fill (no
-   stored range: a contract with no data is never silently missing) and any
+   stored range: a contract with no data is never silently missing; the
+   error names the series and the window asked for) and any
    quote of another instrument. Once an instrument's quotes are stored, an
    empty response means nothing new (an expired contract, a weekend):
    nothing is written, no coverage is recorded, no error, and the next
@@ -299,12 +320,17 @@ catalog.query_last_timestamp(..)                     // the stored end a re-run 
 ### Choosing the source
 
 `fill-catalog` picks each instrument's source from its venue
-(`OkxHistory::serves`, `DatabentoHistory::serves`): OKX's archive for
-`….OKX` ids, Databento for `….GLBX` ids, IB for every other venue. A config
-may hold several; IB's gateway starts only if an IB instrument is in it.
+(`OkxHistory::serves`, `DatabentoHistory::serves`, `IcHistory::serves`):
+OKX's archive for `….OKX` ids, Databento for `….GLBX` ids, IC's cTrader
+for `….ICMARKETS`, IB for every other venue. A config may hold several;
+IB's gateway starts, and IC connects, only if one of their instruments is
+in it.
 
 - `ib/` fills IB instruments' 1-minute TRADES bars through the Docker IB Gateway
   it starts: see [`ib/README.md`](ib/README.md).
+- `ic/` fills IC Markets' forex and metals instruments and their quotes,
+  merged from tick history, through Spotware's cTrader Open API: see
+  [`ic/README.md`](ic/README.md).
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
 - `databento/` fills GLBX instruments' MBP-10 book (`OrderBookDepth`) and
@@ -325,7 +351,8 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
     unique;
   - bars stored under their bar type and resumed after their range;
   - errors: data of another series (a quote of another instrument, another
-    bar type), an empty first response (quotes or bars), a start before the
+    bar type), an empty first response (quotes or bars, naming the window),
+    a start before the
     stored range (refused before fetching); an empty resumed response is
     not an error;
   - coverage over the window asked for; a re-run requests only after each
@@ -334,4 +361,4 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   - a failure keeps the instruments filled before it;
   - a minute-cadence source stored every minute and resumed with only the
     new minutes.
-- `ib/`, `ib/gateway.rs`, `okx/` and `databento/`: see their READMEs.
+- `ib/`, `ib/gateway.rs`, `ic/`, `okx/` and `databento/`: see their READMEs.

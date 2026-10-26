@@ -5,7 +5,7 @@
 A systematic trading system in Rust, built on
 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same
 strategy type runs in backtest, paper and live, on Interactive Brokers and
-OKX. Nautilus owns data, simulation, execution and the portfolio; this repo
+OKX and IC Markets (cTrader, a hedging account). Nautilus owns data, simulation, execution and the portfolio; this repo
 adds only what Nautilus lacks.
 
 ## Commands
@@ -15,26 +15,31 @@ per process. Each takes the strategy name and its TOML config.
 
 | Command | Does |
 |---|---|
-| `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, Interactive Brokers for the rest. |
+| `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, IC Markets' cTrader for IC instruments (tick quotes), Interactive Brokers for the rest. |
 | `backtest` | Runs the strategy over a window of the catalog, with commissions, leverage and funding, and prints the results. |
-| `live` | Runs the strategy on a live node against IB or OKX until Ctrl-C. |
+| `live` | Runs the strategy on a live node against IB, OKX or IC Markets, until Ctrl-C. |
 
 ## Quick start
 
 Requires Rust 1.99+, `clang` and `mold` (the linker set in
-`.cargo/config.toml`), and Docker or Podman for the IB Gateway and for the
-Redis that holds the live node's cache (`docker pull
-docker.io/library/redis:7.4.11-alpine` once; see `src/live/README.md`).
+`.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
+Podman for the IB Gateway and for the Redis that holds the live node's cache
+(`docker pull docker.io/library/redis:7.4.11-alpine` once; see
+`src/live/README.md`).
 
 ```sh
-cp .env.example .env    # IB paper login, OKX API key
+cp .env.example .env    # IB paper login, OKX API key, IC cTrader app
 cargo build --release
 
 cat > ema.toml <<'EOF'
 instrument_ids = ["BTC-USDT-SWAP.OKX"]
+trade_instrument_id = "BTC-USDT-SWAP.OKX"
 bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
 composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
 trade_size = "0.01"
+stop_loss_bps = 100
+take_profit_bps = 200
+hold = "24h"
 warmup = "720h"
 EOF
 
@@ -56,17 +61,18 @@ cargo test
 
 Integration tests run full Nautilus nodes, one per test file. The tests
 against real venues are skipped unless enabled: `NAUTILUS_IB_RUN=1` for the
-IB paper gateway, `NAUTILUS_OKX_RUN=1` for the OKX demo account.
+IB paper gateway, `NAUTILUS_OKX_RUN=1` for the OKX demo account,
+`NAUTILUS_IC_RUN=1` for IC's cTrader demo.
 
 ## Documentation
 
 | Document | Covers |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rules, the pinned Nautilus version, process-wide constraints |
-| [src/data/README.md](src/data/README.md) | Filling the catalog; IB and OKX history in `ib/` and `okx/` |
+| [src/data/README.md](src/data/README.md) | Filling the catalog; IB, IC and OKX history in `ib/`, `ic/` and `okx/` |
 | [src/strategy/README.md](src/strategy/README.md) | Writing a strategy, its config, warmup |
 | [src/backtest/README.md](src/backtest/README.md) | The backtest run, costs, fills, leverage, results |
-| [src/live/README.md](src/live/README.md) | Live nodes; IB and OKX clients in `ib/` and `okx/` |
+| [src/live/README.md](src/live/README.md) | Live nodes; IB, IC and OKX clients in `ib/`, `ic/` and `okx/` |
 | [docs/research/](docs/research/README.md) | Desk research on strategies, costs and brokers |
 
 ## Disclaimer

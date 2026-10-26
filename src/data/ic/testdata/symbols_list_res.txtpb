@@ -1,0 +1,37 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the account's symbols, trimmed to XAUUSD, EURUSD, US500.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOASymbolsListRes OpenApiMessages.proto < symbols_list_res.bin
+# Message: ProtoOASymbolsListRes
+ctidTraderAccountId: 1000001
+symbol {
+  symbolId: 41
+  symbolName: "XAUUSD"
+  enabled: true
+  baseAssetId: 18
+  quoteAssetId: 16
+  symbolCategoryId: 2
+  description: "Gold vs US Dollar"
+  sortingNumber: 3
+}
+symbol {
+  symbolId: 1
+  symbolName: "EURUSD"
+  enabled: true
+  baseAssetId: 5
+  quoteAssetId: 16
+  symbolCategoryId: 1
+  description: "Euro vs US Dollar"
+  sortingNumber: 0
+}
+symbol {
+  symbolId: 10013
+  symbolName: "US500"
+  enabled: true
+  baseAssetId: 38
+  quoteAssetId: 16
+  symbolCategoryId: 3
+  description: "USA S&P 500 Index"
+  sortingNumber: 13
+}

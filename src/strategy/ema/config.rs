@@ -1,8 +1,13 @@
 use anyhow::ensure;
-use nautilus_model::{identifiers::StrategyId, types::Quantity};
+use jiff::SignedDuration;
+use nautilus_model::{
+    identifiers::{InstrumentId, StrategyId},
+    types::Quantity,
+};
 use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
+use super::bracket::Bps;
 use crate::strategy::BarsConfig;
 
 /// Config of the EMA crossover strategy, loaded from TOML.
@@ -12,32 +17,60 @@ pub struct EmaCrossConfig {
     #[serde(default = "default_base")]
     #[builder(default = default_base())]
     pub base: StrategyConfig,
-    /// The bars traded, their warmup and their session.
+    /// The bars read, their warmup and their session: those of every
+    /// instrument in `instrument_ids`.
     #[serde(flatten)]
     pub bars: BarsConfig,
+    /// The one instrument traded, among `instrument_ids`; the others are
+    /// read only.
+    pub trade_instrument_id: InstrumentId,
     #[serde(default = "default_fast_period")]
     #[builder(default = default_fast_period())]
     pub fast_period: usize,
     #[serde(default = "default_slow_period")]
     #[builder(default = default_slow_period())]
     pub slow_period: usize,
-    /// Position held per instrument, long or short.
+    /// The size of each trade.
     pub trade_size: Quantity,
+    /// The stop loss of each trade, this far from the close of the bar it
+    /// was decided on, against the trade.
+    pub stop_loss_bps: Bps,
+    /// The take profit of each trade, this far from the close of the bar
+    /// it was decided on, in the trade's favour.
+    pub take_profit_bps: Bps,
+    /// How long a trade is held after its entry fills, unless its stop
+    /// loss or take profit ends it first, such as `"1h"`.
+    pub hold: SignedDuration,
 }
 
 impl EmaCrossConfig {
     /// # Errors
     ///
     /// Returns an error if the bars are inconsistent (see
-    /// `BarsConfig::validate`), the periods out of order or the size not
-    /// positive.
+    /// `BarsConfig::validate`), the traded instrument not among those read,
+    /// the periods out of order, the size, the distances or the hold not
+    /// positive, or the stop loss of a long at or below zero.
     pub fn validate(&self) -> anyhow::Result<()> {
         self.bars.validate()?;
+        ensure!(
+            self.bars.instrument_ids.contains(&self.trade_instrument_id),
+            "trade instrument {} is not among the instrument ids",
+            self.trade_instrument_id
+        );
         ensure!(
             self.fast_period > 0 && self.fast_period < self.slow_period,
             "fast period must be positive and below the slow period"
         );
         ensure!(self.trade_size.is_positive(), "trade size must be positive");
+        ensure!(
+            self.stop_loss_bps.is_positive() && self.stop_loss_bps < Bps::WHOLE,
+            "stop loss must be above 0 and below 10000 bps"
+        );
+        ensure!(
+            self.take_profit_bps.is_positive(),
+            "take profit must be positive"
+        );
+        ensure!(self.hold.is_positive(), "hold must be positive");
         Ok(())
     }
 }
@@ -64,13 +97,18 @@ const fn default_slow_period() -> usize {
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::BarType;
+    use rust_decimal::Decimal;
 
     use super::*;
 
     const TOML: &str = r#"
         instrument_ids = ["ESH4.CME", "ESM4.CME"]
+        trade_instrument_id = "ESM4.CME"
         bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
         trade_size = "1"
+        stop_loss_bps = 50
+        take_profit_bps = "75.5"
+        hold = "1h"
         warmup = "720h"
         session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
     "#;
@@ -82,6 +120,10 @@ mod tests {
         assert_eq!(config.fast_period, 10);
         assert_eq!(config.slow_period, 30);
         assert_eq!(config.trade_size, Quantity::from(1));
+        assert_eq!(config.trade_instrument_id, InstrumentId::from("ESM4.CME"));
+        assert_eq!(config.stop_loss_bps, Bps::from(Decimal::from(50)));
+        assert_eq!(config.take_profit_bps, Bps::from(Decimal::new(755, 1)));
+        assert_eq!(config.hold, SignedDuration::from_hours(1));
     }
 
     #[test]
@@ -145,5 +187,43 @@ mod tests {
         let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("trade size"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_trade_instrument_not_read() {
+        let toml = TOML.replace(
+            "trade_instrument_id = \"ESM4.CME\"",
+            "trade_instrument_id = \"ESU4.CME\"",
+        );
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("ESU4.CME"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_missing_trade_instrument_at_load() {
+        let toml = TOML.replace("trade_instrument_id = \"ESM4.CME\"", "");
+        let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
+        assert!(err.to_string().contains("trade_instrument_id"), "{err}");
+    }
+
+    #[test]
+    fn rejects_non_positive_exits() {
+        for (from, to) in [
+            ("stop_loss_bps = 50", "stop_loss_bps = 0"),
+            ("take_profit_bps = \"75.5\"", "take_profit_bps = -1"),
+            ("hold = \"1h\"", "hold = \"0s\""),
+        ] {
+            let config: EmaCrossConfig = toml::from_str(&TOML.replace(from, to)).unwrap();
+            assert!(config.validate().is_err(), "{to}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_stop_loss_of_the_whole_price() {
+        let toml = TOML.replace("stop_loss_bps = 50", "stop_loss_bps = 10000");
+        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("stop loss"), "{err}");
     }
 }

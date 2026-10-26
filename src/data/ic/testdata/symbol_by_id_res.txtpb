@@ -1,0 +1,225 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the details of XAUUSD, EURUSD, US500.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001. Fields 41
+# and 42 of ProtoOASymbol are in no published .proto (Spotware's main as of
+# 2026-10-26, the vendored copy), so protoc shows their numbers.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOASymbolByIdRes OpenApiMessages.proto < symbol_by_id_res.bin
+# Message: ProtoOASymbolByIdRes
+ctidTraderAccountId: 1000001
+symbol {
+  symbolId: 41
+  digits: 2
+  pipPosition: 2
+  enableShortSelling: true
+  guaranteedStopLoss: false
+  swapRollover3Days: WEDNESDAY
+  swapLong: -53.31
+  swapShort: 36.61
+  maxVolume: 1000000
+  minVolume: 100
+  stepVolume: 100
+  maxExposure: 10000000000000
+  schedule {
+    startSecond: 64920
+    endSecond: 147540
+  }
+  schedule {
+    startSecond: 151320
+    endSecond: 233940
+  }
+  schedule {
+    startSecond: 237720
+    endSecond: 320340
+  }
+  schedule {
+    startSecond: 324120
+    endSecond: 406740
+  }
+  schedule {
+    startSecond: 410520
+    endSecond: 493020
+  }
+  commission: 3000
+  commissionType: USD_PER_MILLION_USD
+  slDistance: 0
+  tpDistance: 0
+  gslDistance: 0
+  gslCharge: 0
+  distanceSetIn: SYMBOL_DISTANCE_IN_POINTS
+  minCommission: 0
+  minCommissionType: QUOTE_CURRENCY
+  minCommissionAsset: "USD"
+  rolloverCommission: 0
+  skipRolloverDays: 3
+  scheduleTimeZone: "America/New_York"
+  tradingMode: ENABLED
+  rolloverCommission3Days: WEDNESDAY
+  swapCalculationType: PIPS
+  lotSize: 10000
+  preciseTradingCommissionRate: 3000000000
+  preciseMinCommission: 0
+  holiday {
+    holidayId: 1788
+    name: "07.09.2026 - Metals, Metals Futures, XNGUSD & XTIUSD - Early close @ 21:30"
+    description: "US Labor Day"
+    scheduleTimeZone: "Europe/Minsk"
+    holidayDate: 20703
+    isRecurring: false
+    startSecond: 77340
+    endSecond: 86399
+  }
+  pnlConversionFeeRate: 0
+  leverageId: 52543
+  swapPeriod: 24
+  swapTime: 1260
+  skipSWAPPeriods: 0
+  chargeSwapAtWeekends: false
+  measurementUnits: "Oz"
+  41: 1
+  42: 1
+}
+symbol {
+  symbolId: 1
+  digits: 5
+  pipPosition: 4
+  enableShortSelling: true
+  guaranteedStopLoss: false
+  swapRollover3Days: WEDNESDAY
+  swapLong: -0.8
+  swapShort: 0.13
+  maxVolume: 10000000000
+  minVolume: 100000
+  stepVolume: 100000
+  maxExposure: 10000000000000
+  schedule {
+    startSecond: 61260
+    endSecond: 147540
+  }
+  schedule {
+    startSecond: 147660
+    endSecond: 233940
+  }
+  schedule {
+    startSecond: 234060
+    endSecond: 320340
+  }
+  schedule {
+    startSecond: 320460
+    endSecond: 406740
+  }
+  schedule {
+    startSecond: 406860
+    endSecond: 493020
+  }
+  commission: 3000
+  commissionType: USD_PER_MILLION_USD
+  slDistance: 0
+  tpDistance: 0
+  gslDistance: 0
+  gslCharge: 0
+  distanceSetIn: SYMBOL_DISTANCE_IN_POINTS
+  minCommission: 0
+  minCommissionType: QUOTE_CURRENCY
+  minCommissionAsset: "USD"
+  rolloverCommission: 0
+  skipRolloverDays: 3
+  scheduleTimeZone: "America/New_York"
+  tradingMode: ENABLED
+  rolloverCommission3Days: WEDNESDAY
+  swapCalculationType: PIPS
+  lotSize: 10000000
+  preciseTradingCommissionRate: 3000000000
+  preciseMinCommission: 0
+  holiday {
+    holidayId: 1698
+    name: "01.01.2026 New Year\'s Day  ALL FX *"
+    description: "01.01.2026 New Year\'s Day  ALL FX *"
+    scheduleTimeZone: "Europe/Bucharest"
+    holidayDate: 20454
+    isRecurring: false
+    startSecond: 0
+    endSecond: 0
+  }
+  pnlConversionFeeRate: 0
+  leverageId: 52531
+  swapPeriod: 24
+  swapTime: 1260
+  skipSWAPPeriods: 0
+  chargeSwapAtWeekends: false
+  measurementUnits: "EUR"
+  41: 1
+  42: 1
+}
+symbol {
+  symbolId: 10013
+  digits: 2
+  pipPosition: 1
+  enableShortSelling: true
+  guaranteedStopLoss: false
+  swapRollover3Days: FRIDAY
+  swapLong: -20.55
+  swapShort: -2.54
+  maxVolume: 25000
+  minVolume: 10
+  stepVolume: 10
+  maxExposure: 10000000000000
+  schedule {
+    startSecond: 61200
+    endSecond: 143940
+  }
+  schedule {
+    startSecond: 147600
+    endSecond: 230340
+  }
+  schedule {
+    startSecond: 234000
+    endSecond: 316740
+  }
+  schedule {
+    startSecond: 320400
+    endSecond: 403140
+  }
+  schedule {
+    startSecond: 406800
+    endSecond: 489540
+  }
+  commission: 0
+  commissionType: USD_PER_MILLION_USD
+  slDistance: 0
+  tpDistance: 0
+  gslDistance: 0
+  gslCharge: 0
+  distanceSetIn: SYMBOL_DISTANCE_IN_POINTS
+  minCommission: 0
+  minCommissionType: QUOTE_CURRENCY
+  minCommissionAsset: "USD"
+  rolloverCommission: 0
+  skipRolloverDays: 3
+  scheduleTimeZone: "America/Chicago"
+  tradingMode: ENABLED
+  rolloverCommission3Days: FRIDAY
+  swapCalculationType: PIPS
+  lotSize: 100
+  preciseTradingCommissionRate: 0
+  preciseMinCommission: 0
+  holiday {
+    holidayId: 1791
+    name: "07.09.2026 - US Indices & JP225 - Early close @ 20:00"
+    description: "US Labor Day"
+    scheduleTimeZone: "Europe/Minsk"
+    holidayDate: 20703
+    isRecurring: false
+    startSecond: 71940
+    endSecond: 86399
+  }
+  pnlConversionFeeRate: 0
+  leverageId: 1019
+  swapPeriod: 24
+  swapTime: 1260
+  skipSWAPPeriods: 0
+  chargeSwapAtWeekends: false
+  measurementUnits: "Indices"
+  41: 1
+  42: 2
+}

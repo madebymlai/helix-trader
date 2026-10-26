@@ -1,0 +1,55 @@
+# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# the answer to a close of the position's 1 oz under clientMsgId
+# C:PROBE-1: a closing market sell accepted, its clientOrderId the
+# request's clientMsgId.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_close_accepted.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_ACCEPTED
+position {
+  positionId: 690004734
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1793027466285
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_OPEN
+  swap: 0
+  price: 4022.78
+  stopLoss: 3982.78
+  takeProfit: 4062.78
+  utcLastUpdateTimestamp: 1793027472139
+  commission: -11
+  marginRate: 3597.44
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 11991
+  stopLossTriggerMethod: TRADE
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1031776330
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1793027475144
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  orderType: MARKET
+  orderStatus: ORDER_STATUS_ACCEPTED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1793027475144
+  closingOrder: true
+  clientOrderId: "C:PROBE-1"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 690004734
+}
+isServerEvent: false

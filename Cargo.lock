@@ -2221,12 +2221,14 @@ name = "helix-trader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bollard",
  "bon",
  "clap",
  "csv",
  "databento",
  "dotenvy",
+ "futures",
  "ibapi",
  "jiff",
  "log",
@@ -2245,15 +2247,23 @@ dependencies = [
  "nautilus-network",
  "nautilus-okx",
  "nautilus-persistence",
+ "nautilus-portfolio",
+ "nautilus-risk",
  "nautilus-serialization",
  "nautilus-trading",
+ "prost",
+ "prost-build",
  "redis",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",
+ "tungstenite",
+ "ustr",
+ "zeroize",
  "zip",
 ]
 
@@ -2902,6 +2912,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "multimap"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nautilus-analysis"
@@ -3920,6 +3936,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost-build"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
+dependencies = [
+ "heck",
+ "itertools 0.14.0",
+ "log",
+ "multimap",
+ "petgraph",
+ "prost",
+ "prost-types",
+ "regex",
+ "tempfile",
+]
+
+[[package]]
 name = "prost-derive"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3930,6 +3963,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "prost-types"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+dependencies = [
+ "prost",
 ]
 
 [[package]]

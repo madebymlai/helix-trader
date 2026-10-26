@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{DatabentoHistory, IbHistory, OkxHistory, fill_catalog},
+    data::{DatabentoHistory, IbHistory, IcHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
         DataRequirements, catalog_series,
@@ -42,13 +42,14 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX's
-    /// archive (OKX instruments), Databento (GLBX instruments) or
+    /// archive (OKX instruments), Databento (GLBX instruments), IC Markets'
+    /// cTrader (IC instruments) or
     /// Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node with Interactive Brokers or OKX;
-    /// stops on Ctrl-C.
+    /// Runs the strategy on a live node with Interactive Brokers, IC
+    /// Markets or OKX; stops on Ctrl-C.
     Live(LiveArgs),
 }
 
@@ -100,7 +101,9 @@ struct BacktestArgs {
     #[arg(long, value_parser = parse_money)]
     balance: Money,
     /// The account's leverage, for example 10: a position locks its value
-    /// divided by it, times the instrument's margin. 1 is no leverage.
+    /// divided by it, times the instrument's margin. 1 is no leverage. For
+    /// venues whose instruments carry margins of 1 (OKX); IC's carry IC's
+    /// own margin, so an IC backtest keeps 1.
     #[arg(long, default_value = "1")]
     leverage: Decimal,
 }
@@ -224,7 +227,8 @@ async fn main() -> anyhow::Result<()> {
 /// `strategy::catalog_series`) from each instrument's source: OKX's
 /// archive for OKX instruments (their 1-minute candles), Databento's
 /// historical API for GLBX instruments (their MBP-10 book and trades, the
-/// cost quoted first), IB (connected only if needed) for the others.
+/// cost quoted first), IC Markets' cTrader for IC instruments, IB
+/// (connected only if needed) for the others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -246,14 +250,16 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     // The source of an instrument is its venue's: OKX's archive for OKX,
-    // Databento for GLBX, IB for every other venue.
-    let (okx_ids, other_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
+    // Databento for GLBX, IC's cTrader for IC, IB for every other venue.
+    let (okx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
         .instrument_ids()
         .into_iter()
         .partition(|&id| OkxHistory::serves(id));
-    let (glbx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = other_ids
+    let (glbx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = others
         .into_iter()
         .partition(|&id| DatabentoHistory::serves(id));
+    let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
+        others.into_iter().partition(|&id| IcHistory::serves(id));
     if !okx_ids.is_empty() {
         let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
         OkxHistory::new()?
@@ -265,6 +271,13 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         DatabentoHistory::new(&api_key)?
             .fill(&catalog, &glbx_ids, start, end)
             .await?;
+    }
+    if !ic_ids.is_empty() {
+        let series = catalog_series(&requirements.of_instruments(&ic_ids).bar_types);
+        let ic = IcHistory::connect().await?;
+        let filled = ic.fill(&mut catalog, &series, start, end).await;
+        ic.disconnect().await;
+        filled?;
     }
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
@@ -550,8 +563,12 @@ mod tests {
             &path,
             r#"
             instrument_ids = []
+            trade_instrument_id = "ESM4.CME"
             bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
             trade_size = "1"
+            stop_loss_bps = 50
+            take_profit_bps = 50
+            hold = "1h"
             warmup = "720h"
             session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
             "#,

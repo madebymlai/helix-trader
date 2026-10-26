@@ -4,17 +4,18 @@
 
 mod common;
 
-use common::steps;
+use common::trades;
 use jiff::SignedDuration;
 
 #[test]
 fn a_negative_warmup_is_refused() {
-    let catalog = steps::catalog();
-    let mut backtest = steps::backtest(catalog.path(), steps::at("12:30"));
+    let levels = trades::TIME_EXIT;
+    let catalog = trades::catalog(&levels);
+    let mut backtest = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR");
     backtest.warmup = SignedDuration::from_hours(-1);
 
     let err = backtest
-        .run(common::shortest_ema_cross(steps::WARMUP))
+        .run(trades::ema_cross(trades::time_exit()))
         .unwrap_err();
 
     let err = format!("{err:#}");
@@ -23,19 +24,18 @@ fn a_negative_warmup_is_refused() {
 
 #[test]
 fn a_start_on_or_after_the_end_is_refused() {
-    let catalog = steps::catalog();
-    for start in [steps::end(), steps::at("16:00")] {
-        let backtest = steps::backtest(catalog.path(), start);
+    let levels = trades::TIME_EXIT;
+    let catalog = trades::catalog(&levels);
+    let end = trades::end(&levels);
+    for start in [end, trades::at("16:00")] {
+        let backtest = trades::backtest(catalog.path(), start, &levels, "0 EUR");
 
         let err = backtest
-            .run(common::shortest_ema_cross(steps::WARMUP))
+            .run(trades::ema_cross(trades::time_exit()))
             .unwrap_err();
 
         let err = format!("{err:#}");
-        let message = format!(
-            "backtest start {start} must be before its end {}",
-            steps::end()
-        );
+        let message = format!("backtest start {start} must be before its end {end}");
         assert!(err.contains(&message), "{err}");
     }
 }
