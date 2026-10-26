@@ -115,10 +115,16 @@ where
     result
 }
 
+/// How often Nautilus purges the cache of closed orders, closed positions
+/// and account events older than `PURGE_AFTER_MINS`, a week; never an open
+/// order or position. `purge_from_database` asks for Redis too.
+const PURGE_INTERVAL_MINS: u32 = 60;
+const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
+
 /// The config of the live node: `trader_id`, `logging`, `cache`, the
 /// catalog at `catalog`, `data_engine` and the execution engine's
 /// reconciliation and checks, after loading the cache from its database
-/// (`load_cache`, Nautilus' default).
+/// (`load_cache`, Nautilus' default), and its purges (`PURGE_INTERVAL_MINS`).
 fn config(
     trader_id: TraderId,
     catalog: &Path,
@@ -143,6 +149,13 @@ fn config(
             reconciliation: true,
             open_check_interval_secs: Some(10.0),
             position_check_interval_secs: Some(30.0),
+            purge_closed_orders_interval_mins: Some(PURGE_INTERVAL_MINS),
+            purge_closed_orders_buffer_mins: Some(PURGE_AFTER_MINS),
+            purge_closed_positions_interval_mins: Some(PURGE_INTERVAL_MINS),
+            purge_closed_positions_buffer_mins: Some(PURGE_AFTER_MINS),
+            purge_account_events_interval_mins: Some(PURGE_INTERVAL_MINS),
+            purge_account_events_lookback_mins: Some(PURGE_AFTER_MINS),
+            purge_from_database: true,
             ..Default::default()
         },
         ..Default::default()
@@ -154,6 +167,27 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn closed_orders_positions_and_account_events_are_purged_hourly_after_a_week() {
+        let config = config(
+            TraderId::from("HELIX-001"),
+            &PathBuf::from("/data/catalog"),
+            LoggerConfig::default(),
+            CacheConfig::default(),
+            LiveDataEngineConfig::default(),
+        )
+        .unwrap();
+        let exec = config.exec_engine;
+        let week = Some(7 * 24 * 60);
+        assert_eq!(exec.purge_closed_orders_interval_mins, Some(60));
+        assert_eq!(exec.purge_closed_orders_buffer_mins, week);
+        assert_eq!(exec.purge_closed_positions_interval_mins, Some(60));
+        assert_eq!(exec.purge_closed_positions_buffer_mins, week);
+        assert_eq!(exec.purge_account_events_interval_mins, Some(60));
+        assert_eq!(exec.purge_account_events_lookback_mins, week);
+        assert!(exec.purge_from_database);
+    }
 
     fn catalog_of(catalog: &Path) -> String {
         let config = config(

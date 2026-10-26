@@ -131,6 +131,15 @@ policy `always`; data in Redis' append-only file on the named volume
 a run loads what the last run of the same trader left (`--trader-id`);
 tests use their own (`HELIXTEST-...`) and delete their keys.
 
+**Purging.** Every hour, Nautilus purges closed orders, closed positions
+and account events older than 7 days (`LiveExecutionEngineConfig`
+`purge_*_interval_mins` 60, buffers and lookback 10080; Concepts › Cache,
+"Automatic purging in live trading"); open orders and positions never.
+`purge_from_database` is set, asking for Redis too, but at the pinned
+commit the Rust node purges only its memory: nothing reads that flag and
+the purges never call the database's deletes, so Redis keeps them (see
+"Reset").
+
 **Reset.** Stop the node, then delete the trader's keys:
 
 ```sh
