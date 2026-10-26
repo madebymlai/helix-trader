@@ -19,6 +19,7 @@ live/
   mod.rs    `Live`: the start sequence (clients by venue, catalog filling,
             logger), the entry point
   node.rs   builds and runs the LiveNode, broker-agnostic
+  redis.rs  the Redis container behind the node's cache
   ib/       IB client factories and configs, on the gateway `data`'s IB
             part starts; README.md: IB live
   okx/      OKX client factories and configs, and the account checks;
@@ -34,14 +35,16 @@ DataClientFactory>` and friends and never names a broker.
 
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
-  [--catalog catalog] [--client-id 1] [--leverage 1]
+  [--catalog catalog] [--client-id 1] [--leverage 1] [--trader-id HELIX-001]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
 gateway itself, so it needs no prior `fill-catalog` run. In code:
-`live::Live { catalog, account, client_id, leverage, logging
+`live::Live { trader_id, catalog, account, client_id, leverage, logging
 }.run(&requirements, strategy)`, generic over the strategy like
-`Backtest::run`.
+`Backtest::run`. It starts or reuses the Redis container that holds the
+node's cache (see "Cache in Redis").
+
 
 - `--account` is the bare IB account id, else `NAUTILUS_IB_ACCOUNT_ID`,
   needed only for IB instruments; its mode (paper for `D...`) picks the
@@ -50,6 +53,10 @@ gateway itself, so it needs no prior `fill-catalog` run. In code:
   backtest, and only a check: OKX applies the account's leverage and the
   start refuses an OKX instrument at another one (`okx/README.md`); IB does
   not check it.
+- `--trader-id` (default `HELIX-001`, checked by Nautilus: a name and a tag
+  joined by a hyphen) is the node's trader, whose cache in Redis each run
+  loads. Live processes running at the same time each need their own
+  trader id, since the Redis keys are per trader.
 - `--client-id` defaults to the adapter's 1, so `fill-catalog` (10) can run
   at the same time; a multiple of 1000 is refused before any gateway starts.
 - `NAUTILUS_LOG` configures the logger as for the other commands.
@@ -77,7 +84,9 @@ gateway itself, so it needs no prior `fill-catalog` run. In code:
    reused). The end stops a minute short because IB history refuses an end
    within the minute still in progress. The history connection closes here,
    so the node can connect with the same client id.
-5. Build the node (`node.rs`) with the catalog in `LiveNodeConfig::catalogs`,
+5. Start or reuse the Redis container (`redis.rs`), then build the node
+   (`node.rs`) with its cache persisted there, the catalog in
+   `LiveNodeConfig::catalogs`,
    the clients of each venue (IB's routed by default, OKX's routed by
    Nautilus as the only clients of venue OKX), reconciliation on, open-order
    and position checks every 10 and 30 s (as the adapter's
@@ -91,6 +100,82 @@ then served by the catalog; the data engine sends IB only the interval the
 catalog misses, from the fill's end to now, as historical BID_ASK ticks.
 Only the catalog part reaches the internal bars: the IB ticks are dropped
 (see "Known limits").
+
+## Cache in Redis
+
+The node persists Nautilus' cache to Redis, as Nautilus recommends for live
+trading (Concepts › Cache, "Database configuration"; How-to › Configure live
+trading, "Cache database configuration"): `RedisCacheConfig` from
+`nautilus_infrastructure`, a `CacheDatabaseFactory`, given to
+`LiveNodeBuilder::with_cache_database_factory`. The node opens it at start,
+loads it (`LiveExecutionEngineConfig::load_cache`, Nautilus' default) and
+only then connects the clients and reconciles, so reconciliation adds only
+what the venues did since the last run. It is the node's, so it covers every
+venue the node trades. When `run` returns, the node is disposed, which
+closes the cache database, as Nautilus documents.
+
+**What.** Currencies, instruments, accounts, orders and positions, with
+their ids and every event since they opened, and the cache's general
+entries; written as they change (`CacheConfig` defaults: JSON, no
+buffering). Market data is not persisted (`save_market_data` off), nor is
+strategy state (`load_state`/`save_state` off: the strategies rebuild
+theirs from the warmup).
+
+**Where.** The Docker container `helix-redis`, started or reused before the
+node is built, the way the IB Gateway's is (`redis.rs`): image
+`docker.io/library/redis:7.4.11-alpine` (Nautilus needs 6.2 or later), to
+pull once beforehand; port 6379 on 127.0.0.1 only, so no password; restart
+policy `always`; data in Redis' append-only file on the named volume
+`helix-redis-data`, which outlives the container. Keys are
+`trader-<trader id>:...` (`use_trader_prefix`, without the instance id), so
+a run loads what the last run of the same trader left (`--trader-id`);
+tests use their own (`HELIXTEST-...`) and delete their keys.
+
+**Purging.** Every hour, Nautilus purges closed orders, closed positions
+and account events older than 7 days (`LiveExecutionEngineConfig`
+`purge_*_interval_mins` 60, buffers and lookback 10080; Concepts › Cache,
+"Automatic purging in live trading"); open orders and positions never.
+`purge_from_database` is set, asking for Redis too, but at the pinned
+commit the Rust node purges only its memory: nothing reads that flag and
+the purges never call the database's deletes, so Redis keeps them (see
+"Reset").
+
+**Reset.** Stop the node, then delete the trader's keys:
+
+```sh
+docker exec helix-redis redis-cli --scan --pattern 'trader-HELIX-001:*' \
+  | xargs -r docker exec -i helix-redis redis-cli del
+```
+
+`CacheConfig::flush_on_start` is not the way: on Redis it flushes the whole
+database, every trader's keys.
+
+**Observed on IB paper** (`tests/ib_restart.rs`, 2026-10-26, EXS1.IBIS):
+
+- **Restart with an open position.** Two overlapping buys of 1 make one
+  netted position of 2 at 209.75; after a restart it comes back from the
+  cache with the same id, quantity, average price and its two orders, and
+  no other position; startup reconciliation adds nothing.
+- **Position closed while the node was down** (sold behind its back
+  through IB's API). Reconciliation takes IB's sell as an external order
+  (`PERM-<perm id>`) claimed by the strategy, applies its fill, and the
+  cached position closes before the strategy starts.
+- **Order in flight when the node died, working at IB.** Startup
+  reconciliation finds it among IB's open orders: `SUBMITTED` to
+  `ACCEPTED`. It can then be canceled as usual.
+- **Order in flight when the node died, rejected by IB meanwhile** (IB
+  lists rejected orders nowhere). It stays `SUBMITTED`: no IB report names
+  it, Nautilus' in-flight check covers only orders sent in the current run,
+  and its open-order check resolves an order missing at the venue only in
+  full-history mode (`open_check_open_only = false`), not in the default
+  open-only mode (Concepts › Execution › Reconciliation, "Full-history
+  checks"). A strategy that waits for no order in flight on the instrument,
+  as the EMA does, then never trades it: reset the cache, or delete that
+  order's keys.
+- **Empty cache** (a new trader). Reconciliation rebuilds from the
+  executions IB reports, the current day's: the strategy's own orders come
+  back by their order reference, others as external orders claimed by the
+  strategy.
 
 ## Known limits
 
@@ -312,7 +397,8 @@ tests: see [`okx/README.md`](okx/README.md).
   asserting on the result of `run()`, under
   `#[tokio::test(flavor = "current_thread")]`.
 - Venue end-to-end tests are under "IB tests" and "OKX tests" in the venue
-  READMEs.
+  READMEs; `ib_restart.rs` there checks the cache in Redis across
+  restarts.
 
 ## Unverified
 
