@@ -18,7 +18,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType},
     enums::OrderSide,
-    identifiers::{InstrumentId, Symbol, Venue},
+    identifiers::{InstrumentId, Symbol},
     instruments::{CryptoPerpetual, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
@@ -131,7 +131,7 @@ fn an_okx_swap_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commiss
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USDT"),
         leverage: Decimal::ONE,
-        oms_type: venue_oms_type(Venue::from("OKX")),
+        venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
     };
     let (recorder, record) = Recorder::trading_without_warmup(

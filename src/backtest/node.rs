@@ -28,25 +28,34 @@ use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
-use crate::strategy::warmup;
+use crate::{data::catalog_path, strategy::warmup};
 
 /// The id of the one run of the node.
 const RUN_ID: &str = "backtest";
 
-/// The run config of `backtest`: one venue named after the instruments'
-/// venue, keeping positions as `backtest.oms_type` says, at the run's leverage with Nautilus' default margin model (the
-/// notional / leverage times the instrument's margin), which fills orders
-/// on the replayed data and settles funding, the series of the window from
-/// the catalog (the only data replayed: the data engine builds the
-/// strategy's bars from them, the venue settles the funding; see
-/// `Backtest::series` and `data_config`), and the catalog registered in the
-/// engine so that it serves the strategy's warmup requests, with a cache
+/// How many data points the node loads and replays at a time (Nautilus'
+/// streaming mode): a day of CME gold's book depth is 7.4 million
+/// snapshots, beyond 16 GB loaded at once.
+const CHUNK_SIZE: usize = 100_000;
+
+/// The run config of `backtest`: one simulated venue per venue of the
+/// instruments, named after it, keeping positions as `backtest.venue_oms`
+/// says of it, each with the run's balance, leverage (Nautilus' default
+/// margin model: the notional / leverage times the instrument's margin)
+/// and fee model, which fills orders on the replayed data and settles
+/// funding, the series of the window from the catalog (the only data
+/// replayed: the data engine builds the strategy's bars from them and
+/// keeps the books the strategy subscribes to, the venue settles the
+/// funding; see `Backtest::series` and `data_config`), and the catalog registered in the
+/// engine, read-only, so that it serves the strategy's warmup requests and
+/// takes no write-back, with a cache
 /// holding the warmup bars (`warmup::cache_config`) and a data engine
 /// building no bar for an hour without quotes
 /// (`warmup::data_engine_config`). The engine starts
 /// 1 ns before `start` (see `Backtest::engine_start`), which must be before
-/// `end`. Build and run errors are raised, not only logged; the engine
-/// outlives the run (see `run`).
+/// `end`. The data is streamed `CHUNK_SIZE` points at a time. Build and
+/// run errors are raised, not only logged; the engine outlives the run
+/// (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
@@ -55,24 +64,13 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         start < end,
         "backtest start {start} must be before its end {end}"
     );
-    let venue = venue(&backtest.instruments())?;
-    // Absolute: the node's DataFusion reader finds no object store for a
-    // relative path ("file://catalog/...").
-    let catalog = std::path::absolute(&backtest.catalog)?;
-    let catalog = catalog
-        .to_str()
-        .with_context(|| format!("catalog path {} is not UTF-8", catalog.display()))?
-        .to_string();
-    let venue_config = BacktestVenueConfig::builder()
-        .name(venue.as_str())
-        .oms_type(backtest.oms_type)
-        .account_type(AccountType::Margin)
-        .book_type(BookType::L1_MBP)
-        .starting_balances(vec![backtest.balance.to_string()])
-        .default_leverage(backtest.leverage)
-        .fee_model(backtest.fee_model.clone())
-        .fill_model(costs::fill_model()?)
-        .build()?;
+    let venues: BTreeSet<Venue> = backtest.instruments().iter().map(|id| id.venue).collect();
+    ensure!(!venues.is_empty(), "no instruments");
+    let catalog = catalog_path(&backtest.catalog)?;
+    let venues = venues
+        .into_iter()
+        .map(|venue| venue_config(backtest, venue))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let data = backtest
         .series()?
         .into_iter()
@@ -82,18 +80,37 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
     let engine_config = BacktestEngineConfig::builder()
         .cache(cache)
         .data_engine(warmup::data_engine_config())
-        .catalogs(vec![DataCatalogConfig::new(catalog, None, None)])
+        .catalogs(vec![
+            DataCatalogConfig::new(catalog, None, None).with_read_only(true),
+        ])
         .logging(backtest.logging.clone())
         .build();
     Ok(BacktestRunConfig::builder()
         .id(RUN_ID.to_string())
-        .venues(vec![venue_config])
+        .venues(venues)
         .data(data)
         .engine(engine_config)
         .start(UnixNanos::from(backtest.engine_start()?))
         .end(UnixNanos::from(backtest.end))
+        .chunk_size(CHUNK_SIZE)
         .raise_exception(true)
         .dispose_on_completion(false)
+        .build()?)
+}
+
+/// The simulated `venue` of `backtest`: a margin account keeping positions
+/// as `backtest.venue_oms` says, with the run's balance, leverage, fee
+/// model and fill model, filling on the top of the book.
+fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVenueConfig> {
+    Ok(BacktestVenueConfig::builder()
+        .name(venue.as_str())
+        .oms_type((backtest.venue_oms)(venue))
+        .account_type(AccountType::Margin)
+        .book_type(BookType::L1_MBP)
+        .starting_balances(vec![backtest.balance.to_string()])
+        .default_leverage(backtest.leverage)
+        .fee_model(backtest.fee_model.clone())
+        .fill_model(costs::fill_model()?)
         .build()?)
 }
 
@@ -122,7 +139,7 @@ fn data_config(
 /// one result, its return statistics with `MaxDrawdown` (registered with
 /// the portfolio before the run), with the costs of the fills in the
 /// engine's cache, each on the quotes the run replayed, if any, loaded
-/// again as the node loads them.
+/// again as the node loads them (the other series are not).
 pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -143,7 +160,11 @@ where
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;
     let config = &node.configs()[0];
     let mut quotes = Vec::new();
-    for data in config.data() {
+    let quoted = config
+        .data()
+        .iter()
+        .filter(|data| *data.data_type() == NautilusDataType::QuoteTick);
+    for data in quoted {
         let replayed = BacktestNode::load_data_config(data, config.start(), config.end())?;
         quotes.extend(replayed.into_iter().filter_map(|data| match data {
             Data::Quote(quote) => Some(quote),
@@ -156,22 +177,13 @@ where
     outcome
 }
 
-/// The one venue of `instrument_ids`.
-fn venue(instrument_ids: &BTreeSet<InstrumentId>) -> anyhow::Result<Venue> {
-    let first = instrument_ids.first().context("no instruments")?;
-    ensure!(
-        instrument_ids.iter().all(|id| id.venue == first.venue),
-        "instruments span more than one venue"
-    );
-    Ok(first.venue)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
+    use nautilus_execution::models::fee::FeeModelAny;
     use nautilus_model::{data::BarType, enums::OmsType, types::Money};
     use rust_decimal::Decimal;
 
@@ -191,7 +203,7 @@ mod tests {
             fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),
             leverage: Decimal::ONE,
-            oms_type: OmsType::Netting,
+            venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig {
                 print_config: true,
                 ..LoggerConfig::default()
@@ -214,14 +226,14 @@ mod tests {
     #[test]
     fn the_venue_keeps_positions_as_the_backtest_says() {
         let dir = tempfile::tempdir().unwrap();
-        for oms_type in [OmsType::Netting, OmsType::Hedging] {
-            let backtest = Backtest {
-                oms_type,
-                ..backtest(dir.path())
-            };
-            let config = run_config(&backtest).unwrap();
-            assert_eq!(config.venues()[0].oms_type(), oms_type);
-        }
+        let netting = run_config(&backtest(dir.path())).unwrap();
+        let hedging = Backtest {
+            venue_oms: |_| OmsType::Hedging,
+            ..backtest(dir.path())
+        };
+        let hedging = run_config(&hedging).unwrap();
+        assert_eq!(netting.venues()[0].oms_type(), OmsType::Netting);
+        assert_eq!(hedging.venues()[0].oms_type(), OmsType::Hedging);
     }
 
     #[test]
@@ -328,10 +340,24 @@ mod tests {
     }
 
     #[test]
+    fn the_catalog_is_registered_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert!(config.engine().catalogs[0].read_only());
+    }
+
+    #[test]
     fn the_node_installs_the_logger_as_configured() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         assert!(config.engine().logging.print_config);
+    }
+
+    #[test]
+    fn the_data_is_streamed_in_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert_eq!(config.chunk_size(), Some(100_000));
     }
 
     #[test]
@@ -356,14 +382,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_instruments_on_two_venues() {
+    fn instruments_on_two_venues_get_a_venue_each_as_it_keeps_positions() {
         let dir = tempfile::tempdir().unwrap();
-        let mut backtest = backtest(dir.path());
-        backtest
-            .bar_types
-            .push(BarType::from("CSPX.LSEETF-1-HOUR-MID-INTERNAL"));
-        let err = run_config(&backtest).unwrap_err();
-        assert!(err.to_string().contains("venue"), "{err}");
+        let backtest = Backtest {
+            bar_types: vec![
+                BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
+                BarType::from("GC.v.0.GLBX-1-MINUTE-MID-INTERNAL"),
+            ],
+            venue_oms: crate::backtest::venue_oms_type,
+            ..backtest(dir.path())
+        };
+
+        let config = run_config(&backtest).unwrap();
+
+        let venues: Vec<_> = config
+            .venues()
+            .iter()
+            .map(|venue| (venue.name().to_string(), venue.oms_type()))
+            .collect();
+        assert_eq!(
+            venues,
+            [
+                ("GLBX".to_string(), OmsType::Netting),
+                ("ICMARKETS".to_string(), OmsType::Hedging),
+            ]
+        );
+        for venue in config.venues() {
+            assert_eq!(venue.starting_balances(), ["10000.00 EUR"]);
+            assert_eq!(venue.default_leverage(), Some(Decimal::ONE));
+            assert_eq!(venue.account_type(), AccountType::Margin);
+            assert!(matches!(venue.fee_model(), Some(FeeModelAny::Fixed(_))));
+        }
     }
 
     #[test]

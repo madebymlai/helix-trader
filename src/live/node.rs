@@ -26,6 +26,7 @@ use nautilus_live::{
     config::{LiveDataEngineConfig, LiveExecutionEngineConfig, LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
+use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::redis;
@@ -51,9 +52,10 @@ pub(super) struct Clients {
 /// `redis::start`), under `trader_id`'s keys: the node loads the orders,
 /// positions and accounts of its earlier runs at start, then reconciles
 /// them with the venues, and checks open orders and positions as it runs.
-/// No catalog is registered: the data clients answer the historical
-/// requests, and a subscription to external bars starts at the
-/// subscription, not where a catalog would end.
+/// `catalog` is registered, the directory fill-catalog fills and backtests
+/// read: it answers the historical requests first, the data clients
+/// what it lacks, and answers asked to are written back to it (see
+/// `strategy::warmup`).
 ///
 /// # Errors
 ///
@@ -61,11 +63,13 @@ pub(super) struct Clients {
 /// (two clients claiming the same route included), fails to load its cache, the strategy cannot be
 /// added or claim its instruments, or the node fails to start, run or stop
 /// (orders still unresolved after the post-stop delay included).
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn run<S>(
     trader_id: TraderId,
     logging: LoggerConfig,
     cache: CacheConfig,
     data_engine: LiveDataEngineConfig,
+    catalog: DataCatalogConfig,
     clients: Vec<Clients>,
     instrument_ids: &[InstrumentId],
     strategy: S,
@@ -73,7 +77,7 @@ pub(super) async fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let config = config(trader_id, logging, cache, data_engine);
+    let config = config(trader_id, logging, cache, data_engine, catalog);
     let cache_database = redis::start().await?;
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
@@ -121,16 +125,19 @@ const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
 /// The config of the live node: `trader_id`, `logging`, `cache`,
-/// `data_engine` and the execution engine's reconciliation and checks,
-/// after loading the cache from its database (`load_cache`, Nautilus'
-/// default), and its purges (`PURGE_INTERVAL_MINS`). No catalog.
+/// `data_engine`, the one `catalog` and the execution engine's
+/// reconciliation and checks, after loading the cache from its database
+/// (`load_cache`, Nautilus' default), and its purges
+/// (`PURGE_INTERVAL_MINS`).
 fn config(
     trader_id: TraderId,
     logging: LoggerConfig,
     cache: CacheConfig,
     data_engine: LiveDataEngineConfig,
+    catalog: DataCatalogConfig,
 ) -> LiveNodeConfig {
     LiveNodeConfig {
+        catalogs: vec![catalog],
         environment: Environment::Live,
         trader_id,
         logging,
@@ -162,6 +169,7 @@ mod tests {
             LoggerConfig::default(),
             CacheConfig::default(),
             LiveDataEngineConfig::default(),
+            DataCatalogConfig::new("/data/catalog".to_string(), None, None),
         )
     }
 
@@ -178,10 +186,10 @@ mod tests {
         assert!(!exec.purge_from_database);
     }
 
-    /// A catalog would serve the warmup instead of the data clients, and
-    /// start the subscription to a source bar type at its end.
     #[test]
-    fn no_catalog_is_registered() {
-        assert!(node_config().catalogs.is_empty());
+    fn the_catalog_is_registered_writable() {
+        let [catalog] = node_config().catalogs.try_into().unwrap();
+        assert_eq!(catalog.path(), "/data/catalog");
+        assert!(!catalog.read_only());
     }
 }

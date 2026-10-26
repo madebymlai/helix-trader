@@ -5,8 +5,8 @@
 //! (see the README), so a run on missing data would go on silently with
 //! cold indicators; without its data, orders find no market and no bar is
 //! built. Every instrument must be stored, and each series the run replays
-//! (see `Backtest::series`: those the bars are built from and the stored
-//! funding of the instruments) covered over
+//! (see `Backtest::series`: those the bars are built from, the stored book
+//! depth and the stored funding of the instruments) covered over
 //! `[engine start − warmup, end]` by its stored intervals (inclusive
 //! nanoseconds); the engine starts 1 ns before the run start. The gaps come
 //! from `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
@@ -111,7 +111,7 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{
-        data::{Bar, BarType, FundingRateUpdate, QuoteTick},
+        data::{Bar, BarType, FundingRateUpdate, QuoteTick, stubs::stub_depth10},
         enums::OmsType,
         instruments::stubs::equity_aapl,
         types::{Money, Price, Quantity},
@@ -165,7 +165,7 @@ mod tests {
             fee_model: commission_per_order(Money::from("3 USD")).unwrap(),
             balance: Money::from("10000 USD"),
             leverage: Decimal::ONE,
-            oms_type: OmsType::Netting,
+            venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig::default(),
         }
     }
@@ -356,5 +356,43 @@ mod tests {
             err.contains("[2026-10-30T16:00:00Z, 2026-10-31T00:00:00Z] is missing"),
             "{err}"
         );
+    }
+
+    /// Stores one book depth snapshot of AAPL.XNAS over `[from, to]`.
+    fn store_book(dir: &Path, from: &str, to: &str) {
+        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        let mut depth = stub_depth10();
+        (depth.instrument_id, depth.ts_event, depth.ts_init) =
+            (equity_aapl().id, ns(from), ns(from));
+        catalog
+            .write_to_parquet(&[depth], Some(ns(from)), Some(ns(to)), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_stored_book_short_of_the_window_is_named_with_its_missing_range() {
+        let dir = tempfile::tempdir().unwrap();
+        catalog(dir.path(), QUOTED);
+        store_book(
+            dir.path(),
+            "2026-10-01T00:00:00Z",
+            "2026-10-30T23:59:59.999999999Z",
+        );
+        let err = check(&backtest(dir.path(), &[AAPL]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("order_book_depths of AAPL.XNAS"), "{err}");
+        assert!(
+            err.contains("[2026-10-31T00:00:00Z, 2026-10-31T00:00:00Z] is missing"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_stored_book_without_quotes_covering_the_window_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        catalog(dir.path(), &[]);
+        store_book(dir.path(), "2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
+        check(&backtest(dir.path(), &[AAPL])).unwrap();
     }
 }

@@ -360,28 +360,53 @@ session close, even with the market closed.
 
 `IcDataClient::request_quotes` answers with the quotes over `[start, end]`
 (`end` absent: now) from the tick history, merged as a fill merges them, the
-newest `limit` if one is given; a request without `start` is refused. The
-node registers no catalog, so the data engine passes the strategy's whole
-warmup request to the client (see "Warmup").
+newest `limit` if one is given; a request without `start`, or of more than
+one instrument, is refused. The answer is one explicit completed response
+envelope (`DataResponseEnvelope`, `DataEvent::ResponseEnvelope`, as
+Databento's adapter answers, `adapters/databento/src/data.rs`), never a
+payload alone: the data engine writes such an answer back to the catalog
+when the request asks (`update_catalog`, as the warmup's do), and skips
+one carrying a failure. The data engine asks the client only for what the
+catalog lacks (see "Warmup").
+
+A failure cutting the tick history short (a page refused, timed out, or
+lost to a disconnect) is the envelope's failure reason, with the quotes
+fetched before it: a side's pages walk back from the window's end, so
+they cover the window from where they stopped, and the quotes start where
+both sides' ticks do (`ticks::merge`; logged as a warning). The strategy
+learns it from its warmup's `on_data_response` (`strategy/README.md`,
+"Warmup and training"); nothing is written back.
 
 While a request of an instrument is answered (four rate-limited tick
 requests, about a second), its live quotes are held, then sent after the
 response, under one lock, without those at or before the response's last
 quote. So the node never gets a live quote before the warmup response,
 which would panic it (nautilus_trader#5393, `live/README.md`, "Known
-limits"), nor a quote twice. A failed request is logged; the node gets no
-response, and the held quotes go out.
+limits"), nor a quote twice. A failed request still gets its envelope,
+with what was fetched and the failure, and the held quotes go out after
+it.
 
 ## Warmup
 
 The strategy's warmup request (`strategy::warmup`) asks for the quotes of
-each IC instrument over `[now - warmup, now]`. The node registers no
-catalog (`live/README.md`, "Warmup and live bars on IB", for why), so the
-data engine passes it to the data client, which answers from cTrader's
-tick history, as `fill-catalog` fetches it (`IcHistory::quote_ticks`):
-both sides side by side, about 2 pages a second, 312 pages a side for a
-month of gold (`data/ic/README.md`, "Probe"), so a warmup of hours takes
-seconds and one of a month minutes.
+each IC instrument over `[now - warmup, now]`, with `update_catalog`. The
+node registers the catalog fill-catalog fills (`live/README.md`): the data
+engine answers the part it holds from it and passes the rest, from 1 ns
+after its stored range, to the data client, which answers from cTrader's
+tick history, as `fill-catalog` fetches it (`IcHistory::quote_ticks`, the
+one implementation of both): both sides side by side, about 2 pages a
+second, 312 pages a side for a month of gold (`data/ic/README.md`,
+"Probe"), so a warmup of hours takes seconds and one of a month minutes.
+The engine writes the client's answer back over its window, an empty one
+as covered (`record_empty_coverage`), and merges both parts into one
+response. So each start asks IC only for the quotes since the last one's
+end, and the bulk fill and the write-back share the catalog's keys
+(`QuoteTick` by instrument id) without overlapping: fill-catalog resumes
+after the stored range, whoever stored it. Pinned offline by
+`an_answer_written_back_serves_a_later_request_which_asks_ic_for_the_gap_only`
+(`data.rs`: a data engine, the catalog empty, then over a window an hour
+longer: IC is asked for that hour only, the answer merged without a
+duplicate).
 
 The hand-off has no gap and no duplicate. The request ends at `now`, the
 tick history up to it; the spot subscription, sent after the request,
@@ -487,7 +512,10 @@ limits") away from IC, however long the history takes.
   - `data.rs`, the `DataClient` against the mock peer: the instruments sent
     at connect on venue `ICMARKETS`; subscribed quotes from the captured
     spot events; an unsubscription sent; a quote request answered from the
-    tick history of its window, and its limit; a live quote arriving during
+    tick history of its window in one completed envelope, and its limit; a
+    page refused, the quotes before it answered with the failure; through
+    a data engine, an answer written back and a later request asking IC
+    for the gap only; a live quote arriving during
     a request sent after the response; after the peer closes the
     connection, the quotes subscribed again and flowing; a token renewal in
     flight at `stop` saved by the `disconnect` that follows; a request

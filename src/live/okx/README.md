@@ -69,11 +69,16 @@ How warmup is requested is in `strategy/README.md`, "Warmup and training";
 the 5 s build delay of the live hour bars is in "Bars built from quotes".
 What the OKX data client does:
 
-- **Warmup from the REST candles.** The node registers no catalog, so the
-  data engine sends the whole window of the `…-1-MINUTE-LAST-EXTERNAL`
-  request to the OKX data client, which pages OKX's candles up to now
-  (`/market/candles`, then `/market/history-candles`), each stamped
-  `ts_init` = its close, as the archive's.
+- **Warmup from the catalog, then the REST candles.** The node registers
+  the catalog fill-catalog fills, so the data engine answers the
+  `…-1-MINUTE-LAST-EXTERNAL` request from the archive's candles stored
+  there and sends the rest of the window to the OKX data client, which
+  pages OKX's candles up to now (`/market/candles`, then
+  `/market/history-candles`), each stamped `ts_init` = its close, as the
+  archive's. Its answer is not written back: the client replies with the
+  payload alone, which Nautilus does not take as complete coverage (it
+  logs "Catalog write-back requires an explicit completed response
+  envelope").
 - **Live minute bars** come from the business WebSocket's candle channel,
   confirmed candles only.
 - **No quote history.** The data client does not implement

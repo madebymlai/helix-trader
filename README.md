@@ -17,7 +17,7 @@ per process. Each takes the strategy name and its TOML config.
 |---|---|
 | `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, IC Markets' cTrader for IC instruments (tick quotes), Interactive Brokers for the rest. |
 | `backtest` | Runs the strategy over a window of the catalog, with commissions, leverage and funding, and prints the results. |
-| `live` | Runs the strategy on a live node against IB, OKX or IC Markets, until Ctrl-C. |
+| `live` | Runs the strategy on a live node against IB, OKX or IC Markets, until Ctrl-C, warmed up from the same catalog and the venues for the rest; IC's answers are written back to the catalog. |
 
 ## Quick start
 

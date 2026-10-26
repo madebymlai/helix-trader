@@ -20,11 +20,25 @@
 //! `update_subscriptions` (the aggregator goes on with the live data, so
 //! the bar spanning the warmup end comes out once and complete; without it
 //! that bar comes out partial, or as a one-update bar when the warmup ends
-//! on a bar close) and `skip_first_non_full_bar` (the oldest bar, missing
-//! the data before `now - warmup`, is dropped), then the bars are
-//! subscribed to. The bars a request builds reach only the cache: the
-//! response carries what was requested, and the built bars are in the
-//! cache when it arrives.
+//! on a bar close), `skip_first_non_full_bar` (the oldest bar, missing
+//! the data before `now - warmup`, is dropped) and `update_catalog` (with
+//! a catalog registered, the engine answers from it first and asks the
+//! venue only for what it lacks, then writes back the answers a data
+//! client certifies complete, as IC's does; a backtest's catalog answers
+//! are never written back). The bars a request builds reach only the
+//! cache: the response carries what was requested, and the built bars are
+//! in the cache when it arrives; Nautilus delivers no built bars.
+//!
+//! The requests form one request group (`DataActor::request_group`):
+//! Nautilus calls `on_data_response` with the group once every request is
+//! answered, and with the first failure if one failed (a page of the venue
+//! lost, say), its data received up to then kept.
+//!
+//! Then the bars are subscribed to, one subscription per venue, with the
+//! param `start_ns` = `now`: the live stream starts where the warmup ends.
+//! Without it, the data engine of a node with a catalog starts a
+//! subscription to external bars at the catalog's end, and IB sends every
+//! bar since as live.
 //!
 //! The cache keeps at most `bar_capacity` bars per bar type and evicts the
 //! oldest beyond it, so the node running the strategy takes its cache
@@ -38,39 +52,52 @@
 //! `data_engine_config` (backtest) or `live_data_engine_config` (live),
 //! which turn `time_bars_build_with_no_updates` off.
 //!
-//! A strategy calls `start` from `on_start` and `bars` from
-//! `on_historical_quotes` and `on_historical_bars`.
+//! A strategy calls `start` from `on_start`, `bars` from
+//! `on_historical_quotes` and `on_historical_bars`, and `finished` from
+//! `on_data_response`.
 
-use std::{collections::BTreeSet, fmt::Debug};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Debug,
+};
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     cache::CacheConfig,
+    messages::data::DataResponseEnvelope,
 };
-use nautilus_core::Params;
+use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
     data::{Bar, BarType, Data},
     enums::AggregationSource,
-    identifiers::InstrumentId,
+    identifiers::{InstrumentId, Venue},
 };
 use serde_json::json;
 
 /// Requests the warmup of `bar_types`, internal bar types, over
-/// `[now - warmup, now]`, then subscribes `actor` to them. The bars of a composite bar
-/// type are built from its source bars, requested per source bar type; the
-/// others from quotes, requested per instrument. The warmup of each request
-/// arrives in `on_historical_bars` or `on_historical_quotes`, where `bars`
-/// returns it.
+/// `[now - warmup, now]` as the request group `group`, then subscribes
+/// `actor` to them from `now`. The bars of a composite bar type are built
+/// from its source bars, requested per source bar type; the others from
+/// quotes, requested per instrument. The warmup of each request arrives in
+/// `on_historical_bars` or `on_historical_quotes`, where `bars` returns
+/// it; the end of the group in `on_data_response`, where `finished` tells
+/// it. `group` is the caller's, stored before the call: a group whose
+/// requests are all answered at once ends before this returns.
 ///
 /// # Errors
 ///
 /// Returns an error if a composite bar type's source bars are not
 /// external (built, not requested), or if a request fails.
-pub fn start<A>(actor: &mut A, bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Result<()>
+pub fn start<A>(
+    actor: &mut A,
+    bar_types: &[BarType],
+    warmup: SignedDuration,
+    group: UUID4,
+) -> anyhow::Result<()>
 where
     A: DataActor + DataActorNative + Debug + 'static,
 {
@@ -80,6 +107,7 @@ where
         .iter()
         .partition(|bar_type| bar_type.is_composite());
     let sources: BTreeSet<BarType> = composites.iter().map(BarType::composite).collect();
+    let mut requests = Vec::new();
     for source in sources {
         ensure!(
             source.is_externally_aggregated(),
@@ -89,14 +117,14 @@ where
         let built = composites
             .iter()
             .filter(|bar_type| bar_type.composite() == source);
-        actor.request_bars(
+        requests.push(actor.request_bars(
             source,
             Some(start),
             Some(now),
             None,
             None,
-            Some(params(built)),
-        )?;
+            Some(request_params(built)),
+        )?);
     }
     let instruments: BTreeSet<InstrumentId> =
         of_quotes.iter().map(BarType::instrument_id).collect();
@@ -104,32 +132,68 @@ where
         let built = of_quotes
             .iter()
             .filter(|bar_type| bar_type.instrument_id() == instrument_id);
-        actor.request_quotes(
+        requests.push(actor.request_quotes(
             instrument_id,
             Some(start),
             Some(now),
             None,
             None,
-            Some(params(built)),
-        )?;
+            Some(request_params(built)),
+        )?);
     }
+    actor.request_group(requests, Some(group))?;
+    // One subscription per venue: Nautilus routes a list of bar types to
+    // the client of their one venue.
+    let mut by_venue: BTreeMap<Venue, Vec<BarType>> = BTreeMap::new();
     for bar_type in bar_types {
-        actor.subscribe_bars(*bar_type, None, None);
+        by_venue
+            .entry(bar_type.instrument_id().venue)
+            .or_default()
+            .push(*bar_type);
+    }
+    let now_ns = UnixNanos::from(now);
+    for venue_bar_types in by_venue.into_values() {
+        actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now_ns)));
     }
     Ok(())
 }
 
 /// The params of a warmup request building `bar_types`.
-fn params<'a>(bar_types: impl Iterator<Item = &'a BarType>) -> Params {
+fn request_params<'a>(bar_types: impl Iterator<Item = &'a BarType>) -> Params {
     let bar_types: Vec<String> = bar_types.map(ToString::to_string).collect();
     Params::new(
         [
             ("bar_types".to_string(), json!(bar_types)),
             ("update_subscriptions".to_string(), json!(true)),
             ("skip_first_non_full_bar".to_string(), json!(true)),
+            ("update_catalog".to_string(), json!(true)),
         ]
         .into(),
     )
+}
+
+/// The params of the subscription to the bars warmed up to `now`: the live
+/// stream starts there.
+fn subscription_params(now: UnixNanos) -> Params {
+    Params::new([("start_ns".to_string(), json!(now.as_u64()))].into())
+}
+
+/// Whether the warmup `group` ended with `response`, a response to the
+/// actor's requests: `Ok(true)` if it ended complete, `Ok(false)` if
+/// `response` ends something else.
+///
+/// # Errors
+///
+/// Returns an error naming the reason if `response` ends the group and a
+/// request of it failed: the warmup holds what the requests got before.
+pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result<bool> {
+    if *response.correlation_id() != group {
+        return Ok(false);
+    }
+    match response.failure_reason() {
+        Some(reason) => bail!("the warmup is incomplete: {reason}"),
+        None => Ok(true),
+    }
 }
 
 /// The warmup bars of the instrument of `response`, the bars or quotes of
@@ -247,6 +311,27 @@ mod tests {
     use super::*;
 
     const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+    #[test]
+    fn the_warmup_finishes_on_its_groups_response_alone() {
+        let group = UUID4::new();
+
+        let other = DataResponseEnvelope::terminal(UUID4::new(), Some("lost".to_string()));
+        let complete = DataResponseEnvelope::terminal(group, None);
+
+        assert!(!finished(group, &other).unwrap());
+        assert!(finished(group, &complete).unwrap());
+    }
+
+    #[test]
+    fn a_failed_warmup_is_an_error_naming_the_reason() {
+        let group = UUID4::new();
+        let failed = DataResponseEnvelope::terminal(group, Some("page timed out".to_string()));
+
+        let err = finished(group, &failed).unwrap_err().to_string();
+
+        assert!(err.contains("page timed out"), "{err}");
+    }
 
     #[test]
     fn no_bar_types_keep_the_default_cache() {

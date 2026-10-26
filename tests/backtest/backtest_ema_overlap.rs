@@ -28,7 +28,7 @@ const LEVELS: [f64; 4] = [620.0, 600.0, 604.0, 602.0];
 fn on_a_hedging_venue_overlapping_trades_are_two_positions_each_closed_by_its_hold() {
     let catalog = trades::catalog(&LEVELS);
     let backtest = Backtest {
-        oms_type: OmsType::Hedging,
+        venue_oms: |_| OmsType::Hedging,
         ..trades::backtest(catalog.path(), trades::start(), &LEVELS, "0 EUR")
     };
     let exits = Exits::after(SignedDuration::from_mins(90));

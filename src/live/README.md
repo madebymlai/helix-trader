@@ -3,8 +3,10 @@
 The `live` module builds and runs a Nautilus `LiveNode` for the strategy, on
 a paper then a real account (build step 3). It adds no trading logic: it
 sets up the clients of the instruments' venues, then wires the clients, the
-strategy and the node. The venues' data clients serve the warmup: the node
-registers no catalog.
+strategy and the node. The node registers the catalog fill-catalog fills
+and backtests read (`--catalog`, default `catalog`): it serves the warmup
+first, the venues' data clients what it lacks, and IC's answers are
+written back to it.
 Clients go by venue: OKX instruments to OKX's clients, IC instruments
 (`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
 venues gets their clients, routed by Nautilus. IC's account is hedging:
@@ -43,12 +45,12 @@ DataClientFactory>` and friends and never names a broker.
 
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
-  [--client-id 1] [--leverage 1] [--trader-id HELIX-001]
+  [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
 gateway itself, so it needs no prior `fill-catalog` run. In code:
-`live::Live { trader_id, account, client_id, leverage, logging
+`live::Live { trader_id, account, client_id, leverage, logging, catalog
 }.run(&requirements, strategy)`, generic over the strategy like
 `Backtest::run`. It starts or reuses the Redis container that holds the
 node's cache (see "Cache in Redis").
@@ -107,16 +109,26 @@ A strategy on IB trades composite bars of IB's 1-minute bars, such as
 `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (`strategy/README.md`,
 "Bar types"). Its warmup request (`strategy::warmup`) asks for
 `SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars, over
-`[now - warmup, now]`. With no catalog registered, the data engine passes
-it to IB's data client (`request_bars`,
-`adapters/interactive_brokers/src/data/core.rs`), which splits the window
-into IB durations (`calculate_duration_segments`) and answers with IB's
-bars up to now, stamped at their close. The subscription
-to the bars then goes to IB's `subscribe_bars`, which for any bar size but 5
-seconds runs a keepUpToDate historical request (`streams.rs`,
-`handle_historical_bars_subscription`): it starts at the subscription and
-publishes each minute once, when IB's update after its close arrives, or
-2 s after the close at the latest (`HistoricalBarCompletion`).
+`[now - warmup, now]`. The data engine answers it from the catalog's
+minute bars (fill-catalog's) and passes the rest of the window to IB's
+data client (`request_bars`,
+`adapters/interactive_brokers/src/data/core.rs`), which splits it into IB
+durations (`calculate_duration_segments`) and answers with IB's bars up
+to now, stamped at their close; the engine merges the two into one
+response. IB's answer is not written back (the client replies with the
+payload alone, see `data/README.md`, "Nautilus persists only certified
+responses"). The subscription to the bars then goes to IB's
+`subscribe_bars`, which for any bar size but 5 seconds runs a
+keepUpToDate historical request (`streams.rs`,
+`handle_historical_bars_subscription`): it starts at the subscription's
+`start_ns` param, which the warmup sets to its `now`, and publishes each
+minute once, when IB's update after its close arrives, or 2 s after the
+close at the latest (`HistoricalBarCompletion`). Without that param the
+data engine, having a catalog, would set it to 1 ns after the catalog's
+last minute bar (`subscribe_command_with_prefilled_start_ns`,
+`data/src/engine/streaming.rs`), and IB would send every bar since as
+live; until the bump to `04f766b` the node registered no catalog for that
+reason.
 
 The hand-off has no gap and no duplicate because the request ends at
 `now`. IB's answer ends with the minute still in progress, a partial bar
@@ -256,15 +268,18 @@ usage.
 ## node.rs
 
 `node::run` builds the node through `LiveNodeBuilder::from_config`, with
-the engine configs as `LiveNodeConfig` fields. It registers no catalog
-(`LiveNodeConfig::catalogs`, enabled by `nautilus-live`'s `streaming`
-feature, stays empty; see "Warmup and live bars on IB").
+the engine configs as `LiveNodeConfig` fields. It registers the one
+catalog, writable (`LiveNodeConfig::catalogs`, enabled by
+`nautilus-live`'s `streaming` feature; its path absolute, as the
+backtest's), so that the warmup reads it and IC's answers are written back
+(see "Warmup and live bars on IB" and `ic/README.md`).
 
 ```rust
 let config = LiveNodeConfig {
     environment: Environment::Live,
     trader_id,                                   // TraderId::from("HELIX-001")
     logging,
+    catalogs: vec![DataCatalogConfig::new(catalog, None, None)], // absolute path
     cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
     data_engine: warmup::live_data_engine_config(&bar_types), // see the strategy README
     exec_engine: LiveExecutionEngineConfig {

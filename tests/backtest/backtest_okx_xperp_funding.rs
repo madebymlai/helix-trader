@@ -20,7 +20,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, FundingRateUpdate},
     enums::{OrderSide, PositionAdjustmentType},
-    identifiers::{InstrumentId, Symbol, Venue},
+    identifiers::{InstrumentId, Symbol},
     instruments::{CryptoFuture, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
@@ -144,7 +144,7 @@ fn backtest(dir: &Path) -> Backtest {
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("100000 USD"),
         leverage: Decimal::ONE,
-        oms_type: venue_oms_type(Venue::from("OKX")),
+        venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
     }
 }

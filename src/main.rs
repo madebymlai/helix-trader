@@ -153,6 +153,10 @@ struct LiveArgs {
     /// loads. Live processes running at once each need their own.
     #[arg(long, default_value = "HELIX-001", value_parser = parse_trader_id)]
     trader_id: TraderId,
+    /// The catalog directory, fill-catalog's and the backtests': the warmup
+    /// is read from it first, and IC's history is written back to it.
+    #[arg(long, default_value = "catalog")]
+    catalog: PathBuf,
 }
 
 /// The strategies, by command-line name.
@@ -304,31 +308,23 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let fee_model = args.commission.fee_model();
-    let backtest = |requirements: DataRequirements| -> anyhow::Result<Backtest> {
-        // The simulated venue keeps positions as the instruments' venue
-        // does; `Backtest::run` refuses instruments on several venues.
-        let venue = requirements
-            .instrument_ids()
-            .first()
-            .context("the strategy trades no instrument")?
-            .venue;
-        Ok(Backtest {
-            catalog: args.run.catalog.clone(),
-            bar_types: requirements.bar_types,
-            start,
-            end,
-            warmup: requirements.warmup,
-            fee_model,
-            balance: args.balance,
-            leverage: args.leverage,
-            oms_type: backtest::venue_oms_type(venue),
-            logging,
-        })
+    // Each simulated venue keeps positions as the real one does.
+    let backtest = |requirements: DataRequirements| Backtest {
+        catalog: args.run.catalog.clone(),
+        bar_types: requirements.bar_types,
+        start,
+        end,
+        warmup: requirements.warmup,
+        fee_model,
+        balance: args.balance,
+        leverage: args.leverage,
+        venue_oms: backtest::venue_oms_type,
+        logging,
     };
     let outcome = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            backtest(config.bars.data_requirements())?.run(EmaCross::new(config)?)?
+            backtest(config.bars.data_requirements()).run(EmaCross::new(config)?)?
         }
     };
     print!("{}", backtest::report(&outcome));
@@ -343,6 +339,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         client_id: args.client_id,
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
+        catalog: args.catalog,
     };
     match args.strategy {
         Strategy::Ema => {
@@ -513,6 +510,7 @@ mod tests {
         assert_eq!(args.account, Some("DU1234567".parse().unwrap()));
         assert_eq!(args.client_id, 1);
         assert_eq!(args.leverage, Decimal::ONE);
+        assert_eq!(args.catalog, PathBuf::from("catalog"));
     }
 
     #[test]

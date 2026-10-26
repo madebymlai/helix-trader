@@ -12,6 +12,7 @@
 #![allow(dead_code, reason = "each test module uses part of the fixture")]
 
 pub mod cache;
+pub mod glbx;
 pub mod ic;
 pub mod recorder;
 
@@ -203,7 +204,7 @@ pub fn backtest(
         fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),
         leverage: Decimal::ONE,
-        oms_type: venue_oms_type(Venue::from("IBIS")),
+        venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
     }
 }
@@ -576,12 +577,12 @@ pub mod overlap {
 
     use super::*;
 
-    /// Runs the recorder on a venue keeping positions as `venue_oms` and
-    /// returns its record.
-    pub fn run(venue_oms: OmsType) -> Rc<RefCell<recorder::Record>> {
+    /// Runs the recorder on a venue keeping positions as `venue_oms` says
+    /// and returns its record.
+    pub fn run(venue_oms: fn(Venue) -> OmsType) -> Rc<RefCell<recorder::Record>> {
         let catalog = steps::catalog();
         let backtest = Backtest {
-            oms_type: venue_oms,
+            venue_oms,
             ..steps::backtest(catalog.path(), steps::at("12:30"))
         };
         let (recorder, record) = recorder::Recorder::trading_without_warmup(

@@ -34,11 +34,12 @@ Nautilus lacks.
 ## Version
 
 The `nautilus-*` crates come from NautilusTrader's git repository, all
-pinned to the `develop` commit `a51ae015c1` (2026-10-22, crate version
+pinned to the `develop` commit `04f766b4d4` (2026-10-26, crate version
 `0.67.0`, unreleased), because it has the fixes after `0.66.0` that OKX
-needs (nautilus_trader#5339, #5337). Move back to crates.io at the next
-release. Their sources are under
-`~/.cargo/git/checkouts/nautilus_trader-*/a51ae01/crates/`. An upgrade is
+needs (nautilus_trader#5339, #5337) and the historical request groups,
+`on_data_response` and catalog write-back the warmup uses. Move back to
+crates.io at the next release. Their sources are under
+`~/.cargo/git/checkouts/nautilus_trader-*/04f766b/crates/`. An upgrade is
 one deliberate change: release notes read, full test suite green.
 
 ## Build order

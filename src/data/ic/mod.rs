@@ -450,68 +450,101 @@ impl IcHistory {
     }
 
     /// The quotes of `symbol` stamped in `[from, to]`, as data (see
-    /// `quote_ticks`).
+    /// `quote_ticks`), all of them or an error.
     async fn quotes(
         &self,
         symbol: &IcSymbol,
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<Vec<Data>> {
-        let quotes = self.quote_ticks(symbol, from, to).await?;
-        Ok(quotes.into_iter().map(Data::Quote).collect())
+        let fetched = self.quote_ticks(symbol, from, to).await?;
+        if let Some(e) = fetched.failure {
+            return Err(e);
+        }
+        Ok(fetched.quotes.into_iter().map(Data::Quote).collect())
     }
 
     /// The quotes of `symbol` stamped in `[from, to]`, merged from its BID
     /// and ASK ticks of those milliseconds and the last tick of each before
-    /// them (see `ticks::merge`), the two sides fetched side by side.
-    /// Logs the counts.
+    /// them (see `ticks::merge`), the two sides fetched side by side. A
+    /// failed tick request cuts its side short: the quotes then start where
+    /// both sides' ticks do, with the failure. Logs the counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the window is out of range, or as `ticks::merge`.
     pub(crate) async fn quote_ticks(
         &self,
         symbol: &IcSymbol,
         from: Timestamp,
         to: Timestamp,
-    ) -> anyhow::Result<Vec<QuoteTick>> {
+    ) -> anyhow::Result<FetchedQuotes> {
         // [from, to] in ns holds the ticks of [from_ms, to_ms) in ms.
         let ms = |ns: i128| i64::try_from(ns.div_euclid(1_000_000)).context("a time out of range");
         let from_ms = ms(from.as_nanosecond() + 999_999)?;
         let to_ms = ms(to.as_nanosecond())? + 1;
         if from_ms >= to_ms {
-            return Ok(Vec::new());
+            return Ok(FetchedQuotes::default());
         }
-        let (bid, ask) = tokio::try_join!(
+        let ((bid, bid_failure), (ask, ask_failure)) = tokio::join!(
             self.side_ticks(symbol, ProtoOaQuoteType::Bid, from_ms, to_ms),
             self.side_ticks(symbol, ProtoOaQuoteType::Ask, from_ms, to_ms),
-        )?;
+        );
         let merged = ticks::merge(&symbol.instrument, &bid, &ask)?;
+        let id = symbol.instrument.id();
         log::info!(
-            "{}: {} quotes over [{from}, {to}] from {} BID and {} ASK ticks; {} ticks before \
+            "{id}: {} quotes over [{from}, {to}] from {} BID and {} ASK ticks; {} ticks before \
              both sides were known, {} crossed quotes (ask below bid) dropped",
-            symbol.instrument.id(),
             merged.quotes.len(),
             bid.ticks.len(),
             ask.ticks.len(),
             merged.one_sided,
             merged.crossed,
         );
-        Ok(merged.quotes)
+        let failure = bid_failure.or(ask_failure);
+        if let Some(e) = &failure {
+            log::warn!(
+                "{id}: the quotes start at {} ms, not {from_ms} ms: {e:#}",
+                bid.from_ms.max(ask.from_ms)
+            );
+        }
+        Ok(FetchedQuotes {
+            quotes: merged.quotes,
+            failure,
+        })
     }
 
     /// The `side` ticks of `symbol` over `[from_ms, to_ms)` and its last
-    /// tick before them.
+    /// tick before them, and the failure that cut them short, if any.
     async fn side_ticks(
         &self,
         symbol: &IcSymbol,
         side: ProtoOaQuoteType,
         from_ms: i64,
         to_ms: i64,
-    ) -> anyhow::Result<SideTicks> {
+    ) -> (SideTicks, Option<anyhow::Error>) {
         // A closure returning the future, not an async closure: the latter
         // makes the future of a quote request not `Send`.
         let page = move |from, to| self.tick_page(symbol, side, from, to);
-        Ok(SideTicks {
-            before: ticks::last_before(from_ms, page).await?,
-            ticks: ticks::side_ticks(from_ms, to_ms, page).await?,
-        })
+        let before = match ticks::last_before(from_ms, page).await {
+            Ok(before) => before,
+            Err(e) => {
+                let nothing = SideTicks {
+                    before: None,
+                    ticks: Vec::new(),
+                    from_ms: to_ms,
+                };
+                return (nothing, Some(e));
+            }
+        };
+        let pages = ticks::side_ticks(from_ms, to_ms, page).await;
+        let side = SideTicks {
+            // Known only at the window's start.
+            before: before.filter(|_| pages.from_ms == from_ms),
+            ticks: pages.ticks,
+            from_ms: pages.from_ms,
+        };
+        (side, pages.failure)
     }
 
     /// One tick request: the newest page of `side` ticks of `symbol` over
@@ -572,6 +605,14 @@ impl IcHistory {
     pub async fn disconnect(self) {
         self.client.disconnect().await;
     }
+}
+
+/// The quotes `IcHistory::quote_ticks` got over a window, and the failure
+/// that cut them short, if any: then they start later than the window.
+#[derive(Debug, Default)]
+pub(crate) struct FetchedQuotes {
+    pub(crate) quotes: Vec<QuoteTick>,
+    pub(crate) failure: Option<anyhow::Error>,
 }
 
 /// An IC instrument and its cTrader `symbolId` on this server.

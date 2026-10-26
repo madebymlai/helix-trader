@@ -15,6 +15,7 @@ mod common;
 
 mod backtest_bars;
 mod backtest_bars_on_close;
+mod backtest_book_depth;
 mod backtest_commission_per_order;
 mod backtest_commission_rate;
 mod backtest_composite_bars;
@@ -44,5 +45,6 @@ mod backtest_session;
 mod backtest_start_on_close;
 mod backtest_stop;
 mod backtest_trade_size_off_grid;
+mod backtest_two_venues;
 mod backtest_warmup;
 mod backtest_without_session;

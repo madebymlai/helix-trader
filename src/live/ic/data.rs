@@ -23,7 +23,9 @@ use nautilus_common::{
     live::{runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
-        data::{QuotesResponse, RequestQuotes, SubscribeQuotes, UnsubscribeQuotes},
+        data::{
+            DataResponseEnvelope, QuotesResponse, RequestQuotes, SubscribeQuotes, UnsubscribeQuotes,
+        },
     },
 };
 use nautilus_core::{
@@ -315,11 +317,20 @@ impl DataClient for IcDataClient {
     }
 
     /// Answers with the quotes over `[start, end]` (end: now if none) from
-    /// the tick history, the newest `limit` if one is given. The live
-    /// quotes of the instrument wait for the response (see `spots`).
+    /// the tick history, the newest `limit` if one is given, in one
+    /// completed response envelope: the data engine writes it back to the
+    /// catalog if asked (`update_catalog`). A failure cutting the history
+    /// short is the envelope's failure reason, the quotes fetched before it
+    /// kept. The live quotes of the instrument wait for the response (see
+    /// `spots`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request is of more than one instrument, of
+    /// one not loaded, or without a start.
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
         let session = self.session()?;
-        let id = request.instrument_id;
+        let id = request.single_instrument_id()?;
         let symbol = session
             .symbols
             .get(&id)
@@ -338,36 +349,41 @@ impl DataClient for IcDataClient {
         let client_id = request.client_id.unwrap_or(self.client_id);
         let clock = self.clock;
         self.spawn_command("IC quotes request", async move {
-            let fetched = history.quote_ticks(&symbol, start, end).await;
+            let (mut ticks, failure) = match history.quote_ticks(&symbol, start, end).await {
+                Ok(fetched) => (fetched.quotes, fetched.failure),
+                Err(e) => {
+                    log::warn!("IC quotes of {id} not fetched: {e:#}");
+                    (Vec::new(), Some(e))
+                }
+            };
+            if let Some(limit) = request.limit {
+                let excess = ticks.len().saturating_sub(limit.get());
+                ticks.drain(..excess);
+            }
+            let answered = ticks.last().map(|q| q.ts_event);
+            let response = QuotesResponse::new(
+                request.request_id,
+                client_id,
+                id,
+                ticks,
+                datetime_to_unix_nanos(request.start),
+                datetime_to_unix_nanos(request.end),
+                clock.get_time_ns(),
+                request.params,
+            );
+            let envelope = DataResponseEnvelope::new(DataResponse::Quotes(response), true, None);
+            let envelope = match failure {
+                Some(e) => envelope.with_failure(format!("{e:#}")),
+                None => envelope,
+            };
             // Under the lock, so no live quote of the instrument goes
             // between the response and the quotes it held.
             let mut live = lock(&quotes);
-            let (answered, result) = match fetched {
-                Ok(mut ticks) => {
-                    if let Some(limit) = request.limit {
-                        let excess = ticks.len().saturating_sub(limit.get());
-                        ticks.drain(..excess);
-                    }
-                    let answered = ticks.last().map(|q| q.ts_event);
-                    let response = QuotesResponse::new(
-                        request.request_id,
-                        client_id,
-                        id,
-                        ticks,
-                        datetime_to_unix_nanos(request.start),
-                        datetime_to_unix_nanos(request.end),
-                        clock.get_time_ns(),
-                        request.params,
-                    );
-                    send(&sender, DataEvent::Response(DataResponse::Quotes(response)));
-                    (answered, Ok(()))
-                }
-                Err(e) => (None, Err(e)),
-            };
+            send(&sender, DataEvent::ResponseEnvelope(envelope));
             for quote in live.release(id, answered) {
                 send(&sender, DataEvent::Data(Data::Quote(quote)));
             }
-            result
+            Ok(())
         });
         Ok(())
     }
@@ -390,19 +406,30 @@ fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use nautilus_common::live::runner::replace_data_event_sender;
-    use nautilus_core::{UUID4, UnixNanos};
+    use std::{cell::RefCell, rc::Rc};
+
+    use nautilus_common::{
+        cache::Cache,
+        clock::VirtualClock,
+        live::runner::replace_data_event_sender,
+        messages::data::RequestCommand,
+        msgbus::{self, MessageBus, TypedHandler},
+    };
+    use nautilus_core::{Params, UUID4, UnixNanos};
+    use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
+    use nautilus_model::identifiers::TraderId;
     use nautilus_model::{
         instruments::Instrument,
         types::{Price, Quantity},
     };
+    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use prost::Message as _;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::data::ic::{
         messages::{
-            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes,
+            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes,
             ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
             ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
             ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
@@ -525,6 +552,31 @@ mod tests {
         match next_event(events).await {
             DataEvent::Data(Data::Quote(quote)) => quote,
             other => panic!("not a quote: {other:?}"),
+        }
+    }
+
+    /// The next event, a completed response envelope without failure of
+    /// quotes: its quotes response.
+    async fn next_quotes_response(events: &mut Events) -> QuotesResponse {
+        let envelope = next_envelope(events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        quotes_of(&envelope)
+    }
+
+    /// The next event, a completed response envelope.
+    async fn next_envelope(events: &mut Events) -> DataResponseEnvelope {
+        let DataEvent::ResponseEnvelope(envelope) = next_event(events).await else {
+            panic!("not a response envelope");
+        };
+        assert!(envelope.completed());
+        envelope
+    }
+
+    /// The quotes response `envelope` carries.
+    fn quotes_of(envelope: &DataResponseEnvelope) -> QuotesResponse {
+        match envelope.response() {
+            Some(DataResponse::Quotes(response)) => response.clone(),
+            other => panic!("not a quotes response: {other:?}"),
         }
     }
 
@@ -698,12 +750,9 @@ mod tests {
 
         client.request_quotes(asked).unwrap();
 
-        let DataEvent::Response(DataResponse::Quotes(response)) = next_event(&mut events).await
-        else {
-            panic!("not a quotes response");
-        };
+        let response = next_quotes_response(&mut events).await;
         assert_eq!(response.correlation_id, request_id);
-        assert_eq!(response.instrument_id, InstrumentId::from(XAUUSD));
+        assert_eq!(response.instrument_ids, [InstrumentId::from(XAUUSD)]);
         assert_eq!(
             prices(&response.data),
             [
@@ -729,15 +778,201 @@ mod tests {
             ))
             .unwrap();
 
-        let DataEvent::Response(DataResponse::Quotes(response)) = next_event(&mut events).await
-        else {
-            panic!("not a quotes response");
-        };
+        let response = next_quotes_response(&mut events).await;
         assert_eq!(
             prices(&response.data),
             [quote(s + 3_000, "4000.20", "4000.60")]
         );
         client.disconnect().await.unwrap();
+    }
+
+    /// Synthetic: cTrader refuses the third page of BID ticks, as at its
+    /// request limit.
+    #[tokio::test]
+    async fn a_failed_page_answers_the_quotes_before_it_with_the_failure() {
+        let s = at("2026-10-01T00:00:00Z").as_millisecond();
+        let bids: Vec<Tick> = (1..=4)
+            .map(|k| tick(s + k * 1_000, 400_000_000 + k * 1_000))
+            .collect();
+        let asks = vec![tick(s - 30_000, 400_050_000), tick(s + 2_000, 400_060_000)];
+        let script = move |_, request: &ProtoMessage| {
+            if let Some(actions) = accept_auth(request) {
+                return actions;
+            }
+            if request.payload_type == ProtoOaGetTickDataReq::TYPE {
+                let asked =
+                    ProtoOaGetTickDataReq::decode(request.payload.as_deref().unwrap()).unwrap();
+                // Pages of 2, newest first: 4, 3 | 3, 2 | refused below 2001 ms.
+                if asked.from_timestamp == Some(s) && asked.to_timestamp == Some(s + 2_001) {
+                    let refused = ProtoOaErrorRes {
+                        error_code: "REQUEST_FREQUENCY_EXCEEDED".to_owned(),
+                        ..Default::default()
+                    };
+                    return vec![reply(request, &refused)];
+                }
+                return vec![reply(request, &tick_answer(&asked, &bids, &asks, 2))];
+            }
+            peer(vec![], vec![])(0, request)
+        };
+        let (mut client, mut events, _) = connected(script).await;
+        skip_instruments(&mut events).await;
+
+        client
+            .request_quotes(request(
+                Some(at("2026-10-01T00:00:00Z")),
+                at("2026-10-01T01:00:00Z"),
+                None,
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("no failure reason");
+        assert!(reason.contains("REQUEST_FREQUENCY_EXCEEDED"), "{reason}");
+        // The BID ticks reach back to 2001 ms: the quotes start there, the
+        // ask of 2000 ms seeding them.
+        assert_eq!(
+            prices(&quotes_of(&envelope).data),
+            [
+                quote(s + 3_000, "4000.03", "4000.60"),
+                quote(s + 4_000, "4000.04", "4000.60"),
+            ]
+        );
+        client.disconnect().await.unwrap();
+    }
+
+    /// A data engine, its clock at `now`, with a writable catalog in `dir`
+    /// and `client` registered, routed by its venue, on a message bus of
+    /// this thread.
+    fn engine_with(client: IcDataClient, dir: &std::path::Path, now: &str) -> DataEngine {
+        MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
+            .register_message_bus();
+        let mut clock = VirtualClock::new();
+        clock.advance_time(UnixNanos::from(at(now)), true);
+        let mut engine = DataEngine::new(
+            Rc::new(RefCell::new(clock)),
+            Rc::new(RefCell::new(Cache::default())),
+            None,
+        );
+        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        engine.register_catalog(Box::new(catalog), None);
+        let client_id = ClientId::from("ICMARKETS");
+        let venue = Venue::new(IC_VENUE);
+        engine.register_client(
+            DataClientAdapter::new(client_id, Some(venue), false, false, Box::new(client)),
+            Some(venue),
+        );
+        engine
+    }
+
+    /// Asks `engine` for the XAUUSD quotes over `[start, end]` to be
+    /// written back, hands it what the client answers, and returns the
+    /// quotes of its answer.
+    async fn write_back_request(
+        engine: &mut DataEngine,
+        events: &mut Events,
+        start: &str,
+        end: &str,
+    ) -> Vec<nautilus_model::data::QuoteTick> {
+        let mut asked = request(Some(at(start)), at(end), None);
+        asked.params = Some(Params::new(
+            [("update_catalog".to_string(), serde_json::json!(true))].into(),
+        ));
+        let answers: Rc<RefCell<Vec<DataResponseEnvelope>>> = Rc::default();
+        let saved = Rc::clone(&answers);
+        msgbus::register_response_handler(
+            &asked.request_id,
+            TypedHandler::from(move |envelope: &DataResponseEnvelope| {
+                saved.borrow_mut().push(envelope.clone());
+            }),
+        );
+        engine
+            .execute_request(RequestCommand::Quotes(asked))
+            .unwrap();
+        let envelope = next_envelope(events).await;
+        engine.response_envelope(envelope);
+        let answers = answers.borrow();
+        let [answer] = answers.as_slice() else {
+            panic!("{} answers", answers.len())
+        };
+        assert_eq!(answer.failure_reason(), None);
+        quotes_of(answer).data.to_vec()
+    }
+
+    #[tokio::test]
+    async fn an_answer_written_back_serves_a_later_request_which_asks_ic_for_the_gap_only() {
+        let s = at("2026-10-01T00:00:00Z").as_millisecond();
+        let (minute, hour) = (60_000, 3_600_000);
+        let bids = vec![
+            tick(s + 1_000, 400_010_000),
+            tick(s + hour - 1_000, 400_020_000),
+            tick(s + hour, 400_030_000),
+            tick(s + hour + 30 * minute, 400_040_000),
+        ];
+        let asks = vec![
+            tick(s - 30_000, 400_050_000),
+            tick(s + 2_000, 400_060_000),
+            tick(s + hour + 30 * minute + 1_000, 400_070_000),
+        ];
+        let (client, mut events, received) = connected(peer(bids, asks)).await;
+        skip_instruments(&mut events).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
+
+        // An empty catalog: IC answers the whole window, written back.
+        let first = write_back_request(
+            &mut engine,
+            &mut events,
+            "2026-10-01T00:00:00Z",
+            "2026-10-01T01:00:00Z",
+        )
+        .await;
+        let asked_first: Vec<ProtoOaGetTickDataReq> = received_of(&received);
+        // Then over a window reaching an hour further.
+        let second = write_back_request(
+            &mut engine,
+            &mut events,
+            "2026-10-01T00:30:00Z",
+            "2026-10-01T02:00:00Z",
+        )
+        .await;
+
+        assert_eq!(
+            prices(&first),
+            [
+                quote(s + 1_000, "4000.10", "4000.50"),
+                quote(s + 2_000, "4000.10", "4000.60"),
+                quote(s + hour - 1_000, "4000.20", "4000.60"),
+                quote(s + hour, "4000.30", "4000.60"),
+            ]
+        );
+        // The catalog's quotes of [00:30, 01:00], then IC's after 01:00.
+        assert_eq!(
+            prices(&second),
+            [
+                quote(s + hour - 1_000, "4000.20", "4000.60"),
+                quote(s + hour, "4000.30", "4000.60"),
+                quote(s + hour + 30 * minute, "4000.40", "4000.60"),
+                quote(s + hour + 30 * minute + 1_000, "4000.40", "4000.70"),
+            ]
+        );
+        // Both answers of IC written back, each once.
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let stored = catalog
+            .quote_ticks(Some(vec![XAUUSD.to_string()]), None, None)
+            .unwrap();
+        let written = [&first[..], &second[2..]].concat();
+        assert_eq!(prices(&stored), prices(&written));
+        // The second request's tick windows, of each side: the last tick
+        // before the gap (from 1 ms after the stored end), and the gap.
+        let all: Vec<ProtoOaGetTickDataReq> = received_of(&received);
+        let mut windows: Vec<(i64, i64)> = all[asked_first.len()..]
+            .iter()
+            .map(|r| (r.from_timestamp.unwrap(), r.to_timestamp.unwrap()))
+            .collect();
+        windows.sort_unstable();
+        let gap = (s + hour + 1, s + 2 * hour + 1);
+        let before = (gap.0 - 7 * 24 * hour, gap.0);
+        assert_eq!(windows, [before, before, gap, gap]);
     }
 
     /// The peer sends a live spot while the request's ticks are fetched.
@@ -782,10 +1017,7 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(matches!(
-            next_event(&mut events).await,
-            DataEvent::Response(DataResponse::Quotes(_))
-        ));
+        next_quotes_response(&mut events).await;
         let live = next_quote(&mut events).await;
         assert_eq!(live.ts_event, UnixNanos::new(1_793_017_475_790_000_000));
         client.disconnect().await.unwrap();

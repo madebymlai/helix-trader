@@ -75,8 +75,8 @@ impl Backtest {
 `Outcome` is Nautilus' `BacktestResult` (public `result`) plus the costs of
 the fills, private: `report` prints them (see Costs in the report).
 
-`run` fails before building the node when there are no instruments or they
-are on more than one venue, the warmup is negative, `start` is not before
+`run` fails before building the node when there are no instruments, the
+warmup is negative, `start` is not before
 `end`, the leverage is not positive (Nautilus' check), the cache cannot
 hold the warmup (`strategy/README.md`, "Warmup and training"), or the
 catalog cannot serve the run (see Coverage check).
@@ -90,8 +90,10 @@ composite bar type (`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
 `...-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars or OKX's candles), or the
 quotes of their instruments. The data engine builds the strategy's
 internal bars from them, and orders fill on them (see Fills). It also
-replays the funding of each instrument whose catalog stores funding
-(`Backtest::series`; see OKX on candles), and nothing else.
+replays the book depth of each instrument whose catalog stores one (see
+Book data) and the funding of each instrument whose catalog stores funding
+(`Backtest::series`; see OKX on candles), and nothing else. The
+instruments may be on several venues, each simulated (see Venue).
 
 ## The run
 
@@ -141,18 +143,24 @@ pub fn dispose(&mut self);
 ```rust
 let run_config = BacktestRunConfig::builder()
     .id(RUN_ID.to_string())       // read back by get_engine_mut
-    .venues(vec![venue_config])   // the simulated venue
+    .venues(venue_configs)        // one simulated venue per venue of the instruments
     .data(data_configs)           // what to load from the catalog
     .engine(engine_config)        // logging, warmup catalog, cache and data engine from strategy::warmup
     .start(engine_start)          // start − 1 ns (see The engine start)
     .end(end)
+    .chunk_size(CHUNK_SIZE)       // 100,000: streamed, not loaded at once
     .raise_exception(true)
     .dispose_on_completion(false) // the cache outlives run
     .build()?;
 ```
 
-`chunk_size` (stream the data in chunks instead of loading it all) is left
-unset. With the default `raise_exception = false`, a build or run error is
+`chunk_size` streams the data: the node merges the series from the
+catalog and loads and replays `CHUNK_SIZE` (100,000) data points at a
+time instead of loading them all first (Nautilus' streaming mode,
+`run_streaming` in `backtest/src/node.rs`). A day of CME gold's book is
+7.4 million snapshots; loaded at once it went past 16 GB and the run was
+killed. The order of the replay is the same: the suite's results did not
+change. With the default `raise_exception = false`, a build or run error is
 only logged, the run is skipped and `node.run()` returns `Ok` with no
 result; we set it `true` so the error is returned.
 
@@ -186,13 +194,16 @@ past the close, and loses the bar closing at `end`. Stamping the quote
 
 `BacktestVenueConfig`, `bon` builder:
 
+One per venue of the instruments (`BacktestRunConfig::venues` is a
+list), all alike but for the name and the position mode:
+
 | Field | Value |
 |---|---|
-| `name` | the instruments' venue, for example `"IBIS"` |
-| `oms_type` | `Backtest::oms_type`: the real venue's, `venue_oms_type` (see below) |
+| `name` | the venue, for example `"IBIS"` |
+| `oms_type` | `Backtest::venue_oms` of the venue: the real venue's, `venue_oms_type` (see below) |
 | `account_type` | `AccountType::Margin` (the EMA strategy goes short) |
 | `book_type` | `BookType::L1_MBP` (`new` rejects L2 or L3 books without book data) |
-| `starting_balances: Vec<String>` | the balance, `Money::to_string()`, for example `"10000.00 EUR"` |
+| `starting_balances: Vec<String>` | the balance, `Money::to_string()`, for example `"10000.00 EUR"`, the same at every venue |
 | `default_leverage: Option<Decimal>` | `--leverage` (see Leverage) |
 | `fee_model: Option<FeeModelAny>` | required: the node's `build` fails without it (the builder's `build()` does not), so a missing fee never becomes zero |
 | `fill_model: Option<FillModelAny>` | `Default`, no slippage (see Fills) |
@@ -207,11 +218,21 @@ for the venues in `HEDGING_VENUES` (`ICMARKETS`, IC's hedging cTrader
 account, `live/ic/README.md`, "Hedging positions"), `Netting` for every
 other, IB's exchanges (Nautilus' IB
 execution client nets) and OKX (its client nets derivatives, in the net
-position mode `live` requires). `main` sets `oms_type` from the strategy's
-venue. With an unset strategy OMS, Nautilus takes the venue's: two
+position mode `live` requires). `main` passes `venue_oms_type` as
+`Backtest::venue_oms`, which tests replace to run one venue both ways.
+With an unset strategy OMS, Nautilus takes the venue's: two
 overlapping buys make one position at their average on a netting venue,
 two positions on a hedging one (`backtest_netting_venue.rs`,
 `backtest_hedging_venue.rs`).
+
+**Several venues.** A strategy reading one venue's data and trading on
+another (CME gold's book on `GLBX`, IC's gold on `ICMARKETS`) gets a
+simulated venue for each, each keeping positions as it does
+(`GLBX` netting, `ICMARKETS` hedging), each account starting with the
+run's one balance at the run's one leverage and fee model: enough while a
+strategy trades on one venue, the other's account left untouched. The
+report shows each account's balances (see Results).
+`backtest_two_venues.rs` pins it.
 
 Defaults left alone: `liquidity_consumption` `false` (every order sees the
 full quote or bar size), `use_reduce_only` `true`, `allow_cash_borrowing`
@@ -280,6 +301,39 @@ let bars = BacktestDataConfig::builder()            // bars: by bar type
 - The node loads the catalog's instruments in `build`, so `fill_catalog`
   must have written them.
 
+### Book data
+
+For each instrument the catalog stores book depth snapshots of (Databento's
+MBP-10, 10 levels a side, `data/databento/README.md`), the run also loads
+them, keyed by the instrument id:
+
+```rust
+let book = BacktestDataConfig::builder()            // book depth: by instrument
+    .data_type(NautilusDataType::OrderBookDepth)
+    .catalog_path(catalog_path.clone())
+    .instrument_id(InstrumentId::from("GC.v.0.GLBX"))
+    .build()?;
+```
+
+No config field asks for it: the strategy lists the instrument among its
+`instrument_ids`, and the catalog decides. Nautilus replays the snapshots
+with the other data, in time order: to the instrument's venue, and to the
+data engine, which publishes them to a strategy subscribed with
+`subscribe_book_depth` (`on_book_depth`) and, the subscription managed,
+keeps the cache's book (`cache.order_book`) as the last snapshot
+(`backtest_book_depth.rs`). The coverage check asks the snapshots over the
+window, as every series replayed.
+
+An instrument read for its book alone has its bars left out: when none of
+the series its bars are built from is stored but its book is (CME gold's
+MID bars, with no quotes of gold), no bar type of it is replayed or
+checked. Its warmup request, which the catalog cannot answer, goes to
+the venue's backtest data client, which refuses it ("does not support
+RequestQuotes"): the warmup's request group ends failed, which a strategy
+calling `warmup::finished` logs as an error ("the warmup is incomplete"),
+and the run goes on. An instrument with neither is refused by the
+coverage check, as before.
+
 ### Engine config
 
 `BacktestEngineConfig` (`nautilus_backtest::config`), `bon` builder and
@@ -299,11 +353,14 @@ ignored; so the command passes the `NAUTILUS_LOG` config through
 
 Warmup itself is in `strategy/README.md`, "Warmup and training". On the
 backtest side the catalog is registered in
-`BacktestEngineConfig::catalogs`:
+`BacktestEngineConfig::catalogs`, read-only, so that no answer is ever
+written back to it (the warmup asks for write-back, which live IC
+answers take):
 
 ```rust
 DataCatalogConfig::new(path: String, fs_protocol: Option<String>,
                        catalog_backend: Option<CatalogBackendType>) -> DataCatalogConfig
+config.with_read_only(true)    // rejects response write-back
 ```
 
 The request window is clamped to simulated now, the engine start
@@ -313,9 +370,11 @@ start; later bars are built from the replay. What the strategy receives:
 - **Catalog covers the window** (the stored intervals of every series span
   `[start − 1 ns − warmup, start − 1 ns]`): one `on_historical_quotes`
   (`on_historical_bars` for source bars) per instrument before the first
-  `on_bar`, the warmup bars in the cache, the partial oldest one dropped.
-  The bar spanning the warmup end and the run start comes once, complete,
-  in `on_bar`.
+  `on_bar`, the warmup bars in the cache, the partial oldest one dropped,
+  then the warmup's request group ends complete in `on_data_response`
+  (`backtest_long_warmup.rs`, `backtest_composite_warmup.rs`). The bar
+  spanning the warmup end and the run start comes once, complete, in
+  `on_bar`.
 - **Catalog not registered, or a gap in the window**: the data engine asks
   the venue's backtest data client for the missing part, which answers
   nothing (seen with bar requests, before quotes: no response ever came,
@@ -1067,11 +1126,15 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   catalog: missing instrument, quotes 1 ns short at either end, missing,
   or with a gap, the source bars of a composite bar type, stored funding
   short of the window); the run's series (the stored funding of a traded
-  instrument added, none without); the data configs (quotes by instrument,
+  instrument added, none without; the stored book depth of an
+  instrument added beside the source of its bars, or alone when none is
+  stored); the data configs (quotes by instrument,
   a composite bar type's source bars by bar type); the report of a
   hand-built `Outcome` (sections, sorted names, max drawdown, the costs and
   the gross PnL); the venue at the run's leverage with no margin model of
-  ours; a leverage not positive refused. The command line is tested in
+  ours; instruments on two venues a venue each, as each keeps positions,
+  with the run's balance, leverage and fee model; a leverage not positive
+  refused. The command line is tested in
   `main.rs`: required flags, exactly one commission flag, malformed
   `Money`, the window check, `--leverage` 1 unless given.
 - Integration tests in `tests/backtest/`, one node per test, run the real EMA
@@ -1177,6 +1240,16 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_ic_hedging.rs`: on the same quotes, the venue
     `venue_oms_type(ICMARKETS)`, two buys of 10 oz on two bars are two
     open positions, at 4006.10 and 4012.15.
+  - `backtest_book_depth.rs`: CME gold, GC.v.0.GLBX, a `FuturesContract`
+    with book depth snapshots of 10 levels and no quotes (`common::glbx`):
+    a strategy subscribed to its book depth, managed, gets the snapshots
+    of the run's window in order, the cache's book holding each as it
+    arrives; gold's MID bars, without a source, are left out.
+  - `backtest_two_venues.rs`: gold's book from `GLBX` and IC's gold
+    quotes (`common::ic`) in one catalog: a strategy reading the book buys
+    10 oz of XAUUSD on IC's first hour bar; two venues, the trade on
+    `ICMARKETS`, its commission off that account alone, the report
+    showing both accounts at the run's balance.
   - `backtest_ic_margin.rs`: on the same quotes and 1,000 USD, a buy of
     5 oz at 4006.10 (20,030.50 USD) fills, its position locking IC's
     margin, 667.68 USD; a second of 5 oz at 4012.15 is denied by the risk

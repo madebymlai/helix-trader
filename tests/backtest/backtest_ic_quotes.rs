@@ -16,6 +16,7 @@ use jiff::Timestamp;
 use nautilus_model::{
     data::BarType,
     enums::{OmsType, OrderSide},
+    identifiers::Venue,
     types::{Price, Quantity},
 };
 
@@ -23,7 +24,10 @@ use nautilus_model::{
 fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     let catalog = ic::catalog();
     let backtest = ic::backtest(&catalog);
-    assert_eq!(backtest.oms_type, OmsType::Hedging);
+    assert_eq!(
+        (backtest.venue_oms)(Venue::from("ICMARKETS")),
+        OmsType::Hedging
+    );
     let (recorder, record) = Recorder::trading_without_warmup(
         BarType::from(ic::HOUR_BARS),
         vec![(OrderSide::Buy, Quantity::from(10_000))],
