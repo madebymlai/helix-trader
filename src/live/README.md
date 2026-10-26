@@ -2,8 +2,9 @@
 
 The `live` module builds and runs a Nautilus `LiveNode` for the strategy, on
 a paper then a real account (build step 3). It adds no trading logic: it
-sets up the clients of the instruments' venues, fills the catalog up to now
-for the IB instruments, then wires the clients, the strategy and the node.
+sets up the clients of the instruments' venues, then wires the clients, the
+strategy and the node. The venues' data clients serve the warmup: the node
+registers no catalog.
 Clients go by venue: OKX instruments to OKX's clients, all others to IB's,
 and a strategy trading both gets both, routed by Nautilus.
 
@@ -16,8 +17,8 @@ points are under "Unverified".
 
 ```
 live/
-  mod.rs    `Live`: the start sequence (clients by venue, catalog filling,
-            logger), the entry point
+  mod.rs    `Live`: the start sequence (clients by venue, logger), the
+            entry point
   node.rs   builds and runs the LiveNode, broker-agnostic
   redis.rs  the Redis container behind the node's cache
   ib/       IB client factories and configs, on the gateway `data`'s IB
@@ -35,12 +36,12 @@ DataClientFactory>` and friends and never names a broker.
 
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
-  [--catalog catalog] [--client-id 1] [--leverage 1] [--trader-id HELIX-001]
+  [--client-id 1] [--leverage 1] [--trader-id HELIX-001]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
 gateway itself, so it needs no prior `fill-catalog` run. In code:
-`live::Live { trader_id, catalog, account, client_id, leverage, logging
+`live::Live { trader_id, account, client_id, leverage, logging
 }.run(&requirements, strategy)`, generic over the strategy like
 `Backtest::run`. It starts or reuses the Redis container that holds the
 node's cache (see "Cache in Redis").
@@ -67,39 +68,78 @@ node's cache (see "Cache in Redis").
 ## Start sequence
 
 1. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
-   and the `tracing` bridge: the gateway and the fill log before the node
-   exists, and the node reuses that logger when built.
+   and the `tracing` bridge: the gateway logs before the node exists, and
+   the node reuses that logger when built.
 2. OKX instruments, if any: read `OKX_ENVIRONMENT` (`demo` or `live`),
    build the OKX client configs on it, check the credentials are set, and
    check the account (net position mode, each instrument's leverage equal
-   to `--leverage`). Nothing is filled: OKX's data client serves the warmup
-   (`okx/README.md`).
+   to `--leverage`). OKX's data client serves the warmup (`okx/README.md`).
 3. IB instruments, if any: check the client id, start or reuse the Docker
    gateway of the account's mode, wait for its login, and build the IB
-   client configs on it.
-4. Fill the catalog for the IB instruments' data requirements, with the
-   same `IbHistory` and `fill_catalog` as `fill-catalog`: instruments, then
-   each instrument's quotes over `[now - warmup, now - 1 minute]`, resuming
-   after what the catalog holds, through the paper gateway (started or
-   reused). The end stops a minute short because IB history refuses an end
-   within the minute still in progress. The history connection closes here,
-   so the node can connect with the same client id.
-5. Start or reuse the Redis container (`redis.rs`), then build the node
-   (`node.rs`) with its cache persisted there, the catalog in
-   `LiveNodeConfig::catalogs`,
-   the clients of each venue (IB's routed by default, OKX's routed by
-   Nautilus as the only clients of venue OKX), reconciliation on, open-order
-   and position checks every 10 and 30 s (as the adapter's
-   `node_exec_tester`), and a 5 s post-stop delay.
-6. Add the strategy, claim the external orders of its instruments that its
+   client configs on it. IB's data client serves the warmup (below).
+4. Start or reuse the Redis container (`redis.rs`), then build the node
+   (`node.rs`) with its cache persisted there, the clients of each venue
+   (IB's routed by default, OKX's routed by Nautilus as the only clients of
+   venue OKX), reconciliation on, open-order and position checks every 10
+   and 30 s (as the adapter's `node_exec_tester`), and a 5 s post-stop
+   delay.
+5. Add the strategy, claim the external orders of its instruments that its
    config does not claim already (`register_external_order_claims`), then
    `run()`.
 
-The strategy's warmup request of an IB instrument (`strategy::warmup`) is
-then served by the catalog; the data engine sends IB only the interval the
-catalog misses, from the fill's end to now, as historical BID_ASK ticks.
-Only the catalog part reaches the internal bars: the IB ticks are dropped
-(see "Known limits").
+### Warmup and live bars on IB
+
+A strategy on IB trades composite bars of IB's 1-minute bars, such as
+`SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` (`strategy/README.md`,
+"Bar types"). Its warmup request (`strategy::warmup`) asks for
+`SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars, over
+`[now - warmup, now]`. With no catalog registered, the data engine passes
+it to IB's data client (`request_bars`,
+`adapters/interactive_brokers/src/data/core.rs`), which splits the window
+into IB durations (`calculate_duration_segments`) and answers with IB's
+bars up to now, stamped at their close. The subscription
+to the bars then goes to IB's `subscribe_bars`, which for any bar size but 5
+seconds runs a keepUpToDate historical request (`streams.rs`,
+`handle_historical_bars_subscription`): it starts at the subscription and
+publishes each minute once, when IB's update after its close arrives, or
+2 s after the close at the latest (`HistoricalBarCompletion`).
+
+The hand-off has no gap and no duplicate because the request ends at
+`now`. IB's answer ends with the minute still in progress, a partial bar
+stamped at its close, after `now`; the data engine trims the response to
+the request's `[start, end]` (`DataResponse::trim_to_bounds`), so the
+warmup ends on the last closed minute, and the live stream, which starts
+at the subscription, sends the minute in progress once, complete. With no
+end (as until 2026-10-26) nothing was trimmed and that minute came twice:
+partial in the warmup, complete live. The same end keeps the window a
+whole number of seconds: open-ended, the client's own later `now` added a
+`1 S` segment to a warmup of a day or more, which IB refused (error 321,
+logged, the bars of the other segments kept).
+
+A market order needs no quote subscription: the risk engine prices it from
+the latest cached external LAST bar (`risk/src/engine/mod.rs`,
+`market_order_price`), here IB's last minute bar, as it does in a
+backtest (`backtest_ib_minute_bars.rs`). It would deny the order
+(`MARKET_PRICE_UNAVAILABLE`) on MID bars alone.
+
+Measured on paper (`tests/ib_minute_bars.rs`, SXR8.IBIS, 2-hour warmup):
+four runs on 2026-10-26 between 15:29 and 16:35 UTC, three on MID bars,
+the last on the TRADES bars. The warmup answer came 0.1 to 0.2 s after the
+request, 120 or 121 bars; the 16 live minute bars arrived 0.4 to 1.3 s
+after their close, under the 5 s the node waits before building a bar of
+source bars (`strategy/README.md`, "Composite bars"). In the last run,
+with the warmup ending at now, the warmup requested at 16:31:23 ended on
+the bar closing 16:31:00 and the first live bar closed 16:32:00: no gap,
+no duplicate. Without the end, two runs had the minute in progress
+(closing 15:30 and 15:40) in both the warmup, partial, and the live
+stream.
+
+Without a catalog, `fill-catalog` and `live` share nothing: `live` never
+reads the catalog, and a node registering it would serve the warmup from
+it and start the subscription of a stored source bar type where the
+catalog ends (the data engine prefills the subscription's `start_ns` from
+the catalog, `data/src/engine/streaming.rs`), replaying every bar since as
+live.
 
 ## Cache in Redis
 
@@ -178,50 +218,40 @@ database, every trader's keys.
 
 ## Known limits
 
-Both are Nautilus bugs, present in `0.65.0`, `0.66.0` and the pinned
-`develop` commit; there is no documented way around them, so the code keeps
-the documented usage.
+Observed at the pinned `develop` commit; the code keeps the documented
+usage.
 
-- **The IB part of the warmup is lost.** The adapter stamps historical
-  BID_ASK ticks with `ts_init` = the time it received them
-  (`nautilus-interactive-brokers` `data/core.rs`, `request_quotes`), and the
-  data engine trims each response to `[start, end]` on `ts_init`
-  (`DataResponse::trim_to_bounds`). The IB leg's `end` is the time the
-  request was sent, so every tick falls after it and is dropped. The
-  strategy's warmup therefore ends at the fill's end, a minute or so before
-  the start, and the first live bar opens on the last catalog quote: its
-  open and high or low can be stale, and its volume counts that quote's
-  nominal size. The bars after it are right. Upstream:
-  [nautilus_trader#5394](https://github.com/nautechsystems/nautilus_trader/issues/5394).
 - **A live start can panic during the warmup.** `warmup::start` requests
-  the quotes with `update_subscriptions` and then subscribes to the bars, as
-  the Nautilus docs show. A live quote that arrives before the warmup
-  response is passed to the aggregator while it is still in historical
-  mode, moves its clock to now, and the response's older quotes then fail
-  `VirtualClock::advance_time`'s "time must be non-decreasing" check: the
-  node exits with code 101. It depends on timing, so it is more likely when
-  IB history is slow or the instrument ticks fast; starting again usually
-  works. Upstream:
+  the source bars with `update_subscriptions` and then subscribes to the
+  bars, as the Nautilus docs show. A live bar that arrives before the
+  warmup response is passed to the aggregator while it is still in
+  historical mode, moves its clock to now, and the response's older bars
+  then fail `VirtualClock::advance_time`'s "time must be non-decreasing"
+  check: the node exits with code 101. IB answered a 2-hour warmup in
+  0.2 s, but a 720-hour one in 67 s, so a minute bar always came first and
+  the node panicked (paper, 2026-10-26, SXR8.IBIS: `to_time_ns`
+  2026-09-26 < `from_time_ns` 2026-10-26 15:49). On IB a warmup must be
+  answered within the minute: hours, not weeks. Upstream:
   [nautilus_trader#5393](https://github.com/nautechsystems/nautilus_trader/issues/5393).
-
-`0.65.0` also stops paging historical ticks after one page when a request
-has both a start and an end (IB anchors on the start); the gap sent to IB
-here is about a minute, well below one page, and `0.66.0` pages from the
-end only.
+- **A warmup of a day or more may miss bars.** The data client splits the
+  window into years, days and seconds (`calculate_duration_segments`), and
+  IB counts `D` in trading sessions, not 24 h, so bars between the days and
+  seconds segments can go missing without an error, as the same split did
+  for history (`data/ib/README.md`, "Walking back, not segments";
+  nautilus_trader#5384). Not observed live yet.
 
 ## node.rs
 
-`node::run` builds the node through `LiveNodeBuilder::from_config`, because
-the builder has no catalog method and catalogs are a `LiveNodeConfig`
-field. `nautilus-live`'s `streaming` feature is what enables
-`LiveNodeConfig::catalogs` (and `with_streaming_config`).
+`node::run` builds the node through `LiveNodeBuilder::from_config`, with
+the engine configs as `LiveNodeConfig` fields. It registers no catalog
+(`LiveNodeConfig::catalogs`, enabled by `nautilus-live`'s `streaming`
+feature, stays empty; see "Warmup and live bars on IB").
 
 ```rust
 let config = LiveNodeConfig {
     environment: Environment::Live,
     trader_id,                                   // TraderId::from("HELIX-001")
     logging,
-    catalogs: vec![DataCatalogConfig::new(absolute_catalog, None, None)],
     cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
     data_engine: warmup::live_data_engine_config(&bar_types), // see the strategy README
     exec_engine: LiveExecutionEngineConfig {
@@ -252,18 +282,6 @@ node.run().await?;
 - `with_exec_engine_config(LiveExecutionEngineConfig)` replaces the whole
   exec config, including an earlier `with_reconciliation`, so call it
   before the other `with_*` methods.
-
-### Catalog for warmup
-
-Warmup is described in the strategy README ("Warmup and training"). With a
-catalog registered, the data engine serves a request from the catalog and
-asks the adapter only for the missing intervals; without one, the adapter
-answers alone.
-
-Point the config at the catalog `fill_catalog` wrote, as an absolute path:
-the node's DataFusion reader finds no object store for a relative one
-(`file://catalog/...`). Catalog names must be unique. The directory must
-exist, so the start creates it, empty for a run on OKX alone.
 
 ### Clients and routing
 
@@ -401,7 +419,8 @@ tests: see [`okx/README.md`](okx/README.md).
 
 ## Unverified
 
-- How `limit` behaves when a request is served by a catalog plus the adapter.
-- Whether warmup can read a catalog while streaming promotes into it.
+- Whether IB's answer to a `30 D` request of 1-minute bars is complete
+  (it raised no error, but the node panicked before the bars could be
+  counted).
 - Whether IB reports ES's exchange as `CME` (the venue comes from that
   field), and which history depths IB serves (see `data/ib/README.md`).

@@ -16,9 +16,10 @@
 //! `#[serde(flatten)]`, holds the bars traded, their warmup and their
 //! `Session`.
 //!
-//! Strategies trade on bars Nautilus builds from quotes; `warmup` asks for
-//! their history and hands it back, so that no strategy knows how. The
-//! catalog stores what their bars are built from (see `catalog_series`).
+//! Strategies trade on bars Nautilus builds, from source bars (IB's
+//! 1-minute bars, OKX's candles) or from quotes; `warmup` asks for their
+//! history and hands it back, so that no strategy knows how. The catalog
+//! stores what their bars are built from (see `catalog_series`).
 
 mod config;
 pub mod ema;

@@ -1,5 +1,5 @@
 //! Market data: the traded instruments, the series their strategy bars are
-//! built from (quotes, or the source bars of a composite bar type) and the
+//! built from (the source bars of a composite bar type, or quotes) and the
 //! funding of OKX swaps and X-Perps, in the Nautilus catalog.
 //!
 //! Build step 1. Backtest reads what this module writes. The instruments

@@ -69,9 +69,9 @@ How warmup is requested is in `strategy/README.md`, "Warmup and training";
 the 5 s build delay of the live hour bars is in "Bars built from quotes".
 What the OKX data client does:
 
-- **Warmup from the REST candles.** With nothing in the catalog, the data
-  engine sends the whole window of the `…-1-MINUTE-LAST-EXTERNAL` request
-  to the OKX data client, which pages OKX's candles up to now
+- **Warmup from the REST candles.** The node registers no catalog, so the
+  data engine sends the whole window of the `…-1-MINUTE-LAST-EXTERNAL`
+  request to the OKX data client, which pages OKX's candles up to now
   (`/market/candles`, then `/market/history-candles`), each stamped
   `ts_init` = its close, as the archive's.
 - **Live minute bars** come from the business WebSocket's candle channel,

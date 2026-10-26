@@ -55,10 +55,11 @@ pub(super) async fn clients(
 /// at startup.
 ///
 /// The data client is the history's (`data::data_client_config`: the full
-/// session, the symbology and venues of the catalog's instruments), taking
-/// quotes tick by tick (`batch_quotes: false`; the adapter falls back to
-/// `reqMktData` where IB refuses them), so internal bars are built from
-/// every quote change. Data and exec share `gateway`'s client id, hence
+/// session, the symbology and venues of the catalog's instruments), so its
+/// 1-minute bars, requested for the warmup and subscribed to live, are
+/// those `fill-catalog` stores. Quotes a strategy subscribes to come tick
+/// by tick (`batch_quotes: false`; the adapter falls back to `reqMktData`
+/// where IB refuses them). Data and exec share `gateway`'s client id, hence
 /// one connection.
 fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[InstrumentId]) -> IbClients {
     let instrument_provider = InteractiveBrokersInstrumentProviderConfig {
@@ -117,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn the_data_client_streams_tick_by_tick_quotes_over_the_full_session() {
+    fn the_data_client_takes_the_full_session_and_tick_by_tick_quotes() {
         let data = configs(&gateway(), &paper(), &[sxr8()]).data;
         assert!(!data.batch_quotes);
         assert!(!data.use_regular_trading_hours);

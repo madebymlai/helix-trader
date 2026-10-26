@@ -69,12 +69,10 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     );
     // Above OKX's highest leverage, 125.
     let leverage = Decimal::from(1000);
-    let catalog = tempfile::tempdir().unwrap();
     let config = x_perp_ema_cross();
     let requirements = config.bars.data_requirements();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-001"),
-        catalog: catalog.path().to_path_buf(),
         account: None,
         client_id: 1,
         leverage,

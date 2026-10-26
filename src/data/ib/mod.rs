@@ -1,38 +1,36 @@
 //! Interactive Brokers connection and history: the account, the gateway
-//! (see `gateway`), the data client config, and instruments and quotes for
-//! `fill_catalog`, which asks for series of any data type: IB serves
-//! quotes only (see `IbHistory::data`).
+//! (see `gateway`), the data client config, and instruments and bars for
+//! `fill_catalog`, which asks for series of any data type: IB serves its
+//! 1-MINUTE TRADES bars only (see `IbHistory::data`).
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
 //! connects to IB Gateway or TWS, returns `Vec<InstrumentAny>` from
-//! `request_instruments` and `Vec<Bar>` from `request_bars`. IB has no
-//! usable quote history, so quotes are made here from BID and ASK bars.
-//! Another source is another file next to this one.
+//! `request_instruments` and `Vec<Bar>` from `request_bars`. The bars are
+//! stored as IB gives them. Another source is another file next to this
+//! one.
 
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::str::FromStr;
 
 use anyhow::{Context, ensure};
 use ibapi::contracts::{Contract, Symbol};
 use jiff::Timestamp;
-use nautilus_core::{UnixNanos, nanos::DurationNanos};
 use nautilus_interactive_brokers::{
     common::symbology::Symbology, config::InteractiveBrokersDataClientConfig,
     historical::HistoricalInteractiveBrokersClient,
 };
 use nautilus_model::{
-    data::{Bar, BarSpecification, BarType, Data, NautilusDataType, QuoteTick},
-    enums::{AggregationSource, BarAggregation, PriceType},
+    data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
+    enums::{BarAggregation, PriceType},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
-    types::Quantity,
 };
 
 mod gateway;
 pub use gateway::IbAccount;
 pub(crate) use gateway::IbGateway;
 
-/// A connection to IB for history: instruments and quotes, no node.
+/// A connection to IB for history: instruments and bars, no node.
 pub struct IbHistory {
     client: HistoricalInteractiveBrokersClient,
     requests: BarRequests,
@@ -58,15 +56,15 @@ impl BarRequests {
 
 impl IbHistory {
     /// Connects with `client_id` to the paper gateway, started or reused
-    /// (see `IbGateway::paper`), once IB can serve quotes over a window
-    /// ending at `end`: checked before the gateway starts.
+    /// (see `IbGateway::paper`), once IB can serve closed bars over a
+    /// window ending at `end`: checked before the gateway starts.
     ///
     /// # Errors
     ///
     /// Returns an error if `end` is within a minute of `now`, if the
     /// gateway does not start and log in, or if the connection fails.
     pub async fn connect(client_id: i32, end: Timestamp, now: Timestamp) -> anyhow::Result<Self> {
-        ensure_quotes_closed(end, now)?;
+        ensure_bars_closed(end, now)?;
         let config = data_client_config(IbGateway::paper(client_id).await?);
         let requests = BarRequests::of(&config);
         let symbology = Symbology::new(config.instrument_provider.symbology_method);
@@ -81,15 +79,15 @@ impl IbHistory {
         })
     }
 
-    /// The latest end of a window IB can serve quotes over at `now`: one
-    /// bar of those quotes are made from before `now`, the bar still in
-    /// progress until then (see `quoted_bar_spec`).
+    /// The latest end of a window IB can serve closed bars over at `now`:
+    /// one bar before `now`, the bar still in progress until then (see
+    /// `served_spec`).
     ///
     /// # Errors
     ///
     /// Returns an error if that end is out of range.
     pub fn latest_end(now: Timestamp) -> anyhow::Result<Timestamp> {
-        Ok(now.checked_sub(quoted_bar_spec(PriceType::Bid).timedelta())?)
+        Ok(now.checked_sub(served_spec().timedelta())?)
     }
 
     /// The instruments of `ids`, as IB defines them. A future IB does not
@@ -123,13 +121,13 @@ impl IbHistory {
     }
 
     /// The series of `data_type` and `identifier` over `[start, end]`, for
-    /// `fill_catalog`: the quotes of the instrument `identifier` names (see
-    /// `quotes`).
+    /// `fill_catalog`: the bars of the bar type `identifier` names, as IB
+    /// gives them (see `bars`).
     ///
     /// # Errors
     ///
-    /// Returns an error if `data_type` is not quotes, which is all IB
-    /// serves, if `identifier` is not an instrument id, or as `quotes`.
+    /// Returns an error if the series is not IB's 1-MINUTE TRADES bars of
+    /// an instrument (see `served_bar_type`), or as `bars`.
     pub async fn data(
         &self,
         data_type: &NautilusDataType,
@@ -137,57 +135,23 @@ impl IbHistory {
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Data>> {
-        let instrument_id = quoted_instrument(data_type, identifier)?;
-        let quotes = self.quotes(instrument_id, start, end).await?;
-        Ok(quotes.into_iter().map(Data::Quote).collect())
+        let bar_type = served_bar_type(data_type, identifier)?;
+        let bars = self.bars(bar_type, start, end).await?;
+        Ok(bars.into_iter().map(Data::Bar).collect())
     }
 
-    /// The quotes of `instrument_id` over `[start, end]`, one a minute,
-    /// sorted by `ts_init`. IB has no usable quote history: each is made
-    /// from the 1-MINUTE BID and ASK bars of the same close (see
-    /// `quoted_bar_type`), fetched by `quoted_bars` (see `quotes_from_bars`),
-    /// and stamped 1 ns before it (see `quoted_bars_window`). Logs how many
-    /// bars it dropped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any request fails or times out, or if a BID and
-    /// an ASK bar differ in precision.
-    pub async fn quotes(
-        &self,
-        instrument_id: InstrumentId,
-        start: Timestamp,
-        end: Timestamp,
-    ) -> anyhow::Result<Vec<QuoteTick>> {
-        let priced = |price_type| quoted_bar_type(instrument_id, price_type);
-        let (from, to) = quoted_bars_window(start, end);
-        let bids = self.quoted_bars(priced(PriceType::Bid), from, to).await?;
-        let asks = self.quoted_bars(priced(PriceType::Ask), from, to).await?;
-        let made = quotes_from_bars(&bids, &asks)?;
-        log::info!(
-            "{instrument_id}: {} quotes from {} BID and {} ASK bars; dropped {} bars \
-             without the other side and {} crossed pairs (ask below bid)",
-            made.quotes.len(),
-            bids.len(),
-            asks.len(),
-            made.unpaired,
-            made.crossed,
-        );
-        Ok(made.quotes)
-    }
-
-    /// The bars of `bar_type`, one of `quoted_bar_type`, over `(start, end]`,
-    /// sorted by `ts_init` and unique, with the regular-hours setting of the
-    /// live data client. Walks back from `end` one request at a time, each
-    /// of `QUOTED_BARS_PER_REQUEST` (see `walk_back`).
-    async fn quoted_bars(
+    /// The bars of `bar_type` over `[start, end]`, sorted by `ts_init` and
+    /// unique, with the regular-hours setting of the live data client.
+    /// Walks back from `end` one request at a time, each of
+    /// `BARS_PER_REQUEST` (see `walk_back`).
+    async fn bars(
         &self,
         bar_type: BarType,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Bar>> {
         let spec = bar_type.spec().to_string();
-        let duration = QUOTED_BARS_PER_REQUEST;
+        let duration = BARS_PER_REQUEST;
         walk_back(start, end, async |cursor| {
             self.client
                 .request_bars(
@@ -207,49 +171,41 @@ impl IbHistory {
     }
 }
 
-/// The instrument of the series of `data_type` and `identifier`, which
-/// must be quotes: all IB serves.
-fn quoted_instrument(
-    data_type: &NautilusDataType,
-    identifier: &str,
-) -> anyhow::Result<InstrumentId> {
+/// The bar type of the series of `data_type` and `identifier`, which must
+/// be bars IB serves: its own (`EXTERNAL`) 1-MINUTE TRADES bars (see
+/// `served_spec`).
+fn served_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<BarType> {
     ensure!(
-        *data_type == NautilusDataType::QuoteTick,
-        "IB's history serves quotes, not {data_type} ({identifier})"
+        *data_type == NautilusDataType::Bar,
+        "IB's history serves bars, not {data_type} ({identifier})"
     );
-    Ok(InstrumentId::from_str(identifier)?)
+    let bar_type = BarType::from_str(identifier)?;
+    ensure!(
+        bar_type.is_externally_aggregated() && bar_type.spec() == served_spec(),
+        "IB's history serves its own 1-MINUTE-LAST bars, not {identifier}"
+    );
+    Ok(bar_type)
 }
 
-/// The bars of `instrument_id` priced on `price_type` that quotes are made
-/// from (see `quoted_bar_spec`).
-fn quoted_bar_type(instrument_id: InstrumentId, price_type: PriceType) -> BarType {
-    BarType::new(
-        instrument_id,
-        quoted_bar_spec(price_type),
-        AggregationSource::External,
-    )
+/// The spec of the bars IB's history serves: 1-MINUTE, the finest bars IB
+/// paces softly, priced LAST, IB's TRADES bars, the only ones with a
+/// volume. Its string (`1-MINUTE-LAST`) is IB's bar spec string, which the
+/// adapter requests as TRADES.
+fn served_spec() -> BarSpecification {
+    BarSpecification::new(1, BarAggregation::Minute, PriceType::Last)
 }
 
-/// The spec of the bars quotes are made from, priced on `price_type`:
-/// 1-MINUTE, the finest bars IB paces softly, so a resting order is checked
-/// every minute. The cadence is this source's decision: no caller passes
-/// it. Its string (`1-MINUTE-BID`) is IB's bar spec string.
-fn quoted_bar_spec(price_type: PriceType) -> BarSpecification {
-    BarSpecification::new(1, BarAggregation::Minute, price_type)
-}
-
-/// The IB duration of one request of the bars quotes are made from: within
-/// IB's maximum duration for 1-MINUTE bars. `D` counts whole trading days:
-/// a `1 D` request ending in a session's first minute answers that one bar,
-/// so `86400 S`, the 1,440 bars before the end, across sessions (IB's
-/// documented alternative).
-const QUOTED_BARS_PER_REQUEST: &str = "86400 S";
+/// The IB duration of one bar request: within IB's maximum duration for
+/// 1-MINUTE bars. `D` counts whole trading days: a `1 D` request ending in
+/// a session's first minute answers that one bar, so `86400 S`, the 1,440
+/// bars before the end, across sessions (IB's documented alternative).
+const BARS_PER_REQUEST: &str = "86400 S";
 
 /// Fails if `end` is later than `IbHistory::latest_end(now)`.
 ///
 /// IB answers a window ending within one bar of now with the bar still in
-/// progress; its quote, stored, would never be replaced.
-fn ensure_quotes_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
+/// progress; stored, it would never be replaced.
+fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     let latest = IbHistory::latest_end(now)?;
     ensure!(
         end <= latest,
@@ -259,85 +215,7 @@ fn ensure_quotes_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How long before its bars' close a quote is stamped: it then sorts
-/// before a bar of the same close, so a strategy deciding on that bar
-/// fills on its quote (see the backtest README, "Fills on quotes"). The
-/// close quote is the last of its bar, so no look-ahead.
-const QUOTE_LEAD: DurationNanos = DurationNanos::new(1);
-
-/// The window of the bars whose quotes fall in `[start, end]`, for
-/// `walk_back`'s `(start, end]`: those closing over `[start, end]` shifted
-/// by `QUOTE_LEAD`, so quotes stamped at `start` and at `end` are fetched.
-fn quoted_bars_window(start: Timestamp, end: Timestamp) -> (Timestamp, Timestamp) {
-    let lead = Duration::from_nanos(QUOTE_LEAD.as_u64());
-    (start + lead - Duration::from_nanos(1), end + lead)
-}
-
-/// The nominal size of both sides of a quote made from bars: IB gives
-/// none, and this one never limits an order.
-const QUOTE_SIZE: f64 = 1_000_000.0;
-
-/// The quotes made from BID and ASK bars, and what was dropped.
-#[derive(Debug)]
-struct MadeQuotes {
-    /// Sorted by `ts_init`.
-    quotes: Vec<QuoteTick>,
-    /// Bars without a bar of the other side at the same close.
-    unpaired: usize,
-    /// Pairs whose ask is below the bid.
-    crossed: usize,
-}
-
-/// One quote per BID and ASK bar pair of the same close (`ts_init`), from
-/// `bids` and `asks` sorted by `ts_init` and unique: bid = the BID close,
-/// ask = the ASK close, at the bars' price precision (the instrument's),
-/// size `QUOTE_SIZE` at the bars' size precision on both sides, and
-/// `ts_event = ts_init` = `QUOTE_LEAD` before the close.
-///
-/// A bar without the other side, and a crossed pair (ask below bid,
-/// mostly in pre-opening auctions), is dropped and counted, not an error:
-/// the hour then fills on the previous quote. A locked pair (ask = bid) is
-/// kept.
-///
-/// # Errors
-///
-/// Returns an error if a BID and an ASK bar of a pair differ in price or
-/// size precision.
-fn quotes_from_bars(bids: &[Bar], asks: &[Bar]) -> anyhow::Result<MadeQuotes> {
-    let asks_by_close: HashMap<UnixNanos, &Bar> =
-        asks.iter().map(|ask| (ask.ts_init, ask)).collect();
-    let mut made = MadeQuotes {
-        quotes: Vec::new(),
-        unpaired: 0,
-        crossed: 0,
-    };
-    for bid in bids {
-        let Some(ask) = asks_by_close.get(&bid.ts_init) else {
-            made.unpaired += 1;
-            continue;
-        };
-        if ask.close < bid.close {
-            made.crossed += 1;
-            continue;
-        }
-        let stamp = bid.ts_init - QUOTE_LEAD;
-        let quote = QuoteTick::new_checked(
-            bid.bar_type.instrument_id(),
-            bid.close,
-            ask.close,
-            Quantity::new(QUOTE_SIZE, bid.volume.precision),
-            Quantity::new(QUOTE_SIZE, ask.volume.precision),
-            stamp,
-            stamp,
-        )
-        .with_context(|| format!("pairing the BID and ASK bars closing at {}", bid.ts_init))?;
-        made.quotes.push(quote);
-    }
-    made.unpaired += asks.len() - (made.quotes.len() + made.crossed);
-    Ok(made)
-}
-
-/// The bars over `(start, end]`, fetched by walking back from `end`:
+/// The bars over `[start, end]`, fetched by walking back from `end`:
 /// `fetch` gets one request ending at a cursor, first `end`, then the
 /// `ts_init` of the oldest bar so far. Stops once a bar at or before
 /// `start` arrived, on an empty answer, or when an answer brings nothing
@@ -366,7 +244,7 @@ async fn walk_back(
         }
         cursor = oldest;
     }
-    bars.retain(|bar| start < stamp(bar) && stamp(bar) <= end);
+    bars.retain(|bar| (start..=end).contains(&stamp(bar)));
     bars.sort_by_key(|bar| bar.ts_init);
     bars.dedup_by_key(|bar| bar.ts_init);
     Ok(bars)
@@ -439,6 +317,7 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
 mod tests {
     use super::*;
     use ibapi::contracts::SecurityType;
+    use nautilus_core::UnixNanos;
     use nautilus_model::instruments::stubs::futures_contract_es;
 
     fn es() -> InstrumentAny {
@@ -482,7 +361,6 @@ mod tests {
 
     /// A 1-HOUR bar of ESM4 closing at hour `h`.
     fn hourly(h: u64) -> Bar {
-        use nautilus_core::UnixNanos;
         use nautilus_model::types::{Price, Quantity};
         let p = Price::from("5000.00");
         let ts = UnixNanos::from(h * HOUR_NS);
@@ -522,7 +400,7 @@ mod tests {
         let bars = walk_back(hour(5), hour(25), source(1..=30, 8, &mut cursors))
             .await
             .unwrap();
-        assert_eq!(hours(&bars), (6..=25).collect::<Vec<_>>());
+        assert_eq!(hours(&bars), (5..=25).collect::<Vec<_>>());
         assert_eq!(cursors, [hour(25), hour(18), hour(11)]);
     }
 
@@ -546,7 +424,7 @@ mod tests {
         let bars = walk_back(hour(17), hour(25), source(1..=30, 5, &mut cursors))
             .await
             .unwrap();
-        assert_eq!(hours(&bars), (18..=25).collect::<Vec<_>>());
+        assert_eq!(hours(&bars), (17..=25).collect::<Vec<_>>());
         assert_eq!(cursors, [hour(25), hour(21)]);
     }
 
@@ -583,19 +461,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeps_only_bars_after_start_and_up_to_end() {
+    async fn keeps_only_bars_from_start_to_end() {
         let mut cursors = Vec::new();
         let answers = vec![(3..=27).collect()];
         let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
             .await
             .unwrap();
-        assert_eq!(hours(&bars), (6..=25).collect::<Vec<_>>());
+        assert_eq!(hours(&bars), (5..=25).collect::<Vec<_>>());
     }
 
     #[tokio::test]
     async fn returns_the_bars_sorted_and_unique() {
         let mut cursors = Vec::new();
-        let answers = vec![vec![25, 23, 24, 22], vec![20, 22, 21, 21], vec![5]];
+        let answers = vec![vec![25, 23, 24, 22], vec![20, 22, 21, 21], vec![4]];
         let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
             .await
             .unwrap();
@@ -625,15 +503,31 @@ mod tests {
     }
 
     #[test]
-    fn ib_serves_the_quotes_of_an_instrument_and_nothing_else() {
-        let quotes = NautilusDataType::QuoteTick;
-        assert_eq!(
-            quoted_instrument(&quotes, "SXR8.IBIS").unwrap(),
-            InstrumentId::from("SXR8.IBIS")
-        );
-        let bars = "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL";
-        let err = quoted_instrument(&NautilusDataType::Bar, bars).unwrap_err();
-        assert!(err.to_string().contains(bars), "{err}");
+    fn ib_serves_its_own_one_minute_trades_bars() {
+        for identifier in [
+            "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
+            "ESZ6.CME-1-MINUTE-LAST-EXTERNAL",
+        ] {
+            let served = served_bar_type(&NautilusDataType::Bar, identifier).unwrap();
+            assert_eq!(served, bar_type(identifier));
+            // IB's bar spec string, as `bars` requests it.
+            assert_eq!(served.spec().to_string(), "1-MINUTE-LAST");
+        }
+    }
+
+    #[test]
+    fn ib_serves_no_other_series() {
+        for (data_type, identifier) in [
+            (NautilusDataType::QuoteTick, "SXR8.IBIS"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-MID-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-BID-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-HOUR-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-5-MINUTE-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
+        ] {
+            let err = served_bar_type(&data_type, identifier).unwrap_err();
+            assert!(err.to_string().contains(identifier), "{err}");
+        }
     }
 
     #[test]
@@ -648,14 +542,14 @@ mod tests {
     #[test]
     fn accepts_an_end_at_least_a_minute_before_now() {
         let now = at("2024-06-10T12:00:00Z");
-        ensure_quotes_closed(at("2024-06-10T11:59:00Z"), now).unwrap();
-        ensure_quotes_closed(at("2024-06-01T00:00:00Z"), now).unwrap();
+        ensure_bars_closed(at("2024-06-10T11:59:00Z"), now).unwrap();
+        ensure_bars_closed(at("2024-06-01T00:00:00Z"), now).unwrap();
     }
 
     #[test]
     fn rejects_an_end_within_a_minute_of_now() {
         let now = at("2024-06-10T12:00:00Z");
-        let err = ensure_quotes_closed(at("2024-06-10T11:59:00.000000001Z"), now)
+        let err = ensure_bars_closed(at("2024-06-10T11:59:00.000000001Z"), now)
             .unwrap_err()
             .to_string();
         assert!(err.contains("2024-06-10T11:59:00.000000001Z"), "{err}");
@@ -726,159 +620,5 @@ mod tests {
         assert_eq!(future_root("ES"), None);
         assert_eq!(future_root("U5"), None);
         assert_eq!(future_root("ESA5"), None);
-    }
-
-    /// A 1-HOUR bar of SXR8 priced on `side`, closing at `close`
-    /// (nanoseconds) at `price`, with volume 0 at `size_precision`, as IB
-    /// gives BID and ASK bars.
-    fn side_bar(side: &str, close: u64, price: &str, size_precision: u8) -> Bar {
-        use nautilus_model::types::Price;
-        let p = Price::from(price);
-        let ts = UnixNanos::from(close);
-        let bt = bar_type(&format!("SXR8.IBIS-1-HOUR-{side}-EXTERNAL"));
-        Bar::new(bt, p, p, p, p, Quantity::new(0.0, size_precision), ts, ts)
-    }
-
-    fn bid(close: u64, price: &str) -> Bar {
-        side_bar("BID", close, price, 0)
-    }
-
-    fn ask(close: u64, price: &str) -> Bar {
-        side_bar("ASK", close, price, 0)
-    }
-
-    /// The stamp, bid and ask of each quote.
-    fn quoted(made: &MadeQuotes) -> Vec<(u64, String, String)> {
-        made.quotes
-            .iter()
-            .map(|q| {
-                (
-                    q.ts_init.as_u64(),
-                    q.bid_price.to_string(),
-                    q.ask_price.to_string(),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_bid_and_ask_pair_makes_a_quote_at_their_closes() {
-        let made = quotes_from_bars(
-            &[bid(HOUR_NS, "709.4400"), bid(2 * HOUR_NS, "710.2200")],
-            &[ask(HOUR_NS, "709.4800"), ask(2 * HOUR_NS, "710.2900")],
-        )
-        .unwrap();
-        assert_eq!(
-            quoted(&made),
-            [
-                (HOUR_NS - 1, "709.4400".into(), "709.4800".into()),
-                (2 * HOUR_NS - 1, "710.2200".into(), "710.2900".into()),
-            ]
-        );
-        let quote = made.quotes[0];
-        assert_eq!(quote.instrument_id, InstrumentId::from("SXR8.IBIS"));
-        assert_eq!(quote.bid_price.precision, 4);
-        assert_eq!(quote.ask_price.precision, 4);
-        assert_eq!((made.unpaired, made.crossed), (0, 0));
-    }
-
-    #[test]
-    fn a_quote_is_stamped_one_nanosecond_before_its_bars_close() {
-        let made = quotes_from_bars(&[bid(HOUR_NS, "709.44")], &[ask(HOUR_NS, "709.48")]).unwrap();
-        let quote = made.quotes[0];
-        assert_eq!(quote.ts_event.as_u64(), HOUR_NS - 1);
-        assert_eq!(quote.ts_init.as_u64(), HOUR_NS - 1);
-    }
-
-    #[test]
-    fn both_sides_have_the_nominal_size_at_the_bars_size_precision() {
-        for precision in [0, 2] {
-            let made = quotes_from_bars(
-                &[side_bar("BID", HOUR_NS, "709.44", precision)],
-                &[side_bar("ASK", HOUR_NS, "709.48", precision)],
-            )
-            .unwrap();
-            let quote = made.quotes[0];
-            for size in [quote.bid_size, quote.ask_size] {
-                assert_eq!(size, Quantity::new(1_000_000.0, precision), "{precision}");
-                assert_eq!(size.precision, precision);
-            }
-        }
-    }
-
-    #[test]
-    fn a_bar_without_the_other_side_is_dropped_and_counted() {
-        let made = quotes_from_bars(
-            &[bid(HOUR_NS, "709.44"), bid(2 * HOUR_NS, "710.22")],
-            &[
-                ask(2 * HOUR_NS, "710.29"),
-                ask(3 * HOUR_NS, "711.00"),
-                ask(4 * HOUR_NS, "712.00"),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            quoted(&made),
-            [(2 * HOUR_NS - 1, "710.22".into(), "710.29".into())]
-        );
-        assert_eq!((made.unpaired, made.crossed), (3, 0));
-    }
-
-    #[test]
-    fn a_crossed_pair_is_dropped_and_counted_and_a_locked_one_kept() {
-        let made = quotes_from_bars(
-            &[bid(HOUR_NS, "712.58"), bid(2 * HOUR_NS, "712.48")],
-            &[ask(HOUR_NS, "712.28"), ask(2 * HOUR_NS, "712.48")],
-        )
-        .unwrap();
-        assert_eq!(
-            quoted(&made),
-            [(2 * HOUR_NS - 1, "712.48".into(), "712.48".into())]
-        );
-        assert_eq!((made.unpaired, made.crossed), (0, 1));
-    }
-
-    #[test]
-    fn no_bars_make_no_quotes() {
-        let made = quotes_from_bars(&[], &[]).unwrap();
-        assert!(made.quotes.is_empty());
-        assert_eq!((made.unpaired, made.crossed), (0, 0));
-    }
-
-    #[test]
-    fn a_pair_of_different_precisions_is_an_error() {
-        let err =
-            quotes_from_bars(&[bid(HOUR_NS, "709.44")], &[ask(HOUR_NS, "709.4800")]).unwrap_err();
-        assert!(format!("{err:#}").contains("precision"), "{err:#}");
-    }
-
-    #[test]
-    fn quotes_are_made_from_one_minute_bid_and_ask_bars() {
-        let id = InstrumentId::from("SXR8.IBIS");
-        for (price_type, expected, spec) in [
-            (
-                PriceType::Bid,
-                "SXR8.IBIS-1-MINUTE-BID-EXTERNAL",
-                "1-MINUTE-BID",
-            ),
-            (
-                PriceType::Ask,
-                "SXR8.IBIS-1-MINUTE-ASK-EXTERNAL",
-                "1-MINUTE-ASK",
-            ),
-        ] {
-            let quoted = quoted_bar_type(id, price_type);
-            assert_eq!(quoted, bar_type(expected));
-            assert_eq!(quoted.spec().to_string(), spec);
-        }
-    }
-
-    #[test]
-    fn the_bars_of_quotes_over_a_window_close_one_nanosecond_after_its_bounds() {
-        // `walk_back` keeps the bars closing after `from`: the first closes
-        // 1 ns after `start`, its quote stamped at `start`.
-        let (from, to) = quoted_bars_window(hour(5), hour(25));
-        assert_eq!(from.as_nanosecond(), hour(5).as_nanosecond());
-        assert_eq!(to.as_nanosecond(), hour(25).as_nanosecond() + 1);
     }
 }

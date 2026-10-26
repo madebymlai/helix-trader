@@ -98,7 +98,6 @@ async fn phase() {
     };
     let step: Step = serde_json::from_str(&step).unwrap();
     dotenvy::dotenv().ok();
-    let catalog = tempfile::tempdir().unwrap();
     let requirements = DataRequirements {
         bar_types: vec![BarType::from(
             format!("{INSTRUMENT}-1-MINUTE-MID-INTERNAL").as_str(),
@@ -107,7 +106,6 @@ async fn phase() {
     };
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
-        catalog: catalog.path().to_path_buf(),
         account: Some(account()),
         client_id: CLIENT_ID,
         leverage: Decimal::ONE,
