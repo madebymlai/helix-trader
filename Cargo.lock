@@ -2225,7 +2225,7 @@ dependencies = [
  "bon",
  "clap",
  "csv",
- "dbn",
+ "databento",
  "dotenvy",
  "ibapi",
  "jiff",

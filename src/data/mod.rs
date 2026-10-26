@@ -6,7 +6,7 @@
 //! come from the strategy's data requirements.
 
 mod databento;
-pub use databento::DatabentoFiles;
+pub use databento::DatabentoHistory;
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
 mod ib;
