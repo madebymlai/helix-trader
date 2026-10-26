@@ -5,9 +5,10 @@ reads, with three things only: the instruments the strategies trade, the
 series their bars are built from, and the funding of OKX swaps and X-Perps,
 which backtests settle. The strategies' bars themselves are internal, built
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
-quotes"): from quotes (one a minute from IB) or, for a composite bar type,
-from its source bars (OKX's 1-minute candles). The module adds what Nautilus
-lacks: filling the catalog from a historical source.
+quotes"): from quotes (one a minute from IB, one per tick from IC) or, for a
+composite bar type, from its source bars (OKX's 1-minute candles). The
+module adds what Nautilus lacks: filling the catalog from a historical
+source.
 
 APIs were read in the `nautilus-*` crates at `0.66.0` and their signatures
 and engine checks rechecked at the `develop` commit the build pins (see
@@ -29,11 +30,12 @@ data/
     config.rs      the environment and the credential, from IC_*
     messages.rs    Spotware's protobuf messages, their payload types, the envelope
     parse.rs       cTrader symbols -> CurrencyPair, ids
+    ticks.rs       tick history: decoding, paging, the merge into quotes, their size
     websocket/     the cTrader connection: outer client, handler task
     testing.rs     a mock cTrader peer (a local WebSocket server) for the tests
     proto/         Spotware's four .proto files, vendored (build.rs compiles them)
     testdata/      responses captured from IC's demo, scrubbed, text and wire forms
-    README.md      IC history: the cTrader session, credentials, instruments, the tick probe, tests
+    README.md      IC history: the cTrader session, credentials, instruments, tick quotes, tests
   okx/
     mod.rs         OKX history: instruments, the archive, the fill one archive month or day at a time
     archive.rs     a candle month or day file -> bars, a funding month file -> funding rates
@@ -45,7 +47,7 @@ The module runs no node and opens no port of its own; the IB part starts the
 Docker IB Gateway it connects to (see `ib/README.md`, "The gateway"). A
 source is an adapter's historical client returning Nautilus types:
 `Vec<InstrumentAny>`, and a series' data as `Vec<Data>` (IB's quotes, made
-from bars; OKX's candles, as bars). Nautilus has no cTrader adapter, so
+from bars; IC's quotes, merged from ticks; OKX's candles, as bars). Nautilus has no cTrader adapter, so
 `ic/` is its own client (see `ic/README.md`). `ParquetDataCatalog` is the
 storage.
 
@@ -82,7 +84,8 @@ keys it:
 The rule is the data engine's: a composite bar type is built from its source
 bars, an internal one priced LAST from trades, any other from quotes. `ib/`
 serves quotes only, made from IB's `EXTERNAL` 1-MINUTE BID and ASK bars,
-which it never stores. `okx/` serves only the bars of
+which it never stores. `ic/` serves quotes only, one per tick time, merged
+from cTrader's BID and ASK ticks. `okx/` serves only the bars of
 `X.OKX-1-MINUTE-LAST-EXTERNAL`, OKX's 1-minute candles.
 
 ### Bar type format
@@ -192,7 +195,8 @@ pub async fn fill_catalog(
 ```
 
 `fetch` is the seam: `ib/` supplies `IbHistory::data` over the whole window,
-`okx/` one per archive month or day (see `okx/README.md`); tests pass
+`ic/` one per week (see `ic/README.md`, "The fill"), `okx/` one per
+archive month or day (see `okx/README.md`); tests pass
 closures with canned data. A fetch over `[from, to]` returns the items of
 the series whose `ts_init` lies in it, the closed interval stored
 (Nautilus' catalog intervals are closed, the next contiguous when it starts
@@ -218,7 +222,8 @@ bar type instead of the instrument id.
    check. A window already covered (request start at or after `end`) asks
    the source for nothing and is not an error.
 3. **Check.** Refuse an empty response on an instrument's first fill (no
-   stored range: a contract with no data is never silently missing) and any
+   stored range: a contract with no data is never silently missing; the
+   error names the series and the window asked for) and any
    quote of another instrument. Once an instrument's quotes are stored, an
    empty response means nothing new (an expired contract, a weekend):
    nothing is written, no coverage is recorded, no error, and the next
@@ -317,8 +322,8 @@ their instruments is in it.
 
 - `ib/` fills IB instruments' quotes through the Docker IB Gateway it
   starts: see [`ib/README.md`](ib/README.md).
-- `ic/` fills IC Markets' forex and metals instruments (their quotes not
-  yet) through Spotware's cTrader Open API: see
+- `ic/` fills IC Markets' forex and metals instruments and their quotes,
+  merged from tick history, through Spotware's cTrader Open API: see
   [`ic/README.md`](ic/README.md).
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
@@ -343,7 +348,8 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
     unique;
   - bars stored under their bar type and resumed after their range;
   - errors: data of another series (a quote of another instrument, another
-    bar type), an empty first response (quotes or bars), a start before the
+    bar type), an empty first response (quotes or bars, naming the window),
+    a start before the
     stored range (refused before fetching); an empty resumed response is
     not an error;
   - coverage over the window asked for; a re-run requests only after each
