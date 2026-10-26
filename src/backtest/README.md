@@ -386,7 +386,9 @@ Known limits:
 Every fill model is built from `(prob_fill_on_limit: f64, prob_slippage:
 f64, random_seed: Option<u64>)`, probabilities in `[0, 1]`; always pass a
 seed. With `prob_fill_on_limit = 1.0` and `prob_slippage = 0.0` the seed
-draws nothing that changes a result.
+draws nothing that changes a result: probabilities of 0 and 1 never reach
+the RNG. That is also the node's model when `fill_model` is unset, but
+unseeded; ours stays explicit, by the rule to seed all randomness (Rules).
 
 | `FillModelAny` variant | Simulates |
 |---|---|
@@ -743,14 +745,18 @@ one per instrument when netting.
 
 `Max Drawdown`, `CAGR (252 days)` and `Calmar Ratio (252 days)` are not in
 the default set. Each is a `PortfolioStatistic` (`nautilus_analysis`)
-computed from `returns_series`; a `PortfolioAnalyzer` only loops over the
-statistics registered, so `report.rs` calls the one it prints directly:
+computed from the returns series. `node.rs` registers `MaxDrawdown` with
+the engine's portfolio before the run, so the portfolio computes it with
+the default statistics and the result holds it in `stats_returns`, named
+`Max Drawdown` (a negative fraction: -0.05 is 5%):
 
 ```rust
-let max_drawdown = MaxDrawdown::new().calculate_from_returns(&result.returns_series); // Some(-0.05): 5%
+engine.kernel_mut().portfolio.borrow_mut().register_statistic(Arc::new(MaxDrawdown::new()));
 ```
 
-The engine also logs its statistics at the end of the run.
+A registration outlives the analyzer's resets (`Portfolio::register_statistic`).
+The engine also logs its statistics, `Max Drawdown` included, at the end of
+the run.
 
 ### Costs in the report
 
@@ -953,7 +959,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - a wave over days, on which the EMA 5/15 crosses several times:
     `backtest_ema_cross.rs` checks that its PnL is lower by `orders ×
     commission` than in `backtest_ema_cross_free.rs`, and its final
-    balance;
+    balance; `backtest_max_drawdown.rs` that the result's `stats_returns`
+    hold `Max Drawdown`, the largest fall from a peak of the equity
+    compounded over its returns series;
   - steps, a level per hour chosen so that the shortest crossover (1/2)
     trades at hours worked out by hand, and so that what is tested changes
     the orders and the final balance: `backtest_warmup.rs` (a run off an

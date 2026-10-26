@@ -157,10 +157,20 @@ enum Strategy {
 }
 
 /// An RFC 3339 timestamp, or a date taken as midnight UTC.
+///
+/// Not Nautilus' `UnixNanos::from_str`: it reads bare numbers as nanoseconds
+/// or seconds, so `--start 20240102` or `--start 2024` would silently become
+/// a window in 1970.
 fn parse_time(s: &str) -> anyhow::Result<Timestamp> {
     if let Ok(timestamp) = s.parse::<Timestamp>() {
         return Ok(timestamp);
     }
+    // jiff's date parser drops a time, so a time without an offset would
+    // otherwise become midnight.
+    ensure!(
+        !s.contains(['T', 't', ' ']),
+        "{s:?} has a time but no UTC offset: add Z or an offset"
+    );
     let date: Date = s
         .parse()
         .with_context(|| format!("{s:?} is neither a date nor an RFC 3339 timestamp"))?;
@@ -318,6 +328,16 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_without_an_offset_is_refused_rather_than_read_as_midnight() {
+        let err = parse_time("2024-01-02T15:30:00").unwrap_err().to_string();
+        assert!(err.contains("no UTC offset"), "{err}");
+        assert_eq!(
+            parse_time("2024-01-02").unwrap(),
+            "2024-01-02T00:00:00Z".parse::<Timestamp>().unwrap()
+        );
+    }
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]

@@ -61,20 +61,33 @@ impl EmaCrossConfig {
 
     /// One internal bar type per instrument, composite if built from
     /// source bars.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the config has invalid composite source bars, which
+    /// `validate` rejects.
     #[must_use]
     pub fn bar_types(&self) -> Vec<BarType> {
+        self.try_bar_types()
+            .expect("composite source bars validated")
+    }
+
+    /// The bar types, or an error if the composite source bars are
+    /// invalid: Nautilus checks them in `BarType::new_composite_checked`.
+    fn try_bar_types(&self) -> anyhow::Result<Vec<BarType>> {
         self.instrument_ids
             .iter()
             .map(|&id| match self.composite {
-                None => BarType::new(id, self.bar_spec, AggregationSource::Internal),
-                Some(source) => BarType::new_composite(
+                None => Ok(BarType::new(id, self.bar_spec, AggregationSource::Internal)),
+                Some(source) => BarType::new_composite_checked(
                     id,
                     self.bar_spec,
                     AggregationSource::Internal,
                     source.step,
                     source.aggregation,
                     source.aggregation_source,
-                ),
+                )
+                .with_context(|| format!("invalid composite source bars {source:?}")),
             })
             .collect()
     }
@@ -113,14 +126,7 @@ impl EmaCrossConfig {
             self.fast_period > 0 && self.fast_period < self.slow_period,
             "fast period must be positive and below the slow period"
         );
-        if let Some(source) = self.composite {
-            BarSpecification::new_checked(
-                source.step,
-                source.aggregation,
-                self.bar_spec.price_type,
-            )
-            .with_context(|| format!("invalid composite source bars {source:?}"))?;
-        }
+        self.try_bar_types()?;
         // Live, composite bars arrive after their close, so a session would
         // drop its last bar there but not in a backtest.
         ensure!(

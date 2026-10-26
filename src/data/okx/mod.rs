@@ -3,8 +3,9 @@
 //! day, at a time, then, for funding, from OKX's API.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
-//! `OKXRawHttpClient` and `parse_instrument_any`, with margins of 1 (see
-//! `instrument_from`). Candles and a swap's funding come from OKX's archive
+//! `OKXRawHttpClient` (that of its `OKXHttpClient`) and
+//! `parse_instrument_any`, with margins of 1 (see `instrument_from`).
+//! Candles and a swap's funding come from OKX's archive
 //! (see `archive`): one file per swap, or per futures family, and month or
 //! day, the months and days of the archive being those of UTC+8. Candles
 //! are stored as the bars of the instrument's `1-MINUTE-LAST-EXTERNAL` bar
@@ -39,10 +40,7 @@ use nautilus_okx::{
         models::OKXInstrument,
         parse::{is_xperp_rule_type, okx_instrument_type_from_symbol, parse_instrument_any},
     },
-    http::{
-        client::{OKXHttpClient, OKXRawHttpClient},
-        query::GetInstrumentsParams,
-    },
+    http::{client::OKXHttpClient, query::GetInstrumentsParams},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
@@ -85,9 +83,9 @@ const LISTED_PERIODS: i32 = 10;
 /// A connection to OKX's public API and archive, for history.
 #[derive(Debug)]
 pub struct OkxHistory {
-    client: OKXRawHttpClient,
-    /// Nautilus' client of OKX's API, for its parsed funding history.
-    funding: OKXHttpClient,
+    /// Nautilus' client of OKX's API: its parsed funding history, and its
+    /// raw client for the instruments.
+    client: OKXHttpClient,
     archive: HttpClient,
 }
 
@@ -98,10 +96,8 @@ impl OkxHistory {
     ///
     /// Returns an error if a client cannot be built.
     pub fn new() -> anyhow::Result<Self> {
-        let client = OKXRawHttpClient::new(None, 60, 3, 1000, 10_000, OKXEnvironment::Live, None)
+        let client = OKXHttpClient::new(None, 60, 3, 1000, 10_000, OKXEnvironment::Live, None)
             .context("building the OKX HTTP client")?;
-        let funding = OKXHttpClient::new(None, 60, 3, 1000, 10_000, OKXEnvironment::Live, None)
-            .context("building the OKX funding client")?;
         let quota = Quota::with_period(ARCHIVE_REQUEST_PERIOD)
             .context("the archive request period is zero")?;
         let archive = HttpClient::builder()
@@ -109,11 +105,7 @@ impl OkxHistory {
             .timeout_secs(ARCHIVE_REQUEST_TIMEOUT_SECS)
             .build()
             .context("building the OKX archive client")?;
-        Ok(Self {
-            client,
-            funding,
-            archive,
-        })
+        Ok(Self { client, archive })
     }
 
     /// Whether `id` is OKX's, so its history comes from here.
@@ -163,7 +155,7 @@ impl OkxHistory {
                 },
                 async |before| {
                     let funding = self
-                        .funding
+                        .client
                         .request_funding_rates(id, None, Some(before), None)
                         .await
                         .with_context(|| {
@@ -184,6 +176,7 @@ impl OkxHistory {
         let contract = Contract::of(id)?;
         let raw = self
             .client
+            .raw_client()
             .get_instruments(GetInstrumentsParams {
                 inst_type: contract.inst_type,
                 inst_id: Some(id.symbol.to_string()),
