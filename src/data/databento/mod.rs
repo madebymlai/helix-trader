@@ -1,5 +1,7 @@
-//! Databento history: DBN files of one instrument, loaded into the catalog
-//! with Nautilus' own Databento loader (`nautilus_databento::loader`).
+//! Databento history: downloaded DBN files of `GLBX` instruments, loaded
+//! into the catalog with Nautilus' own Databento loader
+//! (`nautilus_databento::loader`), with the instrument's definitions from
+//! Databento's historical API. Market data is never downloaded here.
 //!
 //! An MBP-10 file becomes `OrderBookDepth` snapshots, a trades file
 //! `TradeTick`s, under the instrument id the loader resolves from the
@@ -8,15 +10,26 @@
 //! consecutive daily files cover the catalog without gaps and a file
 //! already stored is not decoded again.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, bail, ensure};
-use dbn::decode::{DbnMetadata, dbn::Decoder};
-use nautilus_core::UnixNanos;
-use nautilus_databento::loader::DatabentoDataLoader;
+use dbn::{
+    Metadata, Schema,
+    decode::{DbnMetadata, dbn::Decoder},
+};
+use jiff::Timestamp;
+use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
+use nautilus_databento::{
+    common::Credential,
+    historical::{DatabentoHistoricalClient, RangeQueryParams},
+    loader::DatabentoDataLoader,
+};
 use nautilus_model::{
     data::{Data, HasTsInit, OrderBookDepth, TradeTick},
-    identifiers::InstrumentId,
+    identifiers::{InstrumentId, Symbol, Venue},
     instruments::{Instrument, InstrumentAny},
 };
 use nautilus_persistence::{
@@ -59,8 +72,56 @@ impl DatabentoFiles {
         })
     }
 
-    /// Loads `files`, each an MBP-10 or trades DBN file of `instrument`,
-    /// into `catalog`, with `instrument` written first if not stored.
+    /// Whether `id` is on `GLBX`, the venue Nautilus' loader gives CME
+    /// Globex records (`GLBX.MDP3`), so its history comes from here.
+    #[must_use]
+    pub fn serves(id: InstrumentId) -> bool {
+        id.venue == Venue::GLBX()
+    }
+
+    /// Fills `catalog` from the DBN files in `dir` for `series`, each the
+    /// trades of a `GLBX` instrument: every MBP-10 and trades file of the
+    /// instrument's symbol whose window meets `[start, end]` is loaded
+    /// whole (see `load`), after the instrument's definitions over the
+    /// files' span, fetched from Databento with `api_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a series is not such trades, checked before any
+    /// request; if `dir` has no file for an instrument; if the definitions
+    /// are of another instrument or cannot be fetched; or as `load`.
+    pub async fn fill(
+        &mut self,
+        catalog: &ParquetDataCatalog,
+        ids: &[InstrumentId],
+        dir: &Path,
+        start: Timestamp,
+        end: Timestamp,
+        api_key: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(id) = ids.iter().find(|&&id| !Self::serves(id)) {
+            bail!("Databento files serve GLBX instruments, not {id}");
+        }
+        for &id in ids {
+            let files = files_of(dir, id.symbol, start, end)?;
+            ensure!(
+                !files.is_empty(),
+                "no mbp-10 or trades file of {} in {} meets [{start}, {end}]",
+                id.symbol,
+                dir.display()
+            );
+            let definitions = definitions(api_key, &files).await?;
+            if let Some(other) = definitions.iter().find(|d| d.id() != id) {
+                bail!("Databento defines {} for the files of {id}", other.id());
+            }
+            self.load(catalog, definitions, &files)?;
+        }
+        Ok(())
+    }
+
+    /// Loads `files`, each an MBP-10 or trades DBN file of one instrument,
+    /// into `catalog`, with `definitions`, the instrument's, written first
+    /// if the instrument is not stored.
     ///
     /// Each file is stored over its request window `[start, end - 1 ns]`
     /// from its metadata, in files of at most `ROWS_PER_FILE` rows. A
@@ -69,27 +130,40 @@ impl DatabentoFiles {
     ///
     /// # Errors
     ///
-    /// Returns an error, stopping the load, on a file of another schema, a
-    /// record of another instrument or outside the file's window, or a
-    /// window stored other than as a prefix. Files loaded before it stay
-    /// stored.
-    pub fn load(
+    /// Returns an error, before writing, if `definitions` is empty or not of
+    /// one instrument and price precision. Otherwise returns an error,
+    /// stopping the load, on a file of another schema, a record of another
+    /// instrument or outside the file's window, or a window stored other
+    /// than as a prefix. Files loaded before it stay stored.
+    fn load(
         &mut self,
         catalog: &ParquetDataCatalog,
-        instrument: InstrumentAny,
+        mut definitions: Vec<InstrumentAny>,
         files: &[PathBuf],
     ) -> anyhow::Result<()> {
-        let id = instrument.id();
+        let first = definitions.first().context("no instrument definition")?;
+        let (id, precision) = (first.id(), first.price_precision());
+        if let Some(other) = definitions
+            .iter()
+            .find(|d| d.id() != id || d.price_precision() != precision)
+        {
+            bail!(
+                "definitions of several instruments: {id} with precision {precision}, \
+                 {} with precision {}",
+                other.id(),
+                other.price_precision()
+            );
+        }
         // The loader resolves prices' precision by symbol: a record of
         // another symbol fails to decode, naming its id.
-        self.loader
-            .set_price_precision(id.symbol, instrument.price_precision());
+        self.loader.set_price_precision(id.symbol, precision);
         let stored = catalog
             .instruments(Some(&[id.to_string()]), None, None)
             .context("reading stored instruments")?;
         if stored.is_empty() {
+            definitions.sort_by_key(HasTsInit::ts_init);
             catalog
-                .write_instruments(vec![instrument])
+                .write_instruments(definitions)
                 .context("writing the instrument")?;
         }
         for path in files {
@@ -106,27 +180,36 @@ impl DatabentoFiles {
         id: InstrumentId,
         path: &Path,
     ) -> anyhow::Result<()> {
-        let schema = self.loader.schema_from_file(path)?;
-        match schema.as_deref() {
-            Some("mbp-10") => self.store::<dbn::Mbp10Msg, OrderBookDepth>(catalog, id, path),
-            Some("trades") => self.store::<dbn::TradeMsg, TradeTick>(catalog, id, path),
-            other => bail!("schema {other:?} is not stored: only mbp-10 and trades are"),
+        let metadata = metadata(path)?;
+        let window = window(&metadata)?;
+        match metadata.schema {
+            Some(Schema::Mbp10) => {
+                self.store::<dbn::Mbp10Msg, OrderBookDepth>(catalog, id, path, window)
+            }
+            Some(Schema::Trades) => {
+                self.store::<dbn::TradeMsg, TradeTick>(catalog, id, path, window)
+            }
+            other => bail!(
+                "schema {} is not stored: only mbp-10 and trades are",
+                other.map_or("none", |schema| schema.as_str())
+            ),
         }
     }
 
     /// Stores the records of type `R` in the file at `path` as `T`s of the
-    /// instrument `id`, over the part of the file's window not yet stored.
+    /// instrument `id`, over the part of the file's window `[start, end]`
+    /// not yet stored.
     fn store<R, T>(
         &self,
         catalog: &ParquetDataCatalog,
         id: InstrumentId,
         path: &Path,
+        (start, end): (u64, u64),
     ) -> anyhow::Result<()>
     where
         R: dbn::Record + dbn::HasRType + 'static,
         T: TryFrom<Data, Error = ()> + HasTsInit + EncodeToRecordBatch + HasCatalogDataType,
     {
-        let (start, end) = file_window(path)?;
         let data_type = T::catalog_data_type();
         let identifier = id.to_string();
         let named = || format!("the {} of {id}", data_path_prefix(&data_type));
@@ -204,18 +287,129 @@ impl DatabentoFiles {
     }
 }
 
-/// The request window of the DBN file at `path`, from its metadata: the
-/// closed interval `[start, end - 1 ns]`, as the catalog stores intervals.
-fn file_window(path: &Path) -> anyhow::Result<(u64, u64)> {
-    let decoder = Decoder::from_zstd_file(path)?;
-    let metadata = decoder.metadata();
-    let end = metadata
-        .end
-        .context("the file's metadata has no end")?
-        .get();
+/// The definitions Databento holds for the symbol of `files` over their
+/// span, from its historical API with `api_key`: the instrument under the id
+/// the loader gives the files' records (for a continuous symbol,
+/// `GC.v.0.GLBX`), once per definition received.
+async fn definitions(api_key: &str, files: &[PathBuf]) -> anyhow::Result<Vec<InstrumentAny>> {
+    let request = definitions_request(files)?;
+    let client = DatabentoHistoricalClient::new(
+        Credential::new(api_key),
+        PathBuf::from(PUBLISHERS),
+        get_atomic_clock_realtime(),
+        false,
+    )
+    .context("building Databento's historical client")?;
+    let described = format!(
+        "the definitions of {:?} in {} over [{}, {})",
+        request.symbols,
+        request.dataset,
+        request.start,
+        request.end.unwrap_or_default(),
+    );
+    let definitions = client
+        .get_range_instruments(request)
+        .await
+        .with_context(|| format!("requesting {described}"))?;
+    log::info!("{} {described}", definitions.len());
+    Ok(definitions)
+}
+
+/// The MBP-10 and trades files of `symbol` in `dir` (`*.dbn.zst`, by name)
+/// whose window meets `[start, end]`, from their metadata.
+fn files_of(
+    dir: &Path,
+    symbol: Symbol,
+    start: Timestamp,
+    end: Timestamp,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let (start, end) = (
+        UnixNanos::from(start).as_u64(),
+        UnixNanos::from(end).as_u64(),
+    );
+    let mut files = Vec::new();
+    let entries = fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("listing {}", dir.display()))?
+            .path();
+        if !path.to_string_lossy().ends_with(".dbn.zst") {
+            continue;
+        }
+        let metadata = metadata(&path)?;
+        let (first, last) = window(&metadata)
+            .with_context(|| format!("reading the window of {}", path.display()))?;
+        if matches!(metadata.schema, Some(Schema::Mbp10 | Schema::Trades))
+            && metadata.symbols == [symbol.as_str()]
+            && first <= end
+            && last >= start
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The request for the definitions of the symbol of `files`, all of one
+/// dataset and one symbol, over their span: from the earliest start to the
+/// latest end of their metadata.
+fn definitions_request(files: &[PathBuf]) -> anyhow::Result<RangeQueryParams> {
+    let mut request: Option<RangeQueryParams> = None;
+    for path in files {
+        let metadata = metadata(path)?;
+        let (first, last) = window(&metadata)
+            .with_context(|| format!("reading the window of {}", path.display()))?;
+        let (start, end) = (UnixNanos::from(first), UnixNanos::from(last + 1));
+        match &mut request {
+            None => {
+                request = Some(RangeQueryParams {
+                    dataset: metadata.dataset,
+                    symbols: metadata.symbols,
+                    start,
+                    end: Some(end),
+                    limit: None,
+                    price_precision: None,
+                });
+            }
+            Some(request) => {
+                ensure!(
+                    request.dataset == metadata.dataset && request.symbols == metadata.symbols,
+                    "{} holds {:?} of {}, not {:?} of {}",
+                    path.display(),
+                    metadata.symbols,
+                    metadata.dataset,
+                    request.symbols,
+                    request.dataset
+                );
+                request.start = request.start.min(start);
+                request.end = request.end.max(Some(end));
+            }
+        }
+    }
+    let request = request.context("no file")?;
+    ensure!(
+        request.symbols.len() == 1,
+        "the files hold several symbols: {:?}",
+        request.symbols
+    );
+    Ok(request)
+}
+
+/// The metadata of the DBN file at `path`.
+fn metadata(path: &Path) -> anyhow::Result<Metadata> {
+    let decoder = Decoder::from_zstd_file(path)
+        .with_context(|| format!("reading the metadata of {}", path.display()))?;
+    Ok(decoder.metadata().clone())
+}
+
+/// The request window of a DBN file, from its `metadata`: the closed
+/// interval `[start, end - 1 ns]`, as the catalog stores intervals.
+fn window(metadata: &Metadata) -> anyhow::Result<(u64, u64)> {
+    let end = metadata.end.context("the metadata has no end")?.get();
     ensure!(
         metadata.start < end,
-        "the file's window [{}, {end}) is empty",
+        "the window [{}, {end}) is empty",
         metadata.start
     );
     Ok((metadata.start, end - 1))
@@ -259,6 +453,16 @@ mod tests {
         instrument("ESH1.GLBX")
     }
 
+    /// The ESH1 definition received at `ts`.
+    fn esh1_at(ts: u64) -> InstrumentAny {
+        let mut contract = futures_contract_es(None, None);
+        contract.id = InstrumentId::from("ESH1.GLBX");
+        contract.raw_symbol = Symbol::from("ESH1");
+        contract.ts_event = UnixNanos::from(ts);
+        contract.ts_init = UnixNanos::from(ts);
+        InstrumentAny::FuturesContract(contract)
+    }
+
     fn new_catalog() -> (tempfile::TempDir, ParquetDataCatalog) {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -295,7 +499,7 @@ mod tests {
         let (_dir, mut catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         databento
-            .load(&catalog, esh1(), &[mbp10(), trades()])
+            .load(&catalog, vec![esh1()], &[mbp10(), trades()])
             .unwrap();
         let ids = Some(vec!["ESH1.GLBX".to_string()]);
         let depths = catalog.order_book_depths(ids.clone(), None, None).unwrap();
@@ -316,7 +520,7 @@ mod tests {
         let (_dir, catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         databento
-            .load(&catalog, esh1(), &[mbp10(), trades()])
+            .load(&catalog, vec![esh1()], &[mbp10(), trades()])
             .unwrap();
         assert_eq!(intervals::<OrderBookDepth>(&catalog), [(START, END)]);
         assert_eq!(intervals::<TradeTick>(&catalog), [(START, END)]);
@@ -327,9 +531,9 @@ mod tests {
         let (dir, catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         let paths = [mbp10(), trades()];
-        databento.load(&catalog, esh1(), &paths).unwrap();
+        databento.load(&catalog, vec![esh1()], &paths).unwrap();
         let before = snapshot(dir.path());
-        databento.load(&catalog, esh1(), &paths).unwrap();
+        databento.load(&catalog, vec![esh1()], &paths).unwrap();
         assert_eq!(snapshot(dir.path()), before);
     }
 
@@ -338,7 +542,7 @@ mod tests {
         let (_dir, mut catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         databento.rows_per_file = 1;
-        databento.load(&catalog, esh1(), &[mbp10()]).unwrap();
+        databento.load(&catalog, vec![esh1()], &[mbp10()]).unwrap();
         assert_eq!(
             intervals::<OrderBookDepth>(&catalog),
             [(START, DEPTH_TS[1] - 1), (DEPTH_TS[1], END)]
@@ -354,7 +558,7 @@ mod tests {
         let (dir, mut catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         databento.rows_per_file = 1;
-        databento.load(&catalog, esh1(), &[mbp10()]).unwrap();
+        databento.load(&catalog, vec![esh1()], &[mbp10()]).unwrap();
         // Keep only the first catalog file, as a load stopped after it.
         // Catalog files are named after their interval, so the later sorts last.
         let (second, _) = snapshot(dir.path())
@@ -367,7 +571,7 @@ mod tests {
             intervals::<OrderBookDepth>(&catalog),
             [(START, DEPTH_TS[1] - 1)]
         );
-        databento.load(&catalog, esh1(), &[mbp10()]).unwrap();
+        databento.load(&catalog, vec![esh1()], &[mbp10()]).unwrap();
         assert_eq!(
             intervals::<OrderBookDepth>(&catalog),
             [(START, DEPTH_TS[1] - 1), (DEPTH_TS[1], END)]
@@ -384,7 +588,7 @@ mod tests {
         let (_dir, catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         let err = databento
-            .load(&catalog, instrument("ESH1.XCME"), &[trades()])
+            .load(&catalog, vec![instrument("ESH1.XCME")], &[trades()])
             .unwrap_err();
         let err = format!("{err:#}");
         assert!(
@@ -399,11 +603,105 @@ mod tests {
         let (_dir, catalog) = new_catalog();
         let mut databento = DatabentoFiles::new().unwrap();
         let mbp1 = testdata("test_data.mbp-1.dbn.zst");
-        let err = databento.load(&catalog, esh1(), &[mbp1]).unwrap_err();
+        let err = databento.load(&catalog, vec![esh1()], &[mbp1]).unwrap_err();
         let err = format!("{err:#}");
         assert!(
             err.contains("mbp-1") && err.contains("test_data.mbp-1"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn stores_every_definition_of_the_instrument() {
+        let (_dir, catalog) = new_catalog();
+        let mut databento = DatabentoFiles::new().unwrap();
+        let definitions = vec![esh1_at(START + 5), esh1_at(START + 1)];
+        databento.load(&catalog, definitions, &[trades()]).unwrap();
+        let mut stored: Vec<u64> = catalog
+            .instruments(None, None, None)
+            .unwrap()
+            .iter()
+            .map(|i| HasTsInit::ts_init(i).as_u64())
+            .collect();
+        stored.sort_unstable();
+        assert_eq!(stored, [START + 1, START + 5]);
+    }
+
+    #[test]
+    fn refuses_definitions_of_several_instruments() {
+        let (_dir, catalog) = new_catalog();
+        let mut databento = DatabentoFiles::new().unwrap();
+        let definitions = vec![esh1(), instrument("ESH1.XCME")];
+        let err = databento
+            .load(&catalog, definitions, &[trades()])
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("ESH1.GLBX") && err.contains("ESH1.XCME"),
+            "{err}"
+        );
+        assert!(catalog.instruments(None, None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn asks_for_the_definitions_of_the_files_symbol_over_their_span() {
+        let request = definitions_request(&[mbp10(), trades()]).unwrap();
+        assert_eq!(request.dataset, "GLBX.MDP3");
+        assert_eq!(request.symbols, ["ESH1"]);
+        assert_eq!(request.start, UnixNanos::from(START));
+        assert_eq!(request.end, Some(UnixNanos::from(END + 1)));
+    }
+
+    #[test]
+    fn refuses_to_ask_for_files_of_several_symbols() {
+        let msft = testdata("test_data.definition.equity.dbn.zst");
+        let err = definitions_request(&[trades(), msft]).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("ESH1") && err.contains("MSFT"), "{err}");
+    }
+
+    fn ns(ns: u64) -> Timestamp {
+        Timestamp::from(UnixNanos::from(ns))
+    }
+
+    #[test]
+    fn serves_glbx_instruments_only() {
+        assert!(DatabentoFiles::serves(InstrumentId::from("GC.v.0.GLBX")));
+        assert!(!DatabentoFiles::serves(InstrumentId::from("GCZ6.XCEC")));
+        assert!(!DatabentoFiles::serves(InstrumentId::from(
+            "BTC-USDT-SWAP.OKX"
+        )));
+    }
+
+    #[test]
+    fn picks_the_mbp10_and_trades_files_of_the_symbol_meeting_the_window() {
+        let dir = testdata("");
+        let files = files_of(&dir, Symbol::from("ESH1"), ns(END), ns(END + 10)).unwrap();
+        assert_eq!(files, [mbp10(), trades()]);
+        let files = files_of(&dir, Symbol::from("ESH1"), ns(0), ns(START)).unwrap();
+        assert_eq!(files, [mbp10(), trades()]);
+    }
+
+    #[test]
+    fn picks_no_file_outside_the_window_or_of_another_symbol() {
+        let dir = testdata("");
+        let after = files_of(&dir, Symbol::from("ESH1"), ns(END + 1), ns(END + 10)).unwrap();
+        assert!(after.is_empty());
+        let before = files_of(&dir, Symbol::from("ESH1"), ns(0), ns(START - 1)).unwrap();
+        assert!(before.is_empty());
+        let other = files_of(&dir, Symbol::from("ESM1"), ns(START), ns(END)).unwrap();
+        assert!(other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn refuses_an_instrument_it_does_not_serve_before_any_request() {
+        let (_dir, catalog) = new_catalog();
+        let mut databento = DatabentoFiles::new().unwrap();
+        let ids = [InstrumentId::from("ESH1.XCME")];
+        let err = databento
+            .fill(&catalog, &ids, &testdata(""), ns(START), ns(END), "unused")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("ESH1.XCME"), "{err}");
     }
 }

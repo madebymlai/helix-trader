@@ -75,7 +75,8 @@ A file is written in catalog files of at most 1,000,000 rows, each ending
 timestamp. A record outside the file's window is an error. A file with no
 record in its window records no coverage.
 
-Days the download has no file for (Saturdays) leave gaps in coverage.
+Saturdays have no file (CME Globex is closed), so they have no coverage:
+expected, not a gap to fill.
 
 ## The instrument (open)
 

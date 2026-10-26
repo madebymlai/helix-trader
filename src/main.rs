@@ -8,11 +8,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IbHistory, OkxHistory, fill_catalog},
+    data::{DatabentoFiles, IbHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
         DataRequirements, catalog_series,
@@ -42,7 +42,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX's
-    /// archive (OKX instruments) or Interactive Brokers (the others).
+    /// archive (OKX instruments), downloaded Databento files (GLBX
+    /// instruments) or Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
@@ -87,6 +88,10 @@ struct FillCatalogArgs {
     /// node with the default id can run at the same time.
     #[arg(long, default_value_t = 10)]
     client_id: i32,
+    /// The directory of the downloaded Databento DBN files (`*.dbn.zst`);
+    /// needed only for GLBX instruments.
+    #[arg(long)]
+    databento_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -221,8 +226,10 @@ async fn main() -> anyhow::Result<()> {
 /// Checks everything that needs no gateway, then fills the catalog with the
 /// instruments and the series their bars are built from (see
 /// `strategy::catalog_series`) from each instrument's source: OKX's
-/// archive for OKX instruments (their 1-minute candles), IB (connected
-/// only if needed) for the others.
+/// archive for OKX instruments (their 1-minute candles), the downloaded
+/// Databento files for GLBX instruments (their trades and MBP-10 book,
+/// with the definitions from Databento's API), IB (connected only if
+/// needed) for the others.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -244,15 +251,29 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     // The source of an instrument is its venue's: OKX's archive for OKX,
-    // IB for every other venue.
-    let (okx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
+    // Databento's files for GLBX, IB for every other venue.
+    let (okx_ids, other_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
         .instrument_ids()
         .into_iter()
         .partition(|&id| OkxHistory::serves(id));
+    let (glbx_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) = other_ids
+        .into_iter()
+        .partition(|&id| DatabentoFiles::serves(id));
+    let databento_dir = match (&glbx_ids[..], &args.databento_dir) {
+        ([], _) => None,
+        ([id, ..], None) => bail!("{id} needs --databento-dir, the Databento files' directory"),
+        (_, Some(dir)) => Some(dir),
+    };
     if !okx_ids.is_empty() {
         let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
         OkxHistory::new()?
             .fill(&mut catalog, &series, start, end)
+            .await?;
+    }
+    if let Some(dir) = databento_dir {
+        let api_key = std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
+        DatabentoFiles::new()?
+            .fill(&catalog, &glbx_ids, dir, start, end, &api_key)
             .await?;
     }
     if !ib_ids.is_empty() {
@@ -386,6 +407,13 @@ mod tests {
         );
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
         assert_eq!(args.client_id, 10);
+        assert_eq!(args.databento_dir, None);
+        let mut argv = REQUIRED.to_vec();
+        argv.extend(["--databento-dir", "/data/glbx"]);
+        assert_eq!(
+            parse(&argv).unwrap().databento_dir,
+            Some(PathBuf::from("/data/glbx"))
+        );
     }
 
     #[test]
