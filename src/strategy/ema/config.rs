@@ -149,6 +149,9 @@ pub struct CompositeSource {
     pub aggregation_source: AggregationSource,
 }
 
+/// The strategy's id and order tag. `oms_type` is left unset: Nautilus
+/// keeps the strategy's positions as the execution client of the venue
+/// does, netting or hedging, in a backtest as live.
 fn default_base() -> StrategyConfig {
     StrategyConfig {
         strategy_id: Some(StrategyId::from("EMA_CROSS-001")),
@@ -187,6 +190,12 @@ mod tests {
             config.bar_types()[1].to_string(),
             "ESM4.CME-1-HOUR-MID-INTERNAL"
         );
+    }
+
+    #[test]
+    fn leaves_the_oms_to_the_venue() {
+        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
+        assert_eq!(config.base.oms_type, None);
     }
 
     #[test]
