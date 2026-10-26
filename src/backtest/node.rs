@@ -21,7 +21,7 @@ use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Data, NautilusDataType},
-    enums::{AccountType, BookType, OmsType},
+    enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
 };
 use nautilus_persistence::config::DataCatalogConfig;
@@ -34,7 +34,7 @@ use crate::strategy::warmup;
 const RUN_ID: &str = "backtest";
 
 /// The run config of `backtest`: one venue named after the instruments'
-/// venue, at the run's leverage with Nautilus' default margin model (the
+/// venue, keeping positions as `backtest.oms_type` says, at the run's leverage with Nautilus' default margin model (the
 /// notional / leverage times the instrument's margin), which fills orders
 /// on the replayed data and settles funding, the series of the window from
 /// the catalog (the only data replayed: the data engine builds the
@@ -65,7 +65,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .to_string();
     let venue_config = BacktestVenueConfig::builder()
         .name(venue.as_str())
-        .oms_type(OmsType::Netting)
+        .oms_type(backtest.oms_type)
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![backtest.balance.to_string()])
@@ -172,7 +172,7 @@ mod tests {
 
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
-    use nautilus_model::{data::BarType, types::Money};
+    use nautilus_model::{data::BarType, enums::OmsType, types::Money};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -191,6 +191,7 @@ mod tests {
             fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),
             leverage: Decimal::ONE,
+            oms_type: OmsType::Netting,
             logging: LoggerConfig {
                 print_config: true,
                 ..LoggerConfig::default()
@@ -199,16 +200,28 @@ mod tests {
     }
 
     #[test]
-    fn one_netting_margin_venue_named_after_the_instruments() {
+    fn one_margin_venue_named_after_the_instruments() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let [venue] = config.venues() else {
             panic!("{:?}", config.venues())
         };
         assert_eq!(venue.name(), "IBIS");
-        assert_eq!(venue.oms_type(), OmsType::Netting);
         assert_eq!(venue.account_type(), AccountType::Margin);
         assert_eq!(venue.book_type(), BookType::L1_MBP);
+    }
+
+    #[test]
+    fn the_venue_keeps_positions_as_the_backtest_says() {
+        let dir = tempfile::tempdir().unwrap();
+        for oms_type in [OmsType::Netting, OmsType::Hedging] {
+            let backtest = Backtest {
+                oms_type,
+                ..backtest(dir.path())
+            };
+            let config = run_config(&backtest).unwrap();
+            assert_eq!(config.venues()[0].oms_type(), oms_type);
+        }
     }
 
     #[test]

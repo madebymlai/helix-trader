@@ -112,6 +112,7 @@ mod tests {
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_model::{
         data::{Bar, BarType, FundingRateUpdate, QuoteTick},
+        enums::OmsType,
         instruments::stubs::equity_aapl,
         types::{Money, Price, Quantity},
     };
@@ -164,6 +165,7 @@ mod tests {
             fee_model: commission_per_order(Money::from("3 USD")).unwrap(),
             balance: Money::from("10000 USD"),
             leverage: Decimal::ONE,
+            oms_type: OmsType::Netting,
             logging: LoggerConfig::default(),
         }
     }

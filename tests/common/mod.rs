@@ -15,7 +15,7 @@ pub mod recorder;
 use std::path::Path;
 
 use helix_trader::{
-    backtest::{Backtest, commission_per_order},
+    backtest::{Backtest, commission_per_order, venue_oms_type},
     strategy::ema::{EmaCross, EmaCrossConfig, Session},
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
@@ -24,7 +24,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, QuoteTick},
     enums::{BarAggregation, PriceType},
-    identifiers::{InstrumentId, Symbol},
+    identifiers::{InstrumentId, Symbol, Venue},
     instruments::{InstrumentAny, stubs::equity_aapl},
     types::{Currency, Money, Price, Quantity},
 };
@@ -197,6 +197,7 @@ pub fn backtest(
         fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),
         leverage: Decimal::ONE,
+        oms_type: venue_oms_type(Venue::from("IBIS")),
         logging: LoggerConfig::default(),
     }
 }
@@ -427,5 +428,38 @@ pub mod fall {
 
     pub fn backtest(catalog: &Path) -> Backtest {
         super::backtest(catalog, at("12:30"), at("15:00"), WARMUP, "0 EUR")
+    }
+}
+
+/// Two overlapping trades on the steps, from 12:30 without warmup: a
+/// recorder, its `oms_type` unset, buys 10 shares on the 13:00 bar, at the
+/// ask of the quote closing it, 620.65, and 10 more on the 14:00 bar, at
+/// 580.65, and closes neither. A netting venue holds them as one long
+/// position of 20 at their average, 600.65; a hedging venue as two of 10,
+/// one at each price.
+pub mod overlap {
+    use std::{cell::RefCell, rc::Rc};
+
+    use nautilus_model::enums::{OmsType, OrderSide};
+
+    use super::*;
+
+    /// Runs the recorder on a venue keeping positions as `venue_oms` and
+    /// returns its record.
+    pub fn run(venue_oms: OmsType) -> Rc<RefCell<recorder::Record>> {
+        let catalog = steps::catalog();
+        let backtest = Backtest {
+            oms_type: venue_oms,
+            ..steps::backtest(catalog.path(), steps::at("12:30"))
+        };
+        let (recorder, record) = recorder::Recorder::trading_without_warmup(
+            BarType::from(MID_BAR_TYPE),
+            vec![
+                (OrderSide::Buy, Quantity::from(10)),
+                (OrderSide::Buy, Quantity::from(10)),
+            ],
+        );
+        backtest.run(recorder).unwrap();
+        record
     }
 }

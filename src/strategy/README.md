@@ -209,6 +209,26 @@ self.submit_order(order, None, None, None)?;
   `on_position_opened(&mut self, event: PositionOpened)`, and so on. The
   fill hook takes a reference; most others take the event by value.
 
+#### Position mode: the venue's
+
+A strategy leaves `oms_type` unset in its `StrategyConfig`. Nautilus then
+keeps its positions as the execution client of the venue does (the
+execution engine's `resolve_oms_type_for_client`; Concepts › Execution,
+"OMS configuration"): IB and OKX in net mode are netting, so trades on an
+instrument add into one position at a blended price; on a hedging venue
+each trade is a position of its own. The same strategy code runs on both.
+Strategy and venue modes always match, so Nautilus keeps no virtual
+positions and a restart reconciles the cached positions with the venue's
+cleanly (see the live README, "Cache in Redis"). A strategy that set
+`HEDGING` on a netting venue could not restart with overlapping trades:
+the venue reports one position at the blended average, which differs from
+the cached per-trade positions, and Nautilus refuses the start. The
+backtest's venue keeps positions the same way (backtest README, "Venue").
+
+A bracket is what a strategy sends: `self.order().bracket()` and
+`submit_order_list`. Whether the venue takes it is the venue's matter (see
+the IB live README, "Brackets").
+
 The EMA strategy decides on each bar's close and sends a market order to
 reach its target position. Limit and stop orders backtest less faithfully:
 see `docs/ARCHITECTURE.md`, "Orders", and the backtest README, "Fills".
@@ -350,4 +370,6 @@ same code and nothing passes from backtest to live.
   fixture's prices are chosen so that the warmup bars, the partial oldest
   bar, the bar at the run start and the session each change the orders and
   the final balance. A recording strategy in `tests/common` checks what the
-  EMA cannot show: every price of the bars and stop orders.
+  EMA cannot show: every price of the bars, stop orders, and positions on
+  a netting and on a hedging venue (`backtest_netting_venue.rs`,
+  `backtest_hedging_venue.rs`).

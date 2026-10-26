@@ -273,21 +273,31 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let fee_model = args.commission.fee_model();
-    let backtest = |requirements: DataRequirements| Backtest {
-        catalog: args.run.catalog.clone(),
-        bar_types: requirements.bar_types,
-        start,
-        end,
-        warmup: requirements.warmup,
-        fee_model,
-        balance: args.balance,
-        leverage: args.leverage,
-        logging,
+    let backtest = |requirements: DataRequirements| -> anyhow::Result<Backtest> {
+        // The simulated venue keeps positions as the instruments' venue
+        // does; `Backtest::run` refuses instruments on several venues.
+        let venue = requirements
+            .instrument_ids()
+            .first()
+            .context("the strategy trades no instrument")?
+            .venue;
+        Ok(Backtest {
+            catalog: args.run.catalog.clone(),
+            bar_types: requirements.bar_types,
+            start,
+            end,
+            warmup: requirements.warmup,
+            fee_model,
+            balance: args.balance,
+            leverage: args.leverage,
+            oms_type: backtest::venue_oms_type(venue),
+            logging,
+        })
     };
     let outcome = match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            backtest(config.data_requirements()).run(EmaCross::new(config)?)?
+            backtest(config.data_requirements())?.run(EmaCross::new(config)?)?
         }
     };
     print!("{}", backtest::report(&outcome));

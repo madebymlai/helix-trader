@@ -18,7 +18,8 @@ use nautilus_common::{
 use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{
     data::{BarType, NautilusDataType},
-    identifiers::InstrumentId,
+    enums::OmsType,
+    identifiers::{InstrumentId, Venue},
     types::Money,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -60,8 +61,30 @@ pub struct Backtest {
     /// locks its value / leverage times the instrument's margin (Nautilus'
     /// default margin model). 1 is no leverage.
     pub leverage: Decimal,
+    /// How the simulated venue keeps positions: as the real venue does,
+    /// `venue_oms_type` of the instruments' venue. A strategy leaving its
+    /// `oms_type` unset follows it, as it follows the execution client's
+    /// live.
+    pub oms_type: OmsType,
     /// The Nautilus logger: the node installs it, so nothing else may.
     pub logging: LoggerConfig,
+}
+
+/// The venues whose accounts hold each trade as a position of its own.
+const HEDGING_VENUES: &[&str] = &[];
+
+/// How the accounts of `venue` keep positions, as the live execution
+/// client declares it: `Hedging` for the venues in `HEDGING_VENUES`,
+/// `Netting`, one position per instrument, for the others: IB's venues
+/// (Nautilus' IB execution client nets) and OKX, whose derivatives
+/// Nautilus' OKX client nets, in the net position mode `live` requires.
+#[must_use]
+pub fn venue_oms_type(venue: Venue) -> OmsType {
+    if HEDGING_VENUES.contains(&venue.as_str()) {
+        OmsType::Hedging
+    } else {
+        OmsType::Netting
+    }
 }
 
 impl Backtest {
@@ -154,8 +177,25 @@ mod tests {
             fee_model: commission_rate(Decimal::ZERO).unwrap(),
             balance: Money::from("10000 USDT"),
             leverage: Decimal::ONE,
+            oms_type: OmsType::Netting,
             logging: LoggerConfig::default(),
         }
+    }
+
+    #[test]
+    fn ib_venues_net_positions() {
+        for venue in ["IBIS", "CME", "NASDAQ", "LSEETF", "IDEALPRO"] {
+            assert_eq!(
+                venue_oms_type(Venue::from(venue)),
+                OmsType::Netting,
+                "{venue}"
+            );
+        }
+    }
+
+    #[test]
+    fn okx_nets_positions() {
+        assert_eq!(venue_oms_type(Venue::from("OKX")), OmsType::Netting);
     }
 
     #[test]
