@@ -114,7 +114,8 @@ where
 
 /// How often Nautilus purges the cache of closed orders, closed positions
 /// and account events older than `PURGE_AFTER_MINS`, a week; never an open
-/// order or position. `purge_from_database` asks for Redis too.
+/// order or position. Memory only: Nautilus' Rust node refuses
+/// `purge_from_database`, so Redis keeps them.
 const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
@@ -152,7 +153,6 @@ fn config(
             purge_closed_positions_buffer_mins: Some(PURGE_AFTER_MINS),
             purge_account_events_interval_mins: Some(PURGE_INTERVAL_MINS),
             purge_account_events_lookback_mins: Some(PURGE_AFTER_MINS),
-            purge_from_database: true,
             ..Default::default()
         },
         ..Default::default()
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(exec.purge_closed_positions_buffer_mins, week);
         assert_eq!(exec.purge_account_events_interval_mins, Some(60));
         assert_eq!(exec.purge_account_events_lookback_mins, week);
-        assert!(exec.purge_from_database);
+        assert!(!exec.purge_from_database);
     }
 
     fn catalog_of(catalog: &Path) -> String {
