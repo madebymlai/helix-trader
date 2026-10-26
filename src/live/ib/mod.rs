@@ -90,10 +90,8 @@ impl IbClients {
         Clients {
             data_factory: Box::new(InteractiveBrokersDataClientFactory::new()),
             data_config: Box::new(self.data),
-            exec: Some((
-                Box::new(InteractiveBrokersExecutionClientFactory::new()),
-                Box::new(self.exec),
-            )),
+            exec_factory: Box::new(InteractiveBrokersExecutionClientFactory::new()),
+            exec_config: Box::new(self.exec),
             routing: RoutingConfig::builder().default(true).build(),
         }
     }

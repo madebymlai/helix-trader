@@ -35,8 +35,8 @@ use super::redis;
 pub(super) struct Clients {
     pub(super) data_factory: Box<dyn DataClientFactory>,
     pub(super) data_config: Box<dyn ClientConfig>,
-    /// The execution client's, if the adapter has one yet.
-    pub(super) exec: Option<(Box<dyn ExecutionClientFactory>, Box<dyn ClientConfig>)>,
+    pub(super) exec_factory: Box<dyn ExecutionClientFactory>,
+    pub(super) exec_config: Box<dyn ClientConfig>,
     pub(super) routing: RoutingConfig,
 }
 
@@ -80,16 +80,19 @@ where
         .with_cache_database_factory(Box::new(cache_database))
         .with_delay_post_stop_secs(5);
     for clients in clients {
-        builder = builder.add_data_client_with_routing(
-            None,
-            clients.data_factory,
-            clients.data_config,
-            clients.routing.clone(),
-        )?;
-        if let Some((factory, config)) = clients.exec {
-            builder =
-                builder.add_exec_client_with_routing(None, factory, config, clients.routing)?;
-        }
+        builder = builder
+            .add_data_client_with_routing(
+                None,
+                clients.data_factory,
+                clients.data_config,
+                clients.routing.clone(),
+            )?
+            .add_exec_client_with_routing(
+                None,
+                clients.exec_factory,
+                clients.exec_config,
+                clients.routing,
+            )?;
     }
     let mut node = builder.build()?;
     let strategy_id = strategy
