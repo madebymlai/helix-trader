@@ -188,16 +188,16 @@ catalog must use the same symbology and venue; the venue rules (never
   client id refused before any gateway starts) and in `data/ib/gateway.rs`
   (account forms and mode, the container config, the login wait on fake
   statuses).
-- End to end, `tests/ib_gateway.rs`, against the Docker paper container:
+- End to end, `tests/live/ib_gateway.rs`, against the Docker paper container:
   history starting or reusing it, `fill_catalog` of the 1-minute TRADES
   bars through it, and `Live` on a paper account, stopped by SIGINT,
   with an EMA crossover never warm enough to trade.
-- End to end, `tests/ib_minute_bars.rs`: a probe on `Live` warming up a
+- End to end, `tests/live/ib_minute_bars.rs`: a probe on `Live` warming up a
   composite bar type from IB's `request_bars`, then getting the live minute
   bars from `subscribe_bars`: no gap and no duplicate at the hand-off
   (`live/README.md`, "Warmup and live bars on IB"), and how long after its
   close each live minute arrives. No order; SXR8 must be quoted.
-- End to end, `tests/ib_restart.rs`, placing orders on the paper account:
+- End to end, `tests/live/ib_restart.rs`, placing orders on the paper account:
   the node's cache in Redis across restarts, each node in a child process,
   1 or 2 EXS1 at a time, then IB read back flat (live README, "Cache in
   Redis", for what it shows). Xetra must be open.
@@ -209,7 +209,7 @@ orders, `ib_restart.rs`, also need `NAUTILUS_IB_LIVE_ORDERS=1`. The account
 comes from `NAUTILUS_IB_ACCOUNT_ID` and must be a paper one.
 
 ```sh
-NAUTILUS_IB_RUN=1 cargo test --test ib_gateway
-NAUTILUS_IB_RUN=1 cargo test --test ib_minute_bars -- --nocapture
-NAUTILUS_IB_RUN=1 NAUTILUS_IB_LIVE_ORDERS=1 cargo test --test ib_restart -- --test-threads=1
+NAUTILUS_IB_RUN=1 cargo test --test live ib_gateway::
+NAUTILUS_IB_RUN=1 cargo test --test live ib_minute_bars:: -- --nocapture
+NAUTILUS_IB_RUN=1 NAUTILUS_IB_LIVE_ORDERS=1 cargo test --test live ib_restart:: -- --test-threads=1
 ```

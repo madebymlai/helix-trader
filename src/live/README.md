@@ -136,7 +136,7 @@ the latest cached external LAST bar (`risk/src/engine/mod.rs`,
 backtest (`backtest_ib_minute_bars.rs`). It would deny the order
 (`MARKET_PRICE_UNAVAILABLE`) on MID bars alone.
 
-Measured on paper (`tests/ib_minute_bars.rs`, SXR8.IBIS, 2-hour warmup):
+Measured on paper (`tests/live/ib_minute_bars.rs`, SXR8.IBIS, 2-hour warmup):
 four runs on 2026-10-26 between 15:29 and 16:35 UTC, three on MID bars,
 the last on the TRADES bars. The warmup answer came 0.1 to 0.2 s after the
 request, 120 or 121 bars; the 16 live minute bars arrived 0.4 to 1.3 s
@@ -203,7 +203,7 @@ docker exec helix-redis redis-cli --scan --pattern 'trader-HELIX-001:*' \
 `CacheConfig::flush_on_start` is not the way: on Redis it flushes the whole
 database, every trader's keys.
 
-**Observed on IB paper** (`tests/ib_restart.rs`, 2026-10-26, EXS1.IBIS):
+**Observed on IB paper** (`tests/live/ib_restart.rs`, 2026-10-26, EXS1.IBIS):
 
 - **Restart with an open position.** Two overlapping buys of 1 make one
   netted position of 2 at 209.75; after a restart it comes back from the
@@ -427,10 +427,11 @@ tests: see [`okx/README.md`](okx/README.md).
 - Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file,
   for what needs no node and no broker.
 - No integration test runs a live node without a broker yet (the venue
-  tests below run `Live` against IB, OKX and IC's demo). One would sit in `tests/`, one
-  node per file: a node with no broker client or a test data client, the
-  strategy added, stopped through `handle().stop()` from a spawned task,
-  asserting on the result of `run()`, under
+  tests below run `Live` against IB, OKX and IC's demo). One would sit in
+  `tests/live/`, a module of its own, one node per process: a node with no
+  broker client or a test data client, the strategy added, stopped through
+  `handle().stop()` from a spawned task, asserting on the result of
+  `run()`, under
   `#[tokio::test(flavor = "current_thread")]`.
 - Venue end-to-end tests are under "IB tests", "OKX tests" and "IC tests"
   in the venue READMEs; `ib_restart.rs` there checks the cache in Redis
