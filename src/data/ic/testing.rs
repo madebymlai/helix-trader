@@ -18,8 +18,9 @@ use super::config::{IcAccountId, IcCredential};
 use super::messages::{
     Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-    ProtoOaErrorRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq,
-    ProtoOaRefreshTokenRes, ProtoOaTickData, frame,
+    ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetDynamicLeverageByIdRes,
+    ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes,
+    ProtoOaTickData, frame,
 };
 use super::ticks::Tick;
 use super::token::{TokenPair, TokenStore};
@@ -39,6 +40,12 @@ pub(crate) const ACCOUNT_AUTH_TOKEN_INVALID: &[u8] =
 pub(crate) const ASSET_LIST_RES: &[u8] = include_bytes!("testdata/asset_list_res.bin");
 pub(crate) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("testdata/symbols_list_res.bin");
 pub(crate) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("testdata/symbol_by_id_res.bin");
+pub(crate) const DYNAMIC_LEVERAGE_XAUUSD_RES: &[u8] =
+    include_bytes!("testdata/dynamic_leverage_xauusd_res.bin");
+pub(crate) const DYNAMIC_LEVERAGE_EURUSD_RES: &[u8] =
+    include_bytes!("testdata/dynamic_leverage_eurusd_res.bin");
+pub(crate) const EXPECTED_MARGIN_EURUSD_RES: &[u8] =
+    include_bytes!("testdata/expected_margin_eurusd_res.bin");
 pub(crate) const SYMBOL_BY_ID_UNKNOWN: &[u8] = include_bytes!("testdata/symbol_by_id_unknown.bin");
 pub(crate) const TICK_DATA_BID_RES: &[u8] = include_bytes!("testdata/tick_data_bid_res.bin");
 pub(crate) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("testdata/tick_data_ask_res.bin");
@@ -122,6 +129,19 @@ pub(crate) fn replay<M: Payload>(request: &ProtoMessage, payload: &[u8]) -> Acti
         }
         .encode_to_vec(),
     )
+}
+
+/// The answer to `request`, a dynamic leverage request: the captured
+/// leverage of XAUUSD or EURUSD, by the `leverageId` their details carry.
+pub(crate) fn dynamic_leverage_answer(request: &ProtoMessage) -> Action {
+    let asked =
+        ProtoOaGetDynamicLeverageByIdReq::decode(request.payload.as_deref().unwrap()).unwrap();
+    let captured = match asked.leverage_id {
+        52_543 => DYNAMIC_LEVERAGE_XAUUSD_RES,
+        52_531 => DYNAMIC_LEVERAGE_EURUSD_RES,
+        other => panic!("no leverage {other} captured"),
+    };
+    replay::<ProtoOaGetDynamicLeverageByIdRes>(request, captured)
 }
 
 /// The captured answers of a cTrader that accepts the application and the

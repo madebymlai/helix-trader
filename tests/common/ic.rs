@@ -1,6 +1,6 @@
 //! IC Markets' gold on its tick quotes: XAUUSD.ICMARKETS, a `CurrencyPair`
-//! of ounces quoted in USD as `fill-catalog` loads it from IC (margins of
-//! 1, at most 10,000 oz an order), and quotes as IC's fill stores them:
+//! of ounces quoted in USD as `fill-catalog` loads it from IC (IC's margin
+//! on the demo, 1:30, at most 10,000 oz an order), and quotes as IC's fill stores them:
 //! stamped at their tick's millisecond, at irregular times, both sides
 //! sized 10,000 (the instrument's maximum order), written through
 //! `fill_catalog`.
@@ -32,6 +32,12 @@ pub fn at(time: &str) -> Timestamp {
     ts(&format!("2026-10-21T{time}Z"))
 }
 
+/// IC's margin of XAUUSD on the demo account: 1 / 30, the account's 1:30
+/// under the symbol's 1:200 (`src/data/ic/README.md`, "Margins").
+pub fn margin() -> Decimal {
+    Decimal::ONE / Decimal::from(30)
+}
+
 /// XAUUSD as IC defines it (`src/data/ic/README.md`, "Currency pairs").
 pub fn instrument() -> InstrumentAny {
     InstrumentAny::CurrencyPair(
@@ -47,8 +53,8 @@ pub fn instrument() -> InstrumentAny {
             .lot_size(Quantity::from(100))
             .min_quantity(Quantity::from(1))
             .max_quantity(Quantity::from(10_000))
-            .margin_init(Decimal::ONE)
-            .margin_maint(Decimal::ONE)
+            .margin_init(margin())
+            .margin_maint(margin())
             .ts_event(UnixNanos::default())
             .ts_init(UnixNanos::default())
             .build()
@@ -117,8 +123,8 @@ pub fn catalog() -> TempDir {
 
 /// A backtest of the hour bars over `[09:00, 12:00]` on the venue as IC
 /// keeps positions (`venue_oms_type`: hedging), charged IC's Raw
-/// commission of 30 USD per million USD traded, at the demo account's
-/// leverage, 1:30.
+/// commission of 30 USD per million USD traded, unleveraged: IC's leverage
+/// is in the instrument's margin.
 pub fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),
@@ -128,7 +134,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("2000000 USD"),
-        leverage: Decimal::from(30),
+        leverage: Decimal::ONE,
         oms_type: venue_oms_type(InstrumentId::from(INSTRUMENT_ID).venue),
         logging: LoggerConfig::default(),
     }

@@ -24,8 +24,9 @@ pub(crate) use proto::{
     ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaApplicationAuthReq,
     ProtoOaApplicationAuthRes, ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes,
     ProtoOaCancelOrderReq, ProtoOaClientDisconnectEvent, ProtoOaClosePositionReq, ProtoOaDeal,
-    ProtoOaDealListReq, ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaErrorRes,
-    ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
+    ProtoOaDealListReq, ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaDynamicLeverage,
+    ProtoOaErrorRes, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaGetDynamicLeverageByIdReq,
+    ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
     ProtoOaLightSymbol, ProtoOaNewOrderReq, ProtoOaOrder, ProtoOaOrderDetailsReq,
     ProtoOaOrderDetailsRes, ProtoOaOrderErrorEvent, ProtoOaOrderListReq, ProtoOaOrderListRes,
     ProtoOaOrderStatus, ProtoOaOrderTriggerMethod, ProtoOaOrderType, ProtoOaPayloadType,
@@ -37,9 +38,13 @@ pub(crate) use proto::{
     ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
 };
 
-// The synthetic positions and deals of the tests are built from these.
+// The tests build synthetic positions, deals and leverage tiers from these,
+// and read IC's margin estimate.
 #[cfg(test)]
-pub(crate) use proto::{ProtoOaClosePositionDetail, ProtoOaTradeData};
+pub(crate) use proto::{
+    ProtoOaClosePositionDetail, ProtoOaDynamicLeverageTier, ProtoOaExpectedMarginRes,
+    ProtoOaTradeData,
+};
 
 /// A message and the payload type it travels under.
 pub(crate) trait Payload: prost::Message + Default {
@@ -74,6 +79,8 @@ payload! {
     ProtoOaSymbolsListRes => ProtoOaPayloadType::ProtoOaSymbolsListRes,
     ProtoOaSymbolByIdReq => ProtoOaPayloadType::ProtoOaSymbolByIdReq,
     ProtoOaSymbolByIdRes => ProtoOaPayloadType::ProtoOaSymbolByIdRes,
+    ProtoOaGetDynamicLeverageByIdReq => ProtoOaPayloadType::ProtoOaGetDynamicLeverageReq,
+    ProtoOaGetDynamicLeverageByIdRes => ProtoOaPayloadType::ProtoOaGetDynamicLeverageRes,
     ProtoOaGetTickDataReq => ProtoOaPayloadType::ProtoOaGetTickdataReq,
     ProtoOaGetTickDataRes => ProtoOaPayloadType::ProtoOaGetTickdataRes,
     ProtoOaSubscribeSpotsReq => ProtoOaPayloadType::ProtoOaSubscribeSpotsReq,

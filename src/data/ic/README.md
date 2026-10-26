@@ -212,7 +212,7 @@ OKX and AX adapters use them:
 | Deal deduplication | ours: deals kept once by id across the halves of a split window | `FifoCache` (`common/src/cache/fifo.rs`) | keep: no native equivalent | `FifoCache` bounds replay deduplication of a stream; this is one request's complete set, which a bounded cache could truncate. |
 | Trade event deduplication | Nautilus' `FifoCache` of the last 10,000 deal ids (`live/ic/dispatch.rs`) | `FifoCache` (`common/src/cache/fifo.rs`; guide, "Event ordering and deduplication") | already native | |
 | Order identity of trade events | Nautilus' `OrderIdentity`, in the dispatch's tracked orders with their shape and bracket role | `OrderIdentity`, `OrderContext` (`live/src/execution/context.rs`; guide, "Tracked and external execution updates") | already native | The shape kept is the bracket's (legs, the position they protect), which `OrderContext` does not hold. |
-| Venue leverage on the margin account | none: Nautilus' account for IC keeps leverage 1, so its risk check reserves the full notional (IC instruments' margins are 1) | `MarginAccount::set_default_leverage` / `set_leverage` (`model/src/accounts/margin.rs`), applied to the cached account only by simulated venues: the sandbox (`adapters/sandbox/src/execution.rs`, `sync_cached_account_config`, through `SimulatedExecutionClientFactory`'s `Rc<RefCell<Cache>>`) and the backtest exchange (`backtest/src/exchange.rs`) | not done: no native path for a live client | A live execution client gets a `CacheView` (`common/src/cache/view.rs`: "so cache writes stay owned by the data and execution engines"), and `AccountState` carries no leverage (`model/src/events/account/state.rs`), so no live adapter at this commit sets it; Binance's and Bybit's set the venue's leverage over HTTP only. The native route for live margins is the instrument's `margin_init` (`docs/concepts/accounting.md`, "set `instrument.margin_init` and `margin_maint` so the percentage recovers the desired dollar amount"; AX parses its venue's margin rates into it, `adapters/architect_ax/src/http/parse.rs`), which would change the catalog's instruments and the backtest's margins too: a decision left open. |
+| Venue leverage on the margin account | Nautilus': IC's leverage as the instruments' `margin_init` and `margin_maint` (see "Margins"); the account keeps leverage 1 | the instrument's `margin_init`/`margin_maint` (`docs/concepts/accounting.md`, "set `instrument.margin_init` and `margin_maint` so the percentage recovers the desired dollar amount"), as AX parses its venue's margin rates into them (`adapters/architect_ax/src/http/parse.rs`); `MarginAccount::set_default_leverage` / `set_leverage` (`model/src/accounts/margin.rs`) are applied to the cached account only by simulated venues (the sandbox, `adapters/sandbox/src/execution.rs`; the backtest exchange, `backtest/src/exchange.rs`) | migrated | A live execution client gets a `CacheView` (`common/src/cache/view.rs`: "so cache writes stay owned by the data and execution engines"), and `AccountState` carries no leverage (`model/src/events/account/state.rs`), so no live adapter at this commit sets the account's leverage; OKX, Bybit, Binance, Kraken, dYdX, IB and AX fill `margin_init` instead. The catalog's instruments carry the same margins, so a backtest runs IC at leverage 1. |
 | Unresolved submissions | `ExecutionClient::retain_unresolved_submissions` true | the same (`common/src/clients/execution.rs`) | already native | An order sent and unanswered stays in flight until venue evidence resolves it. |
 
 ## Instruments
@@ -232,10 +232,60 @@ XAU) becomes a `CurrencyPair`:
 - sizes in units of the base, cTrader's volumes being in cents of a unit:
   `stepVolume` / 100 the increment, `minVolume`, `maxVolume` and
   `lotSize` / 100 (XAUUSD: 100 oz a lot);
-- margins of 1, as OKX's;
+- margins IC's own (see "Margins");
 - stamped at receipt (a symbol has no time).
 
 Indices and shares are refused, naming the symbol.
+
+### Margins
+
+An instrument's `margin_init` and `margin_maint` are 1 / the leverage IC
+applies to the symbol on the account, as Nautilus' AX adapter fills both
+from its venue's margin rates (`adapters/architect_ax/src/http/parse.rs`,
+the instruments' `margin_init`/`margin_maint`). The leverage is the lower
+of two, both read from cTrader at each load of the instruments (a fill, a
+data or execution client's connect):
+
+- the account's, `ProtoOATrader.leverageInCents` (in cents: 3000 is 1:30);
+- the symbol's dynamic leverage, `ProtoOASymbol.leverageId`, asked with
+  `ProtoOAGetDynamicLeverageByIDReq`: tiers of a leverage (in cents too,
+  measured: 20,000 for 1:200) up to a USD volume (in cents), the last tier
+  applying above its volume as well. A symbol without one takes the
+  account's.
+
+cTrader's help ("Dynamic leverage", help.ctrader.com/trading-with-ctrader/
+dynamic-leverage): "the account leverage acts as an upper limit. If the
+symbol leverage is lower than the account leverage, the symbol leverage is
+applied. If the symbol leverage is higher, the account leverage takes
+precedence." On the demo (2026-10-26) the account is 1:30, XAUUSD's
+leverage one tier of 1:200, EURUSD's one tier of 1:1000: both instruments
+get 1 / 30. IC's own margin estimate (`ProtoOAExpectedMarginReq`, captured
+then) agrees: 33.33 EUR for 1,000 EUR of EURUSD (1,000 / 30), 119.76 EUR
+for 1 oz of gold (about 3,590 EUR / 30; at 1:200 it would be about 18).
+
+- **Tiers.** The rate is the first tier's, which covers the smallest
+  positions, under the account's. A position whose USD value passes the
+  first tier's volume gets the next tiers' lower leverage on the excess at
+  IC (cTrader's help, "Margin calculation"), so IC's margin is then above
+  Nautilus' single rate. IC's demo symbols have one tier, which covers
+  every size.
+- **Maintenance.** cTrader states no maintenance or stop-out rate of a
+  symbol: the stop-out level is the broker's, on the account's margin
+  level (`ProtoOATrader` carries the stop-out strategy only), so
+  `margin_maint` equals `margin_init`.
+- **Where it applies.** The live clients' instruments and those
+  `fill-catalog` stores come from the same load (`IcHistory::symbols`,
+  `parse::margin`), so the live risk check and the backtest lock IC's
+  margin. A backtest of IC instruments runs at `--leverage 1`, the default
+  (backtest README, "Leverage"). A catalog filled before IC's margins
+  holds margins of 1: fill it again into a new directory.
+- **Nautilus' use.** Its default margin model, `LeveragedMarginModel`
+  (`model/src/accounts/margin_model.rs`), locks notional / the account's
+  leverage in Nautilus (1) × `margin_init` for an order, × `margin_maint`
+  for a position; the risk engine denies an order whose initial margin,
+  converted to the account's currency, exceeds the free balance
+  (`risk/src/engine/mod.rs`, `check_margin_balance`,
+  `INITIAL_MARGIN_EXCEEDS_FREE_BALANCE`).
 
 ## Quotes: tick history
 
@@ -406,8 +456,12 @@ and filled, its position's protection order accepted, amended and
 cancelled when the position was closed by its id; a limit buy accepted,
 amended and cancelled; a stop loss hit; a volume below the minimum, a
 cancel of an order already cancelled and a close of a position already
-closed refused. Their `.txtpb` say what each is. The positions, orders and
-deals of the reconciliation tests are synthetic.
+closed refused; the dynamic leverages of XAUUSD and EURUSD and IC's margin
+estimates of 1 oz of gold and 1,000 EUR of EURUSD (2026-10-26,
+`dynamic_leverage_*`, `expected_margin_*`, re-encoded from their decoded
+form, every field being in the vendored `.proto`). Their `.txtpb` say what
+each is. The positions, orders and deals of the reconciliation tests are
+synthetic.
 
 ## Tests
 
@@ -425,9 +479,15 @@ deals of the reconciliation tests are synthetic.
     `expiresIn` and the renewal a day before; the path under
     `XDG_STATE_HOME` or `~/.local/state`;
   - `messages.rs`: envelopes, error responses and malformed payloads;
-  - `parse.rs`: XAUUSD and EURUSD to `CurrencyPair`s; an index, a missing
-    step, a minimum finer than the step, digits out of range and an
-    unlisted asset refused; ids round trip;
+  - `parse.rs`: XAUUSD and EURUSD to `CurrencyPair`s, at the margin
+    given; an index, a missing step, a minimum finer than the step, digits
+    out of range and an unlisted asset refused; ids round trip; the margin
+    from the captured leverages: gold on the demo 1 / 30 (the account's
+    1:30 under its 1:200), 0.05 with a tier of 1:20 under the account's
+    1:30, the first tier's whatever the tiers above, the account's for a
+    symbol without a leverage, a leverage missing refused naming the
+    symbol, and 1,000 EUR of EURUSD locking IC's captured estimate,
+    33.33 EUR;
   - `ticks.rs`: the captured ticks decoded and merged into gold quotes;
     ticks out of order refused; pages walked back keeping ticks of a
     millisecond split across pages, a window `[from, to)`, a week a
@@ -465,7 +525,12 @@ deals of the reconciliation tests are synthetic.
   - `websocket/` (subscription state): a refused spot subscription marked
     failed (pending, not confirmed, the accepted one confirmed) and sent
     again on the next connection;
-  - `mod.rs`: the instruments from assets, symbol list and details; an
+  - `mod.rs`: the instruments from assets, symbol list, details, the
+    account's leverage and each symbol's dynamic leverage, at IC's margin
+    (1 / 30 on the captured demo); Nautilus' risk engine passing a market
+    buy of 1 oz of gold (about 3,590 EUR) on a margin account of 1,000 EUR
+    at those margins, and denying it at margins of 1
+    (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE`); an
     unlisted symbol and another venue refused; a series other than quotes
     refused before any request; a fill, against a peer serving ticks as
     cTrader does: the quotes merged and stored with the instrument over the
@@ -485,10 +550,12 @@ deals of the reconciliation tests are synthetic.
   demo only; it places no order): the execution client, from its factory,
   connects on the hedged account, publishes its state (1,000,000.00 EUR, no
   margin) and reconciles it over a week's lookback (nothing open, no deal,
-  complete); XAUUSD and EURUSD loaded as currency pairs; a day of XAUUSD (2026-10-21, 149,043 quotes) stored the same in
+  complete); XAUUSD and EURUSD loaded as currency pairs at IC's margins; a day of XAUUSD (2026-10-21, 149,043 quotes) stored the same in
   one fill and resumed at a time between two milliseconds, one quote a
   millisecond, none crossed, sized 10,000, covered over the day. Passed on
-  2026-10-26 (about 20 s), the execution client's test too.
+  2026-10-26 (about 20 s), the execution client's test too; passed again
+  that day (about 18:10 UTC, 21 s) with the instruments at IC's margins, 1 / 30
+  both.
 - `mod.rs`, `the_demo_session_renews_its_token_and_keeps_receiving_quotes`,
   on the demo (same gate; in the library, as it forces a renewal through
   the client's test-only command): a running session subscribed to XAUUSD

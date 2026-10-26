@@ -100,7 +100,9 @@ struct BacktestArgs {
     #[arg(long, value_parser = parse_money)]
     balance: Money,
     /// The account's leverage, for example 10: a position locks its value
-    /// divided by it, times the instrument's margin. 1 is no leverage.
+    /// divided by it, times the instrument's margin. 1 is no leverage. For
+    /// venues whose instruments carry margins of 1 (OKX); IC's carry IC's
+    /// own margin, so an IC backtest keeps 1.
     #[arg(long, default_value = "1")]
     leverage: Decimal,
 }

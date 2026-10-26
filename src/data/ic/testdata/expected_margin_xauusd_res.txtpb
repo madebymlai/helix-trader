@@ -1,0 +1,18 @@
+# Captured from IC Markets' cTrader demo (2026-10-26, 18:03 UTC), protobuf
+# port 5035: IC's margin estimate (ProtoOAExpectedMarginReq) for 1 oz of
+# XAUUSD (volume 100 cents) on the demo account (1:30, in EUR): 119.76 EUR to
+# buy, 119.75 to sell, about 1 oz at 4,018 USD / 1.12 USD per EUR / 30: the
+# account's 1:30, not the symbol's 1:200 (which would be about 18 EUR). The
+# prices of that moment were not captured, so no test checks it exactly.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; the payload
+# re-encoded from its decoded form (every field is in the vendored .proto).
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExpectedMarginRes OpenApiMessages.proto < expected_margin_xauusd_res.bin
+# Message: ProtoOAExpectedMarginRes
+ctidTraderAccountId: 1000001
+margin {
+  volume: 100
+  buyMargin: 11976
+  sellMargin: 11975
+}
+moneyDigits: 2

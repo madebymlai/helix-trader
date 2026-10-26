@@ -1380,6 +1380,9 @@ mod tests {
                 t if t == ProtoOaSymbolByIdReq::TYPE => {
                     replay::<ProtoOaSymbolByIdRes>(request, SYMBOL_BY_ID_RES)
                 }
+                t if t == crate::data::ic::messages::ProtoOaGetDynamicLeverageByIdReq::TYPE => {
+                    testing::dynamic_leverage_answer(request)
+                }
                 t if t == ProtoOaTraderReq::TYPE => match &venue.trader {
                     Some(trader) => reply(request, trader),
                     None => replay::<ProtoOaTraderRes>(request, TRADER_RES),

@@ -221,17 +221,25 @@ full quote or bar size), `use_reduce_only` `true`, `allow_cash_borrowing`
 
 ### Leverage
 
-Leverage is the account's choice, so it is a flag of the run, not part of
-the instrument. The venue gets it as `default_leverage`, for every
+Leverage comes from one source: the venue's, carried by the instrument's
+margins where the venue states them, or the run's `--leverage` where it
+does not. The venue gets `--leverage` as `default_leverage`, for every
 instrument; unset, Nautilus uses 10 on a margin account (1 on a cash one).
+
+- **IC**: its instruments carry IC's own margin (`data/ic/README.md`,
+  "Margins": 1 / the leverage IC applies, 1:30 on the demo), so an IC
+  backtest runs at `--leverage 1`, the default. Another leverage would
+  divide IC's margin again (`--leverage 30` on the demo's 1/30: 1/900).
+- **OKX**: its instruments carry margins of 1, and the leverage is the
+  account's, set by hand per instrument at OKX: `--leverage` says which.
 
 The margin model is Nautilus' default, `LeveragedMarginModel` (Concepts ›
 Accounting, "Margin models"): an order locks notional / leverage × the
 instrument's `margin_init`; an open position locks notional / leverage ×
 `margin_maint`, its value at entry. OKX instruments are stored with both
 margins at 1 (`data/okx/README.md`), so a position locks notional /
-leverage, as on OKX. IB's instruments have margins of 0 and lock nothing at
-any leverage.
+leverage, as on OKX. IC's carry IC's margin and lock, at 1x, what IC
+locks. IB's instruments have margins of 0 and lock nothing at any leverage.
 
 Liquidation is off, so OKX's own maintenance rate (BTC X-Perp: 0.65%),
 which only decides when OKX liquidates, is not modelled: a run never
@@ -595,7 +603,8 @@ IB's bars is in `data/ib/README.md`.
 
 An IC Markets instrument (`XAUUSD.ICMARKETS`, `EURUSD.ICMARKETS`)
 backtests through the same code as IB's, on its quotes: the catalog holds a
-`CurrencyPair` with margins of 1 and one quote per tick time, merged from
+`CurrencyPair` with IC's margins (1 / 30 on the demo) and one quote per
+tick time, merged from
 cTrader's BID and ASK ticks (`data/ic/README.md`). The strategy trades
 internal bars built from them, such as `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`.
 
@@ -614,8 +623,8 @@ internal bars built from them, such as `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`.
   a side on XAUUSD and EURUSD: `--commission-rate 0.00003`, charged on
   each fill's value in USD.
 - **Venue and balance.** Named `ICMARKETS`; the balance in USD
-  (`--balance "10000 USD"`), the leverage the account's (`--leverage 30`
-  on the demo).
+  (`--balance "10000 USD"`), unleveraged (`--leverage 1`, the default):
+  IC's leverage is in the instrument's margins (see Leverage).
 - **Hedging.** The venue keeps positions as IC's hedging account does
   (`venue_oms_type`): an order opens a position of its own unless it names
   one, so a strategy reduces with `close_position` (`live/ic/README.md`,
@@ -623,7 +632,8 @@ internal bars built from them, such as `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`.
 
 `backtest_ic_quotes.rs` checks the fills, the commission and the spread in
 the report on gold quotes written through `fill_catalog`;
-`backtest_ic_hedging.rs` two overlapping trades kept as two positions.
+`backtest_ic_hedging.rs` two overlapping trades kept as two positions;
+`backtest_ic_margin.rs` IC's margin locked and an order beyond it denied.
 
 ## OKX on candles
 
@@ -1156,7 +1166,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     the commission and PnL in USD at two decimals, at 10x the short left
     open locking a tenth of its value.
   - `backtest_ic_quotes.rs`: XAUUSD.ICMARKETS, a `CurrencyPair` with
-    margins of 1, on irregular millisecond quotes sized 10,000 as IC's fill
+    IC's margins on the demo (1 / 30), unleveraged, on irregular millisecond quotes sized 10,000 as IC's fill
     stores them, written through `fill_catalog` (`common::ic`). A recorder
     without warmup on hour MID bars buys 10,000 oz on the first bar and
     closes that position by its id on the second (`close_position`), the
@@ -1167,3 +1177,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_ic_hedging.rs`: on the same quotes, the venue
     `venue_oms_type(ICMARKETS)`, two buys of 10 oz on two bars are two
     open positions, at 4006.10 and 4012.15.
+  - `backtest_ic_margin.rs`: on the same quotes and 1,000 USD, a buy of
+    5 oz at 4006.10 (20,030.50 USD) fills, its position locking IC's
+    margin, 667.68 USD; a second of 5 oz at 4012.15 is denied by the risk
+    engine (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=331.72 USD,
+    margin=668.69 USD`).

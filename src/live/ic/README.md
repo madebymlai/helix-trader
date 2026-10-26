@@ -91,7 +91,7 @@ account is `HEDGED`, its deposit currency EUR.
 ## What the execution client does
 
 - **Connect**: authenticates, checks the account, loads the run's
-  instruments, listens to the account's trade events, publishes the
+  instruments (at IC's margins, as the data client's), listens to the account's trade events, publishes the
   account state (balance, and the margin the open positions use, in the
   deposit currency), then waits until the node's cache holds the account
   before reporting connected.
@@ -279,8 +279,9 @@ Nautilus position ids either way.
 ## What the data client does
 
 - **Connect**: authenticates (application, then account), loads the run's
-  instruments from cTrader's symbols and sends them to the node, then
-  reports connected.
+  instruments from cTrader's symbols, at IC's margins (the account's and
+  the symbols' leverage), and sends them to the node, then reports
+  connected.
 - **Quotes**: `subscribe_quotes` / `unsubscribe_quotes` become spot
   (un)subscriptions; spot events become `QuoteTick`s by the history's merge,
   stamped at the spot's time, sized as the catalog's (XAUUSD 10,000 oz,
@@ -377,14 +378,15 @@ limits") away from IC, however long the history takes.
   trading IC instruments quoted in USD subscribes to EURUSD.ICMARKETS's
   quotes too (its bars or a `subscribe_quotes`), as `ic_orders_demo.rs`
   does.
-- **Margins.** IC's instruments carry margins of 1 (`data/ic/README.md`,
-  "Currency pairs"), while the demo account runs 1:30: Nautilus' risk
-  engine checks an order's margin as its notional / the account's leverage
-  in Nautilus (1 unless set), 30 times IC's, so it may deny an order IC
-  would take when the free balance is short. The backtest applies
-  `--leverage` (backtest README, "Leverage"). Not changed: a live client
-  cannot set the account's leverage natively (`data/ic/README.md`,
-  "Nautilus primitives", "Venue leverage on the margin account").
+- **Margins.** IC's instruments carry IC's margin (`data/ic/README.md`,
+  "Margins"): 1 / the lower of the account's leverage and the symbol's
+  first dynamic leverage tier, 1 / 30 for gold and EUR/USD on the demo.
+  Nautilus' risk engine checks an order's margin as its notional × that
+  rate, the account's leverage in Nautilus staying 1, so it denies only
+  orders whose margin at IC's rate exceeds the free balance. A position
+  past a symbol's first tier pays a higher margin at IC than Nautilus
+  reckons (no demo symbol has a second tier). The rates are read at
+  connect.
 - **Account state after fills.** The account state is published at
   connect; balances and margins are not read again after a fill (the
   closing deal's `balance` is not used).
