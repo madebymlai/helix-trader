@@ -324,7 +324,7 @@ let bars = BacktestDataConfig::builder()            // bars: by bar type
 - The node queries the catalog over the engine's window only (intersected
   with `start_time`, `end_time` if set): quotes before it are not loaded.
   Indicators warm up from the strategy's request, not the replay.
-- The node loads the catalog's instruments in `build`, so `fill_catalog`
+- The node loads the catalog's instruments in `build`, so fill-catalog
   must have written them.
 
 ### Book data

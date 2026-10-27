@@ -12,10 +12,13 @@ use anyhow::{Context, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{DatabentoHistory, IbHistory, IcHistory, OkxHistory, fill_catalog},
-    live::{IbAccount, Live},
+    data::{
+        DatabentoHistory, IbHistory, IcConnection, IcHistory, NodeClient, NodeFill, OkxHistory,
+        REQUEST_TIMEOUT, fill_catalog, missing,
+    },
+    live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live},
     strategy::{
-        DataRequirements,
+        DataRequirements, SeriesSlice,
         ema::{EmaCross, EmaCrossConfig},
     },
 };
@@ -25,6 +28,7 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
+use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     identifiers::{InstrumentId, TraderId},
     types::Money,
@@ -230,20 +234,22 @@ async fn main() -> anyhow::Result<()> {
 /// instruments and the series the strategy reads, those its bars are built
 /// from and its ticks (see `DataRequirements::catalog_series`), from each
 /// instrument's source: OKX's archive for OKX instruments (their 1-minute
-/// candles), Databento's historical API for GLBX instruments (their MBP-10
-/// book and trades, whatever series are declared, the cost quoted first),
-/// IC Markets' cTrader for IC instruments, IB (connected only if needed)
-/// for the others. OKX, IC and IB refuse a series they do not serve;
-/// Databento takes no series, only the GLBX instruments.
+/// candles), IB (connected only if needed) for the others but GLBX's and
+/// IC's, which fill through a Nautilus node (see `data::NodeFill`), each
+/// contract over its slice (`DataRequirements::slices`): Databento's data
+/// client for GLBX instruments (the series declared, Databento's cost of
+/// every request quoted first, before the node starts), IC's for IC
+/// instruments. OKX, IC and IB refuse a series they do not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
         Strategy::Ema => load_ema_config(&args.run.config)?.bars.data_requirements(),
     };
-    // No node runs in this process, so no node installs Nautilus' logger:
-    // install it here, as a node would, so the `log` output of this crate and
-    // Nautilus, and the adapter's `tracing` warnings (why a contract did not
-    // resolve), reach the console. Configured by NAUTILUS_LOG and RUST_LOG.
+    // OKX's and IB's fills run no node, so no node installs Nautilus'
+    // logger for them: install it here, as a node would (the fill's node
+    // keeps it), so the `log` output of this crate and Nautilus, and the
+    // adapters' `tracing` warnings (why a contract did not resolve), reach
+    // the console. Configured by NAUTILUS_LOG and RUST_LOG.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
@@ -266,32 +272,50 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .partition(|&id| DatabentoHistory::serves(id));
     let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
         others.into_iter().partition(|&id| IcHistory::serves(id));
+    // Databento and IC fill through the node: a rolled root's series
+    // contract by contract, each over its slice.
+    let slices = requirements.slices(start, end);
+    let slices_of = |serves: fn(InstrumentId) -> bool| -> Vec<SeriesSlice> {
+        slices
+            .iter()
+            .filter(|slice| serves(slice.slice.instrument_id))
+            .cloned()
+            .collect()
+    };
+    let mut node = NodeFill::new();
+    if !glbx_ids.is_empty() {
+        let requests = missing(&catalog, &slices_of(DatabentoHistory::serves))?;
+        if !requests.is_empty() {
+            let api_key =
+                std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
+            let databento = DatabentoHistory::new(&api_key)?;
+            databento.quote(&requests).await?;
+            node.add(databento.node_client(), &requests, DatabentoHistory::period);
+        }
+    }
+    if !ic_ids.is_empty() {
+        let instrument_ids =
+            IcHistory::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
+        let requests = missing(&catalog, &slices_of(IcHistory::serves))?;
+        if !requests.is_empty() {
+            let client = NodeClient {
+                factory: Box::new(IcDataClientFactory),
+                config: Box::new(IcDataClientConfig {
+                    connection: IcConnection::from_env()?,
+                    instrument_ids,
+                }),
+                routing: RoutingConfig::default(),
+            };
+            node.add(client, &requests, IcHistory::period);
+        }
+    }
     if !okx_ids.is_empty() {
         let series = requirements.of_instruments(&okx_ids).catalog_series();
         OkxHistory::new()?
             .fill(&mut catalog, &series, start, end)
             .await?;
     }
-    if !glbx_ids.is_empty() {
-        // Databento is asked for dated contracts: a rolled root's series
-        // are filled contract by contract, each over its slice.
-        let slices: Vec<_> = requirements
-            .slices(start, end)
-            .into_iter()
-            .filter(|slice| DatabentoHistory::serves(slice.slice.instrument_id))
-            .collect();
-        let api_key = std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
-        DatabentoHistory::new(&api_key)?
-            .fill(&catalog, &slices)
-            .await?;
-    }
-    if !ic_ids.is_empty() {
-        let series = requirements.of_instruments(&ic_ids).catalog_series();
-        let ic = IcHistory::connect().await?;
-        let filled = ic.fill(&mut catalog, &series, start, end).await;
-        ic.disconnect().await;
-        filled?;
-    }
+    node.run(catalog_dir, REQUEST_TIMEOUT).await?;
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
         let instruments = ib.instruments(&ib_ids).await?;

@@ -27,10 +27,9 @@ use crate::common;
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::IcHistory,
     live::Live,
     rolls::ContinuousBars,
-    strategy::{DataRequirements, catalog_series, warmup},
+    strategy::{DataRequirements, warmup},
 };
 use jiff::SignedDuration;
 use nautilus_common::{
@@ -176,20 +175,14 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let catalog = tempfile::tempdir().unwrap();
     let now = jiff::Timestamp::now();
     let catalog_end = now - CATALOG_BEHIND;
-    {
-        let mut parquet = ParquetDataCatalog::new(catalog.path(), None, None, None, None);
-        let ic = IcHistory::connect().await.unwrap();
-        let filled = ic
-            .fill(
-                &mut parquet,
-                &catalog_series(&[bar_type]),
-                now - warmup,
-                catalog_end,
-            )
-            .await;
-        ic.disconnect().await;
-        filled.unwrap();
-    }
+    crate::ic_demo::fill_quotes_through_node(
+        catalog.path(),
+        bar_type.instrument_id(),
+        now - warmup,
+        catalog_end,
+    )
+    .await
+    .unwrap();
     let started = jiff::Timestamp::now();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),

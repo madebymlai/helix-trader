@@ -1,6 +1,8 @@
 //! IC Markets history and account, over Spotware's cTrader Open API: the
-//! instruments of IC's forex and metals, filled into the catalog, and the
-//! cTrader session the live node's clients (`live/ic`) share.
+//! instruments of IC's forex and metals and their tick history, merged
+//! into quotes, and the cTrader session the live node's clients
+//! (`live/ic`) share. fill-catalog fills the catalog with them through the
+//! node, by IC's data client (see `node_fill`).
 //!
 //! Nautilus has no cTrader adapter, so this module and `live/ic` are one,
 //! laid out as Nautilus' adapters are (`docs/developer_guide/adapters.md`):
@@ -13,16 +15,6 @@
 //! (`XAUUSD.ICMARKETS`).
 
 use std::{collections::HashMap, str::FromStr};
-
-use anyhow::{Context, ensure};
-use jiff::{SignedDuration, Timestamp};
-use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
-use nautilus_model::{
-    data::{Data, NautilusDataType, QuoteTick},
-    identifiers::InstrumentId,
-    instruments::{Instrument, InstrumentAny},
-};
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 pub use self::config::IcConnection;
 use self::{
@@ -40,7 +32,15 @@ use self::{
     ticks::{SideTicks, Tick},
     websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents, TradeEvents, TradeSent},
 };
-use super::fill_catalog;
+use super::node_fill::FillData;
+use anyhow::{Context, ensure};
+use jiff::{SignedDuration, Timestamp};
+use nautilus_core::time::get_atomic_clock_realtime;
+use nautilus_model::{
+    data::{NautilusDataType, QuoteTick},
+    identifiers::InstrumentId,
+    instruments::{Instrument, InstrumentAny},
+};
 
 pub(crate) mod account;
 pub(crate) mod config;
@@ -111,6 +111,29 @@ impl IcHistory {
     #[must_use]
     pub fn serves(id: InstrumentId) -> bool {
         parse::is_ic(id)
+    }
+
+    /// The instruments of `series`, each the quotes of an IC instrument:
+    /// those IC's data client loads to fill them through the node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the first series that is not the quotes of
+    /// an IC instrument: IC serves nothing else.
+    pub fn quoted(series: &[(NautilusDataType, String)]) -> anyhow::Result<Vec<InstrumentId>> {
+        series
+            .iter()
+            .map(|(data_type, identifier)| quotes_of(data_type, identifier))
+            .collect()
+    }
+
+    /// The window one request holds at most in a fill through the node
+    /// (see `NodeFill::add`): a week, the most one tick request spans,
+    /// about 0.7 M BID and 0.7 M ASK ticks of XAUUSD (`README.md`, "Tick
+    /// history").
+    #[must_use]
+    pub fn period(_data: FillData) -> SignedDuration {
+        SignedDuration::from_hours(7 * 24)
     }
 
     /// Checks the account: hedging and `IC_ACCOUNT_ID`'s (see `account`).
@@ -418,52 +441,6 @@ impl IcHistory {
             .collect()
     }
 
-    /// Fills `catalog` with the instruments of `series`, each the quotes
-    /// of an IC instrument, and over `[start, end]` with the quotes
-    /// themselves, merged from cTrader's BID and ASK ticks (see `quotes`),
-    /// a week at a time (see `fill_quotes`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a series is not the quotes of an IC instrument
-    /// (before any request), as `instruments`, as `quotes` or as
-    /// `fill_catalog`: a `start` before the stored quotes, or a first
-    /// window without quotes, naming the series and the window.
-    pub async fn fill(
-        &self,
-        catalog: &mut ParquetDataCatalog,
-        series: &[(NautilusDataType, String)],
-        start: Timestamp,
-        end: Timestamp,
-    ) -> anyhow::Result<()> {
-        let ids = series
-            .iter()
-            .map(|(data_type, identifier)| quotes_of(data_type, identifier))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        for symbol in self.symbols(&ids).await? {
-            fill_quotes(catalog, &symbol.instrument, start, end, async |from, to| {
-                self.quotes(&symbol, from, to).await
-            })
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// The quotes of `symbol` stamped in `[from, to]`, as data (see
-    /// `quote_ticks`), all of them or an error.
-    async fn quotes(
-        &self,
-        symbol: &IcSymbol,
-        from: Timestamp,
-        to: Timestamp,
-    ) -> anyhow::Result<Vec<Data>> {
-        let fetched = self.quote_ticks(symbol, from, to).await?;
-        if let Some(e) = fetched.failure {
-            return Err(e);
-        }
-        Ok(fetched.quotes.into_iter().map(Data::Quote).collect())
-    }
-
     /// The quotes of `symbol` stamped in `[from, to]`, merged from its BID
     /// and ASK ticks of those milliseconds and the last tick of each before
     /// them (see `ticks::merge`), the two sides fetched side by side. A
@@ -622,59 +599,6 @@ pub(crate) struct IcSymbol {
     pub(crate) symbol_id: i64,
 }
 
-/// How much of a fill `fill_quotes` writes at once: a week of XAUUSD is
-/// about 0.7 M BID and 0.7 M ASK ticks (`ic/README.md`, "Tick history").
-const FILL_PERIOD: SignedDuration = SignedDuration::from_hours(7 * 24);
-
-/// Fills `catalog` with `instrument` and its quotes over `[start, end]`
-/// through `fetch`, one `fill_catalog` call per period of `FILL_PERIOD`
-/// from where the stored quotes end (or `start`), the last period taking
-/// the remainder, so that each period but a short whole window spans a
-/// week, which always holds ticks. Each call resumes where the catalog
-/// stopped, so a period without quotes after the first (a market closed)
-/// writes nothing, and the next asks for it again.
-///
-/// # Errors
-///
-/// As `fill_catalog`.
-async fn fill_quotes(
-    catalog: &mut ParquetDataCatalog,
-    instrument: &InstrumentAny,
-    start: Timestamp,
-    end: Timestamp,
-    mut fetch: impl AsyncFnMut(Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
-) -> anyhow::Result<()> {
-    let identifier = instrument.id().to_string();
-    let last = catalog
-        .query_last_timestamp(&NautilusDataType::QuoteTick.into(), Some(&identifier))
-        .with_context(|| format!("reading the stored range of the quotes of {identifier}"))?;
-    // `fill_catalog` resumes 1 ns after the stored end.
-    let begin = last.map_or(start, |last| {
-        Timestamp::from(UnixNanos::from(last)) + SignedDuration::from_nanos(1)
-    });
-    let series = [(NautilusDataType::QuoteTick, identifier)];
-    let mut period_end = begin;
-    loop {
-        period_end = if end.duration_since(period_end) < FILL_PERIOD * 2 {
-            end
-        } else {
-            period_end + FILL_PERIOD
-        };
-        fill_catalog(
-            catalog,
-            vec![instrument.clone()],
-            &series,
-            start,
-            period_end,
-            async |_, _, from, to| fetch(from, to).await,
-        )
-        .await?;
-        if period_end >= end {
-            return Ok(());
-        }
-    }
-}
-
 /// The IC instrument whose quotes the series of `data_type` and
 /// `identifier` is; an error for any other series.
 pub(crate) fn quotes_of(
@@ -701,7 +625,7 @@ mod tests {
         messages::execution::{SubmitOrder, TradingCommand},
         msgbus::{self, MessagingSwitchboard, stubs::get_typed_into_message_saving_handler},
     };
-    use nautilus_core::UUID4;
+    use nautilus_core::{UUID4, UnixNanos};
     use nautilus_model::{
         accounts::{AccountAny, MarginAccount},
         enums::{AccountType, OrderSide, OrderType},
@@ -722,7 +646,7 @@ mod tests {
             self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
             TRADER_RES, accept_auth, replay, reply, tick_answer,
         },
-        ticks::{Tick, WEEK_MS},
+        ticks::Tick,
         *,
     };
 
@@ -952,288 +876,26 @@ mod tests {
 
     const XAUUSD: &str = "XAUUSD.ICMARKETS";
 
-    /// cTrader's XAUUSD symbol id on the server the fixtures come from.
-    const XAUUSD_SYMBOL_ID: i64 = 41;
-
-    fn ts(at: &str) -> Timestamp {
-        at.parse().unwrap()
-    }
-
-    fn ms(at: &str) -> i64 {
-        ts(at).as_millisecond()
-    }
-
-    fn tick(ms: i64, price: i64) -> Tick {
-        Tick { ms, price }
-    }
-
-    fn quotes_series() -> [(NautilusDataType, String); 1] {
-        [(NautilusDataType::QuoteTick, XAUUSD.to_owned())]
-    }
-
-    /// The stored quotes of XAUUSD: (ms, bid, ask).
-    fn stored(catalog: &mut ParquetDataCatalog) -> Vec<(i64, String, String)> {
-        catalog
-            .quote_ticks(Some(vec![XAUUSD.to_owned()]), None, None)
-            .unwrap()
-            .iter()
-            .map(|q| {
-                (
-                    i64::try_from(q.ts_init.as_u64() / 1_000_000).unwrap(),
-                    q.bid_price.to_string(),
-                    q.ask_price.to_string(),
-                )
-            })
-            .collect()
-    }
-
-    fn quote(ms: i64, bid: &str, ask: &str) -> (i64, String, String) {
-        (ms, bid.to_owned(), ask.to_owned())
-    }
-
-    fn intervals(catalog: &ParquetDataCatalog) -> Vec<(u64, u64)> {
-        catalog
-            .get_intervals(&NautilusDataType::QuoteTick.into(), Some(XAUUSD))
-            .unwrap()
-    }
-
-    fn ns(at: Timestamp) -> u64 {
-        UnixNanos::from(at).as_u64()
-    }
-
-    /// The tick requests received: (type, from, to).
-    fn tick_requests(received: &Received) -> Vec<(i32, i64, i64)> {
-        requests(received)
-            .iter()
-            .filter(|f| f.payload_type == ProtoOaGetTickDataReq::TYPE)
-            .map(|f| {
-                let r = ProtoOaGetTickDataReq::decode(f.payload.as_deref().unwrap()).unwrap();
-                assert_eq!(
-                    (r.ctid_trader_account_id, r.symbol_id),
-                    (ACCOUNT_ID, XAUUSD_SYMBOL_ID)
-                );
-                (r.r#type, r.from_timestamp.unwrap(), r.to_timestamp.unwrap())
-            })
-            .collect()
-    }
-
-    fn sorted<T: Ord>(mut items: Vec<T>) -> Vec<T> {
-        items.sort();
-        items
-    }
-
-    #[tokio::test]
-    async fn a_fill_stores_the_quotes_merged_from_the_bid_and_ask_ticks_of_its_window() {
-        let (start, end) = ("2026-10-01T00:00:00Z", "2026-10-01T01:00:00Z");
-        let s = ms(start);
-        let bids = vec![
-            tick(s - 60_000, 400_000_000),
-            tick(s + 1_000, 400_010_000),
-            tick(s + 3_000, 400_020_000),
-            tick(ms(end) + 5_000, 401_000_000),
-        ];
-        let asks = vec![
-            tick(s - 30_000, 400_050_000),
-            tick(s + 2_000, 400_060_000),
-            tick(s + 3_000, 400_070_000),
-        ];
-        let (history, _) = connected_to(ticks_peer(bids, asks, 2)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-
-        history
-            .fill(&mut catalog, &quotes_series(), ts(start), ts(end))
-            .await
-            .unwrap();
-
-        // The bid and ask before the window seed its first quotes; the bid
-        // after it is not stored.
-        assert_eq!(
-            stored(&mut catalog),
-            [
-                quote(s + 1_000, "4000.10", "4000.50"),
-                quote(s + 2_000, "4000.10", "4000.60"),
-                quote(s + 3_000, "4000.20", "4000.70"),
-            ]
+    #[test]
+    fn a_series_other_than_the_quotes_of_an_ic_instrument_is_refused() {
+        let quotes = (NautilusDataType::QuoteTick, XAUUSD.to_owned());
+        let bars = (
+            NautilusDataType::Bar,
+            "XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL".to_owned(),
         );
-        assert_eq!(intervals(&catalog), [(ns(ts(start)), ns(ts(end)))]);
-        let stored = catalog.instruments(None, None, None).unwrap();
-        let ids: Vec<InstrumentId> = stored.iter().map(Instrument::id).collect();
-        assert_eq!(ids, [InstrumentId::from(XAUUSD)]);
-        history.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn each_side_is_asked_for_its_last_tick_before_the_window_and_the_window_to_1_ms_past_its_end()
-     {
-        let (start, end) = ("2026-10-01T00:00:00Z", "2026-10-01T01:00:00Z");
-        let (s, e) = (ms(start), ms(end));
-        let (history, received) = connected().await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-
-        let _ = history
-            .fill(&mut catalog, &quotes_series(), ts(start), ts(end))
-            .await;
+        let elsewhere = (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO".to_owned());
 
         assert_eq!(
-            sorted(tick_requests(&received)),
-            [
-                (1, s - WEEK_MS, s),
-                (1, s, e + 1),
-                (2, s - WEEK_MS, s),
-                (2, s, e + 1),
-            ]
+            IcHistory::quoted(std::slice::from_ref(&quotes)).unwrap(),
+            [InstrumentId::from(XAUUSD)]
         );
-        history.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_resumed_fill_asks_from_1_ms_after_the_stored_end_and_stores_no_quote_twice() {
-        let (start, middle, end) = (
-            "2026-10-01T00:00:00Z",
-            "2026-10-01T01:00:00Z",
-            "2026-10-01T02:00:00Z",
-        );
-        let (s, m, e) = (ms(start), ms(middle), ms(end));
-        let bids = vec![
-            tick(s, 400_000_000),
-            tick(m, 400_010_000),
-            tick(m + 1, 400_020_000),
-        ];
-        let asks = vec![tick(s, 400_050_000)];
-        let (history, received) = connected_to(ticks_peer(bids, asks, 10_000)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        history
-            .fill(&mut catalog, &quotes_series(), ts(start), ts(middle))
-            .await
-            .unwrap();
-        let first = tick_requests(&received).len();
-
-        history
-            .fill(&mut catalog, &quotes_series(), ts(start), ts(end))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            sorted(tick_requests(&received)[first..].to_vec()),
-            [
-                (1, m + 1 - WEEK_MS, m + 1),
-                (1, m + 1, e + 1),
-                (2, m + 1 - WEEK_MS, m + 1),
-                (2, m + 1, e + 1),
-            ]
-        );
-        assert_eq!(
-            stored(&mut catalog),
-            [
-                quote(s, "4000.00", "4000.50"),
-                quote(m, "4000.10", "4000.50"),
-                quote(m + 1, "4000.20", "4000.50"),
-            ]
-        );
-        history.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_start_before_the_stored_quotes_is_refused_before_any_tick_request() {
-        let (start, end) = ("2026-10-01T00:00:00Z", "2026-10-01T01:00:00Z");
-        let bids = vec![tick(ms(start) + 1, 400_000_000)];
-        let asks = vec![tick(ms(start) + 1, 400_050_000)];
-        let (history, received) = connected_to(ticks_peer(bids, asks, 10_000)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        history
-            .fill(&mut catalog, &quotes_series(), ts(start), ts(end))
-            .await
-            .unwrap();
-        let first = tick_requests(&received).len();
-
-        let err = history
-            .fill(
-                &mut catalog,
-                &quotes_series(),
-                ts("2026-09-30T00:00:00Z"),
-                ts(end),
-            )
-            .await
-            .unwrap_err();
-
-        assert!(format!("{err:#}").contains("backwards"), "{err:#}");
-        assert_eq!(tick_requests(&received).len(), first);
-        history.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_first_window_without_ticks_is_an_error_naming_the_series_and_the_window() {
-        let (start, end) = ("2014-01-01T00:00:00Z", "2014-01-02T00:00:00Z");
-        let (history, _) = connected().await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-
-        let err = history
-            .fill(&mut catalog, &quotes_series(), ts(start), ts(end))
-            .await
-            .unwrap_err();
-
-        let err = format!("{err:#}");
-        assert!(err.contains("quotes of XAUUSD.ICMARKETS"), "{err}");
-        assert!(err.contains(start) && err.contains(end), "{err}");
-        history.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_week_without_ticks_is_no_error_and_a_long_fill_is_stored_a_week_at_a_time() {
-        let start = ts("2026-10-01T00:00:00Z");
-        let week = jiff::SignedDuration::from_hours(7 * 24);
-        let end = start + week * 3;
-        let in_week = |n: i32| (start + week * n).as_millisecond() + 60_000;
-        let bids = vec![tick(in_week(0), 400_000_000), tick(in_week(2), 400_010_000)];
-        let asks = vec![tick(in_week(0), 400_050_000)];
-        let (history, _) = connected_to(ticks_peer(bids, asks, 10_000)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-
-        history
-            .fill(&mut catalog, &quotes_series(), start, end)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            stored(&mut catalog),
-            [
-                quote(in_week(0), "4000.00", "4000.50"),
-                quote(in_week(2), "4000.10", "4000.50"),
-            ]
-        );
-        let first_week = ns(start + week);
-        assert_eq!(
-            intervals(&catalog),
-            [(ns(start), first_week), (first_week + 1, ns(end))]
-        );
-        history.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_series_other_than_quotes_is_refused_before_any_request() {
-        let (history, received) = connected().await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let bars = "XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL".to_owned();
-        let start: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
-
-        let err = history
-            .fill(&mut catalog, &[(NautilusDataType::Bar, bars)], start, start)
-            .await
-            .unwrap_err();
-
+        let err = IcHistory::quoted(&[quotes, bars]).unwrap_err();
         assert_eq!(
             err.to_string(),
             "IC serves quotes only, not the Bar of XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL"
         );
-        assert_eq!(requests(&received), []);
-        history.disconnect().await;
+        let err = IcHistory::quoted(&[elsewhere]).unwrap_err();
+        assert!(err.to_string().contains("EUR/USD.IDEALPRO"), "{err}");
     }
 
     /// The log records of the IC adapter at info and above, for the demo
