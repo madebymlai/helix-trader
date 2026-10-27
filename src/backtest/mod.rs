@@ -10,7 +10,7 @@ mod report;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
@@ -32,7 +32,10 @@ pub use self::{
     costs::{commission_per_order, commission_rate},
     report::{Outcome, report},
 };
-use crate::strategy::{TickSeries, catalog_series};
+use crate::{
+    rolls::TransitionTable,
+    strategy::{DataRequirements, SeriesSlice, TickSeries},
+};
 
 /// One backtest: a window of the catalog, the bar types whose source data
 /// is replayed, the tick series replayed as they are, and the costs. Every
@@ -53,7 +56,8 @@ pub struct Backtest {
     /// bars, which reach the strategy only through it.
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are: each replayed as
-    /// declared, beside the series of the bar types. Their instruments
+    /// declared, beside the series of the bar types, a root's as its
+    /// contracts' over their slices (see `series`). Their instruments
     /// are read too, each a simulated venue of the run as well.
     pub ticks: Vec<TickSeries>,
     pub start: Timestamp,
@@ -105,7 +109,7 @@ impl Backtest {
     /// negative warmup, `start` not before
     /// `end`, a leverage not positive), if the cache cannot hold the warmup bars of a bar type (see
     /// `warmup::cache_config`), if the catalog misses an instrument or part of a series
-    /// over `[start - 1 ns - warmup, end]`, if the node fails to build
+    /// over its slice of `[start - 1 ns - warmup, end]`, if the node fails to build
     /// or run, or if a fill of an instrument with quotes has none before
     /// it.
     pub fn run<S>(&self, strategy: S) -> anyhow::Result<Outcome>
@@ -128,8 +132,24 @@ impl Backtest {
             .with_context(|| format!("no engine start before {}", self.start))
     }
 
-    /// The instruments of the bar types and of the ticks, each once.
-    fn instruments(&self) -> BTreeSet<InstrumentId> {
+    /// When the warmup starts: `warmup` before the engine start. The
+    /// series replayed are sliced over `[warmup start, end]` (see
+    /// `series`), and the catalog must cover them there.
+    fn warmup_start(&self) -> anyhow::Result<Timestamp> {
+        ensure!(
+            !self.warmup.is_negative(),
+            "warmup {:#} is negative",
+            self.warmup
+        );
+        let engine_start = self.engine_start()?;
+        engine_start
+            .checked_sub(self.warmup)
+            .with_context(|| format!("no warmup of {:#} before {engine_start}", self.warmup))
+    }
+
+    /// The instruments the strategy reads: those of the bar types and of
+    /// the ticks, roots or plain instruments, each once.
+    fn declared(&self) -> BTreeSet<InstrumentId> {
         let ticks = self.ticks.iter().map(|tick| tick.instrument_id);
         self.bar_types
             .iter()
@@ -138,24 +158,44 @@ impl Backtest {
             .collect()
     }
 
-    /// The catalog series the run replays: those the bars are built from
+    /// The instruments the run replays, each once: the contracts standing
+    /// for each declared instrument over `[warmup start, end]` (see
+    /// `rolls::TransitionTable`), a plain instrument standing for itself.
+    /// A root is none of them.
+    fn instruments(&self) -> anyhow::Result<BTreeSet<InstrumentId>> {
+        let (from, to) = (self.warmup_start()?, self.end);
+        Ok(self
+            .declared()
+            .into_iter()
+            .flat_map(|id| TransitionTable::of(id, from, to).slices())
+            .map(|slice| slice.instrument_id)
+            .collect())
+    }
+
+    /// The catalog series the run replays, each over the slice of
+    /// `[warmup start, end]` its contract stands for its instrument (see
+    /// `strategy::DataRequirements::slices`): those the bars are built from
     /// (see `strategy::catalog_series`), then the ticks as declared, then
-    /// the book depth of each instrument of the bar types whose catalog
-    /// stores one, then the funding of each instrument whose catalog
-    /// stores funding, which the venue settles on open positions; the book
-    /// and the funding keyed by the instrument id; each series once. An
-    /// instrument read for its book alone, none of the series its bars
-    /// are built from stored (CME gold's book without its quotes), has its
-    /// book replayed and its bars left out: no bar is built of it. An
+    /// the book depth of each contract of the instruments of the bar types
+    /// whose catalog stores one, then the funding of each contract whose
+    /// catalog stores funding, which the venue settles on open positions;
+    /// the book and the funding keyed by the contract's id; each series
+    /// once. A plain instrument is one slice on itself over the whole
+    /// span. An instrument read for its book alone, none of the series its
+    /// bars are built from stored (CME gold's book without its quotes), has
+    /// its book replayed and its bars left out: no bar is built of it. An
     /// instrument of the ticks alone has no book replayed but a declared
     /// one.
     ///
     /// # Errors
     ///
-    /// Returns an error if what the catalog stores cannot be read.
-    fn series(&self) -> anyhow::Result<Vec<(NautilusDataType, String)>> {
+    /// Returns an error if the warmup is negative, or if what the catalog
+    /// stores cannot be read.
+    fn series(&self) -> anyhow::Result<Vec<SeriesSlice>> {
+        let (from, to) = (self.warmup_start()?, self.end);
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
-        let stored = |(data_type, identifier): &(NautilusDataType, String)| {
+        let stored = |series: &SeriesSlice| {
+            let (data_type, identifier) = &series.series;
             catalog
                 .query_last_timestamp(&data_type.clone().into(), Some(identifier))
                 .map(|last| last.is_some())
@@ -166,39 +206,60 @@ impl Backtest {
                     )
                 })
         };
+        // The series of `data_type` of each contract of `id`.
+        let of = |data_type: NautilusDataType, id: InstrumentId| -> Vec<SeriesSlice> {
+            TransitionTable::of(id, from, to)
+                .slices()
+                .into_iter()
+                .map(|slice| SeriesSlice {
+                    series: (data_type.clone(), slice.instrument_id.to_string()),
+                    slice,
+                })
+                .collect()
+        };
+        let read = |bar_types: Vec<BarType>, ticks: Vec<TickSeries>| {
+            DataRequirements {
+                bar_types,
+                ticks,
+                warmup: self.warmup,
+            }
+            .slices(from, to)
+        };
         let bar_instruments: BTreeSet<InstrumentId> =
             self.bar_types.iter().map(BarType::instrument_id).collect();
         let mut books = Vec::new();
         for id in bar_instruments {
-            let book = (NautilusDataType::OrderBookDepth, id.to_string());
-            if stored(&book)? {
-                books.push(book);
+            for book in of(NautilusDataType::OrderBookDepth, id) {
+                if stored(&book)? {
+                    books.push(book);
+                }
             }
         }
         let mut funding = Vec::new();
-        for id in self.instruments() {
-            let rate = (NautilusDataType::FundingRateUpdate, id.to_string());
-            if stored(&rate)? {
-                funding.push(rate);
+        for id in self.declared() {
+            for rate in of(NautilusDataType::FundingRateUpdate, id) {
+                if stored(&rate)? {
+                    funding.push(rate);
+                }
             }
         }
         let mut built = Vec::new();
         for bar_type in &self.bar_types {
-            let id = bar_type.instrument_id().to_string();
-            let has_book = books.iter().any(|(_, book_of)| *book_of == id);
+            let has_book = of(NautilusDataType::OrderBookDepth, bar_type.instrument_id())
+                .iter()
+                .any(|book| books.contains(book));
             let mut has_source = false;
-            for source in catalog_series(&[*bar_type]) {
+            for source in read(vec![*bar_type], vec![]) {
                 has_source |= stored(&source)?;
             }
             if has_source || !has_book {
                 built.push(*bar_type);
             }
         }
-        let ticks = self.ticks.iter().map(TickSeries::catalog_series);
-        let mut series: Vec<(NautilusDataType, String)> = Vec::new();
-        for entry in catalog_series(&built)
+        let mut series: Vec<SeriesSlice> = Vec::new();
+        for entry in read(built, vec![])
             .into_iter()
-            .chain(ticks)
+            .chain(read(vec![], self.ticks.clone()))
             .chain(books)
             .chain(funding)
         {
@@ -221,6 +282,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::{rolls::Slice, strategy::catalog_series};
 
     const SWAP: &str = "BTC-USDT-SWAP.OKX";
     const XPERP: &str = "BTC-USD_UM_XPERP-310404.OKX";
@@ -245,6 +307,30 @@ mod tests {
             venue_oms: venue_oms_type,
             logging: LoggerConfig::default(),
         }
+    }
+
+    /// Each of `series`, of plain instruments, over the whole span of
+    /// `backtest`: from 1 ns before its start, its warmup being zero, to its
+    /// end.
+    fn whole(backtest: &Backtest, series: Vec<(NautilusDataType, String)>) -> Vec<SeriesSlice> {
+        series
+            .into_iter()
+            .map(|(data_type, identifier)| {
+                let instrument_id = if data_type == NautilusDataType::Bar {
+                    BarType::from(identifier.as_str()).instrument_id()
+                } else {
+                    InstrumentId::from(identifier.as_str())
+                };
+                SeriesSlice {
+                    series: (data_type, identifier),
+                    slice: Slice {
+                        instrument_id,
+                        from: backtest.start - SignedDuration::from_nanos(1),
+                        to: backtest.end,
+                    },
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -287,7 +373,7 @@ mod tests {
         let backtest = backtest(dir.path(), &[XPERP, SWAP]);
         let mut expected = catalog_series(&backtest.bar_types);
         expected.push((NautilusDataType::FundingRateUpdate, SWAP.to_string()));
-        assert_eq!(backtest.series().unwrap(), expected);
+        assert_eq!(backtest.series().unwrap(), whole(&backtest, expected));
     }
 
     const GOLD: &str = "GC.v.0.GLBX";
@@ -331,7 +417,10 @@ mod tests {
         let backtest = gold(dir.path(), false);
         assert_eq!(
             backtest.series().unwrap(),
-            [(NautilusDataType::OrderBookDepth, GOLD.to_string())]
+            whole(
+                &backtest,
+                vec![(NautilusDataType::OrderBookDepth, GOLD.to_string())]
+            )
         );
     }
 
@@ -341,10 +430,13 @@ mod tests {
         let backtest = gold(dir.path(), true);
         assert_eq!(
             backtest.series().unwrap(),
-            [
-                (NautilusDataType::QuoteTick, GOLD.to_string()),
-                (NautilusDataType::OrderBookDepth, GOLD.to_string()),
-            ]
+            whole(
+                &backtest,
+                vec![
+                    (NautilusDataType::QuoteTick, GOLD.to_string()),
+                    (NautilusDataType::OrderBookDepth, GOLD.to_string()),
+                ]
+            )
         );
     }
 
@@ -354,7 +446,7 @@ mod tests {
         let backtest = backtest(dir.path(), &[XPERP, SWAP]);
         assert_eq!(
             backtest.series().unwrap(),
-            catalog_series(&backtest.bar_types)
+            whole(&backtest, catalog_series(&backtest.bar_types))
         );
     }
 }

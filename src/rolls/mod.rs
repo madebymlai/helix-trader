@@ -7,9 +7,13 @@
 //! product root (`GC.GLBX`) rolls through its contracts (`GCQ6.GLBX`,
 //! `GCZ6.GLBX`, ...); any other id is a plain instrument, with no
 //! transitions and one slice on itself. Callers use the slices and never
-//! branch on an id.
+//! branch on an id. A `Roller` keeps a strategy's tick subscriptions on
+//! the contract standing for each root, switching at each roll.
 
 mod calendar;
+mod roller;
+
+pub use roller::Roller;
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::identifiers::InstrumentId;
@@ -39,6 +43,24 @@ pub struct Transition {
     pub post: InstrumentId,
 }
 
+impl Transition {
+    /// The first transition of `instrument_id` after `time`, `time`
+    /// excluded: the next roll of its product from the contract in front
+    /// at `time` (so its `pre` is that contract), if the id is a root in
+    /// the roll calendar; none otherwise. Unbounded: it holds for any
+    /// future time, as live needs.
+    #[must_use]
+    pub fn after(instrument_id: InstrumentId, time: Timestamp) -> Option<Self> {
+        let product = calendar::product(instrument_id)?;
+        let front = product.front_at(time);
+        Some(Self {
+            time: product.roll_out_of(front),
+            pre: product.instrument_id(front),
+            post: product.instrument_id(product.next(front)),
+        })
+    }
+}
+
 /// The part of a span one contract stands for its root, both ends
 /// included, as the catalog's ranges are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,29 +77,14 @@ impl TransitionTable {
     /// calendar; none otherwise.
     #[must_use]
     pub fn of(instrument_id: InstrumentId, start: Timestamp, end: Timestamp) -> Self {
-        let Some(product) = calendar::product(instrument_id) else {
-            return Self {
-                first: instrument_id,
-                transitions: Vec::new(),
-                start,
-                end,
-            };
-        };
-        let mut front = product.front_at(start);
-        let first = product.instrument_id(front);
+        let first = Transition::after(instrument_id, start).map_or(instrument_id, |next| next.pre);
         let mut transitions = Vec::new();
-        loop {
-            let time = product.roll_out_of(front);
-            if time > end {
-                break;
-            }
-            let next = product.next(front);
-            transitions.push(Transition {
-                time,
-                pre: product.instrument_id(front),
-                post: product.instrument_id(next),
-            });
-            front = next;
+        let mut time = start;
+        while let Some(next) = Transition::after(instrument_id, time)
+            && next.time <= end
+        {
+            transitions.push(next);
+            time = next.time;
         }
         Self {
             first,
@@ -310,6 +317,38 @@ mod tests {
             );
             assert_eq!(table.contract_at(at("2026-07-31T00:00Z")), id(plain));
         }
+    }
+
+    #[test]
+    fn the_transition_after_a_time_is_the_next_roll_of_its_root() {
+        assert_eq!(
+            Transition::after(gc(), at("2026-07-30T12:00Z")),
+            Some(transition("2026-07-31T00:00Z", "GCQ6.GLBX", "GCZ6.GLBX"))
+        );
+    }
+
+    #[test]
+    fn the_transition_after_a_transition_is_the_one_after_it() {
+        assert_eq!(
+            Transition::after(gc(), at("2026-07-31T00:00Z")),
+            Some(transition("2026-11-30T00:00Z", "GCZ6.GLBX", "GCG7.GLBX"))
+        );
+    }
+
+    #[test]
+    fn the_transition_after_the_last_nanosecond_before_a_roll_is_that_roll() {
+        assert_eq!(
+            Transition::after(gc(), before("2026-07-31T00:00Z")),
+            Some(transition("2026-07-31T00:00Z", "GCQ6.GLBX", "GCZ6.GLBX"))
+        );
+    }
+
+    #[test]
+    fn an_id_without_a_calendar_entry_has_no_transition_after_any_time() {
+        assert_eq!(
+            Transition::after(id("GCZ6.GLBX"), at("2026-07-30T12:00Z")),
+            None
+        );
     }
 
     /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to

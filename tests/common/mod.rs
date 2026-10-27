@@ -15,6 +15,7 @@ pub mod cache;
 pub mod glbx;
 pub mod ic;
 pub mod recorder;
+pub mod rolls;
 
 use std::path::Path;
 

@@ -101,6 +101,18 @@ undeclared series replayed but its funding. The instruments, of the bar
 types and of the ticks, may be on several venues, each simulated (see
 Venue).
 
+A declared instrument may be a futures root (`GC.GLBX`, `rolls/README.md`).
+Every series replayed goes through its instrument's transition table over
+`[start − 1 ns − warmup, end]` (`DataRequirements::slices`): a root's
+series is replayed as each contract's series over its slice, one
+`BacktestDataConfig` per contract and slice, bounded by the slice's
+`start_time` and `end_time` (both included; the node clamps them to the
+run's window), so a contract's data reaches the run only while it stands
+for the root. Each contract is registered with its own stored definition;
+the root is never stored nor registered. A plain instrument is one slice
+on itself over the whole window, bounded by the window, so its replay is
+unchanged (`backtest_rolls.rs`).
+
 ## The run
 
 ```rust
@@ -392,8 +404,10 @@ start; later bars are built from the replay. What the strategy receives:
 
 Before building the node, `run` checks the catalog (`coverage.rs`) and
 fails on the first miss: an instrument not stored (the error names its
-id), or a series not covered over `[start − 1 ns − warmup, end]`, the
-warmup and the run (the error names the series, such as `the quotes of
+id; a root's contracts must be, the root not), or a series not covered
+over its slice of `[start − 1 ns − warmup, end]`, the warmup and the run
+(the whole of it for a plain instrument, the part a contract stands for
+its root otherwise; the error names the series, such as `the quotes of
 SXR8.IBIS`, `the bars of SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, `the
 funding_rates of BTC-USDT-SWAP.OKX`, and the first missing range).
 

@@ -4,20 +4,22 @@
 //! A warmup window the catalog does not fully cover gets no answer at all
 //! (see the README), so a run on missing data would go on silently with
 //! cold indicators; without its data, orders find no market and no bar is
-//! built. Every instrument must be stored, and each series the run replays
-//! (see `Backtest::series`: those the bars are built from, the declared
-//! ticks, the stored book depth and the stored funding of the instruments)
-//! covered over
-//! `[engine start − warmup, end]` by its stored intervals (inclusive
-//! nanoseconds); the engine starts 1 ns before the run start. The gaps come
-//! from `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
+//! built. Every instrument replayed must be stored (the contracts of a
+//! root, never the root), and each series the run replays (see
+//! `Backtest::series`: those the bars are built from, the declared ticks,
+//! the stored book depth and the stored funding of the instruments)
+//! covered over its slice of `[engine start − warmup, end]` by its stored
+//! intervals (inclusive nanoseconds): the whole of it for a plain
+//! instrument, the part its contract stands for a root otherwise; the
+//! engine starts 1 ns before the run start. The gaps come from
+//! `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
 //! through the same `missing_intervals` as the data engine's own catalog
 //! lookup for the warmup: adjacent (`end + 1 == start`) and overlapping
 //! intervals cover as one, a 1 ns gap is a gap.
 
 use std::collections::BTreeSet;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, bail};
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -30,23 +32,15 @@ use nautilus_persistence::{
 };
 
 use super::Backtest;
+use crate::strategy::SeriesSlice;
 
-/// Fails unless the catalog of `backtest` stores every instrument and
-/// covers each series over `[engine start − warmup, end]`, the engine
-/// starting 1 ns before `start`; the error names the instrument, or the
-/// series and its first missing range.
+/// Fails unless the catalog of `backtest` stores every instrument replayed
+/// and covers each series over its slice of `[engine start − warmup, end]`,
+/// the engine starting 1 ns before `start`; the error names the
+/// instrument, or the series and its first missing range.
 pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
-    ensure!(
-        !backtest.warmup.is_negative(),
-        "warmup {:#} is negative",
-        backtest.warmup
-    );
-    let engine_start = backtest.engine_start()?;
-    let warmup_start = engine_start
-        .checked_sub(backtest.warmup)
-        .with_context(|| format!("no warmup of {:#} before {engine_start}", backtest.warmup))?;
     let catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
-    let ids = backtest.instruments();
+    let ids = backtest.instruments()?;
     let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
     let stored: BTreeSet<InstrumentId> = catalog
         .instruments(Some(&names), None, None)
@@ -60,14 +54,12 @@ pub(super) fn check(backtest: &Backtest) -> anyhow::Result<()> {
             backtest.catalog.display()
         );
     }
-    for (data_type, identifier) in backtest.series()? {
-        ensure_covered(
-            &catalog,
-            &data_type,
-            &identifier,
-            warmup_start,
-            backtest.end,
-        )?;
+    for SeriesSlice {
+        series: (data_type, identifier),
+        slice,
+    } in backtest.series()?
+    {
+        ensure_covered(&catalog, &data_type, &identifier, slice.from, slice.to)?;
     }
     Ok(())
 }
@@ -93,7 +85,7 @@ fn ensure_covered(
     if let Some(&(start, end)) = missing.first() {
         bail!(
             "the catalog does not cover {named} over [{from}, {to}] \
-             (the warmup and the run): [{}, {}] is missing",
+             (its slice of the warmup and the run): [{}, {}] is missing",
             timestamp(start),
             timestamp(end),
         );

@@ -1,0 +1,180 @@
+//! The roller: keeps a strategy subscribed to the tick series it reads on
+//! the contract standing for each of their instruments, switching at each
+//! roll, with the plain Nautilus clock and subscription API, as Nautilus'
+//! own (crate-private) roller of continuous bars does.
+
+use std::{fmt::Debug, num::NonZeroUsize};
+
+use jiff::{SignedDuration, Timestamp};
+use nautilus_common::{
+    actor::{DataActor, DataActorNative},
+    timer::TimeEvent,
+};
+use nautilus_model::{enums::BookType, identifiers::InstrumentId};
+
+use super::Transition;
+use crate::strategy::{TickData, TickSeries};
+
+/// The prefix of an instrument's roll alert, followed by its id.
+const ROLL_ALERT: &str = "ROLL:";
+
+/// The levels a side of an `OrderBookDepth10` snapshot.
+const DEPTH: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+
+/// Subscribes a strategy to its tick series, each on the contract standing
+/// for its instrument (see `Transition::after`), and rolls them: owned by
+/// the strategy, started in its `on_start` and handed its time events in
+/// `on_time_event`, which return the roll they made, if any. An instrument
+/// that does not roll is subscribed once, with no alert.
+///
+/// It subscribes through the strategy that owns it, so the strategy calls
+/// it on a clone (`self.roller.clone().start(self)`): it holds the series
+/// only, and works out the contracts from the clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Roller {
+    ticks: Vec<TickSeries>,
+}
+
+impl Roller {
+    /// A roller of `ticks`, their instruments roots or plain instruments.
+    #[must_use]
+    pub fn new(ticks: Vec<TickSeries>) -> Self {
+        Self { ticks }
+    }
+
+    /// Subscribes `actor` to each series on the contract standing for its
+    /// instrument now, and sets the alert of each instrument's next roll,
+    /// if it rolls (see `on_time_event`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clock refuses an alert.
+    pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        let now = actor.clock().utc_now();
+        for instrument_id in self.instrument_ids() {
+            let next = Transition::after(instrument_id, now);
+            let contract = next.map_or(instrument_id, |next| next.pre);
+            self.subscribe(actor, instrument_id, contract);
+            if let Some(next) = next {
+                set_alert(actor, instrument_id, next)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// If `event` is an instrument's roll alert, rolls its series: from
+    /// the pre contract to the post contract of its transition, and sets
+    /// the alert of the next one; returns that transition. `None` for any
+    /// other event, which is the strategy's own.
+    ///
+    /// The alert is at the last nanosecond of the pre contract's slice,
+    /// not at the transition: the backtest engine delivers the data of a
+    /// time before the alerts of that time, so an alert at the transition
+    /// would miss the post contract's tick stamped there. So the strategy
+    /// is told after the pre contract's last tick and before the post
+    /// contract's first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clock refuses the next alert.
+    pub fn on_time_event<A>(
+        &self,
+        actor: &mut A,
+        event: &TimeEvent,
+    ) -> anyhow::Result<Option<Transition>>
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        let Some(instrument_id) = self
+            .instrument_ids()
+            .into_iter()
+            .find(|&instrument_id| event.name.as_str() == alert_name(instrument_id))
+        else {
+            return Ok(None);
+        };
+        let roll = Transition::after(instrument_id, event.ts_event.into())
+            .expect("an instrument with a roll alert rolls");
+        self.unsubscribe(actor, instrument_id, roll.pre);
+        self.subscribe(actor, instrument_id, roll.post);
+        if let Some(next) = Transition::after(instrument_id, roll.time) {
+            set_alert(actor, instrument_id, next)?;
+        }
+        Ok(Some(roll))
+    }
+
+    /// The instruments of the series, each once, in order.
+    fn instrument_ids(&self) -> Vec<InstrumentId> {
+        let mut ids: Vec<InstrumentId> = Vec::new();
+        for tick in &self.ticks {
+            if !ids.contains(&tick.instrument_id) {
+                ids.push(tick.instrument_id);
+            }
+        }
+        ids
+    }
+
+    /// The kinds of the series of `instrument_id`.
+    fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = TickData> + '_ {
+        self.ticks
+            .iter()
+            .filter(move |tick| tick.instrument_id == instrument_id)
+            .map(|tick| tick.data)
+    }
+
+    /// Subscribes `actor` to the series of `instrument_id` on `contract`.
+    fn subscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        for data in self.data_of(instrument_id) {
+            match data {
+                TickData::Quotes => actor.subscribe_quotes(contract, None, None),
+                TickData::Trades => actor.subscribe_trades(contract, None, None),
+                TickData::Depth => actor.subscribe_book_depth(
+                    contract,
+                    BookType::L2_MBP,
+                    Some(DEPTH),
+                    None,
+                    false,
+                    None,
+                ),
+            }
+        }
+    }
+
+    /// Unsubscribes `actor` from the series of `instrument_id` on
+    /// `contract`.
+    fn unsubscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        for data in self.data_of(instrument_id) {
+            match data {
+                TickData::Quotes => actor.unsubscribe_quotes(contract, None, None),
+                TickData::Trades => actor.unsubscribe_trades(contract, None, None),
+                TickData::Depth => actor.unsubscribe_book_depth(contract, None, None),
+            }
+        }
+    }
+}
+
+/// The name of the roll alert of `instrument_id`.
+fn alert_name(instrument_id: InstrumentId) -> String {
+    format!("{ROLL_ALERT}{instrument_id}")
+}
+
+/// Sets the roll alert of `instrument_id` for `next`, at the last
+/// nanosecond before it (see `Roller::on_time_event`), handled by the
+/// actor's `on_time_event`.
+fn set_alert<A>(actor: &mut A, instrument_id: InstrumentId, next: Transition) -> anyhow::Result<()>
+where
+    A: DataActor + DataActorNative + Debug + 'static,
+{
+    let at: Timestamp = next.time - SignedDuration::from_nanos(1);
+    actor
+        .clock()
+        .set_time_alert(&alert_name(instrument_id), at, None, None)
+}

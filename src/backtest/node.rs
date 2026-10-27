@@ -28,7 +28,10 @@ use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
-use crate::{data::catalog_path, strategy::warmup};
+use crate::{
+    data::catalog_path,
+    strategy::{SeriesSlice, warmup},
+};
 
 /// The id of the one run of the node.
 const RUN_ID: &str = "backtest";
@@ -46,7 +49,8 @@ const CHUNK_SIZE: usize = 100_000;
 /// funding, the series of the window from the catalog (the only data
 /// replayed: the data engine builds the strategy's bars from them and
 /// keeps the books the strategy subscribes to, the venue settles the
-/// funding; see `Backtest::series` and `data_config`), and the catalog registered in the
+/// funding; see `Backtest::series` and `data_config`), each over its
+/// slice, and the catalog registered in the
 /// engine, read-only, so that it serves the strategy's warmup requests and
 /// takes no write-back, with a cache
 /// holding the warmup bars (`warmup::cache_config`) and a data engine
@@ -64,19 +68,20 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         start < end,
         "backtest start {start} must be before its end {end}"
     );
-    let venues: BTreeSet<Venue> = backtest.instruments().iter().map(|id| id.venue).collect();
+    // A root's contracts are on its venue.
+    let venues: BTreeSet<Venue> = backtest.declared().iter().map(|id| id.venue).collect();
     ensure!(!venues.is_empty(), "no instruments");
     let catalog = catalog_path(&backtest.catalog)?;
     let venues = venues
         .into_iter()
         .map(|venue| venue_config(backtest, venue))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
     let data = backtest
         .series()?
         .into_iter()
-        .map(|(data_type, identifier)| data_config(&catalog, data_type, &identifier))
+        .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
     let engine_config = BacktestEngineConfig::builder()
         .cache(cache)
         .data_engine(warmup::data_engine_config())
@@ -114,22 +119,26 @@ fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVen
         .build()?)
 }
 
-/// The `BacktestDataConfig` loading the series of `data_type` and
-/// `identifier` from `catalog`: bars by their bar type, any other data by
-/// its instrument id, as the catalog keys them.
-fn data_config(
-    catalog: &str,
-    data_type: NautilusDataType,
-    identifier: &str,
-) -> anyhow::Result<BacktestDataConfig> {
+/// The `BacktestDataConfig` loading `series` from `catalog` over its
+/// slice, both ends included: bars by their bar type, any other data by
+/// its instrument id, as the catalog keys them. The node replays the slice
+/// within the run, so a contract of a root is replayed only while it
+/// stands for the root.
+fn data_config(catalog: &str, series: SeriesSlice) -> anyhow::Result<BacktestDataConfig> {
+    let SeriesSlice {
+        series: (data_type, identifier),
+        slice,
+    } = series;
     let builder = BacktestDataConfig::builder()
         .catalog_path(catalog.to_string())
-        .data_type(data_type.clone());
+        .data_type(data_type.clone())
+        .start_time(UnixNanos::from(slice.from))
+        .end_time(UnixNanos::from(slice.to));
     let config = if data_type == NautilusDataType::Bar {
-        builder.bar_types(vec![identifier.to_string()]).build()
+        builder.bar_types(vec![identifier]).build()
     } else {
         builder
-            .instrument_id(InstrumentId::from_str(identifier)?)
+            .instrument_id(InstrumentId::from_str(&identifier)?)
             .build()
     };
     Ok(config?)

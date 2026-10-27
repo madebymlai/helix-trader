@@ -12,6 +12,7 @@ from a roll calendar kept in one file.
 ```
 rolls/
   mod.rs         TransitionTable, Transition, Slice: the public interface
+  roller.rs      Roller: a strategy's tick subscriptions, rolled
   calendar.rs    the roll calendar: products, contracts, roll times
   calendar.toml  the products, embedded at build time
 ```
@@ -49,6 +50,11 @@ its time is after `start` and no later than `end`. A roll exactly at
   both ends included as the catalog's ranges are. Each slice ends 1 ns
   before the next transition, and the last one ends at `end`.
 
+`Transition::after(instrument_id, time)` is the next roll after `time`,
+`time` excluded, from the contract in front then (its `pre`), with no span:
+none for a plain instrument. The table is built from it, and the roller
+uses it to know the next roll in advance.
+
 The transitions carry no roll prices. Nautilus' continuous bars need them,
 read from the catalog at each transition, and they are added where the bar
 params are built.
@@ -57,6 +63,50 @@ params are built.
 series a strategy reads through its instrument's table. The result is the
 series of each contract over its slice (`SeriesSlice`), so fill-catalog,
 the backtest and live only ever see contract ids.
+
+## The roller
+
+A `Roller`, owned by a strategy, keeps it subscribed to the tick series it
+reads (`TickSeries`: quotes, trades or book depth of an instrument, root or
+plain) on the contract standing for each instrument, with the plain
+Nautilus clock and subscription API, as Nautilus' own crate-private roller
+of continuous bars does. The strategy starts it in `on_start` and hands it
+its time events in `on_time_event`:
+
+```rust
+fn on_start(&mut self) -> anyhow::Result<()> {
+    self.roller.clone().start(self)
+}
+
+fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
+    if let Some(roll) = self.roller.clone().on_time_event(self, event)? {
+        // roll.pre to roll.post: restart the indicators.
+    }
+    Ok(())
+}
+```
+
+It subscribes through the strategy, so it is called on a clone; it holds
+the series only and works out the contracts from the clock.
+
+- `start` subscribes each series on the contract in front now and, for an
+  instrument that rolls, sets a time alert (`ROLL:` and the instrument's
+  id) for its next roll. A plain instrument is subscribed once, with no
+  alert.
+- `on_time_event`, on an instrument's alert, unsubscribes its series from
+  the pre contract, subscribes them on the post contract, sets the alert
+  of the next roll, and returns the `Transition`. Any other event returns
+  `None`: it is the strategy's own.
+
+The alert is at the last nanosecond of the pre contract's slice, not at
+the transition. The backtest engine delivers the data of a time before the
+alerts set for that time (`BacktestEngine::run_impl`: timers at the data's
+time are flushed after it), so an alert at the transition would miss the
+post contract's tick stamped there. The strategy is told after the pre
+contract's last tick and before the post contract's first.
+
+Bars do not use the roller: Nautilus' continuous bars roll themselves from
+the table.
 
 ## The calendar
 
