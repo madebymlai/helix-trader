@@ -23,6 +23,8 @@
 
 mod config;
 pub mod ema;
+#[cfg(gold_scalp)]
+pub mod gold_scalp;
 mod session;
 pub mod warmup;
 
