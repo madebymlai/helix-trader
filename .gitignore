@@ -5,3 +5,4 @@ target/
 /catalog/*
 !/catalog/.gitkeep
 /docs/research/
+/src/strategy/gold_scalp/
