@@ -185,7 +185,12 @@ series of each contract over the slice where it stands for the root. A
 plain instrument's series is one slice over the span, on itself. A
 strategy reading the ticks of a root subscribes to them through a
 `rolls::Roller`, which switches them to the next contract at each roll and
-tells the strategy (`rolls/README.md`, "The roller").
+tells the strategy (`rolls/README.md`, "The roller"). Bars on a root are
+Nautilus' continuous bars, built from the trades of each contract in turn
+and adjusted across the rolls: the strategy is given the
+`rolls::ContinuousBars` of its bar types (`Backtest::continuous_bars(mode)`
+reads them over a backtest) and hands them to `warmup::start` (see Warmup
+and training, "Bars on a root").
 
 ### Session
 
@@ -250,7 +255,14 @@ impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
         self.warmup = UUID4::new();
-        warmup::start(self, &bar_types, warmup, self.warmup)
+        // No bars on a futures root: no continuous bars (see Warmup).
+        warmup::start(
+            self,
+            &bar_types,
+            warmup,
+            &ContinuousBars::default(),
+            self.warmup,
+        )
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -295,8 +307,9 @@ impl DataActor for Trend {
   strategy that wants it calls `Strategy::on_start` from its
   `DataActor::on_start`.
 - The warmup is shared as function calls, not as a hook implementation:
-  `on_start` hands `warmup::start` the bar types and warmup of `bars` and a
-  new request group id, stored first; the two `on_historical_*` handlers
+  `on_start` hands `warmup::start` the bar types and warmup of `bars`, the
+  continuous bars of those on a futures root (none here), and a new
+  request group id, stored first; the two `on_historical_*` handlers
   feed the bars `warmup::bars` returns to the strategy's own state; and
   `on_data_response` asks `warmup::finished` whether the warmup ended (see
   "Warmup and training"). Each strategy writes these four handlers itself,
@@ -485,8 +498,8 @@ initialise and models to train. The module `strategy::warmup` is the one
 place that knows Nautilus' warmup protocol for the bars it builds; no
 strategy names the request params or reads the cache for its warmup. A
 strategy makes the three calls shown in Wiring: `warmup::start(self,
-&bar_types, warmup, group)` in `on_start`, which requests the warmup as the
-request group `group` and subscribes to the bars; `warmup::bars(self,
+&bar_types, warmup, &continuous, group)` in `on_start`, which requests the
+warmup as the request group `group` and subscribes to the bars; `warmup::bars(self,
 response)` in `on_historical_quotes` and `on_historical_bars`, which
 returns the warmup bars of the response's instrument, oldest first; and
 `warmup::finished(group, response)` in `on_data_response`, which tells
@@ -543,6 +556,21 @@ whether the warmup ended, complete or not.
   response carries what was requested, never the bars built from it
   (`process_engine_bar` in `data/src/engine/bar.rs` publishes no
   historical bar).
+- **Bars on a root.** Bars on a futures root (`GC.GLBX`) are Nautilus'
+  continuous bars, given to `start` as `rolls::ContinuousBars`
+  (`rolls/README.md`, "Continuous bars"). Their request is `request_bars`
+  of the bar type itself, with the params above and the root's
+  `continuous_future_transitions` and `continuous_future_adjustment_mode`;
+  the data engine requests the trades of each contract over its segment
+  and builds the adjusted bars. It reads neither
+  `update_subscriptions` nor `skip_first_non_full_bar` there: the oldest
+  bar is kept, partial, and the bar spanning the warmup end is not built.
+  It answers with no bars, its bars in the cache only, so `bars` gets none:
+  the strategy calls `warmup::continuous_bars(self, &bar_types,
+  &continuous)` once `finished` returns `Ok(true)`, which returns them
+  oldest first. Each such bar type is subscribed on its own, with
+  `start_ns` and the same two params. `backtest_continuous_bars.rs` pins
+  this.
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
   warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`

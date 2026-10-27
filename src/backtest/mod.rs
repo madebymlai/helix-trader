@@ -18,7 +18,7 @@ use nautilus_common::{
 use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{
     data::{BarType, NautilusDataType},
-    enums::OmsType,
+    enums::{ContinuousFutureAdjustmentType, OmsType},
     identifiers::{InstrumentId, Venue},
     types::Money,
 };
@@ -33,7 +33,7 @@ pub use self::{
     report::{Outcome, report},
 };
 use crate::{
-    rolls::TransitionTable,
+    rolls::{ContinuousBars, TransitionTable},
     strategy::{DataRequirements, SeriesSlice, TickSeries},
 };
 
@@ -119,6 +119,30 @@ impl Backtest {
         let config = node::run_config(self)?;
         coverage::check(self)?;
         node::run(config, strategy)
+    }
+
+    /// The continuous bars of the bar types on roots over the run and its
+    /// warmup, adjusted in `mode`, their roll prices read from the catalog
+    /// (see `rolls::ContinuousBars::read`): the strategy passes them to
+    /// `warmup::start`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the warmup is negative, or as
+    /// `ContinuousBars::read` does: a bar type on a root not built from
+    /// trades, a root without a roll over `[warmup start, end]`, a roll
+    /// without a trade to price it.
+    pub fn continuous_bars(
+        &self,
+        mode: ContinuousFutureAdjustmentType,
+    ) -> anyhow::Result<ContinuousBars> {
+        ContinuousBars::read(
+            &self.catalog,
+            &self.bar_types,
+            self.warmup_start()?,
+            self.end,
+            mode,
+        )
     }
 
     /// When the engine starts: 1 ns before `start`. A minute's quote is

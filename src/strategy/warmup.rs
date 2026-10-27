@@ -52,9 +52,19 @@
 //! `data_engine_config` (backtest) or `live_data_engine_config` (live),
 //! which turn `time_bars_build_with_no_updates` off.
 //!
+//! Bars on a futures root (`GC.GLBX`) are Nautilus' continuous bars, built
+//! from the trades of the contract standing for the root and adjusted
+//! across its rolls (see `rolls::ContinuousBars`): their request is
+//! `request_bars` of the bar type itself, and both it and their
+//! subscription, one per bar type, carry the root's `continuous_future_*`
+//! params. Nautilus builds such a request's bars into the cache only, with
+//! neither `update_subscriptions` nor `skip_first_non_full_bar`, and
+//! answers it with no bars; `continuous_bars` reads them once the group
+//! ended.
+//!
 //! A strategy calls `start` from `on_start`, `bars` from
 //! `on_historical_quotes` and `on_historical_bars`, and `finished` from
-//! `on_data_response`.
+//! `on_data_response`, then, on bars on a root, `continuous_bars`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -76,17 +86,22 @@ use nautilus_model::{
     enums::AggregationSource,
     identifiers::{InstrumentId, Venue},
 };
-use serde_json::json;
+use serde_json::{Value, json};
+
+use crate::rolls::ContinuousBars;
 
 /// Requests the warmup of `bar_types`, internal bar types, over
 /// `[now - warmup, now]` as the request group `group`, then subscribes
 /// `actor` to them from `now`. The bars of a composite bar type are built
-/// from its source bars, requested per source bar type; the others from
-/// quotes, requested per instrument. The warmup of each request arrives in
-/// `on_historical_bars` or `on_historical_quotes`, where `bars` returns
-/// it; the end of the group in `on_data_response`, where `finished` tells
-/// it. `group` is the caller's, stored before the call: a group whose
-/// requests are all answered at once ends before this returns.
+/// from its source bars, requested per source bar type; the bars on a root
+/// with continuous bars in `continuous` are its continuous future,
+/// requested per bar type with their `continuous_future_*` params; the
+/// others are built from quotes, requested per instrument. The warmup of
+/// each request arrives in `on_historical_bars` or `on_historical_quotes`,
+/// where `bars` returns it; the end of the group in `on_data_response`,
+/// where `finished` tells it. `group` is the caller's, stored before the
+/// call: a group whose requests are all answered at once ends before this
+/// returns.
 ///
 /// # Errors
 ///
@@ -96,6 +111,7 @@ pub fn start<A>(
     actor: &mut A,
     bar_types: &[BarType],
     warmup: SignedDuration,
+    continuous: &ContinuousBars,
     group: UUID4,
 ) -> anyhow::Result<()>
 where
@@ -103,9 +119,12 @@ where
 {
     let now = actor.clock().utc_now();
     let start = now.checked_sub(warmup)?;
-    let (composites, of_quotes): (Vec<BarType>, Vec<BarType>) = bar_types
+    let (composites, others): (Vec<BarType>, Vec<BarType>) = bar_types
         .iter()
         .partition(|bar_type| bar_type.is_composite());
+    let (continuous_bars, of_quotes): (Vec<BarType>, Vec<BarType>) = others
+        .into_iter()
+        .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
     let sources: BTreeSet<BarType> = composites.iter().map(BarType::composite).collect();
     let mut requests = Vec::new();
     for source in sources {
@@ -123,7 +142,18 @@ where
             Some(now),
             None,
             None,
-            Some(request_params(built)),
+            Some(request_params(built, None)),
+        )?);
+    }
+    for bar_type in &continuous_bars {
+        let params = continuous.params(bar_type.instrument_id());
+        requests.push(actor.request_bars(
+            *bar_type,
+            Some(start),
+            Some(now),
+            None,
+            None,
+            Some(request_params([bar_type].into_iter(), params)),
         )?);
     }
     let instruments: BTreeSet<InstrumentId> =
@@ -138,28 +168,45 @@ where
             Some(now),
             None,
             None,
-            Some(request_params(built)),
+            Some(request_params(built, None)),
         )?);
     }
     actor.request_group(requests, Some(group))?;
-    // One subscription per venue: Nautilus routes a list of bar types to
-    // the client of their one venue.
+    let now_ns = UnixNanos::from(now);
+    // One subscription per continuous bar type: Nautilus takes the params
+    // of a continuous future per bar type.
+    for &bar_type in &continuous_bars {
+        let params = continuous.params(bar_type.instrument_id());
+        actor.subscribe_bars(bar_type, None, Some(subscription_params(now_ns, params)));
+    }
+    // One subscription per venue for the others: Nautilus routes a list of
+    // bar types to the client of their one venue.
     let mut by_venue: BTreeMap<Venue, Vec<BarType>> = BTreeMap::new();
-    for bar_type in bar_types {
+    let others = bar_types
+        .iter()
+        .filter(|bar_type| !continuous_bars.contains(bar_type));
+    for bar_type in others {
         by_venue
             .entry(bar_type.instrument_id().venue)
             .or_default()
             .push(*bar_type);
     }
-    let now_ns = UnixNanos::from(now);
     for venue_bar_types in by_venue.into_values() {
-        actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now_ns)));
+        actor.subscribe_bars(
+            venue_bar_types,
+            None,
+            Some(subscription_params(now_ns, None)),
+        );
     }
     Ok(())
 }
 
-/// The params of a warmup request building `bar_types`.
-fn request_params<'a>(bar_types: impl Iterator<Item = &'a BarType>) -> Params {
+/// The params of a warmup request building `bar_types`, with the
+/// `continuous` params of their root, if on one.
+fn request_params<'a>(
+    bar_types: impl Iterator<Item = &'a BarType>,
+    continuous: Option<[(String, Value); 2]>,
+) -> Params {
     let bar_types: Vec<String> = bar_types.map(ToString::to_string).collect();
     Params::new(
         [
@@ -168,14 +215,22 @@ fn request_params<'a>(bar_types: impl Iterator<Item = &'a BarType>) -> Params {
             ("skip_first_non_full_bar".to_string(), json!(true)),
             ("update_catalog".to_string(), json!(true)),
         ]
-        .into(),
+        .into_iter()
+        .chain(continuous.into_iter().flatten())
+        .collect(),
     )
 }
 
 /// The params of the subscription to the bars warmed up to `now`: the live
-/// stream starts there.
-fn subscription_params(now: UnixNanos) -> Params {
-    Params::new([("start_ns".to_string(), json!(now.as_u64()))].into())
+/// stream starts there. With the `continuous` params of their root, if on
+/// one.
+fn subscription_params(now: UnixNanos, continuous: Option<[(String, Value); 2]>) -> Params {
+    Params::new(
+        [("start_ns".to_string(), json!(now.as_u64()))]
+            .into_iter()
+            .chain(continuous.into_iter().flatten())
+            .collect(),
+    )
 }
 
 /// Whether the warmup `group` ended with `response`, a response to the
@@ -211,6 +266,27 @@ where
     let mut bars: Vec<Bar> = cache
         .bar_types(Some(&instrument_id), None, AggregationSource::Internal)
         .iter()
+        .flat_map(|bar_type| cache.bars(bar_type).unwrap_or_default())
+        .collect();
+    // The cache holds the newest first.
+    bars.sort_by_key(|bar| bar.ts_event);
+    bars
+}
+
+/// The warmup bars of those of `bar_types` on a root with continuous bars
+/// in `continuous`, oldest first. Nautilus builds a continuous future's
+/// warmup into the cache only and answers its request with no bars, so
+/// `bars` gets none of them: a strategy reads them here once `finished`
+/// tells the group ended. A backtest's group ends in `start`, before any
+/// bar of the run reaches the cache.
+pub fn continuous_bars<A>(actor: &A, bar_types: &[BarType], continuous: &ContinuousBars) -> Vec<Bar>
+where
+    A: DataActor + DataActorNative,
+{
+    let cache = actor.cache();
+    let mut bars: Vec<Bar> = bar_types
+        .iter()
+        .filter(|bar_type| continuous.params(bar_type.instrument_id()).is_some())
         .flat_map(|bar_type| cache.bars(bar_type).unwrap_or_default())
         .collect();
     // The cache holds the newest first.
