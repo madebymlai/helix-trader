@@ -79,10 +79,26 @@ where
 {
     let config = config(trader_id, logging, cache, data_engine, catalog);
     let cache_database = redis::start().await?;
-    let mut node = builder(config, clients)?
+    let mut builder = LiveNodeBuilder::from_config(config)?
+        .with_name("HELIX")
         .with_cache_database_factory(Box::new(cache_database))
-        .with_delay_post_stop_secs(5)
-        .build()?;
+        .with_delay_post_stop_secs(5);
+    for clients in clients {
+        builder = builder
+            .add_data_client_with_routing(
+                None,
+                clients.data_factory,
+                clients.data_config,
+                clients.routing.clone(),
+            )?
+            .add_exec_client_with_routing(
+                None,
+                clients.exec_factory,
+                clients.exec_config,
+                clients.routing,
+            )?;
+    }
+    let mut node = builder.build()?;
     let strategy_id = strategy
         .strategy_id()
         .context("the strategy has no id to claim its instruments with")?;
@@ -99,39 +115,6 @@ where
     let result = node.run().await;
     node.dispose();
     result
-}
-
-/// The builder of the node `config` configures, with the data and
-/// execution clients of each adapter in `clients`, routed as each says.
-/// Nautilus routes data and orders to the client registered for their
-/// venue, then to the default client: a client on one venue gets that
-/// venue's, whichever adapter is the default.
-///
-/// # Errors
-///
-/// Returns an error if `config`'s environment is `Backtest` or two
-/// adapters' clients share a name.
-pub(super) fn builder(
-    config: LiveNodeConfig,
-    clients: Vec<Clients>,
-) -> anyhow::Result<LiveNodeBuilder> {
-    let mut builder = LiveNodeBuilder::from_config(config)?.with_name("HELIX");
-    for clients in clients {
-        builder = builder
-            .add_data_client_with_routing(
-                None,
-                clients.data_factory,
-                clients.data_config,
-                clients.routing.clone(),
-            )?
-            .add_exec_client_with_routing(
-                None,
-                clients.exec_factory,
-                clients.exec_config,
-                clients.routing,
-            )?;
-    }
-    Ok(builder)
 }
 
 /// How often Nautilus purges the cache of closed orders, closed positions

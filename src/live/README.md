@@ -337,7 +337,7 @@ fn add_exec_client_with_routing(/* same shape, Box<dyn ExecutionClientFactory> *
   to the client its `client_id` names, else its venue's, else the default
   (`DataEngine::get_client`). So with IB's clients the default, an
   `….ICMARKETS` order or quote subscription goes to IC's and an
-  `….IBIS` one to IB's, as `mod.rs`'s tests check on a built node.
+  `….IBIS` one to IB's.
 
 ### Strategy and external orders
 
@@ -451,9 +451,7 @@ tests: see [`okx/README.md`](okx/README.md).
 ## Tests
 
 - Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file,
-  for what needs no broker; `mod.rs`'s build a node (`node::builder`,
-  nothing connects) with IC's and IB's clients and check where its engines
-  route each venue's orders and data.
+  for what needs no node and no broker.
 - No integration test runs a live node without a broker yet (the venue
   tests below run `Live` against IB, OKX and IC's demo). One would sit in
   `tests/live/`, a module of its own, one node per process: a node with no
