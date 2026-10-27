@@ -124,14 +124,3 @@ each file stored over its metadata window (midnight to midnight UTC), the
 definitions from `get_range_instruments` as above. That path is gone; the
 catalog it wrote has the same ids, layout and coverage as this one, so a
 fill resumes after it.
-
-## The backfill (2026-10-27)
-
-The four weeks before, 2026-08-31 to 09-28, filled by `fill-catalog` into
-a scratch catalog (quoted and charged $18.86 for MBP-10, $2.63 for trades)
-and its files moved into `catalog/`: a fill does not extend history
-backwards. The scratch fill wrote, as its last depth file, the one
-snapshot at the request end, 09-28 00:00:00, which the first load holds
-too; it was dropped. The catalog now holds 2026-08-31 to 10-23, its files
-contiguous but for the Saturdays. No roll in the span (`GC.v.0` last
-rolled 2026-07-31).
