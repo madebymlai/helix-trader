@@ -140,6 +140,7 @@ fn backtest(dir: &Path) -> Backtest {
         bar_types: vec![BarType::from(HOUR_BARS)],
         start: at("07:00"),
         end: at("17:00"),
+        ticks: vec![],
         warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("100000 USD"),

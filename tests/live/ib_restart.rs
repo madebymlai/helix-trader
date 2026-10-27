@@ -100,6 +100,7 @@ async fn phase() {
         bar_types: vec![BarType::from(
             format!("{INSTRUMENT}-1-MINUTE-MID-INTERNAL").as_str(),
         )],
+        ticks: vec![],
         warmup: SignedDuration::from_mins(10),
     };
     // An empty catalog of its own: the venue answers the whole warmup.

@@ -79,6 +79,7 @@ fn a_strategy_subscribed_to_golds_book_gets_its_stored_snapshots() {
         bar_types: vec![BarType::from(glbx::MINUTE_BARS)],
         start: at("09:00:00"),
         end: at("12:00:00"),
+        ticks: vec![],
         warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),

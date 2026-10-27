@@ -44,6 +44,7 @@ mod backtest_quote_gap;
 mod backtest_session;
 mod backtest_start_on_close;
 mod backtest_stop;
+mod backtest_ticks;
 mod backtest_trade_size_off_grid;
 mod backtest_two_venues;
 mod backtest_warmup;

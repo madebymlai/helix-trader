@@ -89,11 +89,17 @@ The run replays the series the strategy's bars are built from
 composite bar type (`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
 `...-1-MINUTE-LAST-EXTERNAL`, IB's TRADES bars or OKX's candles), or the
 quotes of their instruments. The data engine builds the strategy's
-internal bars from them, and orders fill on them (see Fills). It also
-replays the book depth of each instrument whose catalog stores one (see
-Book data) and the funding of each instrument whose catalog stores funding
-(`Backtest::series`; see OKX on candles), and nothing else. The
-instruments may be on several venues, each simulated (see Venue).
+internal bars from them, and orders fill on them (see Fills). It replays
+the tick series the strategy declares (`Backtest::ticks`, the requirements'
+`ticks`: quotes, trades or book depth of an instrument), one
+`BacktestDataConfig` each, as declared and with no bar types needed
+(`backtest_ticks.rs`). It also replays the book depth of each instrument of
+the bar types whose catalog stores one (see Book data) and the funding of
+each instrument whose catalog stores funding (`Backtest::series`; see OKX
+on candles), and nothing else: an instrument of the ticks alone has no
+undeclared series replayed but its funding. The instruments, of the bar
+types and of the ticks, may be on several venues, each simulated (see
+Venue).
 
 ## The run
 
@@ -315,8 +321,9 @@ let book = BacktestDataConfig::builder()            // book depth: by instrument
     .build()?;
 ```
 
-No config field asks for it: the strategy lists the instrument among its
-`instrument_ids`, and the catalog decides. Nautilus replays the snapshots
+A strategy declaring the book as a tick series (`depth`) gets it as
+declared; otherwise no config field asks for it: the strategy lists the
+instrument among its `instrument_ids`, and the catalog decides. Nautilus replays the snapshots
 with the other data, in time order: to the instrument's venue, and to the
 data engine, which publishes them to a strategy subscribed with
 `subscribe_book_depth` (`on_book_depth`) and, the subscription managed,

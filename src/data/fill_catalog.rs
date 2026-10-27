@@ -163,8 +163,11 @@ fn just_after(last: UnixNanos) -> Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::{DataRequirements, TickData, TickSeries};
     use nautilus_model::{
-        data::{Bar, BarType, QuoteTick},
+        data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
+        enums::AggressorSide,
+        identifiers::TradeId,
         instruments::stubs::{equity_aapl, futures_contract_es},
         types::{Price, Quantity},
     };
@@ -863,5 +866,109 @@ mod tests {
         let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| vec![]).await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains(&format!("bars of {BARS}")), "{err}");
+    }
+
+    /// A trade of ES stamped `ts`.
+    fn trade_at(ts: u64) -> TradeTick {
+        let ts = UnixNanos::from(ts);
+        TradeTick::new(
+            es_id(),
+            Price::from("100.00"),
+            Quantity::from(1),
+            AggressorSide::Buy,
+            TradeId::from(ts.to_string().as_str()),
+            ts,
+            ts,
+        )
+    }
+
+    /// A book depth snapshot of ES stamped `ts`.
+    fn depth_at(ts: u64) -> OrderBookDepth {
+        let mut depth = stub_depth10();
+        let ts = UnixNanos::from(ts);
+        (depth.instrument_id, depth.ts_event, depth.ts_init) = (es_id(), ts, ts);
+        depth
+    }
+
+    /// Fills the instrument and the series of requirements reading ES's
+    /// trades and book depth, no bars, over `[start, end]`, from a source
+    /// of trades at 10, 60 and 150 and snapshots at 20 and 180, and
+    /// returns the result with the windows asked for.
+    async fn fill_ticks(
+        catalog: &mut ParquetDataCatalog,
+        start: u64,
+        end: u64,
+    ) -> (
+        anyhow::Result<()>,
+        Vec<(NautilusDataType, String, u64, u64)>,
+    ) {
+        let tick = |data| TickSeries {
+            data,
+            instrument_id: es_id(),
+        };
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![tick(TickData::Trades), tick(TickData::Depth)],
+            warmup: SignedDuration::ZERO,
+        };
+        let mut asked = Vec::new();
+        let result = fill_catalog(
+            catalog,
+            vec![instrument()],
+            &requirements.catalog_series(),
+            ns(start),
+            ns(end),
+            async |data_type, identifier, from, to| {
+                let (from, to) = (as_ns(from), as_ns(to));
+                asked.push((data_type.clone(), identifier.to_string(), from, to));
+                let within = |ts: &u64| (from..=to).contains(ts);
+                Ok(match data_type {
+                    NautilusDataType::TradeTick => [10, 60, 150]
+                        .into_iter()
+                        .filter(within)
+                        .map(|ts| Data::Trade(trade_at(ts)))
+                        .collect(),
+                    _ => [20, 180]
+                        .into_iter()
+                        .filter(within)
+                        .map(|ts| Data::from(depth_at(ts)))
+                        .collect(),
+                })
+            },
+        )
+        .await;
+        (result, asked)
+    }
+
+    #[tokio::test]
+    async fn declared_ticks_are_stored_and_resume_after_their_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let (r, _) = fill_ticks(&mut catalog, 0, 100).await;
+        r.unwrap();
+        let (r, asked) = fill_ticks(&mut catalog, 0, 200).await;
+        r.unwrap();
+        let es = es_id().to_string();
+        assert_eq!(
+            asked,
+            vec![
+                (NautilusDataType::TradeTick, es.clone(), 101, 200),
+                (NautilusDataType::OrderBookDepth, es.clone(), 101, 200),
+            ]
+        );
+        let trades: Vec<u64> = catalog
+            .trade_ticks(Some(vec![es.clone()]), None, None)
+            .unwrap()
+            .iter()
+            .map(|trade| trade.ts_init.as_u64())
+            .collect();
+        assert_eq!(trades, [10, 60, 150]);
+        let depths: Vec<u64> = catalog
+            .order_book_depths(Some(vec![es]), None, None)
+            .unwrap()
+            .iter()
+            .map(|depth| depth.ts_init.as_u64())
+            .collect();
+        assert_eq!(depths, [20, 180]);
     }
 }

@@ -139,19 +139,39 @@ instrument's quotes itself. Instruments IB serves no TRADES bars for
 (`data/ib/README.md`).
 
 `BarsConfig` states what the strategy needs from data as one
-`strategy::DataRequirements`: its bar types and its warmup, its instruments
-derived from the bar types (`DataRequirements::instrument_ids`).
-`fill_catalog`, backtest and live read them from it (`main` calls
-`config.bars.data_requirements()`), never from the config's fields:
+`strategy::DataRequirements`: its bar types, its tick series and its
+warmup, its instruments derived from the bar types and the ticks
+(`DataRequirements::instrument_ids`). `fill_catalog`, backtest and live
+read them from it (`main` calls `config.bars.data_requirements()`), never
+from the config's fields:
 
 ```rust
 pub fn data_requirements(&self) -> DataRequirements {
     DataRequirements {
         bar_types: self.bar_types(),
+        ticks: self.ticks.clone(),
         warmup: self.warmup,
     }
 }
 ```
+
+A strategy reading ticks as they are, beside or instead of bars, declares
+them as `TickSeries`, a Nautilus data type of one instrument:
+
+```toml
+ticks = [
+    { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
+    { data = "trades", instrument_id = "GC.v.0.GLBX" },
+    { data = "depth", instrument_id = "GC.v.0.GLBX" },
+]
+```
+
+`data` is `quotes` (`QuoteTick`), `trades` (`TradeTick`) or `depth`
+(`OrderBookDepth10`). fill-catalog stores each from its instrument's
+source, and a backtest replays each as declared, one `BacktestDataConfig`
+per series, beside the series the bars are built from; the strategy
+subscribes to them itself. They have no warmup of their own: a strategy
+reading ticks alone gets the default cache. Live does not read them yet.
 
 ### Session
 

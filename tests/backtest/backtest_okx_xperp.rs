@@ -129,6 +129,7 @@ fn an_okx_x_perp_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commi
         bar_types: vec![BarType::from(HOUR_BARS)],
         start,
         end,
+        ticks: vec![],
         warmup: SignedDuration::ZERO,
         // OKX's taker fee, 0.05%.
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),

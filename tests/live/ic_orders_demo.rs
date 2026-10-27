@@ -236,6 +236,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         [XAUUSD, EURUSD].map(|id| BarType::from(format!("{id}-1-MINUTE-MID-INTERNAL").as_str()));
     let requirements = DataRequirements {
         bar_types: bar_types.to_vec(),
+        ticks: vec![],
         warmup: SignedDuration::from_mins(5),
     };
     let record = Arc::new(Mutex::new(Record::default()));

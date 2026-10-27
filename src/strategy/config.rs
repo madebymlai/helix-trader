@@ -7,10 +7,10 @@ use nautilus_model::{
 };
 use serde::Deserialize;
 
-use super::{DataRequirements, session::Session};
+use super::{DataRequirements, TickSeries, session::Session};
 
-/// The config every strategy shares: the bars it reads, their warmup
-/// and their session. A strategy config embeds it with
+/// The config every strategy shares: the bars it reads, their warmup and
+/// their session, and the ticks it reads. A strategy config embeds it with
 /// `#[serde(flatten)]`, so its fields sit at the top of the strategy's TOML,
 /// and the strategy config's `#[serde(deny_unknown_fields)]` rejects any key
 /// that neither takes.
@@ -32,6 +32,12 @@ pub struct BarsConfig {
     pub composite: Option<CompositeSource>,
     /// How far back the warmup history starts.
     pub warmup: SignedDuration,
+    /// The tick series the strategy reads beside its bars, on any venue:
+    /// `ticks = [{ data = "trades", instrument_id = "ESH4.CME" }]`, `data`
+    /// one of `quotes`, `trades`, `depth`. None by default.
+    #[serde(default)]
+    #[builder(default)]
+    pub ticks: Vec<TickSeries>,
     /// The hours traded: only bars wholly inside count. Without one, as on
     /// a market open around the clock, every bar counts.
     #[serde(default)]
@@ -39,12 +45,13 @@ pub struct BarsConfig {
 }
 
 impl BarsConfig {
-    /// The bars, hence the instruments, and the warmup the strategy needs
-    /// from data.
+    /// The bars and the ticks, hence the instruments, and the warmup the
+    /// strategy needs from data.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         DataRequirements {
             bar_types: self.bar_types(),
+            ticks: self.ticks.clone(),
             warmup: self.warmup,
         }
     }
@@ -136,6 +143,7 @@ pub struct CompositeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::TickData;
 
     const TOML: &str = r#"
         instrument_ids = ["ESH4.CME", "ESM4.CME"]
@@ -164,8 +172,24 @@ mod tests {
                     BarType::from("ESH4.CME-1-HOUR-MID-INTERNAL"),
                     BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL")
                 ],
+                ticks: vec![],
                 warmup: SignedDuration::from_hours(720),
             }
+        );
+    }
+
+    #[test]
+    fn states_the_ticks_it_declares_in_its_data_requirements() {
+        let toml =
+            format!("{TOML}\nticks = [{{ data = \"trades\", instrument_id = \"ESH4.CME\" }}]");
+        let config: BarsConfig = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.data_requirements().ticks,
+            [TickSeries {
+                data: TickData::Trades,
+                instrument_id: InstrumentId::from("ESH4.CME"),
+            }]
         );
     }
 

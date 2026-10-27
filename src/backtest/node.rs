@@ -199,6 +199,7 @@ mod tests {
                 BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL"),
                 BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
             ],
+            ticks: vec![],
             warmup: jiff::SignedDuration::from_hours(720),
             fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),

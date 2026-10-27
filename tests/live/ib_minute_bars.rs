@@ -171,6 +171,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     };
     let requirements = DataRequirements {
         bar_types: vec![composite()],
+        ticks: vec![],
         warmup: WARMUP,
     };
     // The catalog: the instrument and its minute bars over

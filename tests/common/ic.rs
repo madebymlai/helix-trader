@@ -131,6 +131,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         bar_types: vec![BarType::from(HOUR_BARS)],
         start: at("09:00:00"),
         end: at("12:00:00"),
+        ticks: vec![],
         warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("2000000 USD"),

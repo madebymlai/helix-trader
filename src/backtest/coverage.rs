@@ -5,8 +5,9 @@
 //! (see the README), so a run on missing data would go on silently with
 //! cold indicators; without its data, orders find no market and no bar is
 //! built. Every instrument must be stored, and each series the run replays
-//! (see `Backtest::series`: those the bars are built from, the stored book
-//! depth and the stored funding of the instruments) covered over
+//! (see `Backtest::series`: those the bars are built from, the declared
+//! ticks, the stored book depth and the stored funding of the instruments)
+//! covered over
 //! `[engine start − warmup, end]` by its stored intervals (inclusive
 //! nanoseconds); the engine starts 1 ns before the run start. The gaps come
 //! from `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
@@ -119,7 +120,10 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::backtest::commission_per_order;
+    use crate::{
+        backtest::commission_per_order,
+        strategy::{TickData, TickSeries},
+    };
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -161,6 +165,7 @@ mod tests {
                 .collect(),
             start: ts("2026-10-02T00:00:00.000000001Z"),
             end: ts("2026-10-31T00:00:00Z"),
+            ticks: vec![],
             warmup: SignedDuration::from_hours(24),
             fee_model: commission_per_order(Money::from("3 USD")).unwrap(),
             balance: Money::from("10000 USD"),
@@ -394,5 +399,36 @@ mod tests {
         catalog(dir.path(), &[]);
         store_book(dir.path(), "2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
         check(&backtest(dir.path(), &[AAPL])).unwrap();
+    }
+
+    /// A backtest of AAPL.XNAS reading its trades and no bars.
+    fn trades_backtest(dir: &Path) -> Backtest {
+        Backtest {
+            bar_types: vec![],
+            ticks: vec![TickSeries {
+                data: TickData::Trades,
+                instrument_id: equity_aapl().id,
+            }],
+            ..backtest(dir, &[])
+        }
+    }
+
+    #[test]
+    fn declared_ticks_not_stored_are_named_with_their_missing_range() {
+        let dir = tempfile::tempdir().unwrap();
+        catalog(dir.path(), QUOTED);
+        let err = check(&trades_backtest(dir.path())).unwrap_err().to_string();
+        assert!(err.contains("trades of AAPL.XNAS"), "{err}");
+        assert!(
+            err.contains("[2026-10-01T00:00:00Z, 2026-10-31T00:00:00Z] is missing"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_instrument_of_declared_ticks_must_be_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = check(&trades_backtest(dir.path())).unwrap_err().to_string();
+        assert!(err.contains("instrument AAPL.XNAS is not stored"), "{err}");
     }
 }

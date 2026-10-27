@@ -200,6 +200,7 @@ pub fn backtest(
         bar_types: vec![BarType::from(MID_BAR_TYPE)],
         start,
         end,
+        ticks: vec![],
         warmup,
         fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),

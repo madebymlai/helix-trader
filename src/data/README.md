@@ -75,7 +75,9 @@ Nautilus has no universe type, and neither do we: the strategy's data
 requirements are the single source of the instruments (see
 `src/strategy/README.md`). `main` reads them and passes Nautilus types to
 `fill_catalog`: `Vec<InstrumentAny>` loaded from the source by id, and the
-series the strategy's bar types are built from (`strategy::catalog_series`).
+series the strategy reads (`DataRequirements::catalog_series`): those its
+bar types are built from (`strategy::catalog_series`) and the tick series it
+declares, each keyed by its instrument id.
 This module never names an instrument. The history window is a run argument
 of `fill-catalog` (`--start`, `--end`), not config.
 

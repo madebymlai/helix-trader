@@ -1,17 +1,19 @@
 //! CME gold's book as Databento's MBP-10 fills the catalog with it:
 //! GC.v.0.GLBX, the continuous front contract, a `FuturesContract`, and
-//! depth snapshots of 10 levels a side keyed by its id, no quotes. Here a
-//! few snapshots on Wednesday 21 October 2026, the day of `common::ic`.
+//! depth snapshots of 10 levels a side keyed by its id, its trades, no
+//! quotes. Here a few snapshots and trades on Wednesday 21 October 2026,
+//! the day of `common::ic`.
 
 use std::path::Path;
 
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{OrderBookDepth, stubs::stub_depth10},
-    identifiers::{InstrumentId, Symbol},
+    data::{OrderBookDepth, TradeTick, stubs::stub_depth10},
+    enums::AggressorSide,
+    identifiers::{InstrumentId, Symbol, TradeId},
     instruments::{InstrumentAny, stubs::futures_contract_es},
-    types::Price,
+    types::{Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use ustr::Ustr;
@@ -70,6 +72,42 @@ pub fn store(dir: &Path) {
     catalog
         .write_to_parquet(
             &depths(),
+            Some(at("08:00:00").into()),
+            Some(at("12:00:00").into()),
+            None,
+        )
+        .unwrap();
+}
+
+/// A trade of one contract at `time` and `price`, bought.
+pub fn trade(time: Timestamp, price: &str) -> TradeTick {
+    TradeTick::new(
+        InstrumentId::from(INSTRUMENT_ID),
+        Price::from(price),
+        Quantity::from(1),
+        AggressorSide::Buy,
+        TradeId::from(time.as_millisecond().to_string().as_str()),
+        time.into(),
+        time.into(),
+    )
+}
+
+/// The trades stored: one before the backtests' start, then two.
+pub fn trades() -> Vec<TradeTick> {
+    vec![
+        trade(at("08:45:00"), "4010.50"),
+        trade(at("09:10:00"), "4011.50"),
+        trade(at("11:50:00"), "4009.50"),
+    ]
+}
+
+/// Writes `trades()` into the catalog in `dir`, stored over 08:00 to
+/// 12:00.
+pub fn store_trades(dir: &Path) {
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    catalog
+        .write_to_parquet(
+            &trades(),
             Some(at("08:00:00").into()),
             Some(at("12:00:00").into()),
             None,

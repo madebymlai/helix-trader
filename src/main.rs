@@ -15,7 +15,7 @@ use helix_trader::{
     data::{DatabentoHistory, IbHistory, IcHistory, OkxHistory, fill_catalog},
     live::{IbAccount, Live},
     strategy::{
-        DataRequirements, catalog_series,
+        DataRequirements,
         ema::{EmaCross, EmaCrossConfig},
     },
 };
@@ -227,12 +227,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Checks everything that needs no gateway, then fills the catalog with the
-/// instruments and the series their bars are built from (see
-/// `strategy::catalog_series`) from each instrument's source: OKX's
-/// archive for OKX instruments (their 1-minute candles), Databento's
-/// historical API for GLBX instruments (their MBP-10 book and trades, the
-/// cost quoted first), IC Markets' cTrader for IC instruments, IB
-/// (connected only if needed) for the others.
+/// instruments and the series the strategy reads, those its bars are built
+/// from and its ticks (see `DataRequirements::catalog_series`), from each
+/// instrument's source: OKX's archive for OKX instruments (their 1-minute
+/// candles), Databento's historical API for GLBX instruments (their MBP-10
+/// book and trades, whatever series are declared; the cost quoted first),
+/// IC Markets' cTrader for IC instruments, IB (connected only if needed)
+/// for the others. Each source refuses a series it does not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -265,7 +266,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
         others.into_iter().partition(|&id| IcHistory::serves(id));
     if !okx_ids.is_empty() {
-        let series = catalog_series(&requirements.of_instruments(&okx_ids).bar_types);
+        let series = requirements.of_instruments(&okx_ids).catalog_series();
         OkxHistory::new()?
             .fill(&mut catalog, &series, start, end)
             .await?;
@@ -277,7 +278,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             .await?;
     }
     if !ic_ids.is_empty() {
-        let series = catalog_series(&requirements.of_instruments(&ic_ids).bar_types);
+        let series = requirements.of_instruments(&ic_ids).catalog_series();
         let ic = IcHistory::connect().await?;
         let filled = ic.fill(&mut catalog, &series, start, end).await;
         ic.disconnect().await;
@@ -286,7 +287,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
         let instruments = ib.instruments(&ib_ids).await?;
-        let series = catalog_series(&requirements.of_instruments(&ib_ids).bar_types);
+        let series = requirements.of_instruments(&ib_ids).catalog_series();
         fill_catalog(
             &mut catalog,
             instruments,
@@ -314,6 +315,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         bar_types: requirements.bar_types,
         start,
         end,
+        ticks: requirements.ticks,
         warmup: requirements.warmup,
         fee_model,
         balance: args.balance,

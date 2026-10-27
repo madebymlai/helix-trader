@@ -32,10 +32,11 @@ pub use self::{
     costs::{commission_per_order, commission_rate},
     report::{Outcome, report},
 };
-use crate::strategy::catalog_series;
+use crate::strategy::{TickSeries, catalog_series};
 
 /// One backtest: a window of the catalog, the bar types whose source data
-/// is replayed and the costs. Every field is required.
+/// is replayed, the tick series replayed as they are, and the costs. Every
+/// field is required.
 #[derive(Debug, Clone)]
 pub struct Backtest {
     /// The catalog directory: instruments, the series the bars are built
@@ -51,6 +52,10 @@ pub struct Backtest {
     /// of (see `series`). The engine's cache is sized to hold their warmup
     /// bars, which reach the strategy only through it.
     pub bar_types: Vec<BarType>,
+    /// The tick series the strategy reads as they are: each replayed as
+    /// declared, beside the series of the bar types. Their instruments
+    /// are read too, each a simulated venue of the run as well.
+    pub ticks: Vec<TickSeries>,
     pub start: Timestamp,
     pub end: Timestamp,
     /// The strategy's warmup: the catalog must cover the series from
@@ -123,19 +128,27 @@ impl Backtest {
             .with_context(|| format!("no engine start before {}", self.start))
     }
 
-    /// The instruments of the bar types, each once.
+    /// The instruments of the bar types and of the ticks, each once.
     fn instruments(&self) -> BTreeSet<InstrumentId> {
-        self.bar_types.iter().map(BarType::instrument_id).collect()
+        let ticks = self.ticks.iter().map(|tick| tick.instrument_id);
+        self.bar_types
+            .iter()
+            .map(BarType::instrument_id)
+            .chain(ticks)
+            .collect()
     }
 
     /// The catalog series the run replays: those the bars are built from
-    /// (see `strategy::catalog_series`), then the book depth of each
-    /// instrument whose catalog stores one, then the funding of each
-    /// instrument whose catalog stores funding, which the venue settles on
-    /// open positions; the book and the funding keyed by the instrument id.
-    /// An instrument read for its book alone, none of the series its bars
+    /// (see `strategy::catalog_series`), then the ticks as declared, then
+    /// the book depth of each instrument of the bar types whose catalog
+    /// stores one, then the funding of each instrument whose catalog
+    /// stores funding, which the venue settles on open positions; the book
+    /// and the funding keyed by the instrument id; each series once. An
+    /// instrument read for its book alone, none of the series its bars
     /// are built from stored (CME gold's book without its quotes), has its
-    /// book replayed and its bars left out: no bar is built of it.
+    /// book replayed and its bars left out: no bar is built of it. An
+    /// instrument of the ticks alone has no book replayed but a declared
+    /// one.
     ///
     /// # Errors
     ///
@@ -153,13 +166,17 @@ impl Backtest {
                     )
                 })
         };
+        let bar_instruments: BTreeSet<InstrumentId> =
+            self.bar_types.iter().map(BarType::instrument_id).collect();
         let mut books = Vec::new();
-        let mut funding = Vec::new();
-        for id in self.instruments() {
+        for id in bar_instruments {
             let book = (NautilusDataType::OrderBookDepth, id.to_string());
             if stored(&book)? {
                 books.push(book);
             }
+        }
+        let mut funding = Vec::new();
+        for id in self.instruments() {
             let rate = (NautilusDataType::FundingRateUpdate, id.to_string());
             if stored(&rate)? {
                 funding.push(rate);
@@ -177,9 +194,18 @@ impl Backtest {
                 built.push(*bar_type);
             }
         }
-        let mut series = catalog_series(&built);
-        series.extend(books);
-        series.extend(funding);
+        let ticks = self.ticks.iter().map(TickSeries::catalog_series);
+        let mut series: Vec<(NautilusDataType, String)> = Vec::new();
+        for entry in catalog_series(&built)
+            .into_iter()
+            .chain(ticks)
+            .chain(books)
+            .chain(funding)
+        {
+            if !series.contains(&entry) {
+                series.push(entry);
+            }
+        }
         Ok(series)
     }
 }
@@ -211,6 +237,7 @@ mod tests {
                 .collect(),
             start: "2026-09-01T00:00:00Z".parse().unwrap(),
             end: "2026-09-30T00:00:00Z".parse().unwrap(),
+            ticks: vec![],
             warmup: SignedDuration::ZERO,
             fee_model: commission_rate(Decimal::ZERO).unwrap(),
             balance: Money::from("10000 USDT"),
