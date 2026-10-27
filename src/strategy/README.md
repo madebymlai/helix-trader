@@ -167,11 +167,15 @@ ticks = [
 ```
 
 `data` is `quotes` (`QuoteTick`), `trades` (`TradeTick`) or `depth`
-(`OrderBookDepth10`). fill-catalog stores each from its instrument's
-source, and a backtest replays each as declared, one `BacktestDataConfig`
+(`OrderBookDepth10`). fill-catalog asks each source for them: OKX, IC and
+IB fetch the declared series and refuse those they do not serve, while
+Databento fetches a GLBX instrument's MBP-10 book and trades whatever is
+declared. A backtest replays each as declared, one `BacktestDataConfig`
 per series, beside the series the bars are built from; the strategy
 subscribes to them itself. They have no warmup of their own: a strategy
-reading ticks alone gets the default cache. Live does not read them yet.
+reading ticks alone gets the default cache. Live sets up the clients of
+their instruments, as of every instrument of the requirements, but
+subscribes to none of them.
 
 ### Session
 

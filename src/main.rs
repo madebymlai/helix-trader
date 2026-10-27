@@ -231,9 +231,10 @@ async fn main() -> anyhow::Result<()> {
 /// from and its ticks (see `DataRequirements::catalog_series`), from each
 /// instrument's source: OKX's archive for OKX instruments (their 1-minute
 /// candles), Databento's historical API for GLBX instruments (their MBP-10
-/// book and trades, whatever series are declared; the cost quoted first),
+/// book and trades, whatever series are declared, the cost quoted first),
 /// IC Markets' cTrader for IC instruments, IB (connected only if needed)
-/// for the others. Each source refuses a series it does not serve.
+/// for the others. OKX, IC and IB refuse a series they do not serve;
+/// Databento takes no series, only the GLBX instruments.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {

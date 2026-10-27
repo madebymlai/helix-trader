@@ -48,8 +48,11 @@ pub struct DataRequirements {
     /// sizes its cache to hold their warmup (see `warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
-    /// of bars: stored and replayed as declared, with no warmup of their
-    /// own. Their instruments are read too.
+    /// of bars: fetched by fill-catalog from their instrument's source
+    /// (Databento fetches a GLBX instrument's book and trades whatever is
+    /// declared) and replayed in a backtest as declared, with no warmup of
+    /// their own. Their instruments are read too: live sets up their
+    /// clients but subscribes to none of the ticks.
     pub ticks: Vec<TickSeries>,
     /// How far back before the run the warmup history starts.
     pub warmup: SignedDuration,
