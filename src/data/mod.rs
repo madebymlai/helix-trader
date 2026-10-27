@@ -13,6 +13,8 @@ mod ib;
 pub use ib::{IbAccount, IbHistory};
 pub(crate) use ib::{IbGateway, data_client_config};
 pub(crate) mod ic;
+mod node_fill;
+pub use node_fill::{FillData, FillRequest, NodeClient, NodeFill, REQUEST_TIMEOUT, missing};
 mod okx;
 pub use ic::{IcConnection, IcHistory};
 pub(crate) use okx::Contract as OkxContract;

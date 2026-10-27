@@ -24,7 +24,8 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            DataResponseEnvelope, QuotesResponse, RequestQuotes, SubscribeQuotes, UnsubscribeQuotes,
+            DataResponseEnvelope, InstrumentResponse, QuotesResponse, RequestInstrument,
+            RequestQuotes, SubscribeQuotes, UnsubscribeQuotes,
         },
     },
 };
@@ -314,6 +315,39 @@ impl DataClient for IcDataClient {
             let symbol_id = lock(&session.quotes).unsubscribe(id)?;
             session.history.unsubscribe_spots(symbol_id)
         })
+    }
+
+    /// Answers with the instrument loaded at connect, in one completed
+    /// response envelope: the data engine writes it to the catalog if asked
+    /// (`update_catalog`) and none of its id is stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request is of more than one instrument, or
+    /// of one not loaded.
+    fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
+        let session = self.session()?;
+        let id = request.single_instrument_id()?;
+        let symbol = session
+            .symbols
+            .get(&id)
+            .with_context(|| format!("{id} is not an instrument the IC data client loaded"))?;
+        let response = InstrumentResponse::new(
+            request.request_id,
+            request.client_id.unwrap_or(self.client_id),
+            id,
+            symbol.instrument.clone(),
+            datetime_to_unix_nanos(request.start),
+            datetime_to_unix_nanos(request.end),
+            self.clock.get_time_ns(),
+            request.params,
+        );
+        let response = DataResponse::Instrument(Box::new(response));
+        send(
+            &self.data_sender,
+            DataEvent::ResponseEnvelope(DataResponseEnvelope::new(response, true, None)),
+        );
+        Ok(())
     }
 
     /// Answers with the quotes over `[start, end]` (end: now if none) from
@@ -973,6 +1007,50 @@ mod tests {
         let gap = (s + hour + 1, s + 2 * hour + 1);
         let before = (gap.0 - 7 * 24 * hour, gap.0);
         assert_eq!(windows, [before, before, gap, gap]);
+    }
+
+    #[tokio::test]
+    async fn an_instrument_request_is_answered_with_the_loaded_instrument_written_back_once() {
+        let (client, mut events, _) = connected(peer(vec![], vec![])).await;
+        skip_instruments(&mut events).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
+        let ask = |engine: &mut DataEngine| {
+            let request = RequestInstrument::new(
+                InstrumentId::from(XAUUSD),
+                Some(at("2026-10-01T00:00:00Z")),
+                Some(at("2026-10-01T01:00:00Z")),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                Some(Params::new(
+                    [("update_catalog".to_string(), serde_json::json!(true))].into(),
+                )),
+            );
+            engine
+                .execute_request(RequestCommand::Instrument(request))
+                .unwrap();
+        };
+
+        ask(&mut engine);
+        let envelope = next_envelope(&mut events).await;
+        engine.response_envelope(envelope.clone());
+        // Asked again: the stored definition is older than the window, so
+        // IC is asked again, and its answer not written twice.
+        ask(&mut engine);
+        engine.response_envelope(next_envelope(&mut events).await);
+
+        let Some(DataResponse::Instrument(answer)) = envelope.response() else {
+            panic!("not an instrument response");
+        };
+        assert_eq!(answer.data.id(), InstrumentId::from(XAUUSD));
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let stored = catalog
+            .instruments(Some(&[XAUUSD.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id(), InstrumentId::from(XAUUSD));
+        assert_eq!(stored[0].price_precision(), 2);
     }
 
     /// The peer sends a live spot while the request's ticks are fetched.

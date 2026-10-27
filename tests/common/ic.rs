@@ -1,6 +1,6 @@
 //! IC Markets' gold on its tick quotes: XAUUSD.ICMARKETS, a `CurrencyPair`
 //! of ounces quoted in USD as `fill-catalog` loads it from IC (IC's margin
-//! on the demo, 1:30, at most 10,000 oz an order), and quotes as IC's fill stores them:
+//! on the demo, 1:30, at most 10,000 oz an order), and quotes as fill-catalog stores them:
 //! stamped at their tick's millisecond, at irregular times, both sides
 //! sized 10,000 (the instrument's maximum order), written through
 //! `fill_catalog`.
@@ -100,8 +100,9 @@ pub fn quotes() -> Vec<QuoteTick> {
     quotes
 }
 
-/// A catalog of the instrument and its quotes from 08:00 to 12:00, written
-/// through `fill_catalog` as IC's fill writes them.
+/// A catalog of the instrument and its quotes from 08:00 to 12:00, stored
+/// over that window as fill-catalog's node writes them back, written
+/// through `fill_catalog`.
 pub fn catalog() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);

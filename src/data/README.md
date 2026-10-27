@@ -8,8 +8,10 @@ signals (Databento's MBP-10 and trades). The strategies' bars themselves are int
 by the Nautilus data engine (see `src/strategy/README.md`, "Bars built from
 quotes"): for a composite bar type from its source bars (IB's 1-minute
 TRADES bars, OKX's 1-minute candles), otherwise from quotes (one per tick
-from IC). The module adds what Nautilus lacks: filling the catalog from a
-historical source.
+from IC). The module fills the catalog from each instrument's historical source:
+through a Nautilus node where the source's data client answers in a way
+Nautilus writes back (Databento, IC; see "The node fill"), and by its own
+writer where it does not yet (IB, OKX; see "fill_catalog.rs").
 
 APIs were read in the `nautilus-*` crates at `0.66.0` and their signatures
 and engine checks rechecked at the `develop` commit the build pins (see
@@ -21,9 +23,10 @@ did not confirm. Examples use the future `ESM4.CME`.
 ```
 data/
   mod.rs           declares the modules, exposes only what others call
-  fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write
+  node_fill.rs     the fill through a node: what the catalog lacks, the node, the actor asking one window at a time
+  fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write (IB, OKX)
   databento/
-    mod.rs         Databento history of GLBX instruments: definitions, MBP-10, trades, a day per request
+    mod.rs         Databento of GLBX instruments: its data client for the node, cost quotes, the dataset's end
     publishers.json Nautilus' Databento publishers, read by the client
     README.md      Databento history: schemas, instrument ids, resume, cost, tests
   ib/
@@ -31,7 +34,7 @@ data/
     gateway.rs     the IB account and the Docker gateway, started and logged in
     README.md      IB history: requests, the gateway, depths, tests
   ic/
-    mod.rs         IC Markets history: the session, instruments, the fill
+    mod.rs         IC Markets history: the session, instruments, tick quotes
     account.rs     the account checked (hedging, IC_ACCOUNT_ID's) and its state
     config.rs      the environment and the credential, from IC_*
     messages.rs    Spotware's protobuf messages, their payload types, the envelope
@@ -50,34 +53,40 @@ data/
     README.md      OKX history: candles, funding, the archive, tests
 ```
 
-The module runs no node and opens no port of its own; the IB part starts the
-Docker IB Gateway it connects to (see `ib/README.md`, "The gateway"). A
-source is an adapter's historical client returning Nautilus types:
-`Vec<InstrumentAny>`, and a series' data as `Vec<Data>` (IB's 1-minute
-bars and OKX's candles, as bars; IC's quotes, merged from ticks). Nautilus
-has no cTrader adapter, so `ic/` is its own client (see `ic/README.md`).
-`ParquetDataCatalog` is the storage.
+Databento and IC fill through a Nautilus live node built for the run
+(`node_fill.rs`): their data clients (Nautilus' `DatabentoDataClient`,
+our `IcDataClient` in `live/ic`) answer its requests, and its data engine
+writes the answers to the catalog. IB and OKX fill without a node: a
+source is an adapter's historical client returning Nautilus types,
+`Vec<InstrumentAny>` and a series' data as `Vec<Data>` (IB's 1-minute
+bars, OKX's candles), written by `fill_catalog`; the IB part starts the
+Docker IB Gateway it connects to (see `ib/README.md`, "The gateway").
+Nautilus has no cTrader adapter, so `ic/` and `live/ic` are its own
+client (see `ic/README.md`). `ParquetDataCatalog` is the storage.
 
 ```
-strategy config ──► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
-        ├──────────► ic/ ──► fill_catalog ──(cTrader Open API, protobuf over WebSocket)──► IC Markets
+strategy config ──► node_fill: a live node, one request at a time, update_catalog
+        │              ├──► DatabentoDataClient ──(historical API)──► Databento (GLBX)
+        │              └──► IcDataClient ──(cTrader Open API)──► IC Markets
+        ├──────────► fill_catalog ──► ib/ ──(HistoricalInteractiveBrokersClient)──► IB Gateway (Docker)
         └──────────► okx/ ──► fill_catalog, one call per archive month or day ──(OKX public API, archive files)──► OKX
                          └──► ParquetDataCatalog ──► backtest
 ```
 
 Only Nautilus types cross this module: no parallel `Symbol` or `Bar`
-types. `fill_catalog` writes the catalog, except Databento's history,
-which `databento/` writes day by day (see "Choosing the source").
+types.
 
 ## Instruments and bar types
 
 Nautilus has no universe type, and neither do we: the strategy's data
 requirements are the single source of the instruments (see
-`src/strategy/README.md`). `main` reads them and passes Nautilus types to
-`fill_catalog`: `Vec<InstrumentAny>` loaded from the source by id, and the
-series the strategy reads (`DataRequirements::catalog_series`): those its
-bar types are built from (`strategy::catalog_series`) and the tick series it
-declares, each keyed by its instrument id.
+`src/strategy/README.md`). `main` reads them and passes Nautilus types on:
+the series the strategy reads (`DataRequirements::catalog_series`), those
+its bar types are built from (`strategy::catalog_series`) and the tick
+series it declares, each keyed by its instrument id; to the node fill as
+slices, each series on a contract over its slice
+(`DataRequirements::slices`), to `fill_catalog` with the
+`Vec<InstrumentAny>` loaded from the source by id.
 This module never names an instrument. The history window is a run argument
 of `fill-catalog` (`--start`, `--end`), not config.
 
@@ -163,38 +172,120 @@ instrument per id. With IB as the source it should not arise (about two
 years of history, unverified). A longer history needs one catalog per
 decade, or a symbol rewrite that breaks the match with the live broker.
 
+## The node fill
+
+`node_fill.rs` fills the catalog through a live node built for the run,
+with the data clients of the sources asked and the catalog registered
+(writable), and an actor asking for one window at a time.
+
+```rust
+pub fn missing(catalog: &ParquetDataCatalog, slices: &[SeriesSlice]) -> anyhow::Result<Vec<FillRequest>>;
+pub struct FillRequest { pub data: FillData, pub instrument_id: InstrumentId, pub from: Timestamp, pub to: Timestamp }
+pub enum FillData { Instrument, Quotes, Trades, Depth }
+pub struct NodeClient { pub factory: Box<dyn DataClientFactory>, pub config: Box<dyn ClientConfig>, pub routing: RoutingConfig }
+impl NodeFill {
+    pub fn new() -> Self;
+    pub fn add(&mut self, client: NodeClient, requests: &[FillRequest], period: impl Fn(FillData) -> SignedDuration);
+    pub async fn run(self, catalog_dir: &Path, timeout: SignedDuration) -> anyhow::Result<()>;
+}
+```
+
+- **What is missing.** `missing` asks the catalog what it lacks of each
+  slice, by Nautilus' own count (`get_missing_intervals_for_request`,
+  the call behind the data engine's catalog lookup): contract by contract,
+  its definition over the span of what it lacks, then each series'
+  missing intervals. A rolled root's contracts come each over its slice;
+  one contract's slices of a series from two tables are merged first. A
+  covered window asks for nothing: no node is built. Quotes, trades and
+  book depths only (`FillData`): a source filling bars or funding through
+  the node does not exist yet.
+- **Windows.** `add` cuts each series request into windows of the
+  source's period (`DatabentoHistory::period`: three hours of MBP-10, a
+  day of anything else; `IcHistory::period`: a week), aligned on multiples
+  of the period from the Unix epoch (a day: each UTC midnight), each
+  ending 1 ns before the next: the most one request, and one catalog
+  file, holds. A source with nothing missing is left out of the node.
+- **The node.** Environment `Live`, trader `FILL-001`, no execution
+  client, no cache database, no state saved. Databento's client is routed
+  by venue (`GLBX`), IC's names its own. Neither opens a live feed:
+  Databento's `connect` starts nothing (its gateway opens on a
+  subscription only), IC's connects its cTrader session and loads its
+  instruments.
+- **The actor** asks for each request in order, the next once the one
+  before is answered, with `update_catalog`: the data engine asks the
+  client for what the catalog lacks of the window and writes the answer
+  back over that window. The definition comes first: its price precision
+  goes with each data request of the instrument (`price_precision`, so
+  Databento's client asks for no definitions of its own). A definition
+  already stored is served from the catalog; a new one is written once
+  per id.
+- **Errors.** The first failure stops the node, and `run` returns it,
+  naming the request: a client answering with a failure (Databento's
+  `RequestFailed`, IC's failure envelope; nothing of the window is written,
+  even the rows it got), a request the client refuses, or no answer within
+  the timeout (`REQUEST_TIMEOUT`, 30 minutes by the wall clock: Nautilus'
+  requests have none). So fill-catalog exits non-zero. What was written
+  before stays; a re-run asks only for what is still missing.
+- **Coverage check.** Nautilus only logs a failed write-back, so the
+  actor would see success: after the run, every window that came back
+  with rows must be covered in the catalog, or `run` fails naming it.
+  Temporary: to be deleted once nautilus_trader#5474 (write-back failure
+  reported to the requester) is fixed.
+
+What Nautilus records:
+
+- An answer is stored over its window, whatever its rows' span, so a
+  weekend inside a window is covered and never asked again.
+- An empty answer records coverage only when it touches a stored interval
+  (its start 1 ns after one's end, or its end 1 ns before one's start);
+  otherwise nothing, and the next fill asks for it again. Asked in order,
+  the empty windows after stored data (a weekend, a Saturday at the end of
+  a fill) join it; empty windows before any stored data of the series
+  (before IC's history, a contract's quiet first hours) are asked again on
+  each fill, the last of them joining the data after it each time.
+- A first fill with no data at all records nothing and is no error.
+- One request at a time: two windows the catalog lacks, asked together,
+  would each be asked whole, and an empty one would record nothing, since
+  the window next to it is not stored yet; and windows meeting on an
+  instant (`[d, d + 1 day]`) would both cover it, the second write failing
+  as an overlap (`write_to_parquet`'s disjoint check).
+
+### Memory
+
+A window's rows are held by the client's response, the data engine
+(without a copy for a window the catalog lacks entirely) and the
+catalog's write, which copies them once more
+(`write_grouped_to_parquet`). Three hours of COMEX gold MBP-10 are about a
+million snapshots, about 1.1 GB decoded, twice that while written; a
+whole day (about 7 million) would be some 7.5 GB, twice that while
+written. The window, not the fill, bounds the memory, and a window is one
+catalog file.
+
 ## fill_catalog.rs
 
-Fills the catalog over one window with the instruments and the series their
-bars are built from (Nautilus `Data`: bars for a composite bar type, or
+Fills the catalog for IB and OKX, until nautilus_trader#5472 (IB) and
+#5473 (OKX) are fixed and they fill through the node (see "Which sources
+fill without a node"), over one window with the instruments and the
+series their bars are built from (Nautilus `Data`: bars for a composite bar type, or
 quotes; the backtest builds the strategies' bars from
 them and fills orders on them, see `src/backtest/README.md`). A source's historical client is a plain
 async call returning Nautilus types, the pattern the Nautilus docs use for
 every source (a client or loader, then `catalog.write_*`). Filling the
 catalog is its own process run.
 
-### Why not a node
+### Which sources fill without a node
 
-The generic history path in Rust is `DataClient` behind a `LiveNode`:
-`DataClient::request_bars` returns `anyhow::Result<()>`, an acknowledgement
-without data, and the bars reach an actor's
-`on_historical_bars` through the data engine. That callback carries no
-request id (an empty response arrives as an empty slice), and an `Err` from
-it is only logged, so a failed fill would still exit cleanly. The historical
-clients return the data and propagate errors with `?`.
-
-### Nautilus persists only certified responses
-
-The data engine serves a request from a registered catalog and asks the
-adapter for the missing intervals; with the `update_catalog` param it
-writes an adapter's answer back to the catalog, over the request's window,
-but only an answer the adapter sends as an explicit completed response
-envelope without a failure (`DataResponseEnvelope`; the engine's
-`update_catalog_from_response`, `data/src/engine/streaming.rs`): IC's data
-client does (`live/ic/README.md`), IB's and OKX's reply with the payload
-alone, which Nautilus does not take as complete coverage. So a live node
-fills the catalog with IC's quotes as its warmups fetch them, and nothing
-else; filling it with a window of history, from any source, is ours.
+Nautilus' own path for history is a request to a data client behind a
+node: the data engine serves what a registered catalog holds, asks the
+client for the missing intervals, and, with the `update_catalog` param,
+writes the answer back over the window asked for. It writes back only an
+answer the client sends as an explicit completed response envelope
+without a failure (`DataResponseEnvelope`; the engine's
+`update_catalog_from_response`, `data/src/engine/streaming.rs`).
+Databento's client and IC's do, so they fill through the node (see "The
+node fill"). IB's and OKX's reply with the payload alone, which Nautilus
+does not take as complete coverage, so they keep `fill_catalog` until
+nautilus_trader#5472 (IB) and #5473 (OKX) are fixed.
 
 ### Interface
 
@@ -210,8 +301,7 @@ pub async fn fill_catalog(
 ```
 
 `fetch` is the seam: `ib/` supplies `IbHistory::data` over the whole window,
-`ic/` one per week (see `ic/README.md`, "The fill"), `okx/` one per
-archive month or day (see `okx/README.md`); tests pass
+`okx/` one per archive month or day (see `okx/README.md`); tests pass
 closures with canned data. A fetch over `[from, to]` returns the items of
 the series whose `ts_init` lies in it, the closed interval stored
 (Nautilus' catalog intervals are closed, the next contiguous when it starts
@@ -330,25 +420,27 @@ catalog.query_last_timestamp(..)                     // the stored end a re-run 
 OKX's archive for `….OKX` ids, Databento for `….GLBX` ids, IC's cTrader
 for `….ICMARKETS`, IB for every other venue. A config may hold several;
 IB's gateway starts, and IC connects, only if one of their instruments is
-in it.
+in it and, for IC and Databento, something of it is missing. The node runs
+after OKX's fill and before IB's.
 
 - `ib/` fills IB instruments' 1-minute TRADES bars through the Docker IB Gateway
   it starts: see [`ib/README.md`](ib/README.md).
-- `ic/` fills IC Markets' forex and metals instruments and their quotes,
-  merged from tick history, through Spotware's cTrader Open API: see
-  [`ic/README.md`](ic/README.md).
+- IC Markets' forex and metals instruments and their quotes, merged from
+  tick history through Spotware's cTrader Open API, fill through the node
+  by IC's data client (`live/ic`), a week a request: see
+  [`ic/README.md`](ic/README.md). IC serves quotes only
+  (`IcHistory::quoted`).
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
-- `databento/` fills GLBX instruments' MBP-10 book (`OrderBookDepth`) and
-  trades, with their definitions, from Databento's historical API, one
-  UTC day per request after logging Databento's quotes. It takes the
-  GLBX series of `DataRequirements::slices`, so a rolled root (`GC.GLBX`)
-  is filled contract by contract, each over its slice. It writes the
-  catalog itself rather than through `fill_catalog`, which drops items
-  sharing a `ts_init` (book updates and trades often do) and holds a whole
-  window in memory (a day of MBP-10 is about 7 GB decoded): see
-  [`databento/README.md`](databento/README.md). A backtest replays the
-  book of each instrument the strategy lists, from the catalog
+- GLBX instruments' series as declared (MBP-10 book as `OrderBookDepth`,
+  trades, quotes), with their definitions, fill through the node by
+  Nautilus' Databento data client, three hours of MBP-10 or a day of
+  anything else a request, after `databento/` checks the dataset's end and
+  logs Databento's quote for every request: see
+  [`databento/README.md`](databento/README.md). The GLBX series come from
+  `DataRequirements::slices`, so a rolled root (`GC.GLBX`) is filled
+  contract by contract, each over its slice. A backtest replays the book
+  of each instrument the strategy lists, from the catalog
   (`backtest/README.md`, "Book data").
 
 ## Tests
@@ -371,4 +463,27 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   - a failure keeps the instruments filled before it;
   - a minute-cadence source stored every minute and resumed with only the
     new minutes.
+- `node_fill.rs`, on temp catalogs: the windows of a period, cut on its
+  multiples from the epoch (three hours, a day ending at midnight); what an
+  empty catalog lacks (a definition, then each series over its slice, a
+  rolled root's contracts each over its own), only what is outside a
+  stored interval, nothing (not even a definition) for a covered window,
+  one request for a series declared twice; bars refused, naming the
+  series; the coverage check failing a window answered with rows but not
+  stored, not a definition or an empty window.
+- `tests/node_fill/`, fill-catalog's fill at its seam: `missing`, then a
+  `NodeFill` whose live node holds a fake data client answering as
+  Databento's, and the catalog:
+  - a day a request, each written back, the definition first and its
+    price precision on each data request, the empty weekend after Friday
+    joining it; a wider fill asking only the new day (the definition from
+    the catalog); the same fill again building no node;
+  - a client answering 50 ms later asked one window at a time, in order;
+    empty windows before any stored data recorded only once they touch it;
+  - a failed request (`RequestFailed`, a failure envelope, a refused
+    request) failing the fill naming the request and its reason, writing
+    nothing, asking nothing after it; a silent client failing it after the
+    timeout;
+  - rows the engine does not write back (another contract's) failing the
+    coverage check; a covered window asking nothing.
 - `ib/`, `ib/gateway.rs`, `ic/`, `okx/` and `databento/`: see their READMEs.

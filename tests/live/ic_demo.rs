@@ -1,8 +1,8 @@
 //! End to end on IC Markets' cTrader demo: the session authenticates the
 //! app and the demo account, XAU/USD and EUR/USD load as currency pairs at
 //! IC's margins,
-//! a day of XAU/USD's quotes fills a temporary catalog, in one fill and
-//! resumed, and the execution client reads the account: its state and its
+//! a day of XAU/USD's quotes fills a temporary catalog through the node
+//! (IC's data client), in one fill and resumed, and the execution client reads the account: its state and its
 //! startup reconciliation. It needs the app's `IC_CLIENT_ID` and `IC_CLIENT_SECRET`, the
 //! demo account's `IC_ACCESS_TOKEN`, `IC_REFRESH_TOKEN` (they seed the
 //! token file, which then holds the latest pair) and `IC_ACCOUNT_ID`, and
@@ -20,14 +20,18 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::{IcConnection, IcHistory},
-    live::{IcExecutionClientConfig, IcExecutionClientFactory},
+    data::{IcConnection, IcHistory, NodeClient, NodeFill, REQUEST_TIMEOUT, missing},
+    live::{
+        IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
+    },
+    strategy::{DataRequirements, TickData, TickSeries},
 };
 use jiff::Timestamp;
 use nautilus_common::{
     cache::Cache, clock::VirtualClock, factories::ExecutionClientFactory,
     live::runner::replace_exec_event_sender, messages::ExecutionEvent,
 };
+use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     accounts::AccountAny,
     data::{NautilusDataType, QuoteTick},
@@ -110,9 +114,41 @@ fn stored(catalog: &mut ParquetDataCatalog) -> Vec<QuoteTick> {
         .unwrap()
 }
 
+/// Fills the catalog in `dir` with the quotes of `instrument_id` over
+/// `[start, end]` through the node, as fill-catalog does: IC's data client
+/// on the connection of the environment.
+pub(crate) async fn fill_quotes_through_node(
+    dir: &std::path::Path,
+    instrument_id: InstrumentId,
+    start: Timestamp,
+    end: Timestamp,
+) -> anyhow::Result<()> {
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![TickSeries {
+            data: TickData::Quotes,
+            instrument_id,
+        }],
+        warmup: jiff::SignedDuration::ZERO,
+    };
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    let requests = missing(&catalog, &requirements.slices(start, end))?;
+    let client = NodeClient {
+        factory: Box::new(IcDataClientFactory),
+        config: Box::new(IcDataClientConfig {
+            connection: IcConnection::from_env()?,
+            instrument_ids: vec![instrument_id],
+        }),
+        routing: RoutingConfig::default(),
+    };
+    let mut node = NodeFill::new();
+    node.add(client, &requests, IcHistory::period);
+    node.run(dir, REQUEST_TIMEOUT).await
+}
+
 /// A day of XAU/USD: Wednesday 21 October 2026 UTC, split for the resumed
 /// fill at a time between two milliseconds.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     if !opted_in("a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed") {
         return;
@@ -121,21 +157,21 @@ async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     let start: Timestamp = "2026-10-21T00:00:00Z".parse().unwrap();
     let middle: Timestamp = "2026-10-21T12:00:00.000000500Z".parse().unwrap();
     let end: Timestamp = "2026-10-22T00:00:00Z".parse().unwrap();
-    let series = [(NautilusDataType::QuoteTick, XAUUSD.to_owned())];
-    let (one, resumed) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut one = ParquetDataCatalog::new(one.path(), None, None, None, None);
-    let mut resumed = ParquetDataCatalog::new(resumed.path(), None, None, None, None);
-    let history = IcHistory::connect().await.unwrap();
+    let gold = InstrumentId::from(XAUUSD);
+    let (one_dir, resumed_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
 
-    let filled = async {
-        history.fill(&mut one, &series, start, end).await?;
-        history.fill(&mut resumed, &series, start, middle).await?;
-        history.fill(&mut resumed, &series, start, end).await
-    }
-    .await;
-    history.disconnect().await;
+    fill_quotes_through_node(one_dir.path(), gold, start, end)
+        .await
+        .unwrap();
+    fill_quotes_through_node(resumed_dir.path(), gold, start, middle)
+        .await
+        .unwrap();
+    fill_quotes_through_node(resumed_dir.path(), gold, start, end)
+        .await
+        .unwrap();
 
-    filled.unwrap();
+    let mut one = ParquetDataCatalog::new(one_dir.path(), None, None, None, None);
+    let mut resumed = ParquetDataCatalog::new(resumed_dir.path(), None, None, None, None);
     let quotes = stored(&mut one);
     println!(
         "{} quotes, first {:?}, last {:?}",

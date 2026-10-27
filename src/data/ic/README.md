@@ -1,8 +1,9 @@
 # IC Markets history and the cTrader session
 
 `data/ic/` fetches IC Markets' forex and metals instruments and their
-quotes, merged from cTrader's BID and ASK tick history, for `fill_catalog`,
-and holds what the live node's clients in `live/ic/` share with it: the
+quotes, merged from cTrader's BID and ASK tick history, which
+fill-catalog's node asks IC's data client (`live/ic/`) for, and holds what
+that client and the execution client share with it: the
 cTrader session (`IcHistory`), its connection, messages and credential,
 the tick merge and the account check. All of it goes through Spotware's
 cTrader Open API: binary protobuf frames over Nautilus'
@@ -19,8 +20,8 @@ primitives"). The messages are Spotware's `.proto`
 files, vendored in `proto/` (the commit is in `build.rs`) and compiled with
 prost; `build.rs` needs `protoc`.
 
-Neighbouring docs: the fill algorithm (resume, coverage, writing) is in
-`data/README.md`, "fill_catalog.rs"; the data and execution clients (live
+Neighbouring docs: the fill (what is missing, the node, coverage) is in
+`data/README.md`, "The node fill"; the data and execution clients (live
 quotes, quote requests, reconciliation), their factories, configs and
 place in the live node in `live/ic/README.md`.
 
@@ -28,7 +29,7 @@ place in the live node in `live/ic/README.md`.
 
 ```
 ic/
-  mod.rs        IcHistory: connect, instruments, the fill, the account,
+  mod.rs        IcHistory: connect, instruments, tick quotes, the account,
                 open positions, deals and orders, trade requests and events
   account.rs    the account checked (hedging, IC_ACCOUNT_ID's) and its state
   config.rs     IcEnvironment, IcCredential and IcConnection, from IC_*
@@ -51,14 +52,16 @@ IcHistory::connect().await -> anyhow::Result<IcHistory>   // reads IC_*, authent
 IcHistory::connect_as(&connection).await                  // the same, on a connection read before
 IcHistory::serves(id: InstrumentId) -> bool               // the ICMARKETS venue
 history.instruments(&ids).await -> anyhow::Result<Vec<InstrumentAny>>
-history.fill(&mut catalog, series, start, end).await      // instruments, then quotes
+IcHistory::quoted(series) -> anyhow::Result<Vec<InstrumentId>> // the quotes' instruments, or an error
+IcHistory::period(data: FillData) -> SignedDuration      // a week: one request of the node fill
 history.check_account().await -> anyhow::Result<()>       // hedging, IC_ACCOUNT_ID's
 history.disconnect().await
 connection.account_id() -> AccountId                      // ICMARKETS-DEMO or ICMARKETS-LIVE
 ```
 
-`fill` refuses a series other than quotes before any request, then fills
-each instrument's quotes a week at a time (see "The fill").
+`quoted` refuses a series other than the quotes of an IC instrument
+before anything connects; fill-catalog gives the instruments to IC's data
+client (see "The fill").
 
 ## Connecting
 
@@ -369,24 +372,30 @@ that never limits its orders (its maximum, 100,000,000) overflows a bar of
 
 ### The fill
 
-`fill` loads the instruments, then for each one calls `fill_catalog` once
-per week from where its quotes end (or `start`), the last period taking the
-remainder, so a fill holds at most two weeks of ticks in memory and a
-stopped run keeps the weeks done. The `fill_catalog` rules hold
-(`../README.md`, "fill_catalog.rs"):
+fill-catalog fills IC's quotes through its node (`../README.md`, "The
+node fill"): IC's data client loads the instruments `IcHistory::quoted`
+gives at connect; the node asks it for each instrument's definition
+(`request_instrument`, the instrument loaded, written to the catalog once
+per id) and then for its quotes a week a request (`IcHistory::period`),
+which it answers from `quote_ticks` in one completed response envelope,
+written back by the data engine over the week. A request holds at most two
+weeks of ticks in memory (the week and, per side, the week before it for
+the last tick) and always holds ticks, so only a short window can end in a
+closed market.
 
-- **Resume**: from 1 ns after the stored end, whatever `start`.
-- **Backwards**: a `start` before the stored quotes is refused before any
-  tick request.
-- **Missing range**: a first window without ticks (before IC's history,
-  or a weekend alone) is an error naming the series and the window.
-- **No ticks**: a period without ticks after the first (a weekend, a
-  holiday, a quiet minute) is no error; a resumed empty period records no
-  coverage, and the next period asks for it again. A week always holds
-  ticks, so only a short window can end in a closed market.
+- **Resume**: the node asks only for what the catalog lacks, by Nautilus'
+  count: a window inside the stored quotes asks for nothing, a wider one
+  for what is outside, before or after.
+- **Failure**: a failed tick request ends the answer with a failure
+  reason (the quotes before it kept in the envelope): Nautilus writes none
+  of the window back, and fill-catalog fails naming it.
+- **No ticks**: a window without ticks (before IC's history, a weekend
+  alone) is no error; Nautilus records it covered only when it touches
+  stored quotes, so one before any stored quotes is asked again on the
+  next fill.
 
-Coverage is the window asked for: a first window partly before IC's history
-stores what IC has, silently, as for IB and OKX.
+Coverage is the window asked for: a first window partly before IC's
+history stores what IC has, silently.
 
 ### Probe (2026-10-26)
 
@@ -533,14 +542,8 @@ synthetic.
     buy of 1 oz of gold (about 3,590 EUR) on a margin account of 1,000 EUR
     at those margins, and denying it at margins of 1
     (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE`); an
-    unlisted symbol and another venue refused; a series other than quotes
-    refused before any request; a fill, against a peer serving ticks as
-    cTrader does: the quotes merged and stored with the instrument over the
-    window, each side's requests (the week before, the window to 1 ms past
-    its end), a resume from 1 ms after the stored end with no quote twice,
-    a `start` before the stored quotes refused before any tick request, a
-    first window without ticks naming the series and the window, a week
-    without ticks no error and a long fill stored a week at a time.
+    unlisted symbol and another venue refused; a series other than the
+    quotes of an IC instrument refused (`quoted`), naming it.
   - `websocket/` (spots): a subscription asks for timestamps and its
     events come through; a symbol subscribed twice is asked for once; after
     a reconnect the subscriptions are sent again, an unsubscribed one not;
@@ -554,7 +557,9 @@ synthetic.
   margin) and reconciles it over a week's lookback (nothing open, no deal,
   complete); XAUUSD and EURUSD loaded as currency pairs at IC's margins; a day of XAUUSD (2026-10-21, 149,043 quotes) stored the same in
   one fill and resumed at a time between two milliseconds, one quote a
-  millisecond, none crossed, sized 10,000, covered over the day. Passed on
+  millisecond, none crossed, sized 10,000, covered over the day; the fill
+  goes through the node (IC's data client) since IC's own fill was
+  replaced, a version of the test not run yet. Passed on
   2026-10-26 (about 20 s), the execution client's test too; passed again
   that day (about 18:10 UTC, 21 s) with the instruments at IC's margins, 1 / 30
   both.

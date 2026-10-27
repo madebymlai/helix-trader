@@ -314,6 +314,10 @@ Nautilus position ids either way.
   live and backtest quotes match.
 - **Requests**: `request_quotes` answers from the tick history up to the
   request's end or now; live quotes of the instrument wait for the response.
+  `request_instrument` answers with the instrument loaded at connect. Both
+  answer in one completed response envelope, which the data engine writes
+  back to the catalog if asked (`update_catalog`): how fill-catalog fills
+  IC's quotes (`../../data/README.md`, "The node fill").
 - **Bars**: built by Nautilus from the quotes (internal bar types such as
   `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`). `request_bars` and
   `subscribe_bars` of external bars are not served, so composite bar types
