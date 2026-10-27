@@ -273,9 +273,16 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             .await?;
     }
     if !glbx_ids.is_empty() {
+        // Databento is asked for dated contracts: a rolled root's series
+        // are filled contract by contract, each over its slice.
+        let slices: Vec<_> = requirements
+            .slices(start, end)
+            .into_iter()
+            .filter(|slice| DatabentoHistory::serves(slice.slice.instrument_id))
+            .collect();
         let api_key = std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
         DatabentoHistory::new(&api_key)?
-            .fill(&catalog, &glbx_ids, start, end)
+            .fill(&catalog, &slices)
             .await?;
     }
     if !ic_ids.is_empty() {

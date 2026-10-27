@@ -25,9 +25,16 @@ fill here. The API key is `DATABENTO_API_KEY`, from the environment or
 ```rust
 DatabentoHistory::new(api_key: &str) -> anyhow::Result<DatabentoHistory>
 DatabentoHistory::serves(id: InstrumentId) -> bool
-history.fill(&self, catalog: &ParquetDataCatalog, ids: &[InstrumentId],
-             start: Timestamp, end: Timestamp) -> anyhow::Result<()>
+history.fill(&self, catalog: &ParquetDataCatalog, slices: &[SeriesSlice])
+    -> anyhow::Result<()>
 ```
+
+`fill` takes the GLBX series of `DataRequirements::slices(start, end)`
+(`strategy/README.md`): each series on a contract over its slice. A plain
+instrument's slice is the whole window on itself; a rolled root
+(`GC.GLBX`) has one slice per contract that stands for it in the window
+(`rolls/README.md`). The fill works per contract over the span its slices
+cover, whatever their series, and never sees a root.
 
 `new` builds Nautilus' client with `publishers.json`, Nautilus' map of
 Databento publishers to venues, copied from `crates/adapters/databento/`
@@ -57,33 +64,46 @@ the contract the series holds (its expiry: 2026-12-29 for the four weeks
 loaded, December's), under the series' id and with `GC.v.0` as raw symbol;
 price increment 0.10, precision 2. `use_exchange_as_venue` (venue `XCEC`) is off: the venue stays `GLBX`.
 
+A dated contract (`GCZ6`, a rolled root's contract, from its slice) is a
+raw symbol to `infer_symbology_type`, so it is requested, and quoted, with
+raw symbology: its records and definitions come back under its own id
+(`GCZ6.GLBX`), the definitions with `GCZ6` as raw symbol. A rolled root
+thus fills one series and one set of definitions per contract, each over
+its slice, and the root itself is never stored.
+
 A definition fetch also caches the symbol's price precision in the client
 (`cache_price_precisions`), which the MBP-10 and trades requests then
 resolve per record.
 
 ## Resume, days and cost
 
-Per instrument, each series (MBP-10, trades) resumes as `fill_catalog`
+Per contract, each series (MBP-10, trades) resumes as `fill_catalog`
 does: from 1 ns after its stored range (`query_last_timestamp`), whatever
-`start`, to `end`; a `start` before the stored range is an error (extending
-history backwards is not supported). A covered window asks for nothing: a
-`fill-catalog` over the stored weeks makes no request at all.
+its slice's start, to its slice's end; a slice starting before the stored
+range is an error (extending history backwards is not supported). A
+contract's slice past its first starts at its roll, so a later, wider
+window resumes each contract after what it holds and starts a new contract
+at its slice. A covered window asks for nothing: a `fill-catalog` over the
+stored weeks makes no request at all.
 
-Otherwise, before any data request:
+`plan` gives these windows for every contract, before any request: a
+contract's slices from several tables (`GC.GLBX` and `GCZ6.GLBX` both
+declared) merge into one span. Then, if anything is missing, before any
+data request:
 
 1. An `end` past the data Databento has (`metadata.get_dataset_range`;
    GLBX.MDP3 lags real time, on 2026-10-26 at 18:42 UTC it ended at 18:30)
    is an error: a request over it fails (422, `data_end_after_available_end`).
-2. Databento's quote for each series' missing window is logged
-   (`metadata.get_cost`, free).
-3. The definitions over the missing span are fetched (a few kilobytes,
-   quoted $0.00 for four weeks) and those later than any stored written.
+2. Databento's quote for each series' missing window of every contract is
+   logged (`metadata.get_cost`, free), then their total.
 
-Then each series is fetched one UTC day per request (the window cut at
-each midnight; the first and last day may be partial) and stored over the
-day asked for, so consecutive days are contiguous in the catalog. A day of
-GC MBP-10 is about 6.8 million snapshots: one request holds one day, some
-7.5 GB decoded. A day is written in catalog files of at most 1,000,000
+Then, contract by contract, the definitions over its missing span are
+fetched (a few kilobytes, quoted $0.00 for four weeks) and those later
+than any stored written, and each series is fetched one UTC day per
+request (the window cut at each midnight; the first and last day may be
+partial) and stored over the day asked for, so consecutive days are
+contiguous in the catalog. A day of GC MBP-10 is about 6.8 million
+snapshots: one request holds one day, some 7.5 GB decoded. A day is written in catalog files of at most 1,000,000
 rows, each ending 1 ns before the next starts and never splitting the
 records of one timestamp. A record of another instrument or outside its
 day is an error. Any error stops the run; the days stored stay, and a
@@ -102,6 +122,14 @@ returning it.
 
 Without network:
 
+- the plan, on a temp catalog, across GC's roll of 2026-07-31: a rolled
+  root (`GC.GLBX`) is fetched contract by contract, `GCQ6` to 1 ns before
+  the roll and `GCZ6` from it; each contract resumes after its stored
+  range, series by series, and one stored over its slice is left out; a
+  contract declared as itself and through its root is fetched once, over
+  both; a dated contract declared as itself (`GCZ6.GLBX`) is fetched over
+  the whole window; a series not on `GLBX` is refused;
+- a contract is requested by its raw symbol (`GCZ6`);
 - `serves`: `GLBX` ids only;
 - resume window: a series not stored over the whole window; a stored one
   after its range, whatever `start`; a covered window (as the loaded
@@ -114,7 +142,8 @@ Without network:
   record of another instrument or outside the day refused.
 
 The requests themselves are not unit-tested: no test places a request,
-paid or free.
+paid or free. Every quote coming before any data request is the order of
+the two loops in `fill`.
 
 ## The first load (2026-10-26)
 

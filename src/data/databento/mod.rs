@@ -3,10 +3,12 @@
 //! and stored in the catalog: MBP-10 as `OrderBookDepth` snapshots, trades
 //! as `TradeTick`s, with the instrument's definitions.
 //!
+//! A fill takes series slices (`strategy::SeriesSlice`), so a rolled root
+//! is filled contract by contract, each by its raw symbol over its slice.
 //! Each series resumes after what the catalog holds and is fetched one UTC
 //! day per request, so a day of MBP-10 (about 7 million snapshots) is the
-//! most held at once. Databento's quote for the missing days is logged
-//! before fetching them. See `README.md`.
+//! most held at once. Databento's quotes for the missing days of every
+//! contract are logged before fetching any. See `README.md`.
 
 use std::path::PathBuf;
 
@@ -29,6 +31,8 @@ use nautilus_persistence::{
     catalog::types::{HasCatalogDataType, data_path_prefix},
 };
 use nautilus_serialization::arrow::EncodeToRecordBatch;
+
+use crate::strategy::SeriesSlice;
 
 /// Nautilus' map of Databento publishers to venues, copied from
 /// `crates/adapters/databento/publishers.json` at the pinned commit: the
@@ -89,60 +93,32 @@ impl DatabentoHistory {
         id.venue == Venue::GLBX()
     }
 
-    /// Fills `catalog` over `[start, end]` with the MBP-10 snapshots and
-    /// trades of `ids`, `GLBX` instruments, and their definitions.
+    /// Fills `catalog` with the MBP-10 snapshots and trades of the
+    /// contracts of `slices`, `GLBX` series, each over its slice, and their
+    /// definitions: what `plan` gives, each contract asked for by its own
+    /// symbol (raw symbology for a dated contract, `GCZ6`) and stored under
+    /// its own id.
     ///
-    /// Each series resumes 1 ns after its stored range, whatever `start`; a
-    /// covered window asks for nothing, not even a quote. Otherwise
-    /// Databento's quote for the missing days is logged, the definitions
-    /// over them later than any stored are written, and each day is one
-    /// request, stored over the day. A day with no record (a Saturday, CME
-    /// being closed) writes nothing.
+    /// A covered plan asks for nothing, not even a quote. Otherwise
+    /// Databento's quotes for every missing window are logged, then their
+    /// total, before any data request. Then, contract by contract, the
+    /// definitions over its missing span later than any stored are
+    /// written, and each day is one request, stored over the day. A day
+    /// with no record (a Saturday, CME being closed) writes nothing.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument is not on `GLBX`, checked before
-    /// any request; if `start` is before a series' stored range (extending
-    /// history backwards is not supported); if a request fails; or if a
-    /// response holds another instrument or a record outside its day. Days
-    /// stored before the error stay stored.
+    /// Returns an error if `plan` does, before any request; if a request
+    /// fails; or if a response holds another instrument or a record outside
+    /// its day. Days stored before the error stay stored.
     pub async fn fill(
         &self,
         catalog: &ParquetDataCatalog,
-        ids: &[InstrumentId],
-        start: Timestamp,
-        end: Timestamp,
+        slices: &[SeriesSlice],
     ) -> anyhow::Result<()> {
-        if let Some(id) = ids.iter().find(|&&id| !Self::serves(id)) {
-            bail!("Databento serves GLBX instruments here, not {id}");
-        }
-        let (start, end) = (nanos(start), nanos(end));
-        for &id in ids {
-            self.fill_instrument(catalog, id, start, end).await?;
-        }
-        Ok(())
-    }
-
-    /// Fills `catalog` with the series of `id` over `[start, end]`.
-    async fn fill_instrument(
-        &self,
-        catalog: &ParquetDataCatalog,
-        id: InstrumentId,
-        start: u64,
-        end: u64,
-    ) -> anyhow::Result<()> {
-        let depth = missing_window::<OrderBookDepth>(catalog, id, start, end)?;
-        let trades = missing_window::<TradeTick>(catalog, id, start, end)?;
-        let from = match (depth, trades) {
-            (None, None) => {
-                log::info!(
-                    "{id}: MBP-10 and trades stored up to {}, nothing to fetch",
-                    at(end)
-                );
-                return Ok(());
-            }
-            (Some((a, _)), Some((b, _))) => a.min(b),
-            (Some((from, _)), None) | (None, Some((from, _))) => from,
+        let fetches = plan(catalog, slices)?;
+        let Some(end) = fetches.iter().map(|fetch| fetch.span().1).max() else {
+            return Ok(());
         };
         let available = self
             .metadata
@@ -152,12 +128,25 @@ impl DatabentoHistory {
             .await
             .with_context(|| format!("requesting the range of {DATASET}"))?;
         ensure_available(end, nanos_of(available.end.unix_timestamp_nanos())?)?;
-        for (schema, window) in [(Schema::Mbp10, depth), (Schema::Trades, trades)] {
-            if let Some(window) = window {
-                self.log_cost(id, schema, window).await?;
+        let mut total = 0.0;
+        for fetch in &fetches {
+            for (schema, window) in fetch.series() {
+                total += self.log_cost(fetch.id, schema, window).await?;
             }
         }
-        self.store_definitions(catalog, id, (from, end)).await?;
+        log::info!("Databento quotes ${total:.2} in all");
+        for fetch in &fetches {
+            self.fetch(catalog, fetch).await?;
+        }
+        Ok(())
+    }
+
+    /// Fills `catalog` with the missing windows of `fetch`: the
+    /// definitions over their span, then the MBP-10 and the trades, a day
+    /// per request.
+    async fn fetch(&self, catalog: &ParquetDataCatalog, fetch: &Fetch) -> anyhow::Result<()> {
+        let Fetch { id, depth, trades } = *fetch;
+        self.store_definitions(catalog, id, fetch.span()).await?;
         for day in depth.map(days).unwrap_or_default() {
             let depths = self
                 .client
@@ -177,13 +166,14 @@ impl DatabentoHistory {
         Ok(())
     }
 
-    /// Logs Databento's quote for `schema` of `id` over `window`.
+    /// Logs and returns Databento's quote for `schema` of `id` over
+    /// `window`.
     async fn log_cost(
         &self,
         id: InstrumentId,
         schema: Schema,
         window: Window,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<f64> {
         let symbol = id.symbol.to_string();
         let params = GetCostParams::builder()
             .dataset(DATASET)
@@ -205,7 +195,7 @@ impl DatabentoHistory {
             at(window.1),
             days(window).len(),
         );
-        Ok(())
+        Ok(cost)
     }
 
     /// Writes the definitions of `id` received over `window` that are later
@@ -240,6 +230,73 @@ impl DatabentoHistory {
             .context("writing the definitions")?;
         Ok(())
     }
+}
+
+/// What the catalog misses of a contract: the window of its MBP-10 and of
+/// its trades to fetch, at least one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fetch {
+    id: InstrumentId,
+    depth: Option<Window>,
+    trades: Option<Window>,
+}
+
+impl Fetch {
+    /// The schemas missing and their windows.
+    fn series(&self) -> impl Iterator<Item = (Schema, Window)> {
+        [(Schema::Mbp10, self.depth), (Schema::Trades, self.trades)]
+            .into_iter()
+            .filter_map(|(schema, window)| Some((schema, window?)))
+    }
+
+    /// The span of the missing windows.
+    fn span(&self) -> Window {
+        self.series()
+            .map(|(_, window)| window)
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+            .expect("at least one missing window")
+    }
+}
+
+/// What to fetch for `slices`, `GLBX` series: per contract, in the order of
+/// `slices`, the MBP-10 and trades missing after what `catalog` stores
+/// over the span its slices cover (see `resume`), whatever the series of
+/// the slices. A rolled root's contracts come each over its own slice; the
+/// slices of one contract from several tables (its root's and its own) are
+/// merged into one span. A contract with nothing missing is left out.
+///
+/// # Errors
+///
+/// Returns an error if a slice is not on `GLBX`, or if a contract's span
+/// starts before a series' stored range (extending history backwards is
+/// not supported).
+fn plan(catalog: &ParquetDataCatalog, slices: &[SeriesSlice]) -> anyhow::Result<Vec<Fetch>> {
+    let mut contracts: Vec<(InstrumentId, Window)> = Vec::new();
+    for SeriesSlice { slice, .. } in slices {
+        let id = slice.instrument_id;
+        if !DatabentoHistory::serves(id) {
+            bail!("Databento serves GLBX instruments here, not {id}");
+        }
+        let (from, to) = (nanos(slice.from), nanos(slice.to));
+        match contracts.iter_mut().find(|(contract, _)| *contract == id) {
+            Some((_, span)) => *span = (span.0.min(from), span.1.max(to)),
+            None => contracts.push((id, (from, to))),
+        }
+    }
+    let mut fetches = Vec::new();
+    for (id, (start, end)) in contracts {
+        let depth = missing_window::<OrderBookDepth>(catalog, id, start, end)?;
+        let trades = missing_window::<TradeTick>(catalog, id, start, end)?;
+        if depth.is_none() && trades.is_none() {
+            log::info!(
+                "{id}: MBP-10 and trades stored up to {}, nothing to fetch",
+                at(end)
+            );
+        } else {
+            fetches.push(Fetch { id, depth, trades });
+        }
+    }
+    Ok(fetches)
 }
 
 /// Refuses an `end` Databento has no data up to yet: a request over it
@@ -451,7 +508,10 @@ fn at(ns: u64) -> Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::{DataRequirements, TickData, TickSeries};
+    use jiff::SignedDuration;
     use nautilus_model::{
+        data::stubs::stub_depth10,
         enums::AggressorSide,
         identifiers::TradeId,
         types::{Price, Quantity},
@@ -624,5 +684,141 @@ mod tests {
         let err = write_day(&catalog, gc(), day, &late, 1).unwrap_err();
         assert!(err.to_string().contains("outside"), "{err}");
         assert!(trade_intervals(&catalog).is_empty());
+    }
+
+    fn ns_at(time: &str) -> u64 {
+        nanos(time.parse().unwrap())
+    }
+
+    /// Requirements reading the trades and book of each of `instrument_ids`.
+    fn ticks_of(instrument_ids: &[&str]) -> DataRequirements {
+        let ticks = instrument_ids
+            .iter()
+            .flat_map(|id| {
+                [TickData::Trades, TickData::Depth].map(|data| TickSeries {
+                    data,
+                    instrument_id: InstrumentId::from(*id),
+                })
+            })
+            .collect();
+        DataRequirements {
+            bar_types: vec![],
+            ticks,
+            warmup: SignedDuration::ZERO,
+        }
+    }
+
+    /// The fetches planned for the series `instrument_ids` read over
+    /// 2026-07-30 00:00 to 2026-07-31 12:00 UTC, across GC's roll from
+    /// GCQ6 to GCZ6 at 2026-07-31 00:00 (the last weekday of July, before
+    /// August, Q's delivery month).
+    fn plan_across_the_roll(
+        catalog: &ParquetDataCatalog,
+        instrument_ids: &[&str],
+    ) -> anyhow::Result<Vec<Fetch>> {
+        let slices = ticks_of(instrument_ids).slices(
+            "2026-07-30T00:00Z".parse().unwrap(),
+            "2026-07-31T12:00Z".parse().unwrap(),
+        );
+        plan(catalog, &slices)
+    }
+
+    fn fetch(id: &str, depth: Option<Window>, trades: Option<Window>) -> Fetch {
+        Fetch {
+            id: InstrumentId::from(id),
+            depth,
+            trades,
+        }
+    }
+
+    #[test]
+    fn a_rolled_root_is_fetched_contract_by_contract_over_each_slice() {
+        let (_dir, catalog) = new_catalog();
+        let q6 = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-31T00:00Z") - 1);
+        let z6 = (ns_at("2026-07-31T00:00Z"), ns_at("2026-07-31T12:00Z"));
+        assert_eq!(
+            plan_across_the_roll(&catalog, &["GC.GLBX"]).unwrap(),
+            [
+                fetch("GCQ6.GLBX", Some(q6), Some(q6)),
+                fetch("GCZ6.GLBX", Some(z6), Some(z6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_contract_is_requested_by_its_raw_symbol() {
+        let request = request(InstrumentId::from("GCZ6.GLBX"), (MONDAY, MONDAY + 1));
+        assert_eq!(request.symbols, ["GCZ6"]);
+    }
+
+    /// GCQ6's trades stored up to 13:00 on the 30th, its book not at all.
+    #[test]
+    fn each_contract_of_a_rolled_root_resumes_after_its_stored_range() {
+        let (_dir, catalog) = new_catalog();
+        let gcq6 = InstrumentId::from("GCQ6.GLBX");
+        let stored = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-30T13:00Z"));
+        let trades = [trade(gcq6, ns_at("2026-07-30T12:00Z"), 1)];
+        write_day(&catalog, gcq6, stored, &trades, ROWS_PER_FILE).unwrap();
+        let q6 = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-31T00:00Z") - 1);
+        let q6_after = (ns_at("2026-07-30T13:00Z") + 1, q6.1);
+        let z6 = (ns_at("2026-07-31T00:00Z"), ns_at("2026-07-31T12:00Z"));
+        assert_eq!(
+            plan_across_the_roll(&catalog, &["GC.GLBX"]).unwrap(),
+            [
+                fetch("GCQ6.GLBX", Some(q6), Some(q6_after)),
+                fetch("GCZ6.GLBX", Some(z6), Some(z6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_contract_stored_over_its_slice_is_not_fetched() {
+        let (_dir, catalog) = new_catalog();
+        let gcq6 = InstrumentId::from("GCQ6.GLBX");
+        let q6 = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-31T00:00Z") - 1);
+        let trades = [trade(gcq6, ns_at("2026-07-30T12:00Z"), 1)];
+        write_day(&catalog, gcq6, q6, &trades, ROWS_PER_FILE).unwrap();
+        let mut depth = stub_depth10();
+        let at_noon = UnixNanos::from(ns_at("2026-07-30T12:00Z"));
+        (depth.instrument_id, depth.ts_event, depth.ts_init) = (gcq6, at_noon, at_noon);
+        write_day(&catalog, gcq6, q6, &[depth], ROWS_PER_FILE).unwrap();
+        let z6 = (ns_at("2026-07-31T00:00Z"), ns_at("2026-07-31T12:00Z"));
+        assert_eq!(
+            plan_across_the_roll(&catalog, &["GC.GLBX"]).unwrap(),
+            [fetch("GCZ6.GLBX", Some(z6), Some(z6))]
+        );
+    }
+
+    /// GCZ6.GLBX declared as itself is one slice over the window; with
+    /// GC.GLBX it is also the root's contract from the roll on.
+    #[test]
+    fn a_contract_declared_as_itself_and_through_its_root_is_fetched_once_over_both() {
+        let (_dir, catalog) = new_catalog();
+        let q6 = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-31T00:00Z") - 1);
+        let window = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-31T12:00Z"));
+        assert_eq!(
+            plan_across_the_roll(&catalog, &["GC.GLBX", "GCZ6.GLBX"]).unwrap(),
+            [
+                fetch("GCQ6.GLBX", Some(q6), Some(q6)),
+                fetch("GCZ6.GLBX", Some(window), Some(window)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dated_contract_is_fetched_over_the_whole_window() {
+        let (_dir, catalog) = new_catalog();
+        let window = (ns_at("2026-07-30T00:00Z"), ns_at("2026-07-31T12:00Z"));
+        assert_eq!(
+            plan_across_the_roll(&catalog, &["GCZ6.GLBX"]).unwrap(),
+            [fetch("GCZ6.GLBX", Some(window), Some(window))]
+        );
+    }
+
+    #[test]
+    fn a_series_not_on_glbx_is_refused() {
+        let (_dir, catalog) = new_catalog();
+        let err = plan_across_the_roll(&catalog, &["GCZ6.XCEC"]).unwrap_err();
+        assert!(err.to_string().contains("GCZ6.XCEC"), "{err}");
     }
 }
