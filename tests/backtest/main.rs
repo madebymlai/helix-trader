@@ -21,6 +21,7 @@ mod backtest_commission_rate;
 mod backtest_composite_bars;
 mod backtest_composite_internal_source;
 mod backtest_composite_warmup;
+mod backtest_continuous_bars;
 mod backtest_coverage;
 mod backtest_ema_entries;
 mod backtest_ema_exits;

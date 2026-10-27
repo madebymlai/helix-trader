@@ -1,5 +1,6 @@
 //! A recording strategy: it warms up through `strategy::warmup` as a real
-//! strategy does, or only subscribes to its bars, records every bar it
+//! strategy does, on a plain instrument or, given its continuous bars, on a
+//! root, or only subscribes to its bars, records every bar it
 //! gets, warmup and replayed, every fill, and on stop the adjustments of
 //! its positions (funding), the orders denied and its account's margins,
 //! and can rest a sell stop on its first replayed
@@ -12,7 +13,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use helix_trader::strategy::warmup;
+use helix_trader::{rolls::ContinuousBars, strategy::warmup};
 use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, messages::data::DataResponseEnvelope};
 use nautilus_core::{UUID4, UnixNanos};
@@ -62,6 +63,8 @@ pub struct Recorder {
     warmup: Option<SignedDuration>,
     /// The request group of the warmup.
     warmup_group: UUID4,
+    /// The continuous bars of its bar type, if on a root.
+    continuous: ContinuousBars,
     /// The trigger of the sell stop of 10 shares sent on the first bar.
     stop: Option<Price>,
     /// The market order sent on each of the first replayed bars, in order.
@@ -90,12 +93,30 @@ impl Recorder {
             bar_type,
             warmup: Some(warmup),
             warmup_group: UUID4::new(),
+            continuous: ContinuousBars::default(),
             stop,
             market: vec![],
             close_on: vec![],
             record: Rc::clone(&record),
         };
         (recorder, record)
+    }
+
+    /// A recorder of `bar_type`, on a root, after `warmup`, its bars
+    /// Nautilus' continuous bars of `continuous`, and the record it fills.
+    pub fn continuous(
+        bar_type: BarType,
+        warmup: SignedDuration,
+        continuous: ContinuousBars,
+    ) -> (Self, Rc<RefCell<Record>>) {
+        let (recorder, record) = Self::new(bar_type, warmup, None);
+        (
+            Self {
+                continuous,
+                ..recorder
+            },
+            record,
+        )
     }
 
     /// A recorder of `bar_type` from the run start, with no warmup request,
@@ -163,7 +184,13 @@ impl DataActor for Recorder {
             return Ok(());
         };
         let bar_types = [self.bar_type];
-        warmup::start(self, &bar_types, warmup, self.warmup_group)
+        warmup::start(
+            self,
+            &bar_types,
+            warmup,
+            &self.continuous.clone(),
+            self.warmup_group,
+        )
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -172,7 +199,10 @@ impl DataActor for Recorder {
             Ok(true) => Ok(()),
             Err(e) => Err(e.to_string()),
         };
-        self.record.borrow_mut().warmup_end = Some(end);
+        let continuous = warmup::continuous_bars(self, &[self.bar_type], &self.continuous);
+        let mut record = self.record.borrow_mut();
+        record.warmup.extend(continuous);
+        record.warmup_end = Some(end);
         Ok(())
     }
 

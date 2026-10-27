@@ -8,11 +8,15 @@
 //! `GCZ6.GLBX`, ...); any other id is a plain instrument, with no
 //! transitions and one slice on itself. Callers use the slices and never
 //! branch on an id. A `Roller` keeps a strategy's tick subscriptions on
-//! the contract standing for each root, switching at each roll.
+//! the contract standing for each root, switching at each roll, and
+//! `ContinuousBars` makes a strategy's bars on a root Nautilus' continuous
+//! bars, which roll themselves.
 
 mod calendar;
+mod continuous;
 mod roller;
 
+pub use continuous::ContinuousBars;
 pub use roller::Roller;
 
 use jiff::{SignedDuration, Timestamp};

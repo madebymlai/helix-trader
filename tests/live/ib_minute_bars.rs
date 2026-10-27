@@ -32,6 +32,7 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 use helix_trader::{
     data::{IbAccount, IbHistory, fill_catalog},
     live::Live,
+    rolls::ContinuousBars,
     strategy::{DataRequirements, catalog_series, warmup},
 };
 use jiff::{SignedDuration, Timestamp};
@@ -91,7 +92,13 @@ impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let composite = composite();
         self.record.borrow_mut().requested_at = self.clock().timestamp_ns();
-        warmup::start(self, &[composite], WARMUP, self.warmup)?;
+        warmup::start(
+            self,
+            &[composite],
+            WARMUP,
+            &ContinuousBars::default(),
+            self.warmup,
+        )?;
         self.subscribe_bars(composite.composite(), None, None);
         Ok(())
     }

@@ -38,7 +38,7 @@ use nautilus_trading::{
 };
 
 use self::{bracket::Exits, signal::Signal};
-use crate::strategy::warmup;
+use crate::{rolls::ContinuousBars, strategy::warmup};
 
 /// The prefix of a trade's time alert, followed by its entry's client order
 /// id.
@@ -218,7 +218,15 @@ impl DataActor for EmaCross {
         self.arm_open_trades()?;
         let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
         self.warmup = UUID4::new();
-        warmup::start(self, &bar_types, warmup, self.warmup)
+        // Its bars are built from quotes or source bars, never from a root's
+        // trades: no continuous bars.
+        warmup::start(
+            self,
+            &bar_types,
+            warmup,
+            &ContinuousBars::default(),
+            self.warmup,
+        )
     }
 
     /// Logs the end of the warmup; Nautilus logs a failed one as an error.

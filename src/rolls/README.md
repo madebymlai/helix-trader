@@ -13,6 +13,7 @@ from a roll calendar kept in one file.
 rolls/
   mod.rs         TransitionTable, Transition, Slice: the public interface
   roller.rs      Roller: a strategy's tick subscriptions, rolled
+  continuous.rs  ContinuousBars: Nautilus' continuous bars on roots
   calendar.rs    the roll calendar: products, contracts, roll times
   calendar.toml  the products, embedded at build time
 ```
@@ -56,8 +57,7 @@ none for a plain instrument. The table is built from it, and the roller
 uses it to know the next roll in advance.
 
 The transitions carry no roll prices. Nautilus' continuous bars need them,
-read from the catalog at each transition, and they are added where the bar
-params are built.
+and `ContinuousBars` reads them from the catalog (see Continuous bars).
 
 `strategy::DataRequirements::slices(start, end)` expands every catalog
 series a strategy reads through its instrument's table. The result is the
@@ -107,6 +107,59 @@ contract's last tick and before the post contract's first.
 
 Bars do not use the roller: Nautilus' continuous bars roll themselves from
 the table.
+
+## Continuous bars
+
+Bars on a root (`GC.GLBX-1-MINUTE-LAST-INTERNAL`) are Nautilus' continuous
+bars: the data engine builds them from the trades of the contract standing
+for the root, adjusted into one price frame, and switches contracts itself
+at each transition (Nautilus' `docs/concepts/continuous_futures.md`). It
+takes the table as the params of the bar request or subscription.
+`ContinuousBars::read(catalog, bar_types, start, end, mode)` builds them
+for the roots among the bar types' instruments, over the span:
+
+- `continuous_future_transitions`: the table's rows, each priced from the
+  catalog. `pre_price` is the pre contract's last trade in its slice,
+  `post_price` the post contract's first trade in its slice, as Nautilus'
+  docs take them (the catalog stores each contract over its slice only, so
+  the two contracts are not priced at the same instant). The trades are
+  read a day at a time from the end of the slice nearest the roll.
+- `continuous_future_adjustment_mode`: the caller's `mode`, one of
+  Nautilus' `ContinuousFutureAdjustmentType` (`BACKWARD_SPREAD`,
+  `FORWARD_SPREAD`, `BACKWARD_RATIO`, `FORWARD_RATIO`).
+
+`params(instrument_id)` gives the two entries of a root, none for a plain
+instrument. `warmup::start` adds them to the warmup request of each bar
+type on a root (`request_bars` of the bar type itself) and to its
+subscription (one `subscribe_bars` per such bar type, since Nautilus reads
+one continuous future per command), and the strategy reads the warmup
+bars from the cache with `warmup::continuous_bars` (`strategy/README.md`,
+"Bars on a root"). `Backtest::continuous_bars(mode)` reads them over the
+backtest's run and warmup, the span the backtest replays.
+
+`read` fails, before any run:
+
+- for bars on a root not built from trades (internal, LAST, not
+  composite): the rolls are priced from trades;
+- for a root with no roll over the span: Nautilus' continuous bars need
+  at least one transition, and the error names the contract to declare
+  instead;
+- for a roll whose pre or post contract has no trade in its slice, naming
+  the contract, its slice and the roll.
+
+What follows from Nautilus' rules (`backtest_continuous_bars.rs` pins
+them):
+
+- Backward modes anchor on the span's last contract: the bars before a
+  roll are shifted by the rolls after them, priced from data after the
+  bar. That is lookahead in the price level, not in the moves within a
+  contract; forward modes anchor on the first contract and use only past
+  rolls.
+- The engine switches the subscription at the transition time on a timer,
+  and a backtest delivers the data of a time before its timers. The post
+  contract's trade stamped exactly at the transition reaches no bar.
+- A roll inside a bar keeps the pre-roll part of the bar at the old
+  adjustment (Nautilus' "Mid-bar roll boundary").
 
 ## The calendar
 

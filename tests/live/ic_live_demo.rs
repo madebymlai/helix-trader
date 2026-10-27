@@ -29,6 +29,7 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 use helix_trader::{
     data::IcHistory,
     live::Live,
+    rolls::ContinuousBars,
     strategy::{DataRequirements, catalog_series, warmup},
 };
 use jiff::SignedDuration;
@@ -102,7 +103,13 @@ nautilus_strategy!(Recorder);
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        warmup::start(self, &[self.bar_type], self.warmup, self.warmup_group)?;
+        warmup::start(
+            self,
+            &[self.bar_type],
+            self.warmup,
+            &ContinuousBars::default(),
+            self.warmup_group,
+        )?;
         self.subscribe_quotes(self.bar_type.instrument_id(), None, None);
         Ok(())
     }
