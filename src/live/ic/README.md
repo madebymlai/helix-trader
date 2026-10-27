@@ -530,7 +530,11 @@ limits") away from IC, however long the history takes.
   before the node was built; account state 999,997.27 EUR, no margin; mass
   status empty, reconciled; the warmup answered in 0.87 s (3,472 quotes),
   29 warmup bars, 3 live bars, the first the minute after the last warmup
-  bar (`data/ic/README.md`, "Tests"). Skipped unless `NAUTILUS_IC_RUN=1` is set in
+  bar (`data/ic/README.md`, "Tests"). On `04f766b`, with a catalog
+  prefilled to 10 min before now (2026-10-26, 22:33 UTC, 157 s): 1,056
+  warmup quotes, 657 of them the catalog's, 29 warmup bars, live quotes
+  after; IC's answer written back, the catalog's quotes then ending at the
+  request's end. Skipped unless `NAUTILUS_IC_RUN=1` is set in
   the shell:
 
   ```sh

@@ -1759,6 +1759,11 @@ mod tests {
         client.unsubscribe_spots(41).unwrap();
 
         assert_eq!(next_spot(&mut spots).await, spot_event(1));
+        // The unsubscription follows the subscription whose spot just came.
+        testing::wait_until(&received, |_| {
+            !spot_unsubscriptions(&received, 0).is_empty()
+        })
+        .await;
         let subscribed: Vec<Vec<i64>> = spot_subscriptions(&received, 0)
             .into_iter()
             .map(|r| r.symbol_id)

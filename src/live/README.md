@@ -160,12 +160,12 @@ no duplicate. Without the end, two runs had the minute in progress
 (closing 15:30 and 15:40) in both the warmup, partial, and the live
 stream.
 
-Without a catalog, `fill-catalog` and `live` share nothing: `live` never
-reads the catalog, and a node registering it would serve the warmup from
-it and start the subscription of a stored source bar type where the
-catalog ends (the data engine prefills the subscription's `start_ns` from
-the catalog, `data/src/engine/streaming.rs`), replaying every bar since as
-live.
+On `04f766b`, with the node on the catalog (paper, 2026-10-27, 07:11 UTC,
+SXR8.IBIS, the catalog's minute bars ending 30 min before now): the
+warmup came 0.3 s after the request, 41 bars, 11 of them the catalog's and
+the rest IB's; it ended on the bar closing 07:11:00 and the first live bar
+closed 07:12:00: no gap, no duplicate, and no bar since the catalog's end
+replayed as live.
 
 ## Cache in Redis
 
