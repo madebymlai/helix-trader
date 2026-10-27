@@ -4,6 +4,10 @@
 #
 # root:   the product's root id, symbol and data venue (GC.GLBX), the form
 #         Nautilus uses for a continuous future's target.
+# contract: the symbol of each dated contract, on the root's venue, as a
+#         template: {month} the month code, {y} the year's last digit, {yy}
+#         its last two digits, {yyyy} the year; any other text is literal.
+#         It names a month and a year.
 # months: the liquid contract months, by their futures month code.
 # roll:   the day the front contract rolls to the next liquid one:
 #         "last-business-day-before-delivery-month" is the last weekday of
@@ -14,6 +18,7 @@
 # month. October (V) is skipped: Databento's volume-led GC.v.0 never fronts it.
 [[product]]
 root = "GC.GLBX"
+contract = "GC{month}{y}"
 months = ["G", "J", "M", "Q", "Z"]
 roll = "last-business-day-before-delivery-month"
 time = "00:00"

@@ -22,9 +22,9 @@ rolls/
 A root is an instrument id listed as a product `root` in `calendar.toml`.
 Its symbol is the product root and its venue the data venue (`GC.GLBX`),
 the form Nautilus uses for a continuous future's target (`ES.XCME` in its
-docs). A root's contracts are named as Databento's raw symbols name them:
-the root's symbol, the month code and the year's last digit, on the same
-venue (`GCZ6.GLBX`).
+docs). A root's contracts are on the same venue, named by the product's
+`contract` template in the calendar (`GC{month}{y}` gives `GCZ6.GLBX`, as
+Databento's raw symbols name them). Only the calendar knows the format.
 
 Any other id is a plain instrument: `XAUUSD.ICMARKETS`, a dated contract
 such as `GCZ6.GLBX`, or Databento's continuous `GC.v.0.GLBX`. It gets a
@@ -115,10 +115,17 @@ the table.
 ```toml
 [[product]]
 root = "GC.GLBX"
+contract = "GC{month}{y}"
 months = ["G", "J", "M", "Q", "Z"]
 roll = "last-business-day-before-delivery-month"
 time = "00:00"
 ```
+
+- `contract` is the symbol of each dated contract, on the root's venue, as
+  a template. `{month}` is the month code, `{y}` the year's last digit,
+  `{yy}` its last two digits and `{yyyy}` the year. Any other text is
+  literal, so any symbol a venue uses can be declared: `GC.{month}{yy}`
+  gives `GC.Z26`.
 
 - `months` are the liquid contract months, by futures month code (F to Z).
   The front rolls through these and skips the others.
@@ -128,8 +135,9 @@ time = "00:00"
   first notice day. It is the only rule so far.
 - `time` is the time of day of the roll, in UTC.
 
-Adding a product means adding one entry. A root listed twice, or a product
-with no months, fails the calendar's parse. A unit test parses the embedded
+Adding a product means adding one entry. A root listed twice, a product
+with no months, or a contract template with an unknown placeholder, an
+unclosed brace, or no month or year fails the calendar's parse. A unit test parses the embedded
 file, so a broken calendar fails there first.
 
 Business days are weekdays. There is no holiday list: a CME holiday matters
