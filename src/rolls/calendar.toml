@@ -1,0 +1,19 @@
+# The roll calendar: one [[product]] per rolled futures product, embedded at
+# build time (see calendar.rs). An instrument id listed as a root rolls; any
+# other id is a plain instrument.
+#
+# root:   the product's root id, symbol and data venue (GC.GLBX), the form
+#         Nautilus uses for a continuous future's target.
+# months: the liquid contract months, by their futures month code.
+# roll:   the day the front contract rolls to the next liquid one:
+#         "last-business-day-before-delivery-month" is the last weekday of
+#         the month before the front contract's delivery month.
+# time:   the time of day of the roll, UTC.
+
+# COMEX gold: first notice day, the last business day before the delivery
+# month. October (V) is skipped: Databento's volume-led GC.v.0 never fronts it.
+[[product]]
+root = "GC.GLBX"
+months = ["G", "J", "M", "Q", "Z"]
+roll = "last-business-day-before-delivery-month"
+time = "00:00"

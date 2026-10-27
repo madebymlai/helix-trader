@@ -1,0 +1,353 @@
+//! Futures rolls: which dated contract stands for a root at each moment.
+//!
+//! Nautilus has no continuous instruments: its continuous futures take a
+//! caller's transition table, and its venues and data sources take dated
+//! contracts only. This module builds that table for any instrument id over
+//! a span, from the roll calendar (`calendar.toml`): an id listed there as a
+//! product root (`GC.GLBX`) rolls through its contracts (`GCQ6.GLBX`,
+//! `GCZ6.GLBX`, ...); any other id is a plain instrument, with no
+//! transitions and one slice on itself. Callers use the slices and never
+//! branch on an id.
+
+mod calendar;
+
+use jiff::{SignedDuration, Timestamp};
+use nautilus_model::identifiers::InstrumentId;
+
+/// The transitions of an instrument over a span, in Nautilus' continuous
+/// futures shape: a transition hands the root from its pre to its post
+/// contract at its time, segment 0 runs on the first pre contract before
+/// the first transition, and each later segment runs on a transition's
+/// post contract from its time, that time included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionTable {
+    /// The contract before the first transition, the instrument itself if
+    /// it does not roll.
+    first: InstrumentId,
+    /// The transitions inside the span, in time order.
+    transitions: Vec<Transition>,
+    /// The span, both ends included.
+    start: Timestamp,
+    end: Timestamp,
+}
+
+/// A roll: from `time` on, `post` stands for the root instead of `pre`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transition {
+    pub time: Timestamp,
+    pub pre: InstrumentId,
+    pub post: InstrumentId,
+}
+
+/// The part of a span one contract stands for its root, both ends
+/// included, as the catalog's ranges are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slice {
+    pub instrument_id: InstrumentId,
+    pub from: Timestamp,
+    pub to: Timestamp,
+}
+
+impl TransitionTable {
+    /// The table of `instrument_id` over `[start, end]`: the rolls of its
+    /// product from the contract in front at `start`, at times after
+    /// `start` up to `end` included, if the id is a root in the roll
+    /// calendar; none otherwise.
+    #[must_use]
+    pub fn of(instrument_id: InstrumentId, start: Timestamp, end: Timestamp) -> Self {
+        let Some(product) = calendar::product(instrument_id) else {
+            return Self {
+                first: instrument_id,
+                transitions: Vec::new(),
+                start,
+                end,
+            };
+        };
+        let mut front = product.front_at(start);
+        let first = product.instrument_id(front);
+        let mut transitions = Vec::new();
+        loop {
+            let time = product.roll_out_of(front);
+            if time > end {
+                break;
+            }
+            let next = product.next(front);
+            transitions.push(Transition {
+                time,
+                pre: product.instrument_id(front),
+                post: product.instrument_id(next),
+            });
+            front = next;
+        }
+        Self {
+            first,
+            transitions,
+            start,
+            end,
+        }
+    }
+
+    /// The transitions, in time order.
+    #[must_use]
+    pub fn transitions(&self) -> &[Transition] {
+        &self.transitions
+    }
+
+    /// The contract standing for the root at `time`, by Nautilus' segment
+    /// rule: the first pre contract before the first transition, then each
+    /// transition's post contract from its time on.
+    #[must_use]
+    pub fn contract_at(&self, time: Timestamp) -> InstrumentId {
+        self.transitions
+            .iter()
+            .rev()
+            .find(|transition| transition.time <= time)
+            .map_or(self.first, |transition| transition.post)
+    }
+
+    /// The slices covering the span, one per contract, in time order: each
+    /// ends 1 ns before the next transition, the last at the span's end.
+    #[must_use]
+    pub fn slices(&self) -> Vec<Slice> {
+        let froms = std::iter::once(self.start)
+            .chain(self.transitions.iter().map(|transition| transition.time));
+        let tos = self
+            .transitions
+            .iter()
+            .map(|transition| transition.time - SignedDuration::from_nanos(1))
+            .chain(std::iter::once(self.end));
+        froms
+            .zip(tos)
+            .map(|(from, to)| Slice {
+                instrument_id: self.contract_at(from),
+                from,
+                to,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::civil;
+
+    use super::*;
+
+    fn gc() -> InstrumentId {
+        InstrumentId::from("GC.GLBX")
+    }
+
+    fn id(s: &str) -> InstrumentId {
+        InstrumentId::from(s)
+    }
+
+    fn at(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    /// One nanosecond before `time`.
+    fn before(time: &str) -> Timestamp {
+        at(time) - SignedDuration::from_nanos(1)
+    }
+
+    fn transition(time: &str, pre: &str, post: &str) -> Transition {
+        Transition {
+            time: at(time),
+            pre: id(pre),
+            post: id(post),
+        }
+    }
+
+    fn slice(instrument_id: &str, from: Timestamp, to: Timestamp) -> Slice {
+        Slice {
+            instrument_id: id(instrument_id),
+            from,
+            to,
+        }
+    }
+
+    /// GC's rolls in 2026, by the rule: 00:00 UTC on the last weekday of
+    /// the month before each liquid delivery month (G, J, M, Q, Z). Jan 31
+    /// is a Saturday, Mar 31 a Tuesday, May 31 a Sunday, Jul 31 a Friday,
+    /// Nov 30 a Monday.
+    #[test]
+    fn gc_rolls_in_2026_on_the_last_weekday_before_each_delivery_month() {
+        let table = TransitionTable::of(gc(), at("2026-01-01T00:00Z"), at("2026-12-31T00:00Z"));
+        assert_eq!(
+            table.transitions(),
+            [
+                transition("2026-01-30T00:00Z", "GCG6.GLBX", "GCJ6.GLBX"),
+                transition("2026-03-31T00:00Z", "GCJ6.GLBX", "GCM6.GLBX"),
+                transition("2026-05-29T00:00Z", "GCM6.GLBX", "GCQ6.GLBX"),
+                transition("2026-07-31T00:00Z", "GCQ6.GLBX", "GCZ6.GLBX"),
+                transition("2026-11-30T00:00Z", "GCZ6.GLBX", "GCG7.GLBX"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_span_starting_after_the_last_roll_of_a_year_starts_on_the_next_years_contract() {
+        let table = TransitionTable::of(gc(), at("2026-12-15T00:00Z"), at("2027-02-15T00:00Z"));
+        assert_eq!(
+            table.transitions(),
+            [transition("2027-01-29T00:00Z", "GCG7.GLBX", "GCJ7.GLBX")]
+        );
+    }
+
+    #[test]
+    fn a_roll_at_the_start_of_the_span_is_already_done() {
+        let table = TransitionTable::of(gc(), at("2026-07-31T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(table.transitions(), []);
+        assert_eq!(
+            table.slices(),
+            [slice(
+                "GCZ6.GLBX",
+                at("2026-07-31T00:00Z"),
+                at("2026-08-31T00:00Z")
+            )]
+        );
+    }
+
+    #[test]
+    fn the_contract_before_a_transition_is_its_pre_contract() {
+        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(
+            table.contract_at(before("2026-07-31T00:00Z")),
+            id("GCQ6.GLBX")
+        );
+    }
+
+    #[test]
+    fn the_contract_at_a_transition_is_its_post_contract() {
+        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(table.contract_at(at("2026-07-31T00:00Z")), id("GCZ6.GLBX"));
+    }
+
+    #[test]
+    fn the_contract_after_a_transition_is_its_post_contract() {
+        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(table.contract_at(at("2026-08-10T14:30Z")), id("GCZ6.GLBX"));
+    }
+
+    #[test]
+    fn the_contract_before_the_first_transition_holds_before_the_span() {
+        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(table.contract_at(at("2026-01-02T00:00Z")), id("GCQ6.GLBX"));
+    }
+
+    #[test]
+    fn the_slices_of_a_span_with_rolls_end_1_ns_before_each_transition() {
+        let table = TransitionTable::of(gc(), at("2026-05-01T00:00Z"), at("2026-08-15T12:00Z"));
+        assert_eq!(
+            table.slices(),
+            [
+                slice(
+                    "GCM6.GLBX",
+                    at("2026-05-01T00:00Z"),
+                    before("2026-05-29T00:00Z")
+                ),
+                slice(
+                    "GCQ6.GLBX",
+                    at("2026-05-29T00:00Z"),
+                    before("2026-07-31T00:00Z")
+                ),
+                slice(
+                    "GCZ6.GLBX",
+                    at("2026-07-31T00:00Z"),
+                    at("2026-08-15T12:00Z")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_slice_of_a_span_without_rolls_is_the_span_on_the_front_contract() {
+        let table = TransitionTable::of(gc(), at("2026-08-31T00:00Z"), at("2026-10-23T00:00Z"));
+        assert_eq!(
+            table.slices(),
+            [slice(
+                "GCZ6.GLBX",
+                at("2026-08-31T00:00Z"),
+                at("2026-10-23T00:00Z")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_roll_at_the_end_of_the_span_gives_its_post_contract_the_last_instant() {
+        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-07-31T00:00Z"));
+        assert_eq!(
+            table.slices(),
+            [
+                slice(
+                    "GCQ6.GLBX",
+                    at("2026-07-01T00:00Z"),
+                    before("2026-07-31T00:00Z")
+                ),
+                slice(
+                    "GCZ6.GLBX",
+                    at("2026-07-31T00:00Z"),
+                    at("2026-07-31T00:00Z")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_id_without_a_calendar_entry_is_one_slice_on_itself() {
+        for plain in ["XAUUSD.ICMARKETS", "GCZ6.GLBX", "GC.v.0.GLBX"] {
+            let table =
+                TransitionTable::of(id(plain), at("2026-01-01T00:00Z"), at("2026-12-31T00:00Z"));
+            assert_eq!(table.transitions(), [], "{plain}");
+            assert_eq!(
+                table.slices(),
+                [slice(
+                    plain,
+                    at("2026-01-01T00:00Z"),
+                    at("2026-12-31T00:00Z")
+                )],
+                "{plain}"
+            );
+            assert_eq!(table.contract_at(at("2026-07-31T00:00Z")), id(plain));
+        }
+    }
+
+    /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to
+    /// 2026-10-23, from the stored daily definitions: the day the
+    /// definitions' expiration moves to the next contract, all at 00:00
+    /// UTC. GC.v.0 rolls by the previous day's volume, so it may switch a
+    /// business day before the rule, as in March (Mar 30, the rule Mar 31).
+    const DATABENTO_SWITCHES: [(&str, &str, &str); 4] = [
+        ("2026-01-30", "GCG6.GLBX", "GCJ6.GLBX"),
+        ("2026-03-30", "GCJ6.GLBX", "GCM6.GLBX"),
+        ("2026-05-29", "GCM6.GLBX", "GCQ6.GLBX"),
+        ("2026-07-31", "GCQ6.GLBX", "GCZ6.GLBX"),
+    ];
+
+    /// The weekday before `date`.
+    fn weekday_before(date: civil::Date) -> civil::Date {
+        let mut day = date.yesterday().unwrap();
+        while matches!(
+            day.weekday(),
+            civil::Weekday::Saturday | civil::Weekday::Sunday
+        ) {
+            day = day.yesterday().unwrap();
+        }
+        day
+    }
+
+    #[test]
+    fn gc_rolls_with_databento_on_the_stored_span_or_a_business_day_after_it() {
+        let table = TransitionTable::of(gc(), at("2026-01-26T00:00Z"), at("2026-10-23T00:00Z"));
+        assert_eq!(table.transitions().len(), DATABENTO_SWITCHES.len());
+        for (rule, (switch, pre, post)) in table.transitions().iter().zip(DATABENTO_SWITCHES) {
+            assert_eq!((rule.pre, rule.post), (id(pre), id(post)));
+            let switch: civil::Date = switch.parse().unwrap();
+            let rule_day = rule.time.to_zoned(jiff::tz::TimeZone::UTC).date();
+            assert!(
+                switch == rule_day || switch == weekday_before(rule_day),
+                "Databento switched {pre} to {post} on {switch}, the rule on {rule_day}"
+            );
+        }
+    }
+}

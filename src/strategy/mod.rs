@@ -31,13 +31,15 @@ pub mod warmup;
 pub use config::{BarsConfig, CompositeSource};
 pub use session::Session;
 
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_model::{
     data::{BarType, NautilusDataType},
     enums::PriceType,
     identifiers::InstrumentId,
 };
 use serde::Deserialize;
+
+use crate::rolls::{Slice, TransitionTable};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -122,12 +124,45 @@ impl DataRequirements {
     /// `catalog_series` sorts.
     #[must_use]
     pub fn catalog_series(&self) -> Vec<(NautilusDataType, String)> {
-        let ticks = self
-            .ticks
-            .iter()
-            .map(|tick| (tick.instrument_id, tick.catalog_series()));
-        sorted_series(bar_sources(&self.bar_types).chain(ticks))
+        self.sources().into_iter().map(Source::series).collect()
     }
+
+    /// The catalog series read over `[start, end]`, contract by contract:
+    /// each of `catalog_series`, in its order, split into the slices of its
+    /// instrument's transition table (see `rolls::TransitionTable`), in
+    /// time order, on the slice's contract. A series of a plain instrument
+    /// is one slice over the span on that instrument.
+    #[must_use]
+    pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<SeriesSlice> {
+        self.sources()
+            .into_iter()
+            .flat_map(|source| {
+                TransitionTable::of(source.instrument_id(), start, end)
+                    .slices()
+                    .into_iter()
+                    .map(move |slice| SeriesSlice {
+                        series: source.on(slice.instrument_id).series(),
+                        slice,
+                    })
+            })
+            .collect()
+    }
+
+    /// The sources of the bars and the ticks, as `catalog_series` sorts
+    /// their series.
+    fn sources(&self) -> Vec<Source> {
+        let ticks = self.ticks.iter().copied().map(Source::Ticks);
+        sorted_sources(bar_sources(&self.bar_types).chain(ticks))
+    }
+}
+
+/// A catalog series over the slice its contract stands for its root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesSlice {
+    /// The series of the slice's contract: its Nautilus data type and
+    /// catalog identifier, as `catalog_series` gives them.
+    pub series: (NautilusDataType, String),
+    pub slice: Slice,
 }
 
 impl TickSeries {
@@ -153,14 +188,54 @@ impl TickSeries {
 /// Each series comes once, sorted by instrument, then identifier.
 #[must_use]
 pub fn catalog_series(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
-    sorted_series(bar_sources(bar_types))
+    sorted_sources(bar_sources(bar_types))
+        .into_iter()
+        .map(Source::series)
+        .collect()
 }
 
-/// The series each of `bar_types` is built from (see `catalog_series`),
-/// with its instrument.
-fn bar_sources(
-    bar_types: &[BarType],
-) -> impl Iterator<Item = (InstrumentId, (NautilusDataType, String))> {
+/// What a catalog series holds: external bars, or the ticks of an
+/// instrument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Bars(BarType),
+    Ticks(TickSeries),
+}
+
+impl Source {
+    fn instrument_id(self) -> InstrumentId {
+        match self {
+            Self::Bars(bar_type) => bar_type.instrument_id(),
+            Self::Ticks(tick) => tick.instrument_id,
+        }
+    }
+
+    /// The same source on `instrument_id`.
+    fn on(self, instrument_id: InstrumentId) -> Self {
+        match self {
+            Self::Bars(bar_type) => Self::Bars(BarType::new(
+                instrument_id,
+                bar_type.spec(),
+                bar_type.aggregation_source(),
+            )),
+            Self::Ticks(tick) => Self::Ticks(TickSeries {
+                instrument_id,
+                ..tick
+            }),
+        }
+    }
+
+    /// The catalog series: its Nautilus data type and catalog identifier.
+    fn series(self) -> (NautilusDataType, String) {
+        match self {
+            Self::Bars(bar_type) => (NautilusDataType::Bar, bar_type.to_string()),
+            Self::Ticks(tick) => tick.catalog_series(),
+        }
+    }
+}
+
+/// The source each of `bar_types` is built from (see `catalog_series`).
+fn bar_sources(bar_types: &[BarType]) -> impl Iterator<Item = Source> {
     bar_types.iter().map(|bar_type| {
         let source = if bar_type.is_composite() {
             bar_type.composite()
@@ -168,30 +243,33 @@ fn bar_sources(
             *bar_type
         };
         let instrument_id = source.instrument_id();
-        let series = if source.is_externally_aggregated() {
-            (NautilusDataType::Bar, source.to_string())
+        if source.is_externally_aggregated() {
+            Source::Bars(source)
         } else if source.spec().price_type == PriceType::Last {
-            (NautilusDataType::TradeTick, instrument_id.to_string())
+            Source::Ticks(TickSeries {
+                data: TickData::Trades,
+                instrument_id,
+            })
         } else {
-            (NautilusDataType::QuoteTick, instrument_id.to_string())
-        };
-        (instrument_id, series)
+            Source::Ticks(TickSeries {
+                data: TickData::Quotes,
+                instrument_id,
+            })
+        }
     })
 }
 
-/// `series`, each with its instrument, each once, sorted by instrument,
-/// then identifier, in the order given otherwise.
-fn sorted_series(
-    series: impl Iterator<Item = (InstrumentId, (NautilusDataType, String))>,
-) -> Vec<(NautilusDataType, String)> {
-    let mut unique: Vec<(InstrumentId, (NautilusDataType, String))> = Vec::new();
-    for entry in series {
-        if !unique.contains(&entry) {
-            unique.push(entry);
+/// `sources`, each once, sorted by instrument, then identifier, in the
+/// order given otherwise.
+fn sorted_sources(sources: impl Iterator<Item = Source>) -> Vec<Source> {
+    let mut unique: Vec<Source> = Vec::new();
+    for source in sources {
+        if !unique.contains(&source) {
+            unique.push(source);
         }
     }
-    unique.sort_by(|(a, (_, a_id)), (b, (_, b_id))| (a, a_id).cmp(&(b, b_id)));
-    unique.into_iter().map(|(_, series)| series).collect()
+    unique.sort_by_cached_key(|&source| (source.instrument_id(), source.series().1));
+    unique
 }
 
 #[cfg(test)]
@@ -339,6 +417,158 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("bars"), "{err}");
+    }
+
+    fn at(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    /// One nanosecond before `time`.
+    fn before(time: &str) -> Timestamp {
+        at(time) - SignedDuration::from_nanos(1)
+    }
+
+    fn series_slice(
+        data_type: NautilusDataType,
+        identifier: &str,
+        instrument_id: &str,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> SeriesSlice {
+        SeriesSlice {
+            series: (data_type, identifier.to_string()),
+            slice: Slice {
+                instrument_id: InstrumentId::from(instrument_id),
+                from,
+                to,
+            },
+        }
+    }
+
+    #[test]
+    fn the_series_of_plain_instruments_are_one_slice_each_over_the_span() {
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
+            ticks: vec![
+                tick(TickData::Quotes, "XAUUSD.ICMARKETS"),
+                tick(TickData::Trades, "GCZ6.GLBX"),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(
+            requirements.slices(start, end),
+            [
+                series_slice(
+                    NautilusDataType::TradeTick,
+                    "GCZ6.GLBX",
+                    "GCZ6.GLBX",
+                    start,
+                    end
+                ),
+                series_slice(
+                    NautilusDataType::QuoteTick,
+                    "XAUUSD.ICMARKETS",
+                    "XAUUSD.ICMARKETS",
+                    start,
+                    end
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_ticks_of_a_root_are_its_contracts_ticks_over_their_slices() {
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(TickData::Trades, "GC.GLBX"),
+                tick(TickData::Depth, "GC.GLBX"),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        let roll = "2026-07-31T00:00Z";
+        assert_eq!(
+            requirements.slices(start, end),
+            [
+                series_slice(
+                    NautilusDataType::TradeTick,
+                    "GCQ6.GLBX",
+                    "GCQ6.GLBX",
+                    start,
+                    before(roll)
+                ),
+                series_slice(
+                    NautilusDataType::TradeTick,
+                    "GCZ6.GLBX",
+                    "GCZ6.GLBX",
+                    at(roll),
+                    end
+                ),
+                series_slice(
+                    NautilusDataType::OrderBookDepth,
+                    "GCQ6.GLBX",
+                    "GCQ6.GLBX",
+                    start,
+                    before(roll)
+                ),
+                series_slice(
+                    NautilusDataType::OrderBookDepth,
+                    "GCZ6.GLBX",
+                    "GCZ6.GLBX",
+                    at(roll),
+                    end
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_bars_of_a_root_are_built_from_its_contracts_series_over_their_slices() {
+        let requirements = DataRequirements {
+            bar_types: vec![
+                BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL"),
+                BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+            ],
+            ticks: vec![],
+            warmup: SignedDuration::from_hours(24),
+        };
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        let roll = "2026-07-31T00:00Z";
+        assert_eq!(
+            requirements.slices(start, end),
+            [
+                series_slice(
+                    NautilusDataType::TradeTick,
+                    "GCQ6.GLBX",
+                    "GCQ6.GLBX",
+                    start,
+                    before(roll)
+                ),
+                series_slice(
+                    NautilusDataType::TradeTick,
+                    "GCZ6.GLBX",
+                    "GCZ6.GLBX",
+                    at(roll),
+                    end
+                ),
+                series_slice(
+                    NautilusDataType::Bar,
+                    "GCQ6.GLBX-1-MINUTE-LAST-EXTERNAL",
+                    "GCQ6.GLBX",
+                    start,
+                    before(roll)
+                ),
+                series_slice(
+                    NautilusDataType::Bar,
+                    "GCZ6.GLBX-1-MINUTE-LAST-EXTERNAL",
+                    "GCZ6.GLBX",
+                    at(roll),
+                    end
+                ),
+            ]
+        );
     }
 
     /// The series of each bar type, as `(data type, identifier)` strings.

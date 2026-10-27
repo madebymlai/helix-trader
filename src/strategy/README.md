@@ -177,6 +177,13 @@ reading ticks alone gets the default cache. Live sets up the clients of
 their instruments, as of every instrument of the requirements, but
 subscribes to none of them.
 
+An instrument may be a futures root (`GC.GLBX`), listed in the roll
+calendar, rather than a dated contract. `DataRequirements::slices(start,
+end)` expands each catalog series the requirements read through its
+instrument's transition table (`rolls/README.md`) into `SeriesSlice`s: the
+series of each contract over the slice where it stands for the root. A
+plain instrument's series is one slice over the span, on itself.
+
 ### Session
 
 `Session` (`strategy/session.rs`, the `session` field of `BarsConfig`) holds a `jiff::tz::TimeZone`, read from its IANA name with
