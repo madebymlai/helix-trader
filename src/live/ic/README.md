@@ -444,8 +444,6 @@ limits") away from IC, however long the history takes.
   position's bracket are updated to the position's remaining volume
   (tested against the mock peer only: the demo's minimum, 1 oz, cannot be
   closed in part).
-- **IC with IB.** A strategy trading IC instruments with IB ones is
-  refused at the start.
 - **Market closed over the whole warmup** (a weekend with a short warmup):
   the warmup response is empty and the strategy starts cold; nothing fails.
 - **The first spot** after a subscription is the last price, even with the

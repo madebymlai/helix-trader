@@ -9,10 +9,11 @@ first, the venues' data clients what it lacks, and IC's answers are
 written back to it.
 Clients go by venue: OKX instruments to OKX's clients, IC instruments
 (`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
-venues gets their clients, routed by Nautilus. IC's account is hedging:
-an order opens a position of its own unless it names one (see
-`ic/README.md`, "Hedging positions"); IC instruments with IB ones are
-refused (see `ic/README.md`, "Known limits").
+venues gets their clients, routed by Nautilus: a venue's own client
+before IB's, the default, so IC's data and orders go to IC's clients with
+IB's in the node ("Clients and routing" under `node.rs`). IC's account is
+hedging: an order opens a position of its own unless it names one (see
+`ic/README.md`, "Hedging positions").
 
 APIs were read in the `nautilus-*` crates at `0.66.0`; the build uses the
 `develop` commit in `docs/ARCHITECTURE.md` (Version), which also holds the
@@ -83,8 +84,7 @@ node's cache (see "Cache in Redis").
    build the OKX client configs on it, check the credentials are set, and
    check the account (net position mode, each instrument's leverage equal
    to `--leverage`). OKX's data client serves the warmup (`okx/README.md`).
-3. IC instruments, if any: refuse IB instruments alongside them, read
-   `IC_ENVIRONMENT` (`demo` or `live`) and the IC credential (all read
+3. IC instruments, if any: read `IC_ENVIRONMENT` (`demo` or `live`) and the IC credential (all read
    before anything connects, step 2's OKX included), build IC's client
    configs on them, then check the account on a session of its own, closed
    before the node connects: hedging and `IC_ACCOUNT_ID`'s, so a wrong
@@ -327,6 +327,17 @@ fn add_exec_client_with_routing(/* same shape, Box<dyn ExecutionClientFactory> *
   explicit venue route wins, the only client for a venue routes it, and
   several clients for one venue with no route and no default client make
   `build()` fail.
+- A data client on one venue (OKX's, IC's) routes that venue when
+  registered; IB's has none (`venue()` is `None`, IB spans many) and is
+  the default.
+- An order goes to the client its `client_id` names (ours name none),
+  else its account's issuer's client, else the client routed for its
+  instrument's venue, else the default
+  (`ExecutionEngine::find_client_for_command`); a subscription or request
+  to the client its `client_id` names, else its venue's, else the default
+  (`DataEngine::get_client`). So with IB's clients the default, an
+  `….ICMARKETS` order or quote subscription goes to IC's and an
+  `….IBIS` one to IB's, as `mod.rs`'s tests check on a built node.
 
 ### Strategy and external orders
 
@@ -440,7 +451,9 @@ tests: see [`okx/README.md`](okx/README.md).
 ## Tests
 
 - Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file,
-  for what needs no node and no broker.
+  for what needs no broker; `mod.rs`'s build a node (`node::builder`,
+  nothing connects) with IC's and IB's clients and check where its engines
+  route each venue's orders and data.
 - No integration test runs a live node without a broker yet (the venue
   tests below run `Live` against IB, OKX and IC's demo). One would sit in
   `tests/live/`, a module of its own, one node per process: a node with no

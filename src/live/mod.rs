@@ -25,7 +25,7 @@ pub use crate::data::IbAccount;
 
 use std::{fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_common::{
     actor::DataActorNative,
     component::Component,
@@ -77,8 +77,7 @@ impl Live {
     ///
     /// Returns an error if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if the catalog cannot be created
-    /// or its path is not UTF-8, if the strategy trades IC
-    /// instruments with IB ones, if an IC bar type is not built from
+    /// or its path is not UTF-8, if an IC bar type is not built from
     /// quotes or IC's environment or credential is missing (see
     /// `ic::clients`, checked before anything connects), if
     /// OKX's clients cannot be set up or the OKX account does not suit the
@@ -117,11 +116,6 @@ impl Live {
         let ic = if ic_ids.is_empty() {
             None
         } else {
-            ensure!(
-                ib_ids.is_empty(),
-                "IC instruments cannot be traded with IB ones yet: IB's execution client is \
-                 the default route, so it would get IC's orders until IC has its own"
-            );
             Some(ic::clients(
                 &requirements.of_instruments(&ic_ids).bar_types,
                 |name| std::env::var(name).ok(),
@@ -155,5 +149,103 @@ impl Live {
             strategy,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_common::messages::execution::{SubmitOrder, TradingCommand};
+    use nautilus_live::config::LiveNodeConfig;
+    use nautilus_model::{
+        data::BarType,
+        events::OrderInitialized,
+        identifiers::{ClientId, ClientOrderId, StrategyId, Venue},
+    };
+
+    use super::*;
+    use crate::data::IbGateway;
+
+    /// IC's clients for gold's hourly bars on the demo, and IB's for SXR8
+    /// on a paper gateway, as `Live::run` sets them up; nothing connects.
+    fn ic_and_ib() -> Vec<node::Clients> {
+        let ic = ic::clients(
+            &[BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
+            |name| {
+                let value = match name {
+                    "IC_ENVIRONMENT" => "demo",
+                    "IC_CLIENT_ID" => "12345_clientIdValue",
+                    "IC_CLIENT_SECRET" => "clientSecretValue",
+                    "IC_ACCESS_TOKEN" => "accessTokenValue",
+                    "IC_REFRESH_TOKEN" => "refreshTokenValue",
+                    "IC_ACCOUNT_ID" => "1000001",
+                    "HOME" => "/home/u",
+                    _ => return None,
+                };
+                Some(value.to_owned())
+            },
+        )
+        .unwrap();
+        let gateway = IbGateway {
+            host: "127.0.0.1".to_string(),
+            port: 4002,
+            client_id: 11,
+        };
+        let account: IbAccount = "DU1234567".parse().unwrap();
+        let ib = ib::configs(&gateway, &account, &[InstrumentId::from("SXR8.IBIS")]);
+        vec![ic.into_node_clients(), ib.into_node_clients()]
+    }
+
+    fn submit(instrument_id: &str) -> TradingCommand {
+        TradingCommand::SubmitOrder(SubmitOrder::new(
+            TraderId::from("HELIX-001"),
+            None,
+            StrategyId::from("S-001"),
+            InstrumentId::from(instrument_id),
+            ClientOrderId::from("O-001"),
+            OrderInitialized::default(),
+            None,
+            None,
+            None,
+            UUID4::new(),
+            0.into(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn with_ib_present_orders_go_to_ic_on_icmarkets_and_to_ib_elsewhere() {
+        let node = node::builder(LiveNodeConfig::default(), ic_and_ib())
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec_engine = node.kernel().exec_engine().borrow();
+        let client_of = |instrument_id| {
+            exec_engine
+                .find_client_for_command(&submit(instrument_id))
+                .map(|client| client.client_id)
+        };
+
+        assert_eq!(
+            client_of("XAUUSD.ICMARKETS"),
+            Some(ClientId::from("ICMARKETS"))
+        );
+        assert_eq!(client_of("SXR8.IBIS"), Some(ClientId::from("IB")));
+    }
+
+    #[test]
+    fn with_ib_present_icmarkets_data_goes_to_ic_and_other_venues_to_ib() {
+        let node = node::builder(LiveNodeConfig::default(), ic_and_ib())
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut data_engine = node.kernel().data_engine.borrow_mut();
+        let mut client_of = |venue| {
+            data_engine
+                .get_client(None, Some(&Venue::new(venue)))
+                .map(|client| client.client_id)
+        };
+
+        assert_eq!(client_of("ICMARKETS"), Some(ClientId::from("ICMARKETS")));
+        assert_eq!(client_of("IBIS"), Some(ClientId::from("IB")));
     }
 }

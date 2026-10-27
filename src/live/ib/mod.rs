@@ -61,7 +61,11 @@ pub(super) async fn clients(
 /// by tick (`batch_quotes: false`; the adapter falls back to `reqMktData`
 /// where IB refuses them). Data and exec share `gateway`'s client id, hence
 /// one connection.
-fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[InstrumentId]) -> IbClients {
+pub(super) fn configs(
+    gateway: &IbGateway,
+    account: &IbAccount,
+    instrument_ids: &[InstrumentId],
+) -> IbClients {
     let instrument_provider = InteractiveBrokersInstrumentProviderConfig {
         load_ids: instrument_ids.iter().copied().collect(),
         ..Default::default()
