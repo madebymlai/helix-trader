@@ -28,7 +28,7 @@ data/
   databento/
     mod.rs         Databento of GLBX instruments: its data client for the node, cost quotes, the dataset's end
     publishers.json Nautilus' Databento publishers, read by the client
-    README.md      Databento history: schemas, instrument ids, resume, cost, tests
+    README.md      Databento history through the node: series, cost quotes, periods, instrument ids, tests
   ib/
     mod.rs         Interactive Brokers history: instruments, 1-minute TRADES bars
     gateway.rs     the IB account and the Docker gateway, started and logged in

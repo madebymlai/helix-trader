@@ -328,7 +328,8 @@ impl OkxHistory {
 
 /// The bar type and window of each of `slices`, OKX's candles each over
 /// its slice; an error for the first slice of another series (see
-/// `candle_bar_type`).
+/// `candle_bar_type`). Temporary until nautilus_trader#5473 is fixed: OKX
+/// then fills through the node.
 fn candle_slices(slices: &[SeriesSlice]) -> anyhow::Result<Vec<(BarType, Timestamp, Timestamp)>> {
     slices
         .iter()

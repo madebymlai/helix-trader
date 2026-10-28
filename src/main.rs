@@ -250,7 +250,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     // logger for them: install it here, as a node would (the fill's node
     // keeps it), so the `log` output of this crate and Nautilus, and the
     // adapters' `tracing` warnings (why a contract did not resolve), reach
-    // the console. Configured by NAUTILUS_LOG and RUST_LOG.
+    // the console. Configured by NAUTILUS_LOG and RUST_LOG. Temporary until
+    // nautilus_trader#5472 and #5473 are fixed: IB and OKX then fill
+    // through the node, which installs the logger.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
@@ -327,7 +329,8 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether `id` is IB's: on a venue no other source serves.
+/// Whether `id` is IB's: on a venue no other source serves. Temporary
+/// until nautilus_trader#5472 is fixed: IB then fills through the node.
 fn is_ib(id: InstrumentId) -> bool {
     !OkxHistory::serves(id) && !DatabentoHistory::serves(id) && !IcHistory::serves(id)
 }
