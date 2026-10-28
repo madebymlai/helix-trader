@@ -201,8 +201,8 @@ impl NodeFill {
   book depths only (`FillData`): a source filling bars or funding through
   the node does not exist yet.
 - **Windows.** `add` cuts each series request into windows of the
-  source's period (`DatabentoHistory::period`: three hours of MBP-10, a
-  day of anything else; `IcHistory::period`: a week), aligned on multiples
+  source's period (`DatabentoHistory::period`: a day; `IcHistory::period`:
+  a week), aligned on multiples
   of the period from the Unix epoch (a day: each UTC midnight), each
   ending 1 ns before the next: the most one request, and one catalog
   file, holds. A source with nothing missing is left out of the node.
@@ -446,8 +446,7 @@ after OKX's fill and before IB's.
   archive and API: see [`okx/README.md`](okx/README.md).
 - GLBX instruments' series as declared (MBP-10 book as `OrderBookDepth`,
   trades, quotes), with their definitions, fill through the node by
-  Nautilus' Databento data client, three hours of MBP-10 or a day of
-  anything else a request, after `databento/` checks the dataset's end and
+  Nautilus' Databento data client, a day a request, after `databento/` checks the dataset's end and
   logs Databento's quote for every request: see
   [`databento/README.md`](databento/README.md). The GLBX series come from
   `DataRequirements::slices`, so a rolled root (`GC.GLBX`) is filled

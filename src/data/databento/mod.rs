@@ -34,12 +34,10 @@ const PUBLISHERS: &str = concat!(
 /// The Databento dataset of `GLBX` instruments.
 const DATASET: &str = "GLBX.MDP3";
 
-/// The window of one MBP-10 request: three hours of COMEX gold are about
-/// a million snapshots, a day about 7 million (some 7.5 GB decoded, which
-/// Nautilus' write copies once more).
-const DEPTH_PERIOD: SignedDuration = SignedDuration::from_hours(3);
-
-/// The window of one request of another series: a UTC day.
+/// The window of one request of any series: a UTC day. A busy day of
+/// COMEX gold MBP-10 is about 7 million snapshots, some 7.5 GB decoded,
+/// which Nautilus' write copies once more; Databento answers each request
+/// after a wait that shorter windows only multiply.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
 /// Databento's historical API, for the history of `GLBX` instruments.
@@ -77,14 +75,11 @@ impl DatabentoHistory {
         id.venue == Venue::GLBX()
     }
 
-    /// The window one request of `data` holds at most (see
-    /// `NodeFill::add`): three hours of MBP-10, a day of anything else.
+    /// The window one request of any series holds at most (see
+    /// `NodeFill::add`): a UTC day.
     #[must_use]
-    pub fn period(data: FillData) -> SignedDuration {
-        match data {
-            FillData::Depth => DEPTH_PERIOD,
-            _ => DAY,
-        }
+    pub fn period(_data: FillData) -> SignedDuration {
+        DAY
     }
 
     /// Checks `requests`, of `GLBX` instruments (see `node_fill::missing`),
@@ -236,12 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn mbp_10_is_asked_three_hours_a_request_anything_else_a_day() {
-        assert_eq!(
-            DatabentoHistory::period(FillData::Depth),
-            SignedDuration::from_hours(3)
-        );
-        for data in [FillData::Trades, FillData::Quotes] {
+    fn every_series_is_asked_a_day_a_request() {
+        for data in [FillData::Depth, FillData::Trades, FillData::Quotes] {
             assert_eq!(
                 DatabentoHistory::period(data),
                 SignedDuration::from_hours(24)

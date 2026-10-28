@@ -60,11 +60,12 @@ version Nautilus uses) for the metadata.
 
 ## Periods
 
-`period` is what one request holds at most: three hours of MBP-10, a UTC
-day of anything else, windows cut on multiples of the period from the
-Unix epoch (so at UTC midnight and every third hour). A day of GC MBP-10
-is about 6.8 million snapshots, some 7.5 GB decoded, and Nautilus' write
-copies them once more; three hours are about a million, 1.1 GB. Each
+`period` is what one request holds at most: a UTC day of any series,
+windows cut on multiples of the period from the Unix epoch (so at UTC
+midnight). A busy day of GC MBP-10 is about 6.8 million snapshots, some
+7.5 GB decoded, and Nautilus' write copies them once more; Databento
+answers each request after a wait, which shorter windows only multiply
+(three-hour windows fetched a quarter of the data an hour). Each
 window is one request, one answer and one catalog file. Nautilus' client
 collects each response before returning it.
 
@@ -109,8 +110,8 @@ fill"), so the client fetches no definitions of its own to learn it
 
 Without network:
 
-- `serves`: `GLBX` ids only; `period`: three hours of MBP-10, a day of
-  trades and quotes; the schema each series is quoted in; a quote's range
+- `serves`: `GLBX` ids only; `period`: a day of MBP-10, trades and
+  quotes; the schema each series is quoted in; a quote's range
   ending 1 ns after its request;
 - an `end` past the dataset's end refused; a request of another venue
   refused before any request;
