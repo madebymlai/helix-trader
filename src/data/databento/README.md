@@ -114,7 +114,7 @@ Without network:
   ending 1 ns after its request;
 - an `end` past the dataset's end refused; a request of another venue
   refused before any request;
-- what the catalog lacks across GC's roll of 2026-07-31 (`node_fill::missing`
+- what the catalog lacks across GC's roll of 2026-07-29 (`node_fill::missing`
   on a temp catalog): a rolled root (`GC.GLBX`) asked contract by
   contract, `GCQ6` to 1 ns before the roll and `GCZ6` from it, each with
   its definition first; a contract's trades stored to 13:00 asked only
