@@ -65,6 +65,16 @@ impl Transition {
     }
 }
 
+/// The contracts `instrument_id` needs from `time` up to its next roll:
+/// the one standing for it at `time`, then the one it rolls into (see
+/// `Transition::after`); the instrument alone if it does not roll. What
+/// live loads for it at its start.
+#[must_use]
+pub fn contracts_at(instrument_id: InstrumentId, time: Timestamp) -> Vec<InstrumentId> {
+    Transition::after(instrument_id, time)
+        .map_or_else(|| vec![instrument_id], |next| vec![next.pre, next.post])
+}
+
 /// The part of a span one contract stands for its root, both ends
 /// included, as the catalog's ranges are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +364,34 @@ mod tests {
         assert_eq!(
             Transition::after(id("GCZ6.GLBX"), at("2026-07-28T12:00Z")),
             None
+        );
+    }
+
+    #[test]
+    fn a_root_needs_the_contract_in_front_and_the_one_it_rolls_into() {
+        assert_eq!(
+            contracts_at(gc(), at("2026-08-10T14:30Z")),
+            [id("GCZ6.GLBX"), id("GCG7.GLBX")]
+        );
+    }
+
+    #[test]
+    fn a_root_needs_at_its_roll_the_post_contract_and_the_next() {
+        assert_eq!(
+            contracts_at(gc(), at("2026-07-29T00:00Z")),
+            [id("GCZ6.GLBX"), id("GCG7.GLBX")]
+        );
+        assert_eq!(
+            contracts_at(gc(), before("2026-07-29T00:00Z")),
+            [id("GCQ6.GLBX"), id("GCZ6.GLBX")]
+        );
+    }
+
+    #[test]
+    fn an_id_without_a_calendar_entry_needs_itself_alone() {
+        assert_eq!(
+            contracts_at(id("GCZ6.GLBX"), at("2026-08-10T14:30Z")),
+            [id("GCZ6.GLBX")]
         );
     }
 

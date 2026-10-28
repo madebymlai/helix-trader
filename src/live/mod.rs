@@ -11,7 +11,7 @@
 //! venues for what it lacks, and IC's answers are written back to it (see
 //! `strategy::warmup`). A futures root's instruments are its contract in
 //! front at the start and the next one, which the strategy's roller
-//! switches to (see `rolls`); bars on a root are refused.
+//! switches to (see `rolls::contracts_at`); bars on a root are refused.
 
 mod ib;
 mod ic;
@@ -42,7 +42,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IcHistory, OkxHistory, catalog_path},
-    rolls::Transition,
+    rolls::{Transition, contracts_at},
     strategy::{DataRequirements, warmup},
 };
 
@@ -160,11 +160,10 @@ impl Live {
 }
 
 /// The instruments the node loads, at `now`: each one `requirements`
-/// reads, a root replaced by the contracts of its slices from `now` to its
-/// next roll (see `rolls::TransitionTable`), the one standing for it now
-/// and the one it rolls into, which the strategy's `Roller` subscribes to
-/// at the roll. A plain instrument is one slice on itself. Each once, in
-/// order.
+/// reads, a root replaced by the contracts it needs up to its next roll
+/// (see `rolls::contracts_at`), the one standing for it now and the one it
+/// rolls into, which the strategy's `Roller` subscribes to at the roll. A
+/// plain instrument stands for itself. Each once, in order.
 ///
 /// # Errors
 ///
@@ -187,13 +186,9 @@ fn loaded_instrument_ids(
     }
     let mut ids: Vec<InstrumentId> = Vec::new();
     for instrument_id in requirements.instrument_ids() {
-        let next_roll = Transition::after(instrument_id, now).map_or(now, |next| next.time);
-        let slices = requirements
-            .of_instruments(&[instrument_id])
-            .slices(now, next_roll);
-        for slice in slices {
-            if !ids.contains(&slice.slice.instrument_id) {
-                ids.push(slice.slice.instrument_id);
+        for contract in contracts_at(instrument_id, now) {
+            if !ids.contains(&contract) {
+                ids.push(contract);
             }
         }
     }
