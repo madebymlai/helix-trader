@@ -129,9 +129,10 @@ impl Backtest {
     /// # Errors
     ///
     /// Returns an error if the warmup is negative, or as
-    /// `ContinuousBars::read` does: a bar type on a root not built from
-    /// trades, a root without a roll over `[warmup start, end]`, a roll
-    /// without a trade to price it.
+    /// `ContinuousBars::read` does: a root without a roll over
+    /// `[warmup start, end]`, a roll without a trade to price it. A bar type
+    /// on a root not built from trades is refused by `run` (see
+    /// `DataRequirements::slices`).
     pub fn continuous_bars(
         &self,
         mode: ContinuousFutureAdjustmentType,
