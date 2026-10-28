@@ -55,10 +55,8 @@ impl Roller {
     {
         let now = actor.clock().utc_now();
         for instrument_id in self.instrument_ids() {
-            let next = Transition::after(instrument_id, now);
-            let contract = next.map_or(instrument_id, |next| next.pre);
-            self.subscribe(actor, instrument_id, contract);
-            if let Some(next) = next {
+            self.subscribe(actor, instrument_id, front(instrument_id, now));
+            if let Some(next) = Transition::after(instrument_id, now) {
                 set_alert(actor, instrument_id, next)?;
             }
         }
@@ -68,7 +66,9 @@ impl Roller {
     /// If `event` is an instrument's roll alert, rolls its series: from
     /// the pre contract to the post contract of its transition, and sets
     /// the alert of the next one; returns that transition. `None` for any
-    /// other event, which is the strategy's own.
+    /// other event, which is the strategy's own. A series of the pre
+    /// contract that another of the instruments still stands on after the
+    /// roll (the contract itself, read beside its root) stays subscribed.
     ///
     /// The alert is at the last nanosecond of the pre contract's slice,
     /// not at the transition: the backtest engine delivers the data of a
@@ -97,7 +97,7 @@ impl Roller {
         };
         let roll = Transition::after(instrument_id, event.ts_event.into())
             .expect("an instrument with a roll alert rolls");
-        self.unsubscribe(actor, instrument_id, roll.pre);
+        self.unsubscribe(actor, instrument_id, roll.pre, roll.time);
         self.subscribe(actor, instrument_id, roll.post);
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             set_alert(actor, instrument_id, next)?;
@@ -146,12 +146,25 @@ impl Roller {
     }
 
     /// Unsubscribes `actor` from the series of `instrument_id` on
-    /// `contract`.
-    fn unsubscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
-    where
+    /// `contract`, but for the kinds an instrument of the roller still
+    /// reads on `contract` at `time`, the contract standing for it then.
+    fn unsubscribe<A>(
+        &self,
+        actor: &mut A,
+        instrument_id: InstrumentId,
+        contract: InstrumentId,
+        time: Timestamp,
+    ) where
         A: DataActor + DataActorNative + Debug + 'static,
     {
         for data in self.data_of(instrument_id) {
+            let still_read = self
+                .ticks
+                .iter()
+                .any(|tick| tick.data == data && front(tick.instrument_id, time) == contract);
+            if still_read {
+                continue;
+            }
             match data {
                 TickData::Quotes => actor.unsubscribe_quotes(contract, None, None),
                 TickData::Trades => actor.unsubscribe_trades(contract, None, None),
@@ -159,6 +172,12 @@ impl Roller {
             }
         }
     }
+}
+
+/// The contract standing for `instrument_id` at `time`: the pre contract
+/// of its next roll, or itself if it does not roll.
+fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
+    Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
 }
 
 /// The name of the roll alert of `instrument_id`.

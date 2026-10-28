@@ -99,7 +99,11 @@ the series only and works out the contracts from the clock.
 - `on_time_event`, on an instrument's alert, unsubscribes its series from
   the pre contract, subscribes them on the post contract, sets the alert
   of the next roll, and returns the `Transition`. Any other event returns
-  `None`: it is the strategy's own.
+  `None`: it is the strategy's own. A series of the pre contract that
+  another of its instruments still stands on keeps its subscription: a
+  contract read as itself beside its root keeps coming after the root
+  rolls off it (Nautilus keeps one subscription per series, whoever
+  subscribed).
 
 The alert is at the last nanosecond of the pre contract's slice, not at
 the transition. The backtest engine delivers the data of a time before the
@@ -144,13 +148,13 @@ bars from the cache with `warmup::continuous_bars` (`strategy/README.md`,
 "Bars on a root"). `Backtest::continuous_bars(mode)` reads them over the
 backtest's run and warmup, the span the backtest replays.
 
-`read` fails, before any run:
-
 Bars on a root must be built from its trades (internal, LAST, not
 composite): the rolls are priced from trades, and Nautilus builds the
 continuous bars from the contracts' trades, so other bars would never
 come. `DataRequirements::slices` refuses others, naming the bar type, so
 backtest and fill-catalog refuse them before anything runs.
+
+`read` fails, before any run:
 
 - for a root with no roll over the span: Nautilus' continuous bars need
   at least one transition, and the error names the contract to declare

@@ -327,6 +327,19 @@ fn a_contract_declared_beside_its_root_is_replayed_once() {
 }
 
 #[test]
+fn the_roller_keeps_a_contract_declared_beside_its_root_after_the_root_rolls_off_it() {
+    let catalog = rolls::catalog();
+    let declared = [ticks(ROOT), ticks(PRE)].concat();
+    let backtest = backtest(&catalog, declared.clone());
+
+    let got = run(&backtest, Subscribe::Roller(Roller::new(declared)));
+
+    // The root rolls from August's contract to December's; August's,
+    // declared as itself, keeps arriving after the roll.
+    assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
+}
+
+#[test]
 fn bars_on_a_root_built_from_quotes_are_refused_naming_the_bar_type() {
     let catalog = rolls::catalog();
     let bars = "GC.GLBX-30-MINUTE-MID-INTERNAL";
