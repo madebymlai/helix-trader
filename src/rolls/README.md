@@ -63,8 +63,9 @@ and `ContinuousBars` reads them from the catalog (see Continuous bars).
 
 `strategy::DataRequirements::slices(start, end)` expands every catalog
 series a strategy reads through its instrument's table. The result is the
-series of each contract over its slice (`SeriesSlice`), so fill-catalog,
-the backtest and live only ever see contract ids.
+series of each contract over its slice (`SeriesSlice`), so fill-catalog
+and the backtest only ever see contract ids. A contract read as itself
+beside its root is one series: its slices from both tables are merged.
 
 ## The roller
 
@@ -145,8 +146,12 @@ backtest's run and warmup, the span the backtest replays.
 
 `read` fails, before any run:
 
-- for bars on a root not built from trades (internal, LAST, not
-  composite): the rolls are priced from trades;
+Bars on a root must be built from its trades (internal, LAST, not
+composite): the rolls are priced from trades, and Nautilus builds the
+continuous bars from the contracts' trades, so other bars would never
+come. `DataRequirements::slices` refuses others, naming the bar type, so
+backtest and fill-catalog refuse them before anything runs.
+
 - for a root with no roll over the span: Nautilus' continuous bars need
   at least one transition, and the error names the contract to declare
   instead;

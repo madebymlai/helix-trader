@@ -111,7 +111,9 @@ run's window), so a contract's data reaches the run only while it stands
 for the root. Each contract is registered with its own stored definition;
 the root is never stored nor registered. A plain instrument is one slice
 on itself over the whole window, bounded by the window, so its replay is
-unchanged (`backtest_rolls.rs`).
+unchanged. A contract declared as itself beside its root is one series,
+its slices from both tables merged, so its data is replayed once
+(`backtest_rolls.rs`).
 
 Bars on a root are Nautilus' continuous bars. The bar sources replayed are
 the contracts' trades, each over its slice, as for ticks, and the strategy
@@ -119,7 +121,9 @@ reads its bars through `Backtest::continuous_bars(mode)`: the root's
 transitions over `[start − 1 ns − warmup, end]`, priced from the catalog,
 in the adjustment mode `mode` (`rolls/README.md`, "Continuous bars"). It
 fails before the run if a roll has no trade to price it
-(`backtest_continuous_bars.rs`).
+(`backtest_continuous_bars.rs`). The run refuses bars on a root not built
+from its trades (internal, LAST, not composite), naming the bar type
+(`DataRequirements::slices`): they would never come.
 
 ## The run
 

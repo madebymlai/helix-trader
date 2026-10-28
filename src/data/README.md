@@ -195,7 +195,8 @@ impl NodeFill {
   the call behind the data engine's catalog lookup): contract by contract,
   its definition over the span of what it lacks, then each series'
   missing intervals. A rolled root's contracts come each over its slice;
-  one contract's slices of a series from two tables are merged first. A
+  `DataRequirements::slices` has already merged one contract's slices of
+  a series from two tables, so no window is asked twice. A
   covered window asks for nothing: no node is built. Quotes, trades and
   book depths only (`FillData`): a source filling bars or funding through
   the node does not exist yet.
@@ -481,8 +482,8 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   multiples from the epoch (three hours, a day ending at midnight); what an
   empty catalog lacks (a definition, then each series over its slice, a
   rolled root's contracts each over its own), only what is outside a
-  stored interval, nothing (not even a definition) for a covered window,
-  one request for a series declared twice; bars refused, naming the
+  stored interval, nothing (not even a definition) for a covered window;
+  bars refused, naming the
   series; the coverage check failing a window answered with rows but not
   stored, not a definition or an empty window.
 - `tests/node_fill/`, fill-catalog's fill at its seam: `missing`, then a

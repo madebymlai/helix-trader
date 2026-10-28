@@ -31,15 +31,18 @@ pub mod warmup;
 pub use config::{BarsConfig, CompositeSource};
 pub use session::Session;
 
+use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp};
+use nautilus_core::{ClosedInterval, UnixNanos};
 use nautilus_model::{
     data::{BarType, NautilusDataType},
     enums::PriceType,
     identifiers::InstrumentId,
 };
+use nautilus_persistence::common::coverage::merge_closed_intervals;
 use serde::Deserialize;
 
-use crate::rolls::{Slice, TransitionTable};
+use crate::rolls::{Slice, Transition, TransitionTable};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -131,21 +134,57 @@ impl DataRequirements {
     /// each of `catalog_series`, in its order, split into the slices of its
     /// instrument's transition table (see `rolls::TransitionTable`), in
     /// time order, on the slice's contract. A series of a plain instrument
-    /// is one slice over the span on that instrument.
+    /// is one slice over the span on that instrument. The slices of one
+    /// series from several tables (a root's and its contract's own) are
+    /// merged where they overlap or touch, so nothing is read twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming a bar type on a root that is not built from
+    /// its trades (internal, LAST, not composite): Nautilus builds its
+    /// continuous bars from the contracts' trades and prices their rolls
+    /// from them (see `rolls::ContinuousBars`), so such bars would never
+    /// come.
+    pub fn slices(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Vec<SeriesSlice>> {
+        for bar_type in &self.bar_types {
+            let instrument_id = bar_type.instrument_id();
+            ensure!(
+                Transition::after(instrument_id, start).is_none()
+                    || (bar_type.is_internally_aggregated()
+                        && !bar_type.is_composite()
+                        && bar_type.spec().price_type == PriceType::Last),
+                "bars {bar_type} on the root {instrument_id} must be built from its trades \
+                 (internal, LAST, not composite): its continuous bars are built and their \
+                 rolls priced from trades"
+            );
+        }
+        let slices = self.sources().into_iter().flat_map(|source| {
+            TransitionTable::of(source.instrument_id(), start, end)
+                .slices()
+                .into_iter()
+                .map(move |slice| SeriesSlice {
+                    series: source.on(slice.instrument_id).series(),
+                    slice,
+                })
+        });
+        Ok(SeriesSlice::merged(slices))
+    }
+
+    /// The contracts standing for the instruments read over `[start, end]`,
+    /// each with its slices of their transition tables (see
+    /// `rolls::TransitionTable`), merged where they overlap or touch: those
+    /// of a root and of a contract read beside it are one. A plain
+    /// instrument is one slice over the span on itself. In the order of
+    /// `instrument_ids`, then time.
     #[must_use]
-    pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<SeriesSlice> {
-        self.sources()
-            .into_iter()
-            .flat_map(|source| {
-                TransitionTable::of(source.instrument_id(), start, end)
-                    .slices()
-                    .into_iter()
-                    .map(move |slice| SeriesSlice {
-                        series: source.on(slice.instrument_id).series(),
-                        slice,
-                    })
-            })
-            .collect()
+    pub fn contract_slices(&self, start: Timestamp, end: Timestamp) -> Vec<Slice> {
+        let keyed = self.instrument_ids().into_iter().flat_map(|id| {
+            TransitionTable::of(id, start, end)
+                .slices()
+                .into_iter()
+                .map(|slice| (slice.instrument_id, slice))
+        });
+        merged(keyed).into_iter().map(|(_, slice)| slice).collect()
     }
 
     /// The sources of the bars and the ticks, as `catalog_series` sorts
@@ -156,6 +195,38 @@ impl DataRequirements {
     }
 }
 
+/// The slices of `keyed`, those of one key merged where they overlap or
+/// touch (Nautilus' `merge_closed_intervals`), each key's in time order,
+/// the keys in the order they first come. A key is of one contract.
+fn merged<K: PartialEq + Clone>(keyed: impl IntoIterator<Item = (K, Slice)>) -> Vec<(K, Slice)> {
+    let mut groups: Vec<(K, InstrumentId, Vec<ClosedInterval>)> = Vec::new();
+    for (key, slice) in keyed {
+        let interval = ClosedInterval {
+            start: UnixNanos::from(slice.from).as_u64(),
+            end: UnixNanos::from(slice.to).as_u64(),
+        };
+        match groups.iter_mut().find(|(of, _, _)| *of == key) {
+            Some((_, _, intervals)) => intervals.push(interval),
+            None => groups.push((key, slice.instrument_id, vec![interval])),
+        }
+    }
+    groups
+        .into_iter()
+        .flat_map(|(key, instrument_id, intervals)| {
+            merge_closed_intervals(&intervals)
+                .into_iter()
+                .map(move |interval| {
+                    let slice = Slice {
+                        instrument_id,
+                        from: UnixNanos::from(interval.start).into(),
+                        to: UnixNanos::from(interval.end).into(),
+                    };
+                    (key.clone(), slice)
+                })
+        })
+        .collect()
+}
+
 /// A catalog series over the slice its contract stands for its root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesSlice {
@@ -163,6 +234,19 @@ pub struct SeriesSlice {
     /// catalog identifier, as `catalog_series` gives them.
     pub series: (NautilusDataType, String),
     pub slice: Slice,
+}
+
+impl SeriesSlice {
+    /// `slices`, those of one series merged where they overlap or touch,
+    /// each series' in time order, the series in the order they first
+    /// come: no part of a series is read twice.
+    #[must_use]
+    pub fn merged(slices: impl IntoIterator<Item = Self>) -> Vec<Self> {
+        merged(slices.into_iter().map(|of| (of.series, of.slice)))
+            .into_iter()
+            .map(|(series, slice)| Self { series, slice })
+            .collect()
+    }
 }
 
 impl TickSeries {
@@ -457,7 +541,7 @@ mod tests {
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         assert_eq!(
-            requirements.slices(start, end),
+            requirements.slices(start, end).unwrap(),
             [
                 series_slice(
                     NautilusDataType::TradeTick,
@@ -490,7 +574,7 @@ mod tests {
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         let roll = "2026-07-29T00:00Z";
         assert_eq!(
-            requirements.slices(start, end),
+            requirements.slices(start, end).unwrap(),
             [
                 series_slice(
                     NautilusDataType::TradeTick,
@@ -525,19 +609,16 @@ mod tests {
     }
 
     #[test]
-    fn the_bars_of_a_root_are_built_from_its_contracts_series_over_their_slices() {
+    fn the_bars_of_a_root_are_built_from_its_contracts_trades_over_their_slices() {
         let requirements = DataRequirements {
-            bar_types: vec![
-                BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL"),
-                BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
-            ],
+            bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![],
             warmup: SignedDuration::from_hours(24),
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         let roll = "2026-07-29T00:00Z";
         assert_eq!(
-            requirements.slices(start, end),
+            requirements.slices(start, end).unwrap(),
             [
                 series_slice(
                     NautilusDataType::TradeTick,
@@ -553,20 +634,99 @@ mod tests {
                     at(roll),
                     end
                 ),
+            ]
+        );
+    }
+
+    /// The slices of `bar_type` over July and August 2026, across GC's
+    /// roll of 29 July.
+    fn bar_slices(bar_type: &str) -> anyhow::Result<Vec<SeriesSlice>> {
+        DataRequirements {
+            bar_types: vec![BarType::from(bar_type)],
+            ticks: vec![],
+            warmup: SignedDuration::ZERO,
+        }
+        .slices(at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"))
+    }
+
+    #[test]
+    fn bars_on_a_root_not_built_from_its_trades_are_refused_naming_the_bar_type() {
+        for bar_type in [
+            "GC.GLBX-1-MINUTE-MID-INTERNAL",
+            "GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            "GC.GLBX-1-MINUTE-LAST-EXTERNAL",
+        ] {
+            let err = bar_slices(bar_type).unwrap_err().to_string();
+            assert!(err.contains(bar_type), "{err}");
+        }
+    }
+
+    #[test]
+    fn bars_on_a_contract_need_not_be_built_from_trades() {
+        assert_eq!(
+            bar_slices("GCZ6.GLBX-1-MINUTE-MID-INTERNAL").unwrap(),
+            [series_slice(
+                NautilusDataType::QuoteTick,
+                "GCZ6.GLBX",
+                "GCZ6.GLBX",
+                at("2026-07-01T00:00Z"),
+                at("2026-08-31T00:00Z")
+            )]
+        );
+    }
+
+    /// GCQ6.GLBX stands for GC.GLBX up to the roll of 29 July and is read
+    /// as itself over the whole span.
+    #[test]
+    fn a_contract_read_beside_its_root_is_one_slice_of_each_series_over_both() {
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(TickData::Trades, "GC.GLBX"),
+                tick(TickData::Trades, "GCQ6.GLBX"),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        assert_eq!(
+            requirements.slices(start, end).unwrap(),
+            [
                 series_slice(
-                    NautilusDataType::Bar,
-                    "GCQ6.GLBX-1-MINUTE-LAST-EXTERNAL",
+                    NautilusDataType::TradeTick,
+                    "GCQ6.GLBX",
                     "GCQ6.GLBX",
                     start,
-                    before(roll)
-                ),
-                series_slice(
-                    NautilusDataType::Bar,
-                    "GCZ6.GLBX-1-MINUTE-LAST-EXTERNAL",
-                    "GCZ6.GLBX",
-                    at(roll),
                     end
                 ),
+                series_slice(
+                    NautilusDataType::TradeTick,
+                    "GCZ6.GLBX",
+                    "GCZ6.GLBX",
+                    at("2026-07-29T00:00Z"),
+                    end
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_contracts_of_a_root_and_of_a_contract_beside_it_are_one_slice_each() {
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
+            ticks: vec![tick(TickData::Depth, "GCQ6.GLBX")],
+            warmup: SignedDuration::ZERO,
+        };
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        let slice = |id: &str, from, to| Slice {
+            instrument_id: InstrumentId::from(id),
+            from,
+            to,
+        };
+        assert_eq!(
+            requirements.contract_slices(start, end),
+            [
+                slice("GCQ6.GLBX", start, end),
+                slice("GCZ6.GLBX", at("2026-07-29T00:00Z"), end),
             ]
         );
     }

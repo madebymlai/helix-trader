@@ -17,7 +17,7 @@ use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{OrderBookDepth, TradeTick},
+    data::{BarType, OrderBookDepth, TradeTick},
     enums::BookType,
     identifiers::{InstrumentId, StrategyId},
     types::Money,
@@ -289,6 +289,62 @@ fn the_roller_of_a_plain_instrument_subscribes_once_and_sets_no_alert() {
             tick(TickData::Trades, POST, "00:45:00"),
         ]
     );
+}
+
+/// What `got` holds of `instrument_id`'s ticks, in order.
+fn ticks_of(got: &[Got], instrument_id: &str) -> Vec<Got> {
+    got.iter()
+        .filter(
+            |got| matches!(got, Got::Tick(_, id, _) if *id == InstrumentId::from(instrument_id)),
+        )
+        .cloned()
+        .collect()
+}
+
+/// August's ticks of the run, read as themselves: each once, the trade at
+/// the roll and the ticks after it included.
+fn pre_ticks_of_the_run() -> Vec<Got> {
+    vec![
+        tick(TickData::Trades, PRE, "thu 23:30:00"),
+        tick(TickData::Depth, PRE, "thu 23:45:00"),
+        tick(TickData::Trades, PRE, "thu 23:59:59.999999999"),
+        tick(TickData::Trades, PRE, "00:00:00"),
+        tick(TickData::Depth, PRE, "00:10:00"),
+        tick(TickData::Trades, PRE, "00:30:00"),
+    ]
+}
+
+#[test]
+fn a_contract_declared_beside_its_root_is_replayed_once() {
+    let catalog = rolls::catalog();
+    let backtest = backtest(&catalog, [ticks(ROOT), ticks(PRE)].concat());
+
+    let got = run(&backtest, Subscribe::Contracts);
+
+    // August's contract stands for the root up to the roll and is read as
+    // itself over the whole run: its ticks before the roll come once.
+    assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
+}
+
+#[test]
+fn bars_on_a_root_built_from_quotes_are_refused_naming_the_bar_type() {
+    let catalog = rolls::catalog();
+    let bars = "GC.GLBX-30-MINUTE-MID-INTERNAL";
+    let backtest = Backtest {
+        bar_types: vec![BarType::from(bars)],
+        ..backtest(&catalog, vec![])
+    };
+
+    let err = backtest
+        .run(RollProbe {
+            core: StrategyCore::new(StrategyConfig::default()),
+            subscribe: Subscribe::Contracts,
+            got: Rc::default(),
+        })
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains(bars), "{err}");
 }
 
 #[test]

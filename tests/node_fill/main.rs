@@ -409,7 +409,7 @@ fn fill(
     timeout: SignedDuration,
 ) -> anyhow::Result<()> {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let requests = missing(&catalog, &requirements.slices(start, end))?;
+    let requests = missing(&catalog, &requirements.slices(start, end)?)?;
     let mut node = NodeFill::new();
     node.add(
         NodeClient {

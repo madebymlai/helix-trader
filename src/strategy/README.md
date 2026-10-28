@@ -182,7 +182,12 @@ calendar, rather than a dated contract. `DataRequirements::slices(start,
 end)` expands each catalog series the requirements read through its
 instrument's transition table (`rolls/README.md`) into `SeriesSlice`s: the
 series of each contract over the slice where it stands for the root. A
-plain instrument's series is one slice over the span, on itself.
+plain instrument's series is one slice over the span, on itself. The
+slices of one series from several tables (a root's and a contract read
+beside it) are merged, so nothing is read twice. Bars on a root not built
+from its trades (internal, LAST, not composite) are refused there, naming
+the bar type: Nautilus builds a root's continuous bars from trades and
+prices their rolls from them, so other bars would never come.
 fill-catalog fills Databento's series from them, contract by contract. A
 strategy reading the ticks of a root subscribes to them through a
 `rolls::Roller`, which switches them to the next contract at each roll and

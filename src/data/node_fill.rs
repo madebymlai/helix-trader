@@ -157,10 +157,9 @@ impl FillRequest {
 /// What `catalog` lacks of `slices`, contract by contract in the order they
 /// first come: the contract's definition over the span of what it lacks,
 /// then each of its series' missing windows (Nautilus'
-/// `get_missing_intervals_for_request`), in time order. The slices of one
-/// series of a contract from several tables (a root's and the contract's
-/// own) are merged first, so no window is asked twice. A contract lacking
-/// nothing is left out.
+/// `get_missing_intervals_for_request`), in time order. The slices are
+/// `DataRequirements::slices`, which reads no window of a series twice. A
+/// contract lacking nothing is left out.
 ///
 /// # Errors
 ///
@@ -170,7 +169,7 @@ pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
 ) -> anyhow::Result<Vec<FillRequest>> {
-    let mut spans: Vec<SeriesSpans> = Vec::new();
+    let mut contracts: Vec<(InstrumentId, Vec<FillRequest>)> = Vec::new();
     for SeriesSlice {
         series: (data_type, identifier),
         slice,
@@ -183,29 +182,14 @@ pub fn missing(
             *identifier == id.to_string(),
             "the {data} of {identifier} on a slice of {id}"
         );
-        let span = (nanos(slice.from), nanos(slice.to));
-        match spans.iter_mut().find(|(i, d, _)| *i == id && *d == data) {
-            Some((_, _, of_series)) => of_series.push(span),
-            None => spans.push((id, data, vec![span])),
-        }
-    }
-    let mut contracts: Vec<(InstrumentId, Vec<FillRequest>)> = Vec::new();
-    for (id, data, of_series) in spans {
-        let data_type = data.data_type().expect("a series");
-        let identifier = id.to_string();
-        let mut gaps = Vec::new();
-        for (from, to) in merged(of_series) {
-            gaps.extend(
-                catalog
-                    .get_missing_intervals_for_request(
-                        from,
-                        to,
-                        &data_type.clone().into(),
-                        Some(&identifier),
-                    )
-                    .with_context(|| format!("reading the stored {data} of {id}"))?,
-            );
-        }
+        let gaps = catalog
+            .get_missing_intervals_for_request(
+                nanos(slice.from),
+                nanos(slice.to),
+                &data_type.clone().into(),
+                Some(identifier),
+            )
+            .with_context(|| format!("reading the stored {data} of {id}"))?;
         let requests = gaps.into_iter().map(|(from, to)| FillRequest {
             data,
             instrument_id: id,
@@ -232,24 +216,6 @@ pub fn missing(
             std::iter::once(definition).chain(requests)
         })
         .collect())
-}
-
-/// A series of a contract and the spans of its slices, closed intervals of
-/// Unix nanoseconds.
-type SeriesSpans = (InstrumentId, FillData, Vec<(u64, u64)>);
-
-/// `spans`, closed intervals, merged where they overlap or touch, in time
-/// order.
-fn merged(mut spans: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
-    spans.sort_unstable();
-    let mut merged: Vec<(u64, u64)> = Vec::new();
-    for (from, to) in spans {
-        match merged.last_mut() {
-            Some(last) if from <= last.1.saturating_add(1) => last.1 = last.1.max(to),
-            _ => merged.push((from, to)),
-        }
-    }
-    merged
 }
 
 fn nanos(at: Timestamp) -> u64 {
@@ -798,38 +764,6 @@ mod tests {
         )];
 
         assert_eq!(missing(&catalog, &slices).unwrap(), []);
-    }
-
-    #[test]
-    fn slices_of_one_series_from_two_tables_are_asked_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [
-            slice(
-                NautilusDataType::OrderBookDepth,
-                "GCZ6.GLBX",
-                "2026-08-01T00:00:00Z",
-                "2026-08-20T00:00:00Z",
-            ),
-            slice(
-                NautilusDataType::OrderBookDepth,
-                "GCZ6.GLBX",
-                "2026-08-10T00:00:00Z",
-                "2026-08-31T00:00:00Z",
-            ),
-        ];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        assert_eq!(
-            asked[1..],
-            [request(
-                FillData::Depth,
-                "GCZ6.GLBX",
-                "2026-08-01T00:00:00Z",
-                "2026-08-31T00:00:00Z"
-            )]
-        );
     }
 
     #[test]

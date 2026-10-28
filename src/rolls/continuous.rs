@@ -12,7 +12,7 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{BarType, TradeTick},
-    enums::{ContinuousFutureAdjustmentType, PriceType},
+    enums::ContinuousFutureAdjustmentType,
     identifiers::InstrumentId,
     types::Price,
 };
@@ -46,15 +46,15 @@ impl ContinuousBars {
     /// `bar_types` over `[start, end]`, adjusted in `mode`, their roll
     /// prices read from the catalog at `catalog`: at each transition, the
     /// pre contract's last trade of its slice and the post contract's
-    /// first, as Nautilus takes them. A plain instrument has none.
+    /// first, as Nautilus takes them. A plain instrument has none. Bars on
+    /// a root are built from its trades: `DataRequirements::slices` refuses
+    /// others.
     ///
     /// # Errors
     ///
-    /// Returns an error if a bar type on a root is not built from trades
-    /// (internal, LAST, not composite), whose prices the rolls are priced
-    /// from, if a root does not roll over the span (Nautilus' continuous
-    /// bars need a transition), or if a contract has no trade in its slice
-    /// to price a roll, or its trades cannot be read.
+    /// Returns an error if a root does not roll over the span (Nautilus'
+    /// continuous bars need a transition), or if a contract has no trade in
+    /// its slice to price a roll, or its trades cannot be read.
     pub fn read(
         catalog: &Path,
         bar_types: &[BarType],
@@ -71,13 +71,6 @@ impl ContinuousBars {
             if table.contract_at(start) == instrument_id {
                 continue;
             }
-            ensure!(
-                bar_type.is_internally_aggregated()
-                    && !bar_type.is_composite()
-                    && bar_type.spec().price_type == PriceType::Last,
-                "bars {bar_type} on a root must be built from trades \
-                 (internal, LAST, not composite): its rolls are priced from trades"
-            );
             ensure!(
                 !table.transitions().is_empty(),
                 "no roll of {instrument_id} over [{start}, {end}]: Nautilus' continuous \
@@ -250,22 +243,6 @@ mod tests {
     fn bars_on_a_plain_instrument_read_nothing() {
         let continuous = read("GCZ6.GLBX-1-MINUTE-LAST-INTERNAL").unwrap();
         assert_eq!(continuous, ContinuousBars::default());
-    }
-
-    #[test]
-    fn bars_on_a_root_built_from_quotes_are_refused() {
-        let err = read("GC.GLBX-1-MINUTE-MID-INTERNAL")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("must be built from trades"), "{err}");
-    }
-
-    #[test]
-    fn bars_on_a_root_built_from_source_bars_are_refused() {
-        let err = read("GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("must be built from trades"), "{err}");
     }
 
     #[test]

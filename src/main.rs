@@ -277,7 +277,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         others.into_iter().partition(|&id| IcHistory::serves(id));
     // Every source takes the series slices of its instruments: a rolled
     // root's series contract by contract, each over its slice.
-    let slices = requirements.slices(start, end);
+    let slices = requirements.slices(start, end)?;
     let slices_of = |serves: fn(InstrumentId) -> bool| -> Vec<SeriesSlice> {
         slices
             .iter()

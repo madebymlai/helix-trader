@@ -33,7 +33,7 @@ pub use self::{
     report::{Outcome, report},
 };
 use crate::{
-    rolls::{ContinuousBars, TransitionTable},
+    rolls::ContinuousBars,
     strategy::{DataRequirements, SeriesSlice, TickSeries},
 };
 
@@ -174,47 +174,55 @@ impl Backtest {
     /// The instruments the strategy reads: those of the bar types and of
     /// the ticks, roots or plain instruments, each once.
     fn declared(&self) -> BTreeSet<InstrumentId> {
-        let ticks = self.ticks.iter().map(|tick| tick.instrument_id);
-        self.bar_types
-            .iter()
-            .map(BarType::instrument_id)
-            .chain(ticks)
-            .collect()
+        self.requirements().instrument_ids().into_iter().collect()
+    }
+
+    /// The bar types and the ticks as data requirements, which expand them
+    /// into the contracts standing for their instruments.
+    fn requirements(&self) -> DataRequirements {
+        DataRequirements {
+            bar_types: self.bar_types.clone(),
+            ticks: self.ticks.clone(),
+            warmup: self.warmup,
+        }
     }
 
     /// The instruments the run replays, each once: the contracts standing
     /// for each declared instrument over `[warmup start, end]` (see
-    /// `rolls::TransitionTable`), a plain instrument standing for itself.
-    /// A root is none of them.
+    /// `strategy::DataRequirements::contract_slices`), a plain instrument
+    /// standing for itself. A root is none of them.
     fn instruments(&self) -> anyhow::Result<BTreeSet<InstrumentId>> {
         let (from, to) = (self.warmup_start()?, self.end);
         Ok(self
-            .declared()
+            .requirements()
+            .contract_slices(from, to)
             .into_iter()
-            .flat_map(|id| TransitionTable::of(id, from, to).slices())
             .map(|slice| slice.instrument_id)
             .collect())
     }
 
     /// The catalog series the run replays, each over the slice of
     /// `[warmup start, end]` its contract stands for its instrument (see
-    /// `strategy::DataRequirements::slices`): those the bars are built from
-    /// (see `strategy::catalog_series`), then the ticks as declared, then
-    /// the book depth of each contract of the instruments of the bar types
+    /// `strategy::DataRequirements::slices`), the slices of one series
+    /// merged (`SeriesSlice::merged`): those the bars are built from (see
+    /// `strategy::catalog_series`) and the ticks as declared, then the
+    /// book depth of each contract of the instruments of the bar types
     /// whose catalog stores one, then the funding of each contract whose
     /// catalog stores funding, which the venue settles on open positions;
-    /// the book and the funding keyed by the contract's id; each series
-    /// once. A plain instrument is one slice on itself over the whole
-    /// span. An instrument read for its book alone, none of the series its
-    /// bars are built from stored (CME gold's book without its quotes), has
-    /// its book replayed and its bars left out: no bar is built of it. An
-    /// instrument of the ticks alone has no book replayed but a declared
-    /// one.
+    /// the book and the funding keyed by the contract's id, over its
+    /// slices (see `strategy::DataRequirements::contract_slices`); no part
+    /// of a series twice. A plain instrument is one slice on itself over the
+    /// whole span. An instrument read for its book alone, none of the
+    /// series its bars are built from stored (CME gold's book without its
+    /// quotes), has its book replayed and its bars left out: no bar is
+    /// built of it. An instrument of the ticks alone has no book replayed
+    /// but a declared one.
     ///
     /// # Errors
     ///
-    /// Returns an error if the warmup is negative, or if what the catalog
-    /// stores cannot be read.
+    /// Returns an error if the warmup is negative, as
+    /// `DataRequirements::slices` does (bars on a root not built from its
+    /// trades), or if what the catalog stores cannot be read.
     fn series(&self) -> anyhow::Result<Vec<SeriesSlice>> {
         let (from, to) = (self.warmup_start()?, self.end);
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
@@ -230,10 +238,12 @@ impl Backtest {
                     )
                 })
         };
-        // The series of `data_type` of each contract of `id`.
-        let of = |data_type: NautilusDataType, id: InstrumentId| -> Vec<SeriesSlice> {
-            TransitionTable::of(id, from, to)
-                .slices()
+        let requirements = self.requirements();
+        // The series of `data_type` of each contract of `ids`.
+        let of = |data_type: NautilusDataType, ids: &[InstrumentId]| -> Vec<SeriesSlice> {
+            requirements
+                .of_instruments(ids)
+                .contract_slices(from, to)
                 .into_iter()
                 .map(|slice| SeriesSlice {
                     series: (data_type.clone(), slice.instrument_id.to_string()),
@@ -249,49 +259,45 @@ impl Backtest {
             }
             .slices(from, to)
         };
-        let bar_instruments: BTreeSet<InstrumentId> =
+        let bar_instruments: Vec<InstrumentId> =
             self.bar_types.iter().map(BarType::instrument_id).collect();
         let mut books = Vec::new();
-        for id in bar_instruments {
-            for book in of(NautilusDataType::OrderBookDepth, id) {
-                if stored(&book)? {
-                    books.push(book);
-                }
+        for book in of(NautilusDataType::OrderBookDepth, &bar_instruments) {
+            if stored(&book)? {
+                books.push(book);
             }
         }
         let mut funding = Vec::new();
-        for id in self.declared() {
-            for rate in of(NautilusDataType::FundingRateUpdate, id) {
-                if stored(&rate)? {
-                    funding.push(rate);
-                }
+        for rate in of(
+            NautilusDataType::FundingRateUpdate,
+            &requirements.instrument_ids(),
+        ) {
+            if stored(&rate)? {
+                funding.push(rate);
             }
         }
         let mut built = Vec::new();
         for bar_type in &self.bar_types {
-            let has_book = of(NautilusDataType::OrderBookDepth, bar_type.instrument_id())
-                .iter()
-                .any(|book| books.contains(book));
+            let has_book = of(
+                NautilusDataType::OrderBookDepth,
+                &[bar_type.instrument_id()],
+            )
+            .iter()
+            .any(|book| books.iter().any(|stored| stored.series == book.series));
             let mut has_source = false;
-            for source in read(vec![*bar_type], vec![]) {
+            for source in read(vec![*bar_type], vec![])? {
                 has_source |= stored(&source)?;
             }
             if has_source || !has_book {
                 built.push(*bar_type);
             }
         }
-        let mut series: Vec<SeriesSlice> = Vec::new();
-        for entry in read(built, vec![])
-            .into_iter()
-            .chain(read(vec![], self.ticks.clone()))
-            .chain(books)
-            .chain(funding)
-        {
-            if !series.contains(&entry) {
-                series.push(entry);
-            }
-        }
-        Ok(series)
+        Ok(SeriesSlice::merged(
+            read(built, self.ticks.clone())?
+                .into_iter()
+                .chain(books)
+                .chain(funding),
+        ))
     }
 }
 
@@ -461,6 +467,78 @@ mod tests {
                     (NautilusDataType::OrderBookDepth, GOLD.to_string()),
                 ]
             )
+        );
+    }
+
+    /// GC.GLBX rolls from GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July
+    /// 2026; its bars are built from the trades of each contract.
+    #[test]
+    fn the_trades_of_a_contract_read_beside_the_bars_of_its_root_are_replayed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
+            ticks: vec![TickSeries {
+                data: crate::strategy::TickData::Trades,
+                instrument_id: InstrumentId::from("GCQ6.GLBX"),
+            }],
+            start: "2026-07-20T00:00:00Z".parse().unwrap(),
+            end: "2026-08-10T00:00:00Z".parse().unwrap(),
+            ..backtest(dir.path(), &[])
+        };
+        let roll: Timestamp = "2026-07-29T00:00:00Z".parse().unwrap();
+        let trades = |id: &str, from, to| SeriesSlice {
+            series: (NautilusDataType::TradeTick, id.to_string()),
+            slice: Slice {
+                instrument_id: InstrumentId::from(id),
+                from,
+                to,
+            },
+        };
+        let from = backtest.start - SignedDuration::from_nanos(1);
+        assert_eq!(
+            backtest.series().unwrap(),
+            [
+                trades("GCQ6.GLBX", from, backtest.end),
+                trades("GCZ6.GLBX", roll, backtest.end),
+            ]
+        );
+    }
+
+    /// GC.GLBX's bars over July and August 2026, a book of August's
+    /// contract stored, and its book read as ticks: GC.GLBX rolls from
+    /// GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July 2026.
+    #[test]
+    fn the_book_of_a_contract_read_beside_the_bars_of_its_root_is_replayed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let ts = UnixNanos::from(1_785_000_000_000_000_000);
+        let mut depth = stub_depth10();
+        (depth.instrument_id, depth.ts_event, depth.ts_init) =
+            (InstrumentId::from("GCQ6.GLBX"), ts, ts);
+        catalog
+            .write_to_parquet(&[depth], None, None, None)
+            .unwrap();
+        let backtest = Backtest {
+            bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
+            ticks: vec![TickSeries {
+                data: crate::strategy::TickData::Depth,
+                instrument_id: InstrumentId::from("GCQ6.GLBX"),
+            }],
+            start: "2026-07-20T00:00:00Z".parse().unwrap(),
+            end: "2026-08-10T00:00:00Z".parse().unwrap(),
+            ..backtest(dir.path(), &[])
+        };
+        // No trades stored: the bars are left out, read for the book alone.
+        assert_eq!(
+            backtest.series().unwrap(),
+            [SeriesSlice {
+                series: (NautilusDataType::OrderBookDepth, "GCQ6.GLBX".to_string()),
+                slice: Slice {
+                    instrument_id: InstrumentId::from("GCQ6.GLBX"),
+                    from: backtest.start - SignedDuration::from_nanos(1),
+                    to: backtest.end,
+                },
+            }]
         );
     }
 

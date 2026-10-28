@@ -132,7 +132,7 @@ pub(crate) async fn fill_quotes_through_node(
         warmup: jiff::SignedDuration::ZERO,
     };
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let requests = missing(&catalog, &requirements.slices(start, end))?;
+    let requests = missing(&catalog, &requirements.slices(start, end)?)?;
     let client = NodeClient {
         factory: Box::new(IcDataClientFactory),
         config: Box::new(IcDataClientConfig {
