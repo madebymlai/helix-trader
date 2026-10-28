@@ -1,6 +1,7 @@
 //! The roll calendar: per product, how its contracts are named, its liquid
-//! contract months and the day and time the front contract rolls, read
-//! from `calendar.toml`, embedded at build time.
+//! contract months and the day and time the front contract rolls (a rule
+//! day, less a number of business days), read from `calendar.toml`,
+//! embedded at build time.
 
 use std::sync::LazyLock;
 
@@ -25,7 +26,8 @@ pub(super) fn product(root: InstrumentId) -> Option<&'static Product> {
 ///
 /// # Errors
 ///
-/// Returns an error if the TOML is not a calendar, if a product's contract
+/// Returns an error if the TOML is not a calendar (a product without
+/// `days_before`, or with a negative one, is not), if a product's contract
 /// template does not parse, if a product lists no months, or if two
 /// products share a root.
 fn parse(toml: &str) -> anyhow::Result<Vec<Product>> {
@@ -60,13 +62,17 @@ pub(super) struct Product {
     contract: ContractTemplate,
     /// The liquid contract months, those the front contract rolls through.
     months: Vec<MonthCode>,
-    /// The day the front contract rolls.
+    /// The rule day the front contract's roll is counted back from.
     roll: Roll,
+    /// The business days (weekdays) before the rule day the front
+    /// contract rolls, so that it rolls before the volume leaves it.
+    days_before: u32,
     /// The time of day of the roll, UTC.
     time: civil::Time,
 }
 
-/// The day a product's front contract rolls to the next liquid one.
+/// The rule day a product's front contract's roll to the next liquid one is
+/// counted back from.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Roll {
@@ -187,8 +193,8 @@ impl Product {
     /// rolled out of, a roll at `time` exactly included.
     pub(super) fn front_at(&self, time: Timestamp) -> Contract {
         let year = time.to_zoned(TimeZone::UTC).year();
-        // A contract's roll falls at most a month before its delivery, so
-        // the front at `time` delivers within the year after `time`'s.
+        // A contract's roll falls weeks before its delivery, so the front
+        // at `time` delivers within the year after `time`'s.
         (year..=year + 1)
             .flat_map(|year| {
                 self.months
@@ -199,20 +205,13 @@ impl Product {
             .expect("a product has liquid months")
     }
 
-    /// When the front rolls out of `contract` into the next liquid one.
+    /// When the front rolls out of `contract` into the next liquid one:
+    /// `days_before` business days before the rule day, at the product's
+    /// time.
     pub(super) fn roll_out_of(&self, contract: Contract) -> Timestamp {
         let Roll::LastBusinessDayBeforeDeliveryMonth = self.roll;
-        let mut day = civil::date(contract.year, contract.month.month(), 1)
-            .yesterday()
-            .expect("a contract delivers within jiff's dates");
-        while matches!(
-            day.weekday(),
-            civil::Weekday::Saturday | civil::Weekday::Sunday
-        ) {
-            day = day
-                .yesterday()
-                .expect("a contract delivers within jiff's dates");
-        }
+        let rule_day = weekday_before(civil::date(contract.year, contract.month.month(), 1));
+        let day = (0..self.days_before).fold(rule_day, |day, _| weekday_before(day));
         day.to_datetime(self.time)
             .to_zoned(TimeZone::UTC)
             .expect("a contract delivers within jiff's dates")
@@ -241,6 +240,22 @@ impl Product {
     }
 }
 
+/// The weekday before `date`.
+fn weekday_before(date: civil::Date) -> civil::Date {
+    let mut day = date;
+    loop {
+        day = day
+            .yesterday()
+            .expect("a contract delivers within jiff's dates");
+        if !matches!(
+            day.weekday(),
+            civil::Weekday::Saturday | civil::Weekday::Sunday
+        ) {
+            return day;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nautilus_model::identifiers::Venue;
@@ -265,6 +280,7 @@ mod tests {
             contract = "GC{month}{y}"
             months = ["G", "J", "M", "Q", "Z"]
             roll = "last-business-day-before-delivery-month"
+            days_before = 2
             time = "00:00"
         "#;
         let err = parse(&product.repeat(2)).unwrap_err();
@@ -280,6 +296,7 @@ mod tests {
             contract = "GC{month}{y}"
             months = []
             roll = "last-business-day-before-delivery-month"
+            days_before = 2
             time = "00:00"
             "#,
         )
@@ -297,10 +314,66 @@ mod tests {
                 contract = "GC{month}{y}"
                 months = ["A"]
                 roll = "last-business-day-before-delivery-month"
+                days_before = 2
                 time = "00:00"
                 "#,
             )
             .is_err()
+        );
+    }
+
+    /// A calendar of one GC product rolling `days_before`, as written in
+    /// TOML, or with no `days_before` line if `None`.
+    fn gold_rolling(days_before: Option<&str>) -> anyhow::Result<Product> {
+        let days_before = days_before.map_or(String::new(), |days| format!("days_before = {days}"));
+        let products = parse(&format!(
+            r#"
+            [[product]]
+            root = "GC.GLBX"
+            contract = "GC{{month}}{{y}}"
+            months = ["G", "J", "M", "Q", "Z"]
+            roll = "last-business-day-before-delivery-month"
+            {days_before}
+            time = "00:00"
+            "#
+        ))?;
+        Ok(products.into_iter().next().unwrap())
+    }
+
+    #[test]
+    fn rejects_a_product_without_days_before() {
+        let err = gold_rolling(None).unwrap_err();
+        assert!(err.to_string().contains("days_before"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_negative_days_before() {
+        assert!(gold_rolling(Some("-1")).is_err());
+    }
+
+    fn roll_out_of(gold: &Product, year: i16, month: MonthCode) -> Timestamp {
+        gold.roll_out_of(Contract { year, month })
+    }
+
+    #[test]
+    fn rolls_on_the_rule_day_with_no_days_before() {
+        // The last weekday of July 2026 is Friday the 31st.
+        let gold = gold_rolling(Some("0")).unwrap();
+        assert_eq!(
+            roll_out_of(&gold, 2026, MonthCode::Q),
+            "2026-07-31T00:00Z".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn counts_days_before_in_weekdays_across_a_weekend() {
+        // The last weekday of March 2026 is Tuesday the 31st; three
+        // weekdays before it are Monday the 30th, Friday the 27th and
+        // Thursday the 26th.
+        let gold = gold_rolling(Some("3")).unwrap();
+        assert_eq!(
+            roll_out_of(&gold, 2026, MonthCode::J),
+            "2026-03-26T00:00Z".parse().unwrap()
         );
     }
 
@@ -313,6 +386,7 @@ mod tests {
             contract = "{contract}"
             months = ["G", "J", "M", "Q", "Z"]
             roll = "last-business-day-before-delivery-month"
+            days_before = 2
             time = "00:00"
             "#
         ))?;

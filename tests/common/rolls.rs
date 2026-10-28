@@ -1,9 +1,10 @@
 //! CME gold rolled: the root GC.GLBX, which the roll calendar rolls from
 //! August's contract (GCQ6.GLBX) to December's (GCZ6.GLBX) at 00:00 UTC on
-//! Friday 31 July 2026, and a catalog storing both contracts as fill-catalog
-//! stores them, each under its own id with its own definition, their trades
-//! and book depth over 22:00 on Thursday 30 July to 02:00 on 31 July, on
-//! both sides of the roll. The root itself is not stored.
+//! Wednesday 29 July 2026 (two weekdays before Friday 31 July, the last
+//! weekday before August), and a catalog storing both contracts as
+//! fill-catalog stores them, each under its own id with its own definition,
+//! their trades and book depth over 22:00 on Tuesday 28 July to 02:00 on
+//! 29 July, on both sides of the roll. The root itself is not stored.
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -26,22 +27,22 @@ pub const PRE: &str = "GCQ6.GLBX";
 /// The front contract from the roll on.
 pub const POST: &str = "GCZ6.GLBX";
 
-/// `hh:mm:ss.fffffffff` UTC on Thursday 30 July 2026.
-pub fn thursday(time: &str) -> Timestamp {
-    ts(&format!("2026-07-30T{time}Z"))
+/// `hh:mm:ss.fffffffff` UTC on Tuesday 28 July 2026.
+pub fn tuesday(time: &str) -> Timestamp {
+    ts(&format!("2026-07-28T{time}Z"))
 }
 
-/// `hh:mm:ss.fffffffff` UTC on Friday 31 July 2026.
-pub fn friday(time: &str) -> Timestamp {
-    ts(&format!("2026-07-31T{time}Z"))
+/// `hh:mm:ss.fffffffff` UTC on Wednesday 29 July 2026.
+pub fn wednesday(time: &str) -> Timestamp {
+    ts(&format!("2026-07-29T{time}Z"))
 }
 
 /// One nanosecond.
 pub const NANOSECOND: SignedDuration = SignedDuration::from_nanos(1);
 
-/// The roll: 00:00 UTC on Friday 31 July 2026.
+/// The roll: 00:00 UTC on Wednesday 29 July 2026.
 pub fn roll() -> Timestamp {
-    friday("00:00:00")
+    wednesday("00:00:00")
 }
 
 /// The contract `id`, raw symbol `raw`, expiring at `expiration`.
@@ -83,12 +84,12 @@ fn depth(id: &str, time: Timestamp) -> OrderBookDepth {
 /// nanosecond), two after the roll.
 pub fn pre_trades() -> Vec<TradeTick> {
     vec![
-        trade(PRE, thursday("22:30:00"), "3990.00"),
-        trade(PRE, thursday("22:45:00"), "3989.00"),
-        trade(PRE, thursday("23:30:00"), "3991.00"),
-        trade(PRE, thursday("23:59:59.999999999"), "3992.00"),
+        trade(PRE, tuesday("22:30:00"), "3990.00"),
+        trade(PRE, tuesday("22:45:00"), "3989.00"),
+        trade(PRE, tuesday("23:30:00"), "3991.00"),
+        trade(PRE, tuesday("23:59:59.999999999"), "3992.00"),
         trade(PRE, roll(), "3992.50"),
-        trade(PRE, friday("00:30:00"), "3993.00"),
+        trade(PRE, wednesday("00:30:00"), "3993.00"),
     ]
 }
 
@@ -96,31 +97,31 @@ pub fn pre_trades() -> Vec<TradeTick> {
 /// slice (the first at the roll), one after the backtests' end.
 pub fn post_trades() -> Vec<TradeTick> {
     vec![
-        trade(POST, thursday("23:15:00"), "4040.00"),
+        trade(POST, tuesday("23:15:00"), "4040.00"),
         trade(POST, roll(), "4041.00"),
-        trade(POST, friday("00:45:00"), "4042.00"),
-        trade(POST, friday("01:30:00"), "4043.00"),
+        trade(POST, wednesday("00:45:00"), "4042.00"),
+        trade(POST, wednesday("01:30:00"), "4043.00"),
     ]
 }
 
 /// The snapshots of August's contract: one in its slice, one after.
 pub fn pre_depths() -> Vec<OrderBookDepth> {
     vec![
-        depth(PRE, thursday("23:45:00")),
-        depth(PRE, friday("00:10:00")),
+        depth(PRE, tuesday("23:45:00")),
+        depth(PRE, wednesday("00:10:00")),
     ]
 }
 
 /// The snapshots of December's contract: one before its slice, one in it.
 pub fn post_depths() -> Vec<OrderBookDepth> {
     vec![
-        depth(POST, thursday("23:50:00")),
-        depth(POST, friday("00:20:00")),
+        depth(POST, tuesday("23:50:00")),
+        depth(POST, wednesday("00:20:00")),
     ]
 }
 
 /// A catalog of both contracts, their trades and their book depth, each
-/// stored over 22:00 Thursday to 02:00 Friday; December's trades left out
+/// stored over 22:00 Tuesday to 02:00 Wednesday; December's trades left out
 /// unless `post_trades_stored`.
 pub fn catalog_storing(post_trades_stored: bool) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -132,8 +133,8 @@ pub fn catalog_storing(post_trades_stored: bool) -> TempDir {
         ])
         .unwrap();
     let (from, to) = (
-        Some(thursday("22:00:00").into()),
-        Some(friday("02:00:00").into()),
+        Some(tuesday("22:00:00").into()),
+        Some(wednesday("02:00:00").into()),
     );
     let mut trades = vec![pre_trades()];
     if post_trades_stored {

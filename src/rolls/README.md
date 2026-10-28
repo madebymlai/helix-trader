@@ -171,6 +171,7 @@ root = "GC.GLBX"
 contract = "GC{month}{y}"
 months = ["G", "J", "M", "Q", "Z"]
 roll = "last-business-day-before-delivery-month"
+days_before = 2
 time = "00:00"
 ```
 
@@ -182,31 +183,43 @@ time = "00:00"
 
 - `months` are the liquid contract months, by futures month code (F to Z).
   The front rolls through these and skips the others.
-- `roll` is the day the front rolls out of a contract into the next liquid
-  one. `last-business-day-before-delivery-month` is the last weekday of
-  the month before the contract's delivery month, which is COMEX metals'
+- `roll` is the rule day the front's roll out of a contract into the next
+  liquid one is counted back from.
+  `last-business-day-before-delivery-month` is the last weekday of the
+  month before the contract's delivery month, which is COMEX metals'
   first notice day. It is the only rule so far.
+- `days_before` is the number of business days before the rule day that
+  the front rolls, 0 for the rule day itself. It is required, with no
+  default, so each product states how far ahead of the rule it rolls.
 - `time` is the time of day of the roll, in UTC.
 
 Adding a product means adding one entry. A root listed twice, a product
-with no months, or a contract template with an unknown placeholder, an
-unclosed brace, or no month or year fails the calendar's parse. A unit test parses the embedded
+with no months, a product with no `days_before` or a negative one, or a
+contract template with an unknown placeholder, an unclosed brace, or no
+month or year fails the calendar's parse. A unit test parses the embedded
 file, so a broken calendar fails there first.
 
-Business days are weekdays. There is no holiday list: a CME holiday matters
-only when it falls on the last weekday of a month, and none did over the
-span checked against Databento.
+Business days are weekdays. There is no holiday list: a CME holiday
+matters only when it falls on a day the roll is counted over, the rule day
+or the `days_before` weekdays before it, and then the roll is a trading
+day nearer the rule day than declared. None did over the span checked
+against Databento.
 
 ### GC against Databento
 
-The rule gives GC's 2026 rolls at 00:00 UTC on Jan 30, Mar 31, May 29,
-Jul 31 and Nov 30, so its front is G, J, M, Q, Z and then the next year's G.
+First notice day gives GC's 2026 rule days as Jan 30, Mar 31, May 29,
+Jul 31 and Nov 30. GC declares `days_before = 2`, so it rolls at 00:00 UTC
+on Jan 28, Mar 27 (across the weekend), May 27, Jul 29 and Nov 26. Its
+front is G, J, M, Q, Z and then the next year's G.
+
 Databento's `GC.v.0` rolls by the previous day's volume. Its switches over
 the stored span (2026-01-26 to 2026-10-23), read from the stored daily
 definitions (whose expiration changes at 00:00 UTC on the switch day), are
-Jan 30, Mar 30, May 29 and Jul 31. Three are on the rule's date, and March
-is one business day early. The rule stays first notice day, because it can
-be computed for future dates and live needs that. The test accepts each
-Databento switch on the rule's date or the business day before it. On a
-day where Databento has already moved before the rule (Mar 30 2026), its
-`GC.v.0` data belongs to neither slice. Research masks roll days.
+Jan 30, Mar 30, May 29 and Jul 31: on first notice day, or a business day
+before it in March. The volume crossed to the next contract a trading day
+before each switch, so up to two business days before first notice day.
+Rolling on first notice day would hold the expiring contract after its
+volume has left. Two business days before, the roll comes before the
+volume moves, and the rule can still be computed for future dates, which
+live needs. A test asserts each stored switch falls after the roll,
+within `days_before` + 1 (three) business days of it.

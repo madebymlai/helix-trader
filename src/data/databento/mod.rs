@@ -306,15 +306,16 @@ mod tests {
     }
 
     /// What the catalog lacks of the series of `instrument_ids` read over
-    /// 2026-07-30 00:00 to 2026-07-31 12:00 UTC, across GC's roll from
-    /// GCQ6 to GCZ6 at 2026-07-31 00:00 (the last weekday of July, before
-    /// August, Q's delivery month): (data, contract, from, to).
+    /// 2026-07-28 00:00 to 2026-07-29 12:00 UTC, across GC's roll from
+    /// GCQ6 to GCZ6 at 2026-07-29 00:00 (two weekdays before Friday 31
+    /// July, the last weekday before August, Q's delivery month): (data,
+    /// contract, from, to).
     fn missing_across_the_roll(
         catalog: &ParquetDataCatalog,
         instrument_ids: &[&str],
     ) -> Vec<(FillData, String, String, String)> {
         let slices =
-            ticks_of(instrument_ids).slices(ts("2026-07-30T00:00Z"), ts("2026-07-31T12:00Z"));
+            ticks_of(instrument_ids).slices(ts("2026-07-28T00:00Z"), ts("2026-07-29T12:00Z"));
         missing(catalog, &slices)
             .unwrap()
             .into_iter()
@@ -333,10 +334,10 @@ mod tests {
         (data, id.to_string(), from.to_string(), to.to_string())
     }
 
-    const Q6_FROM: &str = "2026-07-30T00:00:00Z";
-    const Q6_TO: &str = "2026-07-30T23:59:59.999999999Z";
-    const Z6_FROM: &str = "2026-07-31T00:00:00Z";
-    const Z6_TO: &str = "2026-07-31T12:00:00Z";
+    const Q6_FROM: &str = "2026-07-28T00:00:00Z";
+    const Q6_TO: &str = "2026-07-28T23:59:59.999999999Z";
+    const Z6_FROM: &str = "2026-07-29T00:00:00Z";
+    const Z6_TO: &str = "2026-07-29T12:00:00Z";
 
     #[test]
     fn a_rolled_root_is_asked_contract_by_contract_over_each_slice() {
@@ -354,7 +355,7 @@ mod tests {
         );
     }
 
-    /// GCQ6's trades stored up to 13:00 on the 30th, its book not at all.
+    /// GCQ6's trades stored up to 13:00 on the 28th, its book not at all.
     #[test]
     fn each_contract_of_a_rolled_root_lacks_only_what_it_does_not_store() {
         let (_dir, catalog) = new_catalog();
@@ -364,14 +365,14 @@ mod tests {
             Quantity::from(1),
             AggressorSide::Sell,
             TradeId::new("1"),
-            ts("2026-07-30T12:00Z").into(),
-            ts("2026-07-30T12:00Z").into(),
+            ts("2026-07-28T12:00Z").into(),
+            ts("2026-07-28T12:00Z").into(),
         );
         catalog
             .write_to_parquet(
                 &[trade],
                 Some(ts(Q6_FROM).into()),
-                Some(ts("2026-07-30T13:00Z").into()),
+                Some(ts("2026-07-28T13:00Z").into()),
                 None,
             )
             .unwrap();
@@ -382,7 +383,7 @@ mod tests {
                 asked(
                     FillData::Trades,
                     "GCQ6.GLBX",
-                    "2026-07-30T13:00:00.000000001Z",
+                    "2026-07-28T13:00:00.000000001Z",
                     Q6_TO
                 ),
                 asked(FillData::Depth, "GCQ6.GLBX", Q6_FROM, Q6_TO),

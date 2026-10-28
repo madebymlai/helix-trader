@@ -9,16 +9,25 @@
 #         its last two digits, {yyyy} the year; any other text is literal.
 #         It names a month and a year.
 # months: the liquid contract months, by their futures month code.
-# roll:   the day the front contract rolls to the next liquid one:
-#         "last-business-day-before-delivery-month" is the last weekday of
-#         the month before the front contract's delivery month.
+# roll:   the rule day the front contract's roll to the next liquid one is
+#         counted back from: "last-business-day-before-delivery-month" is
+#         the last weekday of the month before the front contract's
+#         delivery month.
+# days_before: the business days (weekdays) before the rule day the front
+#         contract rolls, 0 for the rule day itself. Required, not negative.
 # time:   the time of day of the roll, UTC.
 
-# COMEX gold: first notice day, the last business day before the delivery
-# month. October (V) is skipped: Databento's volume-led GC.v.0 never fronts it.
+# COMEX gold: two business days before first notice day, the last business
+# day before the delivery month. Volume leaves the expiring contract before
+# first notice day: Databento's volume-led GC.v.0 switched on it or a business
+# day before it in 2026 (Jan 30, Mar 30, May 29, Jul 31), and the volume had
+# crossed a trading day before each switch, up to two business days before
+# first notice day. Rolling two before, we roll before the volume leaves.
+# October (V) is skipped: GC.v.0 never fronts it.
 [[product]]
 root = "GC.GLBX"
 contract = "GC{month}{y}"
 months = ["G", "J", "M", "Q", "Z"]
 roll = "last-business-day-before-delivery-month"
+days_before = 2
 time = "00:00"

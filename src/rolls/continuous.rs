@@ -205,12 +205,12 @@ mod tests {
     fn a_roll_is_priced_from_the_trades_nearest_it_days_away() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        // August's contract trades days before the roll (00:00 on Friday
-        // 31 July) and not on its eve; December's not on the day of the
+        // August's contract trades days before the roll (00:00 on Wednesday
+        // 29 July) and not on its eve; December's not on the day of the
         // roll.
         let pre = [
-            trade("GCQ6.GLBX", "2026-07-27T10:00Z", "3980.00"),
-            trade("GCQ6.GLBX", "2026-07-28T10:00Z", "3985.00"),
+            trade("GCQ6.GLBX", "2026-07-24T10:00Z", "3980.00"),
+            trade("GCQ6.GLBX", "2026-07-27T10:00Z", "3985.00"),
         ];
         let post = [
             trade("GCZ6.GLBX", "2026-08-03T10:00Z", "4040.00"),

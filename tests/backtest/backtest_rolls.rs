@@ -1,5 +1,5 @@
 //! A strategy declaring a rolled root (`common::rolls`: GC.GLBX, rolling
-//! from GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 31 July 2026) over a run
+//! from GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July 2026) over a run
 //! from 23:00 to 01:00 across the roll: the run replays each contract's
 //! series over its slice only, and a `Roller` switches the strategy's
 //! subscriptions from one contract to the next at the roll and tells it.
@@ -7,7 +7,7 @@
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
-use crate::common::rolls::{self, NANOSECOND, POST, PRE, ROOT, friday, roll, thursday};
+use crate::common::rolls::{self, NANOSECOND, POST, PRE, ROOT, roll, tuesday, wednesday};
 use helix_trader::{
     backtest::{Backtest, commission_rate, venue_oms_type},
     rolls::{Roller, Transition},
@@ -132,15 +132,15 @@ fn ticks(instrument_id: &str) -> Vec<TickSeries> {
         .to_vec()
 }
 
-/// A backtest over `[23:00 Thursday, 01:00 Friday]` on `catalog`,
+/// A backtest over `[23:00 Tuesday, 01:00 Wednesday]` on `catalog`,
 /// declaring `ticks` and no bar types.
 fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),
         bar_types: vec![],
         ticks,
-        start: thursday("23:00:00"),
-        end: friday("01:00:00"),
+        start: tuesday("23:00:00"),
+        end: wednesday("01:00:00"),
         warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
@@ -169,9 +169,9 @@ fn run(backtest: &Backtest, subscribe: Subscribe) -> Vec<Got> {
 
 fn tick(data: TickData, instrument_id: &str, time: &str) -> Got {
     let time = if let Some(time) = time.strip_prefix("thu ") {
-        thursday(time)
+        tuesday(time)
     } else {
-        friday(time)
+        wednesday(time)
     };
     Got::Tick(data, InstrumentId::from(instrument_id), time.into())
 }
@@ -306,7 +306,7 @@ fn a_contract_missing_part_of_its_slice_is_refused_naming_the_slice() {
 
     assert!(err.contains(&format!("trades of {POST}")), "{err}");
     assert!(
-        err.contains("[2026-07-31T00:00:00Z, 2026-07-31T01:00:00Z] is missing"),
+        err.contains("[2026-07-29T00:00:00Z, 2026-07-29T01:00:00Z] is missing"),
         "{err}"
     );
 }

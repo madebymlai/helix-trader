@@ -488,7 +488,7 @@ mod tests {
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        let roll = "2026-07-31T00:00Z";
+        let roll = "2026-07-29T00:00Z";
         assert_eq!(
             requirements.slices(start, end),
             [
@@ -535,7 +535,7 @@ mod tests {
             warmup: SignedDuration::from_hours(24),
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        let roll = "2026-07-31T00:00Z";
+        let roll = "2026-07-29T00:00Z";
         assert_eq!(
             requirements.slices(start, end),
             [
