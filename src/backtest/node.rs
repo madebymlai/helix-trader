@@ -133,7 +133,12 @@ fn data_config(catalog: &str, series: SeriesSlice) -> anyhow::Result<BacktestDat
         .catalog_path(catalog.to_string())
         .data_type(data_type.clone())
         .start_time(UnixNanos::from(slice.from))
-        .end_time(UnixNanos::from(slice.to));
+        .end_time(UnixNanos::from(slice.to))
+        // One stream over the series' files, as the catalog itself queries:
+        // Nautilus' default for a backtest config opens a prefetching stream
+        // per file, all before the first chunk, which over months of MBP-10
+        // files takes tens of GB.
+        .optimize_file_loading(true);
     let config = if data_type == NautilusDataType::Bar {
         builder.bar_types(vec![identifier]).build()
     } else {
@@ -231,6 +236,19 @@ mod tests {
         assert_eq!(venue.name(), "IBIS");
         assert_eq!(venue.account_type(), AccountType::Margin);
         assert_eq!(venue.book_type(), BookType::L1_MBP);
+    }
+
+    #[test]
+    fn each_series_is_streamed_from_its_files_as_one_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert!(!config.data().is_empty());
+        assert!(
+            config
+                .data()
+                .iter()
+                .all(BacktestDataConfig::optimize_file_loading)
+        );
     }
 
     #[test]
