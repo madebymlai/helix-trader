@@ -58,6 +58,13 @@ uses it to know the next roll in advance. `contracts_at(instrument_id,
 time)` is what an instrument needs from `time` up to that roll: the
 contract in front and the one it rolls into, or a plain instrument alone.
 
+`Transition::before(instrument_id, time)` mirrors `after`: the last roll
+at or before `time`, `time` included, into the contract in front then
+(its `post`), none for a plain instrument. A time exactly at a roll belongs to
+the post contract, as in `contract_at`, so the roll at that time is the
+one before it. At any time, `before` ends on the contract `after` starts
+from, and that contract is `contract_at`'s.
+
 The transitions carry no roll prices. Nautilus' continuous bars need them,
 and `ContinuousBars` reads them from the catalog (see Continuous bars).
 

@@ -63,6 +63,24 @@ impl Transition {
             post: product.instrument_id(product.next(front)),
         })
     }
+
+    /// The last transition of `instrument_id` at or before `time`, `time`
+    /// included: the roll of its product into the contract in front at
+    /// `time` (so its `post` is that contract, as `contract_at` has it), if
+    /// the id is a root in the roll calendar; none otherwise. A time at a
+    /// roll is on the post contract, so that roll is the one before it,
+    /// and `after` starts where it ends. Unbounded, as `after`.
+    #[must_use]
+    pub fn before(instrument_id: InstrumentId, time: Timestamp) -> Option<Self> {
+        let product = calendar::product(instrument_id)?;
+        let front = product.front_at(time);
+        let previous = product.previous(front);
+        Some(Self {
+            time: product.roll_out_of(previous),
+            pre: product.instrument_id(previous),
+            post: product.instrument_id(front),
+        })
+    }
 }
 
 /// The contracts `instrument_id` needs from `time` up to its next roll:
@@ -363,6 +381,81 @@ mod tests {
     fn an_id_without_a_calendar_entry_has_no_transition_after_any_time() {
         assert_eq!(
             Transition::after(id("GCZ6.GLBX"), at("2026-07-28T12:00Z")),
+            None
+        );
+    }
+
+    /// One nanosecond after `time`.
+    fn just_after(time: &str) -> Timestamp {
+        at(time) + SignedDuration::from_nanos(1)
+    }
+
+    #[test]
+    fn the_transition_before_a_time_between_rolls_is_the_earlier_roll() {
+        assert_eq!(
+            Transition::before(gc(), at("2026-08-10T14:30Z")),
+            Some(transition("2026-07-29T00:00Z", "GCQ6.GLBX", "GCZ6.GLBX"))
+        );
+    }
+
+    #[test]
+    fn the_transition_before_a_roll_exactly_at_its_time_is_that_roll() {
+        assert_eq!(
+            Transition::before(gc(), at("2026-07-29T00:00Z")),
+            Some(transition("2026-07-29T00:00Z", "GCQ6.GLBX", "GCZ6.GLBX"))
+        );
+    }
+
+    #[test]
+    fn the_transition_before_the_nanosecond_after_a_roll_is_that_roll() {
+        assert_eq!(
+            Transition::before(gc(), just_after("2026-07-29T00:00Z")),
+            Some(transition("2026-07-29T00:00Z", "GCQ6.GLBX", "GCZ6.GLBX"))
+        );
+    }
+
+    #[test]
+    fn the_transition_before_the_last_nanosecond_before_a_roll_is_the_roll_before() {
+        assert_eq!(
+            Transition::before(gc(), before("2026-07-29T00:00Z")),
+            Some(transition("2026-05-27T00:00Z", "GCM6.GLBX", "GCQ6.GLBX"))
+        );
+    }
+
+    /// GC's Z5 rolls two weekdays before the last weekday of November
+    /// 2025: Nov 30 is a Sunday, so the last weekday is Fri Nov 28 and
+    /// the roll Wed Nov 26.
+    #[test]
+    fn the_transition_before_the_first_roll_of_a_year_is_the_last_roll_of_the_year_before() {
+        assert_eq!(
+            Transition::before(gc(), at("2026-01-27T12:00Z")),
+            Some(transition("2025-11-26T00:00Z", "GCZ5.GLBX", "GCG6.GLBX"))
+        );
+    }
+
+    /// Around a roll, the transition before a time hands the root to the
+    /// contract standing at that time, which the transition after it hands
+    /// on.
+    #[test]
+    fn the_transition_before_a_time_ends_on_the_contract_the_transition_after_starts_from() {
+        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        for time in [
+            before("2026-07-29T00:00Z"),
+            at("2026-07-29T00:00Z"),
+            just_after("2026-07-29T00:00Z"),
+        ] {
+            let previous = Transition::before(gc(), time).unwrap();
+            let next = Transition::after(gc(), time).unwrap();
+            assert_eq!(previous.post, table.contract_at(time), "{time}");
+            assert_eq!(previous.post, next.pre, "{time}");
+            assert!(previous.time <= time && time < next.time, "{time}");
+        }
+    }
+
+    #[test]
+    fn an_id_without_a_calendar_entry_has_no_transition_before_any_time() {
+        assert_eq!(
+            Transition::before(id("GCZ6.GLBX"), at("2026-08-10T14:30Z")),
             None
         );
     }

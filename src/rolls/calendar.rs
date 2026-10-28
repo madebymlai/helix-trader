@@ -233,6 +233,22 @@ impl Product {
             })
     }
 
+    /// The liquid contract before `contract`.
+    pub(super) fn previous(&self, contract: Contract) -> Contract {
+        self.months
+            .iter()
+            .rev()
+            .map(|&month| Contract {
+                year: contract.year,
+                month,
+            })
+            .find(|&previous| previous < contract)
+            .unwrap_or(Contract {
+                year: contract.year - 1,
+                month: self.months[self.months.len() - 1],
+            })
+    }
+
     /// The instrument id of `contract`: the product's contract template
     /// filled for it, on the root's venue (`GCZ6.GLBX`).
     pub(super) fn instrument_id(&self, contract: Contract) -> InstrumentId {
