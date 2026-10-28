@@ -108,6 +108,10 @@ contract's last tick and before the post contract's first.
 Bars do not use the roller: Nautilus' continuous bars roll themselves from
 the table.
 
+Live, the node loads a root's contract in front at its start and the next
+one, so the contracts the roller subscribes to are loaded; a run spans one
+roll (`live/README.md`, "Rolled roots").
+
 ## Continuous bars
 
 Bars on a root (`GC.GLBX-1-MINUTE-LAST-INTERNAL`) are Nautilus' continuous
@@ -146,6 +150,9 @@ backtest's run and warmup, the span the backtest replays.
   instead;
 - for a roll whose pre or post contract has no trade in its slice, naming
   the contract, its slice and the roll.
+
+Live refuses bars on a root: a live roll's prices are not known when the
+subscription is made (`live/README.md`, "Rolled roots").
 
 What follows from Nautilus' rules (`backtest_continuous_bars.rs` pins
 them):

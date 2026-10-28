@@ -9,7 +9,9 @@
 //! 1-minute bars (see `ib/`). The node registers the catalog fill-catalog
 //! fills and backtests read: the warmup comes from it first, from the
 //! venues for what it lacks, and IC's answers are written back to it (see
-//! `strategy::warmup`).
+//! `strategy::warmup`). A futures root's instruments are its contract in
+//! front at the start and the next one, which the strategy's roller
+//! switches to (see `rolls`); bars on a root are refused.
 
 mod ib;
 mod ic;
@@ -25,7 +27,8 @@ pub use crate::data::IbAccount;
 
 use std::{fmt::Debug, path::PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
+use jiff::Timestamp;
 use nautilus_common::{
     actor::DataActorNative,
     component::Component,
@@ -39,6 +42,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IcHistory, OkxHistory, catalog_path},
+    rolls::Transition,
     strategy::{DataRequirements, warmup},
 };
 
@@ -71,11 +75,14 @@ pub struct Live {
 impl Live {
     /// Sets up the clients of the instruments of `requirements`, OKX's, IC's
     /// then IB's, then runs `strategy` on a live node until SIGINT or
-    /// SIGTERM. The strategy's warmup requests go to the data clients.
+    /// SIGTERM. The strategy's warmup requests go to the data clients. A
+    /// root's instruments are its contract in front at the start and the
+    /// next one (see `README.md`, "Rolled roots").
     ///
     /// # Errors
     ///
-    /// Returns an error if the cache cannot hold the warmup bars of a bar
+    /// Returns an error if a bar type is on a root (live builds no
+    /// continuous bars), if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if the catalog cannot be created
     /// or its path is not UTF-8, if an IC bar type is not built from
     /// quotes or IC's environment or credential is missing (see
@@ -95,7 +102,7 @@ impl Live {
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         let catalog = DataCatalogConfig::new(catalog_path(&self.catalog)?, None, None);
         let data_engine = warmup::live_data_engine_config(&requirements.bar_types);
-        let instrument_ids = requirements.instrument_ids();
+        let instrument_ids = loaded_instrument_ids(requirements, Timestamp::now())?;
         // The node would install the logger when built, after the clients
         // are set up: install it now with the node's trader and config, and
         // the node keeps it. The adapter's `tracing` output joins it.
@@ -149,5 +156,150 @@ impl Live {
             strategy,
         )
         .await
+    }
+}
+
+/// The instruments the node loads, at `now`: each one `requirements`
+/// reads, a root replaced by the contracts of its slices from `now` to its
+/// next roll (see `rolls::TransitionTable`), the one standing for it now
+/// and the one it rolls into, which the strategy's `Roller` subscribes to
+/// at the roll. A plain instrument is one slice on itself. Each once, in
+/// order.
+///
+/// # Errors
+///
+/// Returns an error if a bar type is on a root: live builds no continuous
+/// bars (see `README.md`, "Rolled roots").
+fn loaded_instrument_ids(
+    requirements: &DataRequirements,
+    now: Timestamp,
+) -> anyhow::Result<Vec<InstrumentId>> {
+    for bar_type in &requirements.bar_types {
+        let instrument_id = bar_type.instrument_id();
+        if let Some(next) = Transition::after(instrument_id, now) {
+            bail!(
+                "bars {bar_type} on the root {instrument_id}: live builds no continuous \
+                 bars, whose rolls Nautilus prices up front; read bars on its contract {} \
+                 or the root's ticks",
+                next.pre
+            );
+        }
+    }
+    let mut ids: Vec<InstrumentId> = Vec::new();
+    for instrument_id in requirements.instrument_ids() {
+        let next_roll = Transition::after(instrument_id, now).map_or(now, |next| next.time);
+        let slices = requirements
+            .of_instruments(&[instrument_id])
+            .slices(now, next_roll);
+        for slice in slices {
+            if !ids.contains(&slice.slice.instrument_id) {
+                ids.push(slice.slice.instrument_id);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::SignedDuration;
+    use nautilus_model::data::BarType;
+
+    use super::*;
+    use crate::strategy::{TickData, TickSeries};
+
+    fn at(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn ids(ids: &[&str]) -> Vec<InstrumentId> {
+        ids.iter().map(|&id| InstrumentId::from(id)).collect()
+    }
+
+    fn ticks(data: TickData, instrument_ids: &[&str]) -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![],
+            ticks: instrument_ids
+                .iter()
+                .map(|&id| TickSeries {
+                    data,
+                    instrument_id: InstrumentId::from(id),
+                })
+                .collect(),
+            warmup: SignedDuration::ZERO,
+        }
+    }
+
+    /// GC rolls into GCZ6 on 2026-07-29 and out of it into GCG7 on
+    /// 2026-11-26 (`rolls/README.md`, "GC against Databento").
+    #[test]
+    fn a_root_loads_the_contract_in_front_and_the_next() {
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
+            ..ticks(TickData::Trades, &["GC.GLBX"])
+        };
+        assert_eq!(
+            loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
+            ids(&["XAUUSD.ICMARKETS", "GCZ6.GLBX", "GCG7.GLBX"])
+        );
+    }
+
+    #[test]
+    fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
+        let requirements = ticks(TickData::Depth, &["GC.GLBX"]);
+        assert_eq!(
+            loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
+            ids(&["GCZ6.GLBX", "GCG7.GLBX"])
+        );
+        assert_eq!(
+            loaded_instrument_ids(
+                &requirements,
+                at("2026-07-29T00:00Z") - SignedDuration::from_nanos(1)
+            )
+            .unwrap(),
+            ids(&["GCQ6.GLBX", "GCZ6.GLBX"])
+        );
+    }
+
+    #[test]
+    fn a_contract_read_beside_its_root_loads_once() {
+        let requirements = ticks(TickData::Trades, &["GCZ6.GLBX", "GC.GLBX"]);
+        assert_eq!(
+            loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
+            ids(&["GCZ6.GLBX", "GCG7.GLBX"])
+        );
+    }
+
+    #[test]
+    fn plain_instruments_load_as_they_are_read() {
+        let requirements = DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
+            ],
+            ..ticks(TickData::Quotes, &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"])
+        };
+        assert_eq!(
+            loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
+            ids(&[
+                "SXR8.IBIS",
+                "BTC-USDT-SWAP.OKX",
+                "XAUUSD.ICMARKETS",
+                "GC.v.0.GLBX"
+            ])
+        );
+    }
+
+    #[test]
+    fn bars_on_a_root_are_refused_naming_the_bar_type_and_its_contract() {
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from("GC.GLBX-1-MINUTE-LAST-INTERNAL")],
+            ..ticks(TickData::Trades, &[])
+        };
+        let err = loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("GC.GLBX-1-MINUTE-LAST-INTERNAL"), "{err}");
+        assert!(err.contains("GCZ6.GLBX"), "{err}");
     }
 }

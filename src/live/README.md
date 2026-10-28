@@ -167,6 +167,50 @@ the rest IB's; it ended on the bar closing 07:11:00 and the first live bar
 closed 07:12:00: no gap, no duplicate, and no bar since the catalog's end
 replayed as live.
 
+## Rolled roots
+
+A strategy reading a futures root (`GC.GLBX`, see `rolls/README.md`)
+trades and reads its dated contracts, as in a backtest. At the start,
+`Live::run` takes each instrument the strategy reads through its slices
+from now to its next roll (`DataRequirements::slices`, the same table the
+backtest replays): a root gives the contract standing for it now and the
+one it rolls into next, a plain instrument itself. Those are the node's
+instruments: each goes to the client of its venue like any instrument,
+loaded at connect, and the strategy claims its external orders. A config
+without a root loads what it did before.
+
+The strategy's `Roller` subscribes to the root's ticks on the contract in
+front and switches them to the next one at the roll (`rolls/README.md`,
+"The roller"). The node already holds that contract, since it loaded it at
+the start. A run spans one roll: after it the node does not hold the
+contract after the next one, so restart it before the root's second roll
+(GC rolls two to four months apart).
+
+The contracts are loaded at the start, not requested by the roller as it
+rolls. A request reaches the venue's client only if it skips the catalog
+(`force_instrument_update`, `data/src/engine/streaming.rs`
+`dispatch_instrument_request`), and a backtest's data client answers no
+instrument request (`backtest/src/data_client.rs` has no
+`request_instrument`, and the trait's default refuses it). An instrument
+answered from the catalog reaches the cache but not the client: IB's
+`subscribe_trades` looks the contract up in its own provider and fails
+without it (`adapters/interactive_brokers/src/data/core.rs`). One roller
+cannot do both.
+
+Bars on a root are refused at the start, naming the contract to read
+instead. Nautilus' continuous bars take every roll's prices up front, in
+the subscription's params (`rolls/README.md`, "Continuous bars"). A live
+roll's post price is the post contract's first trade after the roll, so
+it is unknown when the subscription is made. Resubscribing at each roll
+would also move every earlier bar of a backward mode into the new frame
+under a running strategy, and a warmup of hours usually spans no roll,
+which Nautilus' continuous bars need. Read bars on the contract, or the
+root's ticks through the roller.
+
+No live client serves GLBX yet: a GLBX contract goes to IB's clients, the
+default, and IB names CME futures on `CME` (`data/ib/README.md`). Running a
+GLBX root live needs a client for that venue.
+
 ## Cache in Redis
 
 The node persists Nautilus' cache to Redis, as Nautilus recommends for live
