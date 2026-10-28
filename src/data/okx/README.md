@@ -16,11 +16,17 @@ series (quotes, trades, other bars) is refused before any request.
 ```rust
 OkxHistory::new() -> anyhow::Result<OkxHistory>
 OkxHistory::serves(id: InstrumentId) -> bool   // the OKX venue
-history.fill(&mut catalog, series: &[(NautilusDataType, String)], start, end)
-    .await -> anyhow::Result<()>
+history.fill(&mut catalog, slices: &[SeriesSlice]).await -> anyhow::Result<()>
 ```
 
-Per series, `fill` stores, in this order:
+`fill` takes the OKX series of `DataRequirements::slices`, the shape
+`fill-catalog` gives every source (the node fill's too): each series on
+its instrument over its slice, the whole window for an OKX instrument. It
+is temporary: OKX's data client answers without a `DataResponseEnvelope`,
+which Nautilus does not write back; once nautilus_trader#5473 is fixed,
+OKX fills through the node (`../README.md`, "The node fill").
+
+Per slice, `fill` stores, in this order:
 
 1. the instrument (see "Instruments");
 2. a swap's funding from the archive, month by month (see "Funding of swaps");
@@ -226,7 +232,9 @@ files.
 
 Instruments: the real BTC swap and X-Perp to a `CryptoPerpetual` and a
 `CryptoFuture` with margins of 1; a dated future refused; the type and
-family of a symbol; only minute candles served.
+family of a symbol; only minute candles served; the slices of a strategy
+on a composite bar type filled with its minute candles over their window,
+a slice of another series refused.
 
 Candles: samples of a real swap file and a real X-Perp chain file (the
 first 61 minutes and the last of 2026-10-19) to bars, stamped at the open,

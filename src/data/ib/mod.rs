@@ -3,6 +3,11 @@
 //! `fill_catalog`, which asks for series of any data type: IB serves its
 //! 1-MINUTE TRADES bars only (see `IbHistory::data`).
 //!
+//! IB's fill (`IbHistory::fill`) is temporary: IB's data client answers
+//! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
+//! back. Once nautilus_trader#5472 is fixed, IB fills through the node as
+//! Databento and IC do (see `node_fill`), and `fill` and `data` go.
+//!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
 //! connects to IB Gateway or TWS, returns `Vec<InstrumentAny>` from
@@ -25,6 +30,11 @@ use nautilus_model::{
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
+
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+
+use super::fill_catalog::fill_slices;
+use crate::strategy::SeriesSlice;
 
 mod gateway;
 pub use gateway::IbAccount;
@@ -118,6 +128,44 @@ impl IbHistory {
         }
         ensure_all_loaded(ids, &instruments)?;
         Ok(instruments)
+    }
+
+    /// Fills `catalog` with `slices`, IB series each on a contract over its
+    /// slice (`DataRequirements::slices`, as the node fill takes them): the
+    /// instruments of their contracts, then each slice through
+    /// `fill_slices`, fetched by `data`. Temporary until
+    /// nautilus_trader#5472 is fixed; then IB fills through the node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a slice is not IB's 1-MINUTE TRADES bars
+    /// (before any request), or as `instruments` and `fill_slices`.
+    pub async fn fill(
+        &self,
+        catalog: &mut ParquetDataCatalog,
+        slices: &[SeriesSlice],
+    ) -> anyhow::Result<()> {
+        let mut ids: Vec<InstrumentId> = Vec::new();
+        for SeriesSlice {
+            series: (data_type, identifier),
+            slice,
+        } in slices
+        {
+            served_bar_type(data_type, identifier)?;
+            if !ids.contains(&slice.instrument_id) {
+                ids.push(slice.instrument_id);
+            }
+        }
+        let instruments = self.instruments(&ids).await?;
+        fill_slices(
+            catalog,
+            &instruments,
+            slices,
+            async |data_type, identifier, from, to| {
+                self.data(data_type, identifier, from, to).await
+            },
+        )
+        .await
     }
 
     /// The series of `data_type` and `identifier` over `[start, end]`, for

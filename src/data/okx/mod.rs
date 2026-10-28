@@ -16,6 +16,11 @@
 //! the adapter's `OKXHttpClient::request_funding_rates` (see
 //! `fill_funding_from_api`). The archive API, the download and the
 //! conversion are ours, to be removed if Nautilus gains an equivalent.
+//!
+//! The fill (`OkxHistory::fill`) is temporary: OKX's data client answers
+//! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
+//! back. Once nautilus_trader#5473 is fixed, OKX fills through the node as
+//! Databento and IC do (see `node_fill`).
 
 use std::{collections::HashMap, io::Cursor, time::Duration};
 
@@ -47,6 +52,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::fill_catalog;
+use crate::strategy::SeriesSlice;
 
 mod archive;
 
@@ -114,27 +120,25 @@ impl OkxHistory {
         id.venue == *OKX_VENUE
     }
 
-    /// Fills `catalog` over `[start, end]` with `series`, each the bars of
-    /// the `1-MINUTE-LAST-EXTERNAL` bar type of an OKX swap or X-Perp, with
-    /// their instruments and the funding of each, the funding before the
-    /// bars (see `fill_series`).
+    /// Fills `catalog` with `slices` (`DataRequirements::slices`, as the
+    /// node fill takes them), each the bars of the `1-MINUTE-LAST-EXTERNAL`
+    /// bar type of an OKX swap or X-Perp over its slice, with their
+    /// instruments and the funding of each, the funding before the bars
+    /// (see `fill_series`). Temporary: OKX's data client answers without a
+    /// `DataResponseEnvelope`, so Nautilus writes none of its answers back;
+    /// once nautilus_trader#5473 is fixed, OKX fills through the node as
+    /// Databento and IC do, and this fill goes.
     ///
     /// # Errors
     ///
-    /// Returns an error if a series is not such bars, checked before any
+    /// Returns an error if a slice is not such bars, checked before any
     /// request, or as `fill_series`.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
-        series: &[(NautilusDataType, String)],
-        start: Timestamp,
-        end: Timestamp,
+        slices: &[SeriesSlice],
     ) -> anyhow::Result<()> {
-        let bar_types = series
-            .iter()
-            .map(|(data_type, identifier)| candle_bar_type(data_type, identifier))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        for bar_type in bar_types {
+        for (bar_type, start, end) in candle_slices(slices)? {
             let id = bar_type.instrument_id();
             let contract = Contract::of(id)?;
             let instrument = self.instrument(id).await?;
@@ -320,6 +324,27 @@ impl OkxHistory {
         );
         Ok(response.body.to_vec())
     }
+}
+
+/// The bar type and window of each of `slices`, OKX's candles each over
+/// its slice; an error for the first slice of another series (see
+/// `candle_bar_type`).
+fn candle_slices(slices: &[SeriesSlice]) -> anyhow::Result<Vec<(BarType, Timestamp, Timestamp)>> {
+    slices
+        .iter()
+        .map(
+            |SeriesSlice {
+                 series: (data_type, identifier),
+                 slice,
+             }| {
+                Ok((
+                    candle_bar_type(data_type, identifier)?,
+                    slice.from,
+                    slice.to,
+                ))
+            },
+        )
+        .collect()
 }
 
 /// The bar type of a series OKX's archive serves: the bars of the
@@ -1026,6 +1051,40 @@ pub(super) mod tests {
             "BTC-USD_UM_XPERP-310404.OKX-1-MINUTE-LAST-EXTERNAL",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn each_slice_is_filled_with_its_candles_over_its_window() {
+        let requirements = crate::strategy::DataRequirements {
+            bar_types: vec![BarType::from(
+                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ticks: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+        let (start, end) = (
+            "2026-10-01T00:00:00Z".parse().unwrap(),
+            "2026-10-08T00:00:00Z".parse().unwrap(),
+        );
+
+        let fills = candle_slices(&requirements.slices(start, end)).unwrap();
+
+        assert_eq!(fills, [(BarType::from(BTC_MINUTES), start, end)]);
+    }
+
+    #[test]
+    fn a_slice_of_another_series_is_refused() {
+        let requirements = crate::strategy::DataRequirements {
+            bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
+            ticks: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+        let start: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
+        let slices = requirements.slices(start, start + SignedDuration::from_hours(24));
+
+        let err = candle_slices(&slices).unwrap_err();
+
+        assert!(err.to_string().contains("BTC-USDT-SWAP.OKX"), "{err}");
     }
 
     #[test]

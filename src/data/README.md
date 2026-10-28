@@ -290,6 +290,13 @@ nautilus_trader#5472 (IB) and #5473 (OKX) are fixed.
 ### Interface
 
 ```rust
+pub async fn fill_slices(
+    catalog: &mut ParquetDataCatalog,
+    instruments: &[InstrumentAny],             // the slices' contracts, from the source
+    slices: &[SeriesSlice],                    // DataRequirements::slices, as the node fill's
+    fetch: impl AsyncFnMut(&NautilusDataType, &str, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
+) -> anyhow::Result<()>                         // one fill_catalog per slice, in order
+
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,           // from the source, before any data
@@ -300,7 +307,11 @@ pub async fn fill_catalog(
 ) -> anyhow::Result<()>
 ```
 
-`fetch` is the seam: `ib/` supplies `IbHistory::data` over the whole window,
+Every source gets the same shape from `fill-catalog`: the series slices
+of its instruments (`DataRequirements::slices`). `ib/` passes its slices
+to `fill_slices`; `okx/` fills each slice by its archive's periods.
+
+`fetch` is the seam: `ib/` supplies `IbHistory::data` over each slice,
 `okx/` one per archive month or day (see `okx/README.md`); tests pass
 closures with canned data. A fetch over `[from, to]` returns the items of
 the series whose `ts_init` lies in it, the closed interval stored
@@ -462,7 +473,10 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
     a covered window not again;
   - a failure keeps the instruments filled before it;
   - a minute-cadence source stored every minute and resumed with only the
-    new minutes.
+    new minutes;
+  - `fill_slices`: each slice fetched over its window on its contract, its
+    instrument stored; a slice of a contract not loaded refused after the
+    slices before it, which stay stored.
 - `node_fill.rs`, on temp catalogs: the windows of a period, cut on its
   multiples from the epoch (three hours, a day ending at midnight); what an
   empty catalog lacks (a definition, then each series over its slice, a

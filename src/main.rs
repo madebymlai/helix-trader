@@ -14,7 +14,7 @@ use helix_trader::{
     backtest::{self, Backtest},
     data::{
         DatabentoHistory, IbHistory, IcConnection, IcHistory, NodeClient, NodeFill, OkxHistory,
-        REQUEST_TIMEOUT, fill_catalog, missing,
+        REQUEST_TIMEOUT, missing,
     },
     live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live},
     strategy::{
@@ -232,14 +232,15 @@ async fn main() -> anyhow::Result<()> {
 
 /// Checks everything that needs no gateway, then fills the catalog with the
 /// instruments and the series the strategy reads, those its bars are built
-/// from and its ticks (see `DataRequirements::catalog_series`), from each
-/// instrument's source: OKX's archive for OKX instruments (their 1-minute
-/// candles), IB (connected only if needed) for the others but GLBX's and
-/// IC's, which fill through a Nautilus node (see `data::NodeFill`), each
-/// contract over its slice (`DataRequirements::slices`): Databento's data
-/// client for GLBX instruments (the series declared, Databento's cost of
-/// every request quoted first, before the node starts), IC's for IC
-/// instruments. OKX, IC and IB refuse a series they do not serve.
+/// from and its ticks (see `DataRequirements::catalog_series`), each on a
+/// contract over its slice (`DataRequirements::slices`), every source given
+/// its slices: GLBX's and IC's fill through a Nautilus node (see
+/// `data::NodeFill`), by Databento's data client for GLBX instruments (the
+/// series declared, Databento's cost of every request quoted first, before
+/// the node starts) and IC's for IC instruments; OKX's archive fills OKX
+/// instruments (their 1-minute candles) and IB (connected only if needed)
+/// the others, without a node until their clients answer with response
+/// envelopes. OKX, IC and IB refuse a series they do not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = match args.run.strategy {
@@ -272,8 +273,8 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .partition(|&id| DatabentoHistory::serves(id));
     let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
         others.into_iter().partition(|&id| IcHistory::serves(id));
-    // Databento and IC fill through the node: a rolled root's series
-    // contract by contract, each over its slice.
+    // Every source takes the series slices of its instruments: a rolled
+    // root's series contract by contract, each over its slice.
     let slices = requirements.slices(start, end);
     let slices_of = |serves: fn(InstrumentId) -> bool| -> Vec<SeriesSlice> {
         slices
@@ -309,28 +310,26 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             node.add(client, &requests, IcHistory::period);
         }
     }
+    // Temporary until nautilus_trader#5473 is fixed: OKX then fills through
+    // the node.
     if !okx_ids.is_empty() {
-        let series = requirements.of_instruments(&okx_ids).catalog_series();
         OkxHistory::new()?
-            .fill(&mut catalog, &series, start, end)
+            .fill(&mut catalog, &slices_of(OkxHistory::serves))
             .await?;
     }
     node.run(catalog_dir, REQUEST_TIMEOUT).await?;
+    // Temporary until nautilus_trader#5472 is fixed: IB then fills through
+    // the node.
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
-        let instruments = ib.instruments(&ib_ids).await?;
-        let series = requirements.of_instruments(&ib_ids).catalog_series();
-        fill_catalog(
-            &mut catalog,
-            instruments,
-            &series,
-            start,
-            end,
-            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
-        )
-        .await?;
+        ib.fill(&mut catalog, &slices_of(is_ib)).await?;
     }
     Ok(())
+}
+
+/// Whether `id` is IB's: on a venue no other source serves.
+fn is_ib(id: InstrumentId) -> bool {
+    !OkxHistory::serves(id) && !DatabentoHistory::serves(id) && !IcHistory::serves(id)
 }
 
 /// Builds the strategy from its config, runs it over the window of the

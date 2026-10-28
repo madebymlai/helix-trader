@@ -12,6 +12,12 @@
 //! `ParquetDataCatalog` (`nautilus_persistence`), which stores each series
 //! under its data type and identifier. Nautilus does not persist requested
 //! data on its own.
+//!
+//! Temporary, with IB's and OKX's fills that use it: IB's and OKX's data
+//! clients answer without a `DataResponseEnvelope`, so Nautilus writes
+//! none of their answers back. Once nautilus_trader#5472 (IB) and #5473
+//! (OKX) are fixed, they fill through the node as Databento and IC do (see
+//! `node_fill`), and this file goes.
 
 use std::collections::HashSet;
 
@@ -26,6 +32,8 @@ use nautilus_model::{
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
+
+use crate::strategy::SeriesSlice;
 
 /// Fills `catalog` with `instruments`, then over `[start, end]` with each
 /// of `series`, a Nautilus data type and its catalog identifier, fetched one
@@ -140,6 +148,48 @@ pub async fn fill_catalog(
     Ok(())
 }
 
+/// Fills `catalog` with `slices`, each a series on a contract over its
+/// slice (`DataRequirements::slices`, the requests of the node fill too),
+/// one `fill_catalog` per slice in order, with the instrument of the
+/// slice's contract among `instruments` and `fetch` as its fetch.
+/// Temporary: IB's fill until nautilus_trader#5472 is fixed, then IB fills
+/// through the node.
+///
+/// # Errors
+///
+/// Returns an error if no instrument of `instruments` is a slice's
+/// contract, when that slice's turn comes, or as `fill_catalog`. The slices
+/// filled before stay stored.
+pub async fn fill_slices(
+    catalog: &mut ParquetDataCatalog,
+    instruments: &[InstrumentAny],
+    slices: &[SeriesSlice],
+    mut fetch: impl AsyncFnMut(
+        &NautilusDataType,
+        &str,
+        Timestamp,
+        Timestamp,
+    ) -> anyhow::Result<Vec<Data>>,
+) -> anyhow::Result<()> {
+    for SeriesSlice { series, slice } in slices {
+        let id = slice.instrument_id;
+        let instrument = instruments
+            .iter()
+            .find(|instrument| instrument.id() == id)
+            .with_context(|| format!("no instrument of {id} loaded for its slice"))?;
+        fill_catalog(
+            catalog,
+            vec![instrument.clone()],
+            std::slice::from_ref(series),
+            slice.from,
+            slice.to,
+            async |data_type, identifier, from, to| fetch(data_type, identifier, from, to).await,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Whether `item` belongs to the series of `data_type` and `identifier`.
 fn is_of(item: &Data, data_type: &NautilusDataType, identifier: &str) -> bool {
     NautilusDataType::from_data(item) == *data_type && catalog_identifier(item) == identifier
@@ -163,7 +213,10 @@ fn just_after(last: UnixNanos) -> Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::{DataRequirements, TickData, TickSeries};
+    use crate::{
+        rolls::Slice,
+        strategy::{DataRequirements, SeriesSlice, TickData, TickSeries},
+    };
     use nautilus_model::{
         data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
         enums::AggressorSide,
@@ -970,5 +1023,90 @@ mod tests {
             .map(|depth| depth.ts_init.as_u64())
             .collect();
         assert_eq!(depths, [20, 180]);
+    }
+
+    /// ES's December 2021 contract, and its March 2022 one, as two
+    /// contracts a rolled root's slices stand on.
+    fn contracts() -> Vec<InstrumentAny> {
+        let mut march = futures_contract_es(None, None);
+        march.id = InstrumentId::from("ESH22.GLBX");
+        vec![instrument(), InstrumentAny::FuturesContract(march)]
+    }
+
+    fn quotes_slice(id: &str, from: u64, to: u64) -> SeriesSlice {
+        SeriesSlice {
+            series: (NautilusDataType::QuoteTick, id.to_string()),
+            slice: Slice {
+                instrument_id: InstrumentId::from(id),
+                from: ns(from),
+                to: ns(to),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn each_slice_is_fetched_over_its_window_on_its_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let slices = [
+            quotes_slice("ESZ21.GLBX", 0, 100),
+            quotes_slice("ESH22.GLBX", 101, 200),
+        ];
+        let mut asked = Vec::new();
+
+        fill_slices(
+            &mut catalog,
+            &contracts(),
+            &slices,
+            async |data_type, identifier, from, to| {
+                assert_eq!(*data_type, NautilusDataType::QuoteTick);
+                asked.push((identifier.to_string(), as_ns(from), as_ns(to)));
+                let id = InstrumentId::from(identifier);
+                Ok(vec![Data::Quote(quote_at(id, as_ns(from) + 10))])
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            asked,
+            [
+                ("ESZ21.GLBX".to_string(), 0, 100),
+                ("ESH22.GLBX".to_string(), 101, 200)
+            ]
+        );
+        let march = InstrumentId::from("ESH22.GLBX");
+        assert_eq!(stored_quotes(&mut catalog, es_id()), [10]);
+        assert_eq!(stored_quotes(&mut catalog, march), [111]);
+        let ids = vec!["ESZ21.GLBX".to_string(), "ESH22.GLBX".to_string()];
+        assert_eq!(
+            catalog.instruments(Some(&ids), None, None).unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slice_of_a_contract_not_loaded_is_refused_after_the_slices_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let slices = [
+            quotes_slice("ESZ21.GLBX", 0, 100),
+            quotes_slice("ESM22.GLBX", 101, 200),
+        ];
+
+        let err = fill_slices(
+            &mut catalog,
+            &contracts(),
+            &slices,
+            async |_, identifier, from, _| {
+                let id = InstrumentId::from(identifier);
+                Ok(vec![Data::Quote(quote_at(id, as_ns(from) + 10))])
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ESM22.GLBX"), "{err}");
+        assert_eq!(stored_quotes(&mut catalog, es_id()), [10]);
     }
 }

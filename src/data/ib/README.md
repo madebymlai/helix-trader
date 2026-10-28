@@ -44,12 +44,22 @@ IbHistory::connect(client_id: i32, end: Timestamp, now: Timestamp)
                                           // the paper gateway, then connects
 IbHistory::latest_end(now: Timestamp) -> anyhow::Result<Timestamp>  // now − 1 minute
 history.instruments(ids: &[InstrumentId]).await -> anyhow::Result<Vec<InstrumentAny>>
+history.fill(&mut catalog, slices: &[SeriesSlice]).await -> anyhow::Result<()>
 history.data(&data_type, identifier, start, end)
     .await -> anyhow::Result<Vec<Data>>        // the fetch of fill_catalog: the bars of
                                                // an EXTERNAL 1-MINUTE-LAST bar type over
                                                // [start, end], sorted; any other series
                                                // is an error
 ```
+
+`fill` takes the IB series of `DataRequirements::slices`, the shape
+`fill-catalog` gives every source (the node fill's too): it loads the
+instruments of the slices' contracts, then fills each slice through
+`fill_slices` (`fill_catalog` over the slice, `data` its fetch). A series
+other than IB's 1-MINUTE TRADES bars is refused before any request. It is
+temporary: IB's data client answers without a `DataResponseEnvelope`,
+which Nautilus does not write back; once nautilus_trader#5472 is fixed, IB
+fills through the node (`../README.md`, "The node fill").
 
 ## Connecting
 
