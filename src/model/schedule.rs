@@ -2,38 +2,53 @@
 //! the fixed UTC grid of the interval's multiples since the Unix epoch,
 //! whatever the run start, in a backtest as live.
 //!
-//! The grid is kept by a Nautilus timer, `RETRAIN_TIMER`, which `start`
-//! sets on a clock from an epoch-aligned time: Nautilus fires it at that
-//! time plus whole intervals. A live node's clock fires it as it goes; a
-//! backtest, which trains before its run, takes the times the same timer
-//! fires over its span on a virtual clock of its own (`times`). Each time
-//! is trained at once: `missing` gives those the store has no model valid
-//! from.
+//! The grid is kept by a Nautilus timer, named after the strategy
+//! (`timer`, so several strategies retrain in one process), which `start`
+//! sets on a clock from an epoch-aligned time (`last_grid_time`): Nautilus
+//! fires it at that time plus whole intervals. A live node's clock fires
+//! it as it goes, a delay late (`launcher`); a backtest, which trains
+//! before its run, takes the times the same timer fires over its span on
+//! a virtual clock of its own (`times`). Each time is trained at once:
+//! `missing` gives those the store has no model valid from.
 
-use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
+    actor::{DataActor, DataActorNative},
     clock::{Clock, VirtualClock},
     timer::{TimeEvent, TimeEventCallback},
 };
 use nautilus_core::{DurationNanos, UnixNanos};
+use nautilus_model::identifiers::StrategyId;
 
-/// The name of the timer of the retrains.
-pub const RETRAIN_TIMER: &str = "RETRAIN";
+/// The name of the timer `times` fires on its own clock.
+const GRID: &str = "RETRAIN";
 
-/// Starts the retrain timer of `every` on `clock`, from the last grid time
-/// not after now, so it first fires on the next one.
+/// The name of the retrain timer of `strategy_id`.
+#[must_use]
+pub fn timer(strategy_id: StrategyId) -> String {
+    format!("RETRAIN-{strategy_id}")
+}
+
+/// Starts the retrain timer `timer` of `every` on `actor`'s clock, from
+/// the last grid time not after now, `delay` late, so it first fires on
+/// the next one.
 ///
 /// # Errors
 ///
 /// Returns an error if `every` is not positive or Nautilus refuses the
 /// timer.
-pub fn start(clock: &mut dyn Clock, every: SignedDuration) -> anyhow::Result<()> {
-    let now = Timestamp::from(clock.timestamp_ns());
+pub fn start<A: DataActor + DataActorNative>(
+    actor: &A,
+    timer: &str,
+    every: SignedDuration,
+    delay: SignedDuration,
+) -> anyhow::Result<()> {
+    let clock = actor.clock();
+    let start = last_grid_time(clock.timestamp_ns(), every, delay)?;
     clock.set_timer_ns(
-        RETRAIN_TIMER,
+        timer,
         DurationNanos::try_from(every)?,
-        Some(UnixNanos::from(last(every, now)?)),
+        Some(start),
         None,
         None,
         Some(true),
@@ -56,17 +71,30 @@ pub fn times(
     to: Timestamp,
 ) -> anyhow::Result<Vec<Timestamp>> {
     anyhow::ensure!(from < to, "the span {from} to {to} is empty");
-    let first = last(every, from)?;
+    let first = Timestamp::from(last_grid_time(
+        UnixNanos::from(from),
+        every,
+        SignedDuration::ZERO,
+    )?);
     let mut clock = VirtualClock::new();
     clock.register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
-    // Started a grid time before the first, the timer fires on it.
-    let before = first - SignedDuration::from_nanos(1);
-    clock.advance_time(UnixNanos::from(before), true);
-    start(&mut clock, every)?;
+    // Started, as `start` starts it, a grid time before the first, the
+    // timer fires on it.
+    let before = UnixNanos::from(first - SignedDuration::from_nanos(1));
+    clock.advance_time(before, true);
+    clock.set_timer_ns(
+        GRID,
+        DurationNanos::try_from(every)?,
+        Some(last_grid_time(before, every, SignedDuration::ZERO)?),
+        None,
+        None,
+        Some(true),
+        Some(false),
+    )?;
     let events = clock.advance_time(UnixNanos::from(to - SignedDuration::from_nanos(1)), true);
     Ok(events
         .into_iter()
-        .filter(|event| event.name == RETRAIN_TIMER)
+        .filter(|event| event.name == GRID)
         .map(|event| Timestamp::from(event.ts_event))
         .collect())
 }
@@ -82,15 +110,25 @@ pub fn missing(times: &[Timestamp], published: &[Timestamp]) -> Vec<Timestamp> {
         .collect()
 }
 
-/// The last grid time of `every` not after `now`.
-fn last(every: SignedDuration, now: Timestamp) -> anyhow::Result<Timestamp> {
+/// The last multiple of `every` since the epoch, plus `delay`, not after
+/// `now`.
+///
+/// # Errors
+///
+/// Returns an error if `every` is not positive, or the time is before the
+/// epoch.
+pub fn last_grid_time(
+    now: UnixNanos,
+    every: SignedDuration,
+    delay: SignedDuration,
+) -> anyhow::Result<UnixNanos> {
     anyhow::ensure!(
         every.is_positive(),
         "the retrain interval {every:#} is not positive"
     );
-    let (every, now) = (every.as_nanos(), now.as_nanosecond());
-    let last = now.div_euclid(every) * every;
-    Timestamp::from_nanosecond(last).with_context(|| format!("no grid time at {last} ns"))
+    let (every, delay) = (every.as_nanos(), delay.as_nanos());
+    let start = (i128::from(now.as_u64()) - delay).div_euclid(every) * every + delay;
+    Ok(UnixNanos::from(u64::try_from(start)?))
 }
 
 #[cfg(test)]
@@ -160,17 +198,30 @@ mod tests {
     }
 
     #[test]
-    fn the_timer_started_live_fires_on_the_next_grid_time() {
-        let mut clock = VirtualClock::new();
-        clock.register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
-        clock.advance_time(UnixNanos::from(at("2026-10-21T15:20:00Z")), true);
-
-        start(&mut clock, SignedDuration::from_hours(6)).unwrap();
-
-        assert_eq!(
-            clock.next_time_ns(RETRAIN_TIMER).map(Timestamp::from),
-            Some(at("2026-10-21T18:00:00Z"))
+    fn each_strategy_has_a_retrain_timer_of_its_own() {
+        assert_eq!(timer(StrategyId::from("LIVE-001")), "RETRAIN-LIVE-001");
+        assert_ne!(
+            timer(StrategyId::from("LIVE-001")),
+            timer(StrategyId::from("LIVE-002"))
         );
+    }
+
+    #[test]
+    fn the_grid_time_is_the_last_multiple_since_the_epoch_plus_the_delay() {
+        let last = |now: &str| {
+            Timestamp::from(
+                last_grid_time(
+                    UnixNanos::from(at(now)),
+                    SignedDuration::from_hours(24),
+                    SignedDuration::from_mins(6),
+                )
+                .unwrap(),
+            )
+        };
+
+        assert_eq!(last("2026-10-22T13:00:00Z"), at("2026-10-22T00:06:00Z"));
+        assert_eq!(last("2026-10-22T00:06:00Z"), at("2026-10-22T00:06:00Z"));
+        assert_eq!(last("2026-10-22T00:05:59Z"), at("2026-10-21T00:06:00Z"));
     }
 
     #[test]

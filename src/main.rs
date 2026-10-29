@@ -4,6 +4,7 @@
 //! and the warmup come from the config's data requirements.
 
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -22,7 +23,9 @@ use helix_trader::{
     model::{
         dataset,
         handle::{Mode, SettledRows},
+        launcher::{Launcher, Retrained},
         targets::TargetRow,
+        train::Outcome,
     },
     strategy::{
         DataRequirements, SeriesSlice,
@@ -65,8 +68,8 @@ enum Command {
     /// Markets or OKX; stops on Ctrl-C.
     Live(LiveArgs),
     /// Trains the strategy's model at a time, replaying the days its
-    /// dataset lacks, and prints whether a model was published or the
-    /// current one kept, and why.
+    /// dataset lacks, and prints the model published, or fails with why
+    /// the current one was kept.
     Train(Box<TrainArgs>),
     /// Builds the strategy's dataset over the days from --start to --end,
     /// those it lacks, by a dataset run of the strategy over the catalog
@@ -264,12 +267,36 @@ struct LiveArgs {
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
     promotion_minutes: u64,
     /// The model store a strategy trading on a model reads its models
-    /// from: at each decision, the latest valid then.
+    /// from, at each decision the latest valid then, and its retrains
+    /// publish in.
     #[arg(long, default_value = "models")]
     models: PathBuf,
+    /// The costs of the dataset runs of the retrains, for a strategy
+    /// trading on a model.
+    #[command(flatten)]
+    retrain: RetrainCosts,
 }
 
-/// The strategies, by command-line name.
+/// The costs of the dataset runs of a live node's retrains, as `train`
+/// takes them (its `--commission` or `--commission-rate`, and
+/// `--balance`), its leverage the node's. Checked as `train` checks them,
+/// and kept as given, for the `train` the node starts.
+#[derive(Debug, Args)]
+struct RetrainCosts {
+    /// Commission charged once per order in a retrain, for example "3 USD".
+    #[arg(long, value_parser = commission_text, conflicts_with = "retrain_commission_rate")]
+    retrain_commission: Option<String>,
+    /// Commission rate on the value of each fill in a retrain, for example
+    /// 0.00003.
+    #[arg(long, value_parser = commission_rate_text)]
+    retrain_commission_rate: Option<String>,
+    /// Starting balance of a retrain's dataset run, large enough that no
+    /// target is denied, for example "10000000 USD".
+    #[arg(long, value_parser = money_text)]
+    retrain_balance: Option<String>,
+}
+
+/// The strategies), by command-line name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Strategy {
     Ema,
@@ -310,6 +337,21 @@ fn parse_commission_rate(s: &str) -> anyhow::Result<Commission> {
         given: s.to_string(),
         fee_model: backtest::commission_rate(s.parse::<Decimal>()?)?,
     })
+}
+
+/// A commission per order, checked, as given.
+fn commission_text(s: &str) -> anyhow::Result<String> {
+    parse_commission(s).map(|_| s.to_string())
+}
+
+/// A commission rate, checked, as given.
+fn commission_rate_text(s: &str) -> anyhow::Result<String> {
+    parse_commission_rate(s).map(|_| s.to_string())
+}
+
+/// An amount and a currency code, checked, as given.
+fn money_text(s: &str) -> Result<String, String> {
+    parse_money(s).map(|_| s.to_string())
 }
 
 /// Reads the EMA crossover config from `path` and validates it.
@@ -526,6 +568,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 /// `train`, on the backtest's strategy, config, catalog, store, commission
 /// and leverage, and its dataset balance. Each inherits the backtest's
 /// output and environment, so its logs and its outcome show as they come.
+/// A train runs as live's do (`Launcher::process`): one that kept the
+/// current model, which `train` reports by failing, is a kept retrain.
 struct Children {
     strategy: Strategy,
     config: PathBuf,
@@ -565,11 +609,23 @@ impl Children {
         )
     }
 
-    /// Trains the model at `at`: published, or the current one kept,
-    /// either way an outcome the child prints, not an error.
+    /// Trains the model at `at`: published, or the current one kept, its
+    /// reason printed to standard error; either way no error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this binary cannot be found.
     fn train(&self, at: Timestamp) -> anyhow::Result<()> {
-        let models = self.models.to_string_lossy();
-        self.run("train", &["--at", &at.to_string(), "--models", &models])
+        let binary = std::env::current_exe().context("finding this binary")?;
+        let mut args = self.args("train");
+        args.extend(["--models".into(), self.models.clone().into_os_string()]);
+        match Launcher::process(binary, args).launch(at).wait() {
+            Retrained::Published => {}
+            Retrained::Kept(why) => {
+                eprintln!("the retrain at {at}: {why}");
+            }
+        }
+        Ok(())
     }
 
     /// Runs `subcommand` with `args` and waits for it.
@@ -579,20 +635,8 @@ impl Children {
     /// Returns an error if it cannot start, or does not succeed.
     fn run(&self, subcommand: &str, args: &[&str]) -> anyhow::Result<()> {
         let binary = std::env::current_exe().context("finding this binary")?;
-        let strategy = self
-            .strategy
-            .to_possible_value()
-            .expect("every strategy has a name");
         let status = std::process::Command::new(binary)
-            .arg(subcommand)
-            .arg(strategy.get_name())
-            .arg("--config")
-            .arg(&self.config)
-            .arg("--catalog")
-            .arg(&self.catalog)
-            .args(&self.commission)
-            .args(["--balance", &self.balance.to_string()])
-            .args(["--leverage", &self.leverage.to_string()])
+            .args(self.args(subcommand))
             .args(args)
             .status()
             .with_context(|| format!("starting {subcommand} {}", args.join(" ")))?;
@@ -603,19 +647,48 @@ impl Children {
         );
         Ok(())
     }
+
+    /// The arguments of `subcommand` on the backtest's strategy, config,
+    /// catalog, commission, dataset balance and leverage.
+    fn args(&self, subcommand: &str) -> Vec<OsString> {
+        let strategy = self
+            .strategy
+            .to_possible_value()
+            .expect("every strategy has a name");
+        let mut args: Vec<OsString> = vec![subcommand.into(), strategy.get_name().into()];
+        args.extend([
+            "--config".into(),
+            self.config.clone().into_os_string(),
+            "--catalog".into(),
+            self.catalog.clone().into_os_string(),
+        ]);
+        args.extend(self.commission.iter().map(OsString::from));
+        args.extend(
+            [
+                "--balance".to_string(),
+                self.balance.to_string(),
+                "--leverage".to_string(),
+                self.leverage.to_string(),
+            ]
+            .map(OsString::from),
+        );
+        args
+    }
 }
 
-/// Builds the strategy from its config and runs it live until Ctrl-C.
+/// Builds the strategy from its config and runs it live until Ctrl-C. A
+/// strategy trading on a model retrains in a child process, this binary's
+/// `train` (see `retrain_args`).
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
-        account: args.account,
+        account: args.account.clone(),
         client_id: args.client_id,
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
-        catalog: args.catalog,
+        catalog: args.catalog.clone(),
         recording: Recording {
-            staging: args.staging,
+            staging: args.staging.clone(),
             promotion_interval: Duration::from_secs(args.promotion_minutes * 60),
         },
     };
@@ -627,8 +700,11 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         }
         Strategy::Learned => {
             let config = load_learned_config(&args.config)?;
+            let program = std::env::current_exe().context("finding this binary to retrain")?;
             let mode = Mode::Live {
-                models: args.models,
+                models: args.models.clone(),
+                launcher: Launcher::process(program, retrain_args(&args)?),
+                catalog_delay: live.recording.catalog_delay(),
             };
             live.run(
                 &config.bars.data_requirements(),
@@ -682,8 +758,74 @@ impl DatasetRun {
     }
 }
 
-/// Trains the strategy's model at `--at` and prints the outcome: the days
-/// its dataset lacks are replayed by a dataset run (`DatasetRun`).
+/// The arguments of the `train` a live node of `args` starts at each
+/// retrain, but its `--at`: the node's strategy, config, catalog, model
+/// store and leverage, and the retrains' costs.
+///
+/// # Errors
+///
+/// Returns an error if the commission or the balance of the retrains is
+/// missing.
+fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
+    let costs = &args.retrain;
+    let commission = match (&costs.retrain_commission, &costs.retrain_commission_rate) {
+        (Some(commission), _) => ["--commission", commission],
+        (None, Some(rate)) => ["--commission-rate", rate],
+        (None, None) => bail!(
+            "a strategy trading on a model retrains: give the commission of its \
+             dataset runs (--retrain-commission or --retrain-commission-rate)"
+        ),
+    };
+    let balance = costs.retrain_balance.as_deref().context(
+        "a strategy trading on a model retrains: give the starting balance of its \
+         dataset runs (--retrain-balance)",
+    )?;
+    let strategy = args
+        .strategy
+        .to_possible_value()
+        .context("every strategy has a command-line name")?;
+    let mut train: Vec<OsString> = vec!["train".into(), strategy.get_name().into()];
+    for (flag, value) in [
+        ("--config", args.config.as_os_str()),
+        ("--catalog", args.catalog.as_os_str()),
+        ("--models", args.models.as_os_str()),
+    ] {
+        train.extend([flag.into(), value.to_os_string()]);
+    }
+    train.extend(
+        [
+            "--leverage",
+            &args.leverage.to_string(),
+            commission[0],
+            commission[1],
+            "--balance",
+            balance,
+        ]
+        .map(OsString::from),
+    );
+    Ok(train)
+}
+
+/// Prints the outcome of a train that published; one that kept the
+/// current model is an error, its reason: the command fails, so that the
+/// live node that started it knows why (`model::launcher`).
+///
+/// # Errors
+///
+/// Returns an error if the train kept the current model.
+fn reported(outcome: &Outcome) -> anyhow::Result<()> {
+    match outcome {
+        Outcome::Published { .. } => {
+            println!("{outcome}");
+            Ok(())
+        }
+        Outcome::Kept(_) => bail!("{outcome}"),
+    }
+}
+
+/// Trains the strategy's model at `--at` and reports the outcome (see
+/// `reported`): the days its dataset lacks are replayed by a dataset run
+/// (`DatasetRun`).
 fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     let run = DatasetRun {
         catalog: args.catalog.clone(),
@@ -700,8 +842,7 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
             training.train_at(args.at, |start, end| run.replay(&config, start, end))
         }
     };
-    println!("{outcome}");
-    Ok(())
+    reported(&outcome)
 }
 
 /// Builds the strategy's dataset over the days from `--start` to the day
@@ -738,6 +879,7 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helix_trader::model::train::Kept;
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]
@@ -1065,6 +1207,106 @@ mod tests {
         );
         let args = parse_live(&["learned", "--config", "learned.toml"]).unwrap();
         assert_eq!(args.models, PathBuf::from("models"));
+    }
+
+    #[test]
+    fn a_train_keeping_the_model_fails_with_the_reason() {
+        let kept = Outcome::Kept(Kept::BelowMinScore {
+            score: 0.48,
+            min_score: 0.55,
+        });
+        let published = Outcome::Published {
+            valid_from: "2026-10-23T00:00:00Z".parse().unwrap(),
+            score: 0.6,
+        };
+
+        let err = reported(&kept).unwrap_err().to_string();
+
+        assert!(err.contains("0.48") && err.contains("0.55"), "{err}");
+        assert!(reported(&published).is_ok());
+    }
+
+    /// The arguments of a learned live node retraining at a commission
+    /// rate.
+    const LIVE_RETRAINING: [&str; 7] = [
+        "learned",
+        "--config",
+        "learned.toml",
+        "--retrain-commission-rate",
+        "0.00003",
+        "--retrain-balance",
+        "10000000 USD",
+    ];
+
+    #[test]
+    fn live_retrains_through_train_with_its_files_leverage_and_costs() {
+        let mut argv = LIVE_RETRAINING.to_vec();
+        argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
+        argv.extend(["--leverage", "2"]);
+
+        let train = retrain_args(&parse_live(&argv).unwrap()).unwrap();
+
+        assert_eq!(
+            train,
+            [
+                "train",
+                "learned",
+                "--config",
+                "learned.toml",
+                "--catalog",
+                "/data/catalog",
+                "--models",
+                "/data/models",
+                "--leverage",
+                "2",
+                "--commission-rate",
+                "0.00003",
+                "--balance",
+                "10000000 USD",
+            ]
+            .map(std::ffi::OsString::from)
+        );
+    }
+
+    #[test]
+    fn live_retrains_at_a_commission_per_order_too() {
+        let mut argv = LIVE_RETRAINING.to_vec();
+        argv.splice(3..5, ["--retrain-commission", "3 USD"]);
+
+        let train = retrain_args(&parse_live(&argv).unwrap()).unwrap();
+
+        assert!(
+            train
+                .windows(2)
+                .any(|pair| pair == ["--commission", "3 USD"]),
+            "{train:?}"
+        );
+    }
+
+    #[test]
+    fn live_retraining_without_its_costs_is_refused_naming_them() {
+        for missing in [3, 5] {
+            let argv = [&LIVE_RETRAINING[..missing], &LIVE_RETRAINING[missing + 2..]].concat();
+            let err = retrain_args(&parse_live(&argv).unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(LIVE_RETRAINING[missing]), "{err}");
+        }
+    }
+
+    #[test]
+    fn live_refuses_retrain_costs_it_cannot_read() {
+        for (flag, value) in [
+            ("--retrain-commission-rate", "-0.1"),
+            ("--retrain-commission", "3"),
+            ("--retrain-balance", "lots"),
+        ] {
+            let argv = ["learned", "--config", "learned.toml", flag, value];
+            assert!(parse_live(&argv).is_err(), "{flag} {value}");
+        }
+        let mut both = LIVE_RETRAINING.to_vec();
+        both.extend(["--retrain-commission", "3 USD"]);
+        assert!(parse_live(&both).is_err());
     }
 
     #[test]

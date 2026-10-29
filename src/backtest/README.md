@@ -1036,8 +1036,9 @@ runs the steps of `model::walk`:
    trains at it; its window's days already built, it replays none. A
    model in the store is reused, so a second backtest of the span starts
    no child. A train that kept the current model (below the minimum
-   score, failed) published none: the next backtest trains at that time
-   again.
+   score, failed) published none and is no failure of the backtest: its
+   reason goes to standard error, `the retrain at t: ..`, and the next
+   backtest trains at that time again.
 3. The run, on the store: at each decision the latest model valid then.
 4. The scores (`WalkForward::scores`), after the report: per retrain
    period (`from` its retrain time or `--start`, `to` the next or
@@ -1054,9 +1055,10 @@ runs the steps of `model::walk`:
 Each child is this binary (`std::env::current_exe`), on the backtest's
 strategy, config, catalog, store, commission flag as given and leverage,
 with `--dataset-balance` as its balance; it inherits the backtest's
-output and environment, so its log and outcome (`published a model
-valid from ..`, `kept the current model: ..`) come before the run's. A
-child that fails stops the backtest. One process per Nautilus node: the
+environment and output, so its log and outcome come before the run's. A
+train runs through `Launcher::process`, as live's does: `train` fails
+when it keeps the model, the error it printed last the reason. A
+`dataset` child that fails stops the backtest. One process per Nautilus node: the
 build and each train run a node, the backtest another.
 
 A period of the scores prints as, for example:
@@ -1506,11 +1508,15 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
     backtest of the strategy on that store from two hours before the
     model's valid-from trades only from it, a long at each of its three
-    decisions, closed 30 minutes later: 6 orders, 3 positions. The
-    binary's `backtest learned` from midnight of the 23rd to noon of the
+    decisions, closed 30 minutes later: 6 orders, 3 positions. The same
+    `train`, started as a live node starts it, by
+    `Launcher::process` on the test binary's `helix-trader`, publishes,
+    and the backtest trades the same. The binary's `backtest learned` from midnight of the 23rd to noon of the
     24th, retrained daily, builds the 4 days from its first window, trains
     at both midnights and prints both periods' scores after the report,
-    in child processes; a second run starts none.
+    in child processes; a second run starts none. With a minimum score above
+    the fake's 0.5, both retrains keep no model, each reason printed, and
+    the backtest runs on, no order, no model scored.
   - `backtest_retrain.rs`: retraining on the schedule (`model::walk`):
     the probe of `common::dataset` on one feature missing from the first
     quote, so the fake learner predicts its training mean, each model's

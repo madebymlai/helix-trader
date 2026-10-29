@@ -708,7 +708,8 @@ of its choosing (`model::features`, `model::decide`).
   in `on_start` registers the features and starts the cadence, live
   `warmup::live_bar_build_delay(&bar_types)` late; `decide(self)` at each
   decision snapshots the features and publishes their row, then, in
-  `Mode::Backtest` or `Mode::Live { models }`, takes the latest model of
+  `Mode::Backtest { models }` or `Mode::Live { models, .. }`, takes the
+  latest model of
   the store valid at the decision, predicts, and returns the `Trade`
   (side, the targets' size, the probability) that `Thresholds::side`
   makes of the probability: a buy at or above `long`, a sell at or below
@@ -730,13 +731,15 @@ of its choosing (`model::features`, `model::decide`).
   market order and closes it `hold` later.
 - **Schedule.** A model is retrained every `retrain` (`model::schedule`),
   at its multiples since the Unix epoch, whatever the run start, in a
-  backtest as live: the times of a Nautilus timer, `RETRAIN_TIMER`, that
-  `start(clock, every)` sets from the last grid time not after now.
-  `times(every, from, to)` gives those a run over `[from, to)` uses, from
-  the last at or before `from`, firing the same timer on a virtual clock;
-  `missing(times, published)` those the store has no model valid from.
-  A model is the same whatever interval its time came from, so the
-  interval does not key the store.
+  backtest as live: the times of a Nautilus timer named after the
+  strategy (`timer(strategy_id)`, `RETRAIN-<strategy id>`, so several
+  strategies can retrain in one process), that `start(clock, timer,
+  every, delay)` sets from the last grid time not after now, plus the
+  delay (`last_grid_time`). `times(every, from, to)` gives those a run
+  over `[from, to)` uses, from the last at or before `from`, firing such
+  a timer on a virtual clock; `missing(times, published)` those the
+  store has no model valid from. A model is the same whatever interval
+  its time came from, so the interval does not key the store.
 - **Retraining backtest.** `WalkForward` (`model::walk`,
   `WalkForward::new(catalog, models, strategy_id, &features, config)`)
   holds a backtest's retrains and scores: `prepare(start, end, build,
@@ -746,18 +749,43 @@ of its choosing (`model::features`, `model::decide`).
   span with the model the handle used at it, beside the baseline fitted
   at each retrain time, per retrain period and over the span (backtest
   README, "Retraining on the schedule").
+- **Live retraining.** In `Mode::Live { models, launcher,
+  catalog_delay }` the handle retrains too (`model::launcher`): `start`
+  sets the strategy's retrain timer (`schedule::start`) on the grid of
+  `retrain`, `catalog_delay` late (`Recording::catalog_delay`: the data
+  the node received up to a time reaches the catalog that much later);
+  each firing, handed on by the strategy's `on_time_event`, launches a
+  train at its grid time through the `Launcher`, unless one is still
+  running: that one is skipped, with a warning. `decide` first polls the
+  running retrain: a finished one is logged, as info when it published,
+  as an error with the reason when it kept the current model or failed,
+  and the next may start. The model it published is used from that
+  decision on (the store is listed again); live validity starts when the
+  train finishes, a backtest's at its time. `Launcher::process` runs the binary's `train` as a child (one
+  node per process), `--at` and the time appended to its arguments, its
+  exit status the outcome, the error it printed last the reason; a child
+  still running when the node stops runs to its end.
+  `Launcher::in_process` trains on a thread instead, for tests. A node
+  starting with models in the store trades from its first decision on
+  the latest valid then.
 - **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
   at `t`: `Training::new` on the strategy's features and model section,
   `train_at` with a replay through `Backtest::run_dataset` of the strategy
   in `Mode::Dataset` on hedging venues, the costs and balance given as to
   a backtest (`--commission` or `--commission-rate`, `--balance`); it
-  prints the `Outcome`. `dataset <strategy> --config .. --start .. --end
-  ..` builds the days of `[start, end)` the dataset lacks by the same
-  replay (`Dataset::build`, `dataset::days`), with the same costs and
-  balance. `backtest` and `live` take `--models` (default `models`), the
-  store root, beside `train`'s; `backtest` of a strategy trading on a
-  model runs `dataset` and `train` as child processes first, with its
-  `--dataset-balance`.
+  prints a published `Outcome`, and fails with a kept one, its reason.
+  `dataset <strategy> --config .. --start .. --end ..` builds the days
+  of `[start, end)` the dataset lacks by the same replay
+  (`Dataset::build`, `dataset::days`), with the same costs and balance.
+  `backtest` and `live` take `--models` (default `models`), the store
+  root, beside `train`'s; `live` takes the costs of its retrains'
+  dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
+  `--retrain-balance`), needed by a strategy trading on a model, and
+  passes them, its `--config`, `--catalog`, `--models` and `--leverage`
+  to the `train` it starts. `backtest` of a strategy trading on a model
+  runs `dataset` and `train` as child processes first, with its
+  `--dataset-balance`, each train through `Launcher::process` as live's:
+  one keeping the model is a kept retrain, not a failed backtest.
 
 ## Warmup and training
 

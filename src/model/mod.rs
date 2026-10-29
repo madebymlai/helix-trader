@@ -15,14 +15,16 @@
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! targets in a dataset run; `schedule` is when a model is retrained, on
-//! a fixed UTC grid; `walk` is a backtest retraining on that schedule
-//! before its run and scoring its models out of sample after.
+//! a fixed UTC grid; `launcher` starts a live strategy's retrains, one
+//! at a time, in a child process; `walk` is a backtest retraining on the
+//! schedule before its run and scoring its models out of sample after.
 
 pub mod config;
 pub mod dataset;
 pub mod decide;
 pub mod features;
 pub mod handle;
+pub mod launcher;
 pub mod learner;
 pub mod schedule;
 pub mod score;
