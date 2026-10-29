@@ -52,7 +52,7 @@ DataClientFactory>` and friends and never names a broker.
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
   [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog] \
-  [--staging staging] [--promotion-minutes 5]
+  [--staging staging] [--promotion-minutes 5] [--models models]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
@@ -81,6 +81,9 @@ node's cache (see "Cache in Redis").
   refused); it also keeps each trader's instance id. `--promotion-minutes`
   (default 5, at least 1) is how often the staged data is promoted into
   the catalog (see "Recording into the catalog").
+- `--models` (default `models`) is the model store a strategy trading on a
+  model reads, its newest model valid at each decision (strategy README,
+  "Features and decisions", "Model handle"); the EMA reads none.
 - `NAUTILUS_LOG` configures the logger as for the other commands.
 - The command reads `.env` at start (see `.env.example`), and a variable
   already set wins. Credentials come only from the environment, never from

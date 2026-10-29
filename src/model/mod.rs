@@ -11,12 +11,16 @@
 //! models that predict;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting on a window of the dataset and publishing in the
-//! `store` the model whose holdout `score` passes the gate.
+//! `store` the model whose holdout `score` passes the gate; `handle` is
+//! what the strategy holds and decides through, trading on the latest
+//! model of the store valid at each decision, or opening the decision's
+//! targets in a dataset run.
 
 pub mod config;
 pub mod dataset;
 pub mod decide;
 pub mod features;
+pub mod handle;
 pub mod learner;
 pub mod score;
 pub mod store;
