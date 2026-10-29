@@ -275,8 +275,13 @@ struct LiveArgs {
     #[arg(long, default_value = "staging")]
     staging: PathBuf,
     /// How often, in minutes, the staged data is promoted into the
-    /// catalog: the delay before a retrain sees it.
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
+    /// catalog: the delay before a retrain sees it. At most as many as fit
+    /// in u64 seconds.
+    #[arg(
+        long,
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 60)
+    )]
     promotion_minutes: u64,
     /// The model store a strategy trading on a model reads its models
     /// from, at each decision the latest valid then, and its retrains
@@ -1094,6 +1099,21 @@ mod tests {
     #[test]
     fn live_refuses_promoting_every_zero_minutes() {
         let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", "0"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--promotion-minutes"), "{err}");
+    }
+
+    /// The interval is taken in seconds: more minutes than fit in u64
+    /// seconds are refused as given, never wrapped around.
+    #[test]
+    fn live_refuses_more_promotion_minutes_than_fit_in_seconds() {
+        let most = (u64::MAX / 60).to_string();
+        let args = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", &most]);
+        assert_eq!(args.unwrap().promotion_minutes, u64::MAX / 60);
+
+        let over = (u64::MAX / 60 + 1).to_string();
+        let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", &over])
             .unwrap_err()
             .to_string();
         assert!(err.contains("--promotion-minutes"), "{err}");
