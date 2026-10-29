@@ -1407,4 +1407,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     replays them once through `run_dataset`, to the second's end plus the
     bracket's two hours, and stores the 48 rows; a second build of the
     same days replays none, and the rows read back are those the replay
-    settled.
+    settled. Over a weekend without quotes, a build cut on Friday and one
+    cut on Monday store the same 24 rows of Friday: the decisions after
+    the last quote settle at their time limits, the time close filled on
+    that quote.
