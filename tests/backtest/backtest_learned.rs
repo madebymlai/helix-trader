@@ -5,18 +5,28 @@
 //! bars, warm from the warmup's bars; the fake learner predicts the first,
 //! the gold price clamped to 1, so every holdout row ties (AUC 0.5, which
 //! the minimum of 0.5 publishes) and every decision from the model's
-//! valid-from is a long, closed 30 minutes later.
+//! valid-from is a long, closed 30 minutes later. A live node's launcher
+//! (`model::launcher`) starting that `train` as its child publishes the
+//! same model.
 
-use std::{path::Path, process::Command};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use crate::common::{dataset::walk, ic};
 use helix_trader::{
     backtest::Backtest,
-    model::handle::Mode,
+    model::{
+        handle::Mode,
+        launcher::{Launcher, Retrained},
+    },
     strategy::learned::{Learned, LearnedConfig},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::Money;
+use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, warmed up an hour,
 /// trades held 30 minutes; learning whether the horizon's long gains, on
@@ -31,6 +41,7 @@ const CONFIG: &str = r#"
     decision = { every = "1h" }
     targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
     label = "horizon"
+    retrain = "24h"
     window = "46h"
     holdout = "12h"
     thresholds = { long = 0.6, short = 0.4 }
@@ -84,6 +95,14 @@ fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
         stdout.contains(&format!("published a model valid from {}", t())),
         "{stdout}"
     );
+    // The decisions at 22:00 and 23:00 have no model; those of 00:00, 01:00
+    // and 02:00 each a long and its close.
+    assert_eq!(traded(&catalog, models), (6, 3));
+}
+
+/// The orders and positions of a backtest of the strategy on the models
+/// under `models`, from 22:00 of the 22nd to 03:00 of the 23rd.
+fn traded(catalog: &TempDir, models: PathBuf) -> (usize, usize) {
     let config: LearnedConfig = toml::from_str(CONFIG).unwrap();
     let requirements = config.bars.data_requirements();
     let backtest = Backtest {
@@ -93,14 +112,42 @@ fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
         end: t() + SignedDuration::from_hours(3),
         warmup: requirements.warmup,
         balance: Money::from("100000 USD"),
-        ..ic::backtest(&catalog)
+        ..ic::backtest(catalog)
     };
     let strategy = Learned::new(config, Mode::Backtest { models }).unwrap();
-
     let outcome = backtest.run(strategy).unwrap();
+    (outcome.result.total_orders, outcome.result.total_positions)
+}
 
-    // The decisions at 22:00 and 23:00 have no model; those of 00:00, 01:00
-    // and 02:00 each a long and its close.
-    assert_eq!(outcome.result.total_orders, 6);
-    assert_eq!(outcome.result.total_positions, 3);
+#[test]
+fn a_model_a_live_retrain_publishes_through_the_train_subcommand_is_traded() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        t() + SignedDuration::from_hours(4),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    // As a live node starts it (`retrain_args`), with the fixture's costs.
+    let args = [
+        "train".as_ref(),
+        "learned".as_ref(),
+        "--config".as_ref(),
+        config_path.as_os_str(),
+        "--catalog".as_ref(),
+        catalog.path().as_os_str(),
+        "--models".as_ref(),
+        models.as_os_str(),
+        "--commission-rate".as_ref(),
+        "0.00003".as_ref(),
+        "--balance".as_ref(),
+        "10000000 USD".as_ref(),
+    ]
+    .map(OsStr::to_os_string);
+    let launcher = Launcher::process(env!("CARGO_BIN_EXE_helix-trader").into(), args.to_vec());
+
+    let retrained = launcher.launch(t()).wait();
+
+    assert_eq!(retrained, Retrained::Published);
+    assert_eq!(traded(&catalog, models), (6, 3));
 }

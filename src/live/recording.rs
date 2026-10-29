@@ -6,7 +6,8 @@
 //! outside the catalog, in `live/<instance id>/`, promoted into the catalog
 //! the node registers every promotion interval and on a clean stop, each
 //! staging file deleted once promoted. A retrain the node starts then
-//! replays up to the last promotion.
+//! replays up to the last promotion: it waits `Recording::catalog_delay`
+//! after its time for the data up to it.
 //!
 //! The node keeps one instance id per trader across restarts, in a file in
 //! the staging directory: a run after a crash writes to the same
@@ -24,6 +25,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow, ensure};
+use jiff::SignedDuration;
 use nautilus_core::UUID4;
 use nautilus_model::{data::NautilusDataType, identifiers::TraderId};
 use nautilus_persistence::config::{DataCatalogConfig, RotationConfig, StreamingConfig};
@@ -82,6 +84,16 @@ impl Recording {
         Ok(streaming)
     }
 
+    /// How long after a time the data the node received up to it is in
+    /// the catalog: a promotion interval, the promotions not being on a
+    /// grid, and `PROMOTION_MARGIN` past it. A retrain the node starts at a
+    /// time waits that long, so that its replay finds the data up to it.
+    #[must_use]
+    pub fn catalog_delay(&self) -> SignedDuration {
+        SignedDuration::try_from(self.promotion_interval)
+            .map_or(SignedDuration::MAX, |interval| interval + PROMOTION_MARGIN)
+    }
+
     /// The instance id of `trader_id`'s node: the one its last run kept in
     /// the staging directory, else a new one, kept there.
     ///
@@ -131,6 +143,12 @@ impl Recording {
 /// a crash loses at most.
 const FLUSH_INTERVAL_MS: u64 = 1_000;
 
+/// How long past a promotion interval the data received up to a time is
+/// surely in the catalog: past its flush (`FLUSH_INTERVAL_MS`), the live
+/// node's bar build delay for the bars it builds, and the promotion's own
+/// writing.
+const PROMOTION_MARGIN: SignedDuration = SignedDuration::from_mins(1);
+
 /// The data the node streams: the market data its strategy can read and
 /// backtests replay, and the instrument definitions, which a backtest over
 /// the catalog needs.
@@ -178,6 +196,15 @@ mod tests {
         assert_eq!(streaming.promotion_interval_ms, Some(300_000));
         assert!(streaming.promote_on_close);
         assert!(streaming.delete_feather_after_promotion);
+    }
+
+    #[test]
+    fn data_is_in_the_catalog_a_promotion_interval_and_a_minute_after_it_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            recording(dir.path().join("staging")).catalog_delay(),
+            SignedDuration::from_mins(6)
+        );
     }
 
     #[test]

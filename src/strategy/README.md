@@ -671,12 +671,14 @@ of its choosing (`model::features`, `model::decide`).
 - **Model config.** The model section of a strategy's TOML is a
   `ModelConfig` (`model::config`): `decision`, `targets`, `label`
   (`"barrier"` or `"horizon"`: the model learns whether that target's long
-  gains, net of costs), `window` and `holdout` (durations), `thresholds =
+  gains, net of costs), `retrain`, `window` and `holdout` (durations; a
+  retrain at every multiple of `retrain` since the epoch), `thresholds =
   { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC) and `learner`.
   `validate(&requirements)` refuses a traded instrument the strategy does
   not read, a barrier ATR on a bar type it does not read (its bars feed
   the ATR), a label of a target the config lacks, a barrier limit or
-  horizon not shorter than the window, a holdout leaving no fitted row,
+  horizon not shorter than the window, a retrain interval not positive, a
+  holdout leaving no fitted row,
   thresholds that are not probabilities with the short below the long,
   and a minimum score outside [0, 1].
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
@@ -706,7 +708,8 @@ of its choosing (`model::features`, `model::decide`).
   in `on_start` registers the features and starts the cadence, live
   `warmup::live_bar_build_delay(&bar_types)` late; `decide(self)` at each
   decision snapshots the features and publishes their row, then, in
-  `Mode::Backtest` or `Mode::Live { models }`, takes the latest model of
+  `Mode::Backtest { models }` or `Mode::Live { models, .. }`, takes the
+  latest model of
   the store valid at the decision, predicts, and returns the `Trade`
   (side, the targets' size, the probability) that `Thresholds::side`
   makes of the probability: a buy at or above `long`, a sell at or below
@@ -726,13 +729,38 @@ of its choosing (`model::features`, `model::decide`).
   `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
   trading. The trades are the strategy's own orders: `learned/` sends a
   market order and closes it `hold` later.
+- **Live retraining.** In `Mode::Live { models, launcher,
+  catalog_delay }` the handle retrains too (`model::launcher`): `start`
+  sets a timer named after the strategy, `RETRAIN-<strategy id>`, on the
+  epoch-aligned grid of `retrain`, `catalog_delay` late
+  (`Recording::catalog_delay`: the data the node received up to a time
+  reaches the catalog that much later); each firing, handed on by the
+  strategy's `on_time_event`, launches a train at its grid time through
+  the `Launcher`, unless one is still running: that one is skipped, with
+  a warning. `decide` first polls the running retrain: a finished one is
+  logged, as info when it published, as an error with the reason when it
+  kept the current model or failed, and the next may start. The model it
+  published is used from that decision on (the store is listed again);
+  live validity starts when the train finishes, a backtest's at its
+  time. `Launcher::process` runs the binary's `train` as a child (one
+  node per process), `--at` and the time appended to its arguments, its
+  exit status the outcome, the error it printed last the reason; a child
+  still running when the node stops runs to its end.
+  `Launcher::in_process` trains on a thread instead, for tests. A node
+  starting with models in the store trades from its first decision on
+  the latest valid then.
 - **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
   at `t`: `Training::new` on the strategy's features and model section,
   `train_at` with a replay through `Backtest::run_dataset` of the strategy
   in `Mode::Dataset` on hedging venues, the costs and balance given as to
   a backtest (`--commission` or `--commission-rate`, `--balance`); it
-  prints the `Outcome`. `backtest` and `live` take `--models` (default
-  `models`), the store root, beside `train`'s.
+  prints a published `Outcome`, and fails with a kept one, its reason.
+  `backtest` and `live` take `--models` (default `models`), the store
+  root, beside `train`'s; `live` takes the costs of its retrains'
+  dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
+  `--retrain-balance`), needed by a strategy trading on a model, and
+  passes them, its `--config`, `--catalog`, `--models` and `--leverage`
+  to the `train` it starts.
 
 ## Warmup and training
 

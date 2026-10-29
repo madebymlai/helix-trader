@@ -22,6 +22,7 @@ use crate::strategy::DataRequirements;
 /// decision = { every = "15m" }
 /// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
 /// label = "horizon"
+/// retrain = "24h"
 /// window = "720h"
 /// holdout = "120h"
 /// thresholds = { long = 0.6, short = 0.4 }
@@ -37,6 +38,9 @@ pub struct ModelConfig {
     pub targets: TargetsConfig,
     /// The target the model learns: whether its long gains.
     pub label: Label,
+    /// How often the model is retrained, such as `"24h"`: at every multiple
+    /// of it since the Unix epoch.
+    pub retrain: SignedDuration,
     /// How far back from a retrain its rows go, such as `"720h"`.
     pub window: SignedDuration,
     /// The last part of the window the model is scored on and not fitted
@@ -86,7 +90,8 @@ impl ModelConfig {
     /// barrier's ATR is on bars it does not read (the strategy subscribes
     /// to its bars, which feed it), the label names a target the config
     /// lacks, a target (the barrier's limit or
-    /// the horizon) is not shorter than the window, the holdout is not
+    /// the horizon) is not shorter than the window, the retrain interval is
+    /// not positive, the holdout is not
     /// positive or leaves no fitted row (it and the longest target not
     /// shorter than the window), the thresholds are not probabilities with
     /// the short below the long, or the minimum score is not an AUC.
@@ -109,6 +114,11 @@ impl ModelConfig {
             self.targets.label_index(self.label).is_some(),
             "the label {:?} names a target the targets do not have",
             self.label
+        );
+        ensure!(
+            self.retrain.is_positive(),
+            "the retrain interval {:#} is not positive",
+            self.retrain
         );
         let longest = self.targets.settles_within();
         ensure!(
@@ -148,11 +158,13 @@ mod tests {
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
     /// A model section with a barrier closed after 2 hours and a horizon
-    /// of 1 hour, on a window of 48 hours, 12 of them held out.
+    /// of 1 hour, retrained every 24 hours on a window of 48 hours, 12 of
+    /// them held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
         targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
         label = "barrier"
+        retrain = "24h"
         window = "48h"
         holdout = "12h"
         thresholds = { long = 0.6, short = 0.4 }
@@ -205,6 +217,7 @@ mod tests {
         );
         assert_eq!(config.targets.instrument_id, InstrumentId::from(GOLD));
         assert_eq!(config.label, Label::Barrier);
+        assert_eq!(config.retrain, SignedDuration::from_hours(24));
         assert_eq!(config.window, SignedDuration::from_hours(48));
         assert_eq!(config.holdout, SignedDuration::from_hours(12));
         assert_eq!(
@@ -269,6 +282,14 @@ mod tests {
         ] {
             let toml = section(&format!("thresholds = {thresholds}"));
             assert!(refused(&toml).contains("thresholds"), "{thresholds}");
+        }
+    }
+
+    #[test]
+    fn a_retrain_interval_not_positive_is_refused() {
+        for retrain in ["0s", "-1h"] {
+            let toml = section(&format!(r#"retrain = "{retrain}""#));
+            assert!(refused(&toml).contains("retrain"), "{retrain}");
         }
     }
 

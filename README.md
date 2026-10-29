@@ -1,4 +1,4 @@
-<p align="center">
+and publishes it in the model store, or keeps the current one and fails with why. Backtest and live read the same store (`--models`); a live node retrains on its model's interval by starting `train` as a child process. |<p align="center">
   <img src="docs/assets/banner.svg" alt="helix trader" width="100%">
 </p>
 
