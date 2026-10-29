@@ -109,25 +109,31 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     );
 }
 
-/// A train at t (midnight of the 25th) with LightGBM on a window of 94
-/// hours, enough rows for its trees to split (on fewer, LightGBM keeps
-/// the training mean), published whatever
-/// its score; the same model, valid from the holdout's start, then trades
-/// over the holdout, whose decisions are the probe rows'. The walk
-/// leaves the holdout's mids beyond the fitted ones, so the probes share
-/// a leaf: the check is that the trees reloaded in the node give the bits
-/// they gave when fitted.
+/// A train at t (16:00 of the 22nd) with LightGBM on a window of 30
+/// hours, its leaves of 3 rows at least so its trees split the few rows
+/// fitted (on LightGBM's default of 20, it keeps the training mean),
+/// published whatever its score; the same model, valid from the holdout's
+/// start, then trades over the holdout, whose decisions are the probe
+/// rows'. The walk keeps the holdout's mids among the fitted ones, so the
+/// probes fall in different leaves: the check is that the trees reloaded
+/// in the node give the bits they gave when fitted, on several
+/// predictions.
 #[test]
 fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
-        ic::at("00:00:00") + SignedDuration::from_hours(99),
+        ic::at("00:00:00") + SignedDuration::from_hours(43),
     );
     let models = tempfile::tempdir().unwrap();
-    let t = ic::at("00:00:00") + SignedDuration::from_hours(96);
+    let t = ic::at("00:00:00") + SignedDuration::from_hours(40);
     let config = ModelConfig {
-        learner: LearnerConfig::LightGbm(LightGbmConfig::builder().num_iterations(20).build()),
-        window: SignedDuration::from_hours(94),
+        learner: LearnerConfig::LightGbm(
+            LightGbmConfig::builder()
+                .num_iterations(20)
+                .min_data_in_leaf(3)
+                .build(),
+        ),
+        window: SignedDuration::from_hours(30),
         min_score: 0.0,
         // Every probability a trade, to record it.
         thresholds: Thresholds {
@@ -161,6 +167,10 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let record = trade(&catalog, holdout, t, &config, models.path());
 
     let probes = &model.manifest.probes;
+    let mut predictions: Vec<u64> = probes.iter().map(|p| p.prediction.to_bits()).collect();
+    predictions.sort_unstable();
+    predictions.dedup();
+    assert!(predictions.len() > 1, "{probes:?}");
     for probe in probes {
         let row = record
             .rows
