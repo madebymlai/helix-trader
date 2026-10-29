@@ -536,7 +536,8 @@ of its choosing (`model::features`, `model::decide`).
   `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
   `.data(data_type, name, read)` for a raw feature of custom data, the last
   value `read` from a data point. `.code(include_str!("features.rs"))` adds
-  the strategy's feature code to the fingerprint; `.warmup(span)` declares
+  the strategy's feature code to the fingerprint (its unit tests in
+  `features/tests.rs`, so editing one changes no fingerprint); `.warmup(span)` declares
   how much data the features read before a decision, which a dataset
   build replays before its first day (see "Dataset"): a strategy passes
   its own warmup, `learned/` its `warmup`; none unless given. `build()`
@@ -1015,7 +1016,8 @@ data, and the strategy hands them the warmup's bars.
 ## Tests
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
-  each file. `BarsConfig` and `Session` are unit tested where they live,
+  each file, or in `<module>/tests.rs` for a module hashed into a
+  fingerprint (`docs/ARCHITECTURE.md`). `BarsConfig` and `Session` are unit tested where they live,
   `warmup::cache_config` too; a strategy's config tests cover only its own
   fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through

@@ -98,4 +98,8 @@ docs/         project docs
 ```
 
 Unit tests live in a `#[cfg(test)] mod tests` at the bottom of the module
-they test. Tests check behaviour, not implementation.
+they test; a module whose code is hashed into a fingerprint
+(`include_str!`, the model's features, decisions and targets and a
+strategy's feature code) declares `#[cfg(test)] mod tests;` and keeps them
+in `<module>/tests.rs`, so editing a test changes no fingerprint. Tests
+check behaviour, not implementation.
