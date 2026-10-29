@@ -1,0 +1,993 @@
+//! The targets of a strategy's decisions, read from real orders on
+//! Nautilus' simulated venue.
+//!
+//! In a dataset run, at each decision `Targets::open` sends, for each
+//! target of the config and on each side, a long and a short, the orders
+//! whose outcome is the target, on a hedging margin account so that each
+//! is a position of its own:
+//!
+//! - a triple barrier (`Barrier`): a bracket, a market entry, a take-profit
+//!   limit and a stop, the two exits one-updates-the-other, and a time
+//!   alert at the limit that closes the decision's position still open
+//!   (`close_position`, tagged `TIME_TAG`) and cancels the decision's legs
+//!   still open by their ids (cancelling every order of the instrument
+//!   would cancel the legs of the overlapping decisions too);
+//! - a horizon: a market entry closed by a time alert at the horizon.
+//!
+//! The exits are `take_profit` and `stop` away from the decision's price
+//! (`reference`): the mid of the instrument's last quote, else its last
+//! trade, else the close of its last bar.
+//!
+//! Each order's client order id names its decision, target, side and leg,
+//! `D{n}-{B|H}{L|S}-{E|TP|SL}`: the decision's number in the run, `B` a
+//! barrier and `H` a horizon, `L` long and `S` short, the entry, take
+//! profit or stop. The outcome of a target is read from Nautilus' events
+//! alone: a closed position's opening order names its decision and side,
+//! its closing order the exit (a take profit, a stop, or a close tagged
+//! `TIME_TAG`), and Nautilus reports its realised P&L net of commission.
+//! The only state of our own besides the rows being assembled is each
+//! open target's position id, from its entry's fill, which its time close
+//! needs.
+//!
+//! Once every target of a decision has an outcome, the decision is settled
+//! and its row, a `TargetRow`, published on the message bus, custom data
+//! keyed by the strategy's id (`TargetRow::data_type`). A decision whose
+//! order the risk engine denies or the venue rejects, or whose entry has
+//! not filled by its time limit, is unsettled: logged, and no row. So is a
+//! decision whose positions are still open when the run stops.
+//!
+//! A quote at the same nanosecond as a time alert reaches the venue first,
+//! so a barrier hit at the time limit counts as inside the window. On bars
+//! alone the venue replays each bar's open, high, low and close, fills an
+//! entry at the last close, a take profit at its limit and a stop at its
+//! trigger: bars-only targets are as optimistic as bars-only backtests.
+
+use std::{
+    any::Any,
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    fmt::{self, Debug, Display},
+    rc::Rc,
+    sync::Arc,
+};
+
+use anyhow::{Context, ensure};
+use jiff::{SignedDuration, Timestamp};
+use nautilus_common::{
+    actor::{DataActor, DataActorNative},
+    cache::CacheApi,
+    timer::TimeEvent,
+};
+use nautilus_core::UnixNanos;
+use nautilus_model::{
+    data::{CustomData, CustomDataTrait, DataType, HasTsInit},
+    enums::{AggregationSource, OrderSide, PriceType},
+    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    identifiers::{ClientOrderId, InstrumentId, PositionId, StrategyId},
+    instruments::Instrument,
+    orders::Order,
+    position::Position,
+    types::{Money, Price, Quantity},
+};
+use nautilus_trading::strategy::{Strategy, StrategyNative};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use ustr::Ustr;
+
+use super::{decide::FeatureRow, features::Fingerprint};
+
+/// The prefix of a target's time alert, followed by its decision and
+/// target, such as `TARGET-TIME:D12-B`.
+const TIME_ALERT: &str = "TARGET-TIME:";
+
+/// The tag of the order closing a target at its time.
+const TIME_TAG: &str = "TARGET-TIME";
+
+/// The targets of each decision, from the strategy's config: on one
+/// instrument, of one size, a triple barrier, a horizon or both.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, bon::Builder)]
+#[serde(deny_unknown_fields)]
+pub struct TargetsConfig {
+    /// The instrument the targets trade.
+    pub instrument_id: InstrumentId,
+    /// The size of every order, rounded to the instrument's sizes.
+    pub quantity: Quantity,
+    /// The triple barrier, if any.
+    pub barrier: Option<Barrier>,
+    /// The horizon of the horizon target, if any, such as `"1h"`.
+    pub horizon: Option<SignedDuration>,
+}
+
+/// A triple barrier: the exits of a bracket, each this far from the
+/// decision's price in the instrument's prices, and its time limit, such
+/// as `{ take_profit = 3.0, stop = 3.0, limit = "2h" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Barrier {
+    /// How far the take profit is, in the side's favour.
+    pub take_profit: Decimal,
+    /// How far the stop is, against the side.
+    pub stop: Decimal,
+    /// How long after the decision what is still open is closed.
+    pub limit: SignedDuration,
+}
+
+/// How a target's position was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Exit {
+    TakeProfit,
+    Stop,
+    /// At its time limit, or at the horizon.
+    Time,
+}
+
+/// The outcome of a target on one side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Outcome {
+    /// The position's realised P&L, net of its commissions, as Nautilus
+    /// reports it.
+    pub pnl: Money,
+    pub exit: Exit,
+}
+
+/// The outcomes of a target on each side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Outcomes {
+    pub long: Outcome,
+    pub short: Outcome,
+}
+
+/// A settled decision: its features and the outcome of each of its
+/// targets, published on the message bus.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TargetRow {
+    /// The decision, as `decide` published it.
+    pub decision: FeatureRow,
+    /// The triple barrier's outcomes, if the config has one.
+    pub barrier: Option<Outcomes>,
+    /// The horizon target's outcomes, if the config has one.
+    pub horizon: Option<Outcomes>,
+    /// When the last of its positions closed.
+    pub settled_at: UnixNanos,
+}
+
+/// The targets of a strategy's decisions, shared with it as an `Rc`: the
+/// strategy calls `open` at each decision, and hands its order and
+/// position events and its time events to the methods of their names.
+pub struct Targets {
+    config: TargetsConfig,
+    state: RefCell<State>,
+}
+
+/// What the targets keep between events.
+#[derive(Default)]
+struct State {
+    /// The number of the next decision.
+    next: u64,
+    /// The decisions opened and not yet settled or unsettled, by number,
+    /// each with the outcomes it has.
+    open: BTreeMap<u64, Decision>,
+    /// The position of each target whose entry filled, until it closes or
+    /// its time comes.
+    positions: HashMap<Target, PositionId>,
+}
+
+/// An open decision.
+struct Decision {
+    row: FeatureRow,
+    outcomes: BTreeMap<(Kind, Side), Outcome>,
+}
+
+/// A target of a decision on one side: what its orders' ids name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Target {
+    decision: u64,
+    kind: Kind,
+    side: Side,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Kind {
+    Barrier,
+    Horizon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Side {
+    Long,
+    Short,
+}
+
+/// An order of a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    Entry,
+    TakeProfit,
+    Stop,
+}
+
+impl TargetsConfig {
+    /// # Errors
+    ///
+    /// Returns an error if there is no target, or the size, a barrier's
+    /// distance, its limit or the horizon is not positive.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.barrier.is_some() || self.horizon.is_some(),
+            "no target: neither a barrier nor a horizon"
+        );
+        ensure!(
+            self.quantity.is_positive(),
+            "the target quantity must be positive"
+        );
+        if let Some(barrier) = self.barrier {
+            ensure!(
+                barrier.take_profit > Decimal::ZERO && barrier.stop > Decimal::ZERO,
+                "the barrier's take profit and stop must be positive"
+            );
+            ensure!(
+                barrier.limit.is_positive(),
+                "the barrier's limit {:#} is not positive",
+                barrier.limit
+            );
+        }
+        if let Some(horizon) = self.horizon {
+            ensure!(
+                horizon.is_positive(),
+                "the horizon {horizon:#} is not positive"
+            );
+        }
+        Ok(())
+    }
+
+    /// The config as the fingerprint reads it.
+    fn fingerprint_part(&self) -> String {
+        let barrier = self.barrier.map(|b| {
+            format!(
+                "take profit {} stop {} limit {} ns",
+                b.take_profit,
+                b.stop,
+                b.limit.as_nanos()
+            )
+        });
+        let horizon = self.horizon.map(|horizon| horizon.as_nanos());
+        format!(
+            "{} {} barrier {barrier:?} horizon {horizon:?} ns",
+            self.instrument_id, self.quantity
+        )
+    }
+
+    /// The kinds of target of the config.
+    fn kinds(&self) -> impl Iterator<Item = (Kind, SignedDuration)> {
+        let barrier = self.barrier.map(|b| (Kind::Barrier, b.limit));
+        let horizon = self.horizon.map(|h| (Kind::Horizon, h));
+        barrier.into_iter().chain(horizon)
+    }
+}
+
+/// `fingerprint` extended with the targets of `config` and this module's
+/// code, which places and reads them.
+#[must_use]
+pub fn fingerprint(fingerprint: Fingerprint, config: &TargetsConfig) -> Fingerprint {
+    fingerprint
+        .with(config.fingerprint_part().as_bytes())
+        .with(include_str!("targets.rs").as_bytes())
+}
+
+impl Outcome {
+    /// The sign of the P&L: 1 a gain, -1 a loss, 0 neither.
+    #[must_use]
+    pub fn sign(&self) -> i8 {
+        match self.pnl.as_decimal().cmp(&Decimal::ZERO) {
+            std::cmp::Ordering::Greater => 1,
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+        }
+    }
+}
+
+impl Targets {
+    /// # Errors
+    ///
+    /// Returns an error if `config` is invalid.
+    pub fn new(config: TargetsConfig) -> anyhow::Result<Rc<Self>> {
+        config.validate()?;
+        Ok(Rc::new(Self {
+            config,
+            state: RefCell::new(State::default()),
+        }))
+    }
+
+    /// Opens the targets of the decision of `row`: for each target and
+    /// side, its orders, from `strategy`, and each target's time alert.
+    /// With no price of the instrument yet, the decision is unsettled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instrument is not in the cache or an exit
+    /// price or the size cannot be made in it, before any order, or if
+    /// Nautilus refuses an order or an alert, which unsettles the decision.
+    pub fn open<S>(&self, strategy: &mut S, row: FeatureRow) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let decision = {
+            let mut state = self.state.borrow_mut();
+            state.next += 1;
+            state.next - 1
+        };
+        let time = row.ts_event.to_rfc3339();
+        let instrument_id = self.config.instrument_id;
+        let (instrument, reference) = {
+            let cache = strategy.cache();
+            let instrument = cache
+                .instrument(&instrument_id)
+                .with_context(|| format!("instrument {instrument_id} not in cache"))?;
+            (instrument, reference(&cache, &instrument_id))
+        };
+        let Some(reference) = reference else {
+            log::error!(
+                "decision {decision} at {time}: no price of {instrument_id} to set its targets \
+                 from; unsettled"
+            );
+            return Ok(());
+        };
+        let reference = reference.as_decimal();
+        let size = self.config.quantity.as_decimal();
+        let quantity = instrument
+            .try_make_qty_from_decimal(size, None)
+            .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
+        let mut exits = vec![];
+        if let Some(barrier) = self.config.barrier {
+            for side in [Side::Long, Side::Short] {
+                let take_profit = reference + side.sign() * barrier.take_profit;
+                let stop = reference - side.sign() * barrier.stop;
+                exits.push((
+                    side,
+                    instrument.try_make_price_from_decimal(take_profit)?,
+                    instrument.try_make_price_from_decimal(stop)?,
+                ));
+            }
+        }
+        self.state
+            .borrow_mut()
+            .open
+            .insert(decision, Decision::new(row));
+        let sent = self.send(strategy, decision, quantity, &exits);
+        if let Err(e) = &sent {
+            self.unsettle(decision, format_args!("sending its orders: {e}"));
+        }
+        sent
+    }
+
+    /// Sends the orders of `decision`, `quantity` each, the brackets with
+    /// `exits`, and sets the time alert of each target.
+    fn send<S>(
+        &self,
+        strategy: &mut S,
+        decision: u64,
+        quantity: Quantity,
+        exits: &[(Side, Price, Price)],
+    ) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let instrument_id = self.config.instrument_id;
+        for &(side, take_profit, stop) in exits {
+            let target = Target::new(decision, Kind::Barrier, side);
+            let orders = strategy
+                .order()
+                .bracket()
+                .instrument_id(instrument_id)
+                .order_side(side.order_side())
+                .quantity(quantity)
+                .entry_client_order_id(target.order_id(Leg::Entry))
+                .tp_client_order_id(target.order_id(Leg::TakeProfit))
+                .sl_client_order_id(target.order_id(Leg::Stop))
+                .tp_price(take_profit)
+                .sl_trigger_price(stop)
+                .call();
+            strategy.submit_order_list(orders, None, None, None)?;
+        }
+        if self.config.horizon.is_some() {
+            for side in [Side::Long, Side::Short] {
+                let target = Target::new(decision, Kind::Horizon, side);
+                let order = strategy.order().market(
+                    instrument_id,
+                    side.order_side(),
+                    quantity,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(target.order_id(Leg::Entry)),
+                );
+                strategy.submit_order(order, None, None, None)?;
+            }
+        }
+        let now = Timestamp::from(strategy.clock().timestamp_ns());
+        for (kind, after) in self.config.kinds() {
+            strategy.clock().set_time_alert(
+                &time_alert(decision, kind),
+                now + after,
+                None,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// At a target's time alert, closes its position on each side still
+    /// open and cancels its legs still open; a side whose entry has not
+    /// filled leaves its decision unsettled. Another event is not the
+    /// targets'.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Nautilus refuses the cancel or the close.
+    pub fn on_time_event<S>(&self, strategy: &mut S, event: &TimeEvent) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let Some((decision, kind)) = parse_time_alert(&event.name) else {
+            return Ok(());
+        };
+        for side in [Side::Long, Side::Short] {
+            let target = Target::new(decision, kind, side);
+            let position_id = self.state.borrow_mut().positions.remove(&target);
+            let (legs, position) = {
+                let cache = strategy.cache();
+                let legs: Vec<ClientOrderId> = kind
+                    .legs()
+                    .iter()
+                    .map(|&leg| target.order_id(leg))
+                    .filter(|id| cache.order(id).is_some_and(|order| order.is_open()))
+                    .collect();
+                let position = position_id
+                    .and_then(|id| cache.position(&id))
+                    .filter(Position::is_open);
+                (legs, position)
+            };
+            if position_id.is_none() && !self.has_outcome(target) {
+                let entry = target.order_id(Leg::Entry);
+                self.unsettle(
+                    decision,
+                    format_args!("the entry {entry} has not filled by its time"),
+                );
+            }
+            if !legs.is_empty() {
+                strategy.cancel_orders(legs, None, None)?;
+            }
+            if let Some(position) = position {
+                let tags = Some(vec![Ustr::from(TIME_TAG)]);
+                strategy.close_position(&position, None, tags, None, None, None, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps the position of a target's entry, from its fill.
+    pub fn on_order_filled(&self, event: &OrderFilled) {
+        if let Some((target, Leg::Entry)) = Target::parse(event.client_order_id)
+            && let Some(position_id) = event.position_id
+        {
+            self.state
+                .borrow_mut()
+                .positions
+                .insert(target, position_id);
+        }
+    }
+
+    /// A target's order denied by the risk engine unsettles its decision.
+    pub fn on_order_denied(&self, event: &OrderDenied) {
+        self.refused(event.client_order_id, "denied", event.reason);
+    }
+
+    /// A target's order rejected by the venue unsettles its decision.
+    pub fn on_order_rejected(&self, event: &OrderRejected) {
+        self.refused(event.client_order_id, "rejected", event.reason);
+    }
+
+    /// Records the outcome of the target whose position closed, from the
+    /// event and the closing order, and publishes its decision's row,
+    /// from `strategy`, once every target of it has one. A position closed
+    /// by an order of no exit of its target leaves its decision unsettled.
+    pub fn on_position_closed<S>(&self, strategy: &S, event: &PositionClosed)
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let Some((target, Leg::Entry)) = Target::parse(event.opening_order_id) else {
+            return;
+        };
+        self.state.borrow_mut().positions.remove(&target);
+        let exit = event
+            .closing_order_id
+            .and_then(|closing| exit(strategy, target, closing));
+        let (Some(exit), Some(pnl)) = (exit, event.realized_pnl) else {
+            self.unsettle(
+                target.decision,
+                format_args!(
+                    "the position {} of {} closed by {:?}: no exit of its target, or no \
+                     realised P&L",
+                    event.position_id,
+                    target.order_id(Leg::Entry),
+                    event.closing_order_id
+                ),
+            );
+            return;
+        };
+        let row = {
+            let mut state = self.state.borrow_mut();
+            let Some(decision) = state.open.get_mut(&target.decision) else {
+                return;
+            };
+            decision
+                .outcomes
+                .insert((target.kind, target.side), Outcome { pnl, exit });
+            let barrier = decision.outcomes(Kind::Barrier);
+            let horizon = decision.outcomes(Kind::Horizon);
+            if barrier.is_some() != self.config.barrier.is_some()
+                || horizon.is_some() != self.config.horizon.is_some()
+            {
+                return;
+            }
+            let row = TargetRow {
+                decision: decision.row.clone(),
+                barrier,
+                horizon,
+                settled_at: event.ts_event,
+            };
+            state.open.remove(&target.decision);
+            row
+        };
+        let data_type = TargetRow::data_type(row.decision.strategy_id);
+        let data = CustomData::new(Arc::new(row), data_type.clone());
+        strategy.publish_data(&data_type, &data);
+    }
+
+    /// Reports the decisions still open, unsettled at the end of the run.
+    pub fn on_stop(&self) {
+        let state = self.state.borrow();
+        if let (Some(first), Some(last)) = (state.open.values().next(), state.open.values().last())
+        {
+            log::info!(
+                "{} decisions from {} to {} unsettled at the stop, their targets still open",
+                state.open.len(),
+                first.row.ts_event.to_rfc3339(),
+                last.row.ts_event.to_rfc3339()
+            );
+        }
+    }
+
+    /// Unsettles the decision of `id`, a target's order refused `how`.
+    fn refused(&self, id: ClientOrderId, how: &str, reason: Ustr) {
+        if let Some((target, _)) = Target::parse(id) {
+            self.unsettle(target.decision, format_args!("{id} {how}: {reason}"));
+        }
+    }
+
+    /// Whether the decision of `target`, open, has its outcome.
+    fn has_outcome(&self, target: Target) -> bool {
+        self.state
+            .borrow()
+            .open
+            .get(&target.decision)
+            .is_some_and(|decision| decision.outcomes.contains_key(&(target.kind, target.side)))
+    }
+
+    /// Drops `decision` if open, logging `why` it is unsettled.
+    fn unsettle(&self, decision: u64, why: impl Display) {
+        let dropped = self.state.borrow_mut().open.remove(&decision);
+        if let Some(dropped) = dropped {
+            log::error!(
+                "decision {decision} at {}: {why}; its targets are unsettled",
+                dropped.row.ts_event.to_rfc3339()
+            );
+        }
+    }
+}
+
+impl Debug for Targets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.borrow();
+        f.debug_struct("Targets")
+            .field("config", &self.config)
+            .field("next", &state.next)
+            .field("open", &state.open.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Decision {
+    fn new(row: FeatureRow) -> Self {
+        Self {
+            row,
+            outcomes: BTreeMap::new(),
+        }
+    }
+
+    /// The outcomes of `kind`, once it has both.
+    fn outcomes(&self, kind: Kind) -> Option<Outcomes> {
+        Some(Outcomes {
+            long: *self.outcomes.get(&(kind, Side::Long))?,
+            short: *self.outcomes.get(&(kind, Side::Short))?,
+        })
+    }
+}
+
+impl Target {
+    fn new(decision: u64, kind: Kind, side: Side) -> Self {
+        Self {
+            decision,
+            kind,
+            side,
+        }
+    }
+
+    /// The client order id of `leg`: `D{n}-{B|H}{L|S}-{E|TP|SL}`.
+    fn order_id(self, leg: Leg) -> ClientOrderId {
+        let side = match self.side {
+            Side::Long => 'L',
+            Side::Short => 'S',
+        };
+        let leg = match leg {
+            Leg::Entry => "E",
+            Leg::TakeProfit => "TP",
+            Leg::Stop => "SL",
+        };
+        let id = format!("D{}-{}{side}-{leg}", self.decision, self.kind.letter());
+        ClientOrderId::from(id.as_str())
+    }
+
+    /// The target and leg `id` names, if a target's.
+    fn parse(id: ClientOrderId) -> Option<(Self, Leg)> {
+        let (decision, rest) = id.as_str().strip_prefix('D')?.split_once('-')?;
+        let (target, leg) = rest.split_once('-')?;
+        let mut target = target.chars();
+        let kind = Kind::of(target.next()?)?;
+        let side = match target.next()? {
+            'L' => Side::Long,
+            'S' => Side::Short,
+            _ => return None,
+        };
+        let leg = match leg {
+            "E" => Leg::Entry,
+            "TP" => Leg::TakeProfit,
+            "SL" => Leg::Stop,
+            _ => return None,
+        };
+        (target.next().is_none()).then_some(())?;
+        Some((Self::new(decision.parse().ok()?, kind, side), leg))
+    }
+}
+
+impl Kind {
+    fn letter(self) -> char {
+        match self {
+            Self::Barrier => 'B',
+            Self::Horizon => 'H',
+        }
+    }
+
+    fn of(letter: char) -> Option<Self> {
+        match letter {
+            'B' => Some(Self::Barrier),
+            'H' => Some(Self::Horizon),
+            _ => None,
+        }
+    }
+
+    /// The legs of a target of this kind.
+    fn legs(self) -> &'static [Leg] {
+        match self {
+            Self::Barrier => &[Leg::Entry, Leg::TakeProfit, Leg::Stop],
+            Self::Horizon => &[Leg::Entry],
+        }
+    }
+}
+
+impl Side {
+    fn order_side(self) -> OrderSide {
+        match self {
+            Self::Long => OrderSide::Buy,
+            Self::Short => OrderSide::Sell,
+        }
+    }
+
+    /// 1 long, -1 short: the direction of the side's favour.
+    fn sign(self) -> Decimal {
+        match self {
+            Self::Long => Decimal::ONE,
+            Self::Short => -Decimal::ONE,
+        }
+    }
+}
+
+/// The name of the time alert of `decision`'s target of `kind`.
+fn time_alert(decision: u64, kind: Kind) -> String {
+    format!("{TIME_ALERT}D{decision}-{}", kind.letter())
+}
+
+/// The decision and kind of target of the time alert `name`, if one.
+fn parse_time_alert(name: &str) -> Option<(u64, Kind)> {
+    let (decision, kind) = name
+        .strip_prefix(TIME_ALERT)?
+        .strip_prefix('D')?
+        .split_once('-')?;
+    let mut letters = kind.chars();
+    let kind = Kind::of(letters.next()?)?;
+    letters.next().is_none().then_some(())?;
+    Some((decision.parse().ok()?, kind))
+}
+
+/// The exit of `target` that `closing` is, from its id or, closing at the
+/// time, its tag; none if it is no exit of the target.
+fn exit<S: DataActor + DataActorNative>(
+    strategy: &S,
+    target: Target,
+    closing: ClientOrderId,
+) -> Option<Exit> {
+    match Target::parse(closing) {
+        Some((of, Leg::TakeProfit)) if of == target => Some(Exit::TakeProfit),
+        Some((of, Leg::Stop)) if of == target => Some(Exit::Stop),
+        Some(_) => None,
+        None => {
+            let cache = strategy.cache();
+            let order = cache.order(&closing)?;
+            let tagged = order
+                .tags()
+                .is_some_and(|tags| tags.contains(&Ustr::from(TIME_TAG)));
+            tagged.then_some(Exit::Time)
+        }
+    }
+}
+
+/// The price a decision's exits are set from: the mid of the instrument's
+/// last quote, else its last trade, else the close of its last bar, of any
+/// bar type.
+fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Price> {
+    cache
+        .price(instrument_id, PriceType::Mid)
+        .or_else(|| cache.price(instrument_id, PriceType::Last))
+        .or_else(|| {
+            [AggregationSource::External, AggregationSource::Internal]
+                .into_iter()
+                .flat_map(|source| cache.bar_types(Some(instrument_id), None, source))
+                .filter_map(|bar_type| cache.bar(&bar_type))
+                .max_by_key(|bar| bar.ts_init)
+                .map(|bar| bar.close)
+        })
+}
+
+impl TargetRow {
+    /// The data type of the rows of `strategy_id`.
+    #[must_use]
+    pub fn data_type(strategy_id: StrategyId) -> DataType {
+        DataType::new(
+            Self::type_name_static(),
+            None,
+            Some(strategy_id.to_string()),
+        )
+    }
+}
+
+impl HasTsInit for TargetRow {
+    fn ts_init(&self) -> UnixNanos {
+        self.settled_at
+    }
+}
+
+impl CustomDataTrait for TargetRow {
+    fn type_name(&self) -> &'static str {
+        Self::type_name_static()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn ts_event(&self) -> UnixNanos {
+        self.decision.ts_event
+    }
+
+    fn to_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    fn clone_arc(&self) -> Arc<dyn CustomDataTrait> {
+        Arc::new(self.clone())
+    }
+
+    fn eq_arc(&self, other: &dyn CustomDataTrait) -> bool {
+        other.as_any().downcast_ref::<Self>() == Some(self)
+    }
+
+    fn type_name_static() -> &'static str {
+        "TargetRow"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_indicators::average::sma::SimpleMovingAverage;
+    use nautilus_model::enums::PriceType;
+
+    use super::*;
+    use crate::model::features::FeatureSet;
+
+    const GOLD: &str = "XAUUSD.ICMARKETS";
+
+    fn config() -> TargetsConfig {
+        TargetsConfig::builder()
+            .instrument_id(InstrumentId::from(GOLD))
+            .quantity(Quantity::from(1))
+            .barrier(Barrier {
+                take_profit: Decimal::from(3),
+                stop: Decimal::from(2),
+                limit: SignedDuration::from_hours(2),
+            })
+            .horizon(SignedDuration::from_hours(1))
+            .build()
+    }
+
+    #[test]
+    fn a_config_reads_from_toml() {
+        let toml = r#"
+            instrument_id = "XAUUSD.ICMARKETS"
+            quantity = "1"
+            barrier = { take_profit = 3.0, stop = 2, limit = "2h" }
+            horizon = "1h"
+        "#;
+
+        assert_eq!(toml::from_str::<TargetsConfig>(toml).unwrap(), config());
+    }
+
+    #[test]
+    fn a_config_refuses_an_unknown_field() {
+        let toml = r#"
+            instrument_id = "XAUUSD.ICMARKETS"
+            quantity = "1"
+            horizon = "1h"
+            horizn = "2h"
+        "#;
+
+        assert!(toml::from_str::<TargetsConfig>(toml).is_err());
+    }
+
+    #[test]
+    fn either_target_alone_is_valid() {
+        let barrier = TargetsConfig {
+            horizon: None,
+            ..config()
+        };
+        let horizon = TargetsConfig {
+            barrier: None,
+            ..config()
+        };
+
+        assert!(config().validate().is_ok());
+        assert!(barrier.validate().is_ok());
+        assert!(horizon.validate().is_ok());
+    }
+
+    #[test]
+    fn a_config_without_a_target_is_invalid() {
+        let none = TargetsConfig {
+            barrier: None,
+            horizon: None,
+            ..config()
+        };
+
+        assert!(none.validate().is_err());
+    }
+
+    #[test]
+    fn sizes_distances_and_times_must_be_positive() {
+        let barrier = config().barrier.unwrap();
+        let invalid = [
+            TargetsConfig {
+                quantity: Quantity::from(0),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    take_profit: Decimal::ZERO,
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    stop: Decimal::from(-1),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    limit: SignedDuration::ZERO,
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                horizon: Some(SignedDuration::from_mins(-5)),
+                ..config()
+            },
+        ];
+
+        for config in invalid {
+            assert!(config.validate().is_err(), "{config:?}");
+            assert!(Targets::new(config).is_err());
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_changes_with_every_target_spec() {
+        let base = FeatureSet::builder()
+            .quotes(
+                InstrumentId::from(GOLD),
+                "mid",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .build()
+            .unwrap()
+            .fingerprint();
+        let barrier = config().barrier.unwrap();
+        let changed = [
+            TargetsConfig {
+                quantity: Quantity::from(2),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    stop: Decimal::from(3),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    limit: SignedDuration::from_hours(3),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                horizon: None,
+                ..config()
+            },
+            TargetsConfig {
+                horizon: Some(SignedDuration::from_mins(30)),
+                ..config()
+            },
+        ];
+
+        assert_eq!(fingerprint(base, &config()), fingerprint(base, &config()));
+        assert_ne!(fingerprint(base, &config()), base);
+        for config in changed {
+            assert_ne!(
+                fingerprint(base, &config),
+                fingerprint(base, &self::config()),
+                "{config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outcome_has_the_sign_of_its_pnl() {
+        let sign = |pnl: &str| {
+            Outcome {
+                pnl: Money::from(pnl),
+                exit: Exit::Time,
+            }
+            .sign()
+        };
+
+        assert_eq!(sign("0.0005 USDT"), 1);
+        assert_eq!(sign("-0.44 USD"), -1);
+        assert_eq!(sign("0 USD"), 0);
+    }
+}
