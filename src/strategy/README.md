@@ -851,8 +851,9 @@ of its choosing (`model::features`, `model::decide`).
   at each retrain time, per retrain period and over the span (backtest
   README, "Retraining on the schedule"). With a meta model, `prepare`
   builds from the longer of the two windows and trains at each time
-  either store lacks, the meta's only after the primary's first model
-  (before, its window has no row, so it never publishes there), and the
+  either store lacks, the meta's only after the primary's first model as
+  the earlier trains of the span leave it (before, its window has no
+  row, so it never publishes there), and the
   meta's scores follow the primary's.
 - **Live retraining.** In `Mode::Live { models, commission, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
