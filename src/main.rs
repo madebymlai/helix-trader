@@ -1,4 +1,4 @@
-//! Command line: one subcommand per process (fill-catalog, backtest, live), since
+//! Command line: one subcommand per process (fill-catalog, backtest, live, train), since
 //! Nautilus allows one node per process. Every subcommand takes the strategy
 //! name and its TOML config: the instruments and the warmup come from the
 //! config's data requirements.
@@ -6,10 +6,11 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    rc::Rc,
     time::Duration,
 };
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest},
@@ -18,9 +19,11 @@ use helix_trader::{
         REQUEST_TIMEOUT, missing,
     },
     live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live, Recording},
+    model::handle::{Mode, SettledRows},
     strategy::{
         DataRequirements, SeriesSlice,
         ema::{EmaCross, EmaCrossConfig},
+        learned::{self, Learned, LearnedConfig},
     },
 };
 use jiff::Timestamp;
@@ -31,6 +34,7 @@ use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
+    enums::OmsType,
     identifiers::{InstrumentId, TraderId},
     types::Money,
 };
@@ -56,6 +60,10 @@ enum Command {
     /// Runs the strategy on a live node with Interactive Brokers, IC
     /// Markets or OKX; stops on Ctrl-C.
     Live(LiveArgs),
+    /// Trains the strategy's model at a time, replaying the days its
+    /// dataset lacks, and prints whether a model was published or the
+    /// current one kept, and why.
+    Train(Box<TrainArgs>),
 }
 
 /// The arguments of a subcommand working on a window of the catalog.
@@ -109,6 +117,39 @@ struct BacktestArgs {
     /// divided by it, times the instrument's margin. 1 is no leverage. For
     /// venues whose instruments carry margins of 1 (OKX); IC's carry IC's
     /// own margin, so an IC backtest keeps 1.
+    #[arg(long, default_value = "1")]
+    leverage: Decimal,
+    /// The model store a strategy trading on a model reads its models
+    /// from: at each decision, the latest valid then.
+    #[arg(long, default_value = "models")]
+    models: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct TrainArgs {
+    /// The strategy whose model is trained.
+    strategy: Strategy,
+    /// The strategy's TOML config.
+    #[arg(long)]
+    config: PathBuf,
+    /// The time trained at, the model's valid-from: same format as
+    /// --start.
+    #[arg(long, value_parser = parse_time)]
+    at: Timestamp,
+    /// The catalog directory: the data replayed, and the dataset.
+    #[arg(long, default_value = "catalog")]
+    catalog: PathBuf,
+    /// The model store the model is published in.
+    #[arg(long, default_value = "models")]
+    models: PathBuf,
+    /// The costs of the dataset run, whose targets are net of them.
+    #[command(flatten)]
+    commission: CommissionArgs,
+    /// Starting balance of the dataset run's account, large enough that
+    /// no target is denied, for example "10000000 USD".
+    #[arg(long, value_parser = parse_money)]
+    balance: Money,
+    /// The dataset run's leverage, as a backtest's.
     #[arg(long, default_value = "1")]
     leverage: Decimal,
 }
@@ -170,12 +211,17 @@ struct LiveArgs {
     /// catalog: the delay before a retrain sees it.
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
     promotion_minutes: u64,
+    /// The model store a strategy trading on a model reads its models
+    /// from: at each decision, the latest valid then.
+    #[arg(long, default_value = "models")]
+    models: PathBuf,
 }
 
 /// The strategies, by command-line name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Strategy {
     Ema,
+    Learned,
 }
 
 /// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
@@ -218,6 +264,24 @@ fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
     read().with_context(|| format!("loading the EMA config {}", path.display()))
 }
 
+/// Reads the learned strategy's config from `path` and validates it.
+fn load_learned_config(path: &Path) -> anyhow::Result<LearnedConfig> {
+    let read = || -> anyhow::Result<LearnedConfig> {
+        let config: LearnedConfig = toml::from_str(&fs::read_to_string(path)?)?;
+        config.validate()?;
+        Ok(config)
+    };
+    read().with_context(|| format!("loading the learned config {}", path.display()))
+}
+
+/// The data requirements of `strategy`'s config at `path`.
+fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequirements> {
+    Ok(match strategy {
+        Strategy::Ema => load_ema_config(path)?.bars.data_requirements(),
+        Strategy::Learned => load_learned_config(path)?.bars.data_requirements(),
+    })
+}
+
 /// The logger config from `NAUTILUS_LOG`: the default when it is unset, an
 /// error when it is malformed.
 fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<LoggerConfig> {
@@ -236,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
         Command::Backtest(args) => run_backtest(*args),
         Command::Live(args) => run_live(args).await,
+        Command::Train(args) => run_train(*args),
     }
 }
 
@@ -252,9 +317,7 @@ async fn main() -> anyhow::Result<()> {
 /// envelopes. OKX, IC and IB refuse a series they do not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
-    let requirements = match args.run.strategy {
-        Strategy::Ema => load_ema_config(&args.run.config)?.bars.data_requirements(),
-    };
+    let requirements = data_requirements(args.run.strategy, &args.run.config)?;
     // OKX's and IB's fills run no node, so no node installs Nautilus'
     // logger for them: install it here, as a node would (the fill's node
     // keeps it), so the `log` output of this crate and Nautilus, and the
@@ -371,6 +434,13 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
             let config = load_ema_config(&args.run.config)?;
             backtest(config.bars.data_requirements()).run(EmaCross::new(config)?)?
         }
+        Strategy::Learned => {
+            let config = load_learned_config(&args.run.config)?;
+            let mode = Mode::Backtest {
+                models: args.models.clone(),
+            };
+            backtest(config.bars.data_requirements()).run(Learned::new(config, mode)?)?
+        }
     };
     print!("{}", backtest::report(&outcome));
     Ok(())
@@ -396,7 +466,58 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             live.run(&config.bars.data_requirements(), EmaCross::new(config)?)
                 .await
         }
+        Strategy::Learned => {
+            let config = load_learned_config(&args.config)?;
+            let mode = Mode::Live {
+                models: args.models,
+            };
+            live.run(
+                &config.bars.data_requirements(),
+                Learned::new(config, mode)?,
+            )
+            .await
+        }
     }
+}
+
+/// Trains the strategy's model at `--at` and prints the outcome: the days
+/// its dataset lacks are replayed by a dataset run of the strategy over
+/// the catalog, on hedging venues (`model::targets`), the one node of the
+/// process.
+fn run_train(args: TrainArgs) -> anyhow::Result<()> {
+    let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
+    let fee_model = args.commission.fee_model();
+    let outcome = match args.strategy {
+        Strategy::Ema => bail!("the EMA strategy trades on no model"),
+        Strategy::Learned => {
+            let config = load_learned_config(&args.config)?;
+            let training = learned::training(&config, &args.catalog, &args.models)?;
+            let requirements = config.bars.data_requirements();
+            training.train_at(args.at, |start, end| {
+                let rows = SettledRows::default();
+                let mode = Mode::Dataset {
+                    rows: Rc::clone(&rows),
+                };
+                let backtest = Backtest {
+                    catalog: args.catalog.clone(),
+                    bar_types: requirements.bar_types,
+                    ticks: requirements.ticks,
+                    start,
+                    end,
+                    warmup: requirements.warmup,
+                    fee_model,
+                    balance: args.balance,
+                    leverage: args.leverage,
+                    venue_oms: |_| OmsType::Hedging,
+                    logging,
+                };
+                backtest.run_dataset(Learned::new(config, mode)?)?;
+                Ok(rows.take())
+            })
+        }
+    };
+    println!("{outcome}");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -665,5 +786,77 @@ mod tests {
         assert!(logger_config(Err(std::env::VarError::NotUnicode(not_unicode))).is_err());
         assert!(logger_config(Ok("stdout=Debug".to_string())).is_ok());
         assert!(logger_config(Ok("stdout=Loud".to_string())).is_err());
+    }
+
+    fn parse_train(args: &[&str]) -> Result<TrainArgs, clap::Error> {
+        parse_command("train", args).map(|command| match command {
+            Command::Train(args) => *args,
+            command => panic!("{command:?}"),
+        })
+    }
+
+    /// The arguments a train requires.
+    const TRAIN: [&str; 9] = [
+        "learned",
+        "--config",
+        "learned.toml",
+        "--at",
+        "2026-10-23",
+        "--commission-rate",
+        "0.00003",
+        "--balance",
+        "10000000 USD",
+    ];
+
+    #[test]
+    fn parses_a_train_at_a_time_with_its_costs_into_the_models_store() {
+        let args = parse_train(&TRAIN).unwrap();
+        assert_eq!(args.strategy, Strategy::Learned);
+        assert_eq!(args.config, PathBuf::from("learned.toml"));
+        assert_eq!(
+            args.at,
+            "2026-10-23T00:00:00Z".parse::<Timestamp>().unwrap()
+        );
+        assert_eq!(args.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.models, PathBuf::from("models"));
+        assert!(matches!(
+            args.commission.fee_model(),
+            FeeModelAny::MakerTaker(_)
+        ));
+        assert_eq!(args.balance, Money::from("10000000 USD"));
+    }
+
+    #[test]
+    fn a_train_requires_its_time_and_its_costs() {
+        for flag in ["--at", "--commission-rate", "--balance"] {
+            let at = TRAIN.iter().position(|&arg| arg == flag).unwrap();
+            let argv = [&TRAIN[..at], &TRAIN[at + 2..]].concat();
+            let err = parse_train(&argv).unwrap_err().to_string();
+            assert!(err.contains(flag), "{err}");
+        }
+    }
+
+    #[test]
+    fn backtest_and_live_read_models_from_models_unless_told_otherwise() {
+        assert_eq!(
+            parse_backtest(&backtest_required()).unwrap().models,
+            PathBuf::from("models")
+        );
+        let mut argv = backtest_required();
+        argv.extend(["--models", "/data/models"]);
+        assert_eq!(
+            parse_backtest(&argv).unwrap().models,
+            PathBuf::from("/data/models")
+        );
+        let args = parse_live(&["learned", "--config", "learned.toml"]).unwrap();
+        assert_eq!(args.models, PathBuf::from("models"));
+    }
+
+    #[test]
+    fn the_ema_strategy_has_no_model_to_train() {
+        let mut argv = TRAIN.to_vec();
+        argv[0] = "ema";
+        let err = run_train(parse_train(&argv).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("no model"), "{err}");
     }
 }

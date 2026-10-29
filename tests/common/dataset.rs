@@ -1,17 +1,22 @@
-//! The dataset run of the model tests: a probe deciding every hour on the
-//! last mid of IC's gold opens the targets of each decision through
-//! `Backtest::run_dataset`, on IC's hedging venue, and records the target
-//! rows published for it; and the random walk of quotes it replays.
+//! The model runs of the model tests: a probe deciding every hour on the
+//! last mid of IC's gold through its model handle (`model::handle`),
+//! either opening the targets of each decision in a dataset run
+//! (`Backtest::run_dataset`), the rows they settle collected, or trading
+//! on the models of a store, its decisions' rows and trades recorded; on
+//! IC's hedging venue both. And the random walk of quotes they replay.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::ic;
 use helix_trader::{
     backtest::{Backtest, commission_rate},
     model::{
-        decide::{self, DecisionRule},
+        config::{ModelConfig, Thresholds},
+        decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
-        targets::{Barrier, Distance, TargetRow, Targets, TargetsConfig},
+        handle::{Mode, ModelHandle, SettledRows, Trade},
+        learner::LearnerConfig,
+        targets::{Barrier, Distance, Label, TargetRow, TargetsConfig},
     },
     strategy::TickSeries,
 };
@@ -22,6 +27,7 @@ use nautilus_common::{
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
 };
+use nautilus_core::UnixNanos;
 use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{CustomData, NautilusDataType},
@@ -38,61 +44,69 @@ use rust_decimal::Decimal;
 
 pub const STRATEGY: &str = "DATASET-001";
 
-/// Decides every hour on the last mid of IC's gold and opens the targets
-/// of each decision; records the rows published for it.
+/// Decides every hour on the last mid of IC's gold through its model
+/// handle; records the rows published for its decisions and the trades
+/// they make, which it does not send.
 #[derive(Debug)]
-pub struct DatasetProbe {
+pub struct ModelProbe {
     core: StrategyCore,
-    features: Rc<FeatureSet>,
-    targets: Rc<Targets>,
-    rows: Rc<RefCell<Vec<TargetRow>>>,
+    model: Rc<ModelHandle>,
+    record: Rc<RefCell<Record>>,
 }
 
-nautilus_strategy!(DatasetProbe, {
+/// What a trading probe decided.
+#[derive(Debug, Default)]
+pub struct Record {
+    /// The row of each decision on warm features.
+    pub rows: Vec<FeatureRow>,
+    /// The trade of each decision making one, and its time.
+    pub trades: Vec<(UnixNanos, Trade)>,
+}
+
+nautilus_strategy!(ModelProbe, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.targets.on_order_filled(event);
+        self.model.on_order_filled(event);
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
-        self.targets.on_order_denied(&event);
+        self.model.on_order_denied(&event);
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
-        self.targets.on_order_rejected(&event);
+        self.model.on_order_rejected(&event);
     }
 
     fn on_position_closed(&mut self, event: PositionClosed) {
-        Rc::clone(&self.targets).on_position_closed(self, &event);
+        Rc::clone(&self.model).on_position_closed(self, &event);
     }
 });
 
-impl DataActor for DatasetProbe {
+impl DataActor for ModelProbe {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let features = Rc::clone(&self.features);
-        features.register(self);
-        let rows = Rc::clone(&self.rows);
+        let record = Rc::clone(&self.record);
         let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
-            let row = data.data.as_any().downcast_ref::<TargetRow>().unwrap();
-            rows.borrow_mut().push(row.clone());
+            let row = data.data.as_any().downcast_ref::<FeatureRow>().unwrap();
+            record.borrow_mut().rows.push(row.clone());
         });
-        let topic = get_custom_topic(&TargetRow::data_type(StrategyId::from(STRATEGY)));
+        let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
         msgbus::subscribe_any(topic.into(), handler, None);
         self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
-        decide::start(self, rule(), SignedDuration::ZERO)
+        Rc::clone(&self.model).start(self, &[])
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            if let Some(row) = decide::decide(self, &self.features) {
-                Rc::clone(&self.targets).open(self, row)?;
+            if let Some(trade) = Rc::clone(&self.model).decide(self)? {
+                let now = self.clock().timestamp_ns();
+                self.record.borrow_mut().trades.push((now, trade));
             }
             return Ok(());
         }
-        Rc::clone(&self.targets).on_time_event(self, event)
+        Rc::clone(&self.model).on_time_event(self, event)
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
-        self.targets.on_stop();
+        self.model.on_stop();
         Ok(())
     }
 }
@@ -129,6 +143,25 @@ pub fn targets() -> TargetsConfig {
         .build()
 }
 
+/// The probe's decisions and targets, learning whether the bracket's long
+/// gains, on a window of 46 hours, the last 12 held out, by the fake
+/// learner from an AUC of 0.5; a long from 0.6, a short to 0.4.
+pub fn config() -> ModelConfig {
+    ModelConfig::builder()
+        .decision(rule())
+        .targets(targets())
+        .label(Label::Barrier)
+        .window(SignedDuration::from_hours(46))
+        .holdout(SignedDuration::from_hours(12))
+        .thresholds(Thresholds {
+            long: 0.6,
+            short: 0.4,
+        })
+        .min_score(0.5)
+        .learner(LearnerConfig::Fake {})
+        .build()
+}
+
 /// A deterministic random walk in [0, 1).
 pub struct Lcg(pub u64);
 
@@ -158,26 +191,26 @@ pub fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
     ic::catalog_of(quotes, from, to)
 }
 
-/// The replay of a build or a train: the probe over `[from, to]` on IC's hedging
-/// venue, 30 USD per million traded, 10M USD; the rows it settled.
-pub fn replay(
-    catalog: &tempfile::TempDir,
-    from: Timestamp,
-    to: Timestamp,
-) -> anyhow::Result<Vec<TargetRow>> {
-    let rows = Rc::new(RefCell::new(vec![]));
-    let probe = DatasetProbe {
+/// The probe of `config` in `mode`, and what it records.
+fn probe(config: &ModelConfig, mode: Mode) -> (ModelProbe, Rc<RefCell<Record>>) {
+    let record = Rc::new(RefCell::new(Record::default()));
+    let probe = ModelProbe {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(StrategyId::from(STRATEGY)),
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
-        features: features(),
-        targets: Targets::new(targets()).unwrap(),
-        rows: Rc::clone(&rows),
+        model: ModelHandle::new(StrategyId::from(STRATEGY), features(), config, mode).unwrap(),
+        record: Rc::clone(&record),
     };
-    let backtest = Backtest {
-        catalog: catalog.path().to_path_buf(),
+    (probe, record)
+}
+
+/// The run of the probe over `[from, to]` on IC's hedging venue, 30 USD
+/// per million traded, 10M USD.
+fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
+    Backtest {
+        catalog: catalog.to_path_buf(),
         bar_types: vec![],
         ticks: vec![TickSeries {
             data: NautilusDataType::QuoteTick,
@@ -191,7 +224,42 @@ pub fn replay(
         leverage: Decimal::ONE,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
-    };
-    backtest.run_dataset(probe)?;
+    }
+}
+
+/// The replay of a build or a train: the probe's dataset run over
+/// `[from, to]`; the rows it settled.
+pub fn replay(
+    catalog: &tempfile::TempDir,
+    from: Timestamp,
+    to: Timestamp,
+) -> anyhow::Result<Vec<TargetRow>> {
+    let rows = SettledRows::default();
+    let (probe, _) = probe(
+        &config(),
+        Mode::Dataset {
+            rows: Rc::clone(&rows),
+        },
+    );
+    backtest(catalog.path(), from, to).run_dataset(probe)?;
     Ok(rows.take())
+}
+
+/// The probe of `config` trading over `[from, to]` on the models of the
+/// store under `models`; what it decided.
+pub fn trade(
+    catalog: &tempfile::TempDir,
+    from: Timestamp,
+    to: Timestamp,
+    config: &ModelConfig,
+    models: &Path,
+) -> Record {
+    let (probe, record) = probe(
+        config,
+        Mode::Backtest {
+            models: models.to_path_buf(),
+        },
+    );
+    backtest(catalog.path(), from, to).run(probe).unwrap();
+    record.take()
 }

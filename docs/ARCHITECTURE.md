@@ -28,8 +28,14 @@ Nautilus lacks.
 - **One simulator.** Nautilus runs both backtest and live, and the same
   strategy type runs in backtest, paper and live.
 - **One crate.** All code lives under `src/`.
-- **No lock.** A backtest produces no lock or provenance files for live to
-  consume.
+- **Model files, one shared store.** A strategy trading on a learned
+  model reads its models from files, never trains in the trading process:
+  `train` publishes each model in the model store (one directory per
+  strategy, fingerprint and training settings; one file per valid-from,
+  written then renamed, with its manifest and probes). Backtest and live
+  read the same store, each decision using the latest model valid then,
+  checked against the strategy's features and probes before use. Nothing
+  else passes from a backtest to live: no lock or provenance files.
 
 ## Version
 

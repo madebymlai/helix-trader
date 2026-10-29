@@ -27,7 +27,7 @@ module and catalog registration.
 ```
 helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
   [--catalog catalog] (--commission "3 EUR" | --commission-rate 0.0005) \
-  --balance "10000 EUR" [--leverage 10]
+  --balance "10000 EUR" [--leverage 10] [--models models]
 ```
 
 `main` loads and validates the strategy's config, builds the `Backtest`
@@ -51,6 +51,11 @@ commission flag becomes the fee model at argument parsing, so a malformed
 or negative one (`--commission="-3 EUR"`, `--commission-rate=-0.0005`)
 fails there. `--leverage` is a `Decimal`, 1 (no leverage) if not given;
 Nautilus refuses one that is not positive before the run.
+
+`--models` (default `models`) is the model store a strategy trading on a
+model reads, at each decision the latest model valid then (strategy
+README, "Features and decisions", "Model handle"); `train` publishes
+them. The EMA reads none.
 
 On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
 1-HOUR-MID internal bars, 10 shares, stop loss and take profit 100 bps,
@@ -1419,3 +1424,19 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     `run_dataset` and publishes a model whose reload predicts its
     manifest's probes to the bit; with a minimum score of 0.6, a train an
     hour later keeps the model published first, the store unchanged.
+  - `backtest_model.rs`: a strategy trading on its models (strategy
+    README, "Features and decisions", "Model handle"), the probe of
+    `common::dataset`, its model handle in a backtest. On baseline models
+    valid from 02:00, 04:00, 04:30 and 09:00, each predicting its own
+    probability, the hourly decisions of 00:00 to 06:00 trade none before
+    02:00, then each on the latest model valid at or before it (0.7, 0.7,
+    0.8, 0.9, 0.9); the one after the run is never used. Parity: a model
+    LightGBM fitted by a train at midnight on a 94-hour window, published
+    again valid from its holdout's start, predicts in the node, on the
+    holdout's decisions, each probe row's prediction to the bit.
+  - `backtest_learned.rs`: the learned strategy end to end: the binary's
+    `train learned --at` on a fixture config publishes a model (fake
+    learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
+    backtest of the strategy on that store from two hours before the
+    model's valid-from trades only from it, a long at each of its three
+    decisions, closed 30 minutes later: 6 orders, 3 positions.

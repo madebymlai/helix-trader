@@ -42,7 +42,10 @@ positions"): there are no shared trading helpers.
 The one exception is a strategy trading on a learned model: its features
 are a type, `model::features::FeatureSet`, built once and shared with
 Nautilus as an indicator, and its features implement a trait,
-`model::features::Feature` (see "Features and decisions").
+`model::features::Feature`; it holds a type, `model::handle::ModelHandle`,
+the one place it decides, which serves its models or, in a dataset run,
+opens its targets (see "Features and decisions"). Its orders stay its
+own. `learned/` is the example.
 
 ## Config
 
@@ -567,7 +570,8 @@ of its choosing (`model::features`, `model::decide`).
   strategy's (it orders the timers of one time by name), and a live node
   as their tasks wake. `on_time_event` calls `decide::decide(self,
   &features)` when `decide::is_decision(event)`; an event strategy calls
-  it from any handler.
+  it from any handler. A strategy trading on its model does both through
+  its model handle (see "Model handle").
 - **Rows.** `decide` snapshots the features if every one is initialized
   and publishes them on the message bus as a `FeatureRow` (the strategy
   id, the values, the decision time), custom data keyed by the strategy id
@@ -670,7 +674,8 @@ of its choosing (`model::features`, `model::decide`).
   gains, net of costs), `window` and `holdout` (durations), `thresholds =
   { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC) and `learner`.
   `validate(&requirements)` refuses a traded instrument the strategy does
-  not read, a label of a target the config lacks, a barrier limit or
+  not read, a barrier ATR on a bar type it does not read (its bars feed
+  the ATR), a label of a target the config lacks, a barrier limit or
   horizon not shorter than the window, a holdout leaving no fitted row,
   thresholds that are not probabilities with the short below the long,
   and a minimum score outside [0, 1].
@@ -695,6 +700,39 @@ of its choosing (`model::features`, `model::decide`).
   A reloaded model is checked by predicting the probes, not by its bytes.
   `valid_froms()` lists the models in time order, `read(valid_from)` gives
   one back.
+- **Model handle.** A strategy trading on its model holds a `ModelHandle`
+  (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
+  mode)`, an `Rc`), the one place it decides: `start(self, &bar_types)`
+  in `on_start` registers the features and starts the cadence, live
+  `warmup::live_bar_build_delay(&bar_types)` late; `decide(self)` at each
+  decision snapshots the features and publishes their row, then, in
+  `Mode::Backtest` or `Mode::Live { models }`, takes the latest model of
+  the store valid at the decision, predicts, and returns the `Trade`
+  (side, the targets' size, the probability) that `Thresholds::side`
+  makes of the probability: a buy at or above `long`, a sell at or below
+  `short`. No model valid yet, cold features or a probability between
+  the thresholds give no trade, never an error. The store is listed again
+  at each decision, so a model published meanwhile is used from the first
+  decision at or after its valid-from, and a model is swapped in only
+  there, before predicting: no decision mixes two models. Before use a
+  model is checked: its feature names in order and its fingerprint are
+  the strategy's, its width theirs, and it predicts each probe to the bit
+  as when fitted (parity, in the node). One failing is refused, logged as
+  an error, never read again, and the current model kept. In
+  `Mode::Dataset { rows }` (the replay of a train) `decide` opens the
+  decision's targets instead and returns no trade, and the rows they
+  settle are collected in `rows`; the strategy hands the handle its
+  `on_time_event`, `on_order_filled`, `on_order_denied`,
+  `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
+  trading. The trades are the strategy's own orders: `learned/` sends a
+  market order and closes it `hold` later.
+- **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
+  at `t`: `Training::new` on the strategy's features and model section,
+  `train_at` with a replay through `Backtest::run_dataset` of the strategy
+  in `Mode::Dataset` on hedging venues, the costs and balance given as to
+  a backtest (`--commission` or `--commission-rate`, `--balance`); it
+  prints the `Outcome`. `backtest` and `live` take `--models` (default
+  `models`), the store root, beside `train`'s.
 
 ## Warmup and training
 
@@ -806,10 +844,12 @@ whether the warmup ended, complete or not.
   history, so on them only composite bar types get a warmup; on IC only
   bar types built from quotes do.
 
-A model is trained by the strategy itself, retrained on a rolling window of
-the bars received in `on_bar`, every N bars as the config says. The model
-lives only in memory, with no model files, so backtest and live run the
-same code and nothing passes from backtest to live.
+A model is never trained inside the strategy: `train` fits it on the
+strategy's dataset and publishes it as a file in the model store, which
+backtest and live share, and the strategy's model handle reads the latest
+valid one at each decision (see "Features and decisions"). Its features
+warm up as its indicators do: Nautilus feeds them the live and replayed
+data, and the strategy hands them the warmup's bars.
 
 ## Adding a strategy
 
@@ -818,8 +858,9 @@ same code and nothing passes from backtest to live.
    and the strategy's own decision and orders.
 2. Declare it in `strategy/mod.rs`.
 3. In `main.rs`, add a variant to `enum Strategy` and an arm to each `match`
-   on it (fill-catalog, backtest, live), reading the data requirements from
-   `config.bars.data_requirements()`.
+   on it (fill-catalog, backtest, live, train), reading the data
+   requirements from `config.bars.data_requirements()`. A strategy with
+   no model refuses `train`.
 
 ## Tests
 

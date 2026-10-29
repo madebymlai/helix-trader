@@ -5,6 +5,7 @@
 
 use anyhow::ensure;
 use jiff::SignedDuration;
+use nautilus_model::enums::OrderSide;
 use serde::Deserialize;
 
 use super::{
@@ -58,6 +59,21 @@ pub struct Thresholds {
     pub short: f64,
 }
 
+impl Thresholds {
+    /// The side of the trade a prediction of `probability` makes: a buy at
+    /// or above `long`, a sell at or below `short`, none between them.
+    #[must_use]
+    pub fn side(&self, probability: f64) -> Option<OrderSide> {
+        if probability >= self.long {
+            Some(OrderSide::Buy)
+        } else if probability <= self.short {
+            Some(OrderSide::Sell)
+        } else {
+            None
+        }
+    }
+}
+
 impl ModelConfig {
     /// Checks the section against itself and against the strategy's data
     /// `requirements`.
@@ -66,8 +82,10 @@ impl ModelConfig {
     ///
     /// Returns an error if the decision rule or the targets are invalid
     /// (see `DecisionRule::validate`, `TargetsConfig::validate`), the
-    /// targets trade an instrument the strategy does not read, the label
-    /// names a target the config lacks, a target (the barrier's limit or
+    /// targets trade an instrument the strategy does not read, the
+    /// barrier's ATR is on bars it does not read (the strategy subscribes
+    /// to its bars, which feed it), the label names a target the config
+    /// lacks, a target (the barrier's limit or
     /// the horizon) is not shorter than the window, the holdout is not
     /// positive or leaves no fitted row (it and the longest target not
     /// shorter than the window), the thresholds are not probabilities with
@@ -80,6 +98,13 @@ impl ModelConfig {
             requirements.instrument_ids().contains(&traded),
             "the targets trade {traded}, which the strategy does not read"
         );
+        if let Some(atr) = self.targets.barrier.and_then(|barrier| barrier.atr) {
+            ensure!(
+                requirements.bar_types.contains(&atr.bar_type),
+                "the barrier's ATR is on {}, bars the strategy does not read",
+                atr.bar_type
+            );
+        }
         ensure!(
             self.targets.label_index(self.label).is_some(),
             "the label {:?} names a target the targets do not have",
@@ -115,7 +140,7 @@ impl ModelConfig {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::identifiers::InstrumentId;
+    use nautilus_model::{data::BarType, identifiers::InstrumentId};
 
     use super::*;
     use crate::strategy::TickSeries;
@@ -274,5 +299,44 @@ mod tests {
         );
 
         assert!(refused(&toml).contains("label"), "{}", refused(&toml));
+    }
+
+    /// A barrier 1.5 ATRs away on both sides, its ATR on `bar_type`.
+    fn atr_section(bar_type: &str) -> String {
+        section(&format!(
+            r#"targets = {{ instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = {{ take_profit = {{ atr = 1.5 }}, stop = {{ atr = 1.5 }}, limit = "2h", atr = {{ bar_type = "{bar_type}", period = 14 }} }} }}"#
+        ))
+    }
+
+    #[test]
+    fn a_barrier_atr_on_bars_the_strategy_does_not_read_is_refused() {
+        let config: ModelConfig =
+            toml::from_str(&atr_section("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")).unwrap();
+        let mut requirements = reading(GOLD);
+
+        let err = format!("{:#}", config.validate(&requirements).unwrap_err());
+        assert!(
+            err.contains("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
+            "{err}"
+        );
+
+        requirements.bar_types = vec![BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")];
+        assert!(config.validate(&requirements).is_ok());
+    }
+
+    #[test]
+    fn the_thresholds_make_a_probability_a_long_a_short_or_no_trade() {
+        let thresholds = Thresholds {
+            long: 0.6,
+            short: 0.4,
+        };
+
+        assert_eq!(thresholds.side(0.6), Some(OrderSide::Buy));
+        assert_eq!(thresholds.side(0.9), Some(OrderSide::Buy));
+        assert_eq!(thresholds.side(0.4), Some(OrderSide::Sell));
+        assert_eq!(thresholds.side(0.1), Some(OrderSide::Sell));
+        assert_eq!(thresholds.side(0.5), None);
+        assert_eq!(thresholds.side(0.59), None);
+        assert_eq!(thresholds.side(f64::NAN), None);
     }
 }
