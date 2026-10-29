@@ -22,9 +22,13 @@
 //! the interval it covers, the days without rows (a weekend's, cold
 //! features') within the file of the day with rows before them, or the
 //! first after: Nautilus writes no file without rows, so a day without
-//! rows would otherwise stay missing and be replayed by every build. A
-//! decision whose time close finds no market until after the replay
-//! (before a weekend) is unsettled, and its day is filed without it.
+//! rows would otherwise stay missing and be replayed by every build. By
+//! then every decision of a day filed has settled or been dropped for a
+//! reason of its own (a denial, a rejection, an entry unfilled by its
+//! time), wherever the replay ends: its time close, a market order, fills
+//! at its time on the venue's last quote, even with no quote since (a
+//! weekend), as any market order between quotes does. So a day is stored
+//! the same by every build replaying it.
 //!
 //! Nautilus skips writing a file whose name, its interval, exists, and
 //! refuses one overlapping another, so `write` deletes what the catalog
