@@ -1538,7 +1538,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     at midnight on a 46-hour window replays the days it lacks through
     `run_dataset` and publishes a model whose reload predicts its
     manifest's probes to the bit; with a minimum score of 0.6, a train an
-    hour later keeps the model published first, the store unchanged.
+    hour later keeps the current model, that model published in the
+    gated store (the minimum score keys it), the store unchanged.
   - `backtest_model.rs`: a strategy trading on its models (strategy
     README, "Features and decisions", "Model handle"), the probe of
     `common::dataset`, its model handle in a backtest. On baseline models

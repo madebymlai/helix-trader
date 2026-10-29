@@ -108,8 +108,14 @@ fn a_gate_above_the_achievable_score_keeps_the_current_model() {
             .unwrap()
     });
     assert!(first.published(), "{first:?}");
+    // A minimum score keys the store: the gated one holds the model as if
+    // it had published it.
+    let current = training(&catalog, models.path(), 0.5)
+        .store()
+        .read(t())
+        .unwrap();
     let gated = training(&catalog, models.path(), 0.6);
-    let current = gated.store().read(t()).unwrap();
+    gated.store().publish(&current).unwrap();
 
     let outcome = gated.train_at(t() + SignedDuration::from_hours(1), |from, to| {
         replay(&catalog, from, to)
