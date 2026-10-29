@@ -7,8 +7,9 @@
 //! every strategy. Features and targets are list columns, so each strategy
 //! has the width of its own, and its rows are stored under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
-//! `targets::fingerprint`): a change to the feature code or names, the
-//! decision rule or a target finds no row, and the dataset is rebuilt.
+//! `targets::fingerprint`): a change to the feature code, names or
+//! warmup, the decision rule or a target finds no row, and the dataset is
+//! rebuilt.
 //! The feature names are in the metadata of the rows' data type, which
 //! the catalog stores with each file and gives back with each row, so the
 //! rows do not repeat them; `read` checks them.
@@ -16,7 +17,14 @@
 //! The catalog's intervals of the rows are the cache: `missing` asks the
 //! catalog for the days of a span it does not cover, and `build` replays
 //! them, once, from the first missing day to the last plus the longest
-//! target (`TargetsConfig::settles_within`), then writes them. `write`
+//! target (`TargetsConfig::settles_within`), then writes them. The replay
+//! starts the features' warmup (`FeatureSet::warmup`) before the first
+//! day, so that the indicators read at the day's first decisions the data
+//! before it, as inside a longer build; the rows decided before the day
+//! are not stored. A feature whose value is a function of the data within
+//! the warmup then has the same value at every decision of a day, however
+//! long the build; one keeping a running sum, or an exponential average,
+//! may still differ in its last bits. `write`
 //! files only the days a replay settled: those it replayed whole, its end
 //! that far past theirs. Each day's file is written with the day's bounds,
 //! the interval it covers, the days without rows (a weekend's, cold
@@ -31,7 +39,8 @@
 //! the same by every build replaying it.
 //!
 //! A train at a time sees only what was settled then: `settled` replays
-//! the days it lacks to that time and no further, files the days the
+//! the days it lacks to that time and no further, from the warmup before
+//! the first, as `build` does, files the days the
 //! replay settled, and takes the rows of the days it did not, the last
 //! before that time, from the replay alone, so those are replayed again
 //! by the next train.
@@ -140,6 +149,8 @@ pub struct Dataset {
     strategy_id: StrategyId,
     fingerprint: Fingerprint,
     feature_names: Vec<String>,
+    /// How much a replay runs before its first day: the features' warmup.
+    warmup: SignedDuration,
     targets: TargetsConfig,
 }
 
@@ -164,15 +175,17 @@ impl Dataset {
             catalog: catalog.to_path_buf(),
             strategy_id,
             fingerprint: fingerprint(features, rule, &targets),
+            warmup: features.warmup(),
             feature_names: features.names().to_vec(),
             targets,
         })
     }
 
     /// Builds the days `first` to `last` the dataset is missing: `replay`
-    /// runs the strategy from the first missing day's start to the last's
-    /// end plus the longest target and returns the rows it settled, which
-    /// are written (see `write`). The cached days among them are written
+    /// runs the strategy from the features' warmup before the first missing
+    /// day's start to the last's end plus the longest target and returns
+    /// the rows it settled, which are written (see `write`), but those
+    /// decided before the first day. The cached days among them are written
     /// again, recomputed. With no day missing, nothing is replayed.
     /// Returns the missing days, replayed.
     ///
@@ -192,15 +205,16 @@ impl Dataset {
         };
         let from = start_of(first)?;
         let to = start_of(last.tomorrow()?)? + self.targets.settles_within();
-        let rows = replay(from, to)?;
+        let rows = replay(from - self.warmup, to)?;
         self.write(&rows, from, to)?;
         Ok(missing)
     }
 
     /// The rows of the decisions in `[from, at)` settled at `at`, in time
     /// order, as a train at `at` sees them: the days the dataset lacks are
-    /// replayed, once, by `replay` from the first one's start to `at`, no
-    /// further, and the days it settled written (see `write`); the rows of
+    /// replayed, once, by `replay` from the features' warmup before the
+    /// first one's start to `at`, no further, and the days it settled
+    /// written (see `write`), the rows before the first not; the rows of
     /// the days still unsettled, the last before `at`, are taken from the
     /// replay alone. A row whose positions close after `at` is dropped.
     ///
@@ -218,7 +232,7 @@ impl Dataset {
         let mut rows = vec![];
         if let Some(&day) = self.missing(first, last)?.first() {
             let start = start_of(day)?;
-            let replayed = replay(start, at)?;
+            let replayed = replay(start - self.warmup, at)?;
             self.write(&replayed, start, at)?;
             let unsettled: BTreeSet<Date> = self.missing(first, last)?.into_iter().collect();
             rows.extend(
@@ -992,6 +1006,91 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The dataset of one feature declaring a warmup of 2 hours.
+    fn warmed(catalog: &Path) -> Dataset {
+        let features = FeatureSet::builder()
+            .quotes(
+                InstrumentId::from(GOLD),
+                "mid_0",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .warmup(SignedDuration::from_hours(2))
+            .build()
+            .unwrap();
+        Dataset::new(
+            catalog,
+            StrategyId::from(STRATEGY),
+            &features,
+            DecisionRule::Every(SignedDuration::from_hours(1)),
+            targets(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_build_replays_the_features_warmup_before_its_first_day_and_stores_none_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = warmed(dir.path());
+        let rows = [
+            row("2026-01-04T23:00:00Z", vec![1.0], "1"),
+            row("2026-01-05T09:00:00Z", vec![2.0], "1"),
+        ];
+        let mut replays = vec![];
+
+        let built = dataset
+            .build(day("2026-01-05"), day("2026-01-05"), |from, to| {
+                replays.push((from, to));
+                Ok(rows.to_vec())
+            })
+            .unwrap();
+
+        assert_eq!(built, [day("2026-01-05")]);
+        assert_eq!(
+            replays,
+            [(at("2026-01-04T22:00:00Z"), at("2026-01-06T02:00:00Z"))]
+        );
+        assert_bits_eq(
+            &dataset
+                .read(at("2026-01-04T00:00:00Z"), at("2026-01-06T00:00:00Z"))
+                .unwrap(),
+            &[stored("2026-01-05T09:00:00Z", vec![2.0], 1.0)],
+        );
+        assert_eq!(
+            dataset
+                .missing(day("2026-01-04"), day("2026-01-05"))
+                .unwrap(),
+            [day("2026-01-04")]
+        );
+    }
+
+    #[test]
+    fn a_train_replays_the_features_warmup_before_the_first_missing_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = warmed(dir.path());
+        let rows = [
+            row("2026-01-04T23:00:00Z", vec![1.0], "1"),
+            row("2026-01-05T09:00:00Z", vec![2.0], "1"),
+        ];
+        let mut replays = vec![];
+
+        let settled = dataset
+            .settled(
+                at("2026-01-05T00:00:00Z"),
+                at("2026-01-05T12:00:00Z"),
+                |from, to| {
+                    replays.push((from, to));
+                    Ok(rows.to_vec())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            replays,
+            [(at("2026-01-04T22:00:00Z"), at("2026-01-05T12:00:00Z"))]
+        );
+        assert_bits_eq(&settled, &[stored("2026-01-05T09:00:00Z", vec![2.0], 1.0)]);
     }
 
     #[test]

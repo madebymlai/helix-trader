@@ -162,7 +162,12 @@ impl DataActor for TargetProbe {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            if let Some(row) = decide::decide(self, &self.features) {
+            let instrument_id = match self.source {
+                Source::Quotes(id) => id,
+                Source::Bars(bar_type) => bar_type.instrument_id(),
+            };
+            let rule = DecisionRule::Every(self.every);
+            if let Some(row) = decide::decide(self, &self.features, rule, instrument_id) {
                 Rc::clone(&self.targets).open(self, row)?;
             }
             return Ok(());
