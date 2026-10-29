@@ -15,7 +15,12 @@
 //! `ParquetDataCatalog::get_missing_intervals_for_request`, which goes
 //! through the same `missing_intervals` as the data engine's own catalog
 //! lookup for the warmup: adjacent (`end + 1 == start`) and overlapping
-//! intervals cover as one, a 1 ns gap is a gap.
+//! intervals cover as one, a 1 ns gap is a gap. The gaps a live run
+//! streamed across, between the files Nautilus promoted from it, are
+//! joined first (`data::live_runs`): the node was receiving the series
+//! there, and nothing came. Joined in the catalog, they are covered for
+//! the data engine's warmup lookup too, which a gap would leave
+//! unanswered.
 
 use std::collections::BTreeSet;
 
@@ -32,7 +37,7 @@ use nautilus_persistence::{
 };
 
 use super::Backtest;
-use crate::strategy::SeriesSlice;
+use crate::{data::live_runs, strategy::SeriesSlice};
 
 /// Fails unless the catalog of `backtest` stores every instrument replayed
 /// and covers each series over its slice of `[engine start − warmup, end]`,
@@ -74,10 +79,13 @@ fn ensure_covered(
     to: Timestamp,
 ) -> anyhow::Result<()> {
     let named = format!("the {} of {identifier}", data_path_prefix(data_type));
+    let (from_ns, to_ns) = (UnixNanos::from(from).as_u64(), UnixNanos::from(to).as_u64());
+    live_runs::join(catalog, data_type, identifier, from_ns, to_ns)
+        .with_context(|| format!("joining the live runs of {named}"))?;
     let missing = catalog
         .get_missing_intervals_for_request(
-            UnixNanos::from(from).as_u64(),
-            UnixNanos::from(to).as_u64(),
+            from_ns,
+            to_ns,
             &data_type.clone().into(),
             Some(identifier),
         )

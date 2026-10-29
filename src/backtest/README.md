@@ -509,6 +509,26 @@ ranges are checked whole because the warmup request asks for all of
 window. Coverage is of ranges, not of single minutes: a minute without a
 quote inside a covered range passes (see Fills).
 
+Data a live node streamed is joined first (`data::live_runs::join`).
+Nautilus promotes it into the catalog a file per series every promotion
+interval, each named by the `ts_init` of its first and last row, so the
+files of a run leave a gap between them, from one's last row to the
+next one's first: a gap of a tick or more, which the check and the data
+engine's warmup lookup would count as missing, a backtest or a retrain
+over streamed data refused for it. The node records each run's start in
+the catalog (`live-runs/<ns>`, beside `data/`), and before reading a
+series' coverage the check joins each gap whose next file was promoted
+and in which no run started, the file before it ending after the run's
+start (the run's own file, or the warmup it wrote back): Nautilus'
+`extend_file_name` moves that file's end to 1 ns before the next one's
+start, as the data engine records a request answered with nothing. A
+crash or a stop stays a gap (the next run starts inside it), and so does
+the time before a run's first row and a gap before a file fill-catalog
+wrote (`tests/live/streaming.rs`: a backtest over data streamed across
+promotions runs; one across a crash names the crash's gap). Joining
+renames files: a reader that listed them just before can fail to open
+one and must read again.
+
 ## Costs
 
 `costs.rs` builds the two models the venue config takes
@@ -1286,6 +1306,15 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_coverage.rs`: a warmup longer than the stored quotes, or a
     catalog without quotes, is refused before the node is built, naming
     the instrument's quotes and the missing interval.
+  - Streamed data, in the live test binary (`tests/live/streaming.rs`, a
+    stub node in a child process): the binary's backtest over what the
+    node streamed across several promotions runs, and leaves the catalog
+    covering it by Nautilus' own count; over a crash and a restart it is
+    refused, naming the gap from the crashed run's last quote to the
+    restart's first. The joining rule is unit-tested in
+    `data::live_runs` (gaps between a run's files and after the warmup it
+    wrote back joined; those of a crash, before a run's first row, before
+    a file not promoted, or with no run recorded kept).
   - `backtest_inputs.rs`: a negative warmup, or a start on or after the
     end, is refused before the node is built.
 

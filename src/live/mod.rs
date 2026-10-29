@@ -27,7 +27,10 @@ pub use recording::Recording;
 
 pub use crate::data::IbAccount;
 
-use std::{fmt::Debug, path::PathBuf};
+use std::{
+    fmt::Debug,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, bail};
 use jiff::Timestamp;
@@ -36,15 +39,18 @@ use nautilus_common::{
     component::Component,
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
+use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::{InstrumentId, TraderId};
-use nautilus_persistence::config::DataCatalogConfig;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    data::{IcHistory, OkxHistory, catalog_path},
+    data::{IcHistory, OkxHistory, catalog_path, live_runs, record_run_start},
     rolls::{Transition, contracts_at},
-    strategy::{DataRequirements, warmup},
+    strategy::{DataRequirements, SeriesSlice, warmup},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
@@ -81,7 +87,9 @@ impl Live {
     /// then IB's, then runs `strategy` on a live node until SIGINT or
     /// SIGTERM. The strategy's warmup requests go to the data clients. A
     /// root's instruments are its contract in front at the start and the
-    /// next one (see `README.md`, "Rolled roots").
+    /// next one (see `README.md`, "Rolled roots"). The gaps the last runs
+    /// streamed across over the warmup window are joined, and the run's
+    /// start is recorded in the catalog (`data::live_runs`).
     ///
     /// # Errors
     ///
@@ -89,10 +97,11 @@ impl Live {
     /// continuous bars), if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if the catalog cannot be created
     /// or its path is not UTF-8, if the staging directory is inside the
-    /// catalog or the trader's instance id cannot be kept (see
-    /// `Recording`), if an IC bar type is not built from
-    /// quotes or IC's environment or credential is missing (see
-    /// `ic::clients`, checked before anything connects), if
+    /// catalog, the trader's instance id or the run's start cannot be kept
+    /// (see `Recording`, `data::record_run_start`), if a gap over the warmup
+    /// window cannot be joined (`data::live_runs::join`), if an IC bar type
+    /// is not built from quotes or IC's environment or credential is missing
+    /// (see `ic::clients`, checked before anything connects), if
     /// OKX's clients cannot be set up or the OKX account does not suit the
     /// run (see `okx::clients`), if IC is unreachable or its account is not
     /// hedging or not `IC_ACCOUNT_ID`'s (see `ic::IcClients::check_account`),
@@ -153,6 +162,9 @@ impl Live {
             let ib = ib::clients(account, self.client_id, &ib_ids).await?;
             clients.push(ib.into_node_clients());
         }
+        join_warmup(&self.catalog, requirements)?;
+        // Before the node is built, which starts the recording.
+        record_run_start(&self.catalog)?;
         node::run(
             self.trader_id,
             instance_id,
@@ -167,6 +179,31 @@ impl Live {
         )
         .await
     }
+}
+
+/// Joins the gaps the last live runs streamed across over the warmup
+/// window of `requirements` in the catalog at `catalog` (see
+/// `data::live_runs`): the warmup reads the catalog first and asks the
+/// venue for what it lacks, a request per gap, whose answer would hold the
+/// quotes the node received after it.
+///
+/// # Errors
+///
+/// Returns an error if the window cannot be sliced (see
+/// `DataRequirements::slices`) or a gap cannot be joined.
+fn join_warmup(catalog: &Path, requirements: &DataRequirements) -> anyhow::Result<()> {
+    let now = Timestamp::now();
+    let reader = ParquetDataCatalog::new(catalog, None, None, None, None);
+    for SeriesSlice {
+        series: (data_type, identifier),
+        slice,
+    } in requirements.slices(now.checked_sub(requirements.warmup)?, now)?
+    {
+        let (from, to) = (UnixNanos::from(slice.from), UnixNanos::from(slice.to));
+        live_runs::join(&reader, &data_type, &identifier, from.as_u64(), to.as_u64())
+            .with_context(|| format!("joining the live runs of the {data_type} of {identifier}"))?;
+    }
+    Ok(())
 }
 
 /// The instruments the node loads, at `now`: each one `requirements`
