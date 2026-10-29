@@ -29,6 +29,7 @@ mod backtest_ema_exits;
 mod backtest_ema_overlap;
 mod backtest_ema_read_only_instrument;
 mod backtest_ema_time_exit;
+mod backtest_features;
 mod backtest_hedging_venue;
 mod backtest_ib_minute_bars;
 mod backtest_ic_hedging;

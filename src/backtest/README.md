@@ -1338,3 +1338,14 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     margin, 667.68 USD; a second of 5 oz at 4012.15 is denied by the risk
     engine (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=331.72 USD,
     margin=668.69 USD`).
+  - `backtest_features.rs`: a strategy's feature set and its decisions
+    (strategy README, "Features and decisions"), on a ramp of SXR8.IBIS
+    mids a cent a minute: a moving average of the last three quote mids
+    and one of the last two hour MID bars' closes, both registered with
+    Nautilus, a decision every 30 minutes. Each decision fires 10 ms after
+    its half hour and publishes one row: the mean of the three quotes up
+    to it (the mid a minute before, so no later quote), and of the two
+    hour closes up to it, the bar closing on the decision included; no row
+    before the second bar. Without the 10 ms the decision on the hour
+    comes before that hour's bar: a backtest runs the timers of one time in
+    the order of their names.
