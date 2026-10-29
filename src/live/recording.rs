@@ -15,7 +15,9 @@
 //! The node keeps one instance id per trader across restarts, in a file in
 //! the staging directory: a run after a crash writes to the same
 //! `live/<instance id>/`, where Nautilus recovers the files the crashed
-//! run left and promotes them with its own.
+//! run left; the start promotes them as soon as the node is built
+//! (`promote_staged`), before its warmup reads the catalog and writes back
+//! to it.
 //!
 //! Order and position events, account states and custom data are not
 //! streamed: the catalog holds market data, and the strategies' custom data
@@ -30,6 +32,7 @@ use std::{
 use anyhow::{Context, anyhow, ensure};
 use jiff::SignedDuration;
 use nautilus_core::UUID4;
+use nautilus_live::node::LiveNode;
 use nautilus_model::{data::NautilusDataType, identifiers::TraderId};
 use nautilus_persistence::config::{DataCatalogConfig, RotationConfig, StreamingConfig};
 
@@ -140,6 +143,30 @@ impl Recording {
             }),
         }
     }
+}
+
+/// Promotes into the catalog what the last run of `node`'s instance left
+/// staged, a crashed run's rows: call it once the node is built, before it
+/// runs. The node's writer recovered those files when it was built, but
+/// would promote them only at its first promotion, after the strategy's
+/// warmup has read the catalog and written the venue's answer back over
+/// the crash, which they would then overlap: Nautilus refuses them, and
+/// they are lost. Closing the writer promotes them with Nautilus' own
+/// promotion (`StreamingConfig::promote_on_close`); it is reopened in the
+/// same run directory, empty, before the node runs.
+///
+/// # Errors
+///
+/// Returns an error if the staged files cannot be promoted, the catalog
+/// already holding rows over them, or the writer cannot be reopened.
+pub fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
+    let kernel = node.kernel_mut();
+    kernel
+        .close_streaming_writer()
+        .context("promoting what the last run of this instance left staged")?;
+    kernel
+        .reopen_streaming_writer()
+        .context("reopening the streaming writer")
 }
 
 /// How often the writer flushes what it buffered to its staging files: what

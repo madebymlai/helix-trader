@@ -48,8 +48,8 @@ use nautilus_persistence::backend::parquet::{
 const RUNS: &str = "live-runs";
 
 /// Records in the catalog at `catalog` that a live run starts now: call it
-/// before the node is built, so that every row it streams, and the warmup
-/// it writes back, comes after.
+/// before the node runs, so that every row it streams, and the warmup it
+/// writes back, comes after.
 ///
 /// # Errors
 ///
