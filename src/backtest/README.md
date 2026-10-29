@@ -522,7 +522,8 @@ next one's first: a gap of a tick or more, which the check and the data
 engine's warmup lookup would count as missing, a backtest or a retrain
 over streamed data refused for it. The node records each run's start in
 the catalog (`live-runs/<ns>`, beside `data/`), and before reading a
-series' coverage the check joins each gap whose next file was promoted
+series' coverage the check joins, over the whole series, each gap whose
+next file was promoted
 and in which no run started, the file before it ending after the run's
 start (the run's own file, or the warmup it wrote back): Nautilus'
 `extend_file_name` moves that file's end to 1 ns before the next one's

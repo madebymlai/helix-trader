@@ -191,7 +191,7 @@ pub fn missing(
             "the {data} of {identifier} on a slice of {id}"
         );
         let (from, to) = (nanos(slice.from), nanos(slice.to));
-        live_runs::join(catalog, data_type, identifier, from, to)
+        live_runs::join(catalog, data_type, identifier)
             .with_context(|| format!("joining the live runs of the {data} of {id}"))?;
         let gaps = catalog
             .get_missing_intervals_for_request(

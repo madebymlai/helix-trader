@@ -350,10 +350,14 @@ built (`data::record_run_start`, `live-runs/<ns>` beside `data/`), and a
 reader joins the gaps a run streamed across before it reads
 (`data::live_runs::join`, with Nautilus' `extend_file_name`): the
 backtest's coverage check, the dataset's replay through it,
-fill-catalog's node fill, and the node's own start over its warmup
-window. A gap is joined when the file after it was promoted, the file
+fill-catalog's node fill, and the node's own start over the series of its
+warmup. A gap is joined when the file after it was promoted, the file
 before it ends after the run's start (the run's own, or the warmup it
-wrote back), and no run started inside it. A crash or a stop stays a
+wrote back), and no run started inside it. A join covers the whole
+series at once, every gap judged by the file names before it: the file
+before a joined gap is renamed by its interval alone, no longer named as
+promoted, so a later join of a narrower window would leave the gap
+before that file. A crash or a stop stays a
 gap, as does the time before a run's first row. The node itself renames
 nothing while it streams: a reader never loses a file under it.
 

@@ -80,7 +80,7 @@ fn ensure_covered(
 ) -> anyhow::Result<()> {
     let named = format!("the {} of {identifier}", data_path_prefix(data_type));
     let (from_ns, to_ns) = (UnixNanos::from(from).as_u64(), UnixNanos::from(to).as_u64());
-    live_runs::join(catalog, data_type, identifier, from_ns, to_ns)
+    live_runs::join(catalog, data_type, identifier)
         .with_context(|| format!("joining the live runs of {named}"))?;
     let missing = catalog
         .get_missing_intervals_for_request(

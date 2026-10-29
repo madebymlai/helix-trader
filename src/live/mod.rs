@@ -39,7 +39,6 @@ use nautilus_common::{
     component::Component,
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
-use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
@@ -181,8 +180,8 @@ impl Live {
     }
 }
 
-/// Joins the gaps the last live runs streamed across over the warmup
-/// window of `requirements` in the catalog at `catalog` (see
+/// Joins the gaps the last live runs streamed across in the series the
+/// warmup of `requirements` reads in the catalog at `catalog` (see
 /// `data::live_runs`): the warmup reads the catalog first and asks the
 /// venue for what it lacks, a request per gap, whose answer would hold the
 /// quotes the node received after it.
@@ -196,11 +195,10 @@ fn join_warmup(catalog: &Path, requirements: &DataRequirements) -> anyhow::Resul
     let reader = ParquetDataCatalog::new(catalog, None, None, None, None);
     for SeriesSlice {
         series: (data_type, identifier),
-        slice,
+        ..
     } in requirements.slices(now.checked_sub(requirements.warmup)?, now)?
     {
-        let (from, to) = (UnixNanos::from(slice.from), UnixNanos::from(slice.to));
-        live_runs::join(&reader, &data_type, &identifier, from.as_u64(), to.as_u64())
+        live_runs::join(&reader, &data_type, &identifier)
             .with_context(|| format!("joining the live runs of the {data_type} of {identifier}"))?;
     }
     Ok(())
