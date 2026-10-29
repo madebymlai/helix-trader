@@ -27,7 +27,8 @@ module and catalog registration.
 ```
 helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
   [--catalog catalog] (--commission "3 EUR" | --commission-rate 0.0005) \
-  --balance "10000 EUR" [--leverage 10] [--models models]
+  --balance "10000 EUR" [--leverage 10] [--models models] \
+  [--dataset-balance "10000000 EUR"]
 ```
 
 `main` loads and validates the strategy's config, builds the `Backtest`
@@ -55,7 +56,11 @@ Nautilus refuses one that is not positive before the run.
 `--models` (default `models`) is the model store a strategy trading on a
 model reads, at each decision the latest model valid then (strategy
 README, "Features and decisions", "Model handle"); `train` publishes
-them. The EMA reads none.
+them. The EMA reads none. A strategy trading on a model is retrained on
+its schedule before the run, and its scores follow the report (see
+"Retraining on the schedule"); `--dataset-balance`, required then, is
+the balance of the dataset runs that build its targets, large enough
+that none is denied.
 
 On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
 1-HOUR-MID internal bars, 10 shares, stop loss and take profit 100 bps,
@@ -1011,6 +1016,68 @@ A registration outlives the analyzer's resets (`Portfolio::register_statistic`).
 The engine also logs its statistics, `Max Drawdown` included, at the end of
 the run.
 
+### Retraining on the schedule
+
+A backtest of a strategy trading on a model retrains it as live would,
+at every multiple of the model section's `retrain` since the Unix epoch,
+whatever the run start: the times Nautilus fires the retrain timer
+started on an epoch-aligned time (`model::schedule`), on a virtual clock
+over the span, each model valid from the time it was trained at; `main`
+runs the steps of `model::walk`:
+
+1. If the dataset lacks a day from the window of the first retrain time
+   (the last grid time not after `--start`, less `window`) to `--end`,
+   a child process, `dataset <strategy> --start .. --end ..`, builds
+   them, once, to the last day's end plus the longest target: the last
+   retrain period then has its targets to score. The catalog must cover
+   that span, warmup included.
+2. For each retrain time before `--end` the store has no model valid
+   from, in time order, a child process, `train <strategy> --at t`,
+   trains at it; its window's days already built, it replays none. A
+   model in the store is reused, so a second backtest of the span starts
+   no child. A train that kept the current model (below the minimum
+   score, failed) published none: the next backtest trains at that time
+   again.
+3. The run, on the store: at each decision the latest model valid then.
+4. The scores (`WalkForward::scores`), after the report: per retrain
+   period (`from` its retrain time or `--start`, `to` the next or
+   `--end`) and over the span, the AUC and log loss (`model::score`) of
+   the model in use at each decision of the dataset in the span, against
+   its label, the model chosen as the handle chooses it (the latest
+   valid, one failing its checks refused); beside it the baseline, the
+   training mean fitted at each retrain time on the rows a model trained
+   then is fitted on. Every model is out of sample on its period: trained
+   on rows settled by its valid-from. Live, a model is valid only once
+   its train finishes; a backtest takes it valid from its retrain time, a
+   small optimism.
+
+Each child is this binary (`std::env::current_exe`), on the backtest's
+strategy, config, catalog, store, commission flag as given and leverage,
+with `--dataset-balance` as its balance; it inherits the backtest's
+output and environment, so its log and outcome (`published a model
+valid from ..`, `kept the current model: ..`) come before the run's. A
+child that fails stops the backtest. One process per Nautilus node: the
+build and each train run a node, the backtest another.
+
+A period of the scores prints as, for example:
+
+```
+Model scores, out of sample, from 2026-10-23T00:00:00Z to 2026-10-24T00:00:00Z
+  Model valid from: 2026-10-23T00:00:00Z
+  AUC: 0.512346
+  Log loss: 0.701234
+  Rows: 24
+  Baseline AUC: 0.500000
+  Baseline log loss: 0.693147
+  Baseline rows: 24
+```
+
+A period without a model has no model score (`n/a`, `Model valid from:
+none`); an AUC needs a row of each label. The economics are the run's
+report above, from the same Nautilus backtest, its fee and fill models;
+an economic statistic beyond Nautilus' defaults is registered with the
+portfolio, as `MaxDrawdown` is.
+
 ### Costs in the report
 
 The result has no costs, so `report.rs` works them out after the run from
@@ -1439,4 +1506,16 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
     backtest of the strategy on that store from two hours before the
     model's valid-from trades only from it, a long at each of its three
-    decisions, closed 30 minutes later: 6 orders, 3 positions.
+    decisions, closed 30 minutes later: 6 orders, 3 positions. The
+    binary's `backtest learned` from midnight of the 23rd to noon of the
+    24th, retrained daily, builds the 4 days from its first window, trains
+    at both midnights and prints both periods' scores after the report,
+    in child processes; a second run starts none.
+  - `backtest_retrain.rs`: retraining on the schedule (`model::walk`):
+    the probe of `common::dataset` on one feature missing from the first
+    quote, so the fake learner predicts its training mean, each model's
+    own. Over three days retrained at each midnight, the build and the
+    trains run on threads of their own, then every decision of a day
+    trades on the model trained at its midnight, and a second
+    preparation builds and trains nothing; each period scores its model
+    as the baseline fitted at its start, the same mean.

@@ -1,7 +1,8 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
-//! targets of its decisions and the one its model learns, the window a
-//! model is trained on, the gate it must pass, the thresholds that turn
-//! its probability into a trade, and its learner.
+//! targets of its decisions and the one its model learns, how often a
+//! model is retrained and the window it is trained on, the gate it must
+//! pass, the thresholds that turn its probability into a trade, and its
+//! learner.
 
 use anyhow::ensure;
 use jiff::SignedDuration;
@@ -22,6 +23,7 @@ use crate::strategy::DataRequirements;
 /// decision = { every = "15m" }
 /// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
 /// label = "horizon"
+/// retrain = "168h"
 /// window = "720h"
 /// holdout = "120h"
 /// thresholds = { long = 0.6, short = 0.4 }
@@ -37,6 +39,10 @@ pub struct ModelConfig {
     pub targets: TargetsConfig,
     /// The target the model learns: whether its long gains.
     pub label: Label,
+    /// How often the model is retrained, such as `"168h"`: at every multiple
+    /// of it since the Unix epoch, in a backtest as live
+    /// (`model::schedule`).
+    pub retrain: SignedDuration,
     /// How far back from a retrain its rows go, such as `"720h"`.
     pub window: SignedDuration,
     /// The last part of the window the model is scored on and not fitted
@@ -82,10 +88,10 @@ impl ModelConfig {
     ///
     /// Returns an error if the decision rule or the targets are invalid
     /// (see `DecisionRule::validate`, `TargetsConfig::validate`), the
-    /// targets trade an instrument the strategy does not read, the
-    /// barrier's ATR is on bars it does not read (the strategy subscribes
-    /// to its bars, which feed it), the label names a target the config
-    /// lacks, a target (the barrier's limit or
+    /// retrain interval is not positive, the targets trade an instrument
+    /// the strategy does not read, the barrier's ATR is on bars it does not
+    /// read (the strategy subscribes to its bars, which feed it), the label
+    /// names a target the config lacks, a target (the barrier's limit or
     /// the horizon) is not shorter than the window, the holdout is not
     /// positive or leaves no fitted row (it and the longest target not
     /// shorter than the window), the thresholds are not probabilities with
@@ -93,6 +99,11 @@ impl ModelConfig {
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         self.decision.validate()?;
         self.targets.validate()?;
+        ensure!(
+            self.retrain.is_positive(),
+            "the retrain interval {:#} is not positive",
+            self.retrain
+        );
         let traded = self.targets.instrument_id;
         ensure!(
             requirements.instrument_ids().contains(&traded),
@@ -153,6 +164,7 @@ mod tests {
         decision = { every = "1h" }
         targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
         label = "barrier"
+        retrain = "24h"
         window = "48h"
         holdout = "12h"
         thresholds = { long = 0.6, short = 0.4 }
@@ -205,6 +217,7 @@ mod tests {
         );
         assert_eq!(config.targets.instrument_id, InstrumentId::from(GOLD));
         assert_eq!(config.label, Label::Barrier);
+        assert_eq!(config.retrain, SignedDuration::from_hours(24));
         assert_eq!(config.window, SignedDuration::from_hours(48));
         assert_eq!(config.holdout, SignedDuration::from_hours(12));
         assert_eq!(
@@ -221,6 +234,14 @@ mod tests {
     #[test]
     fn a_section_refuses_an_unknown_field() {
         assert!(refused(&section("retrain_every = \"24h\"")).contains("retrain_every"));
+    }
+
+    #[test]
+    fn a_retrain_interval_not_positive_is_refused() {
+        for retrain in ["0h", "-24h"] {
+            let toml = section(&format!(r#"retrain = "{retrain}""#));
+            assert!(refused(&toml).contains("retrain interval"), "{retrain}");
+        }
     }
 
     #[test]

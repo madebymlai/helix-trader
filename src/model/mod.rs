@@ -14,7 +14,9 @@
 //! `store` the model whose holdout `score` passes the gate; `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
-//! targets in a dataset run.
+//! targets in a dataset run; `schedule` is when a model is retrained, on
+//! a fixed UTC grid; `walk` is a backtest retraining on that schedule
+//! before its run and scoring its models out of sample after.
 
 pub mod config;
 pub mod dataset;
@@ -22,7 +24,9 @@ pub mod decide;
 pub mod features;
 pub mod handle;
 pub mod learner;
+pub mod schedule;
 pub mod score;
 pub mod store;
 pub mod targets;
 pub mod train;
+pub mod walk;

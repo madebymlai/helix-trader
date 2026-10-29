@@ -189,13 +189,21 @@ impl Training {
 
     /// Whether the long of the label's target gained in `row`.
     fn label_of(&self, row: &DatasetRow) -> bool {
-        row.targets[self.label] > 0.0
+        gained(row, self.label)
     }
+}
+
+/// Whether the long of the target at `label` among `row`'s targets gained.
+pub(super) fn gained(row: &DatasetRow, label: usize) -> bool {
+    row.targets[label] > 0.0
 }
 
 /// `rows` split at the holdout's start, `holdout`: those before it settled
 /// by then, fitted on, and those from it, held out.
-fn split(rows: Vec<DatasetRow>, holdout: Timestamp) -> (Vec<DatasetRow>, Vec<DatasetRow>) {
+pub(super) fn split(
+    rows: Vec<DatasetRow>,
+    holdout: Timestamp,
+) -> (Vec<DatasetRow>, Vec<DatasetRow>) {
     let holdout = UnixNanos::from(holdout);
     let (fitted, held_out): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|row| row.ts_event < holdout);
@@ -299,6 +307,7 @@ mod tests {
                     .build(),
             )
             .label(Label::Barrier)
+            .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .thresholds(Thresholds {
