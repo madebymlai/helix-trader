@@ -4,8 +4,9 @@
 //!
 //! `missing` turns series slices (`strategy::SeriesSlice`) into what the
 //! catalog lacks of them, by Nautilus' own count
-//! (`get_missing_intervals_for_request`): per contract its definitions,
-//! then each series' missing windows. A `NodeFill` gathers each source's
+//! (`get_missing_intervals_for_request`) once the gaps a live run streamed
+//! across are joined (`live_runs`): per contract its definitions, then
+//! each series' missing windows. A `NodeFill` gathers each source's
 //! data client with its requests, cut into windows of the source's period,
 //! and `run` builds a live node with those clients and the catalog, and an
 //! actor asking for one window at a time with `update_catalog`. The data
@@ -48,7 +49,7 @@ use nautilus_persistence::{
 };
 use serde_json::json;
 
-use super::catalog_path;
+use super::{catalog_path, live_runs};
 use crate::strategy::SeriesSlice;
 
 /// How long `run` waits for the answer to one request at most, by the wall
@@ -162,14 +163,16 @@ impl FillRequest {
 /// What `catalog` lacks of `slices`, contract by contract in the order they
 /// first come: the contract's definition over the span of what it lacks,
 /// then each of its series' missing windows (Nautilus'
-/// `get_missing_intervals_for_request`), in time order. The slices are
+/// `get_missing_intervals_for_request`, once the gaps a live run streamed
+/// across are joined: `live_runs::join`), in time order. The slices are
 /// `DataRequirements::slices`, which reads no window of a series twice. A
 /// contract lacking nothing is left out.
 ///
 /// # Errors
 ///
 /// Returns an error if a series is not the quotes, trades, book depths or
-/// book deltas of its slice's contract, or if the catalog cannot be read.
+/// book deltas of its slice's contract, if the catalog cannot be read, or
+/// if a gap a live run streamed across cannot be joined.
 pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -187,10 +190,13 @@ pub fn missing(
             *identifier == id.to_string(),
             "the {data} of {identifier} on a slice of {id}"
         );
+        let (from, to) = (nanos(slice.from), nanos(slice.to));
+        live_runs::join(catalog, data_type, identifier, from, to)
+            .with_context(|| format!("joining the live runs of the {data} of {id}"))?;
         let gaps = catalog
             .get_missing_intervals_for_request(
-                nanos(slice.from),
-                nanos(slice.to),
+                from,
+                to,
                 &data_type.clone().into(),
                 Some(identifier),
             )

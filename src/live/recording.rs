@@ -7,7 +7,10 @@
 //! the node registers every promotion interval and on a clean stop, each
 //! staging file deleted once promoted. A retrain the node starts then
 //! replays up to the last promotion: it waits `Recording::catalog_delay`
-//! after its time for the data up to it.
+//! after its time for the data up to it. Each promotion names its files by
+//! their rows, so a run's files of a series leave gaps between them, which
+//! the readers join (`data::live_runs`, from the run starts `Live`
+//! records).
 //!
 //! The node keeps one instance id per trader across restarts, in a file in
 //! the staging directory: a run after a crash writes to the same
