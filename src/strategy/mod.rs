@@ -31,6 +31,8 @@ pub mod warmup;
 pub use config::{BarsConfig, CompositeSource};
 pub use session::Session;
 
+use std::str::FromStr;
+
 use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::{ClosedInterval, UnixNanos};
@@ -40,7 +42,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 use nautilus_persistence::common::coverage::merge_closed_intervals;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 
 use crate::rolls::{Slice, Transition, TransitionTable};
 
@@ -53,36 +55,52 @@ pub struct DataRequirements {
     /// sizes its cache to hold their warmup (see `warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
-    /// of bars: fetched by fill-catalog from their instrument's source
-    /// (Databento fetches a GLBX instrument's book and trades whatever is
-    /// declared) and replayed in a backtest as declared, with no warmup of
-    /// their own. Their instruments are read too: live sets up their
-    /// clients but subscribes to none of the ticks.
+    /// of bars, book deltas and custom data among them (see
+    /// `TickSeries`): fetched by fill-catalog from their instrument's
+    /// source (Databento fetches a GLBX instrument's book and trades
+    /// whatever is declared; no source serves custom data) and replayed in
+    /// a backtest as declared, with no warmup of their own. Their
+    /// instruments are read too: live sets up their clients but subscribes
+    /// to none of the ticks.
     pub ticks: Vec<TickSeries>,
     /// How far back before the run the warmup history starts.
     pub warmup: SignedDuration,
 }
 
-/// A tick series a strategy reads: the ticks of one Nautilus data type of
-/// one instrument, `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }`
-/// in a TOML config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// A series a strategy reads as it is: the data of one Nautilus data type
+/// (`NautilusDataType`) of one instrument,
+/// `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }` in a TOML
+/// config. `data` is a name Nautilus parses (`NautilusDataType::from_str`)
+/// of quotes (`"quotes"`), trades (`"trades"`), book depth snapshots
+/// (`"order_book_depths"`), book deltas (`"order_book_deltas"`) or custom
+/// data (`"Custom:<type name>"`): custom data of the instrument, keyed in
+/// the catalog and on the message bus by the instrument id, as Nautilus'
+/// Databento client keys its own (`DataType::new(type_name, None,
+/// Some(instrument_id))`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TickSeries {
-    pub data: TickData,
+    #[serde(deserialize_with = "series_data")]
+    pub data: NautilusDataType,
     pub instrument_id: InstrumentId,
 }
 
-/// The Nautilus data type of a tick series.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TickData {
-    /// `QuoteTick`s.
-    Quotes,
-    /// `TradeTick`s.
-    Trades,
-    /// `OrderBookDepth10` snapshots.
-    Depth,
+/// The data of a tick series: a Nautilus data type by any name Nautilus
+/// parses, one of those a strategy reads as they are (see `TickSeries`).
+fn series_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NautilusDataType, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    let data = NautilusDataType::from_str(&name).map_err(de::Error::custom)?;
+    match data {
+        NautilusDataType::QuoteTick
+        | NautilusDataType::TradeTick
+        | NautilusDataType::OrderBookDepth
+        | NautilusDataType::OrderBookDelta
+        | NautilusDataType::Custom { .. } => Ok(data),
+        _ => Err(de::Error::custom(format!(
+            "{name} is not a series a strategy reads as it is: \
+             quotes, trades, order_book_depths, order_book_deltas or Custom:<type name>"
+        ))),
+    }
 }
 
 impl DataRequirements {
@@ -116,7 +134,7 @@ impl DataRequirements {
                 .ticks
                 .iter()
                 .filter(|tick| instrument_ids.contains(&tick.instrument_id))
-                .copied()
+                .cloned()
                 .collect(),
             warmup: self.warmup,
         }
@@ -127,7 +145,10 @@ impl DataRequirements {
     /// `catalog_series` sorts.
     #[must_use]
     pub fn catalog_series(&self) -> Vec<(NautilusDataType, String)> {
-        self.sources().into_iter().map(Source::series).collect()
+        self.sources()
+            .into_iter()
+            .map(|source| source.series())
+            .collect()
     }
 
     /// The catalog series read over `[start, end]`, contract by contract:
@@ -190,7 +211,7 @@ impl DataRequirements {
     /// The sources of the bars and the ticks, as `catalog_series` sorts
     /// their series.
     fn sources(&self) -> Vec<Source> {
-        let ticks = self.ticks.iter().copied().map(Source::Ticks);
+        let ticks = self.ticks.iter().cloned().map(Source::Ticks);
         sorted_sources(bar_sources(&self.bar_types).chain(ticks))
     }
 }
@@ -251,15 +272,10 @@ impl SeriesSlice {
 
 impl TickSeries {
     /// The catalog series of these ticks: their Nautilus data type, keyed
-    /// by the instrument id.
+    /// by the instrument id (custom data too: see `TickSeries`).
     #[must_use]
     pub fn catalog_series(&self) -> (NautilusDataType, String) {
-        let data_type = match self.data {
-            TickData::Quotes => NautilusDataType::QuoteTick,
-            TickData::Trades => NautilusDataType::TradeTick,
-            TickData::Depth => NautilusDataType::OrderBookDepth,
-        };
-        (data_type, self.instrument_id.to_string())
+        (self.data.clone(), self.instrument_id.to_string())
     }
 }
 
@@ -273,21 +289,21 @@ impl TickSeries {
 #[must_use]
 pub fn catalog_series(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
     sorted_sources(bar_sources(bar_types))
-        .into_iter()
+        .iter()
         .map(Source::series)
         .collect()
 }
 
 /// What a catalog series holds: external bars, or the ticks of an
 /// instrument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
     Bars(BarType),
     Ticks(TickSeries),
 }
 
 impl Source {
-    fn instrument_id(self) -> InstrumentId {
+    fn instrument_id(&self) -> InstrumentId {
         match self {
             Self::Bars(bar_type) => bar_type.instrument_id(),
             Self::Ticks(tick) => tick.instrument_id,
@@ -295,7 +311,7 @@ impl Source {
     }
 
     /// The same source on `instrument_id`.
-    fn on(self, instrument_id: InstrumentId) -> Self {
+    fn on(&self, instrument_id: InstrumentId) -> Self {
         match self {
             Self::Bars(bar_type) => Self::Bars(BarType::new(
                 instrument_id,
@@ -303,14 +319,14 @@ impl Source {
                 bar_type.aggregation_source(),
             )),
             Self::Ticks(tick) => Self::Ticks(TickSeries {
+                data: tick.data.clone(),
                 instrument_id,
-                ..tick
             }),
         }
     }
 
     /// The catalog series: its Nautilus data type and catalog identifier.
-    fn series(self) -> (NautilusDataType, String) {
+    fn series(&self) -> (NautilusDataType, String) {
         match self {
             Self::Bars(bar_type) => (NautilusDataType::Bar, bar_type.to_string()),
             Self::Ticks(tick) => tick.catalog_series(),
@@ -331,12 +347,12 @@ fn bar_sources(bar_types: &[BarType]) -> impl Iterator<Item = Source> {
             Source::Bars(source)
         } else if source.spec().price_type == PriceType::Last {
             Source::Ticks(TickSeries {
-                data: TickData::Trades,
+                data: NautilusDataType::TradeTick,
                 instrument_id,
             })
         } else {
             Source::Ticks(TickSeries {
-                data: TickData::Quotes,
+                data: NautilusDataType::QuoteTick,
                 instrument_id,
             })
         }
@@ -352,7 +368,7 @@ fn sorted_sources(sources: impl Iterator<Item = Source>) -> Vec<Source> {
             unique.push(source);
         }
     }
-    unique.sort_by_cached_key(|&source| (source.instrument_id(), source.series().1));
+    unique.sort_by_cached_key(|source| (source.instrument_id(), source.series().1));
     unique
 }
 
@@ -401,7 +417,7 @@ mod tests {
         );
     }
 
-    fn tick(data: TickData, instrument_id: &str) -> TickSeries {
+    fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
         TickSeries {
             data,
             instrument_id: InstrumentId::from(instrument_id),
@@ -414,9 +430,9 @@ mod tests {
         DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
             ticks: vec![
-                tick(TickData::Quotes, "XAUUSD.ICMARKETS"),
-                tick(TickData::Trades, "GC.v.0.GLBX"),
-                tick(TickData::Depth, "GC.v.0.GLBX"),
+                tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
+                tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
+                tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
             ],
             warmup: SignedDuration::ZERO,
         }
@@ -456,8 +472,8 @@ mod tests {
             DataRequirements {
                 bar_types: vec![],
                 ticks: vec![
-                    tick(TickData::Trades, "GC.v.0.GLBX"),
-                    tick(TickData::Depth, "GC.v.0.GLBX"),
+                    tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
+                    tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
                 ],
                 warmup: SignedDuration::ZERO,
             }
@@ -486,7 +502,7 @@ mod tests {
             r#"ticks = [
                 { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
                 { data = "trades", instrument_id = "GC.v.0.GLBX" },
-                { data = "depth", instrument_id = "GC.v.0.GLBX" },
+                { data = "order_book_depths", instrument_id = "GC.v.0.GLBX" },
             ]"#,
         )
         .unwrap();
@@ -501,6 +517,69 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("bars"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_name_nautilus_does_not_parse() {
+        let err = toml::from_str::<TickSeries>(
+            r#"data = "depth"
+            instrument_id = "GC.v.0.GLBX""#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("depth"), "{err}");
+    }
+
+    #[test]
+    fn book_deltas_and_custom_data_load_from_toml_as_nautilus_data_types() {
+        #[derive(Deserialize)]
+        struct Config {
+            ticks: Vec<TickSeries>,
+        }
+        let config: Config = toml::from_str(
+            r#"ticks = [
+                { data = "order_book_deltas", instrument_id = "GC.v.0.GLBX" },
+                { data = "Custom:Imbalance", instrument_id = "GC.v.0.GLBX" },
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.ticks,
+            [
+                tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"),
+                tick(
+                    NautilusDataType::Custom {
+                        type_name: "Imbalance".to_string()
+                    },
+                    "GC.v.0.GLBX"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn book_deltas_and_custom_data_are_series_of_the_requirements_keyed_by_their_instrument() {
+        let imbalance = NautilusDataType::Custom {
+            type_name: "Imbalance".to_string(),
+        };
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"),
+                tick(imbalance.clone(), "GC.v.0.GLBX"),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        assert_eq!(
+            requirements.instrument_ids(),
+            [InstrumentId::from("GC.v.0.GLBX")]
+        );
+        assert_eq!(
+            requirements.catalog_series(),
+            [
+                (NautilusDataType::OrderBookDelta, "GC.v.0.GLBX".to_string()),
+                (imbalance, "GC.v.0.GLBX".to_string()),
+            ]
+        );
     }
 
     fn at(s: &str) -> Timestamp {
@@ -534,8 +613,8 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
             ticks: vec![
-                tick(TickData::Quotes, "XAUUSD.ICMARKETS"),
-                tick(TickData::Trades, "GCZ6.GLBX"),
+                tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
+                tick(NautilusDataType::TradeTick, "GCZ6.GLBX"),
             ],
             warmup: SignedDuration::ZERO,
         };
@@ -566,8 +645,8 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![
-                tick(TickData::Trades, "GC.GLBX"),
-                tick(TickData::Depth, "GC.GLBX"),
+                tick(NautilusDataType::TradeTick, "GC.GLBX"),
+                tick(NautilusDataType::OrderBookDepth, "GC.GLBX"),
             ],
             warmup: SignedDuration::ZERO,
         };
@@ -682,8 +761,8 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![
-                tick(TickData::Trades, "GC.GLBX"),
-                tick(TickData::Trades, "GCQ6.GLBX"),
+                tick(NautilusDataType::TradeTick, "GC.GLBX"),
+                tick(NautilusDataType::TradeTick, "GCQ6.GLBX"),
             ],
             warmup: SignedDuration::ZERO,
         };
@@ -713,7 +792,7 @@ mod tests {
     fn the_contracts_of_a_root_and_of_a_contract_beside_it_are_one_slice_each() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
-            ticks: vec![tick(TickData::Depth, "GCQ6.GLBX")],
+            ticks: vec![tick(NautilusDataType::OrderBookDepth, "GCQ6.GLBX")],
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));

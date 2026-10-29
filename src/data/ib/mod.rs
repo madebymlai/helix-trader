@@ -572,6 +572,13 @@ mod tests {
             (NautilusDataType::Bar, "SXR8.IBIS-1-HOUR-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-5-MINUTE-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
+            (NautilusDataType::OrderBookDelta, "SXR8.IBIS"),
+            (
+                NautilusDataType::Custom {
+                    type_name: "Imbalance".to_string(),
+                },
+                "SXR8.IBIS",
+            ),
         ] {
             let err = served_bar_type(&data_type, identifier).unwrap_err();
             assert!(err.to_string().contains(identifier), "{err}");

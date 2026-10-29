@@ -2229,6 +2229,7 @@ name = "helix-trader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow",
  "async-trait",
  "bollard",
  "bon",
@@ -2257,6 +2258,7 @@ dependencies = [
  "nautilus-persistence",
  "nautilus-portfolio",
  "nautilus-risk",
+ "nautilus-serialization",
  "nautilus-trading",
  "prost",
  "prost-build",

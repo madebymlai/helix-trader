@@ -118,7 +118,7 @@ impl Backtest {
     {
         let config = node::run_config(self)?;
         coverage::check(self)?;
-        node::run(config, strategy)
+        node::run(config, node::custom_data(self)?, strategy)
     }
 
     /// The continuous bars of the bar types on roots over the run and its
@@ -479,7 +479,7 @@ mod tests {
         let backtest = Backtest {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![TickSeries {
-                data: crate::strategy::TickData::Trades,
+                data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("GCQ6.GLBX"),
             }],
             start: "2026-07-20T00:00:00Z".parse().unwrap(),
@@ -522,7 +522,7 @@ mod tests {
         let backtest = Backtest {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![TickSeries {
-                data: crate::strategy::TickData::Depth,
+                data: NautilusDataType::OrderBookDepth,
                 instrument_id: InstrumentId::from("GCQ6.GLBX"),
             }],
             start: "2026-07-20T00:00:00Z".parse().unwrap(),

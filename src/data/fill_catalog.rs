@@ -215,7 +215,7 @@ mod tests {
     use super::*;
     use crate::{
         rolls::Slice,
-        strategy::{DataRequirements, SeriesSlice, TickData, TickSeries},
+        strategy::{DataRequirements, SeriesSlice, TickSeries},
     };
     use nautilus_model::{
         data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
@@ -961,7 +961,10 @@ mod tests {
         };
         let requirements = DataRequirements {
             bar_types: vec![],
-            ticks: vec![tick(TickData::Trades), tick(TickData::Depth)],
+            ticks: vec![
+                tick(NautilusDataType::TradeTick),
+                tick(NautilusDataType::OrderBookDepth),
+            ],
             warmup: SignedDuration::ZERO,
         };
         let mut asked = Vec::new();

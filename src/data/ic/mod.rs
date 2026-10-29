@@ -607,7 +607,7 @@ pub(crate) fn quotes_of(
 ) -> anyhow::Result<InstrumentId> {
     ensure!(
         *data_type == NautilusDataType::QuoteTick,
-        "IC serves quotes only, not the {data_type:?} of {identifier}"
+        "IC serves quotes only, not the {data_type} of {identifier}"
     );
     let id = InstrumentId::from_str(identifier)
         .with_context(|| format!("{identifier} is no instrument id"))?;
@@ -896,6 +896,18 @@ mod tests {
         );
         let err = IcHistory::quoted(&[elsewhere]).unwrap_err();
         assert!(err.to_string().contains("EUR/USD.IDEALPRO"), "{err}");
+    }
+
+    #[test]
+    fn book_deltas_and_custom_data_are_refused() {
+        let imbalance = NautilusDataType::Custom {
+            type_name: "Imbalance".to_string(),
+        };
+        for data_type in [NautilusDataType::OrderBookDelta, imbalance] {
+            let named = data_type.to_string();
+            let err = IcHistory::quoted(&[(data_type, XAUUSD.to_owned())]).unwrap_err();
+            assert!(err.to_string().contains(&named), "{err}");
+        }
     }
 
     /// The log records of the IC adapter at info and above, for the demo

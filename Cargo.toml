@@ -58,10 +58,16 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 prost-build = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+# The arrow schema Nautilus' custom data macros generate, for the custom
+# data of the backtest tests.
+arrow = { version = "59.3", default-features = false }
 futures = "0.3"
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"] }
 nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["test-support"] }
+# Nautilus' custom data registry and arrow encoding, to store custom data in a
+# test catalog.
+nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["arrow"] }
 # Nautilus' risk engine and the portfolio it takes, for the IC margin check
 # and to register a strategy in a unit test.
 nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
