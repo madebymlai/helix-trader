@@ -6,5 +6,6 @@
 pub mod backtest;
 pub mod data;
 pub mod live;
+pub mod model;
 pub mod rolls;
 pub mod strategy;
