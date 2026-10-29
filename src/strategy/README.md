@@ -537,13 +537,15 @@ of its choosing (`model::features`, `model::decide`).
   `.data(data_type, name, read)` for a raw feature of custom data, the last
   value `read` from a data point. `.code(include_str!("features.rs"))` adds
   the strategy's feature code to the fingerprint (its unit tests in
-  `features/tests.rs`, so editing one changes no fingerprint); `.warmup(span)` declares
-  how much data the features read before a decision, which a dataset
-  build replays before its first day (see "Dataset"): a strategy passes
-  its own warmup, `learned/` its `warmup`; none unless given. `build()`
-  refuses an empty set, two features of one name and a negative warmup.
-  The names and their order are
-  fixed there, and the values come in that order. A feature is a Nautilus
+  `features/tests.rs`, so editing one changes no fingerprint);
+  `.warmup(span)` declares how much data the features read before a
+  decision, which a dataset build replays before its first day (see
+  "Dataset"): a strategy passes its own warmup, `learned/` its `warmup`;
+  none unless given. For a recursive indicator, an exponential average or
+  Wilder's ATR, give several times its period, 5 to 10: its first value
+  keeps a weight that decays only exponentially, e^-1 to e^-2 a period
+  (see "Dataset"). `build()` refuses an empty set, two features of one
+  name and a negative warmup. The names and their order are fixed there, and the values come in that order. A feature is a Nautilus
   `Indicator` exposing its value (`Feature`), which every Nautilus moving
   average does as it is; another indicator, or one of ours, implements
   `Feature::value`. A strategy whose primary is its own rule declares
@@ -689,11 +691,17 @@ of its choosing (`model::features`, `model::decide`).
   before the first day not. So the indicators read at a day's first
   decisions the data before it, as inside a longer build: a day built
   alone is stored as inside a longer build, row for row, for a feature
-  whose value is a function of the data within the warmup (one keeping a
-  running sum, as Nautilus' moving averages do, or an exponential
-  average, may still differ in its last bits). The catalog must cover
-  the data from that warmup before the first day, and the strategy's own
-  warmup request before it. `write(rows, from, to)` files
+  whose value is a function of the data within the warmup; one keeping a
+  running sum, as Nautilus' simple moving average does, may still differ
+  in its last bits. A recursive one, an exponential average or Wilder's
+  ATR (the barrier's), never forgets the value it started from: its
+  weight decays by e^-1 (Wilder's) to e^-2 (an exponential average's) a
+  period, so a warmup of one period leaves a day's first rows depending
+  on where the build started by up to about a third of the difference.
+  A warmup of several times the longest recursive period, 5 to 10, makes
+  them depend on it negligibly (e^-5 or less), not to the bit. The
+  catalog must cover the data from that warmup before the first day, and
+  the strategy's own warmup request before it. `write(rows, from, to)` files
   only the days the replay settled (replayed whole, `to` the longest
   target past their end), each with the day's bounds, a day without rows
   within the file of the day before it (Nautilus writes no file without

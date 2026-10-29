@@ -24,10 +24,16 @@
 //! before it, as inside a longer build; the rows decided before the day
 //! are not stored. A feature whose value is a function of the data within
 //! the warmup then has the same value at every decision of a day, however
-//! long the build; one keeping a running sum, or an exponential average,
-//! may still differ in its last bits. `write`
-//! files only the days a replay settled: those it replayed whole, its end
-//! that far past theirs. Each day's file is written with the day's bounds,
+//! long the build; one keeping a running sum may still differ in its last
+//! bits. A recursive one, an exponential average or Wilder's ATR, never
+//! forgets the value it started from, whose weight decays by e^-1
+//! (Wilder's) to e^-2 (an exponential average's) a period: after a warmup
+//! of one period a day's first rows still depend on where the build
+//! started by up to about a third of the difference. A warmup of
+//! several times the longest recursive period, 5 to 10, makes the rows of
+//! a day depend on the cut negligibly, never to the bit. `write` files
+//! only the days a replay settled: those it replayed whole, its end that
+//! far past theirs. Each day's file is written with the day's bounds,
 //! the interval it covers, the days without rows (a weekend's, cold
 //! features') within the file of the day with rows before them, or the
 //! first after: Nautilus writes no file without rows, so a day without
