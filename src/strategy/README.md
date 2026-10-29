@@ -807,18 +807,16 @@ of its choosing (`model::features`, `model::decide`).
   in `Mode::Dataset` on hedging venues, the costs and balance given as to
   a backtest (`--commission` or `--commission-rate`, `--balance`); it
   prints a published `Outcome`, and fails with a kept one, its reason.
-  `dataset <strategy> --config .. --start .. --end ..` builds the days
-  of `[start, end)` the dataset lacks by the same replay
-  (`Dataset::build`, `dataset::days`), with the same costs and balance.
   `backtest` and `live` take `--models` (default `models`), the store
   root, beside `train`'s; `live` takes the costs of its retrains'
   dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
   `--retrain-balance`), needed by a strategy trading on a model, and
   passes them, its `--config`, `--catalog`, `--models` and `--leverage`
   to the `train` it starts. `backtest` of a strategy trading on a model
-  runs `dataset` and `train` as child processes first, with its
-  `--dataset-balance`, each train through `Launcher::process` as live's:
-  one keeping the model is a kept retrain, not a failed backtest.
+  builds its dataset and runs `train` in child processes first, with
+  its `--dataset-balance`, each train through `Launcher::process` as
+  live's: one keeping the model is a kept retrain, not a failed backtest
+  (backtest README, "Retraining on the schedule").
 
 ## Warmup and training
 

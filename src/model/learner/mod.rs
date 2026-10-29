@@ -63,6 +63,19 @@ pub enum LearnerConfig {
 }
 
 impl LearnerConfig {
+    /// Checks the learner's settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the settings are ones the library would not
+    /// honour (see `LightGbmConfig::validate`).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            Self::LightGbm(config) => config.validate(),
+            Self::Perpetual(_) | Self::Baseline {} | Self::Fake {} => Ok(()),
+        }
+    }
+
     /// Fits a model on `set`.
     ///
     /// # Errors

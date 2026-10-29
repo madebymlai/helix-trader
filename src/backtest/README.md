@@ -1027,10 +1027,9 @@ runs the steps of `model::walk`:
 
 1. If the dataset lacks a day from the window of the first retrain time
    (the last grid time not after `--start`, less `window`) to `--end`,
-   a child process, `dataset <strategy> --start .. --end ..`, builds
-   them, once, to the last day's end plus the longest target: the last
-   retrain period then has its targets to score. The catalog must cover
-   that span, warmup included.
+   a child process builds them, once, to the last day's end plus the
+   longest target: the last retrain period then has its targets to
+   score. The catalog must cover that span, warmup included.
 2. For each retrain time before `--end` the store has no model valid
    from, in time order, a child process, `train <strategy> --at t`,
    trains at it; its window's days already built, it replays none. A
@@ -1057,9 +1056,11 @@ strategy, config, catalog, store, commission flag as given and leverage,
 with `--dataset-balance` as its balance; it inherits the backtest's
 environment and output, so its log and outcome come before the run's. A
 train runs through `Launcher::process`, as live's does: `train` fails
-when it keeps the model, the error it printed last the reason. A
-`dataset` child that fails stops the backtest. One process per Nautilus node: the
-build and each train run a node, the backtest another.
+when it keeps the model, the error it printed last the reason. The
+build runs `dataset`, an internal entry the backtest spawns, not listed
+by `--help`; a build that fails stops the backtest. One process per
+Nautilus node: the build and each train run a node, the backtest
+another.
 
 A period of the scores prints as, for example:
 

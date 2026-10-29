@@ -212,9 +212,7 @@ impl ModelStore {
     }
 
     fn path(&self, valid_from: Timestamp) -> PathBuf {
-        self.directory
-            .join(format!("{valid_from}"))
-            .with_extension(EXTENSION)
+        self.directory.join(format!("{valid_from}.{EXTENSION}"))
     }
 }
 
@@ -391,6 +389,24 @@ mod tests {
         assert_eq!(
             store.valid_froms().unwrap(),
             [at("2026-10-21T12:00:00Z"), at("2026-10-23T00:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn a_model_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), &config());
+        let published = model("2026-10-22T04:00:00.01Z", &[vec![0.5]]);
+
+        store.publish(&published).unwrap();
+
+        assert_eq!(
+            store.valid_froms().unwrap(),
+            [at("2026-10-22T04:00:00.01Z")]
+        );
+        assert_eq!(
+            store.read(at("2026-10-22T04:00:00.01Z")).unwrap(),
+            published
         );
     }
 
