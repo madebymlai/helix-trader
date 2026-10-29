@@ -858,6 +858,12 @@ impl Targets {
         strategy.publish_data(&data_type, &data);
     }
 
+    /// The decisions opened and neither settled nor unsettled yet.
+    #[must_use]
+    pub fn open_decisions(&self) -> usize {
+        self.state.borrow().open.len()
+    }
+
     /// Reports the decisions still open, unsettled at the end of the run.
     pub fn on_stop(&self) {
         let state = self.state.borrow();

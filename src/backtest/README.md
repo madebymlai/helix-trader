@@ -1509,7 +1509,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     take profit of 10 bps: the decision before the ATR has its 75 bars
     sends no order, the next one's short is stopped at 100,078.1 by a bar
     short of the long's take profit. Orders above the instrument's
-    largest are denied, logged, and leave every decision unsettled. Over
+    largest are denied, logged, and the denial drops each decision,
+    unsettled: the run ends before the first decision's horizon, so no
+    time alert can have, and no decision is open at the stop
+    (`Targets::open_decisions`). Over
     two days of a random walk, the rows are the same from a dataset run
     and from a trading run, every decision whose time limit passes before
     the end settled on 10M USD, while the purge leaves the cache a few

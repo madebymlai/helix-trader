@@ -662,7 +662,8 @@ of its choosing (`model::features`, `model::decide`).
   strategy id (`TargetRow::data_type`); `Outcome::sign` is the P&L's
   sign. A denied or rejected order, or an entry not filled by its time,
   leaves the decision unsettled, logged, and so do positions still open
-  at the stop. A barrier hit at the same nanosecond as the time limit
+  at the stop (`open_decisions()` counts the decisions still open). A
+  barrier hit at the same nanosecond as the time limit
   counts: Nautilus hands the venue the quote before the alert. On bars
   alone the venue fills an entry at the last close, a take profit at its
   limit and a stop at its trigger, a bar's high before its low: as
