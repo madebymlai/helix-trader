@@ -299,6 +299,7 @@ mod tests {
                     .build(),
             )
             .label(Label::Barrier)
+            .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .thresholds(Thresholds {

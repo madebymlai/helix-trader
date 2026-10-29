@@ -254,6 +254,7 @@ mod tests {
                     .build(),
             )
             .label(Label::Horizon)
+            .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
             .thresholds(Thresholds {

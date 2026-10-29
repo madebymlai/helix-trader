@@ -1439,4 +1439,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
     backtest of the strategy on that store from two hours before the
     model's valid-from trades only from it, a long at each of its three
-    decisions, closed 30 minutes later: 6 orders, 3 positions.
+    decisions, closed 30 minutes later: 6 orders, 3 positions. The same
+    `train`, started as a live node starts it, by
+    `Launcher::process` on the test binary's `helix-trader`, publishes,
+    and the backtest trades the same.

@@ -72,6 +72,7 @@ mod tests {
         decision = { every = "1h" }
         targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
         label = "horizon"
+        retrain = "24h"
         window = "48h"
         holdout = "12h"
         thresholds = { long = 0.6, short = 0.4 }

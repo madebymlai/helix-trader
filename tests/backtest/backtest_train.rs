@@ -29,6 +29,7 @@ fn config(min_score: f64) -> ModelConfig {
         .decision(rule())
         .targets(targets())
         .label(Label::Barrier)
+        .retrain(SignedDuration::from_hours(24))
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
         .thresholds(Thresholds {
