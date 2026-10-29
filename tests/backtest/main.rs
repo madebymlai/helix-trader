@@ -24,6 +24,7 @@ mod backtest_composite_internal_source;
 mod backtest_composite_warmup;
 mod backtest_continuous_bars;
 mod backtest_coverage;
+mod backtest_dataset;
 mod backtest_ema_entries;
 mod backtest_ema_exits;
 mod backtest_ema_overlap;

@@ -1,0 +1,913 @@
+//! The training table of a strategy, stored by day in the Nautilus catalog,
+//! whose coverage is the day cache.
+//!
+//! A dataset is the settled rows of one strategy (`TargetRow`, from a
+//! dataset run), each its decision's features and the values of its
+//! targets, stored as Nautilus custom data, `DatasetRow`, one type for
+//! every strategy. Features and targets are list columns, so each strategy
+//! has the width of its own, and its rows are stored under an identifier
+//! of its id and its fingerprint (`decide::fingerprint` extended by
+//! `targets::fingerprint`): a change to the feature code or names, the
+//! decision rule or a target finds no row, and the dataset is rebuilt.
+//! The feature names are in the metadata of the rows' data type, which
+//! the catalog stores with each file and gives back with each row, so the
+//! rows do not repeat them; `read` checks them.
+//!
+//! The catalog's intervals of the rows are the cache: `missing` asks the
+//! catalog for the days of a span it does not cover, and `build` replays
+//! them, once, from the first missing day to the last plus the longest
+//! target (`TargetsConfig::settles_within`), then writes them. `write`
+//! files only the days a replay settled: those it replayed whole, its end
+//! that far past theirs. Each day's file is written with the day's bounds,
+//! the interval it covers, the days without rows (a weekend's, cold
+//! features') within the file of the day with rows before them, or the
+//! first after: Nautilus writes no file without rows, so a day without
+//! rows would otherwise stay missing and be replayed by every build. A
+//! decision whose time close finds no market until after the replay
+//! (before a weekend) is unsettled, and its day is filed without it.
+//!
+//! Nautilus skips writing a file whose name, its interval, exists, and
+//! refuses one overlapping another, so `write` deletes what the catalog
+//! holds over the days it writes first: recomputing a day replaces it.
+//! Consolidating the directory would merge the days' files and lose their
+//! intervals, the cache: it is never consolidated.
+//!
+//! Beside the files, each dataset has a manifest, `manifest.json`: its
+//! strategy, fingerprint, feature names in order, target spec and names,
+//! and the days it holds, rewritten whole (write, then rename) at each
+//! write.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use anyhow::{Context, bail, ensure};
+use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
+use nautilus_core::UnixNanos;
+use nautilus_model::{
+    custom_data,
+    data::{CustomData, CustomDataTrait, Data, DataType, NautilusDataType},
+    identifiers::StrategyId,
+};
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use nautilus_serialization::arrow_custom_data;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use super::{
+    decide::{self, DecisionRule},
+    features::{FeatureSet, Fingerprint},
+    targets::{self, TargetRow, TargetsConfig},
+};
+
+/// The key of the feature names in the metadata of the rows' data type.
+const FEATURE_NAMES: &str = "feature_names";
+
+/// The name of the manifest file in the directory of a dataset's rows.
+const MANIFEST: &str = "manifest.json";
+
+/// A settled decision as the catalog stores it.
+#[arrow_custom_data]
+#[custom_data]
+pub struct DatasetRow {
+    /// The value of each feature, in the order of the dataset's names.
+    pub features: Vec<f64>,
+    /// The value of each target, in the order of the dataset's target
+    /// names (`TargetsConfig::target_names`).
+    pub targets: Vec<f64>,
+    /// When the last of the decision's positions closed.
+    pub settled_at: UnixNanos,
+    /// The time of the decision.
+    pub ts_event: UnixNanos,
+    /// The time of the decision too, which files the row in its day.
+    pub ts_init: UnixNanos,
+}
+
+/// What a dataset holds, enough to explain and rebuild it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub strategy_id: StrategyId,
+    /// The fingerprint of the features, the decision rule and the targets.
+    pub fingerprint: String,
+    /// The names of the features, in the order of a row's values.
+    pub feature_names: Vec<String>,
+    /// The names of the targets, in the order of a row's values.
+    pub target_names: Vec<String>,
+    /// The target spec.
+    pub targets: TargetsConfig,
+    /// The days stored, in runs of consecutive days.
+    pub days: Vec<Days>,
+}
+
+/// Consecutive UTC days, the first to the last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Days {
+    pub first: Date,
+    pub last: Date,
+}
+
+/// The dataset of one strategy in a catalog.
+#[derive(Debug, Clone)]
+pub struct Dataset {
+    catalog: PathBuf,
+    strategy_id: StrategyId,
+    fingerprint: Fingerprint,
+    feature_names: Vec<String>,
+    targets: TargetsConfig,
+}
+
+impl Dataset {
+    /// The dataset of `strategy_id`, deciding with `features` on `rule`,
+    /// of `targets`, in the catalog at `catalog`. Registers `DatasetRow`
+    /// with Nautilus, as any reader of the catalog must.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `targets` is invalid.
+    pub fn new(
+        catalog: &Path,
+        strategy_id: StrategyId,
+        features: &FeatureSet,
+        rule: DecisionRule,
+        targets: TargetsConfig,
+    ) -> anyhow::Result<Self> {
+        targets.validate()?;
+        nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
+        Ok(Self {
+            catalog: catalog.to_path_buf(),
+            strategy_id,
+            fingerprint: targets::fingerprint(decide::fingerprint(features, rule), &targets),
+            feature_names: features.names().to_vec(),
+            targets,
+        })
+    }
+
+    /// Builds the days `first` to `last` the dataset is missing: `replay`
+    /// runs the strategy from the first missing day's start to the last's
+    /// end plus the longest target and returns the rows it settled, which
+    /// are written (see `write`). The cached days among them are written
+    /// again, recomputed. With no day missing, nothing is replayed.
+    /// Returns the missing days, replayed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read or written, or as
+    /// `replay` does.
+    pub fn build(
+        &self,
+        first: Date,
+        last: Date,
+        replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
+    ) -> anyhow::Result<Vec<Date>> {
+        let missing = self.missing(first, last)?;
+        let (Some(&first), Some(&last)) = (missing.first(), missing.last()) else {
+            return Ok(missing);
+        };
+        let from = start_of(first)?;
+        let to = start_of(last.tomorrow()?)? + self.targets.settles_within();
+        let rows = replay(from, to)?;
+        self.write(&rows, from, to)?;
+        Ok(missing)
+    }
+
+    /// The days `first` to `last` the catalog does not cover, from its
+    /// missing intervals: a day partly covered is missing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read.
+    pub fn missing(&self, first: Date, last: Date) -> anyhow::Result<Vec<Date>> {
+        let identifier = self.identifier();
+        let missing = self
+            .catalog()
+            .get_missing_intervals_for_request(
+                UnixNanos::from(start_of(first)?).as_u64(),
+                end_of(last)?.as_u64(),
+                &row_type().into(),
+                Some(&identifier),
+            )
+            .with_context(|| format!("reading the days of the dataset {identifier}"))?;
+        let mut days = BTreeSet::new();
+        for (start, end) in missing {
+            let (mut day, last) = (day_of(start.into()), day_of(end.into()));
+            while day <= last {
+                days.insert(day);
+                day = day.tomorrow()?;
+            }
+        }
+        Ok(days.into_iter().collect())
+    }
+
+    /// Writes the `rows` of a replay over `[from, to]` for the days it
+    /// settled, those it replayed whole and whose end plus the longest
+    /// target is not after `to`, and the manifest. What the catalog holds
+    /// over those days is deleted first; the rows of other days are
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read or written.
+    pub fn write(&self, rows: &[TargetRow], from: Timestamp, to: Timestamp) -> anyhow::Result<()> {
+        let days = self.settled_days(from, to)?;
+        let (Some(&first), Some(&last)) = (days.first(), days.last()) else {
+            return Ok(());
+        };
+        let data_type = self.data_type()?;
+        let mut by_day: BTreeMap<Date, Vec<CustomData>> = BTreeMap::new();
+        for row in rows {
+            let stored = DatasetRow::of(row);
+            by_day
+                .entry(day_of(stored.ts_init))
+                .or_default()
+                .push(CustomData::new(Arc::new(stored), data_type.clone()));
+        }
+        // Each file: its first and last day and its rows, a day with rows
+        // and the days without rows after it, the first also those before.
+        let mut files: Vec<(Date, Date, Vec<CustomData>)> = vec![];
+        for day in days {
+            match (files.last_mut(), by_day.remove(&day)) {
+                (Some(file), None) => file.1 = day,
+                (Some(file), Some(data)) if file.2.is_empty() => *file = (file.0, day, data),
+                (_, data) => files.push((day, day, data.unwrap_or_default())),
+            }
+        }
+        let identifier = self.identifier();
+        let mut catalog = self.catalog();
+        catalog
+            .delete_data_range(
+                &row_type(),
+                Some(&identifier),
+                Some(UnixNanos::from(start_of(first)?)),
+                Some(end_of(last)?),
+            )
+            .with_context(|| format!("deleting the days {first} to {last} of {identifier}"))?;
+        for (first, last, mut data) in files {
+            data.sort_by_key(|data| data.data.ts_init());
+            catalog
+                .write_custom_data_batch(
+                    data,
+                    Some(UnixNanos::from(start_of(first)?)),
+                    Some(end_of(last)?),
+                    None,
+                )
+                .with_context(|| format!("writing the days {first} to {last} of {identifier}"))?;
+        }
+        self.write_manifest()
+    }
+
+    /// The rows of the decisions in `[from, to]`, in time order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read, or holds rows of
+    /// other feature names.
+    pub fn read(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<DatasetRow>> {
+        let identifier = self.identifier();
+        let data = self
+            .catalog()
+            .query_custom_data_dynamic(
+                DatasetRow::type_name_static(),
+                Some(std::slice::from_ref(&identifier)),
+                Some(UnixNanos::from(from)),
+                Some(UnixNanos::from(to)),
+                None,
+                None,
+                true,
+            )
+            .with_context(|| format!("reading the dataset {identifier}"))?;
+        let want = self.data_type()?;
+        data.into_iter()
+            .map(|data| {
+                let Data::Custom(custom) = data else {
+                    bail!("the dataset {identifier} holds {data:?}");
+                };
+                ensure!(
+                    custom.data_type.metadata() == want.metadata(),
+                    "the dataset {identifier} holds rows of the features {:?}, not {:?}",
+                    custom.data_type.metadata(),
+                    self.feature_names
+                );
+                custom
+                    .data
+                    .as_any()
+                    .downcast_ref::<DatasetRow>()
+                    .cloned()
+                    .with_context(|| format!("the dataset {identifier} holds {custom:?}"))
+            })
+            .collect()
+    }
+
+    /// The manifest of the dataset, as last written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dataset was never written, or its manifest
+    /// cannot be read.
+    pub fn manifest(&self) -> anyhow::Result<Manifest> {
+        let path = self.directory()?.join(MANIFEST);
+        let json = fs::read_to_string(&path)
+            .with_context(|| format!("reading the manifest {}", path.display()))?;
+        serde_json::from_str(&json)
+            .with_context(|| format!("reading the manifest {}", path.display()))
+    }
+
+    /// The days a replay over `[from, to]` settles: those it replayed
+    /// whole, its end at least the longest target past theirs.
+    fn settled_days(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Date>> {
+        let first = day_of(from.into());
+        let mut day = if start_of(first)? == from {
+            first
+        } else {
+            first.tomorrow()?
+        };
+        let mut days = vec![];
+        while start_of(day.tomorrow()?)? + self.targets.settles_within() <= to {
+            days.push(day);
+            day = day.tomorrow()?;
+        }
+        Ok(days)
+    }
+
+    /// Writes the manifest of what the catalog holds, whole: beside the
+    /// last, then renamed over it.
+    fn write_manifest(&self) -> anyhow::Result<()> {
+        let identifier = self.identifier();
+        let intervals = self
+            .catalog()
+            .get_intervals(&row_type().into(), Some(&identifier))
+            .with_context(|| format!("reading the days of the dataset {identifier}"))?;
+        let mut days: Vec<Days> = vec![];
+        for (start, end) in intervals {
+            let (first, last) = (day_of(start.into()), day_of(end.into()));
+            match days.last_mut() {
+                Some(days) if days.last.tomorrow()? == first => days.last = last,
+                _ => days.push(Days { first, last }),
+            }
+        }
+        let manifest = Manifest {
+            strategy_id: self.strategy_id,
+            fingerprint: self.fingerprint.to_string(),
+            feature_names: self.feature_names.clone(),
+            target_names: self.targets.target_names(),
+            targets: self.targets.clone(),
+            days,
+        };
+        let directory = self.directory()?;
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("creating {}", directory.display()))?;
+        let path = directory.join(MANIFEST);
+        let written = path.with_extension("json.tmp");
+        fs::write(&written, serde_json::to_string_pretty(&manifest)?)
+            .and_then(|()| fs::rename(&written, &path))
+            .with_context(|| format!("writing the manifest {}", path.display()))
+    }
+
+    /// The directory of the rows' files, where the manifest is too: the
+    /// catalog gives its path from the catalog's root.
+    fn directory(&self) -> anyhow::Result<PathBuf> {
+        let directory = self
+            .catalog()
+            .make_path_custom_data(DatasetRow::type_name_static(), Some(&self.identifier()))?;
+        Ok(self.catalog.join(directory))
+    }
+
+    /// The identifier the rows are stored under: the strategy's id and the
+    /// fingerprint.
+    fn identifier(&self) -> String {
+        format!("{}-{}", self.strategy_id, self.fingerprint)
+    }
+
+    /// The data type of the rows, the feature names in its metadata.
+    fn data_type(&self) -> anyhow::Result<DataType> {
+        let metadata = serde_json::from_value(json!({ FEATURE_NAMES: self.feature_names }))?;
+        Ok(DataType::new(
+            DatasetRow::type_name_static(),
+            Some(metadata),
+            Some(self.identifier()),
+        ))
+    }
+
+    fn catalog(&self) -> ParquetDataCatalog {
+        ParquetDataCatalog::new(&self.catalog, None, None, None, None)
+    }
+}
+
+impl DatasetRow {
+    /// The row storing `row`.
+    fn of(row: &TargetRow) -> Self {
+        Self {
+            features: row.decision.features.clone(),
+            targets: row.values(),
+            settled_at: row.settled_at,
+            ts_event: row.decision.ts_event,
+            ts_init: row.decision.ts_init,
+        }
+    }
+}
+
+/// The catalog type of the rows.
+fn row_type() -> NautilusDataType {
+    NautilusDataType::Custom {
+        type_name: DatasetRow::type_name_static().to_string(),
+    }
+}
+
+/// The UTC day of `time`.
+fn day_of(time: UnixNanos) -> Date {
+    Timestamp::from(time).to_zoned(TimeZone::UTC).date()
+}
+
+/// When `day` starts, in UTC.
+fn start_of(day: Date) -> anyhow::Result<Timestamp> {
+    Ok(day.to_zoned(TimeZone::UTC)?.timestamp())
+}
+
+/// The last nanosecond of `day`, in UTC.
+fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
+    Ok(UnixNanos::from(
+        start_of(day.tomorrow()?)? - SignedDuration::from_nanos(1),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_indicators::average::sma::SimpleMovingAverage;
+    use nautilus_model::{
+        enums::PriceType,
+        identifiers::InstrumentId,
+        types::{Money, Quantity},
+    };
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::model::{
+        decide::FeatureRow,
+        targets::{Barrier, Exit, Outcome, Outcomes},
+    };
+
+    const GOLD: &str = "XAUUSD.ICMARKETS";
+    const STRATEGY: &str = "DATASET-001";
+
+    /// A feature set of `width` features on gold's quotes.
+    fn features(width: usize) -> std::rc::Rc<FeatureSet> {
+        (0..width)
+            .fold(FeatureSet::builder(), |builder, i| {
+                builder.quotes(
+                    InstrumentId::from(GOLD),
+                    &format!("mid_{i}"),
+                    SimpleMovingAverage::new(i + 1, Some(PriceType::Mid)),
+                )
+            })
+            .build()
+            .unwrap()
+    }
+
+    /// A barrier with a limit of 2 hours and a horizon of 1 hour.
+    fn targets() -> TargetsConfig {
+        TargetsConfig::builder()
+            .instrument_id(InstrumentId::from(GOLD))
+            .quantity(Quantity::from(1))
+            .barrier(Barrier {
+                take_profit: Decimal::from(3),
+                stop: Decimal::from(2),
+                limit: SignedDuration::from_hours(2),
+            })
+            .horizon(SignedDuration::from_hours(1))
+            .build()
+    }
+
+    fn dataset(catalog: &Path, strategy: &str, width: usize) -> Dataset {
+        Dataset::new(
+            catalog,
+            StrategyId::from(strategy),
+            &features(width),
+            DecisionRule::Every(SignedDuration::from_hours(1)),
+            targets(),
+        )
+        .unwrap()
+    }
+
+    fn at(time: &str) -> Timestamp {
+        time.parse().unwrap()
+    }
+
+    /// The row of the decision at `time`, settled an hour later: its
+    /// features, a long winning `pnl` at its take profit and a short losing
+    /// as much at its stop on the barrier, the reverse at the horizon.
+    fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
+        let ns = UnixNanos::from(at(time));
+        let loss = format!("-{pnl}");
+        let outcome = |pnl: &str, exit| Outcome {
+            pnl: Money::from(&*format!("{pnl} USD")),
+            exit,
+        };
+        TargetRow {
+            decision: FeatureRow {
+                strategy_id: StrategyId::from(STRATEGY),
+                features,
+                ts_event: ns,
+                ts_init: ns,
+            },
+            barrier: Some(Outcomes {
+                long: outcome(pnl, Exit::TakeProfit),
+                short: outcome(&loss, Exit::Stop),
+            }),
+            horizon: Some(Outcomes {
+                long: outcome(&loss, Exit::Time),
+                short: outcome(pnl, Exit::Time),
+            }),
+            settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
+        }
+    }
+
+    /// The row `row` stores.
+    fn stored(time: &str, features: Vec<f64>, pnl: f64) -> DatasetRow {
+        let ns = UnixNanos::from(at(time));
+        DatasetRow {
+            features,
+            targets: vec![pnl, 1.0, -pnl, -1.0, -pnl, 0.0, pnl, 0.0],
+            settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
+            ts_event: ns,
+            ts_init: ns,
+        }
+    }
+
+    /// Whether `got` equals `want` bit for bit, NaN included.
+    fn assert_bits_eq(got: &[DatasetRow], want: &[DatasetRow]) {
+        let bits = |rows: &[DatasetRow]| {
+            rows.iter()
+                .map(|row| {
+                    let values = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    (
+                        values(&row.features),
+                        values(&row.targets),
+                        row.settled_at,
+                        row.ts_event,
+                        row.ts_init,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(got), bits(want), "{got:#?}");
+    }
+
+    #[test]
+    fn rows_read_back_bit_for_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 3);
+        let odd = vec![f64::NAN, -0.0, f64::MIN_POSITIVE / 4.0];
+        let rows = [
+            row("2026-01-06T10:00:00Z", odd.clone(), "2.5"),
+            row("2026-01-05T09:00:00Z", vec![1.0, 2.0, 3.0], "0.75"),
+        ];
+
+        dataset
+            .write(
+                &rows,
+                at("2026-01-05T00:00:00Z"),
+                at("2026-01-07T02:00:00Z"),
+            )
+            .unwrap();
+
+        assert_bits_eq(
+            &dataset
+                .read(at("2026-01-05T00:00:00Z"), at("2026-01-07T00:00:00Z"))
+                .unwrap(),
+            &[
+                stored("2026-01-05T09:00:00Z", vec![1.0, 2.0, 3.0], 0.75),
+                stored("2026-01-06T10:00:00Z", odd, 2.5),
+            ],
+        );
+    }
+    fn day(date: &str) -> Date {
+        date.parse().unwrap()
+    }
+
+    #[test]
+    fn every_day_is_missing_from_an_empty_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            dataset(dir.path(), STRATEGY, 1)
+                .missing(day("2026-01-05"), day("2026-01-07"))
+                .unwrap(),
+            [day("2026-01-05"), day("2026-01-06"), day("2026-01-07")]
+        );
+    }
+
+    #[test]
+    fn a_day_is_written_once_replay_has_passed_its_end_plus_the_horizon() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let rows = [
+            row("2026-01-05T09:00:00Z", vec![1.0], "1"),
+            row("2026-01-06T09:00:00Z", vec![2.0], "1"),
+        ];
+
+        // The barrier's limit, 2 hours, is the longest target.
+        dataset
+            .write(
+                &rows,
+                at("2026-01-05T00:00:00Z"),
+                at("2026-01-07T01:59:59Z"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            dataset
+                .missing(day("2026-01-05"), day("2026-01-06"))
+                .unwrap(),
+            [day("2026-01-06")]
+        );
+        assert_bits_eq(
+            &dataset
+                .read(at("2026-01-05T00:00:00Z"), at("2026-01-07T00:00:00Z"))
+                .unwrap(),
+            &[stored("2026-01-05T09:00:00Z", vec![1.0], 1.0)],
+        );
+    }
+
+    #[test]
+    fn a_day_the_replay_started_within_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let rows = [
+            row("2026-01-05T09:00:00Z", vec![1.0], "1"),
+            row("2026-01-06T09:00:00Z", vec![2.0], "1"),
+        ];
+
+        dataset
+            .write(
+                &rows,
+                at("2026-01-05T08:00:00Z"),
+                at("2026-01-07T02:00:00Z"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            dataset
+                .missing(day("2026-01-05"), day("2026-01-06"))
+                .unwrap(),
+            [day("2026-01-05")]
+        );
+    }
+    #[test]
+    fn recomputing_a_day_replaces_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
+
+        dataset
+            .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
+            .unwrap();
+        dataset
+            .write(&[row("2026-01-05T10:00:00Z", vec![2.0], "3")], from, to)
+            .unwrap();
+
+        assert_bits_eq(
+            &dataset.read(from, to).unwrap(),
+            &[stored("2026-01-05T10:00:00Z", vec![2.0], 3.0)],
+        );
+    }
+
+    #[test]
+    fn days_without_rows_are_covered_by_the_files_of_the_days_beside_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        // A Thursday without decisions, a Friday, a weekend, a Monday.
+        let rows = [
+            row("2026-01-02T09:00:00Z", vec![1.0], "1"),
+            row("2026-01-05T09:00:00Z", vec![2.0], "1"),
+        ];
+
+        dataset
+            .write(
+                &rows,
+                at("2026-01-01T00:00:00Z"),
+                at("2026-01-06T02:00:00Z"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            dataset
+                .missing(day("2026-01-01"), day("2026-01-05"))
+                .unwrap(),
+            []
+        );
+        assert_bits_eq(
+            &dataset
+                .read(at("2026-01-01T00:00:00Z"), at("2026-01-06T00:00:00Z"))
+                .unwrap(),
+            &[
+                stored("2026-01-02T09:00:00Z", vec![1.0], 1.0),
+                stored("2026-01-05T09:00:00Z", vec![2.0], 1.0),
+            ],
+        );
+    }
+    #[test]
+    fn strategies_with_different_feature_widths_coexist() {
+        let dir = tempfile::tempdir().unwrap();
+        let (narrow, wide) = (
+            dataset(dir.path(), "NARROW-001", 1),
+            dataset(dir.path(), "WIDE-001", 3),
+        );
+        let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
+
+        narrow
+            .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
+            .unwrap();
+        wide.write(
+            &[row("2026-01-05T09:00:00Z", vec![1.0, 2.0, 3.0], "2")],
+            from,
+            to,
+        )
+        .unwrap();
+
+        assert_bits_eq(
+            &narrow.read(from, to).unwrap(),
+            &[stored("2026-01-05T09:00:00Z", vec![1.0], 1.0)],
+        );
+        assert_bits_eq(
+            &wide.read(from, to).unwrap(),
+            &[stored("2026-01-05T09:00:00Z", vec![1.0, 2.0, 3.0], 2.0)],
+        );
+    }
+
+    #[test]
+    fn a_change_of_the_features_the_decisions_or_the_targets_finds_an_empty_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
+        dataset(dir.path(), STRATEGY, 1)
+            .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
+            .unwrap();
+        let changed = |rule, targets| {
+            Dataset::new(
+                dir.path(),
+                StrategyId::from(STRATEGY),
+                &features(1),
+                rule,
+                targets,
+            )
+            .unwrap()
+        };
+        let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
+        let changed = [
+            dataset(dir.path(), STRATEGY, 2),
+            changed(
+                DecisionRule::Every(SignedDuration::from_mins(30)),
+                targets(),
+            ),
+            changed(
+                hourly,
+                TargetsConfig {
+                    horizon: Some(SignedDuration::from_mins(30)),
+                    ..targets()
+                },
+            ),
+        ];
+
+        assert!(
+            dataset(dir.path(), STRATEGY, 1)
+                .missing(day("2026-01-05"), day("2026-01-05"))
+                .unwrap()
+                .is_empty()
+        );
+        for dataset in changed {
+            assert_eq!(
+                dataset
+                    .missing(day("2026-01-05"), day("2026-01-05"))
+                    .unwrap(),
+                [day("2026-01-05")],
+                "{dataset:?}"
+            );
+            assert!(dataset.read(from, to).unwrap().is_empty(), "{dataset:?}");
+        }
+    }
+    #[test]
+    fn the_manifest_names_the_features_the_targets_the_days_and_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 2);
+        let rule = DecisionRule::Every(SignedDuration::from_hours(1));
+        let fingerprint = targets::fingerprint(decide::fingerprint(&features(2), rule), &targets());
+        for (time, from, to) in [
+            (
+                "2026-01-05T09:00:00Z",
+                "2026-01-05T00:00:00Z",
+                "2026-01-06T02:00:00Z",
+            ),
+            (
+                "2026-01-06T09:00:00Z",
+                "2026-01-06T00:00:00Z",
+                "2026-01-07T02:00:00Z",
+            ),
+            (
+                "2026-01-08T09:00:00Z",
+                "2026-01-08T00:00:00Z",
+                "2026-01-09T02:00:00Z",
+            ),
+        ] {
+            dataset
+                .write(&[row(time, vec![1.0, 2.0], "1")], at(from), at(to))
+                .unwrap();
+        }
+
+        let manifest = dataset.manifest().unwrap();
+
+        assert_eq!(manifest.strategy_id, StrategyId::from(STRATEGY));
+        assert_eq!(manifest.feature_names, ["mid_0", "mid_1"]);
+        assert_eq!(manifest.targets, targets());
+        assert_eq!(
+            manifest.target_names,
+            [
+                "barrier_long_pnl",
+                "barrier_long_exit",
+                "barrier_short_pnl",
+                "barrier_short_exit",
+                "horizon_long_pnl",
+                "horizon_long_exit",
+                "horizon_short_pnl",
+                "horizon_short_exit",
+            ]
+        );
+        assert_eq!(
+            manifest.days,
+            [
+                Days {
+                    first: day("2026-01-05"),
+                    last: day("2026-01-06")
+                },
+                Days {
+                    first: day("2026-01-08"),
+                    last: day("2026-01-08")
+                },
+            ]
+        );
+        assert_eq!(manifest.fingerprint, fingerprint.to_string());
+    }
+
+    #[test]
+    fn a_dataset_never_written_has_no_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(dataset(dir.path(), STRATEGY, 1).manifest().is_err());
+    }
+    #[test]
+    fn a_build_replays_the_missing_days_once_through_their_settling() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let rows = [
+            row("2026-01-05T09:00:00Z", vec![1.0], "1"),
+            row("2026-01-07T09:00:00Z", vec![3.0], "1"),
+        ];
+        dataset
+            .write(
+                &[row("2026-01-06T09:00:00Z", vec![2.0], "1")],
+                at("2026-01-06T00:00:00Z"),
+                at("2026-01-07T02:00:00Z"),
+            )
+            .unwrap();
+        let mut replays = vec![];
+
+        let built = dataset
+            .build(day("2026-01-05"), day("2026-01-07"), |from, to| {
+                replays.push((from, to));
+                Ok(rows.to_vec())
+            })
+            .unwrap();
+
+        assert_eq!(built, [day("2026-01-05"), day("2026-01-07")]);
+        assert_eq!(
+            replays,
+            [(at("2026-01-05T00:00:00Z"), at("2026-01-08T02:00:00Z"))]
+        );
+        assert!(
+            dataset
+                .missing(day("2026-01-05"), day("2026-01-07"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_second_build_of_the_same_span_replays_no_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let rows = [row("2026-01-05T09:00:00Z", vec![1.0], "1")];
+        dataset
+            .build(day("2026-01-05"), day("2026-01-05"), |_, _| {
+                Ok(rows.to_vec())
+            })
+            .unwrap();
+
+        let built = dataset
+            .build(day("2026-01-05"), day("2026-01-05"), |_, _| {
+                panic!("a second build replayed")
+            })
+            .unwrap();
+
+        assert!(built.is_empty());
+    }
+}
