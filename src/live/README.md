@@ -80,8 +80,9 @@ node's cache (see "Cache in Redis").
 - `--staging` (default `staging`) is the directory the node stages the
   data it streams, outside the catalog (a staging directory inside it is
   refused); it also keeps each trader's instance id. `--promotion-minutes`
-  (default 5, at least 1) is how often the staged data is promoted into
-  the catalog (see "Recording into the catalog").
+  (default 5, at least 1, at most as many as fit in u64 milliseconds) is
+  how often the staged data is promoted into the catalog (see "Recording
+  into the catalog").
 - `--models` (default `models`) is the model store a strategy trading on a
   model reads, its newest model valid at each decision (strategy README,
   "Features and decisions", "Model handle"); the EMA reads none.
