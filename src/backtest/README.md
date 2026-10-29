@@ -91,9 +91,10 @@ composite bar type (`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
 quotes of their instruments. The data engine builds the strategy's
 internal bars from them, and orders fill on them (see Fills). It replays
 the tick series the strategy declares (`Backtest::ticks`, the requirements'
-`ticks`: quotes, trades or book depth of an instrument), one
-`BacktestDataConfig` each, as declared and with no bar types needed
-(`backtest_ticks.rs`). It also replays the book depth of each instrument of
+`ticks`: quotes, trades, book depth, book deltas or custom data of an
+instrument), one `BacktestDataConfig` each but custom data (see Custom
+data), as declared and with no bar types needed (`backtest_ticks.rs`,
+`backtest_book_deltas_and_custom_data.rs`). It also replays the book depth of each instrument of
 the bar types whose catalog stores one (see Book data) and the funding of
 each instrument whose catalog stores funding (`Backtest::series`; see OKX
 on candles), and nothing else: an instrument of the ticks alone has no
@@ -178,7 +179,7 @@ let run_config = BacktestRunConfig::builder()
     .engine(engine_config)        // logging, warmup catalog, cache and data engine from strategy::warmup
     .start(engine_start)          // start − 1 ns (see The engine start)
     .end(end)
-    .chunk_size(CHUNK_SIZE)       // 100,000: streamed, not loaded at once
+    .maybe_chunk_size(chunk_size) // 100,000: streamed, not loaded at once; none with custom data
     .raise_exception(true)
     .dispose_on_completion(false) // the cache outlives run
     .build()?;
@@ -190,7 +191,8 @@ time instead of loading them all first (Nautilus' streaming mode,
 `run_streaming` in `backtest/src/node.rs`). A day of CME gold's book is
 7.4 million snapshots; loaded at once it went past 16 GB and the run was
 killed. The order of the replay is the same: the suite's results did not
-change. With the default `raise_exception = false`, a build or run error is
+change. A run replaying custom data loads all its data at once instead
+(see Custom data). With the default `raise_exception = false`, a build or run error is
 only logged, the run is skipped and `node.run()` returns `Ok` with no
 result; we set it `true` so the error is returned.
 
@@ -345,7 +347,7 @@ let book = BacktestDataConfig::builder()            // book depth: by instrument
     .build()?;
 ```
 
-A strategy declaring the book as a tick series (`depth`) gets it as
+A strategy declaring the book as a tick series (`order_book_depths`) gets it as
 declared; otherwise no config field asks for it: the strategy lists the
 instrument among its `instrument_ids`, and the catalog decides. Nautilus replays the snapshots
 with the other data, in time order: to the instrument's venue, and to the
@@ -364,6 +366,46 @@ RequestQuotes"): the warmup's request group ends failed, which a strategy
 calling `warmup::finished` logs as an error ("the warmup is incomplete"),
 and the run goes on. An instrument with neither is refused by the
 coverage check, as before.
+
+### Book deltas
+
+A strategy declaring book deltas (`order_book_deltas`, Databento's MBO)
+gets them from one `BacktestDataConfig` of `OrderBookDelta` by
+instrument. Nautilus' node regroups the catalog's flat deltas into an
+`OrderBookDeltas` per event, closed by the delta flagged `F_LAST`
+(`batch_deltas`, its default), replays each at its closing delta to the
+venue and the data engine, which publishes it to a strategy subscribed
+with `subscribe_book_deltas` (`on_book_deltas`). Deltas ending without an
+`F_LAST` fail the run (Nautilus: "Order book deltas end without an
+`F_LAST` delta").
+
+### Custom data
+
+A strategy declaring custom data (`Custom:<type name>` of an instrument,
+`strategy/README.md`) gets it replayed in time order with the other
+series, to `on_data` of a subscription to
+`DataType::new(type_name, None, Some(instrument_id))`. Nautilus' node
+cannot load it: `BacktestDataConfig` refuses `NautilusDataType::Custom`
+("is not supported by BacktestDataConfig", `BacktestDataConfig::validate`
+in `backtest/src/config.rs`; Nautilus' develop branch too, 2026-10-29). Its
+engine replays it, though: `BacktestEngine::add_data` takes custom data
+(no instrument needed), merges it by `ts_init` with the rest and hands it
+to the data engine, which publishes it on its data type's topic. So
+`node::custom_data` reads each custom series from the catalog over its
+slice (`ParquetDataCatalog::query_custom_data_dynamic`, which decodes by
+the registered type name: the strategy registers its types with
+`nautilus_serialization::ensure_custom_data_registered` first) and
+`node::run` adds it to the built engine before `node.run()`.
+
+A streaming run (`chunk_size`) clears the engine's data after every chunk
+(`stream_chunks` in `backtest/src/node.rs` calls `clear_data`), so data
+added before the run would be gone after the first chunk. A run with
+custom data therefore has no `chunk_size`: the node loads every series at
+once (`run_oneshot`, which adds its series beside what the engine holds
+and runs). That is the memory of the whole window: fine for bars, quotes
+and custom data, not for months of MBP-10 depth beside them (a day of
+gold's depth went past 16 GB). The coverage check asks custom data over
+its slices as every series.
 
 ### Engine config
 
@@ -1162,7 +1204,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   instrument added, none without; the stored book depth of an
   instrument added beside the source of its bars, or alone when none is
   stored); the data configs (quotes by instrument,
-  a composite bar type's source bars by bar type); the report of a
+  a composite bar type's source bars by bar type, a run of custom data
+  loaded at once); the report of a
   hand-built `Outcome` (sections, sorted names, max drawdown, the costs and
   the gross PnL); the venue at the run's leverage with no margin model of
   ours; instruments on two venues a venue each, as each keeps positions,
@@ -1278,6 +1321,13 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     a strategy subscribed to its book depth, managed, gets the snapshots
     of the run's window in order, the cache's book holding each as it
     arrives; gold's MID bars, without a source, are left out.
+  - `backtest_book_deltas_and_custom_data.rs`: CME gold's book deltas
+    (an event before the run, an event of two deltas, one of one) and its
+    `Imbalance`s, a custom data type of the tests' (`common::glbx`),
+    declared beside IC's gold quotes: the strategy gets the deltas of the
+    run's window as an event each, the imbalances of the window in
+    `on_data`, among the quotes in time order; undeclared, neither is
+    replayed.
   - `backtest_two_venues.rs`: gold's book from `GLBX` and IC's gold
     quotes (`common::ic`) in one catalog: a strategy reading the book buys
     10 oz of XAUUSD on IC's first hour bar; two venues, the trade on
@@ -1288,3 +1338,14 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     margin, 667.68 USD; a second of 5 oz at 4012.15 is denied by the risk
     engine (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=331.72 USD,
     margin=668.69 USD`).
+  - `backtest_features.rs`: a strategy's feature set and its decisions
+    (strategy README, "Features and decisions"), on a ramp of SXR8.IBIS
+    mids a cent a minute: a moving average of the last three quote mids
+    and one of the last two hour MID bars' closes, both registered with
+    Nautilus, a decision every 30 minutes. Each decision fires 10 ms after
+    its half hour and publishes one row: the mean of the three quotes up
+    to it (the mid a minute before, so no later quote), and of the two
+    hour closes up to it, the bar closing on the decision included; no row
+    before the second bar. Without the 10 ms the decision on the hour
+    comes before that hour's bar: a backtest runs the timers of one time in
+    the order of their names.

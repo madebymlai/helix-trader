@@ -15,6 +15,7 @@ mod common;
 
 mod backtest_bars;
 mod backtest_bars_on_close;
+mod backtest_book_deltas_and_custom_data;
 mod backtest_book_depth;
 mod backtest_commission_per_order;
 mod backtest_commission_rate;
@@ -28,6 +29,7 @@ mod backtest_ema_exits;
 mod backtest_ema_overlap;
 mod backtest_ema_read_only_instrument;
 mod backtest_ema_time_exit;
+mod backtest_features;
 mod backtest_hedging_venue;
 mod backtest_ib_minute_bars;
 mod backtest_ic_hedging;

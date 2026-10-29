@@ -77,8 +77,9 @@ beside its root is one series: its slices from both tables are merged.
 ## The roller
 
 A `Roller`, owned by a strategy, keeps it subscribed to the tick series it
-reads (`TickSeries`: quotes, trades or book depth of an instrument, root or
-plain) on the contract standing for each instrument, with the plain
+reads (`TickSeries`: quotes, trades, book depth, book deltas or custom
+data of an instrument, root or plain; custom data keyed by the contract's
+id) on the contract standing for each instrument, with the plain
 Nautilus clock and subscription API, as Nautilus' own crate-private roller
 of continuous bars does. The strategy starts it in `on_start` and hands it
 its time events in `on_time_event`:

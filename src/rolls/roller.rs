@@ -10,10 +10,14 @@ use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
-use nautilus_model::{enums::BookType, identifiers::InstrumentId};
+use nautilus_model::{
+    data::{DataType, NautilusDataType},
+    enums::BookType,
+    identifiers::InstrumentId,
+};
 
 use super::Transition;
-use crate::strategy::{TickData, TickSeries};
+use crate::strategy::TickSeries;
 
 /// The prefix of an instrument's roll alert, followed by its id.
 const ROLL_ALERT: &str = "ROLL:";
@@ -117,11 +121,11 @@ impl Roller {
     }
 
     /// The kinds of the series of `instrument_id`.
-    fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = TickData> + '_ {
+    fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = &NautilusDataType> + '_ {
         self.ticks
             .iter()
             .filter(move |tick| tick.instrument_id == instrument_id)
-            .map(|tick| tick.data)
+            .map(|tick| &tick.data)
     }
 
     /// Subscribes `actor` to the series of `instrument_id` on `contract`.
@@ -131,9 +135,9 @@ impl Roller {
     {
         for data in self.data_of(instrument_id) {
             match data {
-                TickData::Quotes => actor.subscribe_quotes(contract, None, None),
-                TickData::Trades => actor.subscribe_trades(contract, None, None),
-                TickData::Depth => actor.subscribe_book_depth(
+                NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, None),
+                NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, None),
+                NautilusDataType::OrderBookDepth => actor.subscribe_book_depth(
                     contract,
                     BookType::L2_MBP,
                     Some(DEPTH),
@@ -141,6 +145,13 @@ impl Roller {
                     false,
                     None,
                 ),
+                NautilusDataType::OrderBookDelta => {
+                    actor.subscribe_book_deltas(contract, BookType::L3_MBO, None, None, false, None)
+                }
+                NautilusDataType::Custom { type_name } => {
+                    actor.subscribe_data(custom(type_name, contract), None, None);
+                }
+                other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
         }
     }
@@ -161,14 +172,23 @@ impl Roller {
             let still_read = self
                 .ticks
                 .iter()
-                .any(|tick| tick.data == data && front(tick.instrument_id, time) == contract);
+                .any(|tick| tick.data == *data && front(tick.instrument_id, time) == contract);
             if still_read {
                 continue;
             }
             match data {
-                TickData::Quotes => actor.unsubscribe_quotes(contract, None, None),
-                TickData::Trades => actor.unsubscribe_trades(contract, None, None),
-                TickData::Depth => actor.unsubscribe_book_depth(contract, None, None),
+                NautilusDataType::QuoteTick => actor.unsubscribe_quotes(contract, None, None),
+                NautilusDataType::TradeTick => actor.unsubscribe_trades(contract, None, None),
+                NautilusDataType::OrderBookDepth => {
+                    actor.unsubscribe_book_depth(contract, None, None);
+                }
+                NautilusDataType::OrderBookDelta => {
+                    actor.unsubscribe_book_deltas(contract, None, None);
+                }
+                NautilusDataType::Custom { type_name } => {
+                    actor.unsubscribe_data(custom(type_name, contract), None, None);
+                }
+                other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
         }
     }
@@ -178,6 +198,12 @@ impl Roller {
 /// of its next roll, or itself if it does not roll.
 fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
+}
+
+/// The data type of the custom data `type_name` of `contract`, keyed by
+/// its id (see `TickSeries`).
+fn custom(type_name: &str, contract: InstrumentId) -> DataType {
+    DataType::new(type_name, None, Some(contract.to_string()))
 }
 
 /// The name of the roll alert of `instrument_id`.

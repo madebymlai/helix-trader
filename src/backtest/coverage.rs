@@ -112,10 +112,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::{
-        backtest::commission_per_order,
-        strategy::{TickData, TickSeries},
-    };
+    use crate::{backtest::commission_per_order, strategy::TickSeries};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -398,7 +395,7 @@ mod tests {
         Backtest {
             bar_types: vec![],
             ticks: vec![TickSeries {
-                data: TickData::Trades,
+                data: NautilusDataType::TradeTick,
                 instrument_id: equity_aapl().id,
             }],
             ..backtest(dir, &[])

@@ -197,9 +197,10 @@ impl NodeFill {
   missing intervals. A rolled root's contracts come each over its slice;
   `DataRequirements::slices` has already merged one contract's slices of
   a series from two tables, so no window is asked twice. A
-  covered window asks for nothing: no node is built. Quotes, trades and
-  book depths only (`FillData`): a source filling bars or funding through
-  the node does not exist yet.
+  covered window asks for nothing: no node is built. Quotes, trades, book
+  depths and book deltas only (`FillData`): a source filling bars or
+  funding through the node does not exist yet, and no source serves
+  custom data, refused naming it (`FillData::of`).
 - **Windows.** `add` cuts each series request into windows of the
   source's period (`DatabentoHistory::period`: a day; `IcHistory::period`:
   a week), aligned on multiples
@@ -445,7 +446,7 @@ after OKX's fill and before IB's.
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
 - GLBX instruments' series as declared (MBP-10 book as `OrderBookDepth`,
-  trades, quotes), with their definitions, fill through the node by
+  MBO book as `OrderBookDelta`, trades, quotes), with their definitions, fill through the node by
   Nautilus' Databento data client, a day a request, after `databento/` checks the dataset's end and
   logs Databento's quote for every request: see
   [`databento/README.md`](databento/README.md). The GLBX series come from
@@ -482,7 +483,7 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   empty catalog lacks (a definition, then each series over its slice, a
   rolled root's contracts each over its own), only what is outside a
   stored interval, nothing (not even a definition) for a covered window;
-  bars refused, naming the
+  book deltas asked as deltas; bars and custom data refused, naming the
   series; the coverage check failing a window answered with rows but not
   stored, not a definition or an empty window.
 - `tests/node_fill/`, fill-catalog's fill at its seam: `missing`, then a
@@ -494,6 +495,7 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
     the catalog); the same fill again building no node;
   - a client answering 50 ms later asked one window at a time, in order;
     empty windows before any stored data recorded only once they touch it;
+  - book deltas a day a request, written back;
   - a failed request (`RequestFailed`, a failure envelope, a refused
     request) failing the fill naming the request and its reason, writing
     nothing, asking nothing after it; a silent client failing it after the

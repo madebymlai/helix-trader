@@ -17,11 +17,13 @@ mod ib;
 mod ic;
 mod node;
 mod okx;
+mod recording;
 mod redis;
 
 pub use ic::{
     IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
 };
+pub use recording::Recording;
 
 pub use crate::data::IbAccount;
 
@@ -34,7 +36,6 @@ use nautilus_common::{
     component::Component,
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
-use nautilus_core::UUID4;
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
@@ -70,6 +71,9 @@ pub struct Live {
     /// the warmup, and keeps the history the venues certify complete (see
     /// `node::run`). Created if missing.
     pub catalog: PathBuf,
+    /// Where the node stages the data it streams into the catalog, and how
+    /// often it promotes it there; also keeps the trader's instance id.
+    pub recording: Recording,
 }
 
 impl Live {
@@ -84,7 +88,9 @@ impl Live {
     /// Returns an error if a bar type is on a root (live builds no
     /// continuous bars), if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if the catalog cannot be created
-    /// or its path is not UTF-8, if an IC bar type is not built from
+    /// or its path is not UTF-8, if the staging directory is inside the
+    /// catalog or the trader's instance id cannot be kept (see
+    /// `Recording`), if an IC bar type is not built from
     /// quotes or IC's environment or credential is missing (see
     /// `ic::clients`, checked before anything connects), if
     /// OKX's clients cannot be set up or the OKX account does not suit the
@@ -101,6 +107,8 @@ impl Live {
         std::fs::create_dir_all(&self.catalog)
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         let catalog = DataCatalogConfig::new(catalog_path(&self.catalog)?, None, None);
+        let streaming = self.recording.streaming(&catalog)?;
+        let instance_id = self.recording.instance_id(self.trader_id)?;
         let data_engine = warmup::live_data_engine_config(&requirements.bar_types);
         let instrument_ids = loaded_instrument_ids(requirements, Timestamp::now())?;
         // The node would install the logger when built, after the clients
@@ -109,7 +117,7 @@ impl Live {
         let file_config = self.logging.file_config.clone().unwrap_or_default();
         let _log_guard = init_logging(
             self.trader_id,
-            UUID4::new(),
+            instance_id,
             self.logging.clone(),
             file_config,
         )?;
@@ -147,9 +155,11 @@ impl Live {
         }
         node::run(
             self.trader_id,
+            instance_id,
             self.logging.clone(),
             cache,
             data_engine,
+            streaming,
             catalog,
             clients,
             &instrument_ids,
@@ -198,10 +208,10 @@ fn loaded_instrument_ids(
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_model::data::BarType;
+    use nautilus_model::data::{BarType, NautilusDataType};
 
     use super::*;
-    use crate::strategy::{TickData, TickSeries};
+    use crate::strategy::TickSeries;
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -211,13 +221,13 @@ mod tests {
         ids.iter().map(|&id| InstrumentId::from(id)).collect()
     }
 
-    fn ticks(data: TickData, instrument_ids: &[&str]) -> DataRequirements {
+    fn ticks(data: NautilusDataType, instrument_ids: &[&str]) -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
             ticks: instrument_ids
                 .iter()
                 .map(|&id| TickSeries {
-                    data,
+                    data: data.clone(),
                     instrument_id: InstrumentId::from(id),
                 })
                 .collect(),
@@ -231,7 +241,7 @@ mod tests {
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
-            ..ticks(TickData::Trades, &["GC.GLBX"])
+            ..ticks(NautilusDataType::TradeTick, &["GC.GLBX"])
         };
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
@@ -241,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
-        let requirements = ticks(TickData::Depth, &["GC.GLBX"]);
+        let requirements = ticks(NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
             ids(&["GCZ6.GLBX", "GCG7.GLBX"])
@@ -258,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_contract_read_beside_its_root_loads_once() {
-        let requirements = ticks(TickData::Trades, &["GCZ6.GLBX", "GC.GLBX"]);
+        let requirements = ticks(NautilusDataType::TradeTick, &["GCZ6.GLBX", "GC.GLBX"]);
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
             ids(&["GCZ6.GLBX", "GCG7.GLBX"])
@@ -272,7 +282,10 @@ mod tests {
                 BarType::from("SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
                 BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
             ],
-            ..ticks(TickData::Quotes, &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"])
+            ..ticks(
+                NautilusDataType::QuoteTick,
+                &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"],
+            )
         };
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
@@ -289,7 +302,7 @@ mod tests {
     fn bars_on_a_root_are_refused_naming_the_bar_type_and_its_contract() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-MINUTE-LAST-INTERNAL")],
-            ..ticks(TickData::Trades, &[])
+            ..ticks(NautilusDataType::TradeTick, &[])
         };
         let err = loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z"))
             .unwrap_err()
