@@ -121,6 +121,25 @@ impl Backtest {
         node::run(config, node::custom_data(self)?, strategy)
     }
 
+    /// Runs `strategy` over the window on a `BacktestNode` as `run` does,
+    /// for what the strategy does alone, as a dataset run builds the
+    /// training table (`model::targets`): the execution engine purges the
+    /// closed orders and positions from the cache a minute after they
+    /// close, so that the run takes time in proportion to its days, and
+    /// there is no result to read from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error as `run` does, but for the costs of the fills.
+    pub fn run_dataset<S>(&self, strategy: S) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+    {
+        let config = node::dataset_run_config(self)?;
+        coverage::check(self)?;
+        node::run_dataset(config, node::custom_data(self)?, strategy)
+    }
+
     /// The continuous bars of the bar types on roots over the run and its
     /// warmup, adjusted in `mode`, their roll prices read from the catalog
     /// (see `rolls::ContinuousBars::read`): the strategy passes them to

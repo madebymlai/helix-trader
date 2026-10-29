@@ -27,6 +27,7 @@ use nautilus_backtest::{
 };
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_core::UnixNanos;
+use nautilus_execution::engine::config::ExecutionEngineConfig;
 use nautilus_model::{
     data::{Data, NautilusDataType},
     enums::{AccountType, BookType},
@@ -51,6 +52,15 @@ const RUN_ID: &str = "backtest";
 /// snapshots, beyond 16 GB loaded at once.
 const CHUNK_SIZE: usize = 100_000;
 
+/// How often a dataset run's execution engine purges the closed orders and
+/// positions from the cache, and how long after closing one is purged, in
+/// minutes (live keeps a week: `live::node`). Its targets are read from
+/// events as they come, never from the cache afterwards. Kept, they slow
+/// the run more than in proportion to its days: 16 days of quotes every
+/// 5 s and targets every 15 minutes took 70 s against 25 s purged, 2 days
+/// 4.2 s against 3.1 s.
+const DATASET_PURGE_MINS: u32 = 1;
+
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
 /// says of it, each with the run's balance, leverage (Nautilus' default
@@ -73,6 +83,28 @@ const CHUNK_SIZE: usize = 100_000;
 /// at once. Build and run errors are raised, not only logged; the engine
 /// outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+    config(backtest, None)
+}
+
+/// The run config of a dataset run of `backtest`: that of `run_config`,
+/// its execution engine purging closed orders and positions
+/// `DATASET_PURGE_MINS` after they close, every `DATASET_PURGE_MINS`.
+pub(super) fn dataset_run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+    let exec_engine = ExecutionEngineConfig::builder()
+        .purge_closed_orders_interval_mins(DATASET_PURGE_MINS)
+        .purge_closed_orders_buffer_mins(DATASET_PURGE_MINS)
+        .purge_closed_positions_interval_mins(DATASET_PURGE_MINS)
+        .purge_closed_positions_buffer_mins(DATASET_PURGE_MINS)
+        .build()?;
+    config(backtest, Some(exec_engine))
+}
+
+/// The run config of `backtest` (see `run_config`), with `exec_engine`, or
+/// Nautilus' default execution engine.
+fn config(
+    backtest: &Backtest,
+    exec_engine: Option<ExecutionEngineConfig>,
+) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
     let (start, end) = (backtest.start, backtest.end);
@@ -98,6 +130,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
     let engine_config = BacktestEngineConfig::builder()
         .cache(cache)
         .data_engine(warmup::data_engine_config())
+        .maybe_exec_engine(exec_engine)
         .catalogs(vec![
             DataCatalogConfig::new(catalog, None, None).with_read_only(true),
         ])
@@ -218,20 +251,7 @@ pub(super) fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let mut node = BacktestNode::new(vec![config])?;
-    node.build()?;
-    let engine = node
-        .get_engine_mut(RUN_ID)
-        .context("no engine for the run")?;
-    engine
-        .kernel_mut()
-        .portfolio
-        .borrow_mut()
-        .register_statistic(Arc::new(MaxDrawdown::new()));
-    engine.add_strategy(strategy)?;
-    if !custom.is_empty() {
-        engine.add_data(custom, None, false, true)?;
-    }
+    let mut node = build(config, custom, strategy)?;
     let results = node.run()?;
     let [result] = <[BacktestResult; 1]>::try_from(results)
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;
@@ -252,6 +272,51 @@ where
     let outcome = Outcome::new(result, &engine.kernel().cache.borrow(), &quotes);
     node.dispose();
     outcome
+}
+
+/// Runs `config` with `strategy` on a new `BacktestNode`, `custom` added
+/// to its engine, as `run` does, for what the strategy does alone: a
+/// dataset run, whose cache is purged as it goes, has no result to read
+/// from it.
+pub(super) fn run_dataset<S>(
+    config: BacktestRunConfig,
+    custom: Vec<Data>,
+    strategy: S,
+) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+{
+    let mut node = build(config, custom, strategy)?;
+    node.run()?;
+    node.dispose();
+    Ok(())
+}
+
+/// A built `BacktestNode` of `config`, `MaxDrawdown` registered with the
+/// portfolio, `strategy` added and `custom` added to its engine.
+fn build<S>(
+    config: BacktestRunConfig,
+    custom: Vec<Data>,
+    strategy: S,
+) -> anyhow::Result<BacktestNode>
+where
+    S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+{
+    let mut node = BacktestNode::new(vec![config])?;
+    node.build()?;
+    let engine = node
+        .get_engine_mut(RUN_ID)
+        .context("no engine for the run")?;
+    engine
+        .kernel_mut()
+        .portfolio
+        .borrow_mut()
+        .register_statistic(Arc::new(MaxDrawdown::new()));
+    engine.add_strategy(strategy)?;
+    if !custom.is_empty() {
+        engine.add_data(custom, None, false, true)?;
+    }
+    Ok(node)
 }
 
 #[cfg(test)]
@@ -442,6 +507,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         assert!(config.engine().logging.print_config);
+    }
+
+    #[test]
+    fn a_trading_run_keeps_its_closed_orders_and_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert!(config.engine().exec_engine.is_none());
+    }
+
+    /// Every minute, those closed a minute or more before.
+    #[test]
+    fn a_dataset_run_purges_its_closed_orders_and_positions_every_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dataset_run_config(&backtest(dir.path())).unwrap();
+        let exec = config.engine().exec_engine.clone().unwrap();
+        let purge = [
+            exec.purge_closed_orders_interval_mins,
+            exec.purge_closed_orders_buffer_mins,
+            exec.purge_closed_positions_interval_mins,
+            exec.purge_closed_positions_buffer_mins,
+        ];
+        assert_eq!(purge, [Some(1); 4]);
+        // The rest of the run is a trading run's.
+        let trading = run_config(&backtest(dir.path())).unwrap();
+        assert_eq!(config.venues().len(), trading.venues().len());
+        assert_eq!(config.data().len(), trading.data().len());
     }
 
     #[test]

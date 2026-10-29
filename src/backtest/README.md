@@ -75,6 +75,19 @@ impl Backtest {
 `Outcome` is Nautilus' `BacktestResult` (public `result`) plus the costs of
 the fills, private: `report` prints them (see Costs in the report).
 
+`run_dataset` runs a strategy the same way for what it does alone, as a
+dataset run builds the training table from its targets (`model::targets`,
+strategy README, "Features and decisions"): its execution engine purges
+closed orders and positions (see Engine config), so it returns no
+`Outcome`, whose statistics and costs read them from the cache.
+
+```rust
+impl Backtest {
+    pub fn run_dataset<S>(&self, strategy: S) -> anyhow::Result<()>
+    where S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static;
+}
+```
+
 `run` fails before building the node when there are no instruments, the
 warmup is negative, `start` is not before
 `end`, the leverage is not positive (Nautilus' check), the cache cannot
@@ -415,6 +428,19 @@ requests, see Warmup catalog), `logging: LoggerConfig`
 (`Backtest::logging`), `cache` (`warmup::cache_config`) and `data_engine`
 (`warmup::data_engine_config`, no bar for an hour without quotes; see
 "Weekends and holidays, found and fixed").
+
+`exec_engine` is Nautilus' default in a trading run, which keeps every
+closed order and position: the result's statistics and the report's costs
+read them from the cache at the end. A dataset run (`run_dataset`) sets
+the execution engine's own purge: every minute, the closed orders and
+positions closed a minute or more before (`DATASET_PURGE_MINS`; live keeps
+a week, `live/README.md`). Its targets are read from events as they come,
+so they are the same purged or not (`backtest_targets.rs`), and the run
+takes time in proportion to its days. Kept, the closed orders slow it more
+than that: 2, 4, 8 and 16 days of IC's gold quoted every 5 s, with a
+bracket and a horizon trade on each side every 15 minutes, took 3.1, 6.3,
+12.6 and 25.4 s purged against 4.2, 10.7, 31.9 and 69.7 s kept (debug
+build).
 
 The node's kernel installs Nautilus' logger from `logging` when it is
 built. Installing one before (`init_logging`, as `fill-catalog` does)
@@ -1210,7 +1236,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   the gross PnL); the venue at the run's leverage with no margin model of
   ours; instruments on two venues a venue each, as each keeps positions,
   with the run's balance, leverage and fee model; a leverage not positive
-  refused. The command line is tested in
+  refused; a trading run keeping its closed orders and positions, a
+  dataset run purging them every minute, its run otherwise the same. The
+  command line is tested in
   `main.rs`: required flags, exactly one commission flag, malformed
   `Money`, the window check, `--leverage` 1 unless given.
 - Integration tests in `tests/backtest/`, one node per test, run the real EMA
@@ -1349,3 +1377,22 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     before the second bar. Without the 10 ms the decision on the hour
     comes before that hour's bar: a backtest runs the timers of one time in
     the order of their names.
+  - `backtest_targets.rs`: targets from orders (strategy README,
+    "Features and decisions"), through `run_dataset` on a hedging venue: a
+    probe decides every hour and opens a bracket (45 minutes) and a
+    horizon trade (30 minutes) on each side. On IC's gold quoted every
+    5 s, barriers 3.00 from the mid: a dip ends the long by its stop at the
+    bid and the short by its take profit at its limit; a spike at the very
+    nanosecond of the bracket's time limit comes before the alert, so the
+    long's take profit and the short's stop count; barriers left alone
+    close by time; each P&L net of 30 USD per million on each fill; the
+    decision still open at the end has no row. On minute bars alone
+    (BTC-USDT-SWAP.OKX), barriers 100 from the close: a bar touching both
+    barriers fills the long's take profit and the short's stop, its high
+    replayed first, at their limit and trigger; a take profit losing net
+    of 0.05% fees has a negative sign. Orders above the instrument's
+    largest are denied, logged, and leave every decision unsettled. Over
+    two days of a random walk, the rows are the same from a dataset run
+    and from a trading run, every decision whose time limit passes before
+    the end settled on 10M USD, while the purge leaves the cache a few
+    closed orders against thousands.

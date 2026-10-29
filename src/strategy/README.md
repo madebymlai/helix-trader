@@ -577,7 +577,40 @@ of its choosing (`model::features`, `model::decide`).
   feature names in order, the strategy's feature code, the shared indicator
   code (`model::features` itself and Nautilus' indicators, named by the
   git source `Cargo.lock` pins, through `build.rs`), the rule and
-  `model::decide`'s own code.
+  `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
+  adds the targets and `model::targets`' code.
+- **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
+  venue with a large balance) each decision's targets come from real
+  orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
+  slippage and funding are in them. The config (`TargetsConfig`, from
+  TOML) names the instrument, the size of every order, and a triple
+  barrier, `barrier = { take_profit = 3.0, stop = 3.0, limit = "2h" }`
+  (distances from the decision's price: the last quote's mid, else the
+  last trade, else the last bar's close), a horizon, `horizon = "1h"`, or
+  both. The strategy shares a `Targets` (`Targets::new(config)`, an `Rc`),
+  calls `open(self, row)` with each row `decide` returns, and hands it
+  `on_time_event`, `on_order_filled`, `on_order_denied`,
+  `on_order_rejected`, `on_position_closed` and `on_stop`; it sends no
+  orders of its own then. For each target and side, a long and a short,
+  `open` sends a bracket (market entry, take-profit limit, stop, the exits
+  one-updates-the-other) or a market entry, client order ids
+  `D{n}-{B|H}{L|S}-{E|TP|SL}`, and sets a time alert at the limit or
+  horizon that closes the decision's positions still open
+  (`close_position`, tagged) and cancels its legs by their ids. A closed
+  position's opening order names its decision and side, its closing order
+  the exit: take profit, stop or time; the only state kept is each open
+  target's position id, from its entry's fill. Once all its targets are
+  closed, the decision's `TargetRow` (its `FeatureRow`, per target and
+  side the realised P&L net of commission as Nautilus reports it and the
+  exit, the settling time) is published on the message bus, keyed by the
+  strategy id (`TargetRow::data_type`); `Outcome::sign` is the P&L's
+  sign. A denied or rejected order, or an entry not filled by its time,
+  leaves the decision unsettled, logged, and so do positions still open
+  at the stop. A barrier hit at the same nanosecond as the time limit
+  counts: Nautilus hands the venue the quote before the alert. On bars
+  alone the venue fills an entry at the last close, a take profit at its
+  limit and a stop at its trigger, a bar's high before its low: as
+  optimistic as any bars-only backtest.
 
 ## Warmup and training
 
