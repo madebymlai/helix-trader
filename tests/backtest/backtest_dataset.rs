@@ -16,7 +16,7 @@ use helix_trader::{
         dataset::{Dataset, DatasetRow},
         decide::{self, DecisionRule},
         features::FeatureSet,
-        targets::{Barrier, TargetRow, Targets, TargetsConfig},
+        targets::{Barrier, Distance, TargetRow, Targets, TargetsConfig},
     },
     strategy::TickSeries,
 };
@@ -118,16 +118,17 @@ fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// A bracket 3.00 away on both sides closed after 2 hours, the longest
+/// A bracket 7.5 bps away on both sides closed after 2 hours, the longest
 /// target, and a horizon of 1 hour, of one ounce.
 fn targets() -> TargetsConfig {
     TargetsConfig::builder()
         .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
         .quantity(Quantity::from(1))
         .barrier(Barrier {
-            take_profit: Decimal::from(3),
-            stop: Decimal::from(3),
+            take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+            stop: Distance::BasisPoints(Decimal::new(75, 1)),
             limit: SignedDuration::from_hours(2),
+            atr: None,
         })
         .horizon(SignedDuration::from_hours(1))
         .build()
