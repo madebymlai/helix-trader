@@ -25,7 +25,7 @@ use helix_trader::{
         handle::{Mode, SettledRows},
         launcher::{Launcher, Retrained},
         targets::TargetRow,
-        train::Outcome,
+        train::Trained,
     },
     strategy::{
         DataRequirements, SeriesSlice,
@@ -806,21 +806,17 @@ fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
     Ok(train)
 }
 
-/// Prints the outcome of a train that published; one that kept the
-/// current model is an error, its reason: the command fails, so that the
+/// Prints the outcome of a train that published every model it trained;
+/// one that kept a current model is an error, its reason: the command fails, so that the
 /// live node that started it knows why (`model::launcher`).
 ///
 /// # Errors
 ///
-/// Returns an error if the train kept the current model.
-fn reported(outcome: &Outcome) -> anyhow::Result<()> {
-    match outcome {
-        Outcome::Published { .. } => {
-            println!("{outcome}");
-            Ok(())
-        }
-        Outcome::Kept(_) => bail!("{outcome}"),
-    }
+/// Returns an error if the train kept a current model.
+fn reported(trained: &Trained) -> anyhow::Result<()> {
+    ensure!(trained.published(), "{trained}");
+    println!("{trained}");
+    Ok(())
 }
 
 /// Trains the strategy's model at `--at` and reports the outcome (see
@@ -879,7 +875,7 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use helix_trader::model::train::Kept;
+    use helix_trader::model::train::{Kept, Outcome};
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]
@@ -1220,10 +1216,16 @@ mod tests {
             score: 0.6,
         };
 
-        let err = reported(&kept).unwrap_err().to_string();
+        let err = reported(&kept.clone().into()).unwrap_err().to_string();
+        let meta_kept = Trained {
+            primary: Some(published.clone()),
+            meta: Some(kept),
+        };
 
         assert!(err.contains("0.48") && err.contains("0.55"), "{err}");
-        assert!(reported(&published).is_ok());
+        assert!(reported(&published.into()).is_ok());
+        let err = reported(&meta_kept).unwrap_err().to_string();
+        assert!(err.contains("meta") && err.contains("0.48"), "{err}");
     }
 
     /// The arguments of a learned live node retraining at a commission

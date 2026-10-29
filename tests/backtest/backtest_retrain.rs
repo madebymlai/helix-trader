@@ -12,58 +12,22 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{STRATEGY, config, replay_on, rule, targets, trade_on, walk},
+    dataset::{Missing, STRATEGY, config, replay_on, rule, targets, trade_on, walk},
     ic,
 };
 use helix_trader::model::{
     config::{ModelConfig, Thresholds},
     dataset::{self, Dataset},
-    features::{Feature, FeatureSet},
+    features::FeatureSet,
     learner::LearnerConfig,
     store::ModelStore,
-    train::{Outcome, Training},
+    train::Training,
     walk::WalkForward,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
-use nautilus_indicators::indicator::Indicator;
-use nautilus_model::{data::QuoteTick, identifiers::InstrumentId, identifiers::StrategyId};
+use nautilus_model::identifiers::{InstrumentId, StrategyId};
 use tempfile::TempDir;
-
-/// Initialized by the first quote, its value missing.
-#[derive(Default)]
-struct Missing {
-    quoted: bool,
-}
-
-impl Indicator for Missing {
-    fn name(&self) -> String {
-        "Missing".to_string()
-    }
-
-    fn has_inputs(&self) -> bool {
-        self.quoted
-    }
-
-    fn initialized(&self) -> bool {
-        self.quoted
-    }
-
-    fn handle_quote(&mut self, _quote: &QuoteTick) -> anyhow::Result<()> {
-        self.quoted = true;
-        Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.quoted = false;
-    }
-}
-
-impl Feature for Missing {
-    fn value(&self) -> f64 {
-        f64::NAN
-    }
-}
 
 fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
@@ -166,7 +130,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                         .join()
                         .unwrap()
                 });
-                assert!(matches!(outcome, Outcome::Published { .. }), "{outcome:?}");
+                assert!(outcome.published(), "{outcome:?}");
                 Ok(())
             },
         )

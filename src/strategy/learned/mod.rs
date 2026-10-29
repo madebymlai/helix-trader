@@ -8,6 +8,9 @@
 //! add into one, which the first close then closes. A restart does not set
 //! again the alerts of the trades still open.
 //!
+//! A `[model.meta]` table in its config adds a meta model, which takes
+//! or leaves each trade of the model (`model::meta`), and may size it.
+//!
 //! In a dataset run (`Mode::Dataset`, through `training`) it places no
 //! trade of its own: the handle opens each decision's targets and is
 //! handed the order, position and time events.

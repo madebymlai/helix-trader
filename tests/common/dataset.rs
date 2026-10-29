@@ -13,7 +13,7 @@ use helix_trader::{
     model::{
         config::{ModelConfig, Thresholds},
         decide::{self, DecisionRule, FeatureRow},
-        features::FeatureSet,
+        features::{Feature, FeatureSet},
         handle::{Mode, ModelHandle, SettledRows, Trade},
         learner::LearnerConfig,
         targets::{Barrier, Distance, Label, TargetRow, TargetsConfig},
@@ -28,9 +28,9 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
-use nautilus_indicators::average::sma::SimpleMovingAverage;
+use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicator};
 use nautilus_model::{
-    data::{CustomData, NautilusDataType},
+    data::{CustomData, NautilusDataType, QuoteTick},
     enums::{OmsType, PriceType},
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
@@ -214,7 +214,7 @@ fn probe(
 
 /// The run of the probe over `[from, to]` on IC's hedging venue, 30 USD
 /// per million traded, 10M USD.
-fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
+pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
         bar_types: vec![],
@@ -292,4 +292,41 @@ pub fn trade_on(
     );
     backtest(catalog.path(), from, to).run(probe).unwrap();
     record.take()
+}
+
+/// A feature initialized by the first quote, its value missing: the fake
+/// learner then predicts the mean of its training labels, so each model's
+/// probability names it.
+#[derive(Default)]
+pub struct Missing {
+    quoted: bool,
+}
+
+impl Indicator for Missing {
+    fn name(&self) -> String {
+        "Missing".to_string()
+    }
+
+    fn has_inputs(&self) -> bool {
+        self.quoted
+    }
+
+    fn initialized(&self) -> bool {
+        self.quoted
+    }
+
+    fn handle_quote(&mut self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        self.quoted = true;
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.quoted = false;
+    }
+}
+
+impl Feature for Missing {
+    fn value(&self) -> f64 {
+        f64::NAN
+    }
 }

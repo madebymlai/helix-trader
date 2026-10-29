@@ -40,6 +40,7 @@ mod backtest_inputs;
 mod backtest_learned;
 mod backtest_long_warmup;
 mod backtest_max_drawdown;
+mod backtest_meta;
 mod backtest_model;
 mod backtest_netting_venue;
 mod backtest_okx_swap;

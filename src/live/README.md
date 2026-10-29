@@ -374,7 +374,9 @@ catalog for the replay. One retrain per strategy runs at a time: one due
 while another runs is skipped, with a warning. The strategy polls the
 child at each decision: a finished child is logged, as info when it
 published (exit status success), as an error with the error it printed
-last when it kept the current model or failed; the child's standard
+last when it kept the current model or failed (with a meta model, the
+child trains the primary, then the meta, and succeeds only if it
+published both, its error naming each one's outcome); the child's standard
 output and error are the node's. A published model is used from the
 next decision, and a node starting with models in the store trades on
 the latest valid from its first decision (strategy README, "Live

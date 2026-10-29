@@ -136,4 +136,35 @@ mod tests {
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("venue"), "{err}");
     }
+
+    /// A meta model is a `[model.meta]` table, and no more: a meta of the
+    /// meta is an unknown field.
+    #[test]
+    fn loads_a_meta_model_from_its_table_alone_and_no_deeper() {
+        let barrier =
+            r#"barrier = { take_profit = { bps = 10 }, stop = { bps = 10 }, limit = "1h" } }"#;
+        let meta = r#"
+            [model.meta]
+            window = "48h"
+            holdout = "12h"
+            threshold = 0.55
+            min_score = 0.5
+            learner = { kind = "baseline" }
+        "#;
+        let toml = format!(
+            "{}\n{meta}",
+            TOML.replace(
+                r#"horizon = "1h" }"#,
+                &format!(r#"horizon = "1h", {barrier}"#)
+            )
+        );
+
+        let config: LearnedConfig = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.model.meta.unwrap().threshold, 0.55);
+
+        let nested = format!("{toml}\n[model.meta.meta]\nthreshold = 0.5\n");
+        let err = toml::from_str::<LearnedConfig>(&nested).unwrap_err();
+        assert!(err.to_string().contains("unknown field `meta`"), "{err}");
+    }
 }

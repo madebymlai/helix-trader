@@ -1026,13 +1026,14 @@ over the span, each model valid from the time it was trained at; `main`
 runs the steps of `model::walk`:
 
 1. If the dataset lacks a day from the window of the first retrain time
-   (the last grid time not after `--start`, less `window`) to `--end`,
+   (the last grid time not after `--start`, less `window`, or the meta
+   model's `window` if longer) to `--end`,
    a child process, `dataset <strategy> --start .. --end ..`, builds
    them, once, to the last day's end plus the longest target: the last
    retrain period then has its targets to score. The catalog must cover
    that span, warmup included.
 2. For each retrain time before `--end` the store has no model valid
-   from, in time order, a child process, `train <strategy> --at t`,
+   from (the primary's, or its meta model's), in time order, a child process, `train <strategy> --at t`,
    trains at it; its window's days already built, it replays none. A
    model in the store is reused, so a second backtest of the span starts
    no child. A train that kept the current model (below the minimum
@@ -1051,6 +1052,12 @@ runs the steps of `model::walk`:
    on rows settled by its valid-from. Live, a model is valid only once
    its train finishes; a backtest takes it valid from its retrain time, a
    small optimism.
+
+   With a meta model, the meta's scores follow, the same sections
+   headed `Meta model scores`: on the rows the primary in use made a
+   trade of (`model::meta`), the meta model in use at each, against
+   whether the barrier on the primary's side won, beside the baseline
+   fitted on the rows a meta trained then is fitted on.
 
 Each child is this binary (`std::env::current_exe`), on the backtest's
 strategy, config, catalog, store, commission flag as given and leverage,
@@ -1525,3 +1532,17 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     trades on the model trained at its midnight, and a second
     preparation builds and trains nothing; each period scores its model
     as the baseline fitted at its start, the same mean.
+  - `backtest_meta.rs`: meta-labeling (`model::meta`) on the fixture of
+    `backtest_retrain.rs`, every model the fake learner on the missing
+    feature, three days retrained at each midnight. A model primary,
+    long at every decision, with a meta model: the first retrain has no
+    primary model before it and publishes no meta model, the others do;
+    each meta model's holdout carries the probability of the primary
+    model trained a day before it, never of the one trained with it, and
+    the run trades no decision of the first day and every decision of
+    the others, long, at the probability of the meta model of its day.
+    A rule primary, the test's probe signalling a long at even hours, a
+    short at odd ones and none every third hour: its dataset holds the
+    16 signals of each day alone, their side among the features, and the
+    run trades each signal on its side at the probability of the meta
+    model of its day.

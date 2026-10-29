@@ -18,7 +18,7 @@ use helix_trader::model::{
     dataset,
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
     store::{ModelManifest, ModelStore, Probe, StoredModel},
-    train::{Outcome, Training},
+    train::Training,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -148,7 +148,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
                 )
                 .unwrap();
                 let outcome = training.train_at(t, |from, to| replay(&catalog, from, to));
-                assert!(matches!(outcome, Outcome::Published { .. }), "{outcome:?}");
+                assert!(outcome.published(), "{outcome:?}");
                 training.store().read(t).unwrap()
             })
             .join()
