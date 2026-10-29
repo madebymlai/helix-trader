@@ -346,7 +346,7 @@ pub fn data_engine_config() -> DataEngineConfig {
 /// closed, so its last source bar arrives after the bar's close (OKX's
 /// confirmed 1-minute candles: 0.3 to 1.5 s, measured 2026-10-22; IB's
 /// keepUpToDate 1-minute bars: 0.4 to 1.3 s, measured 2026-10-26).
-const SOURCE_BAR_DELAY_MICROS: u64 = 5_000_000;
+const SOURCE_BAR_DELAY_MICROS: i64 = 5_000_000;
 
 /// The data engine config of a live node running a strategy on
 /// `bar_types`: Nautilus' default, without bars for periods without
@@ -354,14 +354,10 @@ const SOURCE_BAR_DELAY_MICROS: u64 = 5_000_000;
 /// (`time_bars_build_delay`).
 #[must_use]
 pub fn live_data_engine_config(bar_types: &[BarType]) -> LiveDataEngineConfig {
-    let delay = if has_composite(bar_types) {
-        SOURCE_BAR_DELAY_MICROS
-    } else {
-        0
-    };
+    let delay = live_bar_build_delay(bar_types).unsigned_abs().as_micros();
     LiveDataEngineConfig {
         time_bars_build_with_no_updates: BUILD_BARS_WITHOUT_QUOTES,
-        time_bars_build_delay: delay,
+        time_bars_build_delay: u64::try_from(delay).expect("a delay of seconds"),
         ..LiveDataEngineConfig::default()
     }
 }
@@ -373,15 +369,11 @@ pub fn live_data_engine_config(bar_types: &[BarType]) -> LiveDataEngineConfig {
 /// catalog already.
 #[must_use]
 pub fn live_bar_build_delay(bar_types: &[BarType]) -> SignedDuration {
-    if has_composite(bar_types) {
-        SignedDuration::from_micros(SOURCE_BAR_DELAY_MICROS.cast_signed())
+    if bar_types.iter().any(BarType::is_composite) {
+        SignedDuration::from_micros(SOURCE_BAR_DELAY_MICROS)
     } else {
         SignedDuration::ZERO
     }
-}
-
-fn has_composite(bar_types: &[BarType]) -> bool {
-    bar_types.iter().any(BarType::is_composite)
 }
 
 /// The most bars a warmup of `warmup` builds of `bar_type`: one per bar
@@ -484,7 +476,10 @@ mod tests {
         ];
         let quotes = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
 
-        assert_eq!(live_bar_build_delay(&composite), SignedDuration::from_secs(5));
+        assert_eq!(
+            live_bar_build_delay(&composite),
+            SignedDuration::from_secs(5)
+        );
         assert_eq!(live_bar_build_delay(&quotes), SignedDuration::ZERO);
     }
 }
