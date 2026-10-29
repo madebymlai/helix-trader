@@ -105,6 +105,8 @@ async fn phase() {
     };
     // An empty catalog of its own: the venue answers the whole warmup.
     let catalog = tempfile::tempdir().unwrap();
+    // Outside the catalog, as `Live` requires.
+    let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
         account: Some(account()),
@@ -112,6 +114,7 @@ async fn phase() {
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
+        recording: crate::recording(staging.path()),
     };
     let probe = Probe::new(step, PathBuf::from(std::env::var(STATE).unwrap()));
     let ran = tokio::time::timeout(Duration::from_secs(300), live.run(&requirements, probe)).await;

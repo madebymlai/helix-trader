@@ -4,7 +4,8 @@
 //! fills it), and a recording strategy gets its minute bars warmed up from
 //! the catalog, then from IC's data client up to now, then live quotes and
 //! the bars Nautilus builds from them, until SIGINT; IC's answer is written
-//! back to the catalog. It needs the app's `IC_CLIENT_ID` and
+//! back to the catalog, and the live quotes the node receives are streamed
+//! into it. It needs the app's `IC_CLIENT_ID` and
 //! `IC_CLIENT_SECRET`, the demo account's `IC_ACCESS_TOKEN`,
 //! `IC_REFRESH_TOKEN` (they seed the token file, which then holds the
 //! latest pair) and `IC_ACCOUNT_ID`, and `IC_ENVIRONMENT=demo`, from the environment or
@@ -184,6 +185,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     .await
     .unwrap();
     let started = jiff::Timestamp::now();
+    // Outside the catalog, as `Live` requires.
+    let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
         account: None,
@@ -191,6 +194,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
+        recording: crate::recording(staging.path()),
     };
     // As Ctrl-C would, once the node runs: its signal handler stops it.
     let interrupt = tokio::spawn(async {
@@ -262,10 +266,25 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         from_catalog < warmup_quotes.len(),
         "no warmup quote from IC"
     );
-    assert!(
-        i128::from(stored_to) >= started.as_nanosecond(),
-        "IC's answer was not written back: the catalog ends at {stored_to}"
-    );
+    // IC's answer, written back: the catalog's quotes after its own end up
+    // to the warmup's last are the warmup's from IC. A check of the
+    // catalog's end alone would pass on the quotes the node streams.
+    let stored: Vec<QuoteTick> = ParquetDataCatalog::new(catalog.path(), None, None, None, None)
+        .query(Some(vec![XAUUSD.to_owned()]), None, None, None, None, true)
+        .unwrap();
+    let seen = |q: &QuoteTick| (q.ts_event, q.bid_price, q.ask_price);
+    let warmup_end = warmup_quotes.last().unwrap().ts_event;
+    let written_back: Vec<_> = stored
+        .iter()
+        .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns && q.ts_event <= warmup_end)
+        .map(seen)
+        .collect();
+    let from_ic: Vec<_> = warmup_quotes
+        .iter()
+        .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns)
+        .map(seen)
+        .collect();
+    assert_eq!(written_back, from_ic, "IC's answer was not written back");
     let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
         - started.checked_sub(warmup).unwrap().as_nanosecond();
     assert!(
@@ -303,4 +322,20 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     assert!(quotes.iter().all(|q| q.bid_size == Quantity::from(10_000)));
     // The hand-off: no live quote repeats the warmup's last.
     assert!(quotes[0].ts_event > warmup_quotes.last().unwrap().ts_event);
+    // Streamed into the catalog: the live quotes the strategy got, in order,
+    // then those the node received until its clients disconnected (see
+    // `live/README.md`, "Recording into the catalog").
+    let streamed: Vec<_> = stored
+        .iter()
+        .filter(|q| q.ts_event >= quotes[0].ts_event)
+        .map(seen)
+        .collect();
+    let got: Vec<_> = quotes.iter().map(seen).collect();
+    println!("{} quotes streamed", streamed.len());
+    assert!(
+        streamed.starts_with(&got),
+        "the live quotes were not streamed: {} streamed, {} got",
+        streamed.len(),
+        got.len()
+    );
 }
