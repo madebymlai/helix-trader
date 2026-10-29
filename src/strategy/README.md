@@ -872,7 +872,10 @@ of its choosing (`model::features`, `model::decide`).
   still running when the node stops runs to its end.
   `Launcher::in_process` trains on a thread instead, for tests. A node
   starting with models in the store trades from its first decision on
-  the latest valid then.
+  the latest valid then. Don't backtest a strategy on the store and
+  catalog its live node retrains into at the same time: two processes
+  building one strategy's dataset at once may both replay a day, and
+  nothing orders their writes of its file and of the manifest.
 - **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
   at `t`: `Training::new` on the strategy's features and model section,
   `train_at` with a replay through `Backtest::run_dataset` of the strategy
