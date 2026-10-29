@@ -30,10 +30,21 @@
 //! Nautilus' `Indicator` does not handle, feeds a raw feature: the value a
 //! function of the strategy reads from it.
 //!
+//! The set records, for each instrument, the time (`ts_init`) of the
+//! latest quote, trade, bar, depth or deltas a feature read
+//! (`last_update`): a decision is fresh only if data of the traded
+//! instrument came since the previous one (`decide`). Custom data is of no
+//! instrument.
+//!
+//! A set declares its warmup (`FeatureSetBuilder::warmup`), how much data
+//! its features read before a decision, such as the strategy's: a dataset
+//! build replays it before its first day (`dataset`).
+//!
 //! The fingerprint covers what makes the features what they are: their
 //! names in order, the strategy's feature code (given to the builder, such
-//! as `include_str!("features.rs")`) and the shared indicator code (this
-//! module, and Nautilus' indicators, named by the source `Cargo.lock` pins).
+//! as `include_str!("features.rs")`), the warmup, and the shared indicator
+//! code (this module, and Nautilus' indicators, named by the source
+//! `Cargo.lock` pins).
 //!
 //! A strategy whose primary is a rule of its own declares the primary's
 //! side and probability as the set's last two values (`primary`): the
@@ -45,16 +56,18 @@
 use std::{
     any::Any,
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::{self, Debug, Display},
     rc::Rc,
 };
 
 use anyhow::{bail, ensure};
+use jiff::SignedDuration;
 use nautilus_common::actor::{
     DataActorNative,
     indicators::{ActorIndicator, SharedActorIndicator},
 };
+use nautilus_core::UnixNanos;
 use nautilus_indicators::indicator::{Indicator, MovingAverage};
 use nautilus_model::{
     data::{
@@ -115,6 +128,9 @@ enum Slot {
 pub struct FeatureSet {
     names: Vec<String>,
     slots: RefCell<Vec<Slot>>,
+    /// The time of the latest update of each instrument a feature read.
+    updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
+    warmup: SignedDuration,
     fingerprint: Fingerprint,
     /// A rule primary's side and probability, while a decision on a side
     /// is made; none if the set declares no primary.
@@ -127,6 +143,7 @@ pub struct FeatureSetBuilder {
     names: Vec<String>,
     slots: Vec<Slot>,
     code: Vec<&'static str>,
+    warmup: SignedDuration,
     primary: bool,
 }
 
@@ -143,6 +160,7 @@ impl FeatureSet {
             names: vec![],
             slots: vec![],
             code: vec![],
+            warmup: SignedDuration::ZERO,
             primary: false,
         }
     }
@@ -203,10 +221,43 @@ impl FeatureSet {
     }
 
     /// The fingerprint of the feature names in order, the strategy's
-    /// feature code and the shared indicator code.
+    /// feature code, the warmup and the shared indicator code.
     #[must_use]
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
+    }
+
+    /// How much data the features read before a decision: a dataset build
+    /// replays this much before its first day (`dataset`).
+    #[must_use]
+    pub const fn warmup(&self) -> SignedDuration {
+        self.warmup
+    }
+
+    /// Whether a feature reads the quotes, trades, bars, depth or deltas
+    /// of `instrument_id`.
+    #[must_use]
+    pub fn reads(&self, instrument_id: InstrumentId) -> bool {
+        self.slots
+            .borrow()
+            .iter()
+            .any(|slot| slot.instrument_id() == Some(instrument_id))
+    }
+
+    /// The time (`ts_init`) of the latest quote, trade, bar, depth or
+    /// deltas of `instrument_id` a feature read, if any: an update no
+    /// feature reads, or custom data, is none.
+    #[must_use]
+    pub fn last_update(&self, instrument_id: InstrumentId) -> Option<UnixNanos> {
+        self.updates.borrow().get(&instrument_id).copied()
+    }
+
+    /// Records an update of `instrument_id` at `ts_init`, read by a
+    /// feature; an older one leaves the latest.
+    fn updated(&self, instrument_id: InstrumentId, ts_init: UnixNanos) {
+        let mut updates = self.updates.borrow_mut();
+        let latest = updates.entry(instrument_id).or_insert(ts_init);
+        *latest = (*latest).max(ts_init);
     }
 
     /// Registers the set with `actor`'s Nautilus indicators: for the
@@ -233,6 +284,7 @@ impl FeatureSet {
                 && *id == depth.instrument_id
             {
                 feature.handle_depth(depth);
+                self.updated(*id, depth.ts_init);
             }
         }
     }
@@ -244,6 +296,7 @@ impl FeatureSet {
                 && *id == deltas.instrument_id
             {
                 feature.handle_deltas(deltas);
+                self.updated(*id, deltas.ts_init);
             }
         }
     }
@@ -270,6 +323,19 @@ impl Slot {
             | Self::Depth(_, feature)
             | Self::Deltas(_, feature) => feature.initialized().then(|| feature.value()),
             Self::Data(_, _, value) => *value,
+        }
+    }
+
+    /// The instrument whose market data the feature reads; none for
+    /// custom data.
+    fn instrument_id(&self) -> Option<InstrumentId> {
+        match self {
+            Self::Quotes(id, _)
+            | Self::Trades(id, _)
+            | Self::Depth(id, _)
+            | Self::Deltas(id, _) => Some(*id),
+            Self::Bars(bar_type, _) => Some(bar_type.instrument_id()),
+            Self::Data(..) => None,
         }
     }
 }
@@ -303,9 +369,11 @@ impl ActorIndicator for FeatureSet {
         for (slot, name) in slots.iter_mut().zip(&self.names) {
             if let Slot::Quotes(id, feature) = slot
                 && *id == quote.instrument_id
-                && let Err(e) = feature.handle_quote(quote)
             {
-                log::error!("feature {name} on the quote {quote}: {e}");
+                if let Err(e) = feature.handle_quote(quote) {
+                    log::error!("feature {name} on the quote {quote}: {e}");
+                }
+                self.updated(*id, quote.ts_init);
             }
         }
         Ok(())
@@ -317,6 +385,7 @@ impl ActorIndicator for FeatureSet {
                 && *id == trade.instrument_id
             {
                 feature.handle_trade(trade);
+                self.updated(*id, trade.ts_init);
             }
         }
         Ok(())
@@ -330,6 +399,7 @@ impl ActorIndicator for FeatureSet {
                 && bar_type.standard() == bar.bar_type.standard()
             {
                 feature.handle_bar(bar);
+                self.updated(bar_type.instrument_id(), bar.ts_init);
             }
         }
         Ok(())
@@ -417,11 +487,22 @@ impl FeatureSetBuilder {
         self
     }
 
+    /// Declares how much data the features read before a decision, such
+    /// as the strategy's warmup: a dataset build replays this much before
+    /// its first day, so that the day's first decisions are those of a
+    /// longer build. None unless given.
+    #[must_use]
+    pub const fn warmup(mut self, warmup: SignedDuration) -> Self {
+        self.warmup = warmup;
+        self
+    }
+
     /// The feature set, shared.
     ///
     /// # Errors
     ///
-    /// Returns an error if no feature is declared, or two share a name.
+    /// Returns an error if no feature is declared, two share a name, or
+    /// the warmup is negative.
     pub fn build(mut self) -> anyhow::Result<Rc<FeatureSet>> {
         ensure!(!self.names.is_empty(), "a feature set needs a feature");
         if self.primary {
@@ -431,11 +512,18 @@ impl FeatureSetBuilder {
         if let Some(name) = self.names.iter().find(|name| !seen.insert(*name)) {
             bail!("two features are named {name}");
         }
+        ensure!(
+            !self.warmup.is_negative(),
+            "the features' warmup {:#} is negative",
+            self.warmup
+        );
+        let warmup = format!("warmup {} ns", self.warmup.as_nanos());
         let fingerprint = self
             .names
             .iter()
             .map(String::as_str)
             .chain(self.code.iter().copied())
+            .chain([warmup.as_str()])
             .chain(SHARED_CODE)
             .fold(Fingerprint::default(), |hash, part| {
                 hash.with(part.as_bytes())
@@ -443,6 +531,8 @@ impl FeatureSetBuilder {
         Ok(Rc::new(FeatureSet {
             names: self.names,
             slots: RefCell::new(self.slots),
+            updates: RefCell::default(),
+            warmup: self.warmup,
             fingerprint,
             primary: self.primary.then(Cell::default),
         }))
@@ -481,7 +571,6 @@ mod tests {
     use std::{cell::Cell, sync::Arc};
 
     use nautilus_common::{actor::DataActor, cache::Cache, clock::VirtualClock};
-    use nautilus_core::UnixNanos;
     use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
         data::{BookOrder, HasTsInit, OrderBookDelta, stubs::stub_depth10},
@@ -863,6 +952,107 @@ mod tests {
         features.handle_data(&level("SIM", 1.5));
         features.handle_data(&level("SIM", 2.5));
         assert_eq!(features.values(), Some(vec![2.5]));
+    }
+
+    /// `update` made at `ns`.
+    macro_rules! at {
+        ($update:expr, $ns:expr) => {{
+            let mut update = $update;
+            update.ts_init = UnixNanos::from($ns);
+            update
+        }};
+    }
+
+    #[test]
+    fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
+        let depth = stub_depth10();
+        let features = FeatureSet::builder()
+            .quotes(id(AUD), "quotes", sma(1))
+            .trades(id(AUD), "trades", sma(1))
+            .bars(BarType::from(AUD_BARS), "bars", sma(1))
+            .depth(depth.instrument_id, "depth", BookCount::default())
+            .build()
+            .unwrap();
+
+        assert_eq!(features.last_update(id(AUD)), None);
+        features.handle_quote(&at!(quote(AUD, 0.7), 10)).unwrap();
+        features.handle_bar(&at!(bar(AUD_BARS, 0.7), 30)).unwrap();
+        // Older than the bar: the latest stays.
+        features.handle_trade(&at!(trade(AUD, 0.7), 20)).unwrap();
+        features.handle_depth(&at!(depth.clone(), 40));
+
+        assert_eq!(features.last_update(id(AUD)), Some(UnixNanos::from(30)));
+        assert_eq!(
+            features.last_update(depth.instrument_id),
+            Some(UnixNanos::from(40))
+        );
+    }
+
+    #[test]
+    fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
+        let features = FeatureSet::builder()
+            .quotes(id(AUD), "quotes", sma(1))
+            .data(level_type("SIM"), "level", read_level)
+            .build()
+            .unwrap();
+
+        features.handle_quote(&at!(quote(GBP, 1.3), 10)).unwrap();
+        features.handle_trade(&at!(trade(AUD, 0.7), 20)).unwrap();
+        features.handle_data(&level("SIM", 1.0));
+
+        assert_eq!(features.last_update(id(GBP)), None);
+        assert_eq!(features.last_update(id(AUD)), None);
+    }
+
+    #[test]
+    fn a_set_reads_the_instruments_of_its_market_data_features() {
+        let features = FeatureSet::builder()
+            .bars(BarType::from(AUD_BARS), "bars", sma(1))
+            .data(level_type("SIM"), "level", read_level)
+            .build()
+            .unwrap();
+
+        assert!(features.reads(id(AUD)));
+        assert!(!features.reads(id(GBP)));
+    }
+
+    #[test]
+    fn a_set_declares_no_warmup_unless_given_one() {
+        let features = |warmup: Option<SignedDuration>| {
+            let builder = FeatureSet::builder().quotes(id(AUD), "mid", sma(1));
+            match warmup {
+                Some(warmup) => builder.warmup(warmup),
+                None => builder,
+            }
+            .build()
+            .unwrap()
+        };
+
+        assert_eq!(features(None).warmup(), SignedDuration::ZERO);
+        assert_eq!(
+            features(Some(SignedDuration::from_hours(2))).warmup(),
+            SignedDuration::from_hours(2)
+        );
+        assert_ne!(
+            features(Some(SignedDuration::from_hours(2))).fingerprint(),
+            features(None).fingerprint()
+        );
+        assert_ne!(
+            features(Some(SignedDuration::from_hours(2))).fingerprint(),
+            features(Some(SignedDuration::from_hours(3))).fingerprint()
+        );
+    }
+
+    #[test]
+    fn a_negative_warmup_is_an_error() {
+        let err = FeatureSet::builder()
+            .quotes(id(AUD), "mid", sma(1))
+            .warmup(SignedDuration::from_hours(-1))
+            .build()
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("warmup"), "{err}");
     }
 
     fn fingerprint(names: [&str; 2], code: &'static str) -> Fingerprint {

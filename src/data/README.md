@@ -25,6 +25,7 @@ data/
   mod.rs           declares the modules, exposes only what others call
   node_fill.rs     the fill through a node: what the catalog lacks, the node, the actor asking one window at a time
   fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write (IB, OKX)
+  live_runs.rs     the live runs' starts in the catalog, and the gaps they streamed across joined
   databento/
     mod.rs         Databento of GLBX instruments: its data client for the node, cost quotes, the dataset's end
     publishers.json Nautilus' Databento publishers, read by the client
@@ -192,7 +193,10 @@ impl NodeFill {
 
 - **What is missing.** `missing` asks the catalog what it lacks of each
   slice, by Nautilus' own count (`get_missing_intervals_for_request`,
-  the call behind the data engine's catalog lookup): contract by contract,
+  the call behind the data engine's catalog lookup), once the gaps a live
+  run streamed across are joined (`live_runs.rs`; `live/README.md`,
+  "Recording into the catalog"), so that the venue is not asked for
+  them: contract by contract,
   its definition over the span of what it lacks, then each series'
   missing intervals. A rolled root's contracts come each over its slice;
   `DataRequirements::slices` has already merged one contract's slices of

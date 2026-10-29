@@ -6,15 +6,16 @@
 //! `on_start` registers the features (and the targets' ATR, in a dataset
 //! run) and starts the decision cadence; `decide`, at each decision (the
 //! cadence's timer, `decide::is_decision`, or an event of the strategy's
-//! choosing), snapshots the features, if every one is initialized, and
-//! publishes their row (`decide::decide`), then:
+//! choosing), snapshots the features, if the decision is fresh (data of
+//! the targets' instrument since the previous) and every one is
+//! initialized, and publishes their row (`decide::decide`), then:
 //!
 //! - trading (`Mode::Backtest`, `Mode::Live`): takes the latest model of
 //!   the store (`store::ModelStore`) valid at the decision, predicts on the
 //!   row and returns the trade the config's thresholds make of the
 //!   probability (`Thresholds::side`), of the targets' size. No model
-//!   valid yet, cold features, or a probability between the thresholds
-//!   are no trade, never an error.
+//!   valid yet, a stale decision, cold features, or a probability between
+//!   the thresholds are no trade, never an error.
 //! - in a dataset run (`Mode::Dataset`): opens the decision's targets
 //!   (`targets::Targets`) and returns no trade, so the strategy places
 //!   none of its own; the strategy hands it its order, position and time
@@ -65,7 +66,7 @@ use nautilus_model::{
     data::{BarType, CustomData},
     enums::OrderSide,
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
-    identifiers::StrategyId,
+    identifiers::{InstrumentId, StrategyId},
     types::{Quantity, fixed::FIXED_PRECISION},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
@@ -122,6 +123,8 @@ pub struct ModelHandle {
     strategy_id: StrategyId,
     features: Rc<FeatureSet>,
     rule: DecisionRule,
+    /// The instrument traded, whose data makes a decision fresh.
+    traded: InstrumentId,
     serving: Serving,
 }
 
@@ -174,7 +177,9 @@ impl ModelHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule is invalid, a store cannot be
+    /// Returns an error if the decision rule is invalid, a cadence's
+    /// features read no data of the targets' instrument (its decisions
+    /// would never be fresh, see `decide::decide`), a store cannot be
     /// keyed, the meta model has no barrier to learn or, in a dataset run,
     /// the targets are invalid.
     pub fn new(
@@ -257,6 +262,12 @@ impl ModelHandle {
         primary: impl FnOnce(&Path) -> anyhow::Result<Primary>,
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
+        let traded = targets.instrument_id;
+        ensure!(
+            rule == DecisionRule::Event || features.reads(traded),
+            "the features read no data of {traded}, the targets' instrument: \
+             no decision of the cadence would be fresh"
+        );
         let serving = match mode {
             Mode::Backtest { models } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -286,6 +297,7 @@ impl ModelHandle {
             strategy_id,
             features: Rc::clone(features),
             rule,
+            traded,
             serving,
         }))
     }
@@ -379,7 +391,7 @@ impl ModelHandle {
         {
             retraining.poll();
         }
-        let Some(row) = decide::decide(strategy, &self.features) else {
+        let Some(row) = decide::decide(strategy, &self.features, self.rule, self.traded) else {
             return Ok(None);
         };
         match &self.serving {
@@ -648,10 +660,13 @@ mod tests {
         time.parse().unwrap()
     }
 
-    fn advance(clock: &Rc<RefCell<VirtualClock>>, to: &str) {
+    /// Advances `clock` to `to`, when a quote of AUD/USD comes to the
+    /// features of `handle`: the market is open.
+    fn advance(handle: &ModelHandle, clock: &Rc<RefCell<VirtualClock>>, to: &str) {
         clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at(to)), true);
+        warm(&handle.features, UnixNanos::from(at(to)));
     }
 
     /// The last mid of AUD/USD, warm once a quote came.
@@ -666,15 +681,16 @@ mod tests {
             .unwrap()
     }
 
-    fn warm(features: &FeatureSet) {
+    /// Hands `features` a quote of AUD/USD made at `now`.
+    fn warm(features: &FeatureSet, now: UnixNanos) {
         let quote = QuoteTick::new(
             InstrumentId::from(AUD),
             Price::from("0.69990"),
             Price::from("0.70010"),
             Quantity::from(1),
             Quantity::from(1),
-            UnixNanos::default(),
-            UnixNanos::default(),
+            now,
+            now,
         );
         features.handle_quote(&quote).unwrap();
     }
@@ -737,10 +753,10 @@ mod tests {
     }
 
     /// The probe's handle trading in a backtest on the models under
-    /// `models`, its features warm.
-    fn handle(models: &Path) -> Rc<ModelHandle> {
+    /// `models`, its features warm: a quote came at the time of `probe`.
+    fn handle(probe: &Decider, models: &Path) -> Rc<ModelHandle> {
         let features = features();
-        warm(&features);
+        warm(&features, probe.clock().timestamp_ns());
         ModelHandle::new(
             StrategyId::from(STRATEGY),
             features,
@@ -761,7 +777,10 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
-        assert_eq!(handle(models.path()).decide(&mut probe).unwrap(), None);
+        assert_eq!(
+            handle(&probe, models.path()).decide(&mut probe).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -772,7 +791,10 @@ mod tests {
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
-        assert_eq!(handle(models.path()).decide(&mut probe).unwrap(), None);
+        assert_eq!(
+            handle(&probe, models.path()).decide(&mut probe).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -795,6 +817,49 @@ mod tests {
         assert_eq!(cold.decide(&mut probe).unwrap(), None);
     }
 
+    /// No quote since the decision an hour before: the market is closed.
+    #[test]
+    fn a_stale_decision_gives_no_trade() {
+        let models = tempfile::tempdir().unwrap();
+        store(models.path())
+            .publish(&baseline("2026-10-22T00:00:00Z", 8))
+            .unwrap();
+        let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
+        let handle = handle(&probe, models.path());
+        clock
+            .borrow_mut()
+            .advance_time(UnixNanos::from(at("2026-10-22T12:00:00Z")), true);
+
+        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+    }
+
+    /// Its decisions would never be fresh.
+    #[test]
+    fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_is_an_error() {
+        let models = tempfile::tempdir().unwrap();
+        let features = FeatureSet::builder()
+            .quotes(
+                InstrumentId::from("GBP/USD.SIM"),
+                "gbp",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .build()
+            .unwrap();
+
+        let err = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config(),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains(AUD), "{err}");
+    }
+
     #[test]
     fn a_probability_from_the_long_threshold_buys_the_targets_size() {
         let models = tempfile::tempdir().unwrap();
@@ -804,7 +869,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
         assert_eq!(
-            handle(models.path()).decide(&mut probe).unwrap(),
+            handle(&probe, models.path()).decide(&mut probe).unwrap(),
             Some(Trade {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
@@ -821,7 +886,10 @@ mod tests {
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
-        let trade = handle(models.path()).decide(&mut probe).unwrap().unwrap();
+        let trade = handle(&probe, models.path())
+            .decide(&mut probe)
+            .unwrap()
+            .unwrap();
 
         assert_eq!((trade.side, trade.probability), (OrderSide::Sell, 0.4));
     }
@@ -834,7 +902,10 @@ mod tests {
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
-        assert_eq!(handle(models.path()).decide(&mut probe).unwrap(), None);
+        assert_eq!(
+            handle(&probe, models.path()).decide(&mut probe).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -849,11 +920,11 @@ mod tests {
             store.publish(&baseline(valid_from, trues)).unwrap();
         }
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = handle(models.path());
+        let handle = handle(&probe, models.path());
 
         let mut probabilities = vec![probability(handle.decide(&mut probe).unwrap())];
         for time in ["2026-10-22T12:00:00Z", "2026-10-22T12:59:59Z"] {
-            advance(&clock, time);
+            advance(&handle, &clock, time);
             probabilities.push(probability(handle.decide(&mut probe).unwrap()));
         }
 
@@ -866,12 +937,12 @@ mod tests {
         let store = store(models.path());
         store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = handle(models.path());
+        let handle = handle(&probe, models.path());
         let before = probability(handle.decide(&mut probe).unwrap());
 
         // Live, a retrain at 12:00 publishes once its child finishes.
         store.publish(&baseline("2026-10-22T12:00:00Z", 9)).unwrap();
-        advance(&clock, "2026-10-22T13:00:00Z");
+        advance(&handle, &clock, "2026-10-22T13:00:00Z");
 
         assert_eq!(before, Some(0.7));
         assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.9));
@@ -885,11 +956,11 @@ mod tests {
         store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
         store.publish(&refused).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = handle(models.path());
+        let handle = handle(&probe, models.path());
 
         let mut probabilities = vec![probability(handle.decide(&mut probe).unwrap())];
         for time in ["2026-10-22T12:00:00Z", "2026-10-22T13:00:00Z"] {
-            advance(&clock, time);
+            advance(&handle, &clock, time);
             probabilities.push(probability(handle.decide(&mut probe).unwrap()));
         }
 
@@ -973,10 +1044,11 @@ mod tests {
     }
 
     /// The probe's handle trading live on the models under `models`,
-    /// retraining through `launcher`, started, its features warm.
+    /// retraining through `launcher`, started, its features warm: a quote
+    /// came at the time of `probe`.
     fn live_handle(probe: &mut Decider, models: &Path, launcher: Launcher) -> Rc<ModelHandle> {
         let features = features();
-        warm(&features);
+        warm(&features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
             features,
@@ -1058,7 +1130,7 @@ mod tests {
 
         run_to(&mut probe, &handle, &clock, "2026-10-23T00:06:00Z");
         let trained_at = publishing.recv().unwrap();
-        advance(&clock, "2026-10-23T01:00:00Z");
+        advance(&handle, &clock, "2026-10-23T01:00:00Z");
 
         assert_eq!(trained_at, at("2026-10-23T00:00:00Z"));
         assert_eq!(before, Some(0.7));
@@ -1085,7 +1157,7 @@ mod tests {
 
         run_to(&mut probe, &handle, &clock, "2026-10-23T00:06:00Z");
         keeping.recv().unwrap();
-        advance(&clock, "2026-10-23T01:00:00Z");
+        advance(&handle, &clock, "2026-10-23T01:00:00Z");
 
         assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.7));
         assert_eq!(
@@ -1155,7 +1227,8 @@ mod tests {
 
     /// The probe's handle trading in a backtest on the models under
     /// `models` as `config` says, its primary a long of 0.6 from midnight,
-    /// its meta model predicting `meta_trues` tenths, if any.
+    /// its meta model predicting `meta_trues` tenths, if any, its features
+    /// warm by a quote at noon of the 22nd.
     fn meta_handle(
         models: &Path,
         config: &ModelConfig,
@@ -1186,7 +1259,7 @@ mod tests {
                 ))
                 .unwrap();
         }
-        warm(&features);
+        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(
             StrategyId::from(STRATEGY),
             features,
@@ -1293,7 +1366,7 @@ mod tests {
             7,
         ))
         .unwrap();
-        warm(&features);
+        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         let handle = ModelHandle::of_rule(
             StrategyId::from(STRATEGY),
             features,

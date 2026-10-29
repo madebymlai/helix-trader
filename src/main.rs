@@ -73,7 +73,10 @@ enum Command {
     Train(Box<TrainArgs>),
     /// Builds the strategy's dataset over the days from --start to --end,
     /// those it lacks, by a dataset run of the strategy over the catalog
-    /// to the last day's end plus its longest target.
+    /// to the last day's end plus its longest target. Internal: the
+    /// backtest of a strategy trading on a model spawns it, so `--help`
+    /// does not list it.
+    #[command(hide = true)]
     Dataset(Box<DatasetArgs>),
 }
 
@@ -1317,6 +1320,20 @@ mod tests {
         argv[0] = "ema";
         let err = run_train(parse_train(&argv).unwrap()).unwrap_err();
         assert!(err.to_string().contains("no model"), "{err}");
+    }
+
+    #[test]
+    fn help_lists_the_commands_but_not_the_internal_dataset() {
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_help()
+            .to_string();
+        let listed = |name: &str| {
+            help.lines()
+                .any(|line| line.split_whitespace().next() == Some(name))
+        };
+
+        assert!(listed("train"), "{help}");
+        assert!(!listed("dataset"), "{help}");
     }
 
     fn parse_dataset(args: &[&str]) -> Result<DatasetArgs, clap::Error> {

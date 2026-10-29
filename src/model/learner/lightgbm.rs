@@ -21,7 +21,10 @@ pub struct LightGbmConfig {
     #[serde(default = "default_num_leaves")]
     #[builder(default = default_num_leaves())]
     pub num_leaves: u32,
-    /// The fewest rows in a leaf.
+    /// The fewest rows in a leaf, 20 at least: lightgbm3 builds LightGBM's
+    /// dataset without parameters, and the dataset drops each feature no
+    /// split leaves 20 rows each side of, LightGBM's default, so fewer
+    /// would not be honoured.
     #[serde(default = "default_min_data_in_leaf")]
     #[builder(default = default_min_data_in_leaf())]
     pub min_data_in_leaf: u32,
@@ -47,8 +50,12 @@ const fn default_num_leaves() -> u32 {
     31
 }
 
+/// The fewest rows in a leaf LightGBM's dataset honours: its default, as
+/// lightgbm3 builds the dataset without parameters.
+const DATASET_MIN_DATA_IN_LEAF: u32 = 20;
+
 const fn default_min_data_in_leaf() -> u32 {
-    20
+    DATASET_MIN_DATA_IN_LEAF
 }
 
 const fn default_feature_fraction() -> f64 {
@@ -60,6 +67,24 @@ const fn default_seed() -> u32 {
 }
 
 impl LightGbmConfig {
+    /// Checks the settings LightGBM would not honour.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `min_data_in_leaf` is below 20: lightgbm3
+    /// builds LightGBM's dataset without parameters, so LightGBM's default
+    /// of 20 applies there whatever the setting.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.min_data_in_leaf >= DATASET_MIN_DATA_IN_LEAF,
+            "min_data_in_leaf {} is below {DATASET_MIN_DATA_IN_LEAF}: lightgbm3 builds \
+             LightGBM's dataset without parameters, so LightGBM's default of \
+             {DATASET_MIN_DATA_IN_LEAF} applies there",
+            self.min_data_in_leaf
+        );
+        Ok(())
+    }
+
     /// The settings as LightGBM's parameters. LightGBM, built without
     /// OpenMP, trains on one thread; `deterministic` and `force_row_wise`
     /// keep its results from depending on the machine.

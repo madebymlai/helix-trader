@@ -162,19 +162,21 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule or the targets are invalid
-    /// (see `DecisionRule::validate`, `TargetsConfig::validate`), the
-    /// retrain interval is not positive, the targets trade an instrument
-    /// the strategy does not read, the barrier's ATR is on bars it does not
-    /// read (the strategy subscribes to its bars, which feed it), the label
-    /// names a target the config lacks, a target (the barrier's limit or
-    /// the horizon) is not shorter than the window, the holdout is not
-    /// positive or leaves no fitted row (it and the longest target not
-    /// shorter than the window), the thresholds are not probabilities with
-    /// the short below the long, the minimum score is not an AUC, or the
-    /// meta model is invalid (see `MetaConfig::validate`).
+    /// Returns an error if the decision rule, the targets or the learner
+    /// are invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
+    /// `LearnerConfig::validate`), the retrain interval is not positive,
+    /// the targets trade an instrument the strategy does not read, the
+    /// barrier's ATR is on bars it does not read (the strategy subscribes
+    /// to its bars, which feed it), the label names a target the config
+    /// lacks, a target (the barrier's limit or the horizon) is not shorter
+    /// than the window, the holdout is not positive or leaves no fitted row
+    /// (it and the longest target not shorter than the window), the
+    /// thresholds are not probabilities with the short below the long, the
+    /// minimum score is not an AUC, or the meta model is invalid (see
+    /// `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
+        self.learner.validate()?;
         ensure!(
             self.targets.label_index(self.label).is_some(),
             "the label {:?} names a target the targets do not have",
@@ -218,8 +220,9 @@ impl MetaConfig {
     /// # Errors
     ///
     /// Returns an error if the targets have no barrier, the trade the meta
-    /// model learns, a target is not shorter than the window, the holdout
-    /// is not positive or leaves no fitted row, the threshold is not a
+    /// model learns, the learner is invalid (see `LearnerConfig::validate`),
+    /// a target is not shorter than the window, the holdout is not
+    /// positive or leaves no fitted row, the threshold is not a
     /// probability, the minimum score is not an AUC, or the sizing's
     /// multiples are not positive with the minimum not above the maximum.
     pub fn validate(&self, targets: &TargetsConfig) -> anyhow::Result<()> {
@@ -228,6 +231,7 @@ impl MetaConfig {
             "the meta model learns whether the primary's barrier trade wins, \
              and the targets have no barrier"
         );
+        self.learner.validate()?;
         validate_window(self.window, self.holdout, targets)?;
         ensure!(
             (0.0..=1.0).contains(&self.threshold),
@@ -470,6 +474,26 @@ mod tests {
         for score in ["1.5", "-0.1"] {
             let toml = section(&format!("min_score = {score}"));
             assert!(refused(&toml).contains("minimum score"), "{score}");
+        }
+    }
+
+    #[test]
+    fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
+        let lightgbm = |rows: u32| {
+            section(&format!(
+                r#"learner = {{ kind = "lightgbm", min_data_in_leaf = {rows} }}"#
+            ))
+        };
+
+        for rows in [1, 19] {
+            assert!(
+                refused(&lightgbm(rows)).contains("min_data_in_leaf"),
+                "{}",
+                refused(&lightgbm(rows))
+            );
+        }
+        for rows in [20, 50] {
+            assert!(load(&lightgbm(rows)).is_ok(), "{rows}");
         }
     }
 

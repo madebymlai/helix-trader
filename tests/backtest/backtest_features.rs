@@ -34,6 +34,9 @@ use nautilus_trading::{
 
 const STRATEGY: &str = "FEATURES-001";
 
+/// The probe's decisions, every 30 minutes.
+const EVERY: DecisionRule = DecisionRule::Every(SignedDuration::from_mins(30));
+
 /// `hh:mm` UTC on the day of the ramp, Wednesday 7 January 2026.
 fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
@@ -101,13 +104,17 @@ impl DataActor for FeatureProbe {
         msgbus::subscribe_any(topic.into(), handler, None);
         self.subscribe_quotes(InstrumentId::from(INSTRUMENT_ID), None, None);
         self.subscribe_bars(BarType::from(MID_BAR_TYPE), None, None);
-        let every = DecisionRule::Every(SignedDuration::from_mins(30));
-        decide::start(self, every, SignedDuration::ZERO)
+        decide::start(self, EVERY, SignedDuration::ZERO)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            decide::decide(self, &self.features);
+            decide::decide(
+                self,
+                &self.features,
+                EVERY,
+                InstrumentId::from(INSTRUMENT_ID),
+            );
         }
         Ok(())
     }

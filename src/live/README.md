@@ -340,6 +340,23 @@ are not streamed: Nautilus builds them into the cache only (see
 sees each series up to the last promotion, a clean prefix of what the
 node received: no gap, no duplicate (`tests/live/streaming.rs`).
 
+**Coverage.** Promotion names each file by the `ts_init` of its first
+and last row, so the files of a series leave a gap between them, from
+one's last row to the next one's first, which Nautilus counts as missing
+(a 1 ns gap is a gap): a backtest, or a retrain's replay, over streamed
+data would be refused, and a warmup over it asks the venue for every
+gap. The node records the start of each run in the catalog before it is
+built (`data::record_run_start`, `live-runs/<ns>` beside `data/`), and a
+reader joins the gaps a run streamed across before it reads
+(`data::live_runs::join`, with Nautilus' `extend_file_name`): the
+backtest's coverage check, the dataset's replay through it,
+fill-catalog's node fill, and the node's own start over its warmup
+window. A gap is joined when the file after it was promoted, the file
+before it ends after the run's start (the run's own, or the warmup it
+wrote back), and no run started inside it. A crash or a stop stays a
+gap, as does the time before a run's first row. The node itself renames
+nothing while it streams: a reader never loses a file under it.
+
 **Instance id.** Nautilus names the staging run directory after the
 node's instance id and, at start, recovers and promotes only the files
 of its own directory. The node of a trader keeps one instance id across
@@ -615,7 +632,10 @@ tests: see [`okx/README.md`](okx/README.md).
   the catalog from its own process: a clean prefix of each series while
   the node runs, everything after a clean stop with no staging file left,
   the built bars under `EXTERNAL`, the instrument definition, and after a
-  crash and a restart the crashed run's staged data promoted.
+  crash and a restart the crashed run's staged data promoted. The
+  binary's backtest over data streamed across several promotions runs,
+  and leaves the catalog covering it by Nautilus' own count; across a
+  crash and a restart it is refused, naming the crash's gap.
 - Retraining needs no node: the launcher and the handle's retrains are
   unit tests (`model::launcher`, `model::handle`) on an in-process
   launcher, a `sh` child and a clock driven by hand, and
@@ -627,11 +647,17 @@ tests: see [`okx/README.md`](okx/README.md).
 
 ## Unverified
 
-- A live retrain against a real venue: none has run. Promotion writes
-  each file with the interval of its own rows' timestamps, so the
-  streamed files of a series may leave gaps between them, which the
-  backtest's coverage check refuses (`backtest::coverage`, a 1 ns gap is
-  a gap): read from the source, not run.
+- A live retrain against a real venue: none has run. The gaps between
+  promoted files that refused a backtest over streamed data are joined
+  (see "Coverage"), shown on the stub client only.
+- A disconnect inside a run reads as covered once joined, as it does
+  inside one promoted file: Nautilus names a file by its rows, and no
+  client tells the node it lost data. A crash or a stop reads as a gap.
+- Joining renames files (Nautilus' `extend_file_name`): a reader that
+  listed a series just before another process joined it (two backtests
+  at once, a backtest and a start) can fail to open a file and must read
+  again. Promotion and the node's retrains, one at a time, do not race
+  it.
 - Streaming on IB and OKX: only IC's demo has streamed so far
   (`ic/README.md`, "IC tests", `ic_live_demo.rs`), and a crash and
   restart only on the stub client.
@@ -639,9 +665,16 @@ tests: see [`okx/README.md`](okx/README.md).
   refuses non-disjoint intervals), with a warning, and its file stays in
   staging: observed for a definition re-sent with the time of one already
   promoted (a stub stamping it at 0).
-  IC's warmup answer, written back up to the start, and the first
-  promoted quotes did not overlap in the one IC demo run; whether they
-  can is not known.
+  IC's warmup answer, written back up to its `now`, cannot overlap the
+  run's first promoted quotes, stamped at their receipt after the
+  subscription the warmup sends after its request (`ic/README.md`,
+  "Warmup"). It can overlap what a crashed run left staged: the restart's
+  warmup asks IC from 1 ns after the last promoted quote, and its answer
+  is written back over that whole window before the first promotion,
+  a promotion interval after the start, promotes the crashed run's
+  recovered tail, whose quotes lie in that window: that promotion fails
+  (non-disjoint intervals) and the tail stays in staging, its quotes in
+  the catalog from IC's answer instead. Read from the source, not run.
 - Whether IB's answer to a `30 D` request of 1-minute bars is complete
   (it raised no error, but the node panicked before the bars could be
   counted).

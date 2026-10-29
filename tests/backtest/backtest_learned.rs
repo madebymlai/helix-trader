@@ -51,7 +51,9 @@ const CONFIG: &str = r#"
 "#;
 
 /// Midnight of the 23rd: the window starts at 02:00 of the 21st, its
-/// first day's replay warms up from 23:00 of the 20th.
+/// first day's replay from 23:00 of the 20th, the strategy's warmup
+/// before the day, its warmup request from 22:00. The catalogs start an
+/// hour before.
 fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
@@ -83,7 +85,7 @@ fn train(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String 
 #[test]
 fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
     let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(4),
     );
     let dir = tempfile::tempdir().unwrap();
@@ -123,7 +125,7 @@ fn traded(catalog: &TempDir, models: PathBuf) -> (usize, usize) {
 #[test]
 fn a_model_a_live_retrain_publishes_through_the_train_subcommand_is_traded() {
     let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(4),
     );
     let dir = tempfile::tempdir().unwrap();
@@ -192,7 +194,7 @@ fn backtest(
 #[test]
 fn the_binarys_backtest_retrains_in_child_processes_once() {
     let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(51),
     );
     let dir = tempfile::tempdir().unwrap();
@@ -234,7 +236,7 @@ fn the_binarys_backtest_retrains_in_child_processes_once() {
 #[test]
 fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
     let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(51),
     );
     let dir = tempfile::tempdir().unwrap();

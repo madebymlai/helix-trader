@@ -6,8 +6,9 @@
 //! bid size less one, the trade's id, the depth's sequence); an actor
 //! subscribes to them and to 1-second bars Nautilus builds from the
 //! trades. The node streams as `Recording` configures it, into a temp-dir
-//! catalog. The test, another process, reads the catalog while the node
-//! runs and after it stops.
+//! catalog, its start recorded there as `Live` records it. The test,
+//! another process, reads the catalog while the node runs and after it
+//! stops, and backtests over it with the binary, a third.
 //!
 //! Hermetic and ungated: no node runs in the test's own process, so it
 //! claims none (`main.rs`). Run it with:
@@ -22,13 +23,14 @@ use std::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Output},
     rc::Rc,
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use helix_trader::live::Recording;
+use helix_trader::{data::record_run_start, live::Recording};
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
     cache::CacheView,
@@ -40,10 +42,13 @@ use nautilus_common::{
     messages::DataEvent,
     nautilus_actor,
 };
-use nautilus_core::time::get_atomic_clock_realtime;
+use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
 use nautilus_model::{
-    data::{Bar, BarType, Data, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
+    data::{
+        Bar, BarType, Data, NautilusDataType, OrderBookDepth, QuoteTick, TradeTick,
+        stubs::stub_depth10,
+    },
     enums::{AggressorSide, BookType},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
@@ -174,6 +179,76 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
+#[test]
+fn a_backtest_across_a_crash_finds_the_gap_it_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    wait_for_staged_quotes(dir.path(), &mut crashed);
+    crashed.kill().unwrap();
+    crashed.wait().unwrap();
+    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), Some(3_000), 1_000_000);
+    assert!(restarted.wait().unwrap().success());
+    let quotes: Vec<QuoteTick> = catalog(dir.path())
+        .query(None, None, None, None, None, true)
+        .unwrap();
+    let (crashed_run, restart): (Vec<&QuoteTick>, Vec<&QuoteTick>) = quotes
+        .iter()
+        .partition(|q| q.bid_size.as_f64() < 1_000_000.0);
+    let (crash, back) = (
+        Timestamp::from(crashed_run.last().unwrap().ts_init),
+        Timestamp::from(restart.first().unwrap().ts_init),
+    );
+    let start = crash + SignedDuration::from_secs(1) + SignedDuration::from_nanos(1);
+
+    let backtest = backtest(dir.path(), start, restart.last().unwrap().ts_init.into());
+
+    let output = backtest_output(&backtest);
+    assert!(!backtest.status.success(), "{output}");
+    let gap = format!(
+        "[{}, {}] is missing",
+        crash + SignedDuration::from_nanos(1),
+        back - SignedDuration::from_nanos(1)
+    );
+    assert!(output.contains("quotes of AUD/USD.SIM"), "{output}");
+    assert!(output.contains(&gap), "{gap} not in {output}");
+}
+
+#[test]
+fn a_backtest_over_the_streamed_data_finds_it_covered_across_promotions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(5_000), 0);
+    assert!(node.wait().unwrap().success());
+    let promoted = catalog(dir.path())
+        .get_intervals(&NautilusDataType::QuoteTick.into(), Some(INSTRUMENT_ID))
+        .unwrap();
+    assert!(promoted.len() >= 2, "one promotion: {promoted:?}");
+    let (first, last) = streamed_span(dir.path());
+    // Its slice of the warmup starts at the first tick, the run ends on
+    // the last.
+    let start = first + SignedDuration::from_secs(1) + SignedDuration::from_nanos(1);
+
+    let backtest = backtest(dir.path(), start, last);
+
+    assert!(backtest.status.success(), "{}", backtest_output(&backtest));
+    // Covered in the catalog itself, as the data engine's warmup lookup
+    // reads it.
+    for data_type in [
+        NautilusDataType::QuoteTick,
+        NautilusDataType::TradeTick,
+        NautilusDataType::OrderBookDepth,
+    ] {
+        let missing = catalog(dir.path())
+            .get_missing_intervals_for_request(
+                UnixNanos::from(first).as_u64(),
+                UnixNanos::from(last).as_u64(),
+                &data_type.clone().into(),
+                Some(INSTRUMENT_ID),
+            )
+            .unwrap();
+        assert_eq!(missing, [], "{data_type}");
+    }
+}
+
 /// Not a test: the node the tests above run in a child process. Passes at
 /// once outside one.
 #[test]
@@ -222,6 +297,8 @@ async fn run_node(
         catalogs: vec![catalog],
         ..Default::default()
     };
+    // Before the node is built, as `Live` records it.
+    record_run_start(&root.join("catalog"))?;
     let mut node = LiveNodeBuilder::from_config(config)?
         .with_name("STREAMING")
         .with_delay_post_stop_secs(0)
@@ -328,6 +405,72 @@ fn bar_seconds(root: &Path) -> Vec<u64> {
     bars.iter()
         .map(|b| b.ts_event.as_u64() / 1_000_000_000)
         .collect()
+}
+
+/// When the quotes, trades and depth of the catalog of `root` all start,
+/// and when they all end.
+fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
+    let mut catalog = catalog(root);
+    let quotes: Vec<QuoteTick> = catalog.query(None, None, None, None, None, true).unwrap();
+    let trades: Vec<TradeTick> = catalog.query(None, None, None, None, None, true).unwrap();
+    let depths: Vec<OrderBookDepth> = catalog.query(None, None, None, None, None, true).unwrap();
+    let spans = [
+        quotes
+            .first()
+            .zip(quotes.last())
+            .map(|(f, l)| (f.ts_init, l.ts_init)),
+        trades
+            .first()
+            .zip(trades.last())
+            .map(|(f, l)| (f.ts_init, l.ts_init)),
+        depths
+            .first()
+            .zip(depths.last())
+            .map(|(f, l)| (f.ts_init, l.ts_init)),
+    ]
+    .map(|span| span.expect("a series streamed nothing"));
+    let first = spans.iter().map(|&(first, _)| first).max().unwrap();
+    let last = spans.iter().map(|&(_, last)| last).min().unwrap();
+    (first.into(), last.into())
+}
+
+/// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes,
+/// warmed up a second, its trades and its stored depth replayed as they
+/// are. Too slow to trade in a few seconds.
+const EMA_CONFIG: &str = r#"
+    instrument_ids = ["AUD/USD.SIM"]
+    trade_instrument_id = "AUD/USD.SIM"
+    bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" }
+    warmup = "1s"
+    ticks = [{ data = "trades", instrument_id = "AUD/USD.SIM" }]
+    trade_size = "1"
+    stop_loss_bps = 100
+    take_profit_bps = 100
+    hold = "1h"
+"#;
+
+/// The binary's backtest of the EMA crossover (`EMA_CONFIG`) over
+/// `[start, end]` of the catalog of `root`, in a process of its own.
+fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
+    let config = root.join("ema.toml");
+    std::fs::write(&config, EMA_CONFIG).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_helix-trader"))
+        .args(["backtest", "ema", "--config"])
+        .arg(&config)
+        .arg("--catalog")
+        .arg(root.join("catalog"))
+        .args(["--start", &start.to_string(), "--end", &end.to_string()])
+        .args(["--commission", "1 USD", "--balance", "1000000 USD"])
+        .output()
+        .unwrap()
+}
+
+fn backtest_output(output: &Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 /// The Feather files left in the staging directory of `root`.
@@ -579,6 +722,14 @@ impl DataClient for Stub {
                 );
                 let mut depth = stub_depth10();
                 depth.instrument_id = instrument_id;
+                // AUD/USD's prices, a backtest replaying them as stored: the
+                // quote's bid and ask, then a pip further a level.
+                for (level, order) in (0_u32..).zip(depth.bids.iter_mut()) {
+                    order.price = Price::new(0.8 - f64::from(level) * 0.000_01, 5);
+                }
+                for (level, order) in (0_u32..).zip(depth.asks.iter_mut()) {
+                    order.price = Price::new(0.8001 + f64::from(level) * 0.000_01, 5);
+                }
                 depth.sequence = seq;
                 depth.ts_event = ts;
                 depth.ts_init = ts;
