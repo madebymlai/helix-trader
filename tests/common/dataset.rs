@@ -192,8 +192,13 @@ pub fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
     ic::catalog_of(quotes, from, to)
 }
 
-/// The probe of `config` in `mode`, and what it records.
-fn probe(config: &ModelConfig, mode: Mode) -> (ModelProbe, Rc<RefCell<Record>>) {
+/// The probe deciding on `features` as `config` says, in `mode`, and what
+/// it records.
+fn probe(
+    features: Rc<FeatureSet>,
+    config: &ModelConfig,
+    mode: Mode,
+) -> (ModelProbe, Rc<RefCell<Record>>) {
     let record = Rc::new(RefCell::new(Record::default()));
     let probe = ModelProbe {
         core: StrategyCore::new(StrategyConfig {
@@ -201,7 +206,7 @@ fn probe(config: &ModelConfig, mode: Mode) -> (ModelProbe, Rc<RefCell<Record>>) 
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
-        model: ModelHandle::new(StrategyId::from(STRATEGY), features(), config, mode).unwrap(),
+        model: ModelHandle::new(StrategyId::from(STRATEGY), features, config, mode).unwrap(),
         record: Rc::clone(&record),
     };
     (probe, record)
@@ -235,8 +240,19 @@ pub fn replay(
     from: Timestamp,
     to: Timestamp,
 ) -> anyhow::Result<Vec<TargetRow>> {
+    replay_on(catalog, features(), from, to)
+}
+
+/// The replay of a build or a train of the probe deciding on `features`.
+pub fn replay_on(
+    catalog: &tempfile::TempDir,
+    features: Rc<FeatureSet>,
+    from: Timestamp,
+    to: Timestamp,
+) -> anyhow::Result<Vec<TargetRow>> {
     let rows = SettledRows::default();
     let (probe, _) = probe(
+        features,
         &config(),
         Mode::Dataset {
             rows: Rc::clone(&rows),
@@ -255,7 +271,20 @@ pub fn trade(
     config: &ModelConfig,
     models: &Path,
 ) -> Record {
+    trade_on(catalog, features(), from, to, config, models)
+}
+
+/// What the probe deciding on `features` decided, trading as `trade`.
+pub fn trade_on(
+    catalog: &tempfile::TempDir,
+    features: Rc<FeatureSet>,
+    from: Timestamp,
+    to: Timestamp,
+    config: &ModelConfig,
+    models: &Path,
+) -> Record {
     let (probe, record) = probe(
+        features,
         config,
         Mode::Backtest {
             models: models.to_path_buf(),

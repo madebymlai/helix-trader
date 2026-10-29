@@ -1,7 +1,8 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
-//! targets of its decisions and the one its model learns, the window a
-//! model is trained on, the gate it must pass, the thresholds that turn
-//! its probability into a trade, and its learner.
+//! targets of its decisions and the one its model learns, how often a
+//! model is retrained and the window it is trained on, the gate it must
+//! pass, the thresholds that turn its probability into a trade, and its
+//! learner.
 
 use anyhow::ensure;
 use jiff::SignedDuration;
@@ -22,7 +23,7 @@ use crate::strategy::DataRequirements;
 /// decision = { every = "15m" }
 /// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
 /// label = "horizon"
-/// retrain = "24h"
+/// retrain = "168h"
 /// window = "720h"
 /// holdout = "120h"
 /// thresholds = { long = 0.6, short = 0.4 }
@@ -38,8 +39,9 @@ pub struct ModelConfig {
     pub targets: TargetsConfig,
     /// The target the model learns: whether its long gains.
     pub label: Label,
-    /// How often the model is retrained, such as `"24h"`: at every multiple
-    /// of it since the Unix epoch.
+    /// How often the model is retrained, such as `"168h"`: at every multiple
+    /// of it since the Unix epoch, in a backtest as live
+    /// (`model::schedule`).
     pub retrain: SignedDuration,
     /// How far back from a retrain its rows go, such as `"720h"`.
     pub window: SignedDuration,
@@ -84,20 +86,26 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule or the targets are invalid
-    /// (see `DecisionRule::validate`, `TargetsConfig::validate`), the
-    /// targets trade an instrument the strategy does not read, the
+    /// Returns an error if the decision rule, the targets or the learner
+    /// are invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
+    /// `LearnerConfig::validate`), the retrain interval is not positive,
+    /// the targets trade an instrument the strategy does not read, the
     /// barrier's ATR is on bars it does not read (the strategy subscribes
     /// to its bars, which feed it), the label names a target the config
-    /// lacks, a target (the barrier's limit or
-    /// the horizon) is not shorter than the window, the retrain interval is
-    /// not positive, the holdout is not
-    /// positive or leaves no fitted row (it and the longest target not
-    /// shorter than the window), the thresholds are not probabilities with
-    /// the short below the long, or the minimum score is not an AUC.
+    /// lacks, a target (the barrier's limit or the horizon) is not shorter
+    /// than the window, the holdout is not positive or leaves no fitted row
+    /// (it and the longest target not shorter than the window), the
+    /// thresholds are not probabilities with the short below the long, or
+    /// the minimum score is not an AUC.
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         self.decision.validate()?;
         self.targets.validate()?;
+        self.learner.validate()?;
+        ensure!(
+            self.retrain.is_positive(),
+            "the retrain interval {:#} is not positive",
+            self.retrain
+        );
         let traded = self.targets.instrument_id;
         ensure!(
             requirements.instrument_ids().contains(&traded),
@@ -114,11 +122,6 @@ impl ModelConfig {
             self.targets.label_index(self.label).is_some(),
             "the label {:?} names a target the targets do not have",
             self.label
-        );
-        ensure!(
-            self.retrain.is_positive(),
-            "the retrain interval {:#} is not positive",
-            self.retrain
         );
         let longest = self.targets.settles_within();
         ensure!(
@@ -158,8 +161,7 @@ mod tests {
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
     /// A model section with a barrier closed after 2 hours and a horizon
-    /// of 1 hour, retrained every 24 hours on a window of 48 hours, 12 of
-    /// them held out.
+    /// of 1 hour, on a window of 48 hours, 12 of them held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
         targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
@@ -237,6 +239,14 @@ mod tests {
     }
 
     #[test]
+    fn a_retrain_interval_not_positive_is_refused() {
+        for retrain in ["0h", "-24h"] {
+            let toml = section(&format!(r#"retrain = "{retrain}""#));
+            assert!(refused(&toml).contains("retrain interval"), "{retrain}");
+        }
+    }
+
+    #[test]
     fn a_horizon_not_shorter_than_the_window_is_refused() {
         let toml = section(
             r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "48h" }"#,
@@ -286,18 +296,30 @@ mod tests {
     }
 
     #[test]
-    fn a_retrain_interval_not_positive_is_refused() {
-        for retrain in ["0s", "-1h"] {
-            let toml = section(&format!(r#"retrain = "{retrain}""#));
-            assert!(refused(&toml).contains("retrain"), "{retrain}");
-        }
-    }
-
-    #[test]
     fn a_minimum_score_outside_an_auc_is_refused() {
         for score in ["1.5", "-0.1"] {
             let toml = section(&format!("min_score = {score}"));
             assert!(refused(&toml).contains("minimum score"), "{score}");
+        }
+    }
+
+    #[test]
+    fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
+        let lightgbm = |rows: u32| {
+            section(&format!(
+                r#"learner = {{ kind = "lightgbm", min_data_in_leaf = {rows} }}"#
+            ))
+        };
+
+        for rows in [1, 19] {
+            assert!(
+                refused(&lightgbm(rows)).contains("min_data_in_leaf"),
+                "{}",
+                refused(&lightgbm(rows))
+            );
+        }
+        for rows in [20, 50] {
+            assert!(load(&lightgbm(rows)).is_ok(), "{rows}");
         }
     }
 

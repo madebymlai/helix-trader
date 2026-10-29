@@ -13,10 +13,10 @@
 //! keeps the model).
 //!
 //! `Retraining` is a live model handle's side of it: a Nautilus timer
-//! named after the strategy (`RETRAIN-<strategy id>`), started on an
-//! epoch-aligned time, fires at every multiple of the retrain interval
-//! since the epoch, `delay` late, the time the data the node received up to
-//! then takes to reach the catalog; each firing launches the train at its
+//! named after the strategy (`schedule::timer`), started on an
+//! epoch-aligned time (`schedule::start`), fires at every multiple of the
+//! retrain interval since the epoch, `delay` late, the time the data the
+//! node received up to then takes to reach the catalog; each firing launches the train at its
 //! grid time, unless one is still running: that one is skipped, with a
 //! warning. The handle polls it at each decision: a finished retrain is
 //! logged, as info when it published, as an error with its reason when it
@@ -46,10 +46,9 @@ use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
-use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::identifiers::StrategyId;
 
-use super::train::Outcome;
+use super::{schedule, train::Outcome};
 
 /// The most lines of a child's standard error kept for the reason it
 /// failed: the error it printed last is at their end.
@@ -214,7 +213,7 @@ impl Retraining {
         launcher: Launcher,
     ) -> Self {
         Self {
-            timer: timer(strategy_id),
+            timer: schedule::timer(strategy_id),
             every,
             delay,
             launcher,
@@ -229,17 +228,7 @@ impl Retraining {
     ///
     /// Returns an error if Nautilus refuses the timer.
     pub(super) fn start<A: DataActor + DataActorNative>(&self, actor: &A) -> anyhow::Result<()> {
-        let clock = actor.clock();
-        let start = last_grid_time(clock.timestamp_ns(), self.every, self.delay)?;
-        clock.set_timer_ns(
-            &self.timer,
-            DurationNanos::try_from(self.every)?,
-            Some(start),
-            None,
-            None,
-            Some(true),
-            Some(false),
-        )
+        schedule::start(actor, &self.timer, self.every, self.delay)
     }
 
     /// Launches the retrain at the grid time of `event`, if it is the
@@ -283,23 +272,6 @@ impl Retraining {
     }
 }
 
-/// The name of the retrain timer of `strategy_id`.
-fn timer(strategy_id: StrategyId) -> String {
-    format!("RETRAIN-{strategy_id}")
-}
-
-/// The last multiple of `every` since the epoch, plus `delay`, not after
-/// `now`.
-fn last_grid_time(
-    now: UnixNanos,
-    every: SignedDuration,
-    delay: SignedDuration,
-) -> anyhow::Result<UnixNanos> {
-    let (every, delay) = (every.as_nanos(), delay.as_nanos());
-    let start = (i128::from(now.as_u64()) - delay).div_euclid(every) * every + delay;
-    Ok(UnixNanos::from(u64::try_from(start)?))
-}
-
 impl fmt::Debug for Launcher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Launcher").finish_non_exhaustive()
@@ -318,6 +290,8 @@ impl fmt::Display for Retrained {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use nautilus_core::UnixNanos;
 
     use super::*;
     use crate::model::train::Kept;
@@ -427,7 +401,7 @@ mod tests {
     fn fired(strategy: &str, time: &str) -> TimeEvent {
         let ns = UnixNanos::from(at(time));
         TimeEvent::new(
-            timer(StrategyId::from(strategy)).as_str().into(),
+            schedule::timer(StrategyId::from(strategy)).as_str().into(),
             nautilus_core::UUID4::new(),
             ns,
             ns,
@@ -521,23 +495,5 @@ mod tests {
         retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:06:00Z"));
 
         assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-    }
-
-    #[test]
-    fn the_grid_time_is_the_last_multiple_since_the_epoch_plus_the_delay() {
-        let last = |now: &str| {
-            Timestamp::from(
-                last_grid_time(
-                    UnixNanos::from(at(now)),
-                    SignedDuration::from_hours(24),
-                    SignedDuration::from_mins(6),
-                )
-                .unwrap(),
-            )
-        };
-
-        assert_eq!(last("2026-10-22T13:00:00Z"), at("2026-10-22T00:06:00Z"));
-        assert_eq!(last("2026-10-22T00:06:00Z"), at("2026-10-22T00:06:00Z"));
-        assert_eq!(last("2026-10-22T00:05:59Z"), at("2026-10-21T00:06:00Z"));
     }
 }

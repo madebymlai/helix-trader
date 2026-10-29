@@ -20,11 +20,29 @@
 //! publishes them on the message bus as a `FeatureRow`, custom data keyed
 //! by the strategy's id (`FeatureRow::data_type`). Cold features give no
 //! decision and publish nothing.
+//!
+//! Nor does a stale decision of a cadence. A decision is fresh if the
+//! features read market data of the traded instrument made (`ts_init`)
+//! after the previous decision of the grid, an interval before, whether
+//! the strategy ran then or not: so the first decision of a run is judged
+//! as any other, and a warmup's data makes it fresh only if made within
+//! that interval. A closed market, a weekend's or a night's, would
+//! otherwise decide on its last quote, its targets the spread and the
+//! fees: a stale decision gives no row, no targets and no trade, in a
+//! dataset run as in a backtest or live, and is logged at debug.
+//!
+//! The market data is the quotes, trades, bars, depth and deltas of the
+//! traded instrument a feature reads (`FeatureSet::last_update`), whatever
+//! their kind or venue, with no calendar of sessions. Not the data of
+//! another instrument, which may trade while the traded one is closed, nor
+//! custom data, which may come on a weekend. The node builds no time bar
+//! for a period without data (`warmup::data_engine_config`), so a bar is
+//! data. A decision on an event is fresh: the event is the data.
 
 use std::{any::Any, sync::Arc};
 
 use anyhow::ensure;
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
@@ -32,7 +50,7 @@ use nautilus_common::{
 use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::{
     data::{CustomData, CustomDataTrait, DataType, HasTsInit},
-    identifiers::StrategyId,
+    identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use serde::{Deserialize, Serialize};
@@ -138,21 +156,43 @@ pub fn is_decision(event: &TimeEvent) -> bool {
     event.name == DECISION_TIMER
 }
 
-/// Decides now: snapshots `features` if every one is initialized, and
-/// publishes the row on the message bus, keyed by `strategy`'s id.
+/// Decides now, on `rule`, trading `instrument_id`: snapshots `features`
+/// if the decision is fresh and every feature is initialized, and
+/// publishes the row on the message bus, keyed by `strategy`'s id. A
+/// decision of a cadence is fresh if a feature read data of
+/// `instrument_id` after the cadence's previous decision (see the module
+/// documentation); a stale one is skipped, logged at debug. A decision on
+/// an event is fresh.
 ///
 /// # Panics
 ///
 /// Panics if `strategy` is not registered with a trader, or has no id.
-pub fn decide<S>(strategy: &S, features: &FeatureSet) -> Option<FeatureRow>
+pub fn decide<S>(
+    strategy: &S,
+    features: &FeatureSet,
+    rule: DecisionRule,
+    instrument_id: InstrumentId,
+) -> Option<FeatureRow>
 where
     S: Strategy + StrategyNative + DataActor + DataActorNative,
 {
+    let now = strategy.clock().timestamp_ns();
+    if let DecisionRule::Every(interval) = rule {
+        let previous = UnixNanos::from(Timestamp::from(now) - interval);
+        if features
+            .last_update(instrument_id)
+            .is_none_or(|last| last <= previous)
+        {
+            log::debug!(
+                "decision at {now} skipped: no data of {instrument_id} since the previous, at {previous}"
+            );
+            return None;
+        }
+    }
     let values = features.values()?;
     let strategy_id = strategy
         .strategy_id()
         .expect("a strategy deciding has an id");
-    let now = strategy.clock().timestamp_ns();
     let row = FeatureRow {
         strategy_id,
         features: values,
@@ -252,6 +292,7 @@ mod tests {
 
     const STRATEGY: &str = "PROBE-001";
     const AUD: &str = "AUD/USD.SIM";
+    const GBP: &str = "GBP/USD.SIM";
 
     /// 2026-10-26T10:07:30Z.
     const NOW: u64 = 1_792_922_850_000_000_000;
@@ -299,6 +340,10 @@ mod tests {
         (probe, clock)
     }
 
+    fn aud() -> InstrumentId {
+        InstrumentId::from(AUD)
+    }
+
     fn every(minutes: i64) -> DecisionRule {
         DecisionRule::Every(SignedDuration::from_mins(minutes))
     }
@@ -315,16 +360,22 @@ mod tests {
             .unwrap()
     }
 
-    fn quote(mid: f64) -> QuoteTick {
+    /// A quote of `instrument` with the mid `mid`, made at `ns`.
+    fn quote_of(instrument: &str, mid: f64, ns: u64) -> QuoteTick {
         QuoteTick::new(
-            InstrumentId::from(AUD),
+            InstrumentId::from(instrument),
             Price::new(mid - 0.0001, 5),
             Price::new(mid + 0.0001, 5),
             Quantity::from(1),
             Quantity::from(1),
-            UnixNanos::default(),
-            UnixNanos::default(),
+            UnixNanos::from(ns),
+            UnixNanos::from(ns),
         )
+    }
+
+    /// A quote of AUD/USD with the mid `mid`, a second before `NOW`.
+    fn quote(mid: f64) -> QuoteTick {
+        quote_of(AUD, mid, NOW - SECOND)
     }
 
     /// The rows published for `STRATEGY` from now on.
@@ -459,7 +510,7 @@ mod tests {
         let features = features();
         features.handle_quote(&quote(0.7)).unwrap();
 
-        assert_eq!(decide(&probe, &features), None);
+        assert_eq!(decide(&probe, &features, every(15), aud()), None);
         assert!(rows.borrow().is_empty());
     }
 
@@ -471,13 +522,86 @@ mod tests {
         features.handle_quote(&quote(0.7)).unwrap();
         features.handle_quote(&quote(0.8)).unwrap();
 
-        let row = decide(&probe, &features).unwrap();
+        let row = decide(&probe, &features, every(15), aud()).unwrap();
 
         assert_eq!(row.strategy_id, StrategyId::from(STRATEGY));
         assert_eq!(row.ts_event, UnixNanos::from(NOW));
         assert_eq!(row.features.len(), 1);
         assert!((row.features[0] - 0.75).abs() < 1e-9, "{row:?}");
         assert_eq!(*rows.borrow(), [row]);
+    }
+
+    /// Warm features whose last quote of AUD/USD was made at `ns`.
+    fn warm_until(ns: u64) -> Rc<FeatureSet> {
+        let features = features();
+        features
+            .handle_quote(&quote_of(AUD, 0.7, ns - SECOND))
+            .unwrap();
+        features.handle_quote(&quote_of(AUD, 0.8, ns)).unwrap();
+        features
+    }
+
+    /// A market closed for the last 16 minutes: its last quote is older
+    /// than the decision 15 minutes ago.
+    #[test]
+    fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothing() {
+        let (probe, _clock) = registered(NOW);
+        let rows = published();
+        let features = warm_until(NOW - 16 * 60 * SECOND);
+
+        assert_eq!(decide(&probe, &features, every(15), aud()), None);
+        assert!(rows.borrow().is_empty());
+    }
+
+    /// The decision 15 minutes ago saw the data up to it: a quote made then
+    /// is stale, one a nanosecond later fresh.
+    #[test]
+    fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
+        let (probe, _clock) = registered(NOW);
+        let previous = NOW - 15 * 60 * SECOND;
+
+        assert_eq!(
+            decide(&probe, &warm_until(previous), every(15), aud()),
+            None
+        );
+        assert!(decide(&probe, &warm_until(previous + 1), every(15), aud()).is_some());
+    }
+
+    /// The traded instrument's market is closed, another's open: the
+    /// decision would trade on stale prices.
+    #[test]
+    fn data_of_another_instrument_makes_no_decision_fresh() {
+        let (probe, _clock) = registered(NOW);
+        let features = FeatureSet::builder()
+            .quotes(
+                InstrumentId::from(AUD),
+                "aud",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .quotes(
+                InstrumentId::from(GBP),
+                "gbp",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .build()
+            .unwrap();
+        features
+            .handle_quote(&quote_of(AUD, 0.7, NOW - 16 * 60 * SECOND))
+            .unwrap();
+        features
+            .handle_quote(&quote_of(GBP, 1.3, NOW - SECOND))
+            .unwrap();
+
+        assert_eq!(decide(&probe, &features, every(15), aud()), None);
+        assert!(decide(&probe, &features, every(15), InstrumentId::from(GBP)).is_some());
+    }
+
+    #[test]
+    fn an_event_decides_on_whatever_data_came_last() {
+        let (probe, _clock) = registered(NOW);
+        let features = warm_until(NOW - 24 * 60 * 60 * SECOND);
+
+        assert!(decide(&probe, &features, DecisionRule::Event, aud()).is_some());
     }
 
     #[test]

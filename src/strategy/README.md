@@ -536,8 +536,12 @@ of its choosing (`model::features`, `model::decide`).
   `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
   `.data(data_type, name, read)` for a raw feature of custom data, the last
   value `read` from a data point. `.code(include_str!("features.rs"))` adds
-  the strategy's feature code to the fingerprint; `build()` refuses an
-  empty set and two features of one name. The names and their order are
+  the strategy's feature code to the fingerprint; `.warmup(span)` declares
+  how much data the features read before a decision, which a dataset
+  build replays before its first day (see "Dataset"): a strategy passes
+  its own warmup, `learned/` its `warmup`; none unless given. `build()`
+  refuses an empty set, two features of one name and a negative warmup.
+  The names and their order are
   fixed there, and the values come in that order. A feature is a Nautilus
   `Indicator` exposing its value (`Feature`), which every Nautilus moving
   average does as it is; another indicator, or one of ours, implements
@@ -569,16 +573,34 @@ of its choosing (`model::features`, `model::decide`).
   engine's timer of the same time, which a backtest may run after the
   strategy's (it orders the timers of one time by name), and a live node
   as their tasks wake. `on_time_event` calls `decide::decide(self,
-  &features)` when `decide::is_decision(event)`; an event strategy calls
-  it from any handler. A strategy trading on its model does both through
-  its model handle (see "Model handle").
-- **Rows.** `decide` snapshots the features if every one is initialized
-  and publishes them on the message bus as a `FeatureRow` (the strategy
-  id, the values, the decision time), custom data keyed by the strategy id
-  (`FeatureRow::data_type`), and returns it. Cold features give no
-  decision and publish nothing.
+  &features, rule, instrument_id)`, `instrument_id` the one traded, when
+  `decide::is_decision(event)`; an event strategy calls it from any
+  handler. A strategy trading on its model does both through its model
+  handle (see "Model handle").
+- **Fresh decisions.** A decision of a cadence is skipped, logged at
+  debug, unless the features read market data of the traded instrument
+  made (`ts_init`) after the previous decision of the grid, an interval
+  before: a closed market, a weekend's or a night's, would otherwise
+  decide on its last quote, and its targets would be the spread and the
+  fees. The market data is the quotes, trades, bars, depth and deltas of
+  the traded instrument a feature reads (`FeatureSet::last_update`),
+  whatever their kind or venue, with no calendar of sessions; not another
+  instrument's, which may trade while the traded one is closed, nor
+  custom data, which may come on a weekend. The data engine builds no bar
+  for a period without data (see "Hours without quotes"), so a bar is
+  data. The previous decision is the grid's whether the strategy ran
+  then or not, so the first decision of a run is judged as any other: a
+  warmup's data makes it fresh only if made within that interval. A
+  decision on an event is fresh. The rule holds in every mode: a stale
+  decision gives no row, no targets and no trade.
+- **Rows.** `decide` snapshots the features if the decision is fresh and
+  every one is initialized, and publishes them on the message bus as a
+  `FeatureRow` (the strategy id, the values, the decision time), custom
+  data keyed by the strategy id (`FeatureRow::data_type`), and returns
+  it. Cold features give no decision and publish nothing.
 - **Fingerprint.** `decide::fingerprint(&features, rule)` hashes the
-  feature names in order, the strategy's feature code, the shared indicator
+  feature names in order, the strategy's feature code, the features'
+  warmup, the shared indicator
   code (`model::features` itself and Nautilus' indicators, named by the
   git source `Cargo.lock` pins, through `build.rs`), the rule and
   `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
@@ -650,8 +672,16 @@ of its choosing (`model::features`, `model::decide`).
   catalog's coverage is the day cache: `missing(first, last)` gives the
   days it lacks, from the catalog's missing intervals, and `build(first,
   last, replay)` has `replay` run the strategy once over them, from the
-  first's start to the last's end plus the longest target
-  (`settles_within`), then `write`s them. `write(rows, from, to)` files
+  features' warmup before the first's start to the last's end plus the
+  longest target (`settles_within`), then `write`s them, the rows decided
+  before the first day not. So the indicators read at a day's first
+  decisions the data before it, as inside a longer build: a day built
+  alone is stored as inside a longer build, row for row, for a feature
+  whose value is a function of the data within the warmup (one keeping a
+  running sum, as Nautilus' moving averages do, or an exponential
+  average, may still differ in its last bits). The catalog must cover
+  the data from that warmup before the first day, and the strategy's own
+  warmup request before it. `write(rows, from, to)` files
   only the days the replay settled (replayed whole, `to` the longest
   target past their end), each with the day's bounds, a day without rows
   within the file of the day before it (Nautilus writes no file without
@@ -663,7 +693,8 @@ of its choosing (`model::features`, `model::decide`).
   strategy, fingerprint, feature names, target spec and names, the days
   held. `settled(from, at, replay)` gives the rows a train at `at` sees,
   those of the decisions in `[from, at)` settled by `at`: `replay` runs
-  once from the first missing day's start to `at`, no further, the days
+  once from the warmup before the first missing day's start to `at`, no
+  further, the days
   it settled are written, and the rows of the days it did not (the last
   before `at`) come from the replay alone, so the next train replays them
   again. `read` refuses rows of other feature names or widths with a
@@ -671,16 +702,15 @@ of its choosing (`model::features`, `model::decide`).
 - **Model config.** The model section of a strategy's TOML is a
   `ModelConfig` (`model::config`): `decision`, `targets`, `label`
   (`"barrier"` or `"horizon"`: the model learns whether that target's long
-  gains, net of costs), `retrain`, `window` and `holdout` (durations; a
-  retrain at every multiple of `retrain` since the epoch), `thresholds =
-  { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC) and `learner`.
-  `validate(&requirements)` refuses a traded instrument the strategy does
-  not read, a barrier ATR on a bar type it does not read (its bars feed
-  the ATR), a label of a target the config lacks, a barrier limit or
-  horizon not shorter than the window, a retrain interval not positive, a
-  holdout leaving no fitted row,
-  thresholds that are not probabilities with the short below the long,
-  and a minimum score outside [0, 1].
+  gains, net of costs), `retrain`, `window` and `holdout` (durations),
+  `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
+  and `learner`. `validate(&requirements)` refuses a retrain interval not
+  positive, a traded instrument the strategy does not read, a barrier ATR
+  on a bar type it does not read (its bars feed the ATR), a label of a
+  target the config lacks, a barrier limit or horizon not shorter than
+  the window, a holdout leaving no fitted row, thresholds that are not
+  probabilities with the short below the long, and a minimum score
+  outside [0, 1].
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
   config)` and `train_at(t, replay)` (`model::train`) train at `t`: the
   rows of the window ending at `t` settled by `t` (`Dataset::settled`),
@@ -701,20 +731,23 @@ of its choosing (`model::features`, `model::decide`).
   missing value written `"NaN"`) and the model as its adapter saved it.
   A reloaded model is checked by predicting the probes, not by its bytes.
   `valid_froms()` lists the models in time order, `read(valid_from)` gives
-  one back.
+  one back. `StoredModel::load(feature_names, fingerprint)` loads it with
+  the checks a handle makes before use (below).
 - **Model handle.** A strategy trading on its model holds a `ModelHandle`
   (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
   mode)`, an `Rc`), the one place it decides: `start(self, &bar_types)`
   in `on_start` registers the features and starts the cadence, live
   `warmup::live_bar_build_delay(&bar_types)` late; `decide(self)` at each
-  decision snapshots the features and publishes their row, then, in
+  fresh decision, on data of the targets' instrument (`new` refuses a
+  cadence on features reading none of it), snapshots the features and
+  publishes their row, then, in
   `Mode::Backtest { models }` or `Mode::Live { models, .. }`, takes the
   latest model of
   the store valid at the decision, predicts, and returns the `Trade`
   (side, the targets' size, the probability) that `Thresholds::side`
   makes of the probability: a buy at or above `long`, a sell at or below
-  `short`. No model valid yet, cold features or a probability between
-  the thresholds give no trade, never an error. The store is listed again
+  `short`. No model valid yet, a stale decision, cold features or a
+  probability between the thresholds give no trade, never an error. The store is listed again
   at each decision, so a model published meanwhile is used from the first
   decision at or after its valid-from, and a model is swapped in only
   there, before predicting: no decision mixes two models. Before use a
@@ -729,20 +762,39 @@ of its choosing (`model::features`, `model::decide`).
   `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
   trading. The trades are the strategy's own orders: `learned/` sends a
   market order and closes it `hold` later.
+- **Schedule.** A model is retrained every `retrain` (`model::schedule`),
+  at its multiples since the Unix epoch, whatever the run start, in a
+  backtest as live: the times of a Nautilus timer named after the
+  strategy (`timer(strategy_id)`, `RETRAIN-<strategy id>`, so several
+  strategies can retrain in one process), that `start(clock, timer,
+  every, delay)` sets from the last grid time not after now, plus the
+  delay (`last_grid_time`). `times(every, from, to)` gives those a run
+  over `[from, to)` uses, from the last at or before `from`, firing such
+  a timer on a virtual clock; `missing(times, published)` those the
+  store has no model valid from. A model is the same whatever interval
+  its time came from, so the interval does not key the store.
+- **Retraining backtest.** `WalkForward` (`model::walk`,
+  `WalkForward::new(catalog, models, strategy_id, &features, config)`)
+  holds a backtest's retrains and scores: `prepare(start, end, build,
+  train)` has `build` build the dataset from the first retrain's window
+  to `end` if it lacks a day, then `train` train at each missing retrain
+  time; `scores(start, end)` scores each decision of the dataset in the
+  span with the model the handle used at it, beside the baseline fitted
+  at each retrain time, per retrain period and over the span (backtest
+  README, "Retraining on the schedule").
 - **Live retraining.** In `Mode::Live { models, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
-  sets a timer named after the strategy, `RETRAIN-<strategy id>`, on the
-  epoch-aligned grid of `retrain`, `catalog_delay` late
-  (`Recording::catalog_delay`: the data the node received up to a time
-  reaches the catalog that much later); each firing, handed on by the
-  strategy's `on_time_event`, launches a train at its grid time through
-  the `Launcher`, unless one is still running: that one is skipped, with
-  a warning. `decide` first polls the running retrain: a finished one is
-  logged, as info when it published, as an error with the reason when it
-  kept the current model or failed, and the next may start. The model it
-  published is used from that decision on (the store is listed again);
-  live validity starts when the train finishes, a backtest's at its
-  time. `Launcher::process` runs the binary's `train` as a child (one
+  sets the strategy's retrain timer (`schedule::start`) on the grid of
+  `retrain`, `catalog_delay` late (`Recording::catalog_delay`: the data
+  the node received up to a time reaches the catalog that much later);
+  each firing, handed on by the strategy's `on_time_event`, launches a
+  train at its grid time through the `Launcher`, unless one is still
+  running: that one is skipped, with a warning. `decide` first polls the
+  running retrain: a finished one is logged, as info when it published,
+  as an error with the reason when it kept the current model or failed,
+  and the next may start. The model it published is used from that
+  decision on (the store is listed again); live validity starts when the
+  train finishes, a backtest's at its time. `Launcher::process` runs the binary's `train` as a child (one
   node per process), `--at` and the time appended to its arguments, its
   exit status the outcome, the error it printed last the reason; a child
   still running when the node stops runs to its end.
@@ -760,7 +812,11 @@ of its choosing (`model::features`, `model::decide`).
   dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
   `--retrain-balance`), needed by a strategy trading on a model, and
   passes them, its `--config`, `--catalog`, `--models` and `--leverage`
-  to the `train` it starts.
+  to the `train` it starts. `backtest` of a strategy trading on a model
+  builds its dataset and runs `train` in child processes first, with
+  its `--dataset-balance`, each train through `Launcher::process` as
+  live's: one keeping the model is a kept retrain, not a failed backtest
+  (backtest README, "Retraining on the schedule").
 
 ## Warmup and training
 

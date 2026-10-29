@@ -41,10 +41,12 @@ use nautilus_trading::{
 
 use crate::{
     model::{
+        dataset::Dataset,
         decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle, Trade},
         train::Training,
+        walk::WalkForward,
     },
     rolls::ContinuousBars,
     strategy::warmup,
@@ -72,7 +74,7 @@ impl Learned {
     /// Returns an error if the config is invalid.
     pub fn new(config: LearnedConfig, mode: Mode) -> anyhow::Result<Self> {
         config.validate()?;
-        let features = features::features(&config.bars.bar_types())?;
+        let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
         let model = ModelHandle::new(
             strategy_id(&config)?,
             Rc::clone(&features),
@@ -142,13 +144,55 @@ impl Learned {
 /// Returns an error if the config is invalid, or as `Training::new` does.
 pub fn training(config: &LearnedConfig, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
     config.validate()?;
-    let features = features::features(&config.bars.bar_types())?;
+    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
     Training::new(
         catalog,
         models,
         strategy_id(config)?,
         &features,
         config.model.clone(),
+    )
+}
+
+/// The backtests of the model of the strategy `config` describes, on its
+/// dataset in the catalog at `catalog` and its models in the store under
+/// `models`: their retrains and their scores.
+///
+/// # Errors
+///
+/// Returns an error if the config is invalid, or as `WalkForward::new`
+/// does.
+pub fn walk_forward(
+    config: &LearnedConfig,
+    catalog: &Path,
+    models: &Path,
+) -> anyhow::Result<WalkForward> {
+    config.validate()?;
+    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    WalkForward::new(
+        catalog,
+        models,
+        strategy_id(config)?,
+        &features,
+        config.model.clone(),
+    )
+}
+
+/// The dataset of the strategy `config` describes, in the catalog at
+/// `catalog`; its replay runs the strategy in `Mode::Dataset`.
+///
+/// # Errors
+///
+/// Returns an error if the config is invalid, or as `Dataset::new` does.
+pub fn dataset(config: &LearnedConfig, catalog: &Path) -> anyhow::Result<Dataset> {
+    config.validate()?;
+    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    Dataset::new(
+        catalog,
+        strategy_id(config)?,
+        &features,
+        config.model.decision,
+        config.model.targets.clone(),
     )
 }
 

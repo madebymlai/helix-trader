@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use jiff::SignedDuration;
 use nautilus_indicators::average::ema::ExponentialMovingAverage;
 use nautilus_model::data::BarType;
 
@@ -12,17 +13,21 @@ use crate::model::features::FeatureSet;
 /// The periods of the averages, in bars: the fast, then the slow.
 const PERIODS: [usize; 2] = [10, 30];
 
-/// The features of `bar_types`, the averages of each in turn.
+/// The features of `bar_types`, the averages of each in turn, warmed by
+/// the strategy's `warmup`, which a dataset build replays before its first
+/// day.
 ///
 /// # Errors
 ///
-/// Returns an error if there is no bar type.
-pub fn features(bar_types: &[BarType]) -> anyhow::Result<Rc<FeatureSet>> {
+/// Returns an error if there is no bar type, or the warmup is negative.
+pub fn features(bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Result<Rc<FeatureSet>> {
     bar_types
         .iter()
         .flat_map(|&bar_type| PERIODS.map(|period| (bar_type, period)))
         .fold(
-            FeatureSet::builder().code(include_str!("features.rs")),
+            FeatureSet::builder()
+                .code(include_str!("features.rs"))
+                .warmup(warmup),
             |builder, (bar_type, period)| {
                 builder.bars(
                     bar_type,
@@ -42,12 +47,24 @@ mod tests {
     use super::*;
 
     const GOLD: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
+    const HOUR: SignedDuration = SignedDuration::from_hours(1);
+
+    /// A dataset build replays the strategy's warmup before its first day.
+    #[test]
+    fn the_features_declare_the_strategys_warmup() {
+        let warmup = SignedDuration::from_hours(3);
+
+        assert_eq!(
+            features(&[BarType::from(GOLD)], warmup).unwrap().warmup(),
+            warmup
+        );
+    }
 
     #[test]
     fn each_bar_type_has_a_fast_and_a_slow_average_in_order() {
         let silver = "XAGUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
 
-        let features = features(&[BarType::from(GOLD), BarType::from(silver)]).unwrap();
+        let features = features(&[BarType::from(GOLD), BarType::from(silver)], HOUR).unwrap();
 
         assert_eq!(
             features.names(),
@@ -64,7 +81,7 @@ mod tests {
     /// 30 bars.
     #[test]
     fn the_features_are_warm_after_the_slow_period() {
-        let features = features(&[BarType::from(GOLD)]).unwrap();
+        let features = features(&[BarType::from(GOLD)], HOUR).unwrap();
         let bar = |close: &str| {
             Bar::new(
                 BarType::from(GOLD),
@@ -89,6 +106,6 @@ mod tests {
 
     #[test]
     fn no_bar_type_is_no_feature_set() {
-        assert!(features(&[]).is_err());
+        assert!(features(&[], HOUR).is_err());
     }
 }
