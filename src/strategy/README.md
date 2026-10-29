@@ -613,8 +613,9 @@ of its choosing (`model::features`, `model::decide`).
   `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
   adds the targets and `model::targets`' code, and
   `dataset::fingerprint(&features, rule, &targets, &commission)` all of
-  it and the commission of the dataset runs, as given
-  (`Commission::PerOrder` or `Commission::Rate`): the targets are net of
+  it and the commission of the dataset runs, as given, normalized
+  (`Commission::PerOrder` or `Commission::Rate`, `3 USD` for `3.00 USD`,
+  `0.00003` for `0.000030`): the targets are net of
   it, so rows and models of other costs are never read. The runs' balance
   and leverage are not in it: large enough, they deny no target.
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging

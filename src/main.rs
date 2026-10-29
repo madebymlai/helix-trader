@@ -205,11 +205,12 @@ struct CommissionArgs {
     commission_rate: Option<Commission>,
 }
 
-/// A commission flag's value: as given, to hand on to a child process, and
-/// its fee model.
+/// A commission flag's value: normalized, so that every spelling of one
+/// commission keys the same dataset, and handed on as such to a child
+/// process, and its fee model.
 #[derive(Debug, Clone)]
 struct Commission {
-    given: String,
+    normalized: String,
     fee_model: FeeModelAny,
 }
 
@@ -223,12 +224,12 @@ impl CommissionArgs {
         }
     }
 
-    /// The commission of the one flag given, as given: what a dataset's
+    /// The commission of the one flag given, normalized: what a dataset's
     /// fingerprint reads, and what a child process is given.
-    fn given(&self) -> dataset::Commission {
+    fn normalized(&self) -> dataset::Commission {
         match (&self.commission, &self.commission_rate) {
-            (Some(commission), _) => dataset::Commission::PerOrder(commission.given.clone()),
-            (None, Some(rate)) => dataset::Commission::Rate(rate.given.clone()),
+            (Some(commission), _) => dataset::Commission::PerOrder(commission.normalized.clone()),
+            (None, Some(rate)) => dataset::Commission::Rate(rate.normalized.clone()),
             (None, None) => unreachable!("clap requires one commission flag"),
         }
     }
@@ -297,7 +298,7 @@ struct LiveArgs {
 /// The costs of the dataset runs of a live node's retrains, as `train`
 /// takes them (its `--commission` or `--commission-rate`, and
 /// `--balance`), its leverage the node's. Checked as `train` checks them,
-/// and kept as given, for the `train` the node starts.
+/// and kept normalized, for the `train` the node starts.
 #[derive(Debug, Args)]
 struct RetrainCosts {
     /// Commission charged once per order in a retrain, for example "3 USD".
@@ -314,7 +315,7 @@ struct RetrainCosts {
 }
 
 impl RetrainCosts {
-    /// The commission of the retrains, as given.
+    /// The commission of the retrains, normalized.
     ///
     /// # Errors
     ///
@@ -358,30 +359,35 @@ fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
 }
 
-/// A commission per order: an amount and a currency code, not negative.
+/// A commission per order: an amount and a currency code, not negative;
+/// normalized as the amount without trailing zeros and the code, `"3 EUR"`
+/// for `"3.00 EUR"`.
 fn parse_commission(s: &str) -> anyhow::Result<Commission> {
+    let money = parse_money(s).map_err(anyhow::Error::msg)?;
     Ok(Commission {
-        given: s.to_string(),
-        fee_model: backtest::commission_per_order(parse_money(s).map_err(anyhow::Error::msg)?)?,
+        normalized: format!("{} {}", money.as_decimal().normalize(), money.currency.code),
+        fee_model: backtest::commission_per_order(money)?,
     })
 }
 
-/// A commission rate: a decimal, not negative.
+/// A commission rate: a decimal, not negative; normalized without trailing
+/// zeros, `"0.00003"` for `"0.000030"`.
 fn parse_commission_rate(s: &str) -> anyhow::Result<Commission> {
+    let rate = s.parse::<Decimal>()?.normalize();
     Ok(Commission {
-        given: s.to_string(),
-        fee_model: backtest::commission_rate(s.parse::<Decimal>()?)?,
+        normalized: rate.to_string(),
+        fee_model: backtest::commission_rate(rate)?,
     })
 }
 
-/// A commission per order, checked, as given.
+/// A commission per order, checked, normalized.
 fn commission_text(s: &str) -> anyhow::Result<String> {
-    parse_commission(s).map(|_| s.to_string())
+    parse_commission(s).map(|commission| commission.normalized)
 }
 
-/// A commission rate, checked, as given.
+/// A commission rate, checked, normalized.
 fn commission_rate_text(s: &str) -> anyhow::Result<String> {
-    parse_commission_rate(s).map(|_| s.to_string())
+    parse_commission_rate(s).map(|commission| commission.normalized)
 }
 
 /// An amount and a currency code, checked, as given.
@@ -578,7 +584,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         }
         Strategy::Learned => {
             let config = load_learned_config(&args.run.config)?;
-            let commission = args.commission.given();
+            let commission = args.commission.normalized();
             let walk =
                 learned::walk_forward(&config, &args.run.catalog, &args.models, &commission)?;
             let children = Children::of(&args)?;
@@ -633,7 +639,7 @@ impl Children {
             config: args.run.config.clone(),
             catalog: args.run.catalog.clone(),
             models: args.models.clone(),
-            commission: args.commission.given(),
+            commission: args.commission.normalized(),
             balance,
             leverage: args.leverage,
         })
@@ -871,7 +877,7 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
                 &config,
                 &args.catalog,
                 &args.models,
-                &args.commission.given(),
+                &args.commission.normalized(),
             )?;
             training.train_at(args.at, |start, end| run.replay(&config, start, end))
         }
@@ -897,7 +903,7 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
         Strategy::Learned => {
             let config = load_learned_config(&args.run.config)?;
-            learned::dataset(&config, &args.run.catalog, &args.commission.given())?.build(
+            learned::dataset(&config, &args.run.catalog, &args.commission.normalized())?.build(
                 first,
                 last,
                 |from, to| run.replay(&config, from, to),
@@ -988,7 +994,7 @@ mod tests {
     }
 
     /// `REQUIRED`, the balance and `commission`.
-    fn backtest_with(commission: &[&'static str]) -> Vec<&'static str> {
+    fn backtest_with<'a>(commission: &[&'a str]) -> Vec<&'a str> {
         let mut argv = REQUIRED.to_vec();
         argv.extend(["--balance", "10000 EUR"]);
         argv.extend(commission);
@@ -1436,17 +1442,62 @@ mod tests {
     }
 
     #[test]
-    fn a_backtest_hands_its_children_the_commission_as_given() {
+    fn a_backtest_hands_its_children_the_commission_normalized() {
         let args = parse_backtest(&backtest_required()).unwrap();
         assert_eq!(
-            commission_args(&args.commission.given()),
+            commission_args(&args.commission.normalized()),
             ["--commission", "3 EUR"]
         );
         let args = parse_backtest(&backtest_with(&["--commission-rate", "0.00003"])).unwrap();
         assert_eq!(
-            commission_args(&args.commission.given()),
+            commission_args(&args.commission.normalized()),
             ["--commission-rate", "0.00003"]
         );
+    }
+
+    /// The commission keys the dataset and its models: two spellings of
+    /// one commission are one key, handed on to the children as such.
+    #[test]
+    fn two_spellings_of_a_commission_are_one_key() {
+        for (one, other) in [
+            (["--commission", "3 EUR"], ["--commission", "3.00 EUR"]),
+            (
+                ["--commission-rate", "0.00003"],
+                ["--commission-rate", "0.000030"],
+            ),
+        ] {
+            let key = |flags: [&'static str; 2]| {
+                parse_backtest(&backtest_with(&flags))
+                    .unwrap()
+                    .commission
+                    .normalized()
+            };
+            assert_eq!(key(one), key(other), "{one:?} {other:?}");
+            let handed = commission_args(&key(other)).map(String::from);
+            let reparsed = parse_backtest(&backtest_with(&[&handed[0], &handed[1]])).unwrap();
+            assert_eq!(reparsed.commission.normalized(), key(one));
+        }
+    }
+
+    /// A live node's retrains are keyed as `train` keys them.
+    #[test]
+    fn two_spellings_of_a_retrain_commission_are_one_key() {
+        let retrain = |rate: &str| {
+            parse_live(&[
+                "learned",
+                "--config",
+                "learned.toml",
+                "--retrain-commission-rate",
+                rate,
+            ])
+            .unwrap()
+            .retrain
+            .commission()
+            .unwrap()
+        };
+        assert_eq!(retrain("0.000030"), retrain("0.00003"));
+        let backtest = parse_backtest(&backtest_with(&["--commission-rate", "0.00003"])).unwrap();
+        assert_eq!(retrain("0.000030"), backtest.commission.normalized());
     }
 
     #[test]
