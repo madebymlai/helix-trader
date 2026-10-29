@@ -86,19 +86,21 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule or the targets are invalid
-    /// (see `DecisionRule::validate`, `TargetsConfig::validate`), the
-    /// retrain interval is not positive, the targets trade an instrument
-    /// the strategy does not read, the barrier's ATR is on bars it does not
-    /// read (the strategy subscribes to its bars, which feed it), the label
-    /// names a target the config lacks, a target (the barrier's limit or
-    /// the horizon) is not shorter than the window, the holdout is not
-    /// positive or leaves no fitted row (it and the longest target not
-    /// shorter than the window), the thresholds are not probabilities with
-    /// the short below the long, or the minimum score is not an AUC.
+    /// Returns an error if the decision rule, the targets or the learner
+    /// are invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
+    /// `LearnerConfig::validate`), the retrain interval is not positive,
+    /// the targets trade an instrument the strategy does not read, the
+    /// barrier's ATR is on bars it does not read (the strategy subscribes
+    /// to its bars, which feed it), the label names a target the config
+    /// lacks, a target (the barrier's limit or the horizon) is not shorter
+    /// than the window, the holdout is not positive or leaves no fitted row
+    /// (it and the longest target not shorter than the window), the
+    /// thresholds are not probabilities with the short below the long, or
+    /// the minimum score is not an AUC.
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         self.decision.validate()?;
         self.targets.validate()?;
+        self.learner.validate()?;
         ensure!(
             self.retrain.is_positive(),
             "the retrain interval {:#} is not positive",
@@ -298,6 +300,26 @@ mod tests {
         for score in ["1.5", "-0.1"] {
             let toml = section(&format!("min_score = {score}"));
             assert!(refused(&toml).contains("minimum score"), "{score}");
+        }
+    }
+
+    #[test]
+    fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
+        let lightgbm = |rows: u32| {
+            section(&format!(
+                r#"learner = {{ kind = "lightgbm", min_data_in_leaf = {rows} }}"#
+            ))
+        };
+
+        for rows in [1, 19] {
+            assert!(
+                refused(&lightgbm(rows)).contains("min_data_in_leaf"),
+                "{}",
+                refused(&lightgbm(rows))
+            );
+        }
+        for rows in [20, 50] {
+            assert!(load(&lightgbm(rows)).is_ok(), "{rows}");
         }
     }
 
