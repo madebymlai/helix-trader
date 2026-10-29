@@ -7,6 +7,10 @@
 //! adapter module and one variant. The adapters:
 //!
 //! - `lightgbm`: LightGBM's gradient-boosted trees, binary objective.
+//! - `perpetual`: PerpetualBooster's gradient-boosted trees, log-loss
+//!   objective, stopped by a budget instead of tuned settings; its
+//!   settings need a memory limit. It fits far slower than LightGBM and
+//!   saves models many times larger.
 //! - `baseline`: the training mean, the benchmark every score is read
 //!   against.
 //! - `fake`: the row's first feature, for tests that need to steer the
@@ -31,6 +35,7 @@
 mod baseline;
 mod fake;
 mod lightgbm;
+mod perpetual;
 
 use std::fmt;
 
@@ -38,6 +43,7 @@ use anyhow::ensure;
 use serde::Deserialize;
 
 pub use lightgbm::LightGbmConfig;
+pub use perpetual::PerpetualConfig;
 
 /// The learner of a strategy's model, loaded from TOML, such as
 /// `learner = { kind = "lightgbm", num_iterations = 200 }`.
@@ -47,6 +53,8 @@ pub enum LearnerConfig {
     /// LightGBM, with its settings.
     #[serde(rename = "lightgbm")]
     LightGbm(LightGbmConfig),
+    /// PerpetualBooster, with its settings.
+    Perpetual(PerpetualConfig),
     /// The mean of the training labels, whatever the row.
     Baseline {},
     /// The row's first feature, clamped to [0, 1]; the mean of the training
@@ -77,6 +85,7 @@ impl LearnerConfig {
     const fn kind(&self) -> &'static str {
         match self {
             Self::LightGbm(_) => "lightgbm",
+            Self::Perpetual(_) => "perpetual",
             Self::Baseline {} => "baseline",
             Self::Fake {} => "fake",
         }
@@ -85,6 +94,7 @@ impl LearnerConfig {
     fn learner(&self) -> &dyn Learner {
         match self {
             Self::LightGbm(config) => config,
+            Self::Perpetual(config) => config,
             Self::Baseline {} => &baseline::Baseline,
             Self::Fake {} => &fake::Fake,
         }
@@ -364,6 +374,10 @@ mod tests {
         lightgbm,
         LearnerConfig::LightGbm(LightGbmConfig::builder().feature_fraction(0.5).build())
     );
+    contract!(
+        perpetual,
+        LearnerConfig::Perpetual(PerpetualConfig::builder().memory_limit(1.0).build())
+    );
     contract!(baseline, LearnerConfig::Baseline {});
     contract!(fake, LearnerConfig::Fake {});
 
@@ -414,6 +428,21 @@ mod tests {
             config,
             LearnerConfig::LightGbm(LightGbmConfig::builder().num_leaves(7).build())
         );
+    }
+
+    #[test]
+    fn loads_perpetual_from_toml_with_defaults() {
+        let config = learner(r#"learner = { kind = "perpetual", memory_limit = 2.5 }"#).unwrap();
+        assert_eq!(
+            config,
+            LearnerConfig::Perpetual(PerpetualConfig::builder().memory_limit(2.5).build())
+        );
+    }
+
+    #[test]
+    fn rejects_perpetual_without_a_memory_limit_at_load() {
+        let err = learner(r#"learner = { kind = "perpetual", budget = 1.0 }"#).unwrap_err();
+        assert!(err.to_string().contains("memory_limit"), "{err}");
     }
 
     #[test]
