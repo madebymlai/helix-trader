@@ -156,26 +156,48 @@ pub fn data_requirements(&self) -> DataRequirements {
 ```
 
 A strategy reading ticks as they are, beside or instead of bars, declares
-them as `TickSeries`, a Nautilus data type of one instrument:
+them as `TickSeries`, a Nautilus data type (`NautilusDataType`) of one
+instrument:
 
 ```toml
 ticks = [
     { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
     { data = "trades", instrument_id = "GC.v.0.GLBX" },
-    { data = "depth", instrument_id = "GC.v.0.GLBX" },
+    { data = "order_book_depths", instrument_id = "GC.v.0.GLBX" },
+    { data = "order_book_deltas", instrument_id = "GC.v.0.GLBX" },
+    { data = "Custom:Imbalance", instrument_id = "GC.v.0.GLBX" },
 ]
 ```
 
-`data` is `quotes` (`QuoteTick`), `trades` (`TradeTick`) or `depth`
-(`OrderBookDepth10`). fill-catalog asks each source for them: OKX, IC and
-IB fetch the declared series and refuse those they do not serve, while
-Databento fetches a GLBX instrument's MBP-10 book and trades whatever is
-declared. A backtest replays each as declared, one `BacktestDataConfig`
-per series, beside the series the bars are built from; the strategy
-subscribes to them itself. They have no warmup of their own: a strategy
-reading ticks alone gets the default cache. Live sets up the clients of
-their instruments, as of every instrument of the requirements, but
-subscribes to none of them.
+`data` is a name Nautilus parses (`NautilusDataType::from_str`) of one of
+the series a strategy reads as they are: `quotes` (`QuoteTick`), `trades`
+(`TradeTick`), `order_book_depths` (`OrderBookDepth10`),
+`order_book_deltas` (`OrderBookDelta`) or `Custom:<type name>`, custom
+data of the instrument. Any other data type, or a name Nautilus does not
+parse, fails the config's load. Custom data is keyed by the instrument
+id, in the catalog and on the message bus, as Nautilus' Databento client
+keys its own: the strategy subscribes to
+`DataType::new(type_name, None, Some(instrument_id))` and gets it in
+`on_data`, and registers the type with Nautilus
+(`nautilus_serialization::ensure_custom_data_registered`) before a
+backtest reads it from the catalog.
+
+fill-catalog asks each source for them: OKX, IC and IB fetch the declared
+series and refuse those they do not serve, while Databento fetches a GLBX
+instrument's MBP-10 book (depth), MBO book (deltas) and trades, whichever
+are declared. No source serves custom data: fill-catalog refuses it,
+naming it; it reaches the catalog otherwise (written by whatever makes
+it). A backtest replays each as declared, beside the series the bars are
+built from, in time order with them: one `BacktestDataConfig` per series,
+deltas grouped into an event per `F_LAST` (`OrderBookDeltas`, in
+`on_book_deltas`); custom data, which `BacktestDataConfig` refuses, read
+from the catalog by the backtest and added to the node's engine (see
+`src/backtest/README.md`, "Custom data"). The strategy subscribes to them
+itself. They have no warmup of their own: a strategy reading ticks alone
+gets the default cache. Live sets up the clients of their instruments, as
+of every instrument of the requirements, but subscribes to none of them;
+live custom data reaches the strategy as it is published on the message
+bus.
 
 An instrument may be a futures root (`GC.GLBX`), listed in the roll
 calendar, rather than a dated contract. `DataRequirements::slices(start,

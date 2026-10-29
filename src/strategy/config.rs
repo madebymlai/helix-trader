@@ -34,7 +34,9 @@ pub struct BarsConfig {
     pub warmup: SignedDuration,
     /// The tick series the strategy reads beside its bars, on any venue:
     /// `ticks = [{ data = "trades", instrument_id = "ESH4.CME" }]`, `data`
-    /// one of `quotes`, `trades`, `depth`. None by default.
+    /// a Nautilus data type by the name Nautilus parses: `quotes`,
+    /// `trades`, `order_book_depths`, `order_book_deltas` or
+    /// `Custom:<type name>` (see `TickSeries`). None by default.
     #[serde(default)]
     #[builder(default)]
     pub ticks: Vec<TickSeries>,
@@ -142,8 +144,9 @@ pub struct CompositeSource {
 
 #[cfg(test)]
 mod tests {
+    use nautilus_model::data::NautilusDataType;
+
     use super::*;
-    use crate::strategy::TickData;
 
     const TOML: &str = r#"
         instrument_ids = ["ESH4.CME", "ESM4.CME"]
@@ -187,7 +190,7 @@ mod tests {
         assert_eq!(
             config.data_requirements().ticks,
             [TickSeries {
-                data: TickData::Trades,
+                data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("ESH4.CME"),
             }]
         );

@@ -166,6 +166,7 @@ fn schema(data: FillData) -> Schema {
         FillData::Quotes => Schema::Mbp1,
         FillData::Trades => Schema::Trades,
         FillData::Depth => Schema::Mbp10,
+        FillData::Deltas => Schema::Mbo,
     }
 }
 
@@ -199,7 +200,7 @@ mod tests {
     use super::*;
     use crate::{
         data::node_fill::missing,
-        strategy::{DataRequirements, TickData, TickSeries},
+        strategy::{DataRequirements, TickSeries},
     };
 
     fn ts(s: &str) -> Timestamp {
@@ -232,7 +233,12 @@ mod tests {
 
     #[test]
     fn every_series_is_asked_a_day_a_request() {
-        for data in [FillData::Depth, FillData::Trades, FillData::Quotes] {
+        for data in [
+            FillData::Depth,
+            FillData::Deltas,
+            FillData::Trades,
+            FillData::Quotes,
+        ] {
             assert_eq!(
                 DatabentoHistory::period(data),
                 SignedDuration::from_hours(24)
@@ -243,6 +249,7 @@ mod tests {
     #[test]
     fn each_series_is_quoted_in_the_schema_the_client_asks_it_in() {
         assert_eq!(schema(FillData::Depth), Schema::Mbp10);
+        assert_eq!(schema(FillData::Deltas), Schema::Mbo);
         assert_eq!(schema(FillData::Trades), Schema::Trades);
         assert_eq!(schema(FillData::Quotes), Schema::Mbp1);
         assert_eq!(schema(FillData::Instrument), Schema::Definition);
@@ -283,7 +290,11 @@ mod tests {
         let ticks = instrument_ids
             .iter()
             .flat_map(|id| {
-                [TickData::Trades, TickData::Depth].map(|data| TickSeries {
+                [
+                    NautilusDataType::TradeTick,
+                    NautilusDataType::OrderBookDepth,
+                ]
+                .map(|data| TickSeries {
                     data,
                     instrument_id: InstrumentId::from(*id),
                 })

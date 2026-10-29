@@ -7,6 +7,14 @@
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 //! The engine is kept after the run, so that the report reads the fills
 //! from its cache, then disposed.
+//!
+//! Custom data is the exception: `BacktestDataConfig` refuses it, so the
+//! run reads it from the catalog itself (`custom_data`) and adds it to the
+//! node's engine before `run`, through the engine's own `add_data`, which
+//! replays it in time order with the rest, routed to its subscribers by
+//! its data type. A streaming run clears the engine's data after each
+//! chunk, dropping what was added before, so a run with custom data loads
+//! all its data at once (no `chunk_size`).
 
 use std::{collections::BTreeSet, fmt::Debug, str::FromStr, sync::Arc};
 
@@ -24,7 +32,9 @@ use nautilus_model::{
     enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
 };
-use nautilus_persistence::config::DataCatalogConfig;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
@@ -57,9 +67,11 @@ const CHUNK_SIZE: usize = 100_000;
 /// building no bar for an hour without quotes
 /// (`warmup::data_engine_config`). The engine starts
 /// 1 ns before `start` (see `Backtest::engine_start`), which must be before
-/// `end`. The data is streamed `CHUNK_SIZE` points at a time. Build and
-/// run errors are raised, not only logged; the engine outlives the run
-/// (see `run`).
+/// `end`. The data is streamed `CHUNK_SIZE` points at a time, unless the
+/// run replays custom data, which `BacktestDataConfig` refuses: then the
+/// custom series are left out (see `custom_data`) and the data is loaded
+/// at once. Build and run errors are raised, not only logged; the engine
+/// outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
@@ -77,8 +89,9 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .map(|venue| venue_config(backtest, venue))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
-    let data = backtest
-        .series()?
+    let (custom, series): (Vec<SeriesSlice>, Vec<SeriesSlice>) =
+        backtest.series()?.into_iter().partition(is_custom);
+    let data = series
         .into_iter()
         .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -97,7 +110,7 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .engine(engine_config)
         .start(UnixNanos::from(backtest.engine_start()?))
         .end(UnixNanos::from(backtest.end))
-        .chunk_size(CHUNK_SIZE)
+        .maybe_chunk_size(custom.is_empty().then_some(CHUNK_SIZE))
         .raise_exception(true)
         .dispose_on_completion(false)
         .build()?)
@@ -149,12 +162,59 @@ fn data_config(catalog: &str, series: SeriesSlice) -> anyhow::Result<BacktestDat
     Ok(config?)
 }
 
-/// Runs `config` with `strategy` on a new `BacktestNode` and returns its
+/// Whether `series` is of custom data, which `BacktestDataConfig` refuses.
+fn is_custom(series: &SeriesSlice) -> bool {
+    matches!(series.series.0, NautilusDataType::Custom { .. })
+}
+
+/// The custom data `backtest` replays (see `Backtest::series`), read from
+/// its catalog, each series over its slice, both ends included: the data
+/// the node cannot load (see `run_config`). Nautilus decodes each type by
+/// its name, so the strategy registers its custom types with Nautilus
+/// before (`nautilus_serialization::ensure_custom_data_registered`).
+///
+/// # Errors
+///
+/// Returns an error if the series cannot be worked out, or if the catalog
+/// cannot be read or a stored type is not registered, naming the series.
+pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
+    let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
+    let mut data = Vec::new();
+    for series in backtest.series()?.into_iter().filter(is_custom) {
+        let SeriesSlice {
+            series: (data_type, identifier),
+            slice,
+        } = series;
+        let NautilusDataType::Custom { type_name } = &data_type else {
+            unreachable!("a custom series");
+        };
+        let read = catalog
+            .query_custom_data_dynamic(
+                type_name,
+                Some(std::slice::from_ref(&identifier)),
+                Some(UnixNanos::from(slice.from)),
+                Some(UnixNanos::from(slice.to)),
+                None,
+                None,
+                true,
+            )
+            .with_context(|| format!("reading the {data_type} of {identifier}"))?;
+        data.extend(read);
+    }
+    Ok(data)
+}
+
+/// Runs `config` with `strategy` on a new `BacktestNode`, `custom` (see
+/// `custom_data`) added to its engine, and returns its
 /// one result, its return statistics with `MaxDrawdown` (registered with
 /// the portfolio before the run), with the costs of the fills in the
 /// engine's cache, each on the quotes the run replayed, if any, loaded
 /// again as the node loads them (the other series are not).
-pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
+pub(super) fn run<S>(
+    config: BacktestRunConfig,
+    custom: Vec<Data>,
+    strategy: S,
+) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
@@ -169,6 +229,9 @@ where
         .borrow_mut()
         .register_statistic(Arc::new(MaxDrawdown::new()));
     engine.add_strategy(strategy)?;
+    if !custom.is_empty() {
+        engine.add_data(custom, None, false, true)?;
+    }
     let results = node.run()?;
     let [result] = <[BacktestResult; 1]>::try_from(results)
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;
@@ -386,6 +449,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         assert_eq!(config.chunk_size(), Some(100_000));
+    }
+
+    #[test]
+    fn a_run_of_custom_data_loads_the_other_series_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            ticks: vec![crate::strategy::TickSeries {
+                data: NautilusDataType::Custom {
+                    type_name: "Imbalance".to_string(),
+                },
+                instrument_id: InstrumentId::from("SXR8.IBIS"),
+            }],
+            ..backtest(dir.path())
+        };
+        let config = run_config(&backtest).unwrap();
+        assert_eq!(config.chunk_size(), None);
+        assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
     #[test]

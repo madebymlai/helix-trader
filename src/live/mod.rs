@@ -198,10 +198,10 @@ fn loaded_instrument_ids(
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_model::data::BarType;
+    use nautilus_model::data::{BarType, NautilusDataType};
 
     use super::*;
-    use crate::strategy::{TickData, TickSeries};
+    use crate::strategy::TickSeries;
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -211,13 +211,13 @@ mod tests {
         ids.iter().map(|&id| InstrumentId::from(id)).collect()
     }
 
-    fn ticks(data: TickData, instrument_ids: &[&str]) -> DataRequirements {
+    fn ticks(data: NautilusDataType, instrument_ids: &[&str]) -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
             ticks: instrument_ids
                 .iter()
                 .map(|&id| TickSeries {
-                    data,
+                    data: data.clone(),
                     instrument_id: InstrumentId::from(id),
                 })
                 .collect(),
@@ -231,7 +231,7 @@ mod tests {
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
-            ..ticks(TickData::Trades, &["GC.GLBX"])
+            ..ticks(NautilusDataType::TradeTick, &["GC.GLBX"])
         };
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
-        let requirements = ticks(TickData::Depth, &["GC.GLBX"]);
+        let requirements = ticks(NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
             ids(&["GCZ6.GLBX", "GCG7.GLBX"])
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn a_contract_read_beside_its_root_loads_once() {
-        let requirements = ticks(TickData::Trades, &["GCZ6.GLBX", "GC.GLBX"]);
+        let requirements = ticks(NautilusDataType::TradeTick, &["GCZ6.GLBX", "GC.GLBX"]);
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
             ids(&["GCZ6.GLBX", "GCG7.GLBX"])
@@ -272,7 +272,10 @@ mod tests {
                 BarType::from("SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
                 BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
             ],
-            ..ticks(TickData::Quotes, &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"])
+            ..ticks(
+                NautilusDataType::QuoteTick,
+                &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"],
+            )
         };
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
@@ -289,7 +292,7 @@ mod tests {
     fn bars_on_a_root_are_refused_naming_the_bar_type_and_its_contract() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-MINUTE-LAST-INTERNAL")],
-            ..ticks(TickData::Trades, &[])
+            ..ticks(NautilusDataType::TradeTick, &[])
         };
         let err = loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z"))
             .unwrap_err()

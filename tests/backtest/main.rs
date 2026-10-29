@@ -15,6 +15,7 @@ mod common;
 
 mod backtest_bars;
 mod backtest_bars_on_close;
+mod backtest_book_deltas_and_custom_data;
 mod backtest_book_depth;
 mod backtest_commission_per_order;
 mod backtest_commission_rate;
