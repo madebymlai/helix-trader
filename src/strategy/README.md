@@ -716,7 +716,10 @@ of its choosing (`model::features`, `model::decide`).
   `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
   and `learner`. `validate(&requirements)` refuses a retrain interval not
   positive, a traded instrument the strategy does not read, a barrier ATR
-  on a bar type it does not read (its bars feed the ATR), a label of a
+  on a bar type it does not read (its bars feed the ATR) or whose period
+  of bars is longer than the strategy's warmup (a dataset run replays
+  only the warmup before its first day, so the ATR would be cold at its
+  first decisions), a label of a
   target the config lacks, a barrier limit or horizon not shorter than
   the window, a holdout leaving no fitted row, thresholds that are not
   probabilities with the short below the long, and a minimum score

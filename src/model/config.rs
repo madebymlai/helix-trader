@@ -293,6 +293,19 @@ fn validate_decisions(
             "the barrier's ATR is on {}, bars the strategy does not read",
             atr.bar_type
         );
+        // A dataset run replays the warmup before its first day, and no
+        // more: an ATR still cold then opens no target at the day's first
+        // decisions, which a longer build would.
+        let warms = i32::try_from(atr.period)
+            .ok()
+            .and_then(|period| atr.bar_type.spec().timedelta().checked_mul(period));
+        ensure!(
+            warms.is_some_and(|warms| warms <= requirements.warmup),
+            "the barrier's ATR of {} bars of {} warms over longer than the warmup {:#}",
+            atr.period,
+            atr.bar_type,
+            requirements.warmup
+        );
     }
     Ok(())
 }
@@ -538,6 +551,25 @@ mod tests {
         );
 
         requirements.bar_types = vec![BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")];
+        requirements.warmup = SignedDuration::from_hours(1);
+        assert!(config.validate(&requirements).is_ok());
+    }
+
+    /// The ATR's 14 one-minute bars warm in 14 minutes: a dataset run,
+    /// which replays the warmup before its first day, would open no target
+    /// at that day's first decisions after a shorter one.
+    #[test]
+    fn a_barrier_atr_longer_than_the_warmup_is_refused() {
+        let config: ModelConfig =
+            toml::from_str(&atr_section("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")).unwrap();
+        let mut requirements = reading(GOLD);
+        requirements.bar_types = vec![BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")];
+
+        requirements.warmup = SignedDuration::from_mins(13);
+        let err = format!("{:#}", config.validate(&requirements).unwrap_err());
+        assert!(err.contains("warmup"), "{err}");
+
+        requirements.warmup = SignedDuration::from_mins(14);
         assert!(config.validate(&requirements).is_ok());
     }
 
