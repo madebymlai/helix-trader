@@ -611,6 +611,32 @@ of its choosing (`model::features`, `model::decide`).
   alone the venue fills an entry at the last close, a take profit at its
   limit and a stop at its trigger, a bar's high before its low: as
   optimistic as any bars-only backtest.
+- **Dataset.** The settled rows are stored by day in the catalog
+  (`model::dataset`), as Nautilus custom data, `DatasetRow`: the feature
+  values, the target values in the order of
+  `TargetsConfig::target_names` (per target, the barrier then the
+  horizon, the long then the short, its P&L and its exit, 1 a take
+  profit, -1 a stop, 0 the time; `TargetRow::values`), the settling and
+  decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
+  &features, rule, targets)`) stores them under the strategy id and the
+  fingerprint, so another strategy, of another width, has its own, and a
+  change to the features, the rule or the targets finds none; the
+  feature names go in the data type's metadata, not in each row. The
+  catalog's coverage is the day cache: `missing(first, last)` gives the
+  days it lacks, from the catalog's missing intervals, and `build(first,
+  last, replay)` has `replay` run the strategy once over them, from the
+  first's start to the last's end plus the longest target
+  (`settles_within`), then `write`s them. `write(rows, from, to)` files
+  only the days the replay settled (replayed whole, `to` the longest
+  target past their end), each with the day's bounds, a day without rows
+  within the file of the day before it (Nautilus writes no file without
+  rows), and deletes what the catalog holds over them first: Nautilus
+  skips a file it already has, so a recomputed day would keep its old
+  rows. The directory is never consolidated, which would lose the days'
+  intervals. `read(from, to)` gives the rows back bit for bit, NaN
+  included; `manifest()` the dataset's `manifest.json` beside its files:
+  strategy, fingerprint, feature names, target spec and names, the days
+  held.
 
 ## Warmup and training
 

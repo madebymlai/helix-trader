@@ -1396,3 +1396,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     and from a trading run, every decision whose time limit passes before
     the end settled on 10M USD, while the purge leaves the cache a few
     closed orders against thousands.
+  - `backtest_dataset.rs`: the dataset store (strategy README, "Features
+    and decisions"): a probe like `backtest_targets.rs`' decides every
+    hour on IC's gold, a random walk, and a dataset build of two days
+    replays them once through `run_dataset`, to the second's end plus the
+    bracket's two hours, and stores the 48 rows; a second build of the
+    same days replays none, and the rows read back are those the replay
+    settled.

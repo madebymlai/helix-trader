@@ -85,7 +85,7 @@ const TIME_TAG: &str = "TARGET-TIME";
 
 /// The targets of each decision, from the strategy's config: on one
 /// instrument, of one size, a triple barrier, a horizon or both.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct TargetsConfig {
     /// The instrument the targets trade.
@@ -101,7 +101,7 @@ pub struct TargetsConfig {
 /// A triple barrier: the exits of a bracket, each this far from the
 /// decision's price in the instrument's prices, and its time limit, such
 /// as `{ take_profit = 3.0, stop = 3.0, limit = "2h" }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Barrier {
     /// How far the take profit is, in the side's favour.
@@ -257,6 +257,32 @@ impl TargetsConfig {
         )
     }
 
+    /// The longest time a decision's targets stay open: the barrier's
+    /// limit or the horizon. A decision is settled by then, but for a time
+    /// close finding no market until later.
+    #[must_use]
+    pub fn settles_within(&self) -> SignedDuration {
+        self.kinds()
+            .map(|(_, after)| after)
+            .max()
+            .unwrap_or(SignedDuration::ZERO)
+    }
+
+    /// The names of the values of a row (`TargetRow::values`), in their
+    /// order: for the barrier, then the horizon, the long then the short,
+    /// each its P&L and its exit, such as `barrier_long_pnl` and
+    /// `barrier_long_exit`.
+    #[must_use]
+    pub fn target_names(&self) -> Vec<String> {
+        self.kinds()
+            .flat_map(|(kind, _)| {
+                [Side::Long, Side::Short].into_iter().flat_map(move |side| {
+                    ["pnl", "exit"].map(|value| format!("{}_{}_{value}", kind.name(), side.name()))
+                })
+            })
+            .collect()
+    }
+
     /// The kinds of target of the config.
     fn kinds(&self) -> impl Iterator<Item = (Kind, SignedDuration)> {
         let barrier = self.barrier.map(|b| (Kind::Barrier, b.limit));
@@ -272,6 +298,18 @@ pub fn fingerprint(fingerprint: Fingerprint, config: &TargetsConfig) -> Fingerpr
     fingerprint
         .with(config.fingerprint_part().as_bytes())
         .with(include_str!("targets.rs").as_bytes())
+}
+
+impl Exit {
+    /// The exit as a value: 1 the take profit, -1 the stop, 0 the time.
+    #[must_use]
+    pub fn value(self) -> f64 {
+        match self {
+            Self::TakeProfit => 1.0,
+            Self::Stop => -1.0,
+            Self::Time => 0.0,
+        }
+    }
 }
 
 impl Outcome {
@@ -664,6 +702,14 @@ impl Target {
 }
 
 impl Kind {
+    /// The name of the kind in the names of a row's values.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Barrier => "barrier",
+            Self::Horizon => "horizon",
+        }
+    }
+
     fn letter(self) -> char {
         match self {
             Self::Barrier => 'B',
@@ -689,6 +735,14 @@ impl Kind {
 }
 
 impl Side {
+    /// The name of the side in the names of a row's values.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Long => "long",
+            Self::Short => "short",
+        }
+    }
+
     fn order_side(self) -> OrderSide {
         match self {
             Self::Long => OrderSide::Buy,
@@ -762,6 +816,19 @@ fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Price> {
 }
 
 impl TargetRow {
+    /// The values of the row, in the order of `TargetsConfig::target_names`
+    /// of the config that made it: each P&L in its currency, each exit as
+    /// `Exit::value`.
+    #[must_use]
+    pub fn values(&self) -> Vec<f64> {
+        [self.barrier, self.horizon]
+            .into_iter()
+            .flatten()
+            .flat_map(|outcomes| [outcomes.long, outcomes.short])
+            .flat_map(|outcome| [outcome.pnl.as_f64(), outcome.exit.value()])
+            .collect()
+    }
+
     /// The data type of the rows of `strategy_id`.
     #[must_use]
     pub fn data_type(strategy_id: StrategyId) -> DataType {
@@ -974,6 +1041,62 @@ mod tests {
                 "{config:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_decision_settles_within_its_longest_target() {
+        let horizon = TargetsConfig {
+            barrier: None,
+            ..config()
+        };
+
+        assert_eq!(config().settles_within(), SignedDuration::from_hours(2));
+        assert_eq!(horizon.settles_within(), SignedDuration::from_hours(1));
+    }
+
+    #[test]
+    fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
+        let outcome = |pnl: &str, exit| Outcome {
+            pnl: Money::from(pnl),
+            exit,
+        };
+        let row = TargetRow {
+            decision: FeatureRow {
+                strategy_id: StrategyId::from("S-001"),
+                features: vec![1.0],
+                ts_event: UnixNanos::from(1),
+                ts_init: UnixNanos::from(1),
+            },
+            barrier: Some(Outcomes {
+                long: outcome("2.5 USD", Exit::TakeProfit),
+                short: outcome("-3.5 USD", Exit::Stop),
+            }),
+            horizon: Some(Outcomes {
+                long: outcome("-0.25 USD", Exit::Time),
+                short: outcome("0.25 USD", Exit::Time),
+            }),
+            settled_at: UnixNanos::from(2),
+        };
+        let horizon = TargetsConfig {
+            barrier: None,
+            ..config()
+        };
+
+        assert_eq!(
+            config().target_names(),
+            [
+                "barrier_long_pnl",
+                "barrier_long_exit",
+                "barrier_short_pnl",
+                "barrier_short_exit",
+                "horizon_long_pnl",
+                "horizon_long_exit",
+                "horizon_short_pnl",
+                "horizon_short_exit",
+            ]
+        );
+        assert_eq!(row.values(), [2.5, 1.0, -3.5, -1.0, -0.25, 0.0, 0.25, 0.0]);
+        assert_eq!(horizon.target_names().len(), 4);
     }
 
     #[test]
