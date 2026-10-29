@@ -52,6 +52,7 @@ mod backtest_stop;
 mod backtest_targets;
 mod backtest_ticks;
 mod backtest_trade_size_off_grid;
+mod backtest_train;
 mod backtest_two_venues;
 mod backtest_warmup;
 mod backtest_without_session;

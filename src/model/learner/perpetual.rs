@@ -5,12 +5,12 @@ use anyhow::{Context, anyhow, ensure};
 use perpetual::booster::config::BoosterIO;
 use perpetual::objective::Objective;
 use perpetual::{Matrix, PerpetualBooster};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Learner, Predictor, SavedModel, TrainingSet};
 
 /// PerpetualBooster's settings, each named and meant as in the library.
-#[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct PerpetualConfig {
     /// The memory a fit may take, in GB. Required: unbounded, a fit grows

@@ -1403,3 +1403,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     bracket's two hours, and stores the 48 rows; a second build of the
     same days replays none, and the rows read back are those the replay
     settled.
+  - `backtest_train.rs`: training at a time (strategy README, "Features
+    and decisions"), with the probe of `backtest_dataset.rs`, shared from
+    `common::dataset`, and the fake learner, whose prediction, the mid
+    clamped to 1, ties every row: the holdout AUC is 0.5 exactly. A train
+    at midnight on a 46-hour window replays the days it lacks through
+    `run_dataset` and publishes a model whose reload predicts its
+    manifest's probes to the bit; with a minimum score of 0.6, a train an
+    hour later keeps the model published first, the store unchanged.

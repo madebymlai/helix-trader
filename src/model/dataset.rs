@@ -26,6 +26,12 @@
 //! decision whose time close finds no market until after the replay
 //! (before a weekend) is unsettled, and its day is filed without it.
 //!
+//! A train at a time sees only what was settled then: `settled` replays
+//! the days it lacks to that time and no further, files the days the
+//! replay settled, and takes the rows of the days it did not, the last
+//! before that time, from the replay alone, so those are replayed again
+//! by the next train.
+//!
 //! Nautilus skips writing a file whose name, its interval, exists, and
 //! refuses one overlapping another, so `write` deletes what the catalog
 //! holds over the days it writes first: recomputing a day replaces it.
@@ -39,12 +45,12 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, bail};
 use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -85,6 +91,20 @@ pub struct DatasetRow {
     /// The time of the decision too, which files the row in its day.
     pub ts_init: UnixNanos,
 }
+
+/// The error of a dataset holding rows that do not match its schema: other
+/// feature names, or a row of another width than its feature or target
+/// names.
+#[derive(Debug)]
+pub struct SchemaMismatch(String);
+
+impl fmt::Display for SchemaMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SchemaMismatch {}
 
 /// What a dataset holds, enough to explain and rebuild it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,7 +159,7 @@ impl Dataset {
         Ok(Self {
             catalog: catalog.to_path_buf(),
             strategy_id,
-            fingerprint: targets::fingerprint(decide::fingerprint(features, rule), &targets),
+            fingerprint: fingerprint(features, rule, &targets),
             feature_names: features.names().to_vec(),
             targets,
         })
@@ -171,6 +191,51 @@ impl Dataset {
         let rows = replay(from, to)?;
         self.write(&rows, from, to)?;
         Ok(missing)
+    }
+
+    /// The rows of the decisions in `[from, at)` settled at `at`, in time
+    /// order, as a train at `at` sees them: the days the dataset lacks are
+    /// replayed, once, by `replay` from the first one's start to `at`, no
+    /// further, and the days it settled written (see `write`); the rows of
+    /// the days still unsettled, the last before `at`, are taken from the
+    /// replay alone. A row whose positions close after `at` is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read or written, or as
+    /// `replay` does.
+    pub fn settled(
+        &self,
+        from: Timestamp,
+        at: Timestamp,
+        replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
+    ) -> anyhow::Result<Vec<DatasetRow>> {
+        let first = day_of(from.into());
+        let last = day_of((at - SignedDuration::from_nanos(1)).into());
+        let mut rows = vec![];
+        if let Some(&day) = self.missing(first, last)?.first() {
+            let start = start_of(day)?;
+            let replayed = replay(start, at)?;
+            self.write(&replayed, start, at)?;
+            let unsettled: BTreeSet<Date> = self.missing(first, last)?.into_iter().collect();
+            rows.extend(
+                replayed
+                    .iter()
+                    .map(DatasetRow::of)
+                    .filter(|row| unsettled.contains(&day_of(row.ts_init))),
+            );
+        }
+        rows.extend(self.read(from, at)?);
+        let (from, at) = (UnixNanos::from(from), UnixNanos::from(at));
+        rows.retain(|row| from <= row.ts_event && row.ts_event < at && row.settled_at <= at);
+        rows.sort_by_key(|row| row.ts_init);
+        Ok(rows)
+    }
+
+    /// The fingerprint the rows are stored under.
+    #[must_use]
+    pub const fn fingerprint(&self) -> Fingerprint {
+        self.fingerprint
     }
 
     /// The days `first` to `last` the catalog does not cover, from its
@@ -262,8 +327,8 @@ impl Dataset {
     ///
     /// # Errors
     ///
-    /// Returns an error if the catalog cannot be read, or holds rows of
-    /// other feature names.
+    /// Returns an error if the catalog cannot be read, or a
+    /// `SchemaMismatch` if it holds rows of other feature names or widths.
     pub fn read(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<DatasetRow>> {
         let identifier = self.identifier();
         let data = self
@@ -284,18 +349,30 @@ impl Dataset {
                 let Data::Custom(custom) = data else {
                     bail!("the dataset {identifier} holds {data:?}");
                 };
-                ensure!(
-                    custom.data_type.metadata() == want.metadata(),
-                    "the dataset {identifier} holds rows of the features {:?}, not {:?}",
-                    custom.data_type.metadata(),
-                    self.feature_names
-                );
-                custom
+                if custom.data_type.metadata() != want.metadata() {
+                    bail!(SchemaMismatch(format!(
+                        "the dataset {identifier} holds rows of the features {:?}, not {:?}",
+                        custom.data_type.metadata(),
+                        self.feature_names
+                    )));
+                }
+                let row = custom
                     .data
                     .as_any()
                     .downcast_ref::<DatasetRow>()
                     .cloned()
-                    .with_context(|| format!("the dataset {identifier} holds {custom:?}"))
+                    .with_context(|| format!("the dataset {identifier} holds {custom:?}"))?;
+                let targets = self.targets.target_names().len();
+                if row.features.len() != self.feature_names.len() || row.targets.len() != targets {
+                    bail!(SchemaMismatch(format!(
+                        "the dataset {identifier} holds a row of {} features and {} targets, \
+                         not {} and {targets}",
+                        row.features.len(),
+                        row.targets.len(),
+                        self.feature_names.len()
+                    )));
+                }
+                Ok(row)
             })
             .collect()
     }
@@ -406,6 +483,18 @@ impl DatasetRow {
             ts_init: row.decision.ts_init,
         }
     }
+}
+
+/// The fingerprint of a dataset of `features` deciding on `rule`, of
+/// `targets`: the decisions' (`decide::fingerprint`) extended by the
+/// targets' (`targets::fingerprint`).
+#[must_use]
+pub fn fingerprint(
+    features: &FeatureSet,
+    rule: DecisionRule,
+    targets: &TargetsConfig,
+) -> Fingerprint {
+    targets::fingerprint(decide::fingerprint(features, rule), targets)
 }
 
 /// The catalog type of the rows.
@@ -909,5 +998,121 @@ mod tests {
             .unwrap();
 
         assert!(built.is_empty());
+    }
+
+    #[test]
+    fn rows_of_another_width_than_the_names_are_a_schema_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
+        dataset
+            .write(
+                &[row("2026-01-05T09:00:00Z", vec![1.0, 2.0], "1")],
+                from,
+                to,
+            )
+            .unwrap();
+
+        let err = dataset.read(from, to).unwrap_err();
+
+        assert!(err.downcast_ref::<SchemaMismatch>().is_some(), "{err:#}");
+    }
+
+    #[test]
+    fn the_settled_rows_are_those_of_the_span_settled_at_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        // Each row settles an hour after its decision.
+        let rows = [
+            row("2026-01-05T08:00:00Z", vec![1.0], "1"),
+            row("2026-01-05T09:00:00Z", vec![2.0], "1"),
+            row("2026-01-07T08:30:00Z", vec![3.0], "1"),
+            row("2026-01-07T09:30:00Z", vec![4.0], "1"),
+        ];
+        let mut replays = vec![];
+
+        let settled = dataset
+            .settled(
+                at("2026-01-05T09:00:00Z"),
+                at("2026-01-07T10:00:00Z"),
+                |from, to| {
+                    replays.push((from, to));
+                    Ok(rows.to_vec())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            replays,
+            [(at("2026-01-05T00:00:00Z"), at("2026-01-07T10:00:00Z"))]
+        );
+        assert_bits_eq(
+            &settled,
+            &[
+                stored("2026-01-05T09:00:00Z", vec![2.0], 1.0),
+                stored("2026-01-07T08:30:00Z", vec![3.0], 1.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_days_settled_at_the_end_are_cached_and_the_others_replayed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let (from, end) = (at("2026-01-05T00:00:00Z"), at("2026-01-07T10:00:00Z"));
+        let rows = [
+            row("2026-01-05T09:00:00Z", vec![1.0], "1"),
+            row("2026-01-06T09:00:00Z", vec![2.0], "1"),
+            row("2026-01-07T08:00:00Z", vec![3.0], "1"),
+        ];
+        dataset
+            .settled(from, end, |_, _| Ok(rows.to_vec()))
+            .unwrap();
+        let mut replays = vec![];
+
+        // The barrier's limit, 2 hours, settles the 6th by 02:00 of the 7th.
+        let missing = dataset
+            .missing(day("2026-01-05"), day("2026-01-07"))
+            .unwrap();
+        let settled = dataset
+            .settled(from, end, |from, to| {
+                replays.push((from, to));
+                Ok(rows[2..].to_vec())
+            })
+            .unwrap();
+
+        assert_eq!(missing, [day("2026-01-07")]);
+        assert_eq!(replays, [(at("2026-01-07T00:00:00Z"), end)]);
+        assert_bits_eq(
+            &settled,
+            &[
+                stored("2026-01-05T09:00:00Z", vec![1.0], 1.0),
+                stored("2026-01-06T09:00:00Z", vec![2.0], 1.0),
+                stored("2026-01-07T08:00:00Z", vec![3.0], 1.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn settled_rows_of_cached_days_replay_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        dataset
+            .write(
+                &[row("2026-01-05T09:00:00Z", vec![1.0], "1")],
+                at("2026-01-05T00:00:00Z"),
+                at("2026-01-06T02:00:00Z"),
+            )
+            .unwrap();
+
+        let settled = dataset
+            .settled(
+                at("2026-01-05T00:00:00Z"),
+                at("2026-01-06T00:00:00Z"),
+                |_, _| panic!("a cached span replayed"),
+            )
+            .unwrap();
+
+        assert_bits_eq(&settled, &[stored("2026-01-05T09:00:00Z", vec![1.0], 1.0)]);
     }
 }
