@@ -1482,9 +1482,13 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     bracket's two hours, and stores the 48 rows; a second build of the
     same days replays none, and the rows read back are those the replay
     settled. Over a weekend without quotes, a build cut on Friday and one
-    cut on Monday store the same 24 rows of Friday: the decisions after
-    the last quote settle at their time limits, the time close filled on
-    that quote.
+    cut on Monday store the same 22 rows of Friday: the decision at the
+    close settles at its time limits, the time close filled on the last
+    quote, and the two after it, with no quote since the one before, are
+    stale and store no row, nor does any decision to Sunday's open. On a
+    feature of the mean of the last two hours of mids, a day built alone,
+    replayed from the features' three-hour warmup before it, stores the
+    same 24 rows as inside a build from the day before.
   - `backtest_train.rs`: training at a time (strategy README, "Features
     and decisions"), with the probe of `backtest_dataset.rs`, shared from
     `common::dataset`, and the fake learner, whose prediction, the mid

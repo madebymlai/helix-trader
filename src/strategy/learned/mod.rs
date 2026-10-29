@@ -74,7 +74,7 @@ impl Learned {
     /// Returns an error if the config is invalid.
     pub fn new(config: LearnedConfig, mode: Mode) -> anyhow::Result<Self> {
         config.validate()?;
-        let features = features::features(&config.bars.bar_types())?;
+        let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
         let model = ModelHandle::new(
             strategy_id(&config)?,
             Rc::clone(&features),
@@ -144,7 +144,7 @@ impl Learned {
 /// Returns an error if the config is invalid, or as `Training::new` does.
 pub fn training(config: &LearnedConfig, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
     config.validate()?;
-    let features = features::features(&config.bars.bar_types())?;
+    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
     Training::new(
         catalog,
         models,
@@ -168,7 +168,7 @@ pub fn walk_forward(
     models: &Path,
 ) -> anyhow::Result<WalkForward> {
     config.validate()?;
-    let features = features::features(&config.bars.bar_types())?;
+    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
     WalkForward::new(
         catalog,
         models,
@@ -186,7 +186,7 @@ pub fn walk_forward(
 /// Returns an error if the config is invalid, or as `Dataset::new` does.
 pub fn dataset(config: &LearnedConfig, catalog: &Path) -> anyhow::Result<Dataset> {
     config.validate()?;
-    let features = features::features(&config.bars.bar_types())?;
+    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
     Dataset::new(
         catalog,
         strategy_id(config)?,
