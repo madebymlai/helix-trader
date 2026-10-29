@@ -12,6 +12,7 @@
 #![allow(dead_code, reason = "each test module uses part of the fixture")]
 
 pub mod cache;
+pub mod dataset;
 pub mod glbx;
 pub mod ic;
 pub mod recorder;

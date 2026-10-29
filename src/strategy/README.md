@@ -657,7 +657,44 @@ of its choosing (`model::features`, `model::decide`).
   intervals. `read(from, to)` gives the rows back bit for bit, NaN
   included; `manifest()` the dataset's `manifest.json` beside its files:
   strategy, fingerprint, feature names, target spec and names, the days
-  held.
+  held. `settled(from, at, replay)` gives the rows a train at `at` sees,
+  those of the decisions in `[from, at)` settled by `at`: `replay` runs
+  once from the first missing day's start to `at`, no further, the days
+  it settled are written, and the rows of the days it did not (the last
+  before `at`) come from the replay alone, so the next train replays them
+  again. `read` refuses rows of other feature names or widths with a
+  `SchemaMismatch`.
+- **Model config.** The model section of a strategy's TOML is a
+  `ModelConfig` (`model::config`): `decision`, `targets`, `label`
+  (`"barrier"` or `"horizon"`: the model learns whether that target's long
+  gains, net of costs), `window` and `holdout` (durations), `thresholds =
+  { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC) and `learner`.
+  `validate(&requirements)` refuses a traded instrument the strategy does
+  not read, a label of a target the config lacks, a barrier limit or
+  horizon not shorter than the window, a holdout leaving no fitted row,
+  thresholds that are not probabilities with the short below the long,
+  and a minimum score outside [0, 1].
+- **Training.** `Training::new(catalog, models, strategy_id, &features,
+  config)` and `train_at(t, replay)` (`model::train`) train at `t`: the
+  rows of the window ending at `t` settled by `t` (`Dataset::settled`),
+  so the purge between them and the model's first use is the longest
+  target; the model fitted on those before the holdout, the window's
+  last part, settled by its start, the same gap; scored by the AUC of its
+  predictions on the holdout (`score::auc`). At or above `min_score` the
+  model is published, valid from `t`; else, and on any error, the current
+  model is kept with the reason (`Kept`: below the minimum score, failed,
+  or schema mismatch). A train returns its `Outcome`, never an error.
+- **Model store.** `ModelStore` (`model::store`) holds the published
+  models under `<models>/<strategy id>/<fingerprint>/<settings>/`, the
+  settings a hash of the learner and its settings, the label, the window
+  and the holdout. Each model is one file, `<valid from>.json`, written
+  beside its name and renamed onto it: its manifest (strategy, valid
+  from, fingerprint, feature names, target spec, label, learner, holdout
+  AUC, and up to 16 holdout rows with the model's predictions on them, a
+  missing value written `"NaN"`) and the model as its adapter saved it.
+  A reloaded model is checked by predicting the probes, not by its bytes.
+  `valid_froms()` lists the models in time order, `read(valid_from)` gives
+  one back.
 
 ## Warmup and training
 

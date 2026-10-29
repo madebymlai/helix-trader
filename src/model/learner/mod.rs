@@ -40,14 +40,14 @@ mod perpetual;
 use std::fmt;
 
 use anyhow::ensure;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
 
 /// The learner of a strategy's model, loaded from TOML, such as
 /// `learner = { kind = "lightgbm", num_iterations = 200 }`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LearnerConfig {
     /// LightGBM, with its settings.
@@ -161,7 +161,8 @@ impl TrainingSet {
 
 /// A model as its adapter saved it: text, loaded back by the learner config
 /// that fitted it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SavedModel(String);
 
 impl SavedModel {

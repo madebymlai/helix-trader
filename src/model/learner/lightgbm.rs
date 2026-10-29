@@ -2,12 +2,12 @@
 
 use anyhow::{Context, ensure};
 use lightgbm3::{Booster, Dataset};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Learner, Predictor, SavedModel, TrainingSet};
 
 /// LightGBM's settings, each named and meant as in LightGBM's parameters.
-#[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct LightGbmConfig {
     /// The number of boosting rounds, one tree each.

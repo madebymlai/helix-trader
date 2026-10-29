@@ -1411,3 +1411,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     cut on Monday store the same 24 rows of Friday: the decisions after
     the last quote settle at their time limits, the time close filled on
     that quote.
+  - `backtest_train.rs`: training at a time (strategy README, "Features
+    and decisions"), with the probe of `backtest_dataset.rs`, shared from
+    `common::dataset`, and the fake learner, whose prediction, the mid
+    clamped to 1, ties every row: the holdout AUC is 0.5 exactly. A train
+    at midnight on a 46-hour window replays the days it lacks through
+    `run_dataset` and publishes a model whose reload predicts its
+    manifest's probes to the bit; with a minimum score of 0.6, a train an
+    hour later keeps the model published first, the store unchanged.

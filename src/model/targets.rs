@@ -152,6 +152,15 @@ pub struct AtrConfig {
     pub period: usize,
 }
 
+/// The target a model learns: whether the long of the barrier, or of the
+/// horizon, gains after its costs, `"barrier"` or `"horizon"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Label {
+    Barrier,
+    Horizon,
+}
+
 /// How a target's position was closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Exit {
@@ -343,6 +352,20 @@ impl TargetsConfig {
                 })
             })
             .collect()
+    }
+
+    /// Where the long's P&L of `label`'s target is among the values of a
+    /// row (`TargetRow::values`); none if the config has no such target.
+    #[must_use]
+    pub fn label_index(&self, label: Label) -> Option<usize> {
+        let kind = match label {
+            Label::Barrier => Kind::Barrier,
+            Label::Horizon => Kind::Horizon,
+        };
+        // Each target has the long's P&L and exit, then the short's.
+        self.kinds()
+            .position(|(of, _)| of == kind)
+            .map(|position| position * 4)
     }
 
     /// The kinds of target of the config.
@@ -1601,5 +1624,31 @@ mod tests {
         assert_eq!(sign("0.0005 USDT"), 1);
         assert_eq!(sign("-0.44 USD"), -1);
         assert_eq!(sign("0 USD"), 0);
+    }
+
+    #[test]
+    fn a_label_is_the_long_pnl_of_its_target_among_a_rows_values() {
+        let horizon = TargetsConfig {
+            barrier: None,
+            ..config()
+        };
+
+        assert_eq!(config().label_index(Label::Barrier), Some(0));
+        assert_eq!(config().label_index(Label::Horizon), Some(4));
+        assert_eq!(horizon.label_index(Label::Horizon), Some(0));
+        assert_eq!(horizon.label_index(Label::Barrier), None);
+    }
+
+    #[test]
+    fn a_label_reads_from_toml() {
+        #[derive(Deserialize)]
+        struct Section {
+            label: Label,
+        }
+        let label = |toml: &str| toml::from_str::<Section>(toml).map(|section| section.label);
+
+        assert_eq!(label(r#"label = "barrier""#).unwrap(), Label::Barrier);
+        assert_eq!(label(r#"label = "horizon""#).unwrap(), Label::Horizon);
+        assert!(label(r#"label = "direction""#).is_err());
     }
 }
