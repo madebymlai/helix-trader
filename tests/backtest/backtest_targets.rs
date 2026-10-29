@@ -7,8 +7,9 @@
 //! its stop and a short by its take profit, a barrier hit at the very
 //! nanosecond of the time limit (inside the window), barriers left alone
 //! (closed by time), a bar touching both barriers (the venue replays its
-//! high before its low), the last decision unsettled at the end of data.
-//! Orders the risk engine denies leave their decisions unsettled. Over two
+//! high before its low), the last decision unsettled at the end of data,
+//! barriers in basis points and a stop in average true ranges, no order
+//! before the ATR is initialized. Orders the risk engine denies leave their decisions unsettled. Over two
 //! days of a random walk the targets are the same with the execution
 //! engine purging closed orders and positions as without, while the purge
 //! keeps the cache to the last minutes' orders. One node per thread, so
@@ -22,7 +23,10 @@ use helix_trader::{
     model::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
-        targets::{Barrier, Exit, Outcome, Outcomes, TargetRow, Targets, TargetsConfig},
+        targets::{
+            AtrConfig, Barrier, Distance, Exit, Outcome, Outcomes, TargetRow, Targets,
+            TargetsConfig,
+        },
     },
     strategy::TickSeries,
 };
@@ -67,6 +71,8 @@ struct Record {
     rows: Vec<TargetRow>,
     /// The closed orders in the cache when it stopped.
     closed_orders: usize,
+    /// When each of its orders filled, in order.
+    fills: Vec<UnixNanos>,
 }
 
 /// Decides every hour on its one feature and opens the targets of each
@@ -118,6 +124,7 @@ impl TargetProbe {
 
 nautilus_strategy!(TargetProbe, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
+        self.record.borrow_mut().fills.push(event.ts_event);
         self.targets.on_order_filled(event);
     }
 
@@ -138,6 +145,7 @@ impl DataActor for TargetProbe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let features = Rc::clone(&self.features);
         features.register(self);
+        Rc::clone(&self.targets).register(self);
         let record = Rc::clone(&self.record);
         let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
             let row = data.data.as_any().downcast_ref::<TargetRow>().unwrap();
@@ -172,17 +180,19 @@ impl DataActor for TargetProbe {
     }
 }
 
-/// The targets of every test: a bracket `distance` away on both sides,
-/// closed 45 minutes after its decision, and a horizon of 30 minutes,
-/// of `quantity` of `instrument_id`.
-fn targets(instrument_id: &str, quantity: &str, distance: Decimal) -> TargetsConfig {
+/// The targets of every test: a bracket `bps` basis points of the
+/// decision's price away on both sides, closed 45 minutes after its
+/// decision, and a horizon of 30 minutes, of `quantity` of
+/// `instrument_id`.
+fn targets(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetsConfig {
     TargetsConfig::builder()
         .instrument_id(InstrumentId::from(instrument_id))
         .quantity(Quantity::from(quantity))
         .barrier(Barrier {
-            take_profit: distance,
-            stop: distance,
+            take_profit: Distance::BasisPoints(bps),
+            stop: Distance::BasisPoints(bps),
             limit: SignedDuration::from_mins(45),
+            atr: None,
         })
         .horizon(SignedDuration::from_mins(30))
         .build()
@@ -281,9 +291,10 @@ fn hand_worked_quotes() -> Vec<QuoteTick> {
     )
 }
 
-/// One ounce, barriers 3.00 from the mid of 4000.10: a long enters at the
-/// ask, 4000.20, its take profit a sell limit at 4003.10 and its stop a
-/// sell stop at 3997.10, both on the bid; a short enters at the bid,
+/// One ounce, barriers 7.5 bps from the mid of 4000.10, 3.000075, on the
+/// nearest cent: a long enters at the ask, 4000.20, its take profit a sell
+/// limit at 4003.10 and its stop a sell stop at 3997.10, both on the bid;
+/// a short enters at the bid,
 /// 4000.00, and exits on the ask. Each fill pays 30 USD per million of its
 /// value, 0.12 USD at these prices.
 #[test]
@@ -292,7 +303,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) =
-        TargetProbe::new(source, targets(ic::INSTRUMENT_ID, "1", Decimal::from(3)));
+        TargetProbe::new(source, targets(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
 
     gold_backtest(catalog.path().to_path_buf())
         .run_dataset(probe)
@@ -360,7 +371,7 @@ fn denied_orders_leave_their_decisions_unsettled() {
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(
         source,
-        targets(ic::INSTRUMENT_ID, "20000", Decimal::from(3)),
+        targets(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
     );
 
     gold_backtest(catalog.path().to_path_buf())
@@ -425,19 +436,14 @@ fn btc_bar(open: Timestamp) -> Bar {
     )
 }
 
-/// One contract (0.01 BTC), barriers 100 from the close of 100,000, on
-/// minute bars alone: the venue fills a market order at the last close,
-/// a take profit at its limit and a stop at its trigger, and replays each
-/// bar's open, high, low and close in that order. Each fill pays OKX's
-/// 0.05% of its value: 0.5 USDT at 100,000, 0.5005 at 100,100, 0.4995 at
-/// 99,900.
-#[test]
-fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
+/// Minute bars of BTC-USDT-SWAP over `[08:00, 13:00)`, each `bar` of its
+/// open, in a catalog with the instrument.
+fn btc_catalog(bar: impl Fn(Timestamp) -> Bar) -> tempfile::TempDir {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let mut bars = vec![];
     let mut open = from;
     while open < to {
-        bars.push(btc_bar(open));
+        bars.push(bar(open));
         open += SignedDuration::from_mins(1);
     }
     let dir = tempfile::tempdir().unwrap();
@@ -446,18 +452,35 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     catalog
         .write_to_parquet(&bars, Some(from.into()), Some(to.into()), None)
         .unwrap();
-    let backtest = Backtest {
-        catalog: dir.path().to_path_buf(),
+    dir
+}
+
+/// A run over `[08:30, 12:30]` of `catalog`'s BTC minute bars alone, on a
+/// hedging venue, OKX's 0.05% of each fill, 10M USDT.
+fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
+    Backtest {
+        catalog: catalog.path().to_path_buf(),
         bar_types: vec![BarType::from(BTC_MINUTE)],
         ticks: vec![],
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000000 USDT"),
         ..gold_backtest(PathBuf::new())
-    };
-    let source = Source::Bars(BarType::from(BTC_MINUTE));
-    let (probe, record) = TargetProbe::new(source, targets(BTC, "1.00", Decimal::from(100)));
+    }
+}
 
-    backtest.run_dataset(probe).unwrap();
+/// One contract (0.01 BTC), barriers 10 bps, 100, from the close of
+/// 100,000, on minute bars alone: the venue fills a market order at the
+/// last close, a take profit at its limit and a stop at its trigger, and
+/// replays each bar's open, high, low and close in that order. Each fill
+/// pays OKX's 0.05% of its value: 0.5 USDT at 100,000, 0.5005 at 100,100,
+/// 0.4995 at 99,900.
+#[test]
+fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
+    let catalog = btc_catalog(btc_bar);
+    let source = Source::Bars(BarType::from(BTC_MINUTE));
+    let (probe, record) = TargetProbe::new(source, targets(BTC, "1.00", Decimal::from(10)));
+
+    btc_backtest(&catalog).run_dataset(probe).unwrap();
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let flat = || {
@@ -505,6 +528,84 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     assert_eq!(record.rows[1].barrier.unwrap().short.sign(), 1);
 }
 
+/// The minute bar opening at `open`: opening and closing at 100,000, its
+/// high 100,030.1 and its low 99,970.0, a true range of 60.1, but the one
+/// opening 10:20 reaching 100,095.0.
+fn btc_ranging_bar(open: Timestamp) -> Bar {
+    let high = if open == ic::at("10:20:00") {
+        100_095.0
+    } else {
+        100_030.1
+    };
+    Bar {
+        high: Price::new(high, 1),
+        low: Price::new(99_970.0, 1),
+        ..btc_bar(open)
+    }
+}
+
+/// One contract (0.01 BTC) on minute bars alone, until 10:50: a take
+/// profit 10 bps, 100, from the close of 100,000, and a stop 1.3 average
+/// true ranges of 75 minute bars, ranging 60.1 each, 78.13, on the nearest
+/// tenth: the long's at 99,921.9, the short's at 100,078.1. The ATR has
+/// fewer than 75 bars at 09:00: that decision opens no target. Each fill
+/// pays OKX's 0.05% of its value.
+#[test]
+fn targets_an_atr_away_are_the_outcomes_worked_out_by_hand() {
+    let catalog = btc_catalog(btc_ranging_bar);
+    let backtest = Backtest {
+        end: ic::at("10:50:00"),
+        ..btc_backtest(&catalog)
+    };
+    let config = TargetsConfig::builder()
+        .instrument_id(InstrumentId::from(BTC))
+        .quantity(Quantity::from("1.00"))
+        .barrier(Barrier {
+            take_profit: Distance::BasisPoints(Decimal::from(10)),
+            stop: Distance::Atr(Decimal::new(13, 1)),
+            limit: SignedDuration::from_mins(45),
+            atr: Some(AtrConfig {
+                bar_type: BarType::from(BTC_MINUTE),
+                period: 75,
+            }),
+        })
+        .horizon(SignedDuration::from_mins(30))
+        .build();
+    let source = Source::Bars(BarType::from(BTC_MINUTE));
+    let (probe, record) = TargetProbe::new(source, config);
+
+    backtest.run_dataset(probe).unwrap();
+
+    let flat = || {
+        outcomes(
+            outcome("-1 USDT", Exit::Time),
+            outcome("-1 USDT", Exit::Time),
+        )
+    };
+    let expected = [
+        // The bar opening 10:20 reaches 100,095.0, past the short's stop,
+        // short of the long's take profit, 100,100: the short's stop fills
+        // at its trigger, 100,078.1 (-0.781 - 0.5 - 0.5003905); the long
+        // closes by time at 100,000.
+        row(
+            decision(ic::at("10:00:00"), 100_000.0),
+            outcomes(
+                outcome("-1 USDT", Exit::Time),
+                outcome("-1.7813905 USDT", Exit::Stop),
+            ),
+            flat(),
+            SignedDuration::from_mins(45),
+        ),
+    ];
+    let record = record.borrow();
+    assert_eq!(record.rows, expected);
+    // The 09:00 decision sent no order: the first fill is the 10:00 one's.
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
+}
+
 // ----------------------------------------------------------------- purge
 
 /// A deterministic random walk in [0, 1).
@@ -539,9 +640,10 @@ fn walk_run(
             .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
             .quantity(Quantity::from(1))
             .barrier(Barrier {
-                take_profit: Decimal::from(3),
-                stop: Decimal::from(3),
+                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                stop: Distance::BasisPoints(Decimal::new(75, 1)),
                 limit: SignedDuration::from_hours(2),
+                atr: None,
             })
             .horizon(SignedDuration::from_hours(1))
             .build();

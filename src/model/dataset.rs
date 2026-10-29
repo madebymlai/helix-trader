@@ -22,9 +22,13 @@
 //! the interval it covers, the days without rows (a weekend's, cold
 //! features') within the file of the day with rows before them, or the
 //! first after: Nautilus writes no file without rows, so a day without
-//! rows would otherwise stay missing and be replayed by every build. A
-//! decision whose time close finds no market until after the replay
-//! (before a weekend) is unsettled, and its day is filed without it.
+//! rows would otherwise stay missing and be replayed by every build. By
+//! then every decision of a day filed has settled or been dropped for a
+//! reason of its own (a denial, a rejection, an entry unfilled by its
+//! time), wherever the replay ends: its time close, a market order, fills
+//! at its time on the venue's last quote, even with no quote since (a
+//! weekend), as any market order between quotes does. So a day is stored
+//! the same by every build replaying it.
 //!
 //! A train at a time sees only what was settled then: `settled` replays
 //! the days it lacks to that time and no further, files the days the
@@ -534,7 +538,7 @@ mod tests {
     use super::*;
     use crate::model::{
         decide::FeatureRow,
-        targets::{Barrier, Exit, Outcome, Outcomes},
+        targets::{Barrier, Distance, Exit, Outcome, Outcomes},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -560,9 +564,10 @@ mod tests {
             .instrument_id(InstrumentId::from(GOLD))
             .quantity(Quantity::from(1))
             .barrier(Barrier {
-                take_profit: Decimal::from(3),
-                stop: Decimal::from(2),
+                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                stop: Distance::BasisPoints(Decimal::from(5)),
                 limit: SignedDuration::from_hours(2),
+                atr: None,
             })
             .horizon(SignedDuration::from_hours(1))
             .build()

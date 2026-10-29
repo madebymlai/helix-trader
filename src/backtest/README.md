@@ -1381,16 +1381,21 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     "Features and decisions"), through `run_dataset` on a hedging venue: a
     probe decides every hour and opens a bracket (45 minutes) and a
     horizon trade (30 minutes) on each side. On IC's gold quoted every
-    5 s, barriers 3.00 from the mid: a dip ends the long by its stop at the
-    bid and the short by its take profit at its limit; a spike at the very
-    nanosecond of the bracket's time limit comes before the alert, so the
-    long's take profit and the short's stop count; barriers left alone
-    close by time; each P&L net of 30 USD per million on each fill; the
-    decision still open at the end has no row. On minute bars alone
-    (BTC-USDT-SWAP.OKX), barriers 100 from the close: a bar touching both
-    barriers fills the long's take profit and the short's stop, its high
-    replayed first, at their limit and trigger; a take profit losing net
-    of 0.05% fees has a negative sign. Orders above the instrument's
+    5 s, barriers 7.5 bps from the mid of 4000.10, 3.000075, on the
+    nearest cent: a dip ends the long by its stop at the bid and the short
+    by its take profit at its limit; a spike at the very nanosecond of the
+    bracket's time limit comes before the alert, so the long's take profit
+    and the short's stop count; barriers left alone close by time; each
+    P&L net of 30 USD per million on each fill; the decision still open at
+    the end has no row. On minute bars alone (BTC-USDT-SWAP.OKX), barriers
+    10 bps, 100, from the close: a bar touching both barriers fills the
+    long's take profit and the short's stop, its high replayed first, at
+    their limit and trigger; a take profit losing net of 0.05% fees has a
+    negative sign. On minute bars ranging 60.1 each, a stop 1.3 average
+    true ranges of 75 bars away, 78.13, on the nearest tenth, beside a
+    take profit of 10 bps: the decision before the ATR has its 75 bars
+    sends no order, the next one's short is stopped at 100,078.1 by a bar
+    short of the long's take profit. Orders above the instrument's
     largest are denied, logged, and leave every decision unsettled. Over
     two days of a random walk, the rows are the same from a dataset run
     and from a trading run, every decision whose time limit passes before
@@ -1402,7 +1407,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     replays them once through `run_dataset`, to the second's end plus the
     bracket's two hours, and stores the 48 rows; a second build of the
     same days replays none, and the rows read back are those the replay
-    settled.
+    settled. Over a weekend without quotes, a build cut on Friday and one
+    cut on Monday store the same 24 rows of Friday: the decisions after
+    the last quote settle at their time limits, the time close filled on
+    that quote.
   - `backtest_train.rs`: training at a time (strategy README, "Features
     and decisions"), with the probe of `backtest_dataset.rs`, shared from
     `common::dataset`, and the fake learner, whose prediction, the mid

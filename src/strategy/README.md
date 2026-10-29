@@ -584,11 +584,32 @@ of its choosing (`model::features`, `model::decide`).
   orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
   slippage and funding are in them. The config (`TargetsConfig`, from
   TOML) names the instrument, the size of every order, and a triple
-  barrier, `barrier = { take_profit = 3.0, stop = 3.0, limit = "2h" }`
-  (distances from the decision's price: the last quote's mid, else the
-  last trade, else the last bar's close), a horizon, `horizon = "1h"`, or
-  both. The strategy shares a `Targets` (`Targets::new(config)`, an `Rc`),
-  calls `open(self, row)` with each row `decide` returns, and hands it
+  barrier, a horizon, `horizon = "1h"`, or both. The barrier's take
+  profit and stop are distances from the decision's price (the last
+  quote's mid, else the last trade, else the last bar's close), each in
+  one unit (`Distance`): basis points of that price, `{ bps = 20 }`, or
+  multiples of an average true range, `{ atr = 1.5 }`; a barrier with an
+  `atr` distance declares its ATR, Nautilus' `AverageTrueRange` (Wilder's
+  average) on bars of the instrument, and only then:
+
+  ```toml
+  [barrier]
+  take_profit = { bps = 20 }
+  stop = { atr = 1.5 }
+  limit = "2h"
+  atr = { bar_type = "EURUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 }
+  ```
+
+  Each exit is on the instrument's nearest tick (Nautilus' tick grid,
+  `next_bid_price` and `next_ask_price`), a tie away from the decision's
+  price. The targets own the ATR: the strategy registers it with
+  `register(self)` in `on_start` and subscribes to its bar type, and
+  Nautilus feeds it each of those bars, as it does the features (bars a
+  warmup builds reach only the cache, so they do not warm it). A
+  decision at which the ATR is not yet initialized opens no target, logged
+  at debug, as cold features give no decision. The strategy shares a
+  `Targets` (`Targets::new(config)`, an `Rc`), calls `open(self, row)`
+  with each row `decide` returns, and hands it
   `on_time_event`, `on_order_filled`, `on_order_denied`,
   `on_order_rejected`, `on_position_closed` and `on_stop`; it sends no
   orders of its own then. For each target and side, a long and a short,

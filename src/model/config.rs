@@ -126,7 +126,7 @@ mod tests {
     /// of 1 hour, on a window of 48 hours, 12 of them held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
-        targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h", barrier = { take_profit = 3.0, stop = 2.0, limit = "2h" } }
+        targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
         label = "barrier"
         window = "48h"
         holdout = "12h"
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn a_limit_not_shorter_than_the_window_is_refused() {
         let toml = section(
-            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = 3.0, stop = 2.0, limit = "49h" } }"#,
+            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "49h" } }"#,
         );
 
         assert!(

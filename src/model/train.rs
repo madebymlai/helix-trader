@@ -258,7 +258,8 @@ mod tests {
         decide::{DecisionRule, FeatureRow},
         learner::LearnerConfig,
         targets::{
-            Barrier, Exit, Label, Outcome as TargetOutcome, Outcomes, TargetRow, TargetsConfig,
+            Barrier, Distance, Exit, Label, Outcome as TargetOutcome, Outcomes, TargetRow,
+            TargetsConfig,
         },
     };
 
@@ -289,9 +290,10 @@ mod tests {
                     .instrument_id(InstrumentId::from(GOLD))
                     .quantity(Quantity::from(1))
                     .barrier(Barrier {
-                        take_profit: Decimal::from(3),
-                        stop: Decimal::from(2),
+                        take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                        stop: Distance::BasisPoints(Decimal::from(5)),
                         limit: SignedDuration::from_hours(2),
+                        atr: None,
                     })
                     .horizon(SignedDuration::from_hours(1))
                     .build(),

@@ -11,7 +11,7 @@ use helix_trader::{
     model::{
         decide::{self, DecisionRule},
         features::FeatureSet,
-        targets::{Barrier, TargetRow, Targets, TargetsConfig},
+        targets::{Barrier, Distance, TargetRow, Targets, TargetsConfig},
     },
     strategy::TickSeries,
 };
@@ -113,26 +113,27 @@ pub fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// A bracket 3.00 away on both sides closed after 2 hours, the longest
+/// A bracket 7.5 bps away on both sides closed after 2 hours, the longest
 /// target, and a horizon of 1 hour, of one ounce.
 pub fn targets() -> TargetsConfig {
     TargetsConfig::builder()
         .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
         .quantity(Quantity::from(1))
         .barrier(Barrier {
-            take_profit: Decimal::from(3),
-            stop: Decimal::from(3),
+            take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+            stop: Distance::BasisPoints(Decimal::new(75, 1)),
             limit: SignedDuration::from_hours(2),
+            atr: None,
         })
         .horizon(SignedDuration::from_hours(1))
         .build()
 }
 
 /// A deterministic random walk in [0, 1).
-struct Lcg(u64);
+pub struct Lcg(pub u64);
 
 impl Lcg {
-    fn next(&mut self) -> f64 {
+    pub fn next(&mut self) -> f64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
