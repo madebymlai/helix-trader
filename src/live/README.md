@@ -52,7 +52,8 @@ DataClientFactory>` and friends and never names a broker.
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
   [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog] \
-  [--staging staging] [--promotion-minutes 5] [--models models]
+  [--staging staging] [--promotion-minutes 5] [--models models] \
+  [--retrain-commission-rate 0.00003 --retrain-balance "10000000 USD"]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
@@ -84,6 +85,11 @@ node's cache (see "Cache in Redis").
 - `--models` (default `models`) is the model store a strategy trading on a
   model reads, its newest model valid at each decision (strategy README,
   "Features and decisions", "Model handle"); the EMA reads none.
+- `--retrain-commission` or `--retrain-commission-rate`, and
+  `--retrain-balance`, are the costs of the dataset runs of the retrains
+  a strategy trading on a model starts, as `train` takes them (see
+  "Retraining"); such a strategy refuses to start without them, the EMA
+  ignores them.
 - `NAUTILUS_LOG` configures the logger as for the other commands.
 - The command reads `.env` at start (see `.env.example`), and a variable
   already set wins. Credentials come only from the environment, never from
@@ -352,6 +358,29 @@ directories of the catalog gain a file per promotion: consolidate them
 from time to time (`ParquetDataCatalog::consolidate_catalog` and its
 kin).
 
+## Retraining
+
+A strategy trading on a model retrains live on its model section's
+`retrain` interval: its model handle (`Mode::Live`) sets a Nautilus timer
+named after the strategy, `RETRAIN-<strategy id>`, on the epoch-aligned
+grid of the interval (`model::schedule`, shared with the backtest), and each firing starts this binary's `train` at
+the grid time as a child process (`model::launcher`), with the node's
+`--config`, `--catalog`, `--models` and `--leverage` and the retrain
+costs: the replay runs a Nautilus node of its own, which this process,
+holding the live one, cannot. The timer fires
+`Recording::catalog_delay` after the grid time, a promotion interval and
+a minute: by then the data the node received up to that time is in the
+catalog for the replay. One retrain per strategy runs at a time: one due
+while another runs is skipped, with a warning. The strategy polls the
+child at each decision: a finished child is logged, as info when it
+published (exit status success), as an error with the error it printed
+last when it kept the current model or failed; the child's standard
+output and error are the node's. A published model is used from the
+next decision, and a node starting with models in the store trades on
+the latest valid from its first decision (strategy README, "Live
+retraining"). A child still running when the node stops runs to its
+end; its model is there for the next start.
+
 ## Known limits
 
 Observed at the pinned `develop` commit; the code keeps the documented
@@ -585,12 +614,22 @@ tests: see [`okx/README.md`](okx/README.md).
   the node runs, everything after a clean stop with no staging file left,
   the built bars under `EXTERNAL`, the instrument definition, and after a
   crash and a restart the crashed run's staged data promoted.
+- Retraining needs no node: the launcher and the handle's retrains are
+  unit tests (`model::launcher`, `model::handle`) on an in-process
+  launcher, a `sh` child and a clock driven by hand, and
+  `tests/backtest/backtest_learned.rs` starts the real `train` as a live
+  node does and backtests on the model it publishes.
 - Venue end-to-end tests are under "IB tests", "OKX tests" and "IC tests"
   in the venue READMEs; `ib_restart.rs` there checks the cache in Redis
   across restarts.
 
 ## Unverified
 
+- A live retrain against a real venue: none has run. Promotion writes
+  each file with the interval of its own rows' timestamps, so the
+  streamed files of a series may leave gaps between them, which the
+  backtest's coverage check refuses (`backtest::coverage`, a 1 ns gap is
+  a gap): read from the source, not run.
 - Streaming on IB and OKX: only IC's demo has streamed so far
   (`ic/README.md`, "IC tests", `ic_live_demo.rs`), and a crash and
   restart only on the stub client.

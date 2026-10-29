@@ -214,8 +214,7 @@ impl Dataset {
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
     ) -> anyhow::Result<Vec<DatasetRow>> {
-        let first = day_of(from.into());
-        let last = day_of((at - SignedDuration::from_nanos(1)).into());
+        let (first, last) = days(from, at);
         let mut rows = vec![];
         if let Some(&day) = self.missing(first, last)?.first() {
             let start = start_of(day)?;
@@ -506,6 +505,16 @@ fn row_type() -> NautilusDataType {
     NautilusDataType::Custom {
         type_name: DatasetRow::type_name_static().to_string(),
     }
+}
+
+/// The UTC days of `[from, to)`: the first and the last, the day of the
+/// last nanosecond before `to`.
+#[must_use]
+pub fn days(from: Timestamp, to: Timestamp) -> (Date, Date) {
+    (
+        day_of(from.into()),
+        day_of((to - SignedDuration::from_nanos(1)).into()),
+    )
 }
 
 /// The UTC day of `time`.

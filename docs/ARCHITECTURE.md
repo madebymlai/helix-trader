@@ -34,7 +34,8 @@ Nautilus lacks.
   strategy, fingerprint and training settings; one file per valid-from,
   written then renamed, with its manifest and probes). Backtest and live
   read the same store, each decision using the latest model valid then,
-  checked against the strategy's features and probes before use. Nothing
+  checked against the strategy's features and probes before use; a live
+  node retrains by starting `train` as a child process. Nothing
   else passes from a backtest to live: no lock or provenance files.
 
 ## Version
