@@ -2317,6 +2317,7 @@ dependencies = [
  "ibapi",
  "jiff",
  "lightgbm3",
+ "lightgbm3-sys",
  "log",
  "nautilus-analysis",
  "nautilus-backtest",
