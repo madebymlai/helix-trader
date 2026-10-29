@@ -16,7 +16,14 @@
 //!
 //! The exits are `take_profit` and `stop` away from the decision's price
 //! (`reference`): the mid of the instrument's last quote, else its last
-//! trade, else the close of its last bar.
+//! trade, else the close of its last bar. Each distance is relative
+//! (`Distance`): basis points of that price, or multiples of an average
+//! true range, Nautilus' `AverageTrueRange` on the bars of a bar type the
+//! barrier declares, which the targets own and Nautilus feeds once
+//! `Targets::register` has registered it. A decision at which that ATR is
+//! not yet initialized opens no target, as a decision on cold features is
+//! none. Each exit is on the instrument's nearest tick (Nautilus' tick
+//! grid), a tie away from the decision's price.
 //!
 //! Each order's client order id names its decision, target, side and leg,
 //! `D{n}-{B|H}{L|S}-{E|TP|SL}`: the decision's number in the run, `B` a
@@ -45,32 +52,37 @@
 use std::{
     any::Any,
     cell::RefCell,
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     fmt::{self, Debug, Display},
     rc::Rc,
     sync::Arc,
 };
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, DataActorNative},
+    actor::{
+        DataActor, DataActorNative,
+        indicators::{ActorIndicator, SharedActorIndicator},
+    },
     cache::CacheApi,
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
+use nautilus_indicators::{indicator::Indicator, volatility::atr::AverageTrueRange};
 use nautilus_model::{
-    data::{CustomData, CustomDataTrait, DataType, HasTsInit},
+    data::{Bar, BarType, CustomData, CustomDataTrait, DataType, HasTsInit, QuoteTick, TradeTick},
     enums::{AggregationSource, OrderSide, PriceType},
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{ClientOrderId, InstrumentId, PositionId, StrategyId},
-    instruments::Instrument,
+    instruments::{Instrument, InstrumentAny},
     orders::Order,
     position::Position,
     types::{Money, Price, Quantity},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
@@ -98,18 +110,46 @@ pub struct TargetsConfig {
     pub horizon: Option<SignedDuration>,
 }
 
-/// A triple barrier: the exits of a bracket, each this far from the
-/// decision's price in the instrument's prices, and its time limit, such
-/// as `{ take_profit = 3.0, stop = 3.0, limit = "2h" }`.
+/// A triple barrier: the exits of a bracket, each a distance from the
+/// decision's price, and its time limit, such as `{ take_profit = { bps =
+/// 20 }, stop = { atr = 1.5 }, limit = "2h", atr = { bar_type =
+/// "...-1-MINUTE-MID-INTERNAL", period = 14 } }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Barrier {
     /// How far the take profit is, in the side's favour.
-    pub take_profit: Decimal,
+    pub take_profit: Distance,
     /// How far the stop is, against the side.
-    pub stop: Decimal,
+    pub stop: Distance,
     /// How long after the decision what is still open is closed.
     pub limit: SignedDuration,
+    /// The average true range the `atr` distances are multiples of: there
+    /// exactly when a distance is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atr: Option<AtrConfig>,
+}
+
+/// How far an exit is from the decision's price, relative to it or to the
+/// market's range, one unit to a distance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Distance {
+    /// Basis points of the decision's price, `{ bps = 20 }`.
+    #[serde(rename = "bps")]
+    BasisPoints(Decimal),
+    /// Multiples of the barrier's average true range at the decision,
+    /// `{ atr = 1.5 }`.
+    #[serde(rename = "atr")]
+    Atr(Decimal),
+}
+
+/// The average true range of a barrier: Nautilus' `AverageTrueRange`, of
+/// its default moving average (Wilder's), on the bars of `bar_type`, the
+/// targets' instrument's, over `period` bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AtrConfig {
+    pub bar_type: BarType,
+    pub period: usize,
 }
 
 /// How a target's position was closed.
@@ -156,6 +196,8 @@ pub struct TargetRow {
 /// position events and its time events to the methods of their names.
 pub struct Targets {
     config: TargetsConfig,
+    /// The barrier's average true range, if a distance is in ATRs.
+    atr: Option<Rc<BarrierAtr>>,
     state: RefCell<State>,
 }
 
@@ -210,7 +252,9 @@ impl TargetsConfig {
     /// # Errors
     ///
     /// Returns an error if there is no target, or the size, a barrier's
-    /// distance, its limit or the horizon is not positive.
+    /// distance, its limit or the horizon is not positive, or the barrier
+    /// has an average true range no distance uses, or an `atr` distance
+    /// without one, or one of another instrument's bars or of no bars.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(
             self.barrier.is_some() || self.horizon.is_some(),
@@ -222,7 +266,7 @@ impl TargetsConfig {
         );
         if let Some(barrier) = self.barrier {
             ensure!(
-                barrier.take_profit > Decimal::ZERO && barrier.stop > Decimal::ZERO,
+                barrier.take_profit.value() > Decimal::ZERO && barrier.stop.value() > Decimal::ZERO,
                 "the barrier's take profit and stop must be positive"
             );
             ensure!(
@@ -230,6 +274,23 @@ impl TargetsConfig {
                 "the barrier's limit {:#} is not positive",
                 barrier.limit
             );
+            match (barrier.uses_atr(), barrier.atr) {
+                (true, None) => bail!(
+                    "the barrier has a distance in ATRs but no ATR: declare its bar type and \
+                     period, `atr = {{ bar_type = .., period = .. }}`"
+                ),
+                (false, Some(_)) => bail!("the barrier has an ATR no distance uses"),
+                (true, Some(atr)) => {
+                    ensure!(
+                        atr.bar_type.instrument_id() == self.instrument_id,
+                        "the barrier's ATR is on {}, not on the targets' instrument {}",
+                        atr.bar_type,
+                        self.instrument_id
+                    );
+                    ensure!(atr.period > 0, "the barrier's ATR period must be positive");
+                }
+                (false, None) => {}
+            }
         }
         if let Some(horizon) = self.horizon {
             ensure!(
@@ -243,8 +304,9 @@ impl TargetsConfig {
     /// The config as the fingerprint reads it.
     fn fingerprint_part(&self) -> String {
         let barrier = self.barrier.map(|b| {
+            let atr = b.atr.map(|atr| format!("{} {}", atr.bar_type, atr.period));
             format!(
-                "take profit {} stop {} limit {} ns",
+                "take profit {} stop {} limit {} ns atr {atr:?}",
                 b.take_profit,
                 b.stop,
                 b.limit.as_nanos()
@@ -258,8 +320,8 @@ impl TargetsConfig {
     }
 
     /// The longest time a decision's targets stay open: the barrier's
-    /// limit or the horizon. A decision is settled by then, but for a time
-    /// close finding no market until later.
+    /// limit or the horizon. A decision is settled by then: a time close
+    /// fills at once, on the venue's last quote at the alert's own time.
     #[must_use]
     pub fn settles_within(&self) -> SignedDuration {
         self.kinds()
@@ -288,6 +350,158 @@ impl TargetsConfig {
         let barrier = self.barrier.map(|b| (Kind::Barrier, b.limit));
         let horizon = self.horizon.map(|h| (Kind::Horizon, h));
         barrier.into_iter().chain(horizon)
+    }
+}
+
+impl Barrier {
+    /// Whether a distance is in ATRs.
+    fn uses_atr(&self) -> bool {
+        [self.take_profit, self.stop]
+            .iter()
+            .any(|distance| matches!(distance, Distance::Atr(_)))
+    }
+
+    /// The take profit and stop of each side, the long then the short,
+    /// from `reference` and, if a distance is in ATRs, the ATR's value
+    /// `atr`, each on the nearest tick of `instrument`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an exit is outside the instrument's prices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a distance is in ATRs and `atr` is none.
+    fn exits(
+        &self,
+        instrument: &InstrumentAny,
+        reference: Decimal,
+        atr: Option<f64>,
+    ) -> anyhow::Result<Vec<(Side, Price, Price)>> {
+        let atr = atr
+            .map(|atr| Decimal::try_from(atr).with_context(|| format!("the ATR {atr}")))
+            .transpose()?;
+        let take_profit = self.take_profit.length(reference, atr);
+        let stop = self.stop.length(reference, atr);
+        [Side::Long, Side::Short]
+            .into_iter()
+            .map(|side| {
+                let favour = side.sign();
+                Ok((
+                    side,
+                    nearest_tick(instrument, reference + favour * take_profit, favour)?,
+                    nearest_tick(instrument, reference - favour * stop, -favour)?,
+                ))
+            })
+            .collect()
+    }
+}
+
+impl Distance {
+    /// The number of its unit.
+    fn value(self) -> Decimal {
+        match self {
+            Self::BasisPoints(value) | Self::Atr(value) => value,
+        }
+    }
+
+    /// The distance in prices from `reference`, the ATR being `atr`.
+    fn length(self, reference: Decimal, atr: Option<Decimal>) -> Decimal {
+        match self {
+            Self::BasisPoints(bps) => reference * bps / Decimal::from(10_000),
+            Self::Atr(multiple) => atr.expect("a validated barrier has its ATR") * multiple,
+        }
+    }
+}
+
+impl Display for Distance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BasisPoints(bps) => write!(f, "{bps} bps"),
+            Self::Atr(multiple) => write!(f, "{multiple} atr"),
+        }
+    }
+}
+
+/// `price` on the nearer of `instrument`'s ticks around it, Nautilus' tick
+/// grid; at a tie, the one `away` (1 up, -1 down) from the decision's
+/// price, so that an exit is not nearer than its distance.
+fn nearest_tick(
+    instrument: &InstrumentAny,
+    price: Decimal,
+    away: Decimal,
+) -> anyhow::Result<Price> {
+    let id = instrument.id();
+    let value = price
+        .to_f64()
+        .with_context(|| format!("the exit {price} of {id}"))?;
+    let (Some(below), Some(above)) = (
+        instrument.next_bid_price(value, 0),
+        instrument.next_ask_price(value, 0),
+    ) else {
+        bail!("the exit {price} is outside the prices of {id}");
+    };
+    let (down, up) = (price - below.as_decimal(), above.as_decimal() - price);
+    Ok(match down.cmp(&up) {
+        Ordering::Less => below,
+        Ordering::Greater => above,
+        Ordering::Equal if away.is_sign_positive() => above,
+        Ordering::Equal => below,
+    })
+}
+
+/// The average true range of a barrier, registered with the strategy's
+/// Nautilus indicators for the bars of its bar type.
+struct BarrierAtr {
+    bar_type: BarType,
+    indicator: RefCell<AverageTrueRange>,
+}
+
+impl BarrierAtr {
+    fn new(config: AtrConfig) -> Self {
+        Self {
+            bar_type: config.bar_type,
+            indicator: RefCell::new(AverageTrueRange::new(config.period, None, None, None)),
+        }
+    }
+
+    /// Its value, once initialized.
+    fn value(&self) -> Option<f64> {
+        let indicator = self.indicator.borrow();
+        indicator.initialized.then_some(indicator.value)
+    }
+}
+
+/// Nautilus' side of the ATR: it reads the bars of its bar type alone.
+impl ActorIndicator for BarrierAtr {
+    fn key(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn initialized(&self) -> anyhow::Result<bool> {
+        Ok(self.value().is_some())
+    }
+
+    fn handle_quote(&self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn handle_trade(&self, _trade: &TradeTick) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Nautilus routes a bar by instrument and specification; the ATR
+    /// reads the bars of its bar type alone, of the same aggregation
+    /// source.
+    fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        if bar.bar_type.standard() == self.bar_type.standard() {
+            self.indicator.borrow_mut().handle_bar(bar);
+        }
+        Ok(())
     }
 }
 
@@ -330,15 +544,34 @@ impl Targets {
     /// Returns an error if `config` is invalid.
     pub fn new(config: TargetsConfig) -> anyhow::Result<Rc<Self>> {
         config.validate()?;
+        let atr = config.barrier.and_then(|barrier| barrier.atr);
         Ok(Rc::new(Self {
             config,
+            atr: atr.map(|atr| Rc::new(BarrierAtr::new(atr))),
             state: RefCell::new(State::default()),
         }))
     }
 
+    /// Registers the barrier's average true range, if any, with `actor`'s
+    /// Nautilus indicators for the bars of its bar type, which `actor`
+    /// subscribes to: the data engine then hands it each of those bars
+    /// before the actor's own handler. Nautilus registers an indicator
+    /// once per bar type, so registering again, on a restart, feeds it
+    /// each bar once.
+    pub fn register<A: DataActorNative>(&self, actor: &mut A) {
+        if let Some(atr) = &self.atr {
+            let shared = Rc::clone(atr) as SharedActorIndicator;
+            actor
+                .core_mut()
+                .register_indicator_for_bars(atr.bar_type, shared);
+        }
+    }
+
     /// Opens the targets of the decision of `row`: for each target and
     /// side, its orders, from `strategy`, and each target's time alert.
-    /// With no price of the instrument yet, the decision is unsettled.
+    /// With no price of the instrument yet, the decision is unsettled;
+    /// with the barrier's ATR not yet initialized, it opens nothing, as a
+    /// decision on cold features is none.
     ///
     /// # Errors
     ///
@@ -349,12 +582,25 @@ impl Targets {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
+        let time = row.ts_event.to_rfc3339();
+        let atr = match &self.atr {
+            None => None,
+            Some(atr) => {
+                let Some(value) = atr.value() else {
+                    log::debug!(
+                        "decision at {time}: the ATR of {} is not initialized; no targets",
+                        atr.bar_type
+                    );
+                    return Ok(());
+                };
+                Some(value)
+            }
+        };
         let decision = {
             let mut state = self.state.borrow_mut();
             state.next += 1;
             state.next - 1
         };
-        let time = row.ts_event.to_rfc3339();
         let instrument_id = self.config.instrument_id;
         let (instrument, reference) = {
             let cache = strategy.cache();
@@ -375,18 +621,10 @@ impl Targets {
         let quantity = instrument
             .try_make_qty_from_decimal(size, None)
             .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
-        let mut exits = vec![];
-        if let Some(barrier) = self.config.barrier {
-            for side in [Side::Long, Side::Short] {
-                let take_profit = reference + side.sign() * barrier.take_profit;
-                let stop = reference - side.sign() * barrier.stop;
-                exits.push((
-                    side,
-                    instrument.try_make_price_from_decimal(take_profit)?,
-                    instrument.try_make_price_from_decimal(stop)?,
-                ));
-            }
-        }
+        let exits = match self.config.barrier {
+            Some(barrier) => barrier.exits(&instrument, reference, atr)?,
+            None => vec![],
+        };
         self.state
             .borrow_mut()
             .open
@@ -879,24 +1117,46 @@ impl CustomDataTrait for TargetRow {
 #[cfg(test)]
 mod tests {
     use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::enums::PriceType;
+    use nautilus_model::{
+        enums::PriceType,
+        identifiers::Symbol,
+        instruments::{CryptoPerpetual, InstrumentAny},
+        types::Currency,
+    };
 
     use super::*;
     use crate::model::features::FeatureSet;
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
+    const GOLD_MINUTE: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
 
+    /// A take profit 20 bps away, a stop 1.5 ATRs of 14 minute bars.
     fn config() -> TargetsConfig {
         TargetsConfig::builder()
             .instrument_id(InstrumentId::from(GOLD))
             .quantity(Quantity::from(1))
             .barrier(Barrier {
-                take_profit: Decimal::from(3),
-                stop: Decimal::from(2),
+                take_profit: Distance::BasisPoints(Decimal::from(20)),
+                stop: Distance::Atr(Decimal::new(15, 1)),
                 limit: SignedDuration::from_hours(2),
+                atr: Some(AtrConfig {
+                    bar_type: BarType::from(GOLD_MINUTE),
+                    period: 14,
+                }),
             })
             .horizon(SignedDuration::from_hours(1))
             .build()
+    }
+
+    /// The barrier of `config` with both distances in basis points and no
+    /// ATR.
+    fn in_bps(take_profit: i64, stop: i64) -> Barrier {
+        Barrier {
+            take_profit: Distance::BasisPoints(Decimal::from(take_profit)),
+            stop: Distance::BasisPoints(Decimal::from(stop)),
+            atr: None,
+            ..config().barrier.unwrap()
+        }
     }
 
     #[test]
@@ -904,11 +1164,37 @@ mod tests {
         let toml = r#"
             instrument_id = "XAUUSD.ICMARKETS"
             quantity = "1"
-            barrier = { take_profit = 3.0, stop = 2, limit = "2h" }
             horizon = "1h"
+
+            [barrier]
+            take_profit = { bps = 20 }
+            stop = { atr = 1.5 }
+            limit = "2h"
+            atr = { bar_type = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 }
         "#;
 
         assert_eq!(toml::from_str::<TargetsConfig>(toml).unwrap(), config());
+    }
+
+    #[test]
+    fn a_distance_has_one_known_unit() {
+        let barrier = |take_profit: &str| {
+            let toml = format!(
+                r#"
+                instrument_id = "XAUUSD.ICMARKETS"
+                quantity = "1"
+                barrier = {{ take_profit = {take_profit}, stop = {{ bps = 10 }}, limit = "2h" }}
+                "#
+            );
+            toml::from_str::<TargetsConfig>(&toml).map(|config| config.barrier.unwrap())
+        };
+
+        assert_eq!(barrier("{ bps = 7.5 }").unwrap().take_profit, {
+            Distance::BasisPoints(Decimal::new(75, 1))
+        });
+        for invalid in ["3.0", "{ ticks = 3 }", "{ bps = 10, atr = 1 }", "{}"] {
+            assert!(barrier(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -959,15 +1245,26 @@ mod tests {
                 ..config()
             },
             TargetsConfig {
+                barrier: Some(in_bps(0, 10)),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(in_bps(10, -1)),
+                ..config()
+            },
+            TargetsConfig {
                 barrier: Some(Barrier {
-                    take_profit: Decimal::ZERO,
+                    stop: Distance::Atr(Decimal::ZERO),
                     ..barrier
                 }),
                 ..config()
             },
             TargetsConfig {
                 barrier: Some(Barrier {
-                    stop: Decimal::from(-1),
+                    atr: Some(AtrConfig {
+                        period: 0,
+                        ..barrier.atr.unwrap()
+                    }),
                     ..barrier
                 }),
                 ..config()
@@ -992,6 +1289,164 @@ mod tests {
     }
 
     #[test]
+    fn an_atr_is_declared_on_the_instruments_bars_exactly_when_a_distance_uses_it() {
+        let barrier = config().barrier.unwrap();
+        let valid = [
+            TargetsConfig {
+                barrier: Some(in_bps(20, 10)),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    take_profit: Distance::Atr(Decimal::from(2)),
+                    ..barrier
+                }),
+                ..config()
+            },
+        ];
+        let invalid = [
+            // An ATR distance with no ATR.
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    atr: None,
+                    ..barrier
+                }),
+                ..config()
+            },
+            // An ATR no distance uses.
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    atr: barrier.atr,
+                    ..in_bps(20, 10)
+                }),
+                ..config()
+            },
+            // An ATR of another instrument's bars.
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    atr: Some(AtrConfig {
+                        bar_type: BarType::from("EURUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
+                        period: 14,
+                    }),
+                    ..barrier
+                }),
+                ..config()
+            },
+        ];
+
+        for config in valid {
+            assert!(config.validate().is_ok(), "{config:?}");
+        }
+        for config in invalid {
+            assert!(config.validate().is_err(), "{config:?}");
+            assert!(Targets::new(config).is_err());
+        }
+    }
+
+    #[test]
+    fn a_config_with_an_atr_distance_without_its_atr_is_refused_at_load() {
+        let toml = r#"
+            instrument_id = "XAUUSD.ICMARKETS"
+            quantity = "1"
+            barrier = { take_profit = { bps = 20 }, stop = { atr = 1.5 }, limit = "2h" }
+        "#;
+        let config = toml::from_str::<TargetsConfig>(toml).unwrap();
+
+        assert!(config.validate().is_err());
+    }
+
+    /// A perpetual priced in half points, 0.5 a tick, as some futures are.
+    fn half_point() -> InstrumentAny {
+        InstrumentAny::CryptoPerpetual(
+            CryptoPerpetual::builder()
+                .instrument_id(InstrumentId::from("HALF-PERP.TEST"))
+                .raw_symbol(Symbol::from("HALF-PERP"))
+                .base_currency(Currency::BTC())
+                .quote_currency(Currency::USDT())
+                .settlement_currency(Currency::USDT())
+                .is_inverse(false)
+                .price_precision(1)
+                .size_precision(0)
+                .price_increment(Price::from("0.5"))
+                .size_increment(Quantity::from(1))
+                .multiplier(Quantity::from(1))
+                .lot_size(Quantity::from(1))
+                .ts_event(UnixNanos::default())
+                .ts_init(UnixNanos::default())
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// The take profit and stop of the long and the short, from `barrier`
+    /// at `reference` with `atr`, as text.
+    fn exits(barrier: Barrier, reference: &str, atr: Option<f64>) -> Vec<(String, String)> {
+        let reference = Decimal::from_str_exact(reference).unwrap();
+        barrier
+            .exits(&half_point(), reference, atr)
+            .unwrap()
+            .into_iter()
+            .map(|(_, take_profit, stop)| (take_profit.to_string(), stop.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn exits_are_basis_points_of_the_reference_on_the_nearest_tick() {
+        // 10 bps of 1000.0 is 1.0, on the tick; 12 bps 1.2, nearer 1.0
+        // than 1.5; 13 bps 1.3, nearer 1.5.
+        assert_eq!(
+            exits(in_bps(10, 12), "1000.0", None),
+            [
+                ("1001.0".into(), "999.0".into()),
+                ("999.0".into(), "1001.0".into())
+            ]
+        );
+        assert_eq!(
+            exits(in_bps(13, 10), "1000.0", None),
+            [
+                ("1001.5".into(), "999.0".into()),
+                ("998.5".into(), "1001.0".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tie_between_two_ticks_goes_away_from_the_reference() {
+        // 12.5 bps of 1000.0 is 1.25, half way between 1.0 and 1.5.
+        let barrier = Barrier {
+            take_profit: Distance::BasisPoints(Decimal::new(125, 1)),
+            ..in_bps(10, 10)
+        };
+
+        assert_eq!(
+            exits(barrier, "1000.0", None),
+            [
+                ("1001.5".into(), "999.0".into()),
+                ("998.5".into(), "1001.0".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
+        // 1.5 ATRs of 2.1 is 3.15, nearer 3.0 than 3.5; 2 ATRs 4.2,
+        // nearer 4.0.
+        let barrier = Barrier {
+            take_profit: Distance::Atr(Decimal::new(15, 1)),
+            stop: Distance::Atr(Decimal::from(2)),
+            ..config().barrier.unwrap()
+        };
+
+        assert_eq!(
+            exits(barrier, "1000.0", Some(2.1)),
+            [
+                ("1003.0".into(), "996.0".into()),
+                ("997.0".into(), "1004.0".into())
+            ]
+        );
+    }
+
+    #[test]
     fn the_fingerprint_changes_with_every_target_spec() {
         let base = FeatureSet::builder()
             .quotes(
@@ -1010,7 +1465,41 @@ mod tests {
             },
             TargetsConfig {
                 barrier: Some(Barrier {
-                    stop: Decimal::from(3),
+                    take_profit: Distance::BasisPoints(Decimal::from(21)),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    take_profit: Distance::Atr(Decimal::from(20)),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    stop: Distance::Atr(Decimal::from(2)),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    atr: Some(AtrConfig {
+                        period: 15,
+                        ..barrier.atr.unwrap()
+                    }),
+                    ..barrier
+                }),
+                ..config()
+            },
+            TargetsConfig {
+                barrier: Some(Barrier {
+                    atr: Some(AtrConfig {
+                        bar_type: BarType::from("XAUUSD.ICMARKETS-5-MINUTE-MID-INTERNAL"),
+                        ..barrier.atr.unwrap()
+                    }),
                     ..barrier
                 }),
                 ..config()

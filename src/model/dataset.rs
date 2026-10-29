@@ -449,7 +449,7 @@ mod tests {
     use super::*;
     use crate::model::{
         decide::FeatureRow,
-        targets::{Barrier, Exit, Outcome, Outcomes},
+        targets::{Barrier, Distance, Exit, Outcome, Outcomes},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -475,9 +475,10 @@ mod tests {
             .instrument_id(InstrumentId::from(GOLD))
             .quantity(Quantity::from(1))
             .barrier(Barrier {
-                take_profit: Decimal::from(3),
-                stop: Decimal::from(2),
+                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                stop: Distance::BasisPoints(Decimal::from(5)),
                 limit: SignedDuration::from_hours(2),
+                atr: None,
             })
             .horizon(SignedDuration::from_hours(1))
             .build()
