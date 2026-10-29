@@ -45,6 +45,9 @@ nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", 
 nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
 nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
 nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+# PerpetualBooster: the 3.0 release candidate, the only version that builds
+# on stable Rust.
+perpetual = "=3.0.0-rc.2"
 prost = "0.14"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
