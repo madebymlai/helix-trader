@@ -1081,7 +1081,7 @@ runs the steps of `model::walk`:
    fitted on the rows a meta trained then is fitted on.
 
 Each child is this binary (`std::env::current_exe`), on the backtest's
-strategy, config, catalog, store, commission flag as given and leverage,
+strategy, config, catalog, store, commission flag (normalized) and leverage,
 with `--dataset-balance` as its balance; it inherits the backtest's
 environment and output, so its log and outcome come before the run's. A
 train runs through `Launcher::process`, as live's does: `train` fails

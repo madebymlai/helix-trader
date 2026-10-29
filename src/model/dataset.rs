@@ -150,9 +150,11 @@ pub struct Days {
     pub last: Date,
 }
 
-/// The commission of a dataset run, which its targets are net of, as given
-/// on the command line: per order (`--commission 3 USD`) or a rate on the
-/// value of each fill (`--commission-rate 0.00003`). Part of the dataset's
+/// The commission of a dataset run, which its targets are net of, as the
+/// command line gives it, normalized (`main.rs`: no trailing zeros, so
+/// that every spelling of one commission is one key): per order
+/// (`--commission 3 USD`) or a rate on the value of each fill
+/// (`--commission-rate 0.00003`). Part of the dataset's
 /// fingerprint, so neither rows nor models of other costs are ever read;
 /// the run's balance and leverage, which deny no target of a dataset run,
 /// are not.

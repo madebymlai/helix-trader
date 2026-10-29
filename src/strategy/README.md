@@ -613,8 +613,9 @@ of its choosing (`model::features`, `model::decide`).
   `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
   adds the targets and `model::targets`' code, and
   `dataset::fingerprint(&features, rule, &targets, &commission)` all of
-  it and the commission of the dataset runs, as given
-  (`Commission::PerOrder` or `Commission::Rate`): the targets are net of
+  it and the commission of the dataset runs, as given, normalized
+  (`Commission::PerOrder` or `Commission::Rate`, `3 USD` for `3.00 USD`,
+  `0.00003` for `0.000030`): the targets are net of
   it, so rows and models of other costs are never read. The runs' balance
   and leverage are not in it: large enough, they deny no target.
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
@@ -851,8 +852,9 @@ of its choosing (`model::features`, `model::decide`).
   at each retrain time, per retrain period and over the span (backtest
   README, "Retraining on the schedule"). With a meta model, `prepare`
   builds from the longer of the two windows and trains at each time
-  either store lacks, the meta's only after the primary's first model
-  (before, its window has no row, so it never publishes there), and the
+  either store lacks, the meta's only after the primary's first model as
+  the earlier trains of the span leave it (before, its window has no
+  row, so it never publishes there), and the
   meta's scores follow the primary's.
 - **Live retraining.** In `Mode::Live { models, commission, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
