@@ -350,12 +350,11 @@ const SOURCE_BAR_DELAY_MICROS: u64 = 5_000_000;
 
 /// The data engine config of a live node running a strategy on
 /// `bar_types`: Nautilus' default, without bars for periods without
-/// quotes, and, if any bar type is composite, building time bars
-/// `SOURCE_BAR_DELAY_MICROS` after their close (`time_bars_build_delay`),
-/// so that the last source bar is in.
+/// quotes, and building time bars `live_bar_build_delay` after their close
+/// (`time_bars_build_delay`).
 #[must_use]
 pub fn live_data_engine_config(bar_types: &[BarType]) -> LiveDataEngineConfig {
-    let delay = if bar_types.iter().any(BarType::is_composite) {
+    let delay = if has_composite(bar_types) {
         SOURCE_BAR_DELAY_MICROS
     } else {
         0
@@ -365,6 +364,24 @@ pub fn live_data_engine_config(bar_types: &[BarType]) -> LiveDataEngineConfig {
         time_bars_build_delay: delay,
         ..LiveDataEngineConfig::default()
     }
+}
+
+/// How long after a bar's close a live node running a strategy on
+/// `bar_types` builds its time bars: `SOURCE_BAR_DELAY_MICROS` if any bar
+/// type is composite, so that the last source bar is in, else none. A
+/// backtest builds every bar at its close, the source bars being in the
+/// catalog already.
+#[must_use]
+pub fn live_bar_build_delay(bar_types: &[BarType]) -> SignedDuration {
+    if has_composite(bar_types) {
+        SignedDuration::from_micros(SOURCE_BAR_DELAY_MICROS.cast_signed())
+    } else {
+        SignedDuration::ZERO
+    }
+}
+
+fn has_composite(bar_types: &[BarType]) -> bool {
+    bar_types.iter().any(BarType::is_composite)
 }
 
 /// The most bars a warmup of `warmup` builds of `bar_type`: one per bar
@@ -455,5 +472,19 @@ mod tests {
         let config = live_data_engine_config(&bar_types);
         assert_eq!(config.time_bars_build_delay, 5_000_000);
         assert!(!config.time_bars_build_with_no_updates);
+    }
+
+    /// The delay a live decision waits for is the one the node builds its
+    /// bars with.
+    #[test]
+    fn the_live_bar_build_delay_is_the_live_nodes() {
+        let composite = [
+            BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+            BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+        ];
+        let quotes = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
+
+        assert_eq!(live_bar_build_delay(&composite), SignedDuration::from_secs(5));
+        assert_eq!(live_bar_build_delay(&quotes), SignedDuration::ZERO);
     }
 }

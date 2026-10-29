@@ -39,6 +39,11 @@ strategy/
 Orders stay in each strategy, on Nautilus' own API (see "Orders and
 positions"): there are no shared trading helpers.
 
+The one exception is a strategy trading on a learned model: its features
+are a type, `model::features::FeatureSet`, built once and shared with
+Nautilus as an indicator, and its features implement a trait,
+`model::features::Feature` (see "Features and decisions").
+
 ## Config
 
 The strategy config is the universe: the single source of the instruments
@@ -492,7 +497,65 @@ OKX's confirmed 1-minute candles arrived 0.3 to 1.5 s after their close on
 (`warmup::live_data_engine_config`, Nautilus' `time_bars_build_delay`);
 otherwise the last minute would land in the next bar. Such a live bar is
 stamped 5 s after its close, its backtest twin on the close. Bars built
-from quotes keep no delay.
+from quotes keep no delay. `warmup::live_bar_build_delay` gives that
+delay, for decisions to wait for it (see "Features and decisions").
+
+## Features and decisions
+
+A strategy trading on a learned model declares its features once, as
+Nautilus indicators, and decides on them on a clock cadence or on an event
+of its choosing (`model::features`, `model::decide`).
+
+- **Declaring.** `FeatureSet::builder()` takes each feature with its data
+  kind and source and a name: `.quotes(instrument_id, name, indicator)`,
+  `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
+  `.data(data_type, name, read)` for a raw feature of custom data, the last
+  value `read` from a data point. `.code(include_str!("features.rs"))` adds
+  the strategy's feature code to the fingerprint; `build()` refuses an
+  empty set and two features of one name. The names and their order are
+  fixed there, and the values come in that order. A feature is a Nautilus
+  `Indicator` exposing its value (`Feature`), which every Nautilus moving
+  average does as it is; another indicator, or one of ours, implements
+  `Feature::value`.
+- **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
+  indicator: `features.register(self)` in `on_start` registers it for the
+  quotes and trades of each instrument and the bars of each bar type it
+  reads (Nautilus' `register_indicator_for_*`). The data engine then feeds
+  it each of those before the strategy's handler, replayed, live and in a
+  request's response (a warmup's quotes), with no strategy code. Nautilus
+  routes no depth, deltas or custom data to indicators: the strategy
+  forwards them from `on_book_depth`, `on_book_deltas` and `on_data`
+  (`handle_depth`, `handle_deltas`, `handle_data`). Bars a warmup builds
+  reach only the cache: a strategy hands those of `warmup::bars` to
+  `handle_bar`. An update reaches only the features declared on its kind
+  and source; an undeclared one is a no-op, never a panic of the
+  indicator trait's defaults. The set never returns an error, since
+  Nautilus skips the strategy's quote, trade or bar handler after an
+  indicator's error: a feature's error is logged.
+- **Deciding.** The rule comes from the config, `decision = { every =
+  "15m" }` or `decision = "event"` (`DecisionRule`). `decide::start(self,
+  rule, delay)` in `on_start` sets a cadence's Nautilus timer
+  (`DECISION_TIMER`) on an epoch-aligned time, so that it keeps the fixed
+  UTC grid of the interval's multiples whatever the run start; `delay` is
+  `warmup::live_bar_build_delay(&bar_types)` live and zero in a backtest,
+  so that a live decision sees the composite bar its backtest twin sees.
+  Each decision fires 10 ms after its time and delay
+  (`DECISION_MARGIN`): a bar closing on the grid is built by the data
+  engine's timer of the same time, which a backtest may run after the
+  strategy's (it orders the timers of one time by name), and a live node
+  as their tasks wake. `on_time_event` calls `decide::decide(self,
+  &features)` when `decide::is_decision(event)`; an event strategy calls
+  it from any handler.
+- **Rows.** `decide` snapshots the features if every one is initialized
+  and publishes them on the message bus as a `FeatureRow` (the strategy
+  id, the values, the decision time), custom data keyed by the strategy id
+  (`FeatureRow::data_type`), and returns it. Cold features give no
+  decision and publish nothing.
+- **Fingerprint.** `decide::fingerprint(&features, rule)` hashes the
+  feature names in order, the strategy's feature code, the shared indicator
+  code (`model::features` itself and Nautilus' indicators, named by the
+  git source `Cargo.lock` pins, through `build.rs`), the rule and
+  `model::decide`'s own code.
 
 ## Warmup and training
 

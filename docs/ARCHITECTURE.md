@@ -77,7 +77,8 @@ Build a thin slice; each step works end to end before the next starts.
 
 ```
 Cargo.toml    crate manifest
-build.rs      compiles Spotware's cTrader protos for src/data/ic/ (needs protoc)
+build.rs      compiles Spotware's cTrader protos for src/data/ic/ (needs protoc),
+              names the pinned source of Nautilus' indicators for src/model/
 src/          crate code, unit tests included
 tests/        integration tests: full runs through Nautilus, two binaries
   backtest/   the backtests, a node per test, in parallel
