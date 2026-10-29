@@ -2,11 +2,18 @@
 //! targets of its decisions and the one its model learns, how often a
 //! model is retrained and the window it is trained on, the gate it must
 //! pass, the thresholds that turn its probability into a trade, and its
-//! learner.
+//! learner; and, optionally, the meta model filtering its trades.
+//!
+//! A strategy has at most two levels of models: a primary, its rule
+//! (`RuleConfig`) or a model (`ModelConfig`), and one meta model
+//! (`MetaConfig`) deciding whether to take the primary's trade. The types
+//! hold no third: a meta section has no meta section of its own, and
+//! writing one is refused at load as an unknown field.
 
 use anyhow::ensure;
 use jiff::SignedDuration;
 use nautilus_model::enums::OrderSide;
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
 
 use super::{
@@ -54,6 +61,75 @@ pub struct ModelConfig {
     pub min_score: f64,
     /// The learner and its settings.
     pub learner: LearnerConfig,
+    /// The meta model deciding whether to take each trade of this one, a
+    /// `[model.meta]` table; none takes every trade.
+    pub meta: Option<MetaConfig>,
+}
+
+/// The model section of a strategy whose primary is a rule of its own: the
+/// strategy decides on a side when its rule signals
+/// (`ModelHandle::decide_on`), and the meta model decides whether to take
+/// that trade. Such as
+///
+/// ```toml
+/// [model]
+/// decision = "event"
+/// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { .. } }
+/// retrain = "168h"
+///
+/// [model.meta]
+/// window = "720h"
+/// holdout = "120h"
+/// threshold = 0.55
+/// min_score = 0.52
+/// learner = { kind = "lightgbm" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
+#[serde(deny_unknown_fields)]
+pub struct RuleConfig {
+    /// When the strategy decides: its rule is asked then, and a decision is
+    /// made only on the side it signals.
+    pub decision: DecisionRule,
+    /// The targets of each decision; a barrier, which the meta model learns.
+    pub targets: TargetsConfig,
+    /// How often the meta model is retrained, as `ModelConfig::retrain`.
+    pub retrain: SignedDuration,
+    /// The meta model.
+    pub meta: MetaConfig,
+}
+
+/// A meta model: on each decision the primary makes a trade of, whether
+/// the triple-barrier trade on the primary's side wins, learned from the
+/// primary's features, its side and its probability. It is retrained on
+/// the primary's schedule, right after the primary.
+#[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
+#[serde(deny_unknown_fields)]
+pub struct MetaConfig {
+    /// How far back from a retrain its rows go; never before the
+    /// primary's first model, whose predictions the rows need.
+    pub window: SignedDuration,
+    /// The last part of the window the model is scored on and not fitted
+    /// on.
+    pub holdout: SignedDuration,
+    /// The probability from which the primary's trade is taken.
+    pub threshold: f64,
+    /// The lowest holdout AUC a model is published with.
+    pub min_score: f64,
+    /// The learner and its settings.
+    pub learner: LearnerConfig,
+    /// How a trade taken is sized from the probability; none trades the
+    /// targets' size.
+    pub size: Option<Sizing>,
+}
+
+/// A trade's size from the meta model's probability: a multiple of the
+/// targets' size, `min` at the threshold, `max` at a probability of 1,
+/// linear between, such as `size = { min = 0.5, max = 2 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sizing {
+    pub min: Decimal,
+    pub max: Decimal,
 }
 
 /// A prediction at or above `long` is a long, at or below `short` a short,
@@ -95,60 +171,158 @@ impl ModelConfig {
     /// lacks, a target (the barrier's limit or the horizon) is not shorter
     /// than the window, the holdout is not positive or leaves no fitted row
     /// (it and the longest target not shorter than the window), the
-    /// thresholds are not probabilities with the short below the long, or
-    /// the minimum score is not an AUC.
+    /// thresholds are not probabilities with the short below the long, the
+    /// minimum score is not an AUC, or the meta model is invalid (see
+    /// `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
-        self.decision.validate()?;
-        self.targets.validate()?;
+        validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
         self.learner.validate()?;
-        ensure!(
-            self.retrain.is_positive(),
-            "the retrain interval {:#} is not positive",
-            self.retrain
-        );
-        let traded = self.targets.instrument_id;
-        ensure!(
-            requirements.instrument_ids().contains(&traded),
-            "the targets trade {traded}, which the strategy does not read"
-        );
-        if let Some(atr) = self.targets.barrier.and_then(|barrier| barrier.atr) {
-            ensure!(
-                requirements.bar_types.contains(&atr.bar_type),
-                "the barrier's ATR is on {}, bars the strategy does not read",
-                atr.bar_type
-            );
-        }
         ensure!(
             self.targets.label_index(self.label).is_some(),
             "the label {:?} names a target the targets do not have",
             self.label
         );
-        let longest = self.targets.settles_within();
-        ensure!(
-            longest < self.window,
-            "the longest target {longest:#} is not shorter than the window {:#}",
-            self.window
-        );
-        ensure!(
-            self.holdout.is_positive() && self.holdout + longest < self.window,
-            "the holdout {:#} leaves no fitted row in the window {:#} \
-             after the longest target {longest:#}",
-            self.holdout,
-            self.window
-        );
+        validate_window(self.window, self.holdout, &self.targets)?;
         let Thresholds { long, short } = self.thresholds;
         ensure!(
             (0.0..=1.0).contains(&short) && (0.0..=1.0).contains(&long) && short < long,
             "the thresholds short {short} and long {long} are not probabilities \
              with the short below the long"
         );
-        ensure!(
-            (0.0..=1.0).contains(&self.min_score),
-            "the minimum score {} is not an AUC",
-            self.min_score
-        );
+        validate_min_score(self.min_score)?;
+        if let Some(meta) = &self.meta {
+            meta.validate(&self.targets)?;
+        }
         Ok(())
     }
+}
+
+impl RuleConfig {
+    /// Checks the section against itself and against the strategy's data
+    /// `requirements`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the decision rule or the targets are invalid,
+    /// the retrain interval is not positive, the targets trade an
+    /// instrument the strategy does not read, the barrier's ATR is on bars
+    /// it does not read (as `ModelConfig::validate`), or the meta model is
+    /// invalid (see `MetaConfig::validate`).
+    pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
+        validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
+        self.meta.validate(&self.targets)
+    }
+}
+
+impl MetaConfig {
+    /// Checks the meta model against the primary's `targets`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the targets have no barrier, the trade the meta
+    /// model learns, the learner is invalid (see `LearnerConfig::validate`),
+    /// a target is not shorter than the window, the holdout is not
+    /// positive or leaves no fitted row, the threshold is not a
+    /// probability, the minimum score is not an AUC, or the sizing's
+    /// multiples are not positive with the minimum not above the maximum.
+    pub fn validate(&self, targets: &TargetsConfig) -> anyhow::Result<()> {
+        ensure!(
+            targets.barrier.is_some(),
+            "the meta model learns whether the primary's barrier trade wins, \
+             and the targets have no barrier"
+        );
+        self.learner.validate()?;
+        validate_window(self.window, self.holdout, targets)?;
+        ensure!(
+            (0.0..=1.0).contains(&self.threshold),
+            "the meta threshold {} is not a probability",
+            self.threshold
+        );
+        validate_min_score(self.min_score)?;
+        if let Some(Sizing { min, max }) = self.size {
+            ensure!(
+                min.is_sign_positive() && !min.is_zero() && min <= max,
+                "the meta sizing's multiples min {min} and max {max} are not positive \
+                 with the min not above the max"
+            );
+        }
+        Ok(())
+    }
+
+    /// The multiple of the targets' size a trade taken at `probability`
+    /// is: one without sizing; with it, `min` at the threshold, `max` at a
+    /// probability of 1, linear between.
+    #[must_use]
+    pub fn size(&self, probability: f64) -> Decimal {
+        let Some(Sizing { min, max }) = self.size else {
+            return Decimal::ONE;
+        };
+        let span = 1.0 - self.threshold;
+        let along = if span > 0.0 {
+            ((probability - self.threshold) / span).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        min + (max - min) * Decimal::from_f64(along).unwrap_or(Decimal::ONE)
+    }
+}
+
+/// Checks what every model section has: the decision `rule`, the
+/// `targets`, the `retrain` interval, against the strategy's
+/// `requirements`.
+fn validate_decisions(
+    rule: DecisionRule,
+    targets: &TargetsConfig,
+    retrain: SignedDuration,
+    requirements: &DataRequirements,
+) -> anyhow::Result<()> {
+    rule.validate()?;
+    targets.validate()?;
+    ensure!(
+        retrain.is_positive(),
+        "the retrain interval {retrain:#} is not positive"
+    );
+    let traded = targets.instrument_id;
+    ensure!(
+        requirements.instrument_ids().contains(&traded),
+        "the targets trade {traded}, which the strategy does not read"
+    );
+    if let Some(atr) = targets.barrier.and_then(|barrier| barrier.atr) {
+        ensure!(
+            requirements.bar_types.contains(&atr.bar_type),
+            "the barrier's ATR is on {}, bars the strategy does not read",
+            atr.bar_type
+        );
+    }
+    Ok(())
+}
+
+/// Checks that the longest of `targets` is shorter than `window`, and
+/// `holdout` positive and short enough to leave a fitted row after it.
+fn validate_window(
+    window: SignedDuration,
+    holdout: SignedDuration,
+    targets: &TargetsConfig,
+) -> anyhow::Result<()> {
+    let longest = targets.settles_within();
+    ensure!(
+        longest < window,
+        "the longest target {longest:#} is not shorter than the window {window:#}"
+    );
+    ensure!(
+        holdout.is_positive() && holdout + longest < window,
+        "the holdout {holdout:#} leaves no fitted row in the window {window:#} \
+         after the longest target {longest:#}"
+    );
+    Ok(())
+}
+
+fn validate_min_score(min_score: f64) -> anyhow::Result<()> {
+    ensure!(
+        (0.0..=1.0).contains(&min_score),
+        "the minimum score {min_score} is not an AUC"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -381,5 +555,145 @@ mod tests {
         assert_eq!(thresholds.side(0.5), None);
         assert_eq!(thresholds.side(0.59), None);
         assert_eq!(thresholds.side(f64::NAN), None);
+    }
+
+    /// A meta model on the section's barrier, held out its last 12 hours.
+    const META: &str = r#"
+        [meta]
+        window = "36h"
+        holdout = "12h"
+        threshold = 0.55
+        min_score = 0.52
+        learner = { kind = "baseline" }
+    "#;
+
+    #[test]
+    fn a_meta_section_reads_from_toml() {
+        let config = load(&format!("{SECTION}\n{META}")).unwrap();
+
+        let meta = config.meta.unwrap();
+        assert_eq!(meta.window, SignedDuration::from_hours(36));
+        assert_eq!(meta.holdout, SignedDuration::from_hours(12));
+        assert_eq!(meta.threshold, 0.55);
+        assert_eq!(meta.min_score, 0.52);
+        assert_eq!(meta.learner, LearnerConfig::Baseline {});
+        assert_eq!(meta.size, None);
+    }
+
+    #[test]
+    fn a_section_without_meta_has_none() {
+        assert_eq!(load(SECTION).unwrap().meta, None);
+    }
+
+    /// Two levels at most: a meta section has no meta section of its own.
+    #[test]
+    fn a_nested_meta_section_is_refused() {
+        let nested = format!(
+            "{SECTION}\n{META}\n{}",
+            META.replace("[meta]", "[meta.meta]")
+        );
+
+        let err = refused(&nested);
+
+        assert!(err.contains("unknown field `meta`"), "{err}");
+    }
+
+    #[test]
+    fn a_meta_model_without_a_barrier_is_refused() {
+        let toml = section(
+            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }"#,
+        )
+        .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+
+        let err = refused(&format!("{toml}\n{META}"));
+
+        assert!(err.contains("barrier"), "{err}");
+    }
+
+    #[test]
+    fn a_meta_window_holdout_threshold_or_score_out_of_range_is_refused() {
+        for (line, why) in [
+            (r#"window = "2h""#, "not shorter than the window"),
+            (r#"holdout = "35h""#, "holdout"),
+            ("threshold = 1.5", "threshold"),
+            ("min_score = -0.1", "minimum score"),
+            ("size = { min = 0, max = 2 }", "sizing"),
+            ("size = { min = 2, max = 1 }", "sizing"),
+        ] {
+            let key = line.split('=').next().unwrap().trim();
+            let meta: Vec<&str> = META
+                .lines()
+                .filter(|kept| kept.split('=').next().unwrap().trim() != key)
+                .chain([line])
+                .collect();
+            let err = refused(&format!("{SECTION}\n{}", meta.join("\n")));
+            assert!(err.contains(why), "{line}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_rule_primarys_section_reads_its_meta_from_toml() {
+        let toml = r#"
+            decision = "event"
+            targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
+            retrain = "24h"
+
+            [meta]
+            window = "36h"
+            holdout = "12h"
+            threshold = 0.55
+            min_score = 0.52
+            learner = { kind = "fake" }
+            size = { min = 0.5, max = 2 }
+        "#;
+
+        let config: RuleConfig = toml::from_str(toml).unwrap();
+        config.validate(&reading(GOLD)).unwrap();
+
+        assert_eq!(config.decision, DecisionRule::Event);
+        assert_eq!(config.meta.learner, LearnerConfig::Fake {});
+        assert_eq!(
+            config.meta.size,
+            Some(Sizing {
+                min: Decimal::new(5, 1),
+                max: Decimal::from(2)
+            })
+        );
+    }
+
+    #[test]
+    fn a_rule_primarys_section_needs_its_meta() {
+        let toml = r#"
+            decision = "event"
+            targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
+            retrain = "24h"
+        "#;
+
+        let err = toml::from_str::<RuleConfig>(toml).unwrap_err().to_string();
+
+        assert!(err.contains("meta"), "{err}");
+    }
+
+    /// From the threshold 0.6 to a probability of 1, 0.5 to 2 times the
+    /// targets' size: 0.8, half way, is 1.25 times.
+    #[test]
+    fn a_meta_probability_sizes_the_trade_from_the_threshold_to_one() {
+        let meta = MetaConfig::builder()
+            .window(SignedDuration::from_hours(36))
+            .holdout(SignedDuration::from_hours(12))
+            .threshold(0.6)
+            .min_score(0.5)
+            .learner(LearnerConfig::Fake {})
+            .size(Sizing {
+                min: Decimal::new(5, 1),
+                max: Decimal::from(2),
+            })
+            .build();
+
+        assert_eq!(meta.size(0.6), Decimal::new(5, 1));
+        assert_eq!(meta.size(0.8).round_dp(9), Decimal::new(125, 2));
+        assert_eq!(meta.size(1.0), Decimal::from(2));
+        let unsized_meta = MetaConfig { size: None, ..meta };
+        assert_eq!(unsized_meta.size(0.8), Decimal::ONE);
     }
 }

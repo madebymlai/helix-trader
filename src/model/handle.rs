@@ -22,6 +22,14 @@
 //!   events, and the rows the targets settle are collected for the caller
 //!   of the run.
 //!
+//! With a meta model (`model::meta`), a trade of the primary is taken only
+//! if the meta model in use, on the row with the primary's side and
+//! probability, predicts at least its threshold, sized from that
+//! probability if the meta sizes (`MetaConfig::size`); no meta model valid
+//! yet is no trade. A strategy whose primary is its rule (`of_rule`)
+//! decides through `decide_on` with the rule's side, only when the rule
+//! signals: the meta model alone decides whether to take it.
+//!
 //! A model is swapped in only inside `decide`, before it predicts: no
 //! decision mixes two models. A backtest and a live node read the same
 //! store, listed again at each decision, so a model published meanwhile
@@ -30,7 +38,7 @@
 //! order, its fingerprint (`dataset::fingerprint`), its width, and its
 //! probes, each of which the reloaded model must predict to the bit as it
 //! did when fitted. A model failing a check is refused, logged as an
-//! error, and the current one kept; it is not read again.
+//! error, and the current one kept; it is not read again (`store::Swap`).
 //!
 //! A live node builds composite bars `warmup::live_bar_build_delay` after
 //! their close, so a live handle starts the cadence with that delay, a
@@ -41,7 +49,11 @@
 //! time, one at a time, and `decide` first polls the running one, so the
 //! model it publishes is used from the next decision.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp};
@@ -55,19 +67,19 @@ use nautilus_model::{
     enums::OrderSide,
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
-    types::Quantity,
+    types::{Quantity, fixed::FIXED_PRECISION},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
-    config::{ModelConfig, Thresholds},
+    config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
     dataset,
     decide::{self, DecisionRule},
     features::FeatureSet,
     launcher::{Launcher, Retraining},
-    learner::Model,
-    store::ModelStore,
-    targets::{TargetRow, Targets},
+    meta::{Meta, meta_row},
+    store::{ModelStore, Swap},
+    targets::{TargetRow, Targets, TargetsConfig},
 };
 use crate::strategy::warmup;
 
@@ -98,9 +110,10 @@ pub type SettledRows = Rc<RefCell<Vec<TargetRow>>>;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trade {
     pub side: OrderSide,
-    /// The targets' size.
+    /// The targets' size, or, with a meta model sizing, its multiple of it.
     pub quantity: Quantity,
-    /// The model's probability that the label is true.
+    /// The probability that the label is true of the model deciding: the
+    /// meta model's, if any, else the primary's.
     pub probability: f64,
 }
 
@@ -129,22 +142,33 @@ enum Serving {
 struct Trading {
     /// Live, the retrains; none in a backtest.
     retraining: Option<Retraining>,
-    store: ModelStore,
-    /// The feature names a model must carry, in order.
-    feature_names: Vec<String>,
-    /// The fingerprint a model must carry.
-    fingerprint: String,
-    thresholds: Thresholds,
+    primary: Primary,
+    /// The targets' size.
     quantity: Quantity,
-    current: RefCell<Current>,
 }
 
-/// The model in use, and the last model read.
-#[derive(Debug, Default)]
-struct Current {
-    model: Option<Model>,
-    /// The valid-from of the last model read, in use or refused.
-    read: Option<Timestamp>,
+/// What picks the side of a trade.
+#[derive(Debug)]
+enum Primary {
+    /// A model, and the meta model taking its trades, if any.
+    Model {
+        models: Models,
+        thresholds: Thresholds,
+        meta: Option<MetaModels>,
+    },
+    /// The strategy's rule, and the meta model taking its trades.
+    Rule { meta: MetaModels },
+}
+
+/// The models of one level of the store, swapped in decision by decision.
+#[derive(Debug)]
+struct Models(RefCell<Swap>);
+
+/// A meta model's models, and its config.
+#[derive(Debug)]
+struct MetaModels {
+    models: Models,
+    config: MetaConfig,
 }
 
 impl ModelHandle {
@@ -155,53 +179,124 @@ impl ModelHandle {
     ///
     /// Returns an error if the decision rule is invalid, a cadence's
     /// features read no data of the targets' instrument (its decisions
-    /// would never be fresh, see `decide::decide`), the store cannot be
-    /// keyed or, in a dataset run, the targets are invalid.
+    /// would never be fresh, see `decide::decide`), a store cannot be
+    /// keyed, the meta model has no barrier to learn or, in a dataset run,
+    /// the targets are invalid.
     pub fn new(
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
         config: &ModelConfig,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
-        config.decision.validate()?;
-        let traded = config.targets.instrument_id;
+        let primary = |models: &Path| -> anyhow::Result<Primary> {
+            let fingerprint =
+                dataset::fingerprint(&features, config.decision, &config.targets).to_string();
+            let meta = Meta::of_model(models, strategy_id, &features, config)?
+                .map(|meta| MetaModels::of(&meta, &fingerprint));
+            Ok(Primary::Model {
+                models: Models::new(
+                    ModelStore::new(models, strategy_id, &features, config)?,
+                    features.names().to_vec(),
+                    fingerprint,
+                ),
+                thresholds: config.thresholds,
+                meta,
+            })
+        };
+        Self::built(
+            strategy_id,
+            &features,
+            (config.decision, &config.targets, config.retrain),
+            mode,
+            primary,
+        )
+    }
+
+    /// The handle of `strategy_id`, whose primary is its rule, deciding on
+    /// `features` as `config` says, in `mode`: the strategy decides through
+    /// `decide_on`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `features` do not declare the primary's side
+    /// and probability (`FeatureSetBuilder::primary`), the decision rule is
+    /// invalid, the store cannot be keyed, the targets have no barrier or,
+    /// in a dataset run, are invalid.
+    pub fn of_rule(
+        strategy_id: StrategyId,
+        features: Rc<FeatureSet>,
+        config: &RuleConfig,
+        mode: Mode,
+    ) -> anyhow::Result<Rc<Self>> {
         ensure!(
-            config.decision == DecisionRule::Event || features.reads(traded),
+            features.has_primary(),
+            "the features of a rule primary declare its side and probability \
+             (`FeatureSetBuilder::primary`)"
+        );
+        let primary = |models: &Path| -> anyhow::Result<Primary> {
+            let meta = Meta::of_rule(models, strategy_id, &features, config)?;
+            let fingerprint =
+                dataset::fingerprint(&features, config.decision, &config.targets).to_string();
+            Ok(Primary::Rule {
+                meta: MetaModels::of(&meta, &fingerprint),
+            })
+        };
+        Self::built(
+            strategy_id,
+            &features,
+            (config.decision, &config.targets, config.retrain),
+            mode,
+            primary,
+        )
+    }
+
+    /// The handle of `strategy_id` deciding with `features` on `rule`, with
+    /// `targets`, retrained every `retrain`, in `mode`: trading on the
+    /// models `primary` reads under the store's root, or opening the
+    /// targets.
+    fn built(
+        strategy_id: StrategyId,
+        features: &Rc<FeatureSet>,
+        (rule, targets, retrain): (DecisionRule, &TargetsConfig, SignedDuration),
+        mode: Mode,
+        primary: impl FnOnce(&Path) -> anyhow::Result<Primary>,
+    ) -> anyhow::Result<Rc<Self>> {
+        rule.validate()?;
+        let traded = targets.instrument_id;
+        ensure!(
+            rule == DecisionRule::Event || features.reads(traded),
             "the features read no data of {traded}, the targets' instrument: \
              no decision of the cadence would be fresh"
         );
         let serving = match mode {
-            Mode::Backtest { models } => Serving::Trading(Box::new(Trading::new(
-                None,
-                strategy_id,
-                &features,
-                config,
-                models,
-            )?)),
+            Mode::Backtest { models } => Serving::Trading(Box::new(Trading {
+                retraining: None,
+                primary: primary(&models)?,
+                quantity: targets.quantity,
+            })),
             Mode::Live {
                 models,
                 launcher,
                 catalog_delay,
-            } => {
-                let retraining =
-                    Retraining::new(strategy_id, config.retrain, catalog_delay, launcher);
-                Serving::Trading(Box::new(Trading::new(
-                    Some(retraining),
+            } => Serving::Trading(Box::new(Trading {
+                retraining: Some(Retraining::new(
                     strategy_id,
-                    &features,
-                    config,
-                    models,
-                )?))
-            }
+                    retrain,
+                    catalog_delay,
+                    launcher,
+                )),
+                primary: primary(&models)?,
+                quantity: targets.quantity,
+            })),
             Mode::Dataset { rows } => Serving::Dataset {
-                targets: Targets::new(config.targets.clone())?,
+                targets: Targets::new(targets.clone())?,
                 rows,
             },
         };
         Ok(Rc::new(Self {
             strategy_id,
-            features,
-            rule: config.decision,
+            features: Rc::clone(features),
+            rule,
             traded,
             serving,
         }))
@@ -248,13 +343,46 @@ impl ModelHandle {
 
     /// Decides now, for `strategy`: the trade of the decision, if any.
     /// Live, first logs the running retrain if it finished, whose model
-    /// the store then lists.
+    /// the store then lists. A handle whose primary is a rule makes no
+    /// decision here: its strategy decides through `decide_on`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the model fails to predict, or, in a dataset
-    /// run, as `Targets::open` does.
+    /// Returns an error if a model fails to predict, or, in a dataset run,
+    /// as `Targets::open` does.
     pub fn decide<S>(&self, strategy: &mut S) -> anyhow::Result<Option<Trade>>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        self.decide_as(strategy, None)
+    }
+
+    /// Decides now on `side`, the side the rule of `strategy`, its primary,
+    /// signals (see `of_rule`): the trade of the decision, if the meta
+    /// model takes it; in a dataset run, the decision's targets opened, its
+    /// row carrying the side.
+    ///
+    /// # Errors
+    ///
+    /// As `decide`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle's primary is not a rule.
+    pub fn decide_on<S>(&self, strategy: &mut S, side: OrderSide) -> anyhow::Result<Option<Trade>>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        self.features
+            .on_side(side, f64::NAN, || self.decide_as(strategy, Some(side)))
+    }
+
+    /// Decides now, on the rule's `side` if the primary is a rule.
+    fn decide_as<S>(
+        &self,
+        strategy: &mut S,
+        side: Option<OrderSide>,
+    ) -> anyhow::Result<Option<Trade>>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
@@ -268,7 +396,7 @@ impl ModelHandle {
         };
         match &self.serving {
             Serving::Trading(trading) => {
-                trading.trade(Timestamp::from(row.ts_event), &row.features)
+                trading.trade(Timestamp::from(row.ts_event), &row.features, side)
             }
             Serving::Dataset { targets, .. } => {
                 targets.open(strategy, row)?;
@@ -339,73 +467,119 @@ impl ModelHandle {
 }
 
 impl Trading {
-    fn new(
-        retraining: Option<Retraining>,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: &ModelConfig,
-        models: PathBuf,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            retraining,
-            store: ModelStore::new(&models, strategy_id, features, config)?,
-            feature_names: features.names().to_vec(),
-            fingerprint: dataset::fingerprint(features, config.decision, &config.targets)
-                .to_string(),
-            thresholds: config.thresholds,
-            quantity: config.targets.quantity,
-            current: RefCell::default(),
-        })
-    }
-
-    /// The trade of the decision at `now` on `row`: the latest model valid
-    /// then swapped in, its prediction on `row` through the thresholds.
-    fn trade(&self, now: Timestamp, row: &[f64]) -> anyhow::Result<Option<Trade>> {
-        self.swap(now);
-        let current = self.current.borrow();
-        let Some(model) = &current.model else {
-            return Ok(None);
-        };
-        let probability = model.predict(row)?;
-        Ok(self.thresholds.side(probability).map(|side| Trade {
-            side,
-            quantity: self.quantity,
-            probability,
-        }))
-    }
-
-    /// Swaps in the latest model valid at `now`, if not read yet; one
-    /// failing its checks is refused, logged, and the current one kept, as
-    /// it is if the store cannot be listed.
-    fn swap(&self, now: Timestamp) {
-        let latest = match self.store.valid_froms() {
-            Ok(times) => times.into_iter().rfind(|&time| time <= now),
-            Err(e) => {
-                log::error!("listing the models at {now}: {e:#}; the current model kept");
-                return;
+    /// The trade of the decision at `now` on `row`, on the rule's `side` if
+    /// the primary is a rule: a model primary's trade, of the latest model
+    /// valid then through the thresholds, taken if its meta model takes
+    /// it; a rule's taken if its meta model takes it.
+    fn trade(
+        &self,
+        now: Timestamp,
+        row: &[f64],
+        side: Option<OrderSide>,
+    ) -> anyhow::Result<Option<Trade>> {
+        match (&self.primary, side) {
+            (
+                Primary::Model {
+                    models,
+                    thresholds,
+                    meta,
+                },
+                None,
+            ) => {
+                let Some(probability) = models.predict(now, row)? else {
+                    return Ok(None);
+                };
+                let Some(side) = thresholds.side(probability) else {
+                    return Ok(None);
+                };
+                match meta {
+                    None => Ok(Some(Trade {
+                        side,
+                        quantity: self.quantity,
+                        probability,
+                    })),
+                    Some(meta) => {
+                        meta.take(now, &meta_row(row, side, probability), side, self.quantity)
+                    }
+                }
             }
-        };
-        let mut current = self.current.borrow_mut();
-        let Some(latest) = latest.filter(|&latest| current.read != Some(latest)) else {
-            return;
-        };
-        current.read = Some(latest);
-        match self.load(latest) {
-            Ok(model) => {
-                log::info!("the model valid from {latest} in use from {now}");
-                current.model = Some(model);
-            }
-            Err(e) => {
-                log::error!("refused the model valid from {latest}: {e:#}; the current model kept");
+            (Primary::Rule { meta }, Some(side)) => meta.take(now, row, side, self.quantity),
+            (Primary::Model { .. }, Some(_)) | (Primary::Rule { .. }, None) => {
+                unreachable!("a rule primary decides on a side, a model primary on none")
             }
         }
     }
+}
 
-    /// The model valid from `valid_from`, checked against the strategy.
-    fn load(&self, valid_from: Timestamp) -> anyhow::Result<Model> {
-        self.store
-            .read(valid_from)?
-            .load(&self.feature_names, &self.fingerprint)
+impl Models {
+    /// The models of `store`, checked against `feature_names` and
+    /// `fingerprint`.
+    fn new(store: ModelStore, feature_names: Vec<String>, fingerprint: String) -> Self {
+        Self(RefCell::new(Swap::new(store, feature_names, fingerprint)))
+    }
+
+    /// The prediction on `row` of the latest model valid at `now`, swapped
+    /// in; none without a model. A store that cannot be listed keeps the
+    /// current model.
+    fn predict(&self, now: Timestamp, row: &[f64]) -> anyhow::Result<Option<f64>> {
+        let mut swap = self.0.borrow_mut();
+        let valid_froms = swap.store().valid_froms().unwrap_or_else(|e| {
+            log::error!("listing the models at {now}: {e:#}; the current model kept");
+            vec![]
+        });
+        swap.at(now, &valid_froms)
+            .map(|(_, model)| model.predict(row))
+            .transpose()
+    }
+}
+
+impl MetaModels {
+    /// The models of `meta`, of a strategy of `fingerprint`.
+    fn of(meta: &Meta, fingerprint: &str) -> Self {
+        Self {
+            models: Models::new(
+                meta.store().clone(),
+                meta.feature_names().to_vec(),
+                fingerprint.to_string(),
+            ),
+            config: meta.config().clone(),
+        }
+    }
+
+    /// The trade on `side` of `quantity`, the targets' size, if the meta
+    /// model in use at `now` predicts at least its threshold on `row`,
+    /// sized from its probability; no trade without a meta model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model fails to predict, or the size is no
+    /// quantity.
+    fn take(
+        &self,
+        now: Timestamp,
+        row: &[f64],
+        side: OrderSide,
+        quantity: Quantity,
+    ) -> anyhow::Result<Option<Trade>> {
+        let Some(probability) = self.models.predict(now, row)? else {
+            return Ok(None);
+        };
+        if probability < self.config.threshold {
+            return Ok(None);
+        }
+        let quantity = match self.config.size {
+            None => quantity,
+            Some(_) => {
+                let size = quantity.as_decimal() * self.config.size(probability);
+                Quantity::from_decimal_dp(size, FIXED_PRECISION)
+                    .map_err(|e| anyhow::anyhow!("sizing {size}: {e}"))?
+            }
+        };
+        Ok(Some(Trade {
+            side,
+            quantity,
+            probability,
+        }))
     }
 }
 
@@ -435,10 +609,12 @@ mod tests {
 
     use super::*;
     use crate::model::{
+        config::Sizing,
         learner::{LearnerConfig, TrainingSet},
         store::{ModelManifest, Probe, StoredModel},
-        targets::{Label, TargetsConfig},
+        targets::{Barrier, Distance, Label, TargetsConfig},
     };
+    use rust_decimal::Decimal;
 
     const STRATEGY: &str = "HANDLE-001";
     const AUD: &str = "AUD/USD.SIM";
@@ -946,6 +1122,7 @@ mod tests {
                 valid_from: at,
                 score: 0.6,
             }
+            .into()
         });
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let handle = live_handle(&mut probe, models.path(), launcher);
@@ -973,6 +1150,7 @@ mod tests {
                 score: 0.48,
                 min_score: 0.5,
             })
+            .into()
         });
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let handle = live_handle(&mut probe, models.path(), launcher);
@@ -986,5 +1164,248 @@ mod tests {
             store(models.path()).valid_froms().unwrap(),
             [at("2026-10-22T10:00:00Z")]
         );
+    }
+
+    /// A baseline valid from `valid_from` on rows of `feature_names`, of a
+    /// strategy deciding with `features` as `config` says (its decisions
+    /// and targets), predicting
+    /// `trues` tenths whatever the row.
+    fn baseline_of(
+        features: &FeatureSet,
+        (decision, targets): (DecisionRule, &TargetsConfig),
+        feature_names: &[&str],
+        valid_from: &str,
+        trues: usize,
+    ) -> StoredModel {
+        let width = feature_names.len();
+        let labels = (0..10).map(|i| i < trues).collect();
+        let set = TrainingSet::new(width, vec![0.5; 10 * width], labels).unwrap();
+        let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
+        StoredModel {
+            manifest: ModelManifest {
+                strategy_id: StrategyId::from(STRATEGY),
+                valid_from: at(valid_from),
+                fingerprint: dataset::fingerprint(features, decision, targets).to_string(),
+                feature_names: feature_names.iter().map(ToString::to_string).collect(),
+                targets: targets.clone(),
+                label: Label::Barrier,
+                learner: LearnerConfig::Baseline {},
+                score: 0.6,
+                probes: vec![],
+            },
+            model: model.save().unwrap(),
+        }
+    }
+
+    const META_NAMES: [&str; 3] = ["mid", "primary_side", "primary_probability"];
+
+    /// The meta model taking a trade from 0.6, sizing it if `size`.
+    fn meta(size: Option<Sizing>) -> MetaConfig {
+        MetaConfig {
+            window: SignedDuration::from_hours(48),
+            holdout: SignedDuration::from_hours(12),
+            threshold: 0.6,
+            min_score: 0.5,
+            learner: LearnerConfig::Baseline {},
+            size,
+        }
+    }
+
+    /// `config` on a barrier besides its horizon, its trades taken by
+    /// `meta`.
+    fn with_meta(meta: MetaConfig) -> ModelConfig {
+        let mut config = config();
+        config.targets.barrier = Some(Barrier {
+            take_profit: Distance::BasisPoints(Decimal::from(10)),
+            stop: Distance::BasisPoints(Decimal::from(10)),
+            limit: SignedDuration::from_hours(2),
+            atr: None,
+        });
+        config.meta = Some(meta);
+        config
+    }
+
+    /// The probe's handle trading in a backtest on the models under
+    /// `models` as `config` says, its primary a long of 0.6 from midnight,
+    /// its meta model predicting `meta_trues` tenths, if any, its features
+    /// warm by a quote at noon of the 22nd.
+    fn meta_handle(
+        models: &Path,
+        config: &ModelConfig,
+        meta_trues: Option<usize>,
+    ) -> Rc<ModelHandle> {
+        let features = features();
+        ModelStore::new(models, StrategyId::from(STRATEGY), &features, config)
+            .unwrap()
+            .publish(&baseline_of(
+                &features,
+                (config.decision, &config.targets),
+                &["mid"],
+                "2026-10-22T00:00:00Z",
+                6,
+            ))
+            .unwrap();
+        if let Some(trues) = meta_trues {
+            ModelStore::new(models, StrategyId::from(STRATEGY), &features, config)
+                .unwrap()
+                .meta(config.meta.as_ref().unwrap(), config.thresholds)
+                .unwrap()
+                .publish(&baseline_of(
+                    &features,
+                    (config.decision, &config.targets),
+                    &META_NAMES,
+                    "2026-10-22T00:00:00Z",
+                    trues,
+                ))
+                .unwrap();
+        }
+        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
+        ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            config,
+            Mode::Backtest {
+                models: models.to_path_buf(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_meta_model_from_its_threshold_takes_the_primarys_trade() {
+        let models = tempfile::tempdir().unwrap();
+        let handle = meta_handle(models.path(), &with_meta(meta(None)), Some(7));
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+
+        assert_eq!(
+            handle.decide(&mut probe).unwrap(),
+            Some(Trade {
+                side: OrderSide::Buy,
+                quantity: Quantity::from(1000),
+                probability: 0.7,
+            })
+        );
+    }
+
+    #[test]
+    fn a_meta_model_below_its_threshold_takes_no_trade() {
+        let models = tempfile::tempdir().unwrap();
+        let handle = meta_handle(models.path(), &with_meta(meta(None)), Some(5));
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+
+        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+    }
+
+    #[test]
+    fn no_meta_model_valid_yet_takes_no_trade() {
+        let models = tempfile::tempdir().unwrap();
+        let handle = meta_handle(models.path(), &with_meta(meta(None)), None);
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+
+        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+    }
+
+    /// From the threshold 0.6 to 1, 0.5 to 2 times the size: 0.8 is 1.25
+    /// times 1000.
+    #[test]
+    fn a_sizing_meta_model_sizes_the_trade_from_its_probability() {
+        let models = tempfile::tempdir().unwrap();
+        let sizing = Sizing {
+            min: Decimal::new(5, 1),
+            max: Decimal::from(2),
+        };
+        let handle = meta_handle(models.path(), &with_meta(meta(Some(sizing))), Some(8));
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+
+        let trade = handle.decide(&mut probe).unwrap().unwrap();
+
+        assert_eq!(trade.quantity.as_decimal(), Decimal::from(1250));
+        assert_eq!(trade.probability, 0.8);
+    }
+
+    /// The rule primary of `config`: its features declare the side.
+    fn rule_features() -> Rc<FeatureSet> {
+        FeatureSet::builder()
+            .quotes(
+                InstrumentId::from(AUD),
+                "mid",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .primary()
+            .build()
+            .unwrap()
+    }
+
+    fn rule_config() -> RuleConfig {
+        let config = with_meta(meta(None));
+        RuleConfig {
+            decision: config.decision,
+            targets: config.targets,
+            retrain: config.retrain,
+            meta: meta(None),
+        }
+    }
+
+    #[test]
+    fn a_rule_primarys_side_is_traded_if_its_meta_model_takes_it() {
+        let models = tempfile::tempdir().unwrap();
+        let config = rule_config();
+        let features = rule_features();
+        ModelStore::of_rule(
+            models.path(),
+            StrategyId::from(STRATEGY),
+            &features,
+            &config,
+        )
+        .unwrap()
+        .publish(&baseline_of(
+            &features,
+            (config.decision, &config.targets),
+            &META_NAMES,
+            "2026-10-22T00:00:00Z",
+            7,
+        ))
+        .unwrap();
+        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
+        let handle = ModelHandle::of_rule(
+            StrategyId::from(STRATEGY),
+            features,
+            &config,
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+
+        let without_side = handle.decide(&mut probe).unwrap();
+        let sold = handle.decide_on(&mut probe, OrderSide::Sell).unwrap();
+
+        assert_eq!(without_side, None);
+        assert_eq!(
+            sold,
+            Some(Trade {
+                side: OrderSide::Sell,
+                quantity: Quantity::from(1000),
+                probability: 0.7,
+            })
+        );
+    }
+
+    #[test]
+    fn a_rule_primarys_features_must_declare_its_side() {
+        let models = tempfile::tempdir().unwrap();
+
+        let err = ModelHandle::of_rule(
+            StrategyId::from(STRATEGY),
+            features(),
+            &rule_config(),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("side"), "{err}");
     }
 }

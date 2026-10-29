@@ -545,7 +545,11 @@ of its choosing (`model::features`, `model::decide`).
   fixed there, and the values come in that order. A feature is a Nautilus
   `Indicator` exposing its value (`Feature`), which every Nautilus moving
   average does as it is; another indicator, or one of ours, implements
-  `Feature::value`.
+  `Feature::value`. A strategy whose primary is its own rule declares
+  `.primary()`: the set's last two values are then the rule's side and
+  probability, `primary_side` and `primary_probability`, given at each
+  decision on a side (see "Meta-labeling"), the set having no values
+  without one.
 - **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
   indicator: `features.register(self)` in `on_start` registers it for the
   quotes and trades of each instrument and the bars of each bar type it
@@ -710,7 +714,8 @@ of its choosing (`model::features`, `model::decide`).
   target the config lacks, a barrier limit or horizon not shorter than
   the window, a holdout leaving no fitted row, thresholds that are not
   probabilities with the short below the long, and a minimum score
-  outside [0, 1].
+  outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
+  meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
   config)` and `train_at(t, replay)` (`model::train`) train at `t`: the
   rows of the window ending at `t` settled by `t` (`Dataset::settled`),
@@ -720,7 +725,11 @@ of its choosing (`model::features`, `model::decide`).
   predictions on the holdout (`score::auc`). At or above `min_score` the
   model is published, valid from `t`; else, and on any error, the current
   model is kept with the reason (`Kept`: below the minimum score, failed,
-  or schema mismatch). A train returns its `Outcome`, never an error.
+  or schema mismatch). A train returns what it did, `Trained`: the
+  `Outcome` of each model, never an error. With a meta model the primary
+  trains first, then the meta, on the rows of the one replay (see
+  "Meta-labeling"); `Training::of_rule` trains a rule primary's meta
+  alone.
 - **Model store.** `ModelStore` (`model::store`) holds the published
   models under `<models>/<strategy id>/<fingerprint>/<settings>/`, the
   settings a hash of the learner and its settings, the label, the window
@@ -732,7 +741,14 @@ of its choosing (`model::features`, `model::decide`).
   A reloaded model is checked by predicting the probes, not by its bytes.
   `valid_froms()` lists the models in time order, `read(valid_from)` gives
   one back. `StoredModel::load(feature_names, fingerprint)` loads it with
-  the checks a handle makes before use (below).
+  the checks a handle makes before use (below). A meta model's store is
+  `meta/<settings>` under its primary's directory (`ModelStore::meta`),
+  its settings its learner, window and holdout and the primary's
+  thresholds; a rule primary's under the strategy id and fingerprint
+  (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
+  strategy does, decision by decision: the latest valid, checked, a
+  model failing a check refused and the current one kept; the handle,
+  the backtest's scores and the meta's rows all use it.
 - **Model handle.** A strategy trading on its model holds a `ModelHandle`
   (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
   mode)`, an `Rc`), the one place it decides: `start(self, &bar_types)`
@@ -762,6 +778,33 @@ of its choosing (`model::features`, `model::decide`).
   `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
   trading. The trades are the strategy's own orders: `learned/` sends a
   market order and closes it `hold` later.
+- **Meta-labeling.** A primary picks the side, a meta model decides
+  whether to take the trade (`model::meta`). The primary is a model, to
+  which a `[model.meta]` table alone adds a meta model, or the
+  strategy's rule: its model section is a `RuleConfig` (`decision`,
+  `targets`, `retrain` and a required `[model.meta]`), its features
+  declare `.primary()`, its handle is `ModelHandle::of_rule`, and it
+  calls `decide_on(self, side)` only when its rule signals (`decide`
+  makes no decision then). The meta table (`MetaConfig`): `window`,
+  `holdout`, `threshold` (the probability from which a trade is taken),
+  `min_score`, `learner`, and an optional `size = { min = 0.5, max = 2 }`,
+  the trade a multiple of the targets' size, `min` at the threshold to
+  `max` at a probability of 1, linear between. The meta model decides
+  only when the primary signals, on the primary's features with its side
+  (1 a buy, -1 a sell) and probability (missing for a rule) after them,
+  and learns whether the triple-barrier trade on the primary's side won:
+  the targets need a barrier, and a dataset row, which opens a long and a
+  short at every decision, has either side's, so the meta's rows need no
+  replay of their own. A rule primary's rows are its decisions on a side.
+  A model primary's are its dataset's rows, each with the prediction of
+  the primary model the strategy used then (`Swap`), out of sample by
+  construction, none before the primary's first model, which the meta's
+  window never starts before; a row the primary makes no trade of is
+  none. Trading, the handle takes the primary's trade if the meta model
+  in use predicts at least `threshold`, sized if it sizes; no meta model
+  valid yet is no trade. Two levels at most, by the types: `MetaConfig`
+  has no meta, so `[model.meta.meta]` is refused at load as an unknown
+  field.
 - **Schedule.** A model is retrained every `retrain` (`model::schedule`),
   at its multiples since the Unix epoch, whatever the run start, in a
   backtest as live: the times of a Nautilus timer named after the
@@ -781,7 +824,9 @@ of its choosing (`model::features`, `model::decide`).
   time; `scores(start, end)` scores each decision of the dataset in the
   span with the model the handle used at it, beside the baseline fitted
   at each retrain time, per retrain period and over the span (backtest
-  README, "Retraining on the schedule").
+  README, "Retraining on the schedule"). With a meta model, `prepare`
+  builds from the longer of the two windows and trains at each time
+  either store lacks, and the meta's scores follow the primary's.
 - **Live retraining.** In `Mode::Live { models, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
   sets the strategy's retrain timer (`schedule::start`) on the grid of
@@ -806,7 +851,8 @@ of its choosing (`model::features`, `model::decide`).
   `train_at` with a replay through `Backtest::run_dataset` of the strategy
   in `Mode::Dataset` on hedging venues, the costs and balance given as to
   a backtest (`--commission` or `--commission-rate`, `--balance`); it
-  prints a published `Outcome`, and fails with a kept one, its reason.
+  prints what it did when every model it trained published, and fails
+  with a kept one, its reason, each model's outcome named.
   `backtest` and `live` take `--models` (default `models`), the store
   root, beside `train`'s; `live` takes the costs of its retrains'
   dataset runs (`--retrain-commission` or `--retrain-commission-rate`,

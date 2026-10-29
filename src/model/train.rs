@@ -18,42 +18,95 @@
 //! A model learns whether the long of its label's target gains after its
 //! costs (`targets::Label`).
 //!
+//! With a meta model (`model::meta`), the primary trains first, then the
+//! meta, on the same rows, of the one replay: the meta's window is its
+//! own (`MetaConfig::window`), from the primary's first model on, and its
+//! rows are made from the primary's out-of-sample predictions, the models
+//! of the store the primary used at each decision, the one just published
+//! valid from `t` used by none. Fitting, scoring and publishing are the
+//! primary's, in the meta's store. A strategy whose primary is its rule
+//! trains its meta model alone.
+//!
 //! A train never errors: what goes wrong is an outcome, the current model
-//! kept with the reason (`Kept`).
+//! kept with the reason (`Kept`), for each model trained.
 
 use std::{fmt, path::Path};
 
 use anyhow::Context;
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
 
 use super::{
-    config::ModelConfig,
+    config::{ModelConfig, RuleConfig},
     dataset::{Dataset, DatasetRow, SchemaMismatch},
     features::FeatureSet,
-    learner::TrainingSet,
+    learner::{LearnerConfig, TrainingSet},
+    meta::Meta,
     score,
     store::{ModelManifest, ModelStore, Probe, StoredModel},
-    targets::TargetRow,
+    targets::{Label, TargetRow, TargetsConfig},
 };
 
 /// The most rows of the holdout a published model is probed on.
 const PROBES: usize = 16;
 
-/// The training of one strategy's model.
+/// The training of one strategy's models: its primary model, its meta
+/// model, or both.
 #[derive(Debug)]
 pub struct Training {
     strategy_id: StrategyId,
-    feature_names: Vec<String>,
-    config: ModelConfig,
+    targets: TargetsConfig,
+    dataset: Dataset,
+    /// The primary model; none for a strategy whose primary is its rule.
+    primary: Option<Primary>,
+    /// The meta model, if any.
+    meta: Option<(Level, Meta)>,
+}
+
+/// A primary model's training.
+#[derive(Debug)]
+struct Primary {
+    level: Level,
     /// Where the label is among a row's target values.
     label: usize,
-    dataset: Dataset,
+}
+
+/// How the models of one level are fitted, scored and published.
+#[derive(Debug)]
+struct Level {
+    /// The names of the features of its rows, in order.
+    feature_names: Vec<String>,
+    /// The target it learns, as its manifest says.
+    label: Label,
+    window: SignedDuration,
+    holdout: SignedDuration,
+    min_score: f64,
+    learner: LearnerConfig,
     store: ModelStore,
 }
 
-/// What a train did.
+/// A row as a model is fitted and scored on it: its features and its
+/// label, the decision's time and when its targets settled.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Example {
+    pub features: Vec<f64>,
+    pub label: bool,
+    pub ts_event: UnixNanos,
+    pub settled_at: UnixNanos,
+}
+
+/// What a train did: the outcome of each model it trained, the primary's
+/// first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trained {
+    /// The primary model's; none for a rule primary.
+    pub primary: Option<Outcome>,
+    /// The meta model's, if the strategy has one.
+    pub meta: Option<Outcome>,
+}
+
+/// What a train did to one model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// A model was published, valid from `valid_from`, with its holdout AUC.
@@ -76,14 +129,16 @@ pub enum Kept {
 }
 
 impl Training {
-    /// The training of `strategy_id`'s model, deciding with `features`, on
-    /// its dataset in the catalog at `catalog` and its models in the store
-    /// under `models`, as `config` says.
+    /// The training of `strategy_id`'s model, and of its meta model if
+    /// `config` has one, deciding with `features`, on its dataset in the
+    /// catalog at `catalog` and its models in the store under `models`, as
+    /// `config` says.
     ///
     /// # Errors
     ///
     /// Returns an error if the targets are invalid, the label names a
-    /// target they lack, or the store cannot be keyed.
+    /// target they lack, the meta model has no barrier to learn, or a
+    /// store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -95,10 +150,24 @@ impl Training {
             .targets
             .label_index(config.label)
             .with_context(|| format!("the label {:?} has no target", config.label))?;
+        let primary = Primary {
+            level: Level {
+                feature_names: features.names().to_vec(),
+                label: config.label,
+                window: config.window,
+                holdout: config.holdout,
+                min_score: config.min_score,
+                learner: config.learner.clone(),
+                store: ModelStore::new(models, strategy_id, features, &config)?,
+            },
+            label,
+        };
+        let meta = Meta::of_model(models, strategy_id, features, &config)?.map(|meta| {
+            let level = Level::of_meta(&meta);
+            (level, meta)
+        });
         Ok(Self {
             strategy_id,
-            feature_names: features.names().to_vec(),
-            label,
             dataset: Dataset::new(
                 catalog,
                 strategy_id,
@@ -106,59 +175,142 @@ impl Training {
                 config.decision,
                 config.targets.clone(),
             )?,
-            store: ModelStore::new(models, strategy_id, features, &config)?,
-            config,
+            targets: config.targets,
+            primary: Some(primary),
+            meta,
         })
     }
 
-    /// The store the models are published in.
+    /// The training of the meta model of `strategy_id`, whose primary is
+    /// its rule, deciding with `features` (which declare the rule's side
+    /// and probability), on its dataset in the catalog at `catalog` and its
+    /// models in the store under `models`, as `config` says.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the targets are invalid or have no barrier, the
+    /// features do not declare the primary, or the store cannot be keyed.
+    pub fn of_rule(
+        catalog: &Path,
+        models: &Path,
+        strategy_id: StrategyId,
+        features: &FeatureSet,
+        config: RuleConfig,
+    ) -> anyhow::Result<Self> {
+        let meta = Meta::of_rule(models, strategy_id, features, &config)?;
+        Ok(Self {
+            strategy_id,
+            dataset: Dataset::new(
+                catalog,
+                strategy_id,
+                features,
+                config.decision,
+                config.targets.clone(),
+            )?,
+            targets: config.targets,
+            primary: None,
+            meta: Some((Level::of_meta(&meta), meta)),
+        })
+    }
+
+    /// The store the primary model is published in, or a rule primary's
+    /// meta model.
     #[must_use]
-    pub const fn store(&self) -> &ModelStore {
-        &self.store
+    pub fn store(&self) -> &ModelStore {
+        match (&self.primary, &self.meta) {
+            (Some(primary), _) => &primary.level.store,
+            (None, Some((meta, _))) => &meta.store,
+            (None, None) => unreachable!("a training has a model"),
+        }
+    }
+
+    /// The store the meta model is published in, if there is one.
+    #[must_use]
+    pub fn meta_store(&self) -> Option<&ModelStore> {
+        self.meta.as_ref().map(|(level, _)| &level.store)
     }
 
     /// Trains at `at`: `replay` runs the strategy over a span of the days
     /// the dataset lacks and returns the rows it settled (see
-    /// `Dataset::settled`). Publishes the model, or keeps the current one
-    /// with the reason.
+    /// `Dataset::settled`), once for both models. Publishes the primary
+    /// model, or keeps the current one with the reason, then the meta
+    /// model.
     pub fn train_at(
         &self,
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
-    ) -> Outcome {
-        match self.train(at, replay) {
-            Ok(outcome) => outcome,
-            Err(e) => Outcome::Kept(match e.downcast_ref::<SchemaMismatch>() {
-                Some(mismatch) => Kept::SchemaMismatch(mismatch.to_string()),
-                None => Kept::Failed(format!("{e:#}")),
-            }),
-        }
+    ) -> Trained {
+        let from = self
+            .primary
+            .iter()
+            .map(|primary| primary.level.window)
+            .chain(self.meta.iter().map(|(level, _)| level.window))
+            .max()
+            .map_or(at, |window| at - window);
+        let rows = match self.dataset.settled(from, at, replay) {
+            Ok(rows) => rows,
+            Err(e) => {
+                return Trained {
+                    primary: self.primary.as_ref().map(|_| kept(&e)),
+                    meta: self.meta.as_ref().map(|_| kept(&e)),
+                };
+            }
+        };
+        let primary = self.primary.as_ref().map(|primary| {
+            let start = UnixNanos::from(at - primary.level.window);
+            let examples = rows
+                .iter()
+                .filter(|row| row.ts_event >= start)
+                .map(|row| Example::of(row, gained(row, primary.label)))
+                .collect();
+            self.fit(&primary.level, at, examples)
+        });
+        let meta = self.meta.as_ref().map(|(level, meta)| {
+            let examples = meta.window_start(at).and_then(|start| {
+                let start = UnixNanos::from(start);
+                let rows: Vec<&DatasetRow> =
+                    rows.iter().filter(|row| row.ts_event >= start).collect();
+                meta.examples(&rows)
+            });
+            match examples {
+                Ok(examples) => self.fit(level, at, examples),
+                Err(e) => kept(&e),
+            }
+        });
+        Trained { primary, meta }
     }
 
-    fn train(
+    /// Fits `level`'s model at `at` on `examples`, in time order, and
+    /// publishes it, or keeps the current one with the reason.
+    fn fit(&self, level: &Level, at: Timestamp, examples: Vec<Example>) -> Outcome {
+        self.try_fit(level, at, examples)
+            .unwrap_or_else(|e| kept(&e))
+    }
+
+    fn try_fit(
         &self,
+        level: &Level,
         at: Timestamp,
-        replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
+        examples: Vec<Example>,
     ) -> anyhow::Result<Outcome> {
-        let rows = self.dataset.settled(at - self.config.window, at, replay)?;
-        let (fitted, held_out) = split(rows, at - self.config.holdout);
+        let (fitted, held_out) = split(examples, at - level.holdout);
         let set = TrainingSet::new(
-            self.feature_names.len(),
+            level.feature_names.len(),
             fitted.iter().flat_map(|row| row.features.clone()).collect(),
-            fitted.iter().map(|row| self.label_of(row)).collect(),
+            fitted.iter().map(|row| row.label).collect(),
         )
         .context("fitting on the window before the holdout")?;
-        let model = self.config.learner.fit(&set)?;
+        let model = level.learner.fit(&set)?;
         let predictions = held_out
             .iter()
-            .map(|row| Ok((model.predict(&row.features)?, self.label_of(row))))
+            .map(|row| Ok((model.predict(&row.features)?, row.label)))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let score = score::auc(&predictions)
             .context("the holdout has no row of each label to score the model on")?;
-        if score < self.config.min_score {
+        if score < level.min_score {
             return Ok(Outcome::Kept(Kept::BelowMinScore {
                 score,
-                min_score: self.config.min_score,
+                min_score: level.min_score,
             }));
         }
         let probes = spread(held_out.len())
@@ -167,15 +319,15 @@ impl Training {
                 prediction: predictions[i].0,
             })
             .collect();
-        self.store.publish(&StoredModel {
+        level.store.publish(&StoredModel {
             manifest: ModelManifest {
                 strategy_id: self.strategy_id,
                 valid_from: at,
                 fingerprint: self.dataset.fingerprint().to_string(),
-                feature_names: self.feature_names.clone(),
-                targets: self.config.targets.clone(),
-                label: self.config.label,
-                learner: self.config.learner.clone(),
+                feature_names: level.feature_names.clone(),
+                targets: self.targets.clone(),
+                label: level.label,
+                learner: level.learner.clone(),
                 score,
                 probes,
             },
@@ -186,11 +338,65 @@ impl Training {
             score,
         })
     }
+}
 
-    /// Whether the long of the label's target gained in `row`.
-    fn label_of(&self, row: &DatasetRow) -> bool {
-        gained(row, self.label)
+impl Level {
+    /// The level of `meta`: it learns whether the barrier on the primary's
+    /// side wins.
+    fn of_meta(meta: &Meta) -> Self {
+        let config = meta.config();
+        Self {
+            feature_names: meta.feature_names().to_vec(),
+            label: Label::Barrier,
+            window: config.window,
+            holdout: config.holdout,
+            min_score: config.min_score,
+            learner: config.learner.clone(),
+            store: meta.store().clone(),
+        }
     }
+}
+
+impl Example {
+    /// The example of `row`, of `label`.
+    pub(super) fn of(row: &DatasetRow, label: bool) -> Self {
+        Self {
+            features: row.features.clone(),
+            label,
+            ts_event: row.ts_event,
+            settled_at: row.settled_at,
+        }
+    }
+}
+
+impl Trained {
+    /// Whether every model trained was published.
+    #[must_use]
+    pub fn published(&self) -> bool {
+        [&self.primary, &self.meta]
+            .into_iter()
+            .flatten()
+            .all(|outcome| matches!(outcome, Outcome::Published { .. }))
+    }
+}
+
+/// A train of a primary model alone.
+impl From<Outcome> for Trained {
+    fn from(primary: Outcome) -> Self {
+        Self {
+            primary: Some(primary),
+            meta: None,
+        }
+    }
+}
+
+/// The current model kept for the error `e`: a schema mismatch, or a
+/// failure.
+fn kept(e: &anyhow::Error) -> Outcome {
+    Outcome::Kept(match e.downcast_ref::<SchemaMismatch>() {
+        Some(mismatch) => Kept::SchemaMismatch(mismatch.to_string()),
+        None => Kept::Failed(format!("{e:#}")),
+    })
 }
 
 /// Whether the long of the target at `label` among `row`'s targets gained.
@@ -198,15 +404,12 @@ pub(super) fn gained(row: &DatasetRow, label: usize) -> bool {
     row.targets[label] > 0.0
 }
 
-/// `rows` split at the holdout's start, `holdout`: those before it settled
-/// by then, fitted on, and those from it, held out.
-pub(super) fn split(
-    rows: Vec<DatasetRow>,
-    holdout: Timestamp,
-) -> (Vec<DatasetRow>, Vec<DatasetRow>) {
+/// `examples` split at the holdout's start, `holdout`: those before it
+/// settled by then, fitted on, and those from it, held out.
+pub(super) fn split(examples: Vec<Example>, holdout: Timestamp) -> (Vec<Example>, Vec<Example>) {
     let holdout = UnixNanos::from(holdout);
     let (fitted, held_out): (Vec<_>, Vec<_>) =
-        rows.into_iter().partition(|row| row.ts_event < holdout);
+        examples.into_iter().partition(|row| row.ts_event < holdout);
     let fitted = fitted
         .into_iter()
         .filter(|row| row.settled_at <= holdout)
@@ -219,6 +422,20 @@ pub(super) fn split(
 fn spread(len: usize) -> impl Iterator<Item = usize> {
     let count = len.min(PROBES);
     (0..count).map(move |i| i * len / count)
+}
+
+/// A train of one model reads as its outcome; of two, each model's.
+impl fmt::Display for Trained {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.primary, &self.meta) {
+            (Some(primary), None) => write!(f, "{primary}"),
+            (Some(primary), Some(meta)) => {
+                write!(f, "the primary model: {primary}; the meta model: {meta}")
+            }
+            (None, Some(meta)) => write!(f, "the meta model: {meta}"),
+            (None, None) => Ok(()),
+        }
+    }
 }
 
 impl fmt::Display for Outcome {
@@ -262,7 +479,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        config::Thresholds,
+        config::{MetaConfig, Thresholds},
         decide::{DecisionRule, FeatureRow},
         learner::LearnerConfig,
         targets::{
@@ -412,6 +629,7 @@ mod tests {
                 valid_from: t,
                 score: 1.0
             }
+            .into()
         );
         let stored = training.store().read(t).unwrap();
         let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
@@ -486,6 +704,7 @@ mod tests {
                 score: 0.0,
                 min_score: 0.5
             })
+            .into()
         );
         assert_eq!(gated.store().valid_froms().unwrap(), [t]);
     }
@@ -495,9 +714,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
 
-        let outcome = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| {
-            anyhow::bail!("the catalog does not cover the window")
-        });
+        let outcome = training
+            .train_at(at("2026-01-07T00:00:00Z"), |_, _| {
+                anyhow::bail!("the catalog does not cover the window")
+            })
+            .primary
+            .unwrap();
 
         let Outcome::Kept(Kept::Failed(why)) = outcome else {
             panic!("{outcome:?}");
@@ -513,7 +735,10 @@ mod tests {
         let mut rows = rows();
         rows.remove(5);
 
-        let outcome = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
+        let outcome = training
+            .train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows))
+            .primary
+            .unwrap();
 
         assert!(
             matches!(outcome, Outcome::Kept(Kept::Failed(_))),
@@ -535,7 +760,10 @@ mod tests {
 
         // The 6th settles by midnight of the 7th plus 2 hours, so it is
         // stored, and read back.
-        let outcome = training.train_at(at("2026-01-07T02:00:00Z"), |_, _| Ok(wide));
+        let outcome = training
+            .train_at(at("2026-01-07T02:00:00Z"), |_, _| Ok(wide))
+            .primary
+            .unwrap();
 
         assert!(
             matches!(outcome, Outcome::Kept(Kept::SchemaMismatch(_))),
@@ -557,5 +785,264 @@ mod tests {
         assert!(published.to_string().contains("published"), "{published}");
         assert!(below.to_string().contains("kept"), "{below}");
         assert!(below.to_string().contains("below"), "{below}");
+    }
+
+    /// The section of `config` with a meta model on the fake learner, on a
+    /// window of `window` hours, the last 6 held out, taking a trade from
+    /// 0.5, published from an AUC of 0.
+    fn with_meta(window: i64) -> ModelConfig {
+        ModelConfig {
+            meta: Some(meta(window)),
+            ..config()
+        }
+    }
+
+    fn meta(window: i64) -> MetaConfig {
+        MetaConfig::builder()
+            .window(SignedDuration::from_hours(window))
+            .holdout(SignedDuration::from_hours(6))
+            .threshold(0.5)
+            .min_score(0.0)
+            .learner(LearnerConfig::Fake {})
+            .build()
+    }
+
+    /// Publishes in `store` a primary baseline valid from `valid_from`,
+    /// predicting `probability` on every row.
+    fn primary(store: &ModelStore, valid_from: &str, probability: f64) {
+        let trues = (probability * 10.0).round() as usize;
+        let labels = (0..10).map(|i| i < trues).collect();
+        let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
+        let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
+        let config = config();
+        store
+            .publish(&StoredModel {
+                manifest: ModelManifest {
+                    strategy_id: StrategyId::from(STRATEGY),
+                    valid_from: at(valid_from),
+                    fingerprint: crate::model::dataset::fingerprint(
+                        &features(1),
+                        config.decision,
+                        &config.targets,
+                    )
+                    .to_string(),
+                    feature_names: vec!["mid_0".to_string()],
+                    targets: config.targets,
+                    label: config.label,
+                    learner: LearnerConfig::Baseline {},
+                    score: 0.6,
+                    probes: vec![],
+                },
+                model: model.save().unwrap(),
+            })
+            .unwrap();
+    }
+
+    /// The decisions of the 6th: one before the primary's first model (a
+    /// win), two long trades of the model valid from 06:00, predicting 0.8
+    /// (a win and a loss of the long: meta labels true, false), two short
+    /// trades of the one valid from 17:00, predicting 0.2, held out (a win
+    /// and a loss of the long: the short's labels false, true), the meta's
+    /// fake predicting their first feature, 0.3 and 0.7.
+    fn meta_rows() -> Vec<TargetRow> {
+        vec![
+            row("2026-01-06T05:00:00Z", vec![0.5], true, hour()),
+            row("2026-01-06T08:00:00Z", vec![0.5], true, hour()),
+            row("2026-01-06T10:00:00Z", vec![0.5], false, hour()),
+            row("2026-01-06T19:00:00Z", vec![0.3], true, hour()),
+            row("2026-01-06T20:00:00Z", vec![0.7], false, hour()),
+        ]
+    }
+
+    /// The primary's models: from 06:00 a long, from 17:00 a short, and
+    /// from 21:00, after every row, a long again, which no row may use.
+    fn primaries(training: &Training) {
+        primary(training.store(), "2026-01-06T06:00:00Z", 0.8);
+        primary(training.store(), "2026-01-06T17:00:00Z", 0.2);
+        primary(training.store(), "2026-01-06T21:00:00Z", 0.9);
+    }
+
+    #[test]
+    fn a_meta_model_learns_the_primarys_side_from_its_out_of_sample_predictions() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(24));
+        primaries(&training);
+        let t = at("2026-01-07T00:00:00Z");
+
+        let trained = training.train_at(t, |_, _| Ok(meta_rows()));
+
+        assert_eq!(
+            trained.meta,
+            Some(Outcome::Published {
+                valid_from: t,
+                score: 1.0
+            })
+        );
+        let stored = training.meta_store().unwrap().read(t).unwrap();
+        assert_eq!(
+            stored.manifest.feature_names,
+            ["mid_0", "primary_side", "primary_probability"]
+        );
+        assert_eq!(stored.manifest.label, Label::Barrier);
+        let probes: Vec<(Vec<f64>, f64)> = stored
+            .manifest
+            .probes
+            .iter()
+            .map(|probe| (probe.row.clone(), probe.prediction))
+            .collect();
+        assert_eq!(
+            probes,
+            [(vec![0.3, -1.0, 0.2], 0.3), (vec![0.7, -1.0, 0.2], 0.7)]
+        );
+        // Fitted on the two long trades, a win and a loss: the decision
+        // before the primary's first model is no row.
+        let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
+        assert_eq!(model.predict(&[f64::NAN, 1.0, 0.8]).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn the_primary_trains_before_its_meta_model_on_one_replay_of_the_longer_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(36));
+        primaries(&training);
+        let mut replays = vec![];
+
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
+            replays.push((from, to));
+            Ok(meta_rows())
+        });
+
+        assert_eq!(
+            replays,
+            [(at("2026-01-05T00:00:00Z"), at("2026-01-07T00:00:00Z"))]
+        );
+        assert!(
+            trained.primary.is_some() && trained.meta.is_some(),
+            "{trained:?}"
+        );
+    }
+
+    #[test]
+    fn a_meta_model_without_a_primary_model_before_it_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(24));
+
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(meta_rows()));
+
+        assert!(
+            matches!(trained.meta, Some(Outcome::Kept(Kept::Failed(_)))),
+            "{trained:?}"
+        );
+        assert!(
+            training
+                .meta_store()
+                .unwrap()
+                .valid_froms()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The rule's decisions of the 6th, its side among their features:
+    /// fitted, a long winning, a short losing and a short winning (labels
+    /// true, false, true); held out, a long losing at 0.3 and a short
+    /// winning at 0.7 (false, true).
+    #[test]
+    fn a_rule_primarys_meta_model_learns_whether_the_rules_side_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
+        let features = FeatureSet::builder()
+            .quotes(
+                InstrumentId::from(GOLD),
+                "mid_0",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .primary()
+            .build()
+            .unwrap();
+        let config = config();
+        let training = Training::of_rule(
+            &dir.path().join("catalog"),
+            &dir.path().join("models"),
+            StrategyId::from(STRATEGY),
+            &features,
+            RuleConfig {
+                decision: config.decision,
+                targets: config.targets,
+                retrain: config.retrain,
+                meta: meta(24),
+            },
+        )
+        .unwrap();
+        let (buy, sell) = (1.0, -1.0);
+        let rows = vec![
+            row(
+                "2026-01-06T08:00:00Z",
+                vec![0.5, buy, f64::NAN],
+                true,
+                hour(),
+            ),
+            row(
+                "2026-01-06T10:00:00Z",
+                vec![0.5, sell, f64::NAN],
+                true,
+                hour(),
+            ),
+            row(
+                "2026-01-06T12:00:00Z",
+                vec![0.5, sell, f64::NAN],
+                false,
+                hour(),
+            ),
+            row(
+                "2026-01-06T19:00:00Z",
+                vec![0.3, buy, f64::NAN],
+                false,
+                hour(),
+            ),
+            row(
+                "2026-01-06T20:00:00Z",
+                vec![0.7, sell, f64::NAN],
+                false,
+                hour(),
+            ),
+        ];
+        let t = at("2026-01-07T00:00:00Z");
+
+        let trained = training.train_at(t, |_, _| Ok(rows));
+
+        assert_eq!(trained.primary, None);
+        assert_eq!(
+            trained.meta,
+            Some(Outcome::Published {
+                valid_from: t,
+                score: 1.0
+            })
+        );
+        let stored = training.store().read(t).unwrap();
+        let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
+        assert!(
+            (model.predict(&[f64::NAN, buy, f64::NAN]).unwrap() - 2.0 / 3.0).abs() < 1e-12,
+            "{stored:?}"
+        );
+    }
+
+    #[test]
+    fn a_train_of_two_models_reads_as_each_outcome() {
+        let published = Outcome::Published {
+            valid_from: at("2026-01-07T00:00:00Z"),
+            score: 0.625,
+        };
+        let trained = Trained {
+            primary: Some(published.clone()),
+            meta: Some(Outcome::Kept(Kept::Failed("no row".to_string()))),
+        };
+
+        let text = trained.to_string();
+
+        assert!(!trained.published());
+        assert!(Trained::from(published).published());
+        assert!(text.contains("primary") && text.contains("meta"), "{text}");
+        assert!(text.contains("no row"), "{text}");
     }
 }

@@ -45,10 +45,17 @@
 //! as `include_str!("features.rs")`), the warmup, and the shared indicator
 //! code (this module, and Nautilus' indicators, named by the source
 //! `Cargo.lock` pins).
+//!
+//! A strategy whose primary is a rule of its own declares the primary's
+//! side and probability as the set's last two values (`primary`): the
+//! model handle gives them at each decision on a side (`on_side`), the
+//! side 1 a buy and -1 a sell, the probability missing (NaN) for a rule;
+//! without a side the set has no values, so the strategy decides on
+//! nothing else.
 
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Debug, Display},
     rc::Rc,
@@ -66,6 +73,7 @@ use nautilus_model::{
     data::{
         Bar, BarType, CustomData, DataType, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick,
     },
+    enums::OrderSide,
     identifiers::InstrumentId,
 };
 use sha2::{Digest, Sha256};
@@ -77,6 +85,18 @@ const SHARED_CODE: [&str; 2] = [
     include_str!("features.rs"),
     env!("NAUTILUS_INDICATORS_SOURCE"),
 ];
+
+/// The names of a primary's side and probability, the last values of a
+/// rule primary's set and of a meta model's rows.
+pub const PRIMARY_FEATURES: [&str; 2] = ["primary_side", "primary_probability"];
+
+/// The values of a primary's `side` and `probability`, in the order of
+/// `PRIMARY_FEATURES`: the side 1 a buy, -1 a sell.
+#[must_use]
+pub fn primary_values(side: OrderSide, probability: f64) -> [f64; 2] {
+    let side = if side == OrderSide::Buy { 1.0 } else { -1.0 };
+    [side, probability]
+}
 
 /// A feature: a Nautilus indicator exposing its current value.
 pub trait Feature: Indicator {
@@ -112,6 +132,9 @@ pub struct FeatureSet {
     updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
     warmup: SignedDuration,
     fingerprint: Fingerprint,
+    /// A rule primary's side and probability, while a decision on a side
+    /// is made; none if the set declares no primary.
+    primary: Option<Cell<Option<[f64; 2]>>>,
 }
 
 /// Declares the features of a `FeatureSet`, each with its source and a
@@ -121,6 +144,7 @@ pub struct FeatureSetBuilder {
     slots: Vec<Slot>,
     code: Vec<&'static str>,
     warmup: SignedDuration,
+    primary: bool,
 }
 
 /// A SHA-256 hash of what makes rows, models and decisions comparable:
@@ -137,6 +161,7 @@ impl FeatureSet {
             slots: vec![],
             code: vec![],
             warmup: SignedDuration::ZERO,
+            primary: false,
         }
     }
 
@@ -149,8 +174,41 @@ impl FeatureSet {
     /// The value of each feature, in the order of the names, if every
     /// feature is initialized.
     #[must_use]
+    /// A rule primary's set has values only on a side (`on_side`).
     pub fn values(&self) -> Option<Vec<f64>> {
-        self.slots.borrow().iter().map(Slot::value).collect()
+        let mut values: Vec<f64> = self
+            .slots
+            .borrow()
+            .iter()
+            .map(Slot::value)
+            .collect::<Option<_>>()?;
+        if let Some(primary) = &self.primary {
+            values.extend(primary.get()?);
+        }
+        Some(values)
+    }
+
+    /// Whether the set declares a rule primary's side and probability.
+    #[must_use]
+    pub const fn has_primary(&self) -> bool {
+        self.primary.is_some()
+    }
+
+    /// Runs `decide` with the primary's `side` and `probability` as the
+    /// set's last values, then takes them away.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the set declares no primary.
+    pub fn on_side<T>(&self, side: OrderSide, probability: f64, decide: impl FnOnce() -> T) -> T {
+        let primary = self
+            .primary
+            .as_ref()
+            .expect("a set deciding on a side declares the primary");
+        primary.set(Some(primary_values(side, probability)));
+        let decided = decide();
+        primary.set(None);
+        decided
     }
 
     /// Whether every feature is initialized.
@@ -414,6 +472,14 @@ impl FeatureSetBuilder {
         self.declare(name, Slot::Data(data_type, Box::new(read), None))
     }
 
+    /// Declares a rule primary's side and probability, `PRIMARY_FEATURES`,
+    /// after the other features, whatever the order of the calls.
+    #[must_use]
+    pub fn primary(mut self) -> Self {
+        self.primary = true;
+        self
+    }
+
     /// Adds `code`, the strategy's feature code, to the fingerprint.
     #[must_use]
     pub fn code(mut self, code: &'static str) -> Self {
@@ -437,8 +503,11 @@ impl FeatureSetBuilder {
     ///
     /// Returns an error if no feature is declared, two share a name, or
     /// the warmup is negative.
-    pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
+    pub fn build(mut self) -> anyhow::Result<Rc<FeatureSet>> {
         ensure!(!self.names.is_empty(), "a feature set needs a feature");
+        if self.primary {
+            self.names.extend(PRIMARY_FEATURES.map(String::from));
+        }
         let mut seen = BTreeSet::new();
         if let Some(name) = self.names.iter().find(|name| !seen.insert(*name)) {
             bail!("two features are named {name}");
@@ -465,6 +534,7 @@ impl FeatureSetBuilder {
             updates: RefCell::default(),
             warmup: self.warmup,
             fingerprint,
+            primary: self.primary.then(Cell::default),
         }))
     }
 
@@ -1096,5 +1166,56 @@ mod tests {
         probe.handle_quote(&quote(AUD, 0.7));
 
         assert_eq!(features.values(), None);
+    }
+
+    #[test]
+    fn a_rule_primarys_side_and_probability_are_the_last_two_names() {
+        let features = FeatureSet::builder()
+            .quotes(id(AUD), "mid", sma(1))
+            .primary()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            features.names(),
+            ["mid", "primary_side", "primary_probability"]
+        );
+    }
+
+    /// Warm, the set still has no values until a side is given, and none
+    /// after.
+    #[test]
+    fn a_rule_primarys_values_are_there_only_on_a_side() {
+        let features = FeatureSet::builder()
+            .quotes(id(AUD), "mid", sma(1))
+            .primary()
+            .build()
+            .unwrap();
+        features.handle_quote(&quote(AUD, 0.7)).unwrap();
+
+        let sold = features.on_side(OrderSide::Sell, f64::NAN, || features.values());
+        let bought = features.on_side(OrderSide::Buy, 0.8, || features.values());
+
+        assert_eq!(features.values(), None);
+        let sold = sold.unwrap();
+        assert!((sold[0] - 0.7).abs() < 1e-9, "{sold:?}");
+        assert_eq!(sold[1], -1.0);
+        assert!(sold[2].is_nan(), "{sold:?}");
+        assert_eq!(bought.unwrap()[1..], [1.0, 0.8]);
+    }
+
+    #[test]
+    fn declaring_a_rule_primary_changes_the_fingerprint() {
+        let plain = FeatureSet::builder()
+            .quotes(id(AUD), "mid", sma(1))
+            .build()
+            .unwrap();
+        let ruled = FeatureSet::builder()
+            .quotes(id(AUD), "mid", sma(1))
+            .primary()
+            .build()
+            .unwrap();
+
+        assert_ne!(plain.fingerprint(), ruled.fingerprint());
     }
 }

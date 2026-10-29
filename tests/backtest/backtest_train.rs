@@ -79,6 +79,7 @@ fn train_at_t_publishes_a_model_whose_probes_reload_to_identical_predictions() {
             valid_from: t(),
             score: 0.5
         }
+        .into()
     );
     let stored = training.store().read(t()).unwrap();
     let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
@@ -105,7 +106,7 @@ fn a_gate_above_the_achievable_score_keeps_the_current_model() {
             .join()
             .unwrap()
     });
-    assert!(matches!(first, Outcome::Published { .. }), "{first:?}");
+    assert!(first.published(), "{first:?}");
     let gated = training(&catalog, models.path(), 0.6);
     let current = gated.store().read(t()).unwrap();
 
@@ -119,6 +120,7 @@ fn a_gate_above_the_achievable_score_keeps_the_current_model() {
             score: 0.5,
             min_score: 0.6
         })
+        .into()
     );
     assert_eq!(gated.store().valid_froms().unwrap(), [t()]);
     assert_eq!(gated.store().read(t()).unwrap(), current);

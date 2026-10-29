@@ -48,7 +48,7 @@ use nautilus_common::{
 };
 use nautilus_model::identifiers::StrategyId;
 
-use super::{schedule, train::Outcome};
+use super::{schedule, train::Trained};
 
 /// The most lines of a child's standard error kept for the reason it
 /// failed: the error it printed last is at their end.
@@ -70,7 +70,7 @@ pub struct Running {
 /// What a finished train did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retrained {
-    /// It published a model, valid from its time.
+    /// It published every model it trained, valid from its time.
     Published,
     /// It kept the current model; why, or why it failed.
     Kept(String),
@@ -99,11 +99,15 @@ impl Launcher {
     /// Trains on a thread of this process, by `train`: for tests, which
     /// hold no node on that thread or replay none.
     #[must_use]
-    pub fn in_process(train: impl Fn(Timestamp) -> Outcome + Send + Sync + 'static) -> Self {
+    pub fn in_process(train: impl Fn(Timestamp) -> Trained + Send + Sync + 'static) -> Self {
         Self {
-            train: Arc::new(move |at| match train(at) {
-                Outcome::Published { .. } => Retrained::Published,
-                kept @ Outcome::Kept(_) => Retrained::Kept(kept.to_string()),
+            train: Arc::new(move |at| {
+                let trained = train(at);
+                if trained.published() {
+                    Retrained::Published
+                } else {
+                    Retrained::Kept(trained.to_string())
+                }
             }),
         }
     }
@@ -294,17 +298,18 @@ mod tests {
     use nautilus_core::UnixNanos;
 
     use super::*;
-    use crate::model::train::Kept;
+    use crate::model::train::{Kept, Outcome};
 
     fn at(time: &str) -> Timestamp {
         time.parse().unwrap()
     }
 
-    fn published(at: Timestamp) -> Outcome {
+    fn published(at: Timestamp) -> Trained {
         Outcome::Published {
             valid_from: at,
             score: 0.6,
         }
+        .into()
     }
 
     /// A child of `sh` running `script`, `--at` and the time its `$1` and
@@ -333,12 +338,28 @@ mod tests {
                 score: 0.48,
                 min_score: 0.55,
             })
+            .into()
         });
 
         let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
             panic!("published");
         };
         assert!(why.contains("0.48") && why.contains("0.55"), "{why}");
+    }
+
+    /// The primary published, its meta model kept: the retrain is kept,
+    /// with the meta's reason.
+    #[test]
+    fn an_in_process_train_keeping_its_meta_model_is_kept_with_its_reason() {
+        let launcher = Launcher::in_process(|at| Trained {
+            meta: Some(Outcome::Kept(Kept::Failed("no meta row".to_string()))),
+            ..published(at)
+        });
+
+        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+            panic!("published");
+        };
+        assert!(why.contains("meta") && why.contains("no meta row"), "{why}");
     }
 
     #[test]

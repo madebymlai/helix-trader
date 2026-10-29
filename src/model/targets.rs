@@ -368,6 +368,18 @@ impl TargetsConfig {
             .map(|position| position * 4)
     }
 
+    /// Where the P&L of `label`'s target on `side` is among the values of
+    /// a row (`TargetRow::values`); none if the config has no such target.
+    #[must_use]
+    pub fn pnl_index(&self, label: Label, side: OrderSide) -> Option<usize> {
+        let long = self.label_index(label)?;
+        Some(if side == OrderSide::Buy {
+            long
+        } else {
+            long + 2
+        })
+    }
+
     /// The kinds of target of the config.
     fn kinds(&self) -> impl Iterator<Item = (Kind, SignedDuration)> {
         let barrier = self.barrier.map(|b| (Kind::Barrier, b.limit));
@@ -1637,6 +1649,16 @@ mod tests {
         assert_eq!(config().label_index(Label::Horizon), Some(4));
         assert_eq!(horizon.label_index(Label::Horizon), Some(0));
         assert_eq!(horizon.label_index(Label::Barrier), None);
+    }
+
+    #[test]
+    fn a_sides_pnl_is_its_target_names_pnl_among_a_rows_values() {
+        let names = config().target_names();
+        let name = |label, side| names[config().pnl_index(label, side).unwrap()].clone();
+
+        assert_eq!(name(Label::Barrier, OrderSide::Buy), "barrier_long_pnl");
+        assert_eq!(name(Label::Barrier, OrderSide::Sell), "barrier_short_pnl");
+        assert_eq!(name(Label::Horizon, OrderSide::Sell), "horizon_short_pnl");
     }
 
     #[test]

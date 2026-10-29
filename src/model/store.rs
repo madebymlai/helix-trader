@@ -8,6 +8,17 @@
 //! ever listed beside models of the same features and training. Backtest
 //! and live read the same list.
 //!
+//! A meta model's store sits in a `meta/` directory under its primary's,
+//! keyed by its own training settings (its learner and settings, window
+//! and holdout) and the primary's thresholds, which make its rows; a rule
+//! primary has no store of its own, its meta's `meta/` sits under the
+//! strategy id and fingerprint. A meta model is only ever listed beside
+//! meta models of the same primary.
+//!
+//! `Swap` is how the models are used: at each decision, in time order,
+//! the latest valid then, checked before use, a model failing a check
+//! refused and the current one kept.
+//!
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
 //! target spec and label, the learner, the holdout score and probe rows
@@ -29,8 +40,9 @@ use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    config::ModelConfig,
+    config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
     dataset,
+    decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
     learner::{LearnerConfig, Model, SavedModel},
     targets::{Label, TargetsConfig},
@@ -38,6 +50,10 @@ use super::{
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
+
+/// The directory of the meta models within the directory of their primary's
+/// models, or of a rule primary's dataset.
+const META: &str = "meta";
 
 /// The models of one strategy, fingerprint and training settings.
 #[derive(Debug, Clone)]
@@ -138,17 +154,62 @@ impl ModelStore {
         features: &FeatureSet,
         config: &ModelConfig,
     ) -> anyhow::Result<Self> {
-        let fingerprint = dataset::fingerprint(features, config.decision, &config.targets);
         let settings = Fingerprint::default()
             .with(serde_json::to_string(&config.learner)?.as_bytes())
             .with(format!("{:?}", config.label).as_bytes())
             .with(&config.window.as_nanos().to_le_bytes())
             .with(&config.holdout.as_nanos().to_le_bytes());
         Ok(Self {
-            directory: root
-                .join(strategy_id.as_str())
-                .join(fingerprint.to_string())
-                .join(settings.to_string()),
+            directory: dataset_directory(
+                root,
+                strategy_id,
+                features,
+                config.decision,
+                &config.targets,
+            )
+            .join(settings.to_string()),
+        })
+    }
+
+    /// The store of the meta model `meta` of this store's models, whose
+    /// trades `thresholds` make: within this store's directory, under
+    /// `meta/` and the meta's training settings, `thresholds` among them
+    /// (they make the meta's rows).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the learner cannot be written as JSON.
+    pub fn meta(&self, meta: &MetaConfig, thresholds: Thresholds) -> anyhow::Result<Self> {
+        let settings = meta_settings(meta)?
+            .with(&thresholds.long.to_le_bytes())
+            .with(&thresholds.short.to_le_bytes());
+        Ok(Self {
+            directory: self.directory.join(META).join(settings.to_string()),
+        })
+    }
+
+    /// The store, under `root`, of the meta models of `strategy_id`, whose
+    /// primary is its rule, deciding with `features` as `config` says.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the learner cannot be written as JSON.
+    pub fn of_rule(
+        root: &Path,
+        strategy_id: StrategyId,
+        features: &FeatureSet,
+        config: &RuleConfig,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            directory: dataset_directory(
+                root,
+                strategy_id,
+                features,
+                config.decision,
+                &config.targets,
+            )
+            .join(META)
+            .join(meta_settings(&config.meta)?.to_string()),
         })
     }
 
@@ -213,6 +274,92 @@ impl ModelStore {
 
     fn path(&self, valid_from: Timestamp) -> PathBuf {
         self.directory.join(format!("{valid_from}.{EXTENSION}"))
+    }
+}
+
+/// The directory, under `root`, of the stores of `strategy_id` deciding
+/// with `features` on `rule`, of `targets`: its id and its dataset's
+/// fingerprint.
+fn dataset_directory(
+    root: &Path,
+    strategy_id: StrategyId,
+    features: &FeatureSet,
+    rule: DecisionRule,
+    targets: &TargetsConfig,
+) -> PathBuf {
+    root.join(strategy_id.as_str())
+        .join(dataset::fingerprint(features, rule, targets).to_string())
+}
+
+/// The training settings of `meta`: its learner, window and holdout.
+fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
+    Ok(Fingerprint::default()
+        .with(serde_json::to_string(&meta.learner)?.as_bytes())
+        .with(&meta.window.as_nanos().to_le_bytes())
+        .with(&meta.holdout.as_nanos().to_le_bytes()))
+}
+
+/// The models of a store as a strategy swaps them in, decision by decision
+/// in time order: at each, the latest valid then, checked against the
+/// strategy before use (`StoredModel::load`). One failing a check is
+/// refused, logged as an error, and the current one kept; it is not read
+/// again.
+#[derive(Debug)]
+pub struct Swap {
+    store: ModelStore,
+    /// The feature names a model must carry, in order.
+    feature_names: Vec<String>,
+    /// The fingerprint a model must carry.
+    fingerprint: String,
+    /// The model in use, and its valid-from.
+    current: Option<(Timestamp, Model)>,
+    /// The valid-from of the last model read, in use or refused.
+    read: Option<Timestamp>,
+}
+
+impl Swap {
+    /// Swaps in the models of `store` for a strategy of `feature_names`
+    /// and `fingerprint`; none in use yet.
+    #[must_use]
+    pub const fn new(store: ModelStore, feature_names: Vec<String>, fingerprint: String) -> Self {
+        Self {
+            store,
+            feature_names,
+            fingerprint,
+            current: None,
+            read: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn store(&self) -> &ModelStore {
+        &self.store
+    }
+
+    /// The model in use at `now`, and its valid-from, among the models
+    /// valid from `valid_froms`, the store's list in order: the latest
+    /// valid then, swapped in if not read yet, unless it fails its checks.
+    pub fn at(&mut self, now: Timestamp, valid_froms: &[Timestamp]) -> Option<(Timestamp, &Model)> {
+        let latest = valid_froms.iter().rfind(|&&time| time <= now).copied();
+        if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
+            self.read = Some(latest);
+            match self
+                .store
+                .read(latest)
+                .and_then(|stored| stored.load(&self.feature_names, &self.fingerprint))
+            {
+                Ok(model) => {
+                    log::info!("the model valid from {latest} in use from {now}");
+                    self.current = Some((latest, model));
+                }
+                Err(e) => log::error!(
+                    "refused the model valid from {latest}: {e:#}; the current model kept"
+                ),
+            }
+        }
+        self.current
+            .as_ref()
+            .map(|(valid_from, model)| (*valid_from, model))
     }
 }
 

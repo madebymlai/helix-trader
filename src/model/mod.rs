@@ -18,6 +18,9 @@
 //! a fixed UTC grid; `launcher` starts a live strategy's retrains, one
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
+//! `meta` is meta-labeling: a meta model deciding whether to take the
+//! trade of the primary, the strategy's rule or its model, trained on
+//! the primary's out-of-sample predictions.
 
 pub mod config;
 pub mod dataset;
@@ -26,6 +29,7 @@ pub mod features;
 pub mod handle;
 pub mod launcher;
 pub mod learner;
+pub mod meta;
 pub mod schedule;
 pub mod score;
 pub mod store;

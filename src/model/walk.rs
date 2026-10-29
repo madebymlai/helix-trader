@@ -35,12 +35,13 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::ModelConfig,
-    dataset::{self, Dataset},
+    dataset::{self, Dataset, DatasetRow},
     features::FeatureSet,
     learner::{LearnerConfig, Model, TrainingSet},
+    meta::Meta,
     schedule, score,
-    store::ModelStore,
-    train,
+    store::{ModelStore, Swap},
+    train::{self, Example},
 };
 
 /// The retrains and scores of one strategy's backtests.
@@ -52,6 +53,8 @@ pub struct WalkForward {
     label: usize,
     dataset: Dataset,
     store: ModelStore,
+    /// The meta model, if any: trained with the primary.
+    meta: Option<Meta>,
 }
 
 /// The out-of-sample scores of a backtest.
@@ -63,6 +66,9 @@ pub struct Scores {
     pub model: Score,
     /// The baseline's over the span.
     pub baseline: Score,
+    /// The meta model's, on the rows the primary in use made a trade of,
+    /// if there is one.
+    pub meta: Option<Box<Scores>>,
 }
 
 /// The scores of one retrain period.
@@ -121,6 +127,7 @@ impl WalkForward {
                 config.targets.clone(),
             )?,
             store: ModelStore::new(models, strategy_id, features, &config)?,
+            meta: Meta::of_model(models, strategy_id, features, &config)?,
             config,
         })
     }
@@ -129,7 +136,8 @@ impl WalkForward {
     /// from the window of the span's first retrain time to the span's end,
     /// `build` builds it over that span (`Dataset::build` of its days);
     /// then `train` trains at each retrain time of the span the store has
-    /// no model valid from, in time order (`Training::train_at`).
+    /// no model valid from, or the meta model's store, if any, in time
+    /// order (`Training::train_at`, which trains both).
     ///
     /// # Errors
     ///
@@ -143,24 +151,35 @@ impl WalkForward {
         mut train: impl FnMut(Timestamp) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let times = schedule::times(self.config.retrain, start, end)?;
-        let from = times[0] - self.config.window;
+        let window = self.meta.as_ref().map_or(self.config.window, |meta| {
+            self.config.window.max(meta.config().window)
+        });
+        let from = times[0] - window;
         let (first, last) = dataset::days(from, end);
         if !self.dataset.missing(first, last)?.is_empty() {
             build(from, end)?;
         }
-        for at in schedule::missing(&times, &self.store.valid_froms()?) {
+        let mut missing: BTreeSet<Timestamp> =
+            schedule::missing(&times, &self.store.valid_froms()?)
+                .into_iter()
+                .collect();
+        if let Some(meta) = &self.meta {
+            missing.extend(schedule::missing(&times, &meta.store().valid_froms()?));
+        }
+        for at in missing {
             train(at)?;
         }
         Ok(())
     }
 
-    /// The scores of a backtest over `[start, end)`, prepared (`prepare`).
+    /// The scores of a backtest over `[start, end)`, prepared (`prepare`):
+    /// the model's, and the meta model's, if any.
     ///
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset lacks a day of
     /// it or of a retrain window, a model fails to predict, or the
-    /// dataset or the store cannot be read.
+    /// dataset or a store cannot be read.
     pub fn scores(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Scores> {
         let times = schedule::times(self.config.retrain, start, end)?;
         let (first, last) = dataset::days(start, end);
@@ -171,120 +190,134 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
-        let mut models = Models::new(self);
-        let (mut model_rows, mut baseline_rows) = (vec![], vec![]);
-        let mut periods = vec![];
-        for (i, &at) in times.iter().enumerate() {
-            let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
-            let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
-            let baseline = self.baseline(at)?;
-            let (mut period_models, mut by_model, mut by_baseline) =
-                (BTreeSet::new(), vec![], vec![]);
-            for row in rows
-                .iter()
-                .filter(|row| from_ns <= row.ts_event && row.ts_event < to_ns)
-            {
-                let label = train::gained(row, self.label);
-                if let Some((valid_from, model)) = models.at(Timestamp::from(row.ts_event))? {
-                    period_models.insert(valid_from);
-                    by_model.push((model.predict(&row.features)?, label));
-                }
-                if let Some(baseline) = &baseline {
-                    by_baseline.push((baseline.predict(&row.features)?, label));
-                }
-            }
-            periods.push(Period {
-                from,
-                to,
-                models: period_models.into_iter().collect(),
-                model: Score::of(&by_model),
-                baseline: Score::of(&by_baseline),
-            });
-            model_rows.extend(by_model);
-            baseline_rows.extend(by_baseline);
+        let fingerprint = self.dataset.fingerprint().to_string();
+        let examples: Vec<Example> = rows
+            .iter()
+            .map(|row| Example::of(row, train::gained(row, self.label)))
+            .collect();
+        let models = Swap::new(
+            self.store.clone(),
+            self.feature_names.clone(),
+            fingerprint.clone(),
+        );
+        let mut scores = score(&times, start, end, &examples, models, |at| {
+            self.baseline(at)
+        })?;
+        if let Some(meta) = &self.meta {
+            let examples = meta.examples(&rows.iter().collect::<Vec<_>>())?;
+            let models = Swap::new(
+                meta.store().clone(),
+                meta.feature_names().to_vec(),
+                fingerprint,
+            );
+            let meta_scores = score(&times, start, end, &examples, models, |at| {
+                self.meta_baseline(meta, at)
+            })?;
+            scores.meta = Some(Box::new(meta_scores));
         }
-        Ok(Scores {
-            periods,
-            model: Score::of(&model_rows),
-            baseline: Score::of(&baseline_rows),
-        })
+        Ok(scores)
     }
 
     /// The baseline a retrain at `at` fits: the training mean of the rows
     /// a model trained then is fitted on (`train::split`); none without
     /// such a row.
     fn baseline(&self, at: Timestamp) -> anyhow::Result<Option<Model>> {
-        let rows = self.dataset.settled(at - self.config.window, at, |_, _| {
-            bail!("the dataset lacks days of the window ending {at}: build it first")
-        })?;
-        let (fitted, _) = train::split(rows, at - self.config.holdout);
-        if fitted.is_empty() {
-            return Ok(None);
-        }
-        let set = TrainingSet::new(
-            self.feature_names.len(),
-            fitted.iter().flat_map(|row| row.features.clone()).collect(),
-            fitted
-                .iter()
-                .map(|row| train::gained(row, self.label))
-                .collect(),
-        )?;
-        Ok(Some(LearnerConfig::Baseline {}.fit(&set)?))
-    }
-}
-
-/// The models of the store as a strategy swaps them in, decision by
-/// decision in time order.
-struct Models<'a> {
-    walk: &'a WalkForward,
-    valid_froms: Option<Vec<Timestamp>>,
-    current: Option<(Timestamp, Model)>,
-    /// The valid-from of the last model read, in use or refused.
-    read: Option<Timestamp>,
-}
-
-impl<'a> Models<'a> {
-    const fn new(walk: &'a WalkForward) -> Self {
-        Self {
-            walk,
-            valid_froms: None,
-            current: None,
-            read: None,
-        }
-    }
-
-    /// The model in use at `now`, and its valid-from: the latest valid
-    /// then, unless it fails its checks, logged as the handle logs it.
-    fn at(&mut self, now: Timestamp) -> anyhow::Result<Option<(Timestamp, &Model)>> {
-        if self.valid_froms.is_none() {
-            self.valid_froms = Some(self.walk.store.valid_froms()?);
-        }
-        let latest = self
-            .valid_froms
+        let rows = self.settled(at - self.config.window, at)?;
+        let examples = rows
             .iter()
-            .flatten()
-            .rfind(|&&time| time <= now)
-            .copied();
-        if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
-            self.read = Some(latest);
-            let fingerprint = self.walk.dataset.fingerprint().to_string();
-            match self
-                .walk
-                .store
-                .read(latest)
-                .and_then(|stored| stored.load(&self.walk.feature_names, &fingerprint))
+            .map(|row| Example::of(row, train::gained(row, self.label)))
+            .collect();
+        fit_baseline(self.feature_names.len(), examples, at - self.config.holdout)
+    }
+
+    /// The baseline of `meta` a retrain at `at` fits, as `baseline`: on the
+    /// rows a meta model trained then is fitted on.
+    fn meta_baseline(&self, meta: &Meta, at: Timestamp) -> anyhow::Result<Option<Model>> {
+        let rows = self.settled(meta.window_start(at)?, at)?;
+        let examples = meta.examples(&rows.iter().collect::<Vec<_>>())?;
+        fit_baseline(
+            meta.feature_names().len(),
+            examples,
+            at - meta.config().holdout,
+        )
+    }
+
+    /// The rows of `[from, at)` settled at `at`, of days the dataset holds.
+    fn settled(&self, from: Timestamp, at: Timestamp) -> anyhow::Result<Vec<DatasetRow>> {
+        self.dataset.settled(from, at, |_, _| {
+            bail!("the dataset lacks days of the window ending {at}: build it first")
+        })
+    }
+}
+
+/// The scores over `[start, end)`, retrained at `times`, of the models
+/// `models` swaps in on `examples`, in time order, beside the baseline
+/// `baseline` fits at each retrain time.
+fn score(
+    times: &[Timestamp],
+    start: Timestamp,
+    end: Timestamp,
+    examples: &[Example],
+    mut models: Swap,
+    baseline: impl Fn(Timestamp) -> anyhow::Result<Option<Model>>,
+) -> anyhow::Result<Scores> {
+    let valid_froms = models.store().valid_froms()?;
+    let (mut model_rows, mut baseline_rows) = (vec![], vec![]);
+    let mut periods = vec![];
+    for (i, &at) in times.iter().enumerate() {
+        let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
+        let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
+        let baseline = baseline(at)?;
+        let (mut period_models, mut by_model, mut by_baseline) = (BTreeSet::new(), vec![], vec![]);
+        for example in examples
+            .iter()
+            .filter(|example| from_ns <= example.ts_event && example.ts_event < to_ns)
+        {
+            if let Some((valid_from, model)) =
+                models.at(Timestamp::from(example.ts_event), &valid_froms)
             {
-                Ok(model) => self.current = Some((latest, model)),
-                Err(e) => log::error!(
-                    "refused the model valid from {latest}: {e:#}; the current model kept"
-                ),
+                period_models.insert(valid_from);
+                by_model.push((model.predict(&example.features)?, example.label));
+            }
+            if let Some(baseline) = &baseline {
+                by_baseline.push((baseline.predict(&example.features)?, example.label));
             }
         }
-        Ok(self
-            .current
-            .as_ref()
-            .map(|(valid_from, model)| (*valid_from, model)))
+        periods.push(Period {
+            from,
+            to,
+            models: period_models.into_iter().collect(),
+            model: Score::of(&by_model),
+            baseline: Score::of(&by_baseline),
+        });
+        model_rows.extend(by_model);
+        baseline_rows.extend(by_baseline);
     }
+    Ok(Scores {
+        periods,
+        model: Score::of(&model_rows),
+        baseline: Score::of(&baseline_rows),
+        meta: None,
+    })
+}
+
+/// The training mean of `examples` of `width` features fitted on before
+/// the holdout from `holdout` (`train::split`); none without such a row.
+fn fit_baseline(
+    width: usize,
+    examples: Vec<Example>,
+    holdout: Timestamp,
+) -> anyhow::Result<Option<Model>> {
+    let (fitted, _) = train::split(examples, holdout);
+    if fitted.is_empty() {
+        return Ok(None);
+    }
+    let set = TrainingSet::new(
+        width,
+        fitted.iter().flat_map(|row| row.features.clone()).collect(),
+        fitted.iter().map(|row| row.label).collect(),
+    )?;
+    Ok(Some(LearnerConfig::Baseline {}.fit(&set)?))
 }
 
 impl Score {
@@ -299,29 +332,38 @@ impl Score {
 }
 
 /// The scores as text, in the sections of the backtest's report: one per
-/// period, then the span.
+/// period, then the span; then the meta model's, if any, the same way.
 impl fmt::Display for Scores {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for period in &self.periods {
-            writeln!(
-                f,
-                "\nModel scores, out of sample, from {} to {}",
-                period.from, period.to
-            )?;
-            let models = if period.models.is_empty() {
-                "none".to_string()
-            } else {
-                let models: Vec<String> = period.models.iter().map(ToString::to_string).collect();
-                models.join(", ")
-            };
-            writeln!(f, "  Model valid from: {models}")?;
-            lines(f, false, period.model)?;
-            lines(f, true, period.baseline)?;
+        sections(f, "Model", self)?;
+        match &self.meta {
+            Some(meta) => sections(f, "Meta model", meta),
+            None => Ok(()),
         }
-        writeln!(f, "\nModel scores, out of sample, over the span")?;
-        lines(f, false, self.model)?;
-        lines(f, true, self.baseline)
     }
+}
+
+/// The sections of `scores`, each headed by `model`, the model's name.
+fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &Scores) -> fmt::Result {
+    for period in &scores.periods {
+        writeln!(
+            f,
+            "\n{model} scores, out of sample, from {} to {}",
+            period.from, period.to
+        )?;
+        let models = if period.models.is_empty() {
+            "none".to_string()
+        } else {
+            let models: Vec<String> = period.models.iter().map(ToString::to_string).collect();
+            models.join(", ")
+        };
+        writeln!(f, "  Model valid from: {models}")?;
+        lines(f, false, period.model)?;
+        lines(f, true, period.baseline)?;
+    }
+    writeln!(f, "\n{model} scores, out of sample, over the span")?;
+    lines(f, false, scores.model)?;
+    lines(f, true, scores.baseline)
 }
 
 /// The lines of `score`, the model's or the `baseline`'s.
@@ -348,13 +390,14 @@ mod tests {
         identifiers::InstrumentId,
         types::{Money, Quantity},
     };
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::model::{
-        config::Thresholds,
+        config::{MetaConfig, Thresholds},
         decide::{DecisionRule, FeatureRow},
         store::{ModelManifest, StoredModel},
-        targets::{Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
+        targets::{Barrier, Distance, Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -672,6 +715,7 @@ mod tests {
             }],
             model: score,
             baseline: Score::default(),
+            meta: None,
         };
 
         assert_eq!(
@@ -694,6 +738,115 @@ Model scores, out of sample, over the span
   Baseline log loss: n/a
   Baseline rows: 0
 "
+        );
+    }
+
+    /// `config` on a barrier besides its horizon, with a meta model on a
+    /// window of 48 hours.
+    fn with_meta() -> ModelConfig {
+        let mut config = config();
+        config.targets.barrier = Some(Barrier {
+            take_profit: Distance::BasisPoints(Decimal::from(10)),
+            stop: Distance::BasisPoints(Decimal::from(10)),
+            limit: SignedDuration::from_hours(2),
+            atr: None,
+        });
+        config.meta = Some(
+            MetaConfig::builder()
+                .window(SignedDuration::from_hours(48))
+                .holdout(SignedDuration::from_hours(6))
+                .threshold(0.5)
+                .min_score(0.5)
+                .learner(LearnerConfig::Fake {})
+                .build(),
+        );
+        config
+    }
+
+    /// The primary's models in the store at both retrain times, its meta
+    /// model's at none: the backtest builds from the meta's longer window
+    /// and trains at both times, which train both models.
+    #[test]
+    fn a_backtest_with_a_meta_model_builds_its_window_and_trains_where_either_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
+        let walk = WalkForward::new(
+            &dir.path().join("catalog"),
+            &dir.path().join("models"),
+            StrategyId::from(STRATEGY),
+            &features(),
+            with_meta(),
+        )
+        .unwrap();
+        for at in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
+            let fingerprint = walk.dataset.fingerprint().to_string();
+            walk.store.publish(&model(&walk, at, fingerprint)).unwrap();
+        }
+        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
+
+        walk.prepare(
+            at("2026-01-07T00:00:00Z"),
+            at("2026-01-09T00:00:00Z"),
+            |from, to| {
+                built.borrow_mut().push((from, to));
+                Ok(())
+            },
+            |at| {
+                trained.borrow_mut().push(at);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            built.take(),
+            [(at("2026-01-05T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
+        );
+        assert_eq!(
+            trained.take(),
+            [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn the_meta_models_scores_follow_the_models_in_the_report() {
+        let score = Score {
+            rows: 2,
+            auc: None,
+            log_loss: Some(0.5),
+        };
+        let period = Period {
+            from: at("2026-01-07T00:00:00Z"),
+            to: at("2026-01-08T00:00:00Z"),
+            models: vec![],
+            model: score,
+            baseline: score,
+        };
+        let meta = Scores {
+            periods: vec![period.clone()],
+            model: score,
+            baseline: score,
+            meta: None,
+        };
+        let scores = Scores {
+            periods: vec![period],
+            model: score,
+            baseline: score,
+            meta: Some(Box::new(meta)),
+        };
+
+        let text = scores.to_string();
+
+        let primary = text
+            .find("\nModel scores, out of sample, over the span")
+            .unwrap();
+        let meta = text
+            .find("\nMeta model scores, out of sample, from 2026-01-07T00:00:00Z")
+            .unwrap();
+        assert!(primary < meta, "{text}");
+        assert!(
+            text.contains("\nMeta model scores, out of sample, over the span"),
+            "{text}"
         );
     }
 }

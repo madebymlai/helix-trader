@@ -35,8 +35,11 @@ Nautilus lacks.
   written then renamed, with its manifest and probes). Backtest and live
   read the same store, each decision using the latest model valid then,
   checked against the strategy's features and probes before use; a live
-  node retrains by starting `train` as a child process. Nothing
-  else passes from a backtest to live: no lock or provenance files.
+  node retrains by starting `train` as a child process. A meta model
+  (meta-labeling) is a second level of the same store, under its
+  primary's directory, trained by the same `train` right after the
+  primary; the config types allow no third. Nothing else passes from a
+  backtest to live: no lock or provenance files.
 
 ## Version
 
