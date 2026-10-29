@@ -23,7 +23,7 @@ mod redis;
 pub use ic::{
     IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
 };
-pub use recording::Recording;
+pub use recording::{Recording, promote_staged};
 
 pub use crate::data::IbAccount;
 
@@ -39,7 +39,6 @@ use nautilus_common::{
     component::Component,
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
-use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
@@ -87,9 +86,11 @@ impl Live {
     /// then IB's, then runs `strategy` on a live node until SIGINT or
     /// SIGTERM. The strategy's warmup requests go to the data clients. A
     /// root's instruments are its contract in front at the start and the
-    /// next one (see `README.md`, "Rolled roots"). The gaps the last runs
-    /// streamed across over the warmup window are joined, and the run's
-    /// start is recorded in the catalog (`data::live_runs`).
+    /// next one (see `README.md`, "Rolled roots"). Once the node is built,
+    /// with what the last run left staged promoted (`promote_staged`), the
+    /// gaps the last runs streamed across in the series of the warmup are
+    /// joined, and the run's start is recorded in the catalog
+    /// (`data::live_runs`), before it runs.
     ///
     /// # Errors
     ///
@@ -98,8 +99,9 @@ impl Live {
     /// type (see `warmup::cache_config`), if the catalog cannot be created
     /// or its path is not UTF-8, if the staging directory is inside the
     /// catalog, the trader's instance id or the run's start cannot be kept
-    /// (see `Recording`, `data::record_run_start`), if a gap over the warmup
-    /// window cannot be joined (`data::live_runs::join`), if an IC bar type
+    /// (see `Recording`, `data::record_run_start`), if what the last run left
+    /// staged cannot be promoted (`promote_staged`), if a gap cannot be
+    /// joined (`data::live_runs::join`), if an IC bar type
     /// is not built from quotes or IC's environment or credential is missing
     /// (see `ic::clients`, checked before anything connects), if
     /// OKX's clients cannot be set up or the OKX account does not suit the
@@ -107,7 +109,7 @@ impl Live {
     /// hedging or not `IC_ACCOUNT_ID`'s (see `ic::IcClients::check_account`),
     /// if the strategy trades IB instruments and no account is given, if
     /// IB's clients cannot be set up (see `ib::clients`), or if the node
-    /// fails (see `node::run`).
+    /// fails (see `node::build`, `node::run`).
     pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -162,10 +164,9 @@ impl Live {
             let ib = ib::clients(account, self.client_id, &ib_ids).await?;
             clients.push(ib.into_node_clients());
         }
-        join_warmup(&self.catalog, requirements)?;
-        // Before the node is built, which starts the recording.
-        record_run_start(&self.catalog)?;
-        node::run(
+        // Built first, which promotes what the last run left staged: the
+        // gaps are joined, and the warmup reads the catalog, with it there.
+        let node = node::build(
             self.trader_id,
             instance_id,
             self.logging.clone(),
@@ -174,15 +175,17 @@ impl Live {
             streaming,
             catalog,
             clients,
-            &instrument_ids,
-            strategy,
         )
-        .await
+        .await?;
+        join_warmup(&self.catalog, requirements)?;
+        // Before the node runs, which starts the recording.
+        record_run_start(&self.catalog)?;
+        node::run(node, &instrument_ids, strategy).await
     }
 }
 
-/// Joins the gaps the last live runs streamed across over the warmup
-/// window of `requirements` in the catalog at `catalog` (see
+/// Joins the gaps the last live runs streamed across in the series the
+/// warmup of `requirements` reads in the catalog at `catalog` (see
 /// `data::live_runs`): the warmup reads the catalog first and asks the
 /// venue for what it lacks, a request per gap, whose answer would hold the
 /// quotes the node received after it.
@@ -196,11 +199,10 @@ fn join_warmup(catalog: &Path, requirements: &DataRequirements) -> anyhow::Resul
     let reader = ParquetDataCatalog::new(catalog, None, None, None, None);
     for SeriesSlice {
         series: (data_type, identifier),
-        slice,
+        ..
     } in requirements.slices(now.checked_sub(requirements.warmup)?, now)?
     {
-        let (from, to) = (UnixNanos::from(slice.from), UnixNanos::from(slice.to));
-        live_runs::join(&reader, &data_type, &identifier, from.as_u64(), to.as_u64())
+        live_runs::join(&reader, &data_type, &identifier)
             .with_context(|| format!("joining the live runs of the {data_type} of {identifier}"))?;
     }
     Ok(())

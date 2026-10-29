@@ -39,7 +39,7 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::{ModelConfig, RuleConfig},
-    dataset::{Dataset, DatasetRow, SchemaMismatch},
+    dataset::{Commission, Dataset, DatasetRow, SchemaMismatch},
     features::FeatureSet,
     learner::{LearnerConfig, TrainingSet},
     meta::Meta,
@@ -130,9 +130,9 @@ pub enum Kept {
 
 impl Training {
     /// The training of `strategy_id`'s model, and of its meta model if
-    /// `config` has one, deciding with `features`, on its dataset in the
-    /// catalog at `catalog` and its models in the store under `models`, as
-    /// `config` says.
+    /// `config` has one, deciding with `features`, on its dataset, net of
+    /// `commission`, in the catalog at `catalog` and its models in the
+    /// store under `models`, as `config` says.
     ///
     /// # Errors
     ///
@@ -145,6 +145,7 @@ impl Training {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: ModelConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         let label = config
             .targets
@@ -158,14 +159,15 @@ impl Training {
                 holdout: config.holdout,
                 min_score: config.min_score,
                 learner: config.learner.clone(),
-                store: ModelStore::new(models, strategy_id, features, &config)?,
+                store: ModelStore::new(models, strategy_id, features, &config, commission)?,
             },
             label,
         };
-        let meta = Meta::of_model(models, strategy_id, features, &config)?.map(|meta| {
-            let level = Level::of_meta(&meta);
-            (level, meta)
-        });
+        let meta =
+            Meta::of_model(models, strategy_id, features, &config, commission)?.map(|meta| {
+                let level = Level::of_meta(&meta);
+                (level, meta)
+            });
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -174,6 +176,7 @@ impl Training {
                 features,
                 config.decision,
                 config.targets.clone(),
+                commission,
             )?,
             targets: config.targets,
             primary: Some(primary),
@@ -183,8 +186,9 @@ impl Training {
 
     /// The training of the meta model of `strategy_id`, whose primary is
     /// its rule, deciding with `features` (which declare the rule's side
-    /// and probability), on its dataset in the catalog at `catalog` and its
-    /// models in the store under `models`, as `config` says.
+    /// and probability), on its dataset, net of `commission`, in the catalog
+    /// at `catalog` and its models in the store under `models`, as `config`
+    /// says.
     ///
     /// # Errors
     ///
@@ -196,8 +200,9 @@ impl Training {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: RuleConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
-        let meta = Meta::of_rule(models, strategy_id, features, &config)?;
+        let meta = Meta::of_rule(models, strategy_id, features, &config, commission)?;
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -206,6 +211,7 @@ impl Training {
                 features,
                 config.decision,
                 config.targets.clone(),
+                commission,
             )?,
             targets: config.targets,
             primary: None,
@@ -536,6 +542,11 @@ mod tests {
             .build()
     }
 
+    /// A commission rate of 30 per million.
+    fn commission() -> Commission {
+        Commission::Rate("0.00003".to_string())
+    }
+
     /// The training in `dir`, its catalog and its store side by side.
     fn training(dir: &Path, config: ModelConfig) -> Training {
         std::fs::create_dir_all(dir.join("catalog")).unwrap();
@@ -545,6 +556,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features(1),
             config,
+            &commission(),
         )
         .unwrap()
     }
@@ -676,8 +688,13 @@ mod tests {
         assert_eq!(manifest.feature_names, ["mid_0"]);
         assert_eq!(
             manifest.fingerprint,
-            crate::model::dataset::fingerprint(&features(1), config().decision, &config().targets)
-                .to_string()
+            crate::model::dataset::fingerprint(
+                &features(1),
+                config().decision,
+                &config().targets,
+                &commission()
+            )
+            .to_string()
         );
         assert_eq!(manifest.targets, config().targets);
         assert_eq!(manifest.label, Label::Barrier);
@@ -824,6 +841,7 @@ mod tests {
                         &features(1),
                         config.decision,
                         &config.targets,
+                        &commission(),
                     )
                     .to_string(),
                     feature_names: vec!["mid_0".to_string()],
@@ -972,6 +990,7 @@ mod tests {
                 retrain: config.retrain,
                 meta: meta(24),
             },
+            &commission(),
         )
         .unwrap();
         let (buy, sell) = (1.0, -1.0);

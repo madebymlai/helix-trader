@@ -12,6 +12,7 @@ use helix_trader::{
     backtest::{Backtest, commission_rate},
     model::{
         config::{ModelConfig, Thresholds},
+        dataset::Commission,
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet},
         handle::{Mode, ModelHandle, SettledRows, Trade},
@@ -212,6 +213,11 @@ fn probe(
     (probe, record)
 }
 
+/// The commission of `backtest`, as given: 30 USD per million traded.
+pub fn commission() -> Commission {
+    Commission::Rate("0.00003".to_string())
+}
+
 /// The run of the probe over `[from, to]` on IC's hedging venue, 30 USD
 /// per million traded, 10M USD.
 pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
@@ -288,6 +294,7 @@ pub fn trade_on(
         config,
         Mode::Backtest {
             models: models.to_path_buf(),
+            commission: commission(),
         },
     );
     backtest(catalog.path(), from, to).run(probe).unwrap();

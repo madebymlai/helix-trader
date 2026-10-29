@@ -44,7 +44,7 @@ use nautilus_trading::{
 
 use crate::{
     model::{
-        dataset::Dataset,
+        dataset::{Commission, Dataset},
         decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle, Trade},
@@ -139,13 +139,19 @@ impl Learned {
 }
 
 /// The training of the model of the strategy `config` describes, on its
-/// dataset in the catalog at `catalog` and its models in the store under
-/// `models`; its replay runs the strategy in `Mode::Dataset`.
+/// dataset, net of `commission`, in the catalog at `catalog` and its models
+/// in the store under `models`; its replay runs the strategy in
+/// `Mode::Dataset`.
 ///
 /// # Errors
 ///
 /// Returns an error if the config is invalid, or as `Training::new` does.
-pub fn training(config: &LearnedConfig, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
+pub fn training(
+    config: &LearnedConfig,
+    catalog: &Path,
+    models: &Path,
+    commission: &Commission,
+) -> anyhow::Result<Training> {
     config.validate()?;
     let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
     Training::new(
@@ -154,12 +160,13 @@ pub fn training(config: &LearnedConfig, catalog: &Path, models: &Path) -> anyhow
         strategy_id(config)?,
         &features,
         config.model.clone(),
+        commission,
     )
 }
 
 /// The backtests of the model of the strategy `config` describes, on its
-/// dataset in the catalog at `catalog` and its models in the store under
-/// `models`: their retrains and their scores.
+/// dataset, net of `commission`, in the catalog at `catalog` and its models
+/// in the store under `models`: their retrains and their scores.
 ///
 /// # Errors
 ///
@@ -169,6 +176,7 @@ pub fn walk_forward(
     config: &LearnedConfig,
     catalog: &Path,
     models: &Path,
+    commission: &Commission,
 ) -> anyhow::Result<WalkForward> {
     config.validate()?;
     let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
@@ -178,16 +186,22 @@ pub fn walk_forward(
         strategy_id(config)?,
         &features,
         config.model.clone(),
+        commission,
     )
 }
 
-/// The dataset of the strategy `config` describes, in the catalog at
-/// `catalog`; its replay runs the strategy in `Mode::Dataset`.
+/// The dataset of the strategy `config` describes, net of `commission`, in
+/// the catalog at `catalog`; its replay runs the strategy in
+/// `Mode::Dataset`.
 ///
 /// # Errors
 ///
 /// Returns an error if the config is invalid, or as `Dataset::new` does.
-pub fn dataset(config: &LearnedConfig, catalog: &Path) -> anyhow::Result<Dataset> {
+pub fn dataset(
+    config: &LearnedConfig,
+    catalog: &Path,
+    commission: &Commission,
+) -> anyhow::Result<Dataset> {
     config.validate()?;
     let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
     Dataset::new(
@@ -196,6 +210,7 @@ pub fn dataset(config: &LearnedConfig, catalog: &Path) -> anyhow::Result<Dataset
         &features,
         config.model.decision,
         config.model.targets.clone(),
+        commission,
     )
 }
 

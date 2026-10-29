@@ -7,9 +7,10 @@
 //! every strategy. Features and targets are list columns, so each strategy
 //! has the width of its own, and its rows are stored under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
-//! `targets::fingerprint`): a change to the feature code, names or
-//! warmup, the decision rule or a target finds no row, and the dataset is
-//! rebuilt.
+//! `targets::fingerprint` and the commission of its dataset runs,
+//! `Commission`): a change to the feature code, names or warmup, the
+//! decision rule, a target or the commission finds no row, and the dataset
+//! is rebuilt.
 //! The feature names are in the metadata of the rows' data type, which
 //! the catalog stores with each file and gives back with each row, so the
 //! rows do not repeat them; `read` checks them.
@@ -23,10 +24,16 @@
 //! before it, as inside a longer build; the rows decided before the day
 //! are not stored. A feature whose value is a function of the data within
 //! the warmup then has the same value at every decision of a day, however
-//! long the build; one keeping a running sum, or an exponential average,
-//! may still differ in its last bits. `write`
-//! files only the days a replay settled: those it replayed whole, its end
-//! that far past theirs. Each day's file is written with the day's bounds,
+//! long the build; one keeping a running sum may still differ in its last
+//! bits. A recursive one, an exponential average or Wilder's ATR, never
+//! forgets the value it started from, whose weight decays by e^-1
+//! (Wilder's) to e^-2 (an exponential average's) a period: after a warmup
+//! of one period a day's first rows still depend on where the build
+//! started by up to about a third of the difference. A warmup of
+//! several times the longest recursive period, 5 to 10, makes the rows of
+//! a day depend on the cut negligibly, never to the bit. `write` files
+//! only the days a replay settled: those it replayed whole, its end that
+//! far past theirs. Each day's file is written with the day's bounds,
 //! the interval it covers, the days without rows (a weekend's, cold
 //! features') within the file of the day with rows before them, or the
 //! first after: Nautilus writes no file without rows, so a day without
@@ -123,7 +130,8 @@ impl std::error::Error for SchemaMismatch {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub strategy_id: StrategyId,
-    /// The fingerprint of the features, the decision rule and the targets.
+    /// The fingerprint of the features, the decision rule, the targets and
+    /// the commission.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
@@ -142,6 +150,28 @@ pub struct Days {
     pub last: Date,
 }
 
+/// The commission of a dataset run, which its targets are net of, as given
+/// on the command line: per order (`--commission 3 USD`) or a rate on the
+/// value of each fill (`--commission-rate 0.00003`). Part of the dataset's
+/// fingerprint, so neither rows nor models of other costs are ever read;
+/// the run's balance and leverage, which deny no target of a dataset run,
+/// are not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Commission {
+    PerOrder(String),
+    Rate(String),
+}
+
+impl Commission {
+    /// The commission as the fingerprint reads it.
+    fn fingerprint_part(&self) -> String {
+        match self {
+            Self::PerOrder(commission) => format!("commission per order {commission}"),
+            Self::Rate(rate) => format!("commission rate {rate}"),
+        }
+    }
+}
+
 /// The dataset of one strategy in a catalog.
 #[derive(Debug, Clone)]
 pub struct Dataset {
@@ -156,7 +186,7 @@ pub struct Dataset {
 
 impl Dataset {
     /// The dataset of `strategy_id`, deciding with `features` on `rule`,
-    /// of `targets`, in the catalog at `catalog`. Registers `DatasetRow`
+    /// of `targets` net of `commission`, in the catalog at `catalog`. Registers `DatasetRow`
     /// with Nautilus, as any reader of the catalog must.
     ///
     /// # Errors
@@ -168,13 +198,14 @@ impl Dataset {
         features: &FeatureSet,
         rule: DecisionRule,
         targets: TargetsConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         targets.validate()?;
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
         Ok(Self {
             catalog: catalog.to_path_buf(),
             strategy_id,
-            fingerprint: fingerprint(features, rule, &targets),
+            fingerprint: fingerprint(features, rule, &targets, commission),
             warmup: features.warmup(),
             feature_names: features.names().to_vec(),
             targets,
@@ -503,15 +534,17 @@ impl DatasetRow {
 }
 
 /// The fingerprint of a dataset of `features` deciding on `rule`, of
-/// `targets`: the decisions' (`decide::fingerprint`) extended by the
-/// targets' (`targets::fingerprint`).
+/// `targets` net of `commission`: the decisions' (`decide::fingerprint`)
+/// extended by the targets' (`targets::fingerprint`) and the commission.
 #[must_use]
 pub fn fingerprint(
     features: &FeatureSet,
     rule: DecisionRule,
     targets: &TargetsConfig,
+    commission: &Commission,
 ) -> Fingerprint {
     targets::fingerprint(decide::fingerprint(features, rule), targets)
+        .with(commission.fingerprint_part().as_bytes())
 }
 
 /// The catalog type of the rows.
@@ -596,6 +629,11 @@ mod tests {
             .build()
     }
 
+    /// A commission rate of 30 per million.
+    fn commission() -> Commission {
+        Commission::Rate("0.00003".to_string())
+    }
+
     fn dataset(catalog: &Path, strategy: &str, width: usize) -> Dataset {
         Dataset::new(
             catalog,
@@ -603,6 +641,7 @@ mod tests {
             &features(width),
             DecisionRule::Every(SignedDuration::from_hours(1)),
             targets(),
+            &commission(),
         )
         .unwrap()
     }
@@ -854,19 +893,20 @@ mod tests {
     }
 
     #[test]
-    fn a_change_of_the_features_the_decisions_or_the_targets_finds_an_empty_cache() {
+    fn a_change_of_the_features_the_decisions_the_targets_or_the_commission_finds_an_empty_cache() {
         let dir = tempfile::tempdir().unwrap();
         let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
         dataset(dir.path(), STRATEGY, 1)
             .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
             .unwrap();
-        let changed = |rule, targets| {
+        let changed = |rule, targets, commission| {
             Dataset::new(
                 dir.path(),
                 StrategyId::from(STRATEGY),
                 &features(1),
                 rule,
                 targets,
+                &commission,
             )
             .unwrap()
         };
@@ -876,6 +916,7 @@ mod tests {
             changed(
                 DecisionRule::Every(SignedDuration::from_mins(30)),
                 targets(),
+                commission(),
             ),
             changed(
                 hourly,
@@ -883,6 +924,13 @@ mod tests {
                     horizon: Some(SignedDuration::from_mins(30)),
                     ..targets()
                 },
+                commission(),
+            ),
+            changed(hourly, targets(), Commission::Rate("0.00004".to_string())),
+            changed(
+                hourly,
+                targets(),
+                Commission::PerOrder("0.00003 USD".to_string()),
             ),
         ];
 
@@ -907,8 +955,6 @@ mod tests {
     fn the_manifest_names_the_features_the_targets_the_days_and_the_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 2);
-        let rule = DecisionRule::Every(SignedDuration::from_hours(1));
-        let fingerprint = targets::fingerprint(decide::fingerprint(&features(2), rule), &targets());
         for (time, from, to) in [
             (
                 "2026-01-05T09:00:00Z",
@@ -962,7 +1008,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(manifest.fingerprint, fingerprint.to_string());
+        assert_eq!(manifest.fingerprint, dataset.fingerprint().to_string());
     }
 
     #[test]
@@ -1025,6 +1071,7 @@ mod tests {
             &features,
             DecisionRule::Every(SignedDuration::from_hours(1)),
             targets(),
+            &commission(),
         )
         .unwrap()
     }

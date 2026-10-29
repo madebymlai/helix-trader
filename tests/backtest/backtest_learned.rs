@@ -16,7 +16,10 @@ use std::{
     process::Command,
 };
 
-use crate::common::{dataset::walk, ic};
+use crate::common::{
+    dataset::{commission, walk},
+    ic,
+};
 use helix_trader::{
     backtest::Backtest,
     model::{
@@ -117,7 +120,14 @@ fn traded(catalog: &TempDir, models: PathBuf) -> (usize, usize) {
         balance: Money::from("100000 USD"),
         ..ic::backtest(catalog)
     };
-    let strategy = Learned::new(config, Mode::Backtest { models }).unwrap();
+    let strategy = Learned::new(
+        config,
+        Mode::Backtest {
+            models,
+            commission: commission(),
+        },
+    )
+    .unwrap();
     let outcome = backtest.run(strategy).unwrap();
     (outcome.result.total_orders, outcome.result.total_positions)
 }

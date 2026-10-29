@@ -536,13 +536,16 @@ of its choosing (`model::features`, `model::decide`).
   `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
   `.data(data_type, name, read)` for a raw feature of custom data, the last
   value `read` from a data point. `.code(include_str!("features.rs"))` adds
-  the strategy's feature code to the fingerprint; `.warmup(span)` declares
-  how much data the features read before a decision, which a dataset
-  build replays before its first day (see "Dataset"): a strategy passes
-  its own warmup, `learned/` its `warmup`; none unless given. `build()`
-  refuses an empty set, two features of one name and a negative warmup.
-  The names and their order are
-  fixed there, and the values come in that order. A feature is a Nautilus
+  the strategy's feature code to the fingerprint (its unit tests in
+  `features/tests.rs`, so editing one changes no fingerprint);
+  `.warmup(span)` declares how much data the features read before a
+  decision, which a dataset build replays before its first day (see
+  "Dataset"): a strategy passes its own warmup, `learned/` its `warmup`;
+  none unless given. For a recursive indicator, an exponential average or
+  Wilder's ATR, give several times its period, 5 to 10: its first value
+  keeps a weight that decays only exponentially, e^-1 to e^-2 a period
+  (see "Dataset"). `build()` refuses an empty set, two features of one
+  name and a negative warmup. The names and their order are fixed there, and the values come in that order. A feature is a Nautilus
   `Indicator` exposing its value (`Feature`), which every Nautilus moving
   average does as it is; another indicator, or one of ours, implements
   `Feature::value`. A strategy whose primary is its own rule declares
@@ -608,7 +611,12 @@ of its choosing (`model::features`, `model::decide`).
   code (`model::features` itself and Nautilus' indicators, named by the
   git source `Cargo.lock` pins, through `build.rs`), the rule and
   `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
-  adds the targets and `model::targets`' code.
+  adds the targets and `model::targets`' code, and
+  `dataset::fingerprint(&features, rule, &targets, &commission)` all of
+  it and the commission of the dataset runs, as given
+  (`Commission::PerOrder` or `Commission::Rate`): the targets are net of
+  it, so rows and models of other costs are never read. The runs' balance
+  and leverage are not in it: large enough, they deny no target.
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
   venue with a large balance) each decision's targets come from real
   orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
@@ -657,7 +665,8 @@ of its choosing (`model::features`, `model::decide`).
   strategy id (`TargetRow::data_type`); `Outcome::sign` is the P&L's
   sign. A denied or rejected order, or an entry not filled by its time,
   leaves the decision unsettled, logged, and so do positions still open
-  at the stop. A barrier hit at the same nanosecond as the time limit
+  at the stop (`open_decisions()` counts the decisions still open). A
+  barrier hit at the same nanosecond as the time limit
   counts: Nautilus hands the venue the quote before the alert. On bars
   alone the venue fills an entry at the last close, a take profit at its
   limit and a stop at its trigger, a bar's high before its low: as
@@ -669,9 +678,10 @@ of its choosing (`model::features`, `model::decide`).
   horizon, the long then the short, its P&L and its exit, 1 a take
   profit, -1 a stop, 0 the time; `TargetRow::values`), the settling and
   decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
-  &features, rule, targets)`) stores them under the strategy id and the
-  fingerprint, so another strategy, of another width, has its own, and a
-  change to the features, the rule or the targets finds none; the
+  &features, rule, targets, &commission)`) stores them under the strategy
+  id and the fingerprint, so another strategy, of another width, has its
+  own, and a change to the features, the rule, the targets or the
+  commission finds none; the
   feature names go in the data type's metadata, not in each row. The
   catalog's coverage is the day cache: `missing(first, last)` gives the
   days it lacks, from the catalog's missing intervals, and `build(first,
@@ -681,11 +691,17 @@ of its choosing (`model::features`, `model::decide`).
   before the first day not. So the indicators read at a day's first
   decisions the data before it, as inside a longer build: a day built
   alone is stored as inside a longer build, row for row, for a feature
-  whose value is a function of the data within the warmup (one keeping a
-  running sum, as Nautilus' moving averages do, or an exponential
-  average, may still differ in its last bits). The catalog must cover
-  the data from that warmup before the first day, and the strategy's own
-  warmup request before it. `write(rows, from, to)` files
+  whose value is a function of the data within the warmup; one keeping a
+  running sum, as Nautilus' simple moving average does, may still differ
+  in its last bits. A recursive one, an exponential average or Wilder's
+  ATR (the barrier's), never forgets the value it started from: its
+  weight decays by e^-1 (Wilder's) to e^-2 (an exponential average's) a
+  period, so a warmup of one period leaves a day's first rows depending
+  on where the build started by up to about a third of the difference.
+  A warmup of several times the longest recursive period, 5 to 10, makes
+  them depend on it negligibly (e^-5 or less), not to the bit. The
+  catalog must cover the data from that warmup before the first day, and
+  the strategy's own warmup request before it. `write(rows, from, to)` files
   only the days the replay settled (replayed whole, `to` the longest
   target past their end), each with the day's bounds, a day without rows
   within the file of the day before it (Nautilus writes no file without
@@ -710,15 +726,19 @@ of its choosing (`model::features`, `model::decide`).
   `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
   and `learner`. `validate(&requirements)` refuses a retrain interval not
   positive, a traded instrument the strategy does not read, a barrier ATR
-  on a bar type it does not read (its bars feed the ATR), a label of a
+  on a bar type it does not read (its bars feed the ATR) or whose period
+  of bars is longer than the strategy's warmup (a dataset run replays
+  only the warmup before its first day, so the ATR would be cold at its
+  first decisions), a label of a
   target the config lacks, a barrier limit or horizon not shorter than
   the window, a holdout leaving no fitted row, thresholds that are not
   probabilities with the short below the long, and a minimum score
   outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
   meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
-  config)` and `train_at(t, replay)` (`model::train`) train at `t`: the
-  rows of the window ending at `t` settled by `t` (`Dataset::settled`),
+  config, &commission)` and `train_at(t, replay)` (`model::train`) train
+  at `t`: the rows of the window ending at `t` settled by `t`
+  (`Dataset::settled`),
   so the purge between them and the model's first use is the longest
   target; the model fitted on those before the holdout, the window's
   last part, settled by its start, the same gap; scored by the AUC of its
@@ -731,10 +751,13 @@ of its choosing (`model::features`, `model::decide`).
   "Meta-labeling"); `Training::of_rule` trains a rule primary's meta
   alone.
 - **Model store.** `ModelStore` (`model::store`) holds the published
-  models under `<models>/<strategy id>/<fingerprint>/<settings>/`, the
-  settings a hash of the learner and its settings, the label, the window
-  and the holdout. Each model is one file, `<valid from>.json`, written
-  beside its name and renamed onto it: its manifest (strategy, valid
+  models under `<models>/<strategy id>/<fingerprint>/<settings>/` (the
+  dataset's fingerprint, the commission in it), the settings a hash of the
+  learner and its settings, the label, the window, the holdout and the
+  minimum score: a model published at a lower minimum may score below a
+  higher one, so a stricter gate lists none of it. Each model is one
+  file, `<valid from>.json`, written beside its name and renamed onto
+  it: its manifest (strategy, valid
   from, fingerprint, feature names, target spec, label, learner, holdout
   AUC, and up to 16 holdout rows with the model's predictions on them, a
   missing value written `"NaN"`) and the model as its adapter saved it.
@@ -743,9 +766,9 @@ of its choosing (`model::features`, `model::decide`).
   one back. `StoredModel::load(feature_names, fingerprint)` loads it with
   the checks a handle makes before use (below). A meta model's store is
   `meta/<settings>` under its primary's directory (`ModelStore::meta`),
-  its settings its learner, window and holdout and the primary's
-  thresholds; a rule primary's under the strategy id and fingerprint
-  (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
+  its settings its learner, window, holdout and minimum score and the
+  primary's thresholds; a rule primary's under the strategy id and
+  fingerprint (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
   strategy does, decision by decision: the latest valid, checked, a
   model failing a check refused and the current one kept; the handle,
   the backtest's scores and the meta's rows all use it.
@@ -757,7 +780,8 @@ of its choosing (`model::features`, `model::decide`).
   fresh decision, on data of the targets' instrument (`new` refuses a
   cadence on features reading none of it), snapshots the features and
   publishes their row, then, in
-  `Mode::Backtest { models }` or `Mode::Live { models, .. }`, takes the
+  `Mode::Backtest { models, commission }` or `Mode::Live { models,
+  commission, .. }`, takes the
   latest model of
   the store valid at the decision, predicts, and returns the `Trade`
   (side, the targets' size, the probability) that `Thresholds::side`
@@ -817,7 +841,8 @@ of its choosing (`model::features`, `model::decide`).
   store has no model valid from. A model is the same whatever interval
   its time came from, so the interval does not key the store.
 - **Retraining backtest.** `WalkForward` (`model::walk`,
-  `WalkForward::new(catalog, models, strategy_id, &features, config)`)
+  `WalkForward::new(catalog, models, strategy_id, &features, config,
+  &commission)`)
   holds a backtest's retrains and scores: `prepare(start, end, build,
   train)` has `build` build the dataset from the first retrain's window
   to `end` if it lacks a day, then `train` train at each missing retrain
@@ -826,8 +851,10 @@ of its choosing (`model::features`, `model::decide`).
   at each retrain time, per retrain period and over the span (backtest
   README, "Retraining on the schedule"). With a meta model, `prepare`
   builds from the longer of the two windows and trains at each time
-  either store lacks, and the meta's scores follow the primary's.
-- **Live retraining.** In `Mode::Live { models, launcher,
+  either store lacks, the meta's only after the primary's first model
+  (before, its window has no row, so it never publishes there), and the
+  meta's scores follow the primary's.
+- **Live retraining.** In `Mode::Live { models, commission, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
   sets the strategy's retrain timer (`schedule::start`) on the grid of
   `retrain`, `catalog_delay` late (`Recording::catalog_delay`: the data
@@ -845,7 +872,10 @@ of its choosing (`model::features`, `model::decide`).
   still running when the node stops runs to its end.
   `Launcher::in_process` trains on a thread instead, for tests. A node
   starting with models in the store trades from its first decision on
-  the latest valid then.
+  the latest valid then. Don't backtest a strategy on the store and
+  catalog its live node retrains into at the same time: two processes
+  building one strategy's dataset at once may both replay a day, and
+  nothing orders their writes of its file and of the manifest.
 - **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
   at `t`: `Training::new` on the strategy's features and model section,
   `train_at` with a replay through `Backtest::run_dataset` of the strategy
@@ -858,9 +888,11 @@ of its choosing (`model::features`, `model::decide`).
   dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
   `--retrain-balance`), needed by a strategy trading on a model, and
   passes them, its `--config`, `--catalog`, `--models` and `--leverage`
-  to the `train` it starts. `backtest` of a strategy trading on a model
+  to the `train` it starts; its handle reads the models of that
+  commission. `backtest` of a strategy trading on a model
   builds its dataset and runs `train` in child processes first, with
-  its `--dataset-balance`, each train through `Launcher::process` as
+  its `--dataset-balance`, and trades on the models of its own
+  commission, each train through `Launcher::process` as
   live's: one keeping the model is a kept retrain, not a failed backtest
   (backtest README, "Retraining on the schedule").
 
@@ -995,7 +1027,8 @@ data, and the strategy hands them the warmup's bars.
 ## Tests
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
-  each file. `BarsConfig` and `Session` are unit tested where they live,
+  each file, or in `<module>/tests.rs` for a module hashed into a
+  fingerprint (`docs/ARCHITECTURE.md`). `BarsConfig` and `Session` are unit tested where they live,
   `warmup::cache_config` too; a strategy's config tests cover only its own
   fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through

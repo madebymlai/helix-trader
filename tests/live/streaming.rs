@@ -28,8 +28,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use async_trait::async_trait;
-use helix_trader::{data::record_run_start, live::Recording};
+use helix_trader::{
+    data::record_run_start,
+    live::{Recording, promote_staged},
+};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
@@ -76,6 +80,9 @@ const PROMOTION_MS: &str = "HELIX_STREAMING_PROMOTION_MS";
 const STOP_MS: &str = "HELIX_STREAMING_STOP_MS";
 /// The number of the child's first tick.
 const FIRST_SEQ: &str = "HELIX_STREAMING_FIRST_SEQ";
+/// Set, the child writes a venue's answer back over what the catalog lacks
+/// before its node runs, as a warmup does at the strategy's start.
+const WRITE_BACK: &str = "HELIX_STREAMING_WRITE_BACK";
 
 /// How long a child gets to do what the test waits for.
 const PATIENCE: Duration = Duration::from_secs(60);
@@ -176,6 +183,43 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     assert_contiguous("the crashed run's quotes", &first_run, 0);
     assert!(!second_run.is_empty());
     assert_contiguous("the restart's quotes", &second_run, 1_000_000);
+    assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
+}
+
+/// The restart's warmup writes the venue's answer back over what the
+/// catalog lacks up to now: the crashed run's staged rows are in the
+/// catalog by then, so the answer lands after them, not over them.
+#[test]
+fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    wait_for_staged_quotes(dir.path(), &mut crashed);
+    crashed.kill().unwrap();
+    crashed.wait().unwrap();
+    let mut restarted = NodeProcess(
+        node_command(
+            dir.path(),
+            Duration::from_secs(3_600),
+            Some(2_000),
+            1_000_000,
+        )
+        .env(WRITE_BACK, "1")
+        .spawn()
+        .unwrap(),
+    );
+
+    assert!(restarted.wait().unwrap().success());
+
+    let seqs = quote_seqs(dir.path());
+    let crashed_run: Vec<u64> = seqs.iter().copied().filter(|&s| s < 1_000_000).collect();
+    assert!(
+        !crashed_run.is_empty(),
+        "the crashed run's quotes were lost"
+    );
+    assert_contiguous("the crashed run's quotes", &crashed_run, 0);
+    let after: Vec<u64> = seqs[crashed_run.len()..].to_vec();
+    assert_eq!(after.first(), Some(&WRITTEN_BACK), "{after:?}");
+    assert_contiguous("the restart's quotes", &after[1..], 1_000_000);
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
@@ -297,8 +341,6 @@ async fn run_node(
         catalogs: vec![catalog],
         ..Default::default()
     };
-    // Before the node is built, as `Live` records it.
-    record_run_start(&root.join("catalog"))?;
     let mut node = LiveNodeBuilder::from_config(config)?
         .with_name("STREAMING")
         .with_delay_post_stop_secs(0)
@@ -308,6 +350,13 @@ async fn run_node(
             Box::new(StubConfig { first_seq }),
         )?
         .build()?;
+    // As `Live` starts it: what the last run staged promoted, then the run's
+    // start recorded, before the node runs.
+    promote_staged(&mut node)?;
+    record_run_start(&root.join("catalog"))?;
+    if std::env::var(WRITE_BACK).is_ok() {
+        write_back(root)?;
+    }
     node.add_actor(Subscriber {
         core: DataActorCore::new(DataActorConfig::default()),
     })?;
@@ -321,6 +370,41 @@ async fn run_node(
     let result = node.run().await;
     node.dispose();
     result
+}
+
+/// The number the quote a venue answers a warmup with carries: none the
+/// stub sends.
+const WRITTEN_BACK: u64 = 2_000_000;
+
+/// Writes back what a venue answers a warmup asking for the quotes the
+/// catalog of `root` lacks up to now, as IC's history is (`update_catalog`):
+/// one quote, at now, filed over the last missing window.
+fn write_back(root: &Path) -> anyhow::Result<()> {
+    let catalog = catalog(root);
+    let now = get_atomic_clock_realtime().get_time_ns();
+    let missing = catalog.get_missing_intervals_for_request(
+        0,
+        now.as_u64(),
+        &NautilusDataType::QuoteTick.into(),
+        Some(INSTRUMENT_ID),
+    )?;
+    let &(start, end) = missing.last().context("the catalog lacks nothing")?;
+    let quote = QuoteTick::new(
+        InstrumentId::from(INSTRUMENT_ID),
+        Price::from("0.80000"),
+        Price::from("0.80010"),
+        Quantity::new((WRITTEN_BACK + 1) as f64, 0),
+        Quantity::from("1"),
+        UnixNanos::from(end),
+        UnixNanos::from(end),
+    );
+    catalog.write_to_parquet(
+        &[quote],
+        Some(UnixNanos::from(start)),
+        Some(UnixNanos::from(end)),
+        None,
+    )?;
+    Ok(())
 }
 
 /// What a reader finds in the catalog: the number of quotes, trades,
@@ -526,6 +610,20 @@ fn spawn_node(
     stop_ms: Option<u64>,
     first_seq: u64,
 ) -> NodeProcess {
+    NodeProcess(
+        node_command(root, promotion_interval, stop_ms, first_seq)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// The command of the child process of `spawn_node`.
+fn node_command(
+    root: &Path,
+    promotion_interval: Duration,
+    stop_ms: Option<u64>,
+    first_seq: u64,
+) -> Command {
     std::fs::create_dir_all(root.join("catalog")).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -533,11 +631,12 @@ fn spawn_node(
         .env(ROOT, root)
         .env(PROMOTION_MS, promotion_interval.as_millis().to_string())
         .env(FIRST_SEQ, first_seq.to_string())
-        .env_remove(STOP_MS);
+        .env_remove(STOP_MS)
+        .env_remove(WRITE_BACK);
     if let Some(stop_ms) = stop_ms {
         command.env(STOP_MS, stop_ms.to_string());
     }
-    NodeProcess(command.spawn().unwrap())
+    command
 }
 
 /// A node's child process, killed if the test ends before it does, so that

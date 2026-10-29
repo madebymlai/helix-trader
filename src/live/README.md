@@ -120,8 +120,13 @@ node's cache (see "Cache in Redis").
    (IB's routed by default, OKX's and IC's routed by Nautilus as the only
    clients of their venue), reconciliation on, open-order and position checks every 10
    and 30 s (as the adapter's `node_exec_tester`), a 5 s post-stop
-   delay, and the streaming of its data into the catalog.
-6. Add the strategy, claim the external orders of its instruments that its
+   delay, and the streaming of its data into the catalog; then promote
+   what the last run of its instance left staged (`promote_staged`, see
+   "Instance id").
+6. Join the gaps the last runs streamed across in the series of the
+   warmup, and record the run's start in the catalog (see "Recording
+   into the catalog").
+7. Add the strategy, claim the external orders of its instruments that its
    config does not claim already (`register_external_order_claims`), then
    `run()`.
 
@@ -350,10 +355,14 @@ built (`data::record_run_start`, `live-runs/<ns>` beside `data/`), and a
 reader joins the gaps a run streamed across before it reads
 (`data::live_runs::join`, with Nautilus' `extend_file_name`): the
 backtest's coverage check, the dataset's replay through it,
-fill-catalog's node fill, and the node's own start over its warmup
-window. A gap is joined when the file after it was promoted, the file
+fill-catalog's node fill, and the node's own start over the series of its
+warmup. A gap is joined when the file after it was promoted, the file
 before it ends after the run's start (the run's own, or the warmup it
-wrote back), and no run started inside it. A crash or a stop stays a
+wrote back), and no run started inside it. A join covers the whole
+series at once, every gap judged by the file names before it: the file
+before a joined gap is renamed by its interval alone, no longer named as
+promoted, so a later join of a narrower window would leave the gap
+before that file. A crash or a stop stays a
 gap, as does the time before a run's first row. The node itself renames
 nothing while it streams: a reader never loses a file under it.
 
@@ -363,8 +372,16 @@ of its own directory. The node of a trader keeps one instance id across
 runs, in `<staging>/<trader id>.instance-id`, written once (temporary
 file, then rename): a run after a crash writes to the same directory,
 seals the files the crashed run left (`.feather.partial`, up to their
-last complete batch) and promotes them with its own; a crash loses at
-most the last second, unflushed. The same id is the logger's. A file
+last complete batch), and the start promotes them as soon as the node is
+built (`promote_staged`: the writer closed, which promotes what it
+holds, `promote_on_close`, and reopened, empty, in the same directory),
+before the gaps are joined and the warmup reads the catalog and writes
+IC's answer back after them. Left to the first promotion, a promotion
+interval later, they would lie under that answer, which Nautilus would
+refuse to promote them over (non-disjoint intervals), losing them, and
+every start after would fail the same way. A crash loses at most the last
+second, unflushed. A staged file the catalog already holds rows over
+fails the start, naming it. The same id is the logger's. A file
 that holds no instance id fails the start rather than being replaced:
 with a new id, what the old one left unpromoted would stay in staging.
 Two live processes at once each need their own trader (see "Cache in
@@ -580,8 +597,12 @@ rotation_config)`, then the public fields: `promotion_interval_ms`,
 carries). `RotationConfig` is by size, interval, scheduled dates, or none;
 with none, each promotion seals the files it promotes. The kernel creates
 the writer when the node is built (refusing an invalid config,
-`StreamingConfig::validate`), flushes it at stop and closes it, promoting
-the rest, at dispose. `replace_existing` empties the run directory first:
+`StreamingConfig::validate`), which recovers what a crashed run of the
+instance left but promotes it only at its first promotion; flushes it at
+stop and closes it, promoting the rest, at dispose.
+`NautilusKernel::close_streaming_writer` closes it, promoting, and
+`reopen_streaming_writer` opens it again in the same run directory
+(`LiveNode::kernel_mut`). `replace_existing` empties the run directory first:
 off, so that a restart keeps what a crash left.
 
 ### Logging
@@ -632,7 +653,9 @@ tests: see [`okx/README.md`](okx/README.md).
   the catalog from its own process: a clean prefix of each series while
   the node runs, everything after a clean stop with no staging file left,
   the built bars under `EXTERNAL`, the instrument definition, and after a
-  crash and a restart the crashed run's staged data promoted. The
+  crash and a restart the crashed run's staged data promoted, before an
+  answer written back over what the catalog lacks up to the start, as
+  IC's warmup writes it back, lands after it. The
   binary's backtest over data streamed across several promotions runs,
   and leaves the catalog covering it by Nautilus' own count; across a
   crash and a restart it is refused, naming the crash's gap.
@@ -668,13 +691,9 @@ tests: see [`okx/README.md`](okx/README.md).
   IC's warmup answer, written back up to its `now`, cannot overlap the
   run's first promoted quotes, stamped at their receipt after the
   subscription the warmup sends after its request (`ic/README.md`,
-  "Warmup"). It can overlap what a crashed run left staged: the restart's
-  warmup asks IC from 1 ns after the last promoted quote, and its answer
-  is written back over that whole window before the first promotion,
-  a promotion interval after the start, promotes the crashed run's
-  recovered tail, whose quotes lie in that window: that promotion fails
-  (non-disjoint intervals) and the tail stays in staging, its quotes in
-  the catalog from IC's answer instead. Read from the source, not run.
+  "Warmup"), nor what a crashed run left staged, promoted when the
+  restart's node is built, before the warmup (see "Instance id"; the stub
+  client's restart writes an answer back as IC's, `streaming.rs`).
 - Whether IB's answer to a `30 D` request of 1-minute bars is complete
   (it raised no error, but the node panicked before the bars could be
   counted).

@@ -2,17 +2,18 @@
 //! the time it was trained at.
 //!
 //! A store is a directory per strategy id, fingerprint (that of its
-//! dataset: the features, the decision rule and the targets, see
-//! `dataset::fingerprint`) and training settings (the learner and its
-//! settings, the label, the window and the holdout), so a model is only
-//! ever listed beside models of the same features and training. Backtest
-//! and live read the same list.
+//! dataset: the features, the decision rule, the targets and the
+//! commission they are net of, see `dataset::fingerprint`) and training
+//! settings (the learner and its settings, the label, the window, the
+//! holdout and the minimum score, below which a model is never
+//! published), so a model is only ever listed beside models of the same
+//! features, costs and training. Backtest and live read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory under its primary's,
-//! keyed by its own training settings (its learner and settings, window
-//! and holdout) and the primary's thresholds, which make its rows; a rule
-//! primary has no store of its own, its meta's `meta/` sits under the
-//! strategy id and fingerprint. A meta model is only ever listed beside
+//! keyed by its own training settings (its learner and settings, window,
+//! holdout and minimum score) and the primary's thresholds, which make its
+//! rows; a rule primary has no store of its own, its meta's `meta/` sits
+//! under the strategy id and fingerprint. A meta model is only ever listed beside
 //! meta models of the same primary.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
@@ -32,6 +33,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, ensure};
@@ -41,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
-    dataset,
+    dataset::{self, Commission},
     decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
     learner::{LearnerConfig, Model, SavedModel},
@@ -50,6 +52,10 @@ use super::{
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
+
+/// The publishes of this process so far, which tell its temporary files
+/// apart.
+static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
 /// The directory of the meta models within the directory of their primary's
 /// models, or of a rule primary's dataset.
@@ -76,7 +82,8 @@ pub struct ModelManifest {
     pub strategy_id: StrategyId,
     /// The time the model was trained at, from which it is valid.
     pub valid_from: Timestamp,
-    /// The fingerprint of the features, the decision rule and the targets.
+    /// The fingerprint of the features, the decision rule, the targets and
+    /// the commission.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
@@ -143,7 +150,8 @@ impl StoredModel {
 
 impl ModelStore {
     /// The store, under `root`, of the models of `strategy_id` deciding with
-    /// `features` as `config` says and trained as it says.
+    /// `features` as `config` says, on targets net of `commission`, and
+    /// trained as `config` says.
     ///
     /// # Errors
     ///
@@ -153,12 +161,14 @@ impl ModelStore {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &ModelConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         let settings = Fingerprint::default()
             .with(serde_json::to_string(&config.learner)?.as_bytes())
             .with(format!("{:?}", config.label).as_bytes())
             .with(&config.window.as_nanos().to_le_bytes())
-            .with(&config.holdout.as_nanos().to_le_bytes());
+            .with(&config.holdout.as_nanos().to_le_bytes())
+            .with(&config.min_score.to_le_bytes());
         Ok(Self {
             directory: dataset_directory(
                 root,
@@ -166,6 +176,7 @@ impl ModelStore {
                 features,
                 config.decision,
                 &config.targets,
+                commission,
             )
             .join(settings.to_string()),
         })
@@ -189,7 +200,8 @@ impl ModelStore {
     }
 
     /// The store, under `root`, of the meta models of `strategy_id`, whose
-    /// primary is its rule, deciding with `features` as `config` says.
+    /// primary is its rule, deciding with `features` as `config` says, on
+    /// targets net of `commission`.
     ///
     /// # Errors
     ///
@@ -199,6 +211,7 @@ impl ModelStore {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &RuleConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             directory: dataset_directory(
@@ -207,6 +220,7 @@ impl ModelStore {
                 features,
                 config.decision,
                 &config.targets,
+                commission,
             )
             .join(META)
             .join(meta_settings(&config.meta)?.to_string()),
@@ -215,7 +229,9 @@ impl ModelStore {
 
     /// Publishes `model`, valid from its manifest's time, replacing the
     /// model valid from then, if any: written beside its file, then renamed
-    /// onto it.
+    /// onto it. The file written is this publish's own, named by the
+    /// process and the publish, so publishers at once, in a backtest and a
+    /// live node say, never write or rename each other's.
     ///
     /// # Errors
     ///
@@ -224,7 +240,9 @@ impl ModelStore {
         fs::create_dir_all(&self.directory)
             .with_context(|| format!("creating the model store {}", self.directory.display()))?;
         let path = self.path(model.manifest.valid_from);
-        let written = path.with_extension(format!("{EXTENSION}.tmp"));
+        let publish = PUBLISHES.fetch_add(1, Ordering::Relaxed);
+        let written =
+            path.with_extension(format!("{EXTENSION}.{}-{publish}.tmp", std::process::id()));
         fs::write(&written, serde_json::to_string_pretty(model)?)
             .and_then(|()| fs::rename(&written, &path))
             .with_context(|| format!("writing the model {}", path.display()))
@@ -278,25 +296,28 @@ impl ModelStore {
 }
 
 /// The directory, under `root`, of the stores of `strategy_id` deciding
-/// with `features` on `rule`, of `targets`: its id and its dataset's
-/// fingerprint.
+/// with `features` on `rule`, of `targets` net of `commission`: its id and
+/// its dataset's fingerprint.
 fn dataset_directory(
     root: &Path,
     strategy_id: StrategyId,
     features: &FeatureSet,
     rule: DecisionRule,
     targets: &TargetsConfig,
+    commission: &Commission,
 ) -> PathBuf {
     root.join(strategy_id.as_str())
-        .join(dataset::fingerprint(features, rule, targets).to_string())
+        .join(dataset::fingerprint(features, rule, targets, commission).to_string())
 }
 
-/// The training settings of `meta`: its learner, window and holdout.
+/// The training settings of `meta`: its learner, window, holdout and
+/// minimum score.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
-        .with(&meta.holdout.as_nanos().to_le_bytes()))
+        .with(&meta.holdout.as_nanos().to_le_bytes())
+        .with(&meta.min_score.to_le_bytes()))
 }
 
 /// The models of a store as a strategy swaps them in, decision by decision
@@ -454,7 +475,23 @@ mod tests {
     }
 
     fn store(root: &Path, config: &ModelConfig) -> ModelStore {
-        ModelStore::new(root, StrategyId::from(STRATEGY), &features(), config).unwrap()
+        store_net_of(root, config, &commission())
+    }
+
+    fn store_net_of(root: &Path, config: &ModelConfig, commission: &Commission) -> ModelStore {
+        ModelStore::new(
+            root,
+            StrategyId::from(STRATEGY),
+            &features(),
+            config,
+            commission,
+        )
+        .unwrap()
+    }
+
+    /// A commission rate of 30 per million.
+    fn commission() -> Commission {
+        Commission::Rate("0.00003".to_string())
     }
 
     fn at(time: &str) -> Timestamp {
@@ -557,6 +594,28 @@ mod tests {
         );
     }
 
+    /// Two publishers of a model at the same time, say a backtest and a
+    /// live node's retrain, each write their own file before the rename:
+    /// neither fails, and the model reads back whole.
+    #[test]
+    fn publishers_at_the_same_time_at_once_each_publish_a_whole_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), &config());
+        let published = model("2026-10-22T00:00:00Z", &[vec![0.5]]);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..50 {
+                        store.publish(&published).unwrap();
+                    }
+                });
+            }
+        });
+
+        assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), published);
+    }
+
     #[test]
     fn publishing_at_the_same_time_replaces_the_model() {
         let dir = tempfile::tempdir().unwrap();
@@ -573,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn other_training_settings_or_targets_list_none_of_the_models() {
+    fn other_training_settings_targets_or_minimum_score_list_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
@@ -609,7 +668,61 @@ mod tests {
             min_score: 0.9,
             ..config()
         };
-        assert_eq!(store(dir.path(), &gated).valid_froms().unwrap().len(), 1);
+        assert!(store(dir.path(), &gated).valid_froms().unwrap().is_empty());
+    }
+
+    /// A meta model published at one minimum score may score below
+    /// another: a meta of another minimum lists none of them.
+    #[test]
+    fn a_meta_model_of_another_minimum_score_is_not_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = |min_score| {
+            MetaConfig::builder()
+                .window(SignedDuration::from_hours(48))
+                .holdout(SignedDuration::from_hours(12))
+                .threshold(0.55)
+                .min_score(min_score)
+                .learner(LearnerConfig::Fake {})
+                .build()
+        };
+        let primary = store(dir.path(), &config());
+        primary
+            .meta(&meta(0.5), config().thresholds)
+            .unwrap()
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+
+        assert!(
+            primary
+                .meta(&meta(0.9), config().thresholds)
+                .unwrap()
+                .valid_froms()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A model learned targets net of its dataset run's commission: one of
+    /// other costs is another model.
+    #[test]
+    fn another_commission_lists_none_of_the_models() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), &config())
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+
+        for other in [
+            Commission::Rate("0.00004".to_string()),
+            Commission::PerOrder("3 USD".to_string()),
+        ] {
+            assert!(
+                store_net_of(dir.path(), &config(), &other)
+                    .valid_froms()
+                    .unwrap()
+                    .is_empty(),
+                "{other:?}"
+            );
+        }
     }
 
     /// A model trained at a time is the same whatever the interval that

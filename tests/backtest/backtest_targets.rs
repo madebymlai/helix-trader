@@ -9,7 +9,8 @@
 //! (closed by time), a bar touching both barriers (the venue replays its
 //! high before its low), the last decision unsettled at the end of data,
 //! barriers in basis points and a stop in average true ranges, no order
-//! before the ATR is initialized. Orders the risk engine denies leave their decisions unsettled. Over two
+//! before the ATR is initialized. Orders the risk engine denies drop their
+//! decisions, unsettled, before any time alert could. Over two
 //! days of a random walk the targets are the same with the execution
 //! engine purging closed orders and positions as without, while the purge
 //! keeps the cache to the last minutes' orders. One node per thread, so
@@ -71,6 +72,10 @@ struct Record {
     rows: Vec<TargetRow>,
     /// The closed orders in the cache when it stopped.
     closed_orders: usize,
+    /// The decisions it opened the targets of.
+    decisions: usize,
+    /// The decisions still open when it stopped.
+    open_decisions: usize,
     /// When each of its orders filled, in order.
     fills: Vec<UnixNanos>,
 }
@@ -168,6 +173,7 @@ impl DataActor for TargetProbe {
             };
             let rule = DecisionRule::Every(self.every);
             if let Some(row) = decide::decide(self, &self.features, rule, instrument_id) {
+                self.record.borrow_mut().decisions += 1;
                 Rc::clone(&self.targets).open(self, row)?;
             }
             return Ok(());
@@ -180,6 +186,7 @@ impl DataActor for TargetProbe {
             .cache()
             .orders_closed(None, None, None, None, None)
             .len();
+        self.record.borrow_mut().open_decisions = self.targets.open_decisions();
         self.targets.on_stop();
         Ok(())
     }
@@ -368,7 +375,9 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
 }
 
 /// Every order exceeds the instrument's largest, 10,000 oz: the risk
-/// engine denies each, and no decision settles.
+/// engine denies each, and the denial drops its decision, unsettled. The
+/// run ends at 09:20, before the 09:00 decision's horizon and time limit,
+/// whose alerts would drop it too: only the denial can have.
 #[test]
 fn denied_orders_leave_their_decisions_unsettled() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -378,12 +387,16 @@ fn denied_orders_leave_their_decisions_unsettled() {
         source,
         targets(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
     );
+    let backtest = Backtest {
+        end: ic::at("09:20:00"),
+        ..gold_backtest(catalog.path().to_path_buf())
+    };
 
-    gold_backtest(catalog.path().to_path_buf())
-        .run_dataset(probe)
-        .unwrap();
+    backtest.run_dataset(probe).unwrap();
 
+    assert_eq!(record.borrow().decisions, 1);
     assert_eq!(record.borrow().rows, []);
+    assert_eq!(record.borrow().open_decisions, 0);
 }
 
 // ------------------------------------------------------------------ bars

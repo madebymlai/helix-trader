@@ -522,7 +522,8 @@ next one's first: a gap of a tick or more, which the check and the data
 engine's warmup lookup would count as missing, a backtest or a retrain
 over streamed data refused for it. The node records each run's start in
 the catalog (`live-runs/<ns>`, beside `data/`), and before reading a
-series' coverage the check joins each gap whose next file was promoted
+series' coverage the check joins, over the whole series, each gap whose
+next file was promoted
 and in which no run started, the file before it ending after the run's
 start (the run's own file, or the warmup it wrote back): Nautilus'
 `extend_file_name` moves that file's end to 1 ns before the next one's
@@ -1051,7 +1052,8 @@ runs the steps of `model::walk`:
    once, to the last day's end plus the longest target: the last
    retrain period then has its targets to score. The catalog must cover that span, warmup included.
 2. For each retrain time before `--end` the store has no model valid
-   from (the primary's, or its meta model's), in time order, a child
+   from (the primary's, or its meta model's after the primary's first
+   model: before it the meta has no row), in time order, a child
    process, `train <strategy> --at t`, trains at it (the primary, then
    its meta model); its window's days already built, it replays none. A
    model in the store is reused, so a second backtest of the span starts
@@ -1507,7 +1509,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     take profit of 10 bps: the decision before the ATR has its 75 bars
     sends no order, the next one's short is stopped at 100,078.1 by a bar
     short of the long's take profit. Orders above the instrument's
-    largest are denied, logged, and leave every decision unsettled. Over
+    largest are denied, logged, and the denial drops each decision,
+    unsettled: the run ends before the first decision's horizon, so no
+    time alert can have, and no decision is open at the stop
+    (`Targets::open_decisions`). Over
     two days of a random walk, the rows are the same from a dataset run
     and from a trading run, every decision whose time limit passes before
     the end settled on 10M USD, while the purge leaves the cache a few
@@ -1533,7 +1538,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     at midnight on a 46-hour window replays the days it lacks through
     `run_dataset` and publishes a model whose reload predicts its
     manifest's probes to the bit; with a minimum score of 0.6, a train an
-    hour later keeps the model published first, the store unchanged.
+    hour later keeps the current model, that model published in the
+    gated store (the minimum score keys it), the store unchanged.
   - `backtest_model.rs`: a strategy trading on its models (strategy
     README, "Features and decisions", "Model handle"), the probe of
     `common::dataset`, its model handle in a backtest. On baseline models

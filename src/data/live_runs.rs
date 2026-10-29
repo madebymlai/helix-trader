@@ -15,7 +15,8 @@
 //! streams anything (`record_run_start`): an empty directory
 //! `live-runs/<ns>` beside `data/`, read back with Nautilus' own listing
 //! (`list_directory_stems`). A reader about to read a series joins the
-//! gaps the runs streamed across first (`join`), recording each as covered
+//! gaps the runs streamed across first (`join`), over the whole series at
+//! once, recording each as covered
 //! with Nautilus' `extend_file_name`, the rename by which the data engine
 //! records a request answered with nothing: the file before the gap then
 //! ends where the next one starts, for every later reader, the data
@@ -47,8 +48,8 @@ use nautilus_persistence::backend::parquet::{
 const RUNS: &str = "live-runs";
 
 /// Records in the catalog at `catalog` that a live run starts now: call it
-/// before the node is built, so that every row it streams, and the warmup
-/// it writes back, comes after.
+/// before the node runs, so that every row it streams, and the warmup it
+/// writes back, comes after.
 ///
 /// # Errors
 ///
@@ -62,9 +63,11 @@ pub fn record_run_start(catalog: &Path) -> anyhow::Result<()> {
 }
 
 /// Joins the gaps a live run streamed across in the series of `data_type`
-/// and `identifier` over `[from, to]` (inclusive nanoseconds), each whole,
-/// to the file before it (see the module docs): call it before reading the
-/// series' coverage.
+/// and `identifier`, each whole, to the file before it (see the module
+/// docs): call it before reading the series' coverage. It joins the whole
+/// series at once, judging every gap by the names the files had before
+/// it: a joined file is renamed by its interval alone, which would read as
+/// a file never promoted to a later join of the gap before it.
 ///
 /// # Errors
 ///
@@ -74,12 +77,10 @@ pub fn join(
     catalog: &ParquetDataCatalog,
     data_type: &NautilusDataType,
     identifier: &str,
-    from: u64,
-    to: u64,
 ) -> anyhow::Result<()> {
     let catalog_type = data_type.clone().into();
     let gaps = catalog
-        .get_missing_intervals_for_request(from, to, &catalog_type, Some(identifier))
+        .get_missing_intervals_for_request(0, u64::MAX, &catalog_type, Some(identifier))
         .context("reading the stored intervals")?;
     if gaps.is_empty() {
         return Ok(());
@@ -199,11 +200,10 @@ mod tests {
         ParquetDataCatalog::new(dir, None, None, None, None)
     }
 
-    /// What the catalog lacks of the quotes over `[from, to]` once joined
-    /// over that window, by Nautilus' own count, as the data engine reads
-    /// it.
+    /// What the catalog lacks of the quotes over `[from, to]` once joined,
+    /// by Nautilus' own count, as the data engine reads it.
     fn quotes_missing(catalog: &ParquetDataCatalog, from: u64, to: u64) -> Vec<(u64, u64)> {
-        join(catalog, &NautilusDataType::QuoteTick, AUDUSD, from, to).unwrap();
+        join(catalog, &NautilusDataType::QuoteTick, AUDUSD).unwrap();
         catalog
             .get_missing_intervals_for_request(
                 from,
@@ -259,6 +259,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(missing, []);
+    }
+
+    /// Joining renames the file before a gap, by its interval alone: a
+    /// reader of a narrow window then one of a wider one still find every
+    /// gap the run streamed across joined.
+    #[test]
+    fn a_wider_read_after_a_narrow_one_finds_every_streamed_gap_joined() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = catalog(
+            dir.path(),
+            &[1_000],
+            &[
+                (1_000, 1_100, PROMOTED),
+                (1_200, 1_300, PROMOTED),
+                (1_400, 1_500, PROMOTED),
+            ],
+        );
+        assert_eq!(quotes_missing(&catalog, 1_350, 1_360), []);
+        assert_eq!(quotes_missing(&catalog, 1_000, 1_500), []);
     }
 
     #[test]
