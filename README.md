@@ -21,8 +21,8 @@ per process. Each takes the strategy name and its TOML config.
 
 ## Quick start
 
-Requires Rust 1.99+, `clang` and `mold` (the linker set in
-`.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
+Requires Rust 1.99+, `clang`, `cmake` (to build LightGBM), `mold` (the linker
+set in `.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
 Podman for the IB Gateway and for the Redis that holds the live node's cache
 (`docker pull docker.io/library/redis:7.4.11-alpine` once; see
 `src/live/README.md`).
