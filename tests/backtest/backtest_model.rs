@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use crate::common::{
-    dataset::{STRATEGY, config, features, replay, rule, targets, trade, walk},
+    dataset::{STRATEGY, commission, config, features, replay, rule, targets, trade, walk},
     ic,
 };
 use helix_trader::model::{
@@ -25,7 +25,14 @@ use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
 
 fn store(models: &Path, config: &ModelConfig) -> ModelStore {
-    ModelStore::new(models, StrategyId::from(STRATEGY), &features(), config).unwrap()
+    ModelStore::new(
+        models,
+        StrategyId::from(STRATEGY),
+        &features(),
+        config,
+        &commission(),
+    )
+    .unwrap()
 }
 
 /// A baseline model of the probe valid from `valid_from`, predicting
@@ -38,7 +45,8 @@ fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
         manifest: ModelManifest {
             strategy_id: StrategyId::from(STRATEGY),
             valid_from,
-            fingerprint: dataset::fingerprint(&features(), rule(), &targets()).to_string(),
+            fingerprint: dataset::fingerprint(&features(), rule(), &targets(), &commission())
+                .to_string(),
             feature_names: vec!["mid".to_string()],
             targets: targets(),
             label: config().label,
@@ -145,6 +153,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
                     StrategyId::from(STRATEGY),
                     &features(),
                     config.clone(),
+                    &commission(),
                 )
                 .unwrap();
                 let outcome = training.train_at(t, |from, to| replay(&catalog, from, to));

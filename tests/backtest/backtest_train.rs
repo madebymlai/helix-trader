@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use crate::common::{
-    dataset::{STRATEGY, features, replay, rule, targets, walk},
+    dataset::{STRATEGY, commission, features, replay, rule, targets, walk},
     ic,
 };
 use helix_trader::model::{
@@ -48,6 +48,7 @@ fn training(catalog: &TempDir, models: &Path, min_score: f64) -> Training {
         StrategyId::from(STRATEGY),
         &features(),
         config(min_score),
+        &commission(),
     )
     .unwrap()
 }

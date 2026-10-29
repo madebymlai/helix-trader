@@ -2,11 +2,11 @@
 //! the time it was trained at.
 //!
 //! A store is a directory per strategy id, fingerprint (that of its
-//! dataset: the features, the decision rule and the targets, see
-//! `dataset::fingerprint`) and training settings (the learner and its
-//! settings, the label, the window and the holdout), so a model is only
-//! ever listed beside models of the same features and training. Backtest
-//! and live read the same list.
+//! dataset: the features, the decision rule, the targets and the
+//! commission they are net of, see `dataset::fingerprint`) and training
+//! settings (the learner and its settings, the label, the window and the
+//! holdout), so a model is only ever listed beside models of the same
+//! features, costs and training. Backtest and live read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory under its primary's,
 //! keyed by its own training settings (its learner and settings, window
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
-    dataset,
+    dataset::{self, Commission},
     decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
     learner::{LearnerConfig, Model, SavedModel},
@@ -76,7 +76,8 @@ pub struct ModelManifest {
     pub strategy_id: StrategyId,
     /// The time the model was trained at, from which it is valid.
     pub valid_from: Timestamp,
-    /// The fingerprint of the features, the decision rule and the targets.
+    /// The fingerprint of the features, the decision rule, the targets and
+    /// the commission.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
@@ -143,7 +144,8 @@ impl StoredModel {
 
 impl ModelStore {
     /// The store, under `root`, of the models of `strategy_id` deciding with
-    /// `features` as `config` says and trained as it says.
+    /// `features` as `config` says, on targets net of `commission`, and
+    /// trained as `config` says.
     ///
     /// # Errors
     ///
@@ -153,6 +155,7 @@ impl ModelStore {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &ModelConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         let settings = Fingerprint::default()
             .with(serde_json::to_string(&config.learner)?.as_bytes())
@@ -166,6 +169,7 @@ impl ModelStore {
                 features,
                 config.decision,
                 &config.targets,
+                commission,
             )
             .join(settings.to_string()),
         })
@@ -189,7 +193,8 @@ impl ModelStore {
     }
 
     /// The store, under `root`, of the meta models of `strategy_id`, whose
-    /// primary is its rule, deciding with `features` as `config` says.
+    /// primary is its rule, deciding with `features` as `config` says, on
+    /// targets net of `commission`.
     ///
     /// # Errors
     ///
@@ -199,6 +204,7 @@ impl ModelStore {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &RuleConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             directory: dataset_directory(
@@ -207,6 +213,7 @@ impl ModelStore {
                 features,
                 config.decision,
                 &config.targets,
+                commission,
             )
             .join(META)
             .join(meta_settings(&config.meta)?.to_string()),
@@ -278,17 +285,18 @@ impl ModelStore {
 }
 
 /// The directory, under `root`, of the stores of `strategy_id` deciding
-/// with `features` on `rule`, of `targets`: its id and its dataset's
-/// fingerprint.
+/// with `features` on `rule`, of `targets` net of `commission`: its id and
+/// its dataset's fingerprint.
 fn dataset_directory(
     root: &Path,
     strategy_id: StrategyId,
     features: &FeatureSet,
     rule: DecisionRule,
     targets: &TargetsConfig,
+    commission: &Commission,
 ) -> PathBuf {
     root.join(strategy_id.as_str())
-        .join(dataset::fingerprint(features, rule, targets).to_string())
+        .join(dataset::fingerprint(features, rule, targets, commission).to_string())
 }
 
 /// The training settings of `meta`: its learner, window and holdout.
@@ -454,7 +462,23 @@ mod tests {
     }
 
     fn store(root: &Path, config: &ModelConfig) -> ModelStore {
-        ModelStore::new(root, StrategyId::from(STRATEGY), &features(), config).unwrap()
+        store_net_of(root, config, &commission())
+    }
+
+    fn store_net_of(root: &Path, config: &ModelConfig, commission: &Commission) -> ModelStore {
+        ModelStore::new(
+            root,
+            StrategyId::from(STRATEGY),
+            &features(),
+            config,
+            commission,
+        )
+        .unwrap()
+    }
+
+    /// A commission rate of 30 per million.
+    fn commission() -> Commission {
+        Commission::Rate("0.00003".to_string())
     }
 
     fn at(time: &str) -> Timestamp {
@@ -610,6 +634,29 @@ mod tests {
             ..config()
         };
         assert_eq!(store(dir.path(), &gated).valid_froms().unwrap().len(), 1);
+    }
+
+    /// A model learned targets net of its dataset run's commission: one of
+    /// other costs is another model.
+    #[test]
+    fn another_commission_lists_none_of_the_models() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), &config())
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+
+        for other in [
+            Commission::Rate("0.00004".to_string()),
+            Commission::PerOrder("3 USD".to_string()),
+        ] {
+            assert!(
+                store_net_of(dir.path(), &config(), &other)
+                    .valid_froms()
+                    .unwrap()
+                    .is_empty(),
+                "{other:?}"
+            );
+        }
     }
 
     /// A model trained at a time is the same whatever the interval that

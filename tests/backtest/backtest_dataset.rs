@@ -10,7 +10,7 @@
 use std::{collections::VecDeque, rc::Rc};
 
 use crate::common::{
-    dataset::{Lcg, STRATEGY, features, replay, replay_on, rule, targets, walk},
+    dataset::{Lcg, STRATEGY, commission, features, replay, replay_on, rule, targets, walk},
     ic,
 };
 use helix_trader::model::{
@@ -41,6 +41,7 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
         &features(),
         rule(),
         targets(),
+        &commission(),
     )
     .unwrap();
     let (mut replayed, mut settled) = (vec![], vec![]);
@@ -160,6 +161,7 @@ fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
             &two_hour_mean(),
             rule(),
             targets(),
+            &commission(),
         )
         .unwrap();
         dataset
@@ -232,6 +234,7 @@ fn stored_by_a_build_to(last: Date, from: Timestamp, to: Timestamp) -> Vec<Datas
             &features(),
             rule(),
             targets(),
+            &commission(),
         )
         .unwrap();
         dataset

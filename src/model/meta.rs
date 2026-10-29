@@ -32,7 +32,7 @@ use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
 
 use super::{
     config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
-    dataset::{self, DatasetRow},
+    dataset::{self, Commission, DatasetRow},
     features::{FeatureSet, PRIMARY_FEATURES, primary_values},
     store::{ModelStore, Swap},
     targets::{Label, TargetsConfig},
@@ -70,8 +70,8 @@ enum Primary {
 
 impl Meta {
     /// The meta model of `config`, the model of `strategy_id` deciding
-    /// with `features`, its models in the store under `models`; none if
-    /// `config` has no meta section.
+    /// with `features` on targets net of `commission`, its models in the
+    /// store under `models`; none if `config` has no meta section.
     ///
     /// # Errors
     ///
@@ -82,11 +82,12 @@ impl Meta {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &ModelConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Option<Self>> {
         let Some(meta) = &config.meta else {
             return Ok(None);
         };
-        let primary = ModelStore::new(models, strategy_id, features, config)?;
+        let primary = ModelStore::new(models, strategy_id, features, config, commission)?;
         let store = primary.meta(meta, config.thresholds)?;
         Ok(Some(Self {
             config: meta.clone(),
@@ -95,8 +96,13 @@ impl Meta {
             primary: Primary::Model {
                 store: primary,
                 feature_names: features.names().to_vec(),
-                fingerprint: dataset::fingerprint(features, config.decision, &config.targets)
-                    .to_string(),
+                fingerprint: dataset::fingerprint(
+                    features,
+                    config.decision,
+                    &config.targets,
+                    commission,
+                )
+                .to_string(),
                 thresholds: config.thresholds,
             },
             store,
@@ -104,8 +110,8 @@ impl Meta {
     }
 
     /// The meta model of `config`, of `strategy_id`, whose primary is its
-    /// rule, deciding with `features`, its models in the store under
-    /// `models`.
+    /// rule, deciding with `features` on targets net of `commission`, its
+    /// models in the store under `models`.
     ///
     /// # Errors
     ///
@@ -117,6 +123,7 @@ impl Meta {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &RuleConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         ensure!(
             features.has_primary(),
@@ -128,7 +135,7 @@ impl Meta {
             primary: Primary::Rule,
             feature_names: features.names().to_vec(),
             pnl: pnl(&config.targets)?,
-            store: ModelStore::of_rule(models, strategy_id, features, config)?,
+            store: ModelStore::of_rule(models, strategy_id, features, config, commission)?,
         })
     }
 

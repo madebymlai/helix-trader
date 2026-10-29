@@ -608,7 +608,12 @@ of its choosing (`model::features`, `model::decide`).
   code (`model::features` itself and Nautilus' indicators, named by the
   git source `Cargo.lock` pins, through `build.rs`), the rule and
   `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
-  adds the targets and `model::targets`' code.
+  adds the targets and `model::targets`' code, and
+  `dataset::fingerprint(&features, rule, &targets, &commission)` all of
+  it and the commission of the dataset runs, as given
+  (`Commission::PerOrder` or `Commission::Rate`): the targets are net of
+  it, so rows and models of other costs are never read. The runs' balance
+  and leverage are not in it: large enough, they deny no target.
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
   venue with a large balance) each decision's targets come from real
   orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
@@ -669,9 +674,10 @@ of its choosing (`model::features`, `model::decide`).
   horizon, the long then the short, its P&L and its exit, 1 a take
   profit, -1 a stop, 0 the time; `TargetRow::values`), the settling and
   decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
-  &features, rule, targets)`) stores them under the strategy id and the
-  fingerprint, so another strategy, of another width, has its own, and a
-  change to the features, the rule or the targets finds none; the
+  &features, rule, targets, &commission)`) stores them under the strategy
+  id and the fingerprint, so another strategy, of another width, has its
+  own, and a change to the features, the rule, the targets or the
+  commission finds none; the
   feature names go in the data type's metadata, not in each row. The
   catalog's coverage is the day cache: `missing(first, last)` gives the
   days it lacks, from the catalog's missing intervals, and `build(first,
@@ -717,7 +723,7 @@ of its choosing (`model::features`, `model::decide`).
   outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
   meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
-  config)` and `train_at(t, replay)` (`model::train`) train at `t`: the
+  config, &commission)` and `train_at(t, replay)` (`model::train`) train at `t`: the
   rows of the window ending at `t` settled by `t` (`Dataset::settled`),
   so the purge between them and the model's first use is the longest
   target; the model fitted on those before the holdout, the window's
@@ -731,8 +737,8 @@ of its choosing (`model::features`, `model::decide`).
   "Meta-labeling"); `Training::of_rule` trains a rule primary's meta
   alone.
 - **Model store.** `ModelStore` (`model::store`) holds the published
-  models under `<models>/<strategy id>/<fingerprint>/<settings>/`, the
-  settings a hash of the learner and its settings, the label, the window
+  models under `<models>/<strategy id>/<fingerprint>/<settings>/` (the
+  dataset's fingerprint, the commission in it), the settings a hash of the learner and its settings, the label, the window
   and the holdout. Each model is one file, `<valid from>.json`, written
   beside its name and renamed onto it: its manifest (strategy, valid
   from, fingerprint, feature names, target spec, label, learner, holdout
@@ -757,7 +763,8 @@ of its choosing (`model::features`, `model::decide`).
   fresh decision, on data of the targets' instrument (`new` refuses a
   cadence on features reading none of it), snapshots the features and
   publishes their row, then, in
-  `Mode::Backtest { models }` or `Mode::Live { models, .. }`, takes the
+  `Mode::Backtest { models, commission }` or `Mode::Live { models,
+  commission, .. }`, takes the
   latest model of
   the store valid at the decision, predicts, and returns the `Trade`
   (side, the targets' size, the probability) that `Thresholds::side`
@@ -817,7 +824,8 @@ of its choosing (`model::features`, `model::decide`).
   store has no model valid from. A model is the same whatever interval
   its time came from, so the interval does not key the store.
 - **Retraining backtest.** `WalkForward` (`model::walk`,
-  `WalkForward::new(catalog, models, strategy_id, &features, config)`)
+  `WalkForward::new(catalog, models, strategy_id, &features, config,
+  &commission)`)
   holds a backtest's retrains and scores: `prepare(start, end, build,
   train)` has `build` build the dataset from the first retrain's window
   to `end` if it lacks a day, then `train` train at each missing retrain
@@ -827,7 +835,7 @@ of its choosing (`model::features`, `model::decide`).
   README, "Retraining on the schedule"). With a meta model, `prepare`
   builds from the longer of the two windows and trains at each time
   either store lacks, and the meta's scores follow the primary's.
-- **Live retraining.** In `Mode::Live { models, launcher,
+- **Live retraining.** In `Mode::Live { models, commission, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
   sets the strategy's retrain timer (`schedule::start`) on the grid of
   `retrain`, `catalog_delay` late (`Recording::catalog_delay`: the data
@@ -858,9 +866,11 @@ of its choosing (`model::features`, `model::decide`).
   dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
   `--retrain-balance`), needed by a strategy trading on a model, and
   passes them, its `--config`, `--catalog`, `--models` and `--leverage`
-  to the `train` it starts. `backtest` of a strategy trading on a model
+  to the `train` it starts; its handle reads the models of that
+  commission. `backtest` of a strategy trading on a model
   builds its dataset and runs `train` in child processes first, with
-  its `--dataset-balance`, each train through `Launcher::process` as
+  its `--dataset-balance`, and trades on the models of its own
+  commission, each train through `Launcher::process` as
   live's: one keeping the model is a kept retrain, not a failed backtest
   (backtest README, "Retraining on the schedule").
 

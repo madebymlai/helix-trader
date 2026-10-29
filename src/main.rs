@@ -216,21 +216,30 @@ struct Commission {
 impl CommissionArgs {
     /// The fee model of the one flag given.
     fn fee_model(&self) -> FeeModelAny {
-        self.given().1.fee_model.clone()
-    }
-
-    /// The one flag given and its value, as given.
-    fn args(&self) -> [String; 2] {
-        let (flag, commission) = self.given();
-        [flag.to_string(), commission.given.clone()]
-    }
-
-    fn given(&self) -> (&str, &Commission) {
         match (&self.commission, &self.commission_rate) {
-            (Some(commission), _) => ("--commission", commission),
-            (None, Some(rate)) => ("--commission-rate", rate),
+            (Some(commission), _) => commission.fee_model.clone(),
+            (None, Some(rate)) => rate.fee_model.clone(),
             (None, None) => unreachable!("clap requires one commission flag"),
         }
+    }
+
+    /// The commission of the one flag given, as given: what a dataset's
+    /// fingerprint reads, and what a child process is given.
+    fn given(&self) -> dataset::Commission {
+        match (&self.commission, &self.commission_rate) {
+            (Some(commission), _) => dataset::Commission::PerOrder(commission.given.clone()),
+            (None, Some(rate)) => dataset::Commission::Rate(rate.given.clone()),
+            (None, None) => unreachable!("clap requires one commission flag"),
+        }
+    }
+}
+
+/// The flag of `commission` and its value, as `dataset` and `train` take
+/// them.
+fn commission_args(commission: &dataset::Commission) -> [&str; 2] {
+    match commission {
+        dataset::Commission::PerOrder(commission) => ["--commission", commission],
+        dataset::Commission::Rate(rate) => ["--commission-rate", rate],
     }
 }
 
@@ -297,6 +306,24 @@ struct RetrainCosts {
     /// target is denied, for example "10000000 USD".
     #[arg(long, value_parser = money_text)]
     retrain_balance: Option<String>,
+}
+
+impl RetrainCosts {
+    /// The commission of the retrains, as given.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if neither flag was given.
+    fn commission(&self) -> anyhow::Result<dataset::Commission> {
+        match (&self.retrain_commission, &self.retrain_commission_rate) {
+            (Some(commission), _) => Ok(dataset::Commission::PerOrder(commission.clone())),
+            (None, Some(rate)) => Ok(dataset::Commission::Rate(rate.clone())),
+            (None, None) => bail!(
+                "a strategy trading on a model retrains: give the commission of its \
+                 dataset runs (--retrain-commission or --retrain-commission-rate)"
+            ),
+        }
+    }
 }
 
 /// The strategies), by command-line name.
@@ -546,7 +573,9 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         }
         Strategy::Learned => {
             let config = load_learned_config(&args.run.config)?;
-            let walk = learned::walk_forward(&config, &args.run.catalog, &args.models)?;
+            let commission = args.commission.given();
+            let walk =
+                learned::walk_forward(&config, &args.run.catalog, &args.models, &commission)?;
             let children = Children::of(&args)?;
             walk.prepare(
                 start,
@@ -556,6 +585,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
             )?;
             let mode = Mode::Backtest {
                 models: args.models.clone(),
+                commission,
             };
             let outcome =
                 backtest(config.bars.data_requirements()).run(Learned::new(config, mode)?)?;
@@ -578,7 +608,7 @@ struct Children {
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
-    commission: [String; 2],
+    commission: dataset::Commission,
     balance: Money,
     leverage: Decimal,
 }
@@ -598,7 +628,7 @@ impl Children {
             config: args.run.config.clone(),
             catalog: args.run.catalog.clone(),
             models: args.models.clone(),
-            commission: args.commission.args(),
+            commission: args.commission.given(),
             balance,
             leverage: args.leverage,
         })
@@ -665,7 +695,7 @@ impl Children {
             "--catalog".into(),
             self.catalog.clone().into_os_string(),
         ]);
-        args.extend(self.commission.iter().map(OsString::from));
+        args.extend(commission_args(&self.commission).map(OsString::from));
         args.extend(
             [
                 "--balance".to_string(),
@@ -706,6 +736,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             let program = std::env::current_exe().context("finding this binary to retrain")?;
             let mode = Mode::Live {
                 models: args.models.clone(),
+                commission: args.retrain.commission()?,
                 launcher: Launcher::process(program, retrain_args(&args)?),
                 catalog_delay: live.recording.catalog_delay(),
             };
@@ -771,14 +802,8 @@ impl DatasetRun {
 /// missing.
 fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
     let costs = &args.retrain;
-    let commission = match (&costs.retrain_commission, &costs.retrain_commission_rate) {
-        (Some(commission), _) => ["--commission", commission],
-        (None, Some(rate)) => ["--commission-rate", rate],
-        (None, None) => bail!(
-            "a strategy trading on a model retrains: give the commission of its \
-             dataset runs (--retrain-commission or --retrain-commission-rate)"
-        ),
-    };
+    let commission = costs.commission()?;
+    let commission = commission_args(&commission);
     let balance = costs.retrain_balance.as_deref().context(
         "a strategy trading on a model retrains: give the starting balance of its \
          dataset runs (--retrain-balance)",
@@ -837,7 +862,12 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
         Strategy::Learned => {
             let config = load_learned_config(&args.config)?;
-            let training = learned::training(&config, &args.catalog, &args.models)?;
+            let training = learned::training(
+                &config,
+                &args.catalog,
+                &args.models,
+                &args.commission.given(),
+            )?;
             training.train_at(args.at, |start, end| run.replay(&config, start, end))
         }
     };
@@ -862,8 +892,11 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
         Strategy::Learned => {
             let config = load_learned_config(&args.run.config)?;
-            learned::dataset(&config, &args.run.catalog)?
-                .build(first, last, |from, to| run.replay(&config, from, to))?
+            learned::dataset(&config, &args.run.catalog, &args.commission.given())?.build(
+                first,
+                last,
+                |from, to| run.replay(&config, from, to),
+            )?
         }
     };
     match (built.first(), built.last()) {
@@ -1385,9 +1418,15 @@ mod tests {
     #[test]
     fn a_backtest_hands_its_children_the_commission_as_given() {
         let args = parse_backtest(&backtest_required()).unwrap();
-        assert_eq!(args.commission.args(), ["--commission", "3 EUR"]);
+        assert_eq!(
+            commission_args(&args.commission.given()),
+            ["--commission", "3 EUR"]
+        );
         let args = parse_backtest(&backtest_with(&["--commission-rate", "0.00003"])).unwrap();
-        assert_eq!(args.commission.args(), ["--commission-rate", "0.00003"]);
+        assert_eq!(
+            commission_args(&args.commission.given()),
+            ["--commission-rate", "0.00003"]
+        );
     }
 
     #[test]

@@ -73,7 +73,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
     config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
-    dataset,
+    dataset::{self, Commission},
     decide::{self, DecisionRule},
     features::FeatureSet,
     launcher::{Launcher, Retraining},
@@ -86,15 +86,21 @@ use crate::strategy::warmup;
 /// Where a handle runs, and so what it does at a decision.
 #[derive(Debug, Clone)]
 pub enum Mode {
-    /// Trades in a backtest on the models of the store under `models`.
-    Backtest { models: PathBuf },
-    /// Trades live on the models of the store under `models`, deciding
+    /// Trades in a backtest on the models of the store under `models`
+    /// whose targets are net of `commission`, that of its dataset runs.
+    Backtest {
+        models: PathBuf,
+        commission: Commission,
+    },
+    /// Trades live on the models of the store under `models` whose targets
+    /// are net of `commission`, that of its retrains' dataset runs, deciding
     /// the live node's bar build delay late, and retrains on the
     /// config's interval through `launcher`, each retrain launched
     /// `catalog_delay` after its time: once the data the node received up
     /// to then is in the catalog (`live::Recording::catalog_delay`).
     Live {
         models: PathBuf,
+        commission: Commission,
         launcher: Launcher,
         catalog_delay: SignedDuration,
     },
@@ -188,14 +194,15 @@ impl ModelHandle {
         config: &ModelConfig,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
-        let primary = |models: &Path| -> anyhow::Result<Primary> {
+        let primary = |models: &Path, commission: &Commission| -> anyhow::Result<Primary> {
             let fingerprint =
-                dataset::fingerprint(&features, config.decision, &config.targets).to_string();
-            let meta = Meta::of_model(models, strategy_id, &features, config)?
+                dataset::fingerprint(&features, config.decision, &config.targets, commission)
+                    .to_string();
+            let meta = Meta::of_model(models, strategy_id, &features, config, commission)?
                 .map(|meta| MetaModels::of(&meta, &fingerprint));
             Ok(Primary::Model {
                 models: Models::new(
-                    ModelStore::new(models, strategy_id, &features, config)?,
+                    ModelStore::new(models, strategy_id, &features, config, commission)?,
                     features.names().to_vec(),
                     fingerprint,
                 ),
@@ -233,10 +240,11 @@ impl ModelHandle {
             "the features of a rule primary declare its side and probability \
              (`FeatureSetBuilder::primary`)"
         );
-        let primary = |models: &Path| -> anyhow::Result<Primary> {
-            let meta = Meta::of_rule(models, strategy_id, &features, config)?;
+        let primary = |models: &Path, commission: &Commission| -> anyhow::Result<Primary> {
+            let meta = Meta::of_rule(models, strategy_id, &features, config, commission)?;
             let fingerprint =
-                dataset::fingerprint(&features, config.decision, &config.targets).to_string();
+                dataset::fingerprint(&features, config.decision, &config.targets, commission)
+                    .to_string();
             Ok(Primary::Rule {
                 meta: MetaModels::of(&meta, &fingerprint),
             })
@@ -252,14 +260,14 @@ impl ModelHandle {
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
     /// `targets`, retrained every `retrain`, in `mode`: trading on the
-    /// models `primary` reads under the store's root, or opening the
-    /// targets.
+    /// models `primary` reads under the store's root, of the targets net of
+    /// the mode's commission, or opening the targets.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
         (rule, targets, retrain): (DecisionRule, &TargetsConfig, SignedDuration),
         mode: Mode,
-        primary: impl FnOnce(&Path) -> anyhow::Result<Primary>,
+        primary: impl FnOnce(&Path, &Commission) -> anyhow::Result<Primary>,
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
         let traded = targets.instrument_id;
@@ -269,13 +277,14 @@ impl ModelHandle {
              no decision of the cadence would be fresh"
         );
         let serving = match mode {
-            Mode::Backtest { models } => Serving::Trading(Box::new(Trading {
+            Mode::Backtest { models, commission } => Serving::Trading(Box::new(Trading {
                 retraining: None,
-                primary: primary(&models)?,
+                primary: primary(&models, &commission)?,
                 quantity: targets.quantity,
             })),
             Mode::Live {
                 models,
+                commission,
                 launcher,
                 catalog_delay,
             } => Serving::Trading(Box::new(Trading {
@@ -285,7 +294,7 @@ impl ModelHandle {
                     catalog_delay,
                     launcher,
                 )),
-                primary: primary(&models)?,
+                primary: primary(&models, &commission)?,
                 quantity: targets.quantity,
             })),
             Mode::Dataset { rows } => Serving::Dataset {
@@ -721,7 +730,19 @@ mod tests {
     }
 
     fn store(models: &Path) -> ModelStore {
-        ModelStore::new(models, StrategyId::from(STRATEGY), &features(), &config()).unwrap()
+        ModelStore::new(
+            models,
+            StrategyId::from(STRATEGY),
+            &features(),
+            &config(),
+            &commission(),
+        )
+        .unwrap()
+    }
+
+    /// A commission rate of 30 per million.
+    fn commission() -> Commission {
+        Commission::Rate("0.00003".to_string())
     }
 
     /// A baseline model valid from `valid_from` predicting `trues` tenths
@@ -736,8 +757,13 @@ mod tests {
             manifest: ModelManifest {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from: at(valid_from),
-                fingerprint: dataset::fingerprint(&features(), config.decision, &config.targets)
-                    .to_string(),
+                fingerprint: dataset::fingerprint(
+                    &features(),
+                    config.decision,
+                    &config.targets,
+                    &commission(),
+                )
+                .to_string(),
                 feature_names: vec!["mid".to_string()],
                 targets: config.targets,
                 label: config.label,
@@ -763,6 +789,7 @@ mod tests {
             &config(),
             Mode::Backtest {
                 models: models.to_path_buf(),
+                commission: commission(),
             },
         )
         .unwrap()
@@ -780,6 +807,35 @@ mod tests {
         assert_eq!(
             handle(&probe, models.path()).decide(&mut probe).unwrap(),
             None
+        );
+    }
+
+    /// A model learned targets net of its dataset runs' commission: a
+    /// backtest of other costs does not trade on it.
+    #[test]
+    fn a_model_of_another_commission_gives_no_trade() {
+        let models = tempfile::tempdir().unwrap();
+        store(models.path())
+            .publish(&baseline("2026-10-22T00:00:00Z", 8))
+            .unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let features = features();
+        warm(&features, probe.clock().timestamp_ns());
+        let other = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config(),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                commission: Commission::PerOrder("3 USD".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(other.decide(&mut probe).unwrap(), None);
+        assert_eq!(
+            probability(handle(&probe, models.path()).decide(&mut probe).unwrap()),
+            Some(0.8)
         );
     }
 
@@ -810,6 +866,7 @@ mod tests {
             &config(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
+                commission: commission(),
             },
         )
         .unwrap();
@@ -852,6 +909,7 @@ mod tests {
             &config(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
+                commission: commission(),
             },
         )
         .unwrap_err()
@@ -1023,7 +1081,8 @@ mod tests {
         let models = models.path().to_path_buf();
         assert_eq!(
             next(Mode::Backtest {
-                models: models.clone()
+                models: models.clone(),
+                commission: commission(),
             }),
             at("2026-10-22T12:00:00.010Z")
         );
@@ -1038,6 +1097,7 @@ mod tests {
     fn live(models: PathBuf, launcher: Launcher) -> Mode {
         Mode::Live {
             models,
+            commission: commission(),
             launcher,
             catalog_delay: SignedDuration::from_mins(6),
         }
@@ -1185,7 +1245,8 @@ mod tests {
             manifest: ModelManifest {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from: at(valid_from),
-                fingerprint: dataset::fingerprint(features, decision, targets).to_string(),
+                fingerprint: dataset::fingerprint(features, decision, targets, &commission())
+                    .to_string(),
                 feature_names: feature_names.iter().map(ToString::to_string).collect(),
                 targets: targets.clone(),
                 label: Label::Barrier,
@@ -1235,29 +1296,41 @@ mod tests {
         meta_trues: Option<usize>,
     ) -> Rc<ModelHandle> {
         let features = features();
-        ModelStore::new(models, StrategyId::from(STRATEGY), &features, config)
+        ModelStore::new(
+            models,
+            StrategyId::from(STRATEGY),
+            &features,
+            config,
+            &commission(),
+        )
+        .unwrap()
+        .publish(&baseline_of(
+            &features,
+            (config.decision, &config.targets),
+            &["mid"],
+            "2026-10-22T00:00:00Z",
+            6,
+        ))
+        .unwrap();
+        if let Some(trues) = meta_trues {
+            ModelStore::new(
+                models,
+                StrategyId::from(STRATEGY),
+                &features,
+                config,
+                &commission(),
+            )
+            .unwrap()
+            .meta(config.meta.as_ref().unwrap(), config.thresholds)
             .unwrap()
             .publish(&baseline_of(
                 &features,
                 (config.decision, &config.targets),
-                &["mid"],
+                &META_NAMES,
                 "2026-10-22T00:00:00Z",
-                6,
+                trues,
             ))
             .unwrap();
-        if let Some(trues) = meta_trues {
-            ModelStore::new(models, StrategyId::from(STRATEGY), &features, config)
-                .unwrap()
-                .meta(config.meta.as_ref().unwrap(), config.thresholds)
-                .unwrap()
-                .publish(&baseline_of(
-                    &features,
-                    (config.decision, &config.targets),
-                    &META_NAMES,
-                    "2026-10-22T00:00:00Z",
-                    trues,
-                ))
-                .unwrap();
         }
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(
@@ -1266,6 +1339,7 @@ mod tests {
             config,
             Mode::Backtest {
                 models: models.to_path_buf(),
+                commission: commission(),
             },
         )
         .unwrap()
@@ -1356,6 +1430,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features,
             &config,
+            &commission(),
         )
         .unwrap()
         .publish(&baseline_of(
@@ -1373,6 +1448,7 @@ mod tests {
             &config,
             Mode::Backtest {
                 models: models.path().to_path_buf(),
+                commission: commission(),
             },
         )
         .unwrap();
@@ -1402,6 +1478,7 @@ mod tests {
             &rule_config(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
+                commission: commission(),
             },
         )
         .unwrap_err();

@@ -22,7 +22,9 @@
 use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{Missing, STRATEGY, backtest, config, replay_on, rule, targets, trade_on, walk},
+    dataset::{
+        Missing, STRATEGY, backtest, commission, config, replay_on, rule, targets, trade_on, walk,
+    },
     ic,
 };
 use helix_trader::model::{
@@ -152,6 +154,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
         StrategyId::from(STRATEGY),
         &features(false),
         model_primary(),
+        &commission(),
     )
     .unwrap()
     .prepare(
@@ -165,6 +168,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     &features(false),
                     rule(),
                     targets(),
+                    &commission(),
                 )?;
                 let (first, last) = dataset::days(from, to);
                 dataset.build(first, last, |from, to| {
@@ -181,6 +185,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     StrategyId::from(STRATEGY),
                     &features(false),
                     model_primary(),
+                    &commission(),
                 )
                 .unwrap()
                 .train_at(at, |from, to| replay_on(catalog, features(false), from, to))
@@ -224,6 +229,7 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
         StrategyId::from(STRATEGY),
         &features(false),
         &model_primary(),
+        &commission(),
     )
     .unwrap();
     let meta = primary.meta(&meta(), model_primary().thresholds).unwrap();
@@ -392,6 +398,7 @@ fn rule_dataset(catalog: &TempDir) -> Dataset {
         &features(true),
         rule(),
         targets(),
+        &commission(),
     )
     .unwrap()
 }
@@ -420,6 +427,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
                     StrategyId::from(STRATEGY),
                     &features(true),
                     rule_primary(),
+                    &commission(),
                 )
                 .unwrap()
                 .train_at(at, |from, to| replay_rule(&catalog, from, to))
@@ -448,6 +456,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
     let trades = on_thread(|| {
         let (probe, trades) = rule_probe(Mode::Backtest {
             models: models.path().to_path_buf(),
+            commission: commission(),
         });
         backtest(catalog.path(), start, end).run(probe).unwrap();
         trades.take()
@@ -458,6 +467,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
         StrategyId::from(STRATEGY),
         &features(true),
         &rule_primary(),
+        &commission(),
     )
     .unwrap();
     let longs: Vec<f64> = retrains

@@ -35,7 +35,7 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::ModelConfig,
-    dataset::{self, Dataset, DatasetRow},
+    dataset::{self, Commission, Dataset, DatasetRow},
     features::FeatureSet,
     learner::{LearnerConfig, Model, TrainingSet},
     meta::Meta,
@@ -99,8 +99,8 @@ pub struct Score {
 
 impl WalkForward {
     /// The backtests of `strategy_id`'s model, deciding with `features`,
-    /// on its dataset in the catalog at `catalog` and its models in the
-    /// store under `models`, as `config` says.
+    /// on its dataset, net of `commission`, in the catalog at `catalog` and
+    /// its models in the store under `models`, as `config` says.
     ///
     /// # Errors
     ///
@@ -112,6 +112,7 @@ impl WalkForward {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: ModelConfig,
+        commission: &Commission,
     ) -> anyhow::Result<Self> {
         let Some(label) = config.targets.label_index(config.label) else {
             bail!("the label {:?} has no target", config.label);
@@ -125,9 +126,10 @@ impl WalkForward {
                 features,
                 config.decision,
                 config.targets.clone(),
+                commission,
             )?,
-            store: ModelStore::new(models, strategy_id, features, &config)?,
-            meta: Meta::of_model(models, strategy_id, features, &config)?,
+            store: ModelStore::new(models, strategy_id, features, &config, commission)?,
+            meta: Meta::of_model(models, strategy_id, features, &config, commission)?,
             config,
         })
     }
@@ -440,6 +442,11 @@ mod tests {
             .build()
     }
 
+    /// A commission rate of 30 per million.
+    fn commission() -> Commission {
+        Commission::Rate("0.00003".to_string())
+    }
+
     fn walk(dir: &Path) -> WalkForward {
         std::fs::create_dir_all(dir.join("catalog")).unwrap();
         WalkForward::new(
@@ -448,6 +455,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features(),
             config(),
+            &commission(),
         )
         .unwrap()
     }
@@ -776,6 +784,7 @@ Model scores, out of sample, over the span
             StrategyId::from(STRATEGY),
             &features(),
             with_meta(),
+            &commission(),
         )
         .unwrap();
         for at in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
