@@ -182,6 +182,8 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     let requirements = config.bars.data_requirements();
     // An empty catalog of its own: the venue answers the whole warmup.
     let catalog = tempfile::tempdir().unwrap();
+    // Outside the catalog, as `Live` requires.
+    let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-043"),
         account: Some(account),
@@ -189,6 +191,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
+        recording: crate::recording(staging.path()),
     };
     // As Ctrl-C would, once the node runs: its signal handler stops it.
     // The node is not `Send`, so it runs here and the signal is sent from

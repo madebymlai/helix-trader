@@ -202,6 +202,8 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         .await
         .unwrap();
     }
+    // Outside the catalog, as `Live` requires.
+    let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
         account: Some(account),
@@ -209,6 +211,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
+        recording: crate::recording(staging.path()),
     };
     let started = Timestamp::now();
     let ran = tokio::time::timeout(Duration::from_secs(600), live.run(&requirements, probe)).await;

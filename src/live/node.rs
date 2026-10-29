@@ -21,12 +21,13 @@ use nautilus_common::{
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
     logging::logger::LoggerConfig,
 };
+use nautilus_core::UUID4;
 use nautilus_live::{
     builder::LiveNodeBuilder,
     config::{LiveDataEngineConfig, LiveExecutionEngineConfig, LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
-use nautilus_persistence::config::DataCatalogConfig;
+use nautilus_persistence::config::{DataCatalogConfig, StreamingConfig};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::redis;
@@ -41,9 +42,9 @@ pub(super) struct Clients {
     pub(super) routing: RoutingConfig,
 }
 
-/// Builds the live node of `trader_id` on the clients of each adapter in
-/// `clients`, routed as each says, with `cache` configuring the cache
-/// (sized for the warmup) and `data_engine`
+/// Builds the live node of `trader_id`, as its `instance_id`, on the
+/// clients of each adapter in `clients`, routed as each says, with `cache`
+/// configuring the cache (sized for the warmup) and `data_engine`
 /// the data engine (see `warmup::live_data_engine_config`), adds
 /// `strategy` claiming the external orders of `instrument_ids`, and runs it
 /// until SIGINT or SIGTERM.
@@ -55,7 +56,8 @@ pub(super) struct Clients {
 /// `catalog` is registered, the directory fill-catalog fills and backtests
 /// read: it answers the historical requests first, the data clients
 /// what it lacks, and answers asked to are written back to it (see
-/// `strategy::warmup`).
+/// `strategy::warmup`). The data the node receives is streamed into it as
+/// `streaming` says (see `Recording`).
 ///
 /// # Errors
 ///
@@ -66,9 +68,11 @@ pub(super) struct Clients {
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn run<S>(
     trader_id: TraderId,
+    instance_id: UUID4,
     logging: LoggerConfig,
     cache: CacheConfig,
     data_engine: LiveDataEngineConfig,
+    streaming: StreamingConfig,
     catalog: DataCatalogConfig,
     clients: Vec<Clients>,
     instrument_ids: &[InstrumentId],
@@ -77,7 +81,15 @@ pub(super) async fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let config = config(trader_id, logging, cache, data_engine, catalog);
+    let config = config(
+        trader_id,
+        instance_id,
+        logging,
+        cache,
+        data_engine,
+        streaming,
+        catalog,
+    );
     let cache_database = redis::start().await?;
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
@@ -124,22 +136,26 @@ where
 const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
-/// The config of the live node: `trader_id`, `logging`, `cache`,
-/// `data_engine`, the one `catalog` and the execution engine's
-/// reconciliation and checks, after loading the cache from its database
-/// (`load_cache`, Nautilus' default), and its purges
-/// (`PURGE_INTERVAL_MINS`).
+/// The config of the live node: `trader_id` and its kept `instance_id`,
+/// `logging`, `cache`, `data_engine`, the one `catalog`, `streaming` into
+/// it, and the execution engine's reconciliation and checks, after loading
+/// the cache from its database (`load_cache`, Nautilus' default), and its
+/// purges (`PURGE_INTERVAL_MINS`).
 fn config(
     trader_id: TraderId,
+    instance_id: UUID4,
     logging: LoggerConfig,
     cache: CacheConfig,
     data_engine: LiveDataEngineConfig,
+    streaming: StreamingConfig,
     catalog: DataCatalogConfig,
 ) -> LiveNodeConfig {
     LiveNodeConfig {
         catalogs: vec![catalog],
+        streaming: Some(streaming),
         environment: Environment::Live,
         trader_id,
+        instance_id: Some(instance_id),
         logging,
         cache: Some(cache),
         data_engine,
@@ -161,15 +177,27 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::live::Recording;
+
+    const INSTANCE_ID: &str = "2d89666b-1a1e-4a75-b193-4eb3b454c757";
 
     fn node_config() -> LiveNodeConfig {
+        let catalog = DataCatalogConfig::new("/data/catalog".to_string(), None, None);
+        let recording = Recording {
+            staging: "/data/staging".into(),
+            promotion_interval: Duration::from_secs(5 * 60),
+        };
         config(
             TraderId::from("HELIX-001"),
+            UUID4::from(INSTANCE_ID),
             LoggerConfig::default(),
             CacheConfig::default(),
             LiveDataEngineConfig::default(),
-            DataCatalogConfig::new("/data/catalog".to_string(), None, None),
+            recording.streaming(&catalog).unwrap(),
+            catalog,
         )
     }
 
@@ -191,5 +219,14 @@ mod tests {
         let [catalog] = node_config().catalogs.try_into().unwrap();
         assert_eq!(catalog.path(), "/data/catalog");
         assert!(!catalog.read_only());
+    }
+
+    #[test]
+    fn the_node_streams_into_its_catalog_under_its_kept_instance_id() {
+        let config = node_config();
+        assert_eq!(config.instance_id, Some(UUID4::from(INSTANCE_ID)));
+        let streaming = config.streaming.unwrap();
+        assert_eq!(streaming.writer_path, "/data/staging");
+        assert_eq!(streaming.catalog.unwrap().path(), "/data/catalog");
     }
 }
