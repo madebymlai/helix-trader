@@ -138,8 +138,9 @@ impl WalkForward {
     /// from the window of the span's first retrain time to the span's end,
     /// `build` builds it over that span (`Dataset::build` of its days);
     /// then `train` trains at each retrain time of the span the store has
-    /// no model valid from, or the meta model's store, if any, in time
-    /// order (`Training::train_at`, which trains both).
+    /// no model valid from, or the meta model's store, if any, after the
+    /// primary's first model (`Meta::window_start`: before, the meta has
+    /// no row), in time order (`Training::train_at`, which trains both).
     ///
     /// # Errors
     ///
@@ -166,7 +167,13 @@ impl WalkForward {
                 .into_iter()
                 .collect();
         if let Some(meta) = &self.meta {
-            missing.extend(schedule::missing(&times, &meta.store().valid_froms()?));
+            // A meta trained where its window is empty, before the
+            // primary's first model, publishes nothing: no time to train.
+            for at in schedule::missing(&times, &meta.store().valid_froms()?) {
+                if meta.window_start(at)? < at {
+                    missing.insert(at);
+                }
+            }
         }
         for at in missing {
             train(at)?;
@@ -771,9 +778,10 @@ Model scores, out of sample, over the span
         config
     }
 
-    /// The primary's models in the store at both retrain times, its meta
-    /// model's at none: the backtest builds from the meta's longer window
-    /// and trains at both times, which train both models.
+    /// The primary's models in the store at both retrain times and the day
+    /// before, its meta model's at none: the backtest builds from the
+    /// meta's longer window and trains at both times, which train both
+    /// models.
     #[test]
     fn a_backtest_with_a_meta_model_builds_its_window_and_trains_where_either_lacks() {
         let dir = tempfile::tempdir().unwrap();
@@ -787,9 +795,12 @@ Model scores, out of sample, over the span
             &commission(),
         )
         .unwrap();
-        for at in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
-            let fingerprint = walk.dataset.fingerprint().to_string();
-            walk.store.publish(&model(&walk, at, fingerprint)).unwrap();
+        for at in [
+            at("2026-01-06T00:00:00Z"),
+            at("2026-01-07T00:00:00Z"),
+            at("2026-01-08T00:00:00Z"),
+        ] {
+            publish(&walk, at);
         }
         let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
 
@@ -815,6 +826,52 @@ Model scores, out of sample, over the span
             trained.take(),
             [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")]
         );
+    }
+
+    /// A meta model has no row before its primary's first model, so none
+    /// is trained at the primary's first retrain time: a second backtest
+    /// of the span finds nothing to train.
+    #[test]
+    fn a_second_backtest_with_a_meta_model_trains_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
+        let walk = WalkForward::new(
+            &dir.path().join("catalog"),
+            &dir.path().join("models"),
+            StrategyId::from(STRATEGY),
+            &features(),
+            with_meta(),
+            &commission(),
+        )
+        .unwrap();
+        let meta = walk.meta.as_ref().unwrap();
+        // A train publishes the primary, and the meta if the primary had a
+        // model before.
+        let train = |at| {
+            let earlier = walk.store.valid_froms()?.first().is_some_and(|&t| t < at);
+            publish(&walk, at);
+            if earlier {
+                let fingerprint = walk.dataset.fingerprint().to_string();
+                meta.store().publish(&model(&walk, at, fingerprint))?;
+            }
+            Ok(())
+        };
+        let span = (at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"));
+        walk.prepare(span.0, span.1, |_, _| Ok(()), train).unwrap();
+        let trained = RefCell::new(vec![]);
+
+        walk.prepare(
+            span.0,
+            span.1,
+            |_, _| Ok(()),
+            |at| {
+                trained.borrow_mut().push(at);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(trained.take(), []);
     }
 
     #[test]

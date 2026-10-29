@@ -1052,7 +1052,8 @@ runs the steps of `model::walk`:
    once, to the last day's end plus the longest target: the last
    retrain period then has its targets to score. The catalog must cover that span, warmup included.
 2. For each retrain time before `--end` the store has no model valid
-   from (the primary's, or its meta model's), in time order, a child
+   from (the primary's, or its meta model's after the primary's first
+   model: before it the meta has no row), in time order, a child
    process, `train <strategy> --at t`, trains at it (the primary, then
    its meta model); its window's days already built, it replays none. A
    model in the store is reused, so a second backtest of the span starts
