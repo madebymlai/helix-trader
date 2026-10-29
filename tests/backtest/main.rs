@@ -47,6 +47,7 @@ mod backtest_okx_swap_funding;
 mod backtest_okx_xperp;
 mod backtest_okx_xperp_funding;
 mod backtest_quote_gap;
+mod backtest_retrain;
 mod backtest_rolls;
 mod backtest_session;
 mod backtest_start_on_close;

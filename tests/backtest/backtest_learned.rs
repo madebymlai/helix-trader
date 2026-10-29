@@ -7,7 +7,8 @@
 //! the minimum of 0.5 publishes) and every decision from the model's
 //! valid-from is a long, closed 30 minutes later. A live node's launcher
 //! (`model::launcher`) starting that `train` as its child publishes the
-//! same model.
+//! same model. The binary's `backtest` retrains on the schedule first, in
+//! child processes of its own, a retrain keeping the model no failure.
 
 use std::{
     ffi::OsStr,
@@ -150,4 +151,112 @@ fn a_model_a_live_retrain_publishes_through_the_train_subcommand_is_traded() {
 
     assert_eq!(retrained, Retrained::Published);
     assert_eq!(traded(&catalog, models), (6, 3));
+}
+
+/// The binary's `backtest` of the strategy of `config` over `[start,
+/// end]`, retraining into the store under `models`; its stdout and its
+/// stderr.
+fn backtest(
+    config: &Path,
+    catalog: &Path,
+    models: &Path,
+    start: Timestamp,
+    end: Timestamp,
+) -> (String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
+        .arg("backtest")
+        .arg("learned")
+        .arg("--config")
+        .arg(config)
+        .arg("--catalog")
+        .arg(catalog)
+        .arg("--models")
+        .arg(models)
+        .args(["--start", &start.to_string(), "--end", &end.to_string()])
+        .args(["--commission-rate", "0.00003", "--balance", "100000 USD"])
+        .args(["--dataset-balance", "10000000 USD"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    (stdout, stderr)
+}
+
+/// A backtest from midnight of the 23rd to noon of the 24th retrains at
+/// midnight of each, in child processes of the binary: the dataset built
+/// from the first window, 02:00 of the 21st, to the end of the 24th plus
+/// the horizon, then a train at each time, then the run, its report
+/// followed by the scores of both periods. A second backtest of the span
+/// starts no child.
+#[test]
+fn the_binarys_backtest_retrains_in_child_processes_once() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        t() + SignedDuration::from_hours(51),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    let (start, end) = (t(), t() + SignedDuration::from_hours(36));
+    let next = t() + SignedDuration::from_hours(24);
+
+    let (stdout, _) = backtest(&config_path, catalog.path(), &models, start, end);
+
+    assert!(stdout.contains("built 4 days of the dataset"), "{stdout}");
+    for at in [t(), next] {
+        assert!(
+            stdout.contains(&format!("published a model valid from {at}")),
+            "{stdout}"
+        );
+    }
+    let scores = stdout.find("Model scores").expect(&stdout);
+    assert!(stdout.find("Final balances").unwrap() < scores, "{stdout}");
+    for (from, to) in [(t(), next), (next, end)] {
+        assert!(
+            stdout.contains(&format!("Model scores, out of sample, from {from} to {to}")),
+            "{stdout}"
+        );
+    }
+    assert!(stdout.contains("over the span"), "{stdout}");
+
+    let (again, _) = backtest(&config_path, catalog.path(), &models, start, end);
+
+    assert!(!again.contains("days of the dataset"), "{again}");
+    assert!(!again.contains("published a model"), "{again}");
+    assert!(again.contains("over the span"), "{again}");
+}
+
+/// With a minimum score of 0.6, above the fake's 0.5, both retrains keep
+/// the current model, there being none: `train` fails with the reason,
+/// and the backtest goes on, its reason printed, to a run with no model,
+/// no period scored but by the baseline.
+#[test]
+fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(2),
+        t() + SignedDuration::from_hours(51),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    std::fs::write(
+        &config_path,
+        CONFIG.replace("min_score = 0.5", "min_score = 0.6"),
+    )
+    .unwrap();
+    let (start, end) = (t(), t() + SignedDuration::from_hours(36));
+
+    let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
+
+    for at in [t(), t() + SignedDuration::from_hours(24)] {
+        assert!(
+            stderr.contains(&format!(
+                "the retrain at {at}: kept the current model: holdout AUC 0.5 below the minimum 0.6"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(stdout.contains("Orders: 0"), "{stdout}");
+    assert!(stdout.contains("Model valid from: none"), "{stdout}");
+    assert!(!stdout.contains("published a model"), "{stdout}");
 }

@@ -671,16 +671,15 @@ of its choosing (`model::features`, `model::decide`).
 - **Model config.** The model section of a strategy's TOML is a
   `ModelConfig` (`model::config`): `decision`, `targets`, `label`
   (`"barrier"` or `"horizon"`: the model learns whether that target's long
-  gains, net of costs), `retrain`, `window` and `holdout` (durations; a
-  retrain at every multiple of `retrain` since the epoch), `thresholds =
-  { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC) and `learner`.
-  `validate(&requirements)` refuses a traded instrument the strategy does
-  not read, a barrier ATR on a bar type it does not read (its bars feed
-  the ATR), a label of a target the config lacks, a barrier limit or
-  horizon not shorter than the window, a retrain interval not positive, a
-  holdout leaving no fitted row,
-  thresholds that are not probabilities with the short below the long,
-  and a minimum score outside [0, 1].
+  gains, net of costs), `retrain`, `window` and `holdout` (durations),
+  `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
+  and `learner`. `validate(&requirements)` refuses a retrain interval not
+  positive, a traded instrument the strategy does not read, a barrier ATR
+  on a bar type it does not read (its bars feed the ATR), a label of a
+  target the config lacks, a barrier limit or horizon not shorter than
+  the window, a holdout leaving no fitted row, thresholds that are not
+  probabilities with the short below the long, and a minimum score
+  outside [0, 1].
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
   config)` and `train_at(t, replay)` (`model::train`) train at `t`: the
   rows of the window ending at `t` settled by `t` (`Dataset::settled`),
@@ -701,7 +700,8 @@ of its choosing (`model::features`, `model::decide`).
   missing value written `"NaN"`) and the model as its adapter saved it.
   A reloaded model is checked by predicting the probes, not by its bytes.
   `valid_froms()` lists the models in time order, `read(valid_from)` gives
-  one back.
+  one back. `StoredModel::load(feature_names, fingerprint)` loads it with
+  the checks a handle makes before use (below).
 - **Model handle.** A strategy trading on its model holds a `ModelHandle`
   (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
   mode)`, an `Rc`), the one place it decides: `start(self, &bar_types)`
@@ -729,20 +729,39 @@ of its choosing (`model::features`, `model::decide`).
   `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
   trading. The trades are the strategy's own orders: `learned/` sends a
   market order and closes it `hold` later.
+- **Schedule.** A model is retrained every `retrain` (`model::schedule`),
+  at its multiples since the Unix epoch, whatever the run start, in a
+  backtest as live: the times of a Nautilus timer named after the
+  strategy (`timer(strategy_id)`, `RETRAIN-<strategy id>`, so several
+  strategies can retrain in one process), that `start(clock, timer,
+  every, delay)` sets from the last grid time not after now, plus the
+  delay (`last_grid_time`). `times(every, from, to)` gives those a run
+  over `[from, to)` uses, from the last at or before `from`, firing such
+  a timer on a virtual clock; `missing(times, published)` those the
+  store has no model valid from. A model is the same whatever interval
+  its time came from, so the interval does not key the store.
+- **Retraining backtest.** `WalkForward` (`model::walk`,
+  `WalkForward::new(catalog, models, strategy_id, &features, config)`)
+  holds a backtest's retrains and scores: `prepare(start, end, build,
+  train)` has `build` build the dataset from the first retrain's window
+  to `end` if it lacks a day, then `train` train at each missing retrain
+  time; `scores(start, end)` scores each decision of the dataset in the
+  span with the model the handle used at it, beside the baseline fitted
+  at each retrain time, per retrain period and over the span (backtest
+  README, "Retraining on the schedule").
 - **Live retraining.** In `Mode::Live { models, launcher,
   catalog_delay }` the handle retrains too (`model::launcher`): `start`
-  sets a timer named after the strategy, `RETRAIN-<strategy id>`, on the
-  epoch-aligned grid of `retrain`, `catalog_delay` late
-  (`Recording::catalog_delay`: the data the node received up to a time
-  reaches the catalog that much later); each firing, handed on by the
-  strategy's `on_time_event`, launches a train at its grid time through
-  the `Launcher`, unless one is still running: that one is skipped, with
-  a warning. `decide` first polls the running retrain: a finished one is
-  logged, as info when it published, as an error with the reason when it
-  kept the current model or failed, and the next may start. The model it
-  published is used from that decision on (the store is listed again);
-  live validity starts when the train finishes, a backtest's at its
-  time. `Launcher::process` runs the binary's `train` as a child (one
+  sets the strategy's retrain timer (`schedule::start`) on the grid of
+  `retrain`, `catalog_delay` late (`Recording::catalog_delay`: the data
+  the node received up to a time reaches the catalog that much later);
+  each firing, handed on by the strategy's `on_time_event`, launches a
+  train at its grid time through the `Launcher`, unless one is still
+  running: that one is skipped, with a warning. `decide` first polls the
+  running retrain: a finished one is logged, as info when it published,
+  as an error with the reason when it kept the current model or failed,
+  and the next may start. The model it published is used from that
+  decision on (the store is listed again); live validity starts when the
+  train finishes, a backtest's at its time. `Launcher::process` runs the binary's `train` as a child (one
   node per process), `--at` and the time appended to its arguments, its
   exit status the outcome, the error it printed last the reason; a child
   still running when the node stops runs to its end.
@@ -755,12 +774,18 @@ of its choosing (`model::features`, `model::decide`).
   in `Mode::Dataset` on hedging venues, the costs and balance given as to
   a backtest (`--commission` or `--commission-rate`, `--balance`); it
   prints a published `Outcome`, and fails with a kept one, its reason.
+  `dataset <strategy> --config .. --start .. --end ..` builds the days
+  of `[start, end)` the dataset lacks by the same replay
+  (`Dataset::build`, `dataset::days`), with the same costs and balance.
   `backtest` and `live` take `--models` (default `models`), the store
   root, beside `train`'s; `live` takes the costs of its retrains'
   dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
   `--retrain-balance`), needed by a strategy trading on a model, and
   passes them, its `--config`, `--catalog`, `--models` and `--leverage`
-  to the `train` it starts.
+  to the `train` it starts. `backtest` of a strategy trading on a model
+  runs `dataset` and `train` as child processes first, with its
+  `--dataset-balance`, each train through `Launcher::process` as live's:
+  one keeping the model is a kept retrain, not a failed backtest.
 
 ## Warmup and training
 

@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use jiff::Timestamp;
 use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ use super::{
     config::ModelConfig,
     dataset,
     features::{FeatureSet, Fingerprint},
-    learner::{LearnerConfig, SavedModel},
+    learner::{LearnerConfig, Model, SavedModel},
     targets::{Label, TargetsConfig},
 };
 
@@ -81,6 +81,48 @@ pub struct Probe {
     #[serde(with = "values")]
     pub row: Vec<f64>,
     pub prediction: f64,
+}
+
+impl StoredModel {
+    /// The model, loaded by its manifest's learner and checked against a
+    /// strategy of `feature_names` and `fingerprint`: the manifest's feature
+    /// names in order and fingerprint are the strategy's, the model takes
+    /// as many features, and it predicts each probe to the bit as when
+    /// fitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot be loaded or fails a check.
+    pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<Model> {
+        let manifest = &self.manifest;
+        ensure!(
+            manifest.feature_names == feature_names,
+            "its features {:?} are not the strategy's {feature_names:?}",
+            manifest.feature_names
+        );
+        ensure!(
+            manifest.fingerprint == fingerprint,
+            "its fingerprint {} is not the strategy's {fingerprint}",
+            manifest.fingerprint
+        );
+        let model = manifest.learner.load(&self.model)?;
+        let width = model.width();
+        ensure!(
+            width == manifest.feature_names.len(),
+            "it takes {width} features, its manifest names {}",
+            manifest.feature_names.len()
+        );
+        for probe in &manifest.probes {
+            let prediction = model.predict(&probe.row)?;
+            ensure!(
+                prediction.to_bits() == probe.prediction.to_bits(),
+                "it predicts {prediction} on the probe {:?}, not {} as when fitted",
+                probe.row,
+                probe.prediction
+            );
+        }
+        Ok(model)
+    }
 }
 
 impl ModelStore {
@@ -405,5 +447,25 @@ mod tests {
             ..config()
         };
         assert_eq!(store(dir.path(), &gated).valid_froms().unwrap().len(), 1);
+    }
+
+    /// A model trained at a time is the same whatever the interval that
+    /// time came from: backtests and live retraining at other intervals
+    /// share it.
+    #[test]
+    fn another_retrain_interval_lists_the_same_models() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), &config())
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+        let weekly = ModelConfig {
+            retrain: SignedDuration::from_hours(168),
+            ..config()
+        };
+
+        assert_eq!(
+            store(dir.path(), &weekly).valid_froms().unwrap(),
+            [at("2026-10-22T00:00:00Z")]
+        );
     }
 }

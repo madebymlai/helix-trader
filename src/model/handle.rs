@@ -42,7 +42,6 @@
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
-use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -391,37 +390,9 @@ impl Trading {
 
     /// The model valid from `valid_from`, checked against the strategy.
     fn load(&self, valid_from: Timestamp) -> anyhow::Result<Model> {
-        let stored = self.store.read(valid_from)?;
-        let manifest = &stored.manifest;
-        ensure!(
-            manifest.feature_names == self.feature_names,
-            "its features {:?} are not the strategy's {:?}",
-            manifest.feature_names,
-            self.feature_names
-        );
-        ensure!(
-            manifest.fingerprint == self.fingerprint,
-            "its fingerprint {} is not the strategy's {}",
-            manifest.fingerprint,
-            self.fingerprint
-        );
-        let model = manifest.learner.load(&stored.model)?;
-        let width = model.width();
-        ensure!(
-            width == manifest.feature_names.len(),
-            "it takes {width} features, its manifest names {}",
-            manifest.feature_names.len()
-        );
-        for probe in &manifest.probes {
-            let prediction = model.predict(&probe.row)?;
-            ensure!(
-                prediction.to_bits() == probe.prediction.to_bits(),
-                "it predicts {prediction} on the probe {:?}, not {} as when fitted",
-                probe.row,
-                probe.prediction
-            );
-        }
-        Ok(model)
+        self.store
+            .read(valid_from)?
+            .load(&self.feature_names, &self.fingerprint)
     }
 }
 

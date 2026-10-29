@@ -363,7 +363,7 @@ kin).
 A strategy trading on a model retrains live on its model section's
 `retrain` interval: its model handle (`Mode::Live`) sets a Nautilus timer
 named after the strategy, `RETRAIN-<strategy id>`, on the epoch-aligned
-grid of the interval, and each firing starts this binary's `train` at
+grid of the interval (`model::schedule`, shared with the backtest), and each firing starts this binary's `train` at
 the grid time as a child process (`model::launcher`), with the node's
 `--config`, `--catalog`, `--models` and `--leverage` and the retrain
 costs: the replay runs a Nautilus node of its own, which this process,
