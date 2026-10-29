@@ -33,6 +33,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, ensure};
@@ -51,6 +52,10 @@ use super::{
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
+
+/// The publishes of this process so far, which tell its temporary files
+/// apart.
+static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
 /// The directory of the meta models within the directory of their primary's
 /// models, or of a rule primary's dataset.
@@ -224,7 +229,9 @@ impl ModelStore {
 
     /// Publishes `model`, valid from its manifest's time, replacing the
     /// model valid from then, if any: written beside its file, then renamed
-    /// onto it.
+    /// onto it. The file written is this publish's own, named by the
+    /// process and the publish, so publishers at once, in a backtest and a
+    /// live node say, never write or rename each other's.
     ///
     /// # Errors
     ///
@@ -233,7 +240,9 @@ impl ModelStore {
         fs::create_dir_all(&self.directory)
             .with_context(|| format!("creating the model store {}", self.directory.display()))?;
         let path = self.path(model.manifest.valid_from);
-        let written = path.with_extension(format!("{EXTENSION}.tmp"));
+        let publish = PUBLISHES.fetch_add(1, Ordering::Relaxed);
+        let written =
+            path.with_extension(format!("{EXTENSION}.{}-{publish}.tmp", std::process::id()));
         fs::write(&written, serde_json::to_string_pretty(model)?)
             .and_then(|()| fs::rename(&written, &path))
             .with_context(|| format!("writing the model {}", path.display()))
@@ -583,6 +592,28 @@ mod tests {
             store.read(at("2026-10-22T04:00:00.01Z")).unwrap(),
             published
         );
+    }
+
+    /// Two publishers of a model at the same time, say a backtest and a
+    /// live node's retrain, each write their own file before the rename:
+    /// neither fails, and the model reads back whole.
+    #[test]
+    fn publishers_at_the_same_time_at_once_each_publish_a_whole_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), &config());
+        let published = model("2026-10-22T00:00:00Z", &[vec![0.5]]);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..50 {
+                        store.publish(&published).unwrap();
+                    }
+                });
+            }
+        });
+
+        assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), published);
     }
 
     #[test]
