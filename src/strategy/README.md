@@ -723,8 +723,9 @@ of its choosing (`model::features`, `model::decide`).
   outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
   meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
-  config, &commission)` and `train_at(t, replay)` (`model::train`) train at `t`: the
-  rows of the window ending at `t` settled by `t` (`Dataset::settled`),
+  config, &commission)` and `train_at(t, replay)` (`model::train`) train
+  at `t`: the rows of the window ending at `t` settled by `t`
+  (`Dataset::settled`),
   so the purge between them and the model's first use is the longest
   target; the model fitted on those before the holdout, the window's
   last part, settled by its start, the same gap; scored by the AUC of its
@@ -738,9 +739,12 @@ of its choosing (`model::features`, `model::decide`).
   alone.
 - **Model store.** `ModelStore` (`model::store`) holds the published
   models under `<models>/<strategy id>/<fingerprint>/<settings>/` (the
-  dataset's fingerprint, the commission in it), the settings a hash of the learner and its settings, the label, the window
-  and the holdout. Each model is one file, `<valid from>.json`, written
-  beside its name and renamed onto it: its manifest (strategy, valid
+  dataset's fingerprint, the commission in it), the settings a hash of the
+  learner and its settings, the label, the window, the holdout and the
+  minimum score: a model published at a lower minimum may score below a
+  higher one, so a stricter gate lists none of it. Each model is one
+  file, `<valid from>.json`, written beside its name and renamed onto
+  it: its manifest (strategy, valid
   from, fingerprint, feature names, target spec, label, learner, holdout
   AUC, and up to 16 holdout rows with the model's predictions on them, a
   missing value written `"NaN"`) and the model as its adapter saved it.
@@ -749,9 +753,9 @@ of its choosing (`model::features`, `model::decide`).
   one back. `StoredModel::load(feature_names, fingerprint)` loads it with
   the checks a handle makes before use (below). A meta model's store is
   `meta/<settings>` under its primary's directory (`ModelStore::meta`),
-  its settings its learner, window and holdout and the primary's
-  thresholds; a rule primary's under the strategy id and fingerprint
-  (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
+  its settings its learner, window, holdout and minimum score and the
+  primary's thresholds; a rule primary's under the strategy id and
+  fingerprint (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
   strategy does, decision by decision: the latest valid, checked, a
   model failing a check refused and the current one kept; the handle,
   the backtest's scores and the meta's rows all use it.

@@ -4,15 +4,16 @@
 //! A store is a directory per strategy id, fingerprint (that of its
 //! dataset: the features, the decision rule, the targets and the
 //! commission they are net of, see `dataset::fingerprint`) and training
-//! settings (the learner and its settings, the label, the window and the
-//! holdout), so a model is only ever listed beside models of the same
+//! settings (the learner and its settings, the label, the window, the
+//! holdout and the minimum score, below which a model is never
+//! published), so a model is only ever listed beside models of the same
 //! features, costs and training. Backtest and live read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory under its primary's,
-//! keyed by its own training settings (its learner and settings, window
-//! and holdout) and the primary's thresholds, which make its rows; a rule
-//! primary has no store of its own, its meta's `meta/` sits under the
-//! strategy id and fingerprint. A meta model is only ever listed beside
+//! keyed by its own training settings (its learner and settings, window,
+//! holdout and minimum score) and the primary's thresholds, which make its
+//! rows; a rule primary has no store of its own, its meta's `meta/` sits
+//! under the strategy id and fingerprint. A meta model is only ever listed beside
 //! meta models of the same primary.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
@@ -161,7 +162,8 @@ impl ModelStore {
             .with(serde_json::to_string(&config.learner)?.as_bytes())
             .with(format!("{:?}", config.label).as_bytes())
             .with(&config.window.as_nanos().to_le_bytes())
-            .with(&config.holdout.as_nanos().to_le_bytes());
+            .with(&config.holdout.as_nanos().to_le_bytes())
+            .with(&config.min_score.to_le_bytes());
         Ok(Self {
             directory: dataset_directory(
                 root,
@@ -299,12 +301,14 @@ fn dataset_directory(
         .join(dataset::fingerprint(features, rule, targets, commission).to_string())
 }
 
-/// The training settings of `meta`: its learner, window and holdout.
+/// The training settings of `meta`: its learner, window, holdout and
+/// minimum score.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
-        .with(&meta.holdout.as_nanos().to_le_bytes()))
+        .with(&meta.holdout.as_nanos().to_le_bytes())
+        .with(&meta.min_score.to_le_bytes()))
 }
 
 /// The models of a store as a strategy swaps them in, decision by decision
@@ -597,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn other_training_settings_or_targets_list_none_of_the_models() {
+    fn other_training_settings_targets_or_minimum_score_list_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
@@ -633,7 +637,38 @@ mod tests {
             min_score: 0.9,
             ..config()
         };
-        assert_eq!(store(dir.path(), &gated).valid_froms().unwrap().len(), 1);
+        assert!(store(dir.path(), &gated).valid_froms().unwrap().is_empty());
+    }
+
+    /// A meta model published at one minimum score may score below
+    /// another: a meta of another minimum lists none of them.
+    #[test]
+    fn a_meta_model_of_another_minimum_score_is_not_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = |min_score| {
+            MetaConfig::builder()
+                .window(SignedDuration::from_hours(48))
+                .holdout(SignedDuration::from_hours(12))
+                .threshold(0.55)
+                .min_score(min_score)
+                .learner(LearnerConfig::Fake {})
+                .build()
+        };
+        let primary = store(dir.path(), &config());
+        primary
+            .meta(&meta(0.5), config().thresholds)
+            .unwrap()
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+
+        assert!(
+            primary
+                .meta(&meta(0.9), config().thresholds)
+                .unwrap()
+                .valid_froms()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A model learned targets net of its dataset run's commission: one of
