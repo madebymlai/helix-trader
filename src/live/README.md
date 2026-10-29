@@ -6,7 +6,9 @@ sets up the clients of the instruments' venues, then wires the clients, the
 strategy and the node. The node registers the catalog fill-catalog fills
 and backtests read (`--catalog`, default `catalog`): it serves the warmup
 first, the venues' data clients what it lacks, and IC's answers are
-written back to it.
+written back to it. The node streams the market data it receives into it,
+so that a retrain the node starts replays up to the present (see
+"Recording into the catalog").
 Clients go by venue: OKX instruments to OKX's clients, IC instruments
 (`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
 venues gets their clients, routed by Nautilus: a venue's own client
@@ -27,6 +29,9 @@ live/
   mod.rs    `Live`: the start sequence (clients by venue, logger), the
             entry point
   node.rs   builds and runs the LiveNode, broker-agnostic
+  recording.rs
+            `Recording`: the streaming of the live data into the
+            catalog, and the trader's kept instance id
   redis.rs  the Redis container behind the node's cache
   ib/       IB client factories and configs, on the gateway `data`'s IB
             part starts; README.md: IB live
@@ -46,13 +51,14 @@ DataClientFactory>` and friends and never names a broker.
 
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
-  [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog]
+  [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog] \
+  [--staging staging] [--promotion-minutes 5]
 ```
 
 It runs one strategy until Ctrl-C (SIGINT) or SIGTERM, starting the
 gateway itself, so it needs no prior `fill-catalog` run. In code:
-`live::Live { trader_id, account, client_id, leverage, logging, catalog
-}.run(&requirements, strategy)`, generic over the strategy like
+`live::Live { trader_id, account, client_id, leverage, logging, catalog,
+recording }.run(&requirements, strategy)`, generic over the strategy like
 `Backtest::run`. It starts or reuses the Redis container that holds the
 node's cache (see "Cache in Redis").
 
@@ -70,6 +76,11 @@ node's cache (see "Cache in Redis").
   trader id, since the Redis keys are per trader.
 - `--client-id` defaults to the adapter's 1, so `fill-catalog` (10) can run
   at the same time; a multiple of 1000 is refused before any gateway starts.
+- `--staging` (default `staging`) is the directory the node stages the
+  data it streams, outside the catalog (a staging directory inside it is
+  refused); it also keeps each trader's instance id. `--promotion-minutes`
+  (default 5, at least 1) is how often the staged data is promoted into
+  the catalog (see "Recording into the catalog").
 - `NAUTILUS_LOG` configures the logger as for the other commands.
 - The command reads `.env` at start (see `.env.example`), and a variable
   already set wins. Credentials come only from the environment, never from
@@ -77,7 +88,9 @@ node's cache (see "Cache in Redis").
 
 ## Start sequence
 
-1. Install Nautilus' logger, with the node's trader id and `LoggerConfig`,
+1. Read the trader's instance id from the staging directory, or keep a new
+   one there (see "Recording into the catalog"), then install Nautilus'
+   logger, with the node's trader and instance ids and `LoggerConfig`,
    and the `tracing` bridge: the gateway logs before the node exists, and
    the node reuses that logger when built.
 2. OKX instruments, if any: read `OKX_ENVIRONMENT` (`demo` or `live`),
@@ -97,8 +110,8 @@ node's cache (see "Cache in Redis").
    (`node.rs`) with its cache persisted there, the clients of each venue
    (IB's routed by default, OKX's and IC's routed by Nautilus as the only
    clients of their venue), reconciliation on, open-order and position checks every 10
-   and 30 s (as the adapter's `node_exec_tester`), and a 5 s post-stop
-   delay.
+   and 30 s (as the adapter's `node_exec_tester`), a 5 s post-stop
+   delay, and the streaming of its data into the catalog.
 6. Add the strategy, claim the external orders of its instruments that its
    config does not claim already (`register_external_order_claims`), then
    `run()`.
@@ -285,6 +298,57 @@ database, every trader's keys.
   back by their order reference, others as external orders claimed by the
   strategy.
 
+## Recording into the catalog
+
+The node streams the market data it receives into the catalog it
+registers, so that a retrain the node starts replays up to the present
+(`recording.rs`, `Recording`): Nautilus' streaming writer
+(`LiveNodeConfig::streaming`, a `StreamingConfig`) appends what the
+message bus carries to Feather files under the staging directory
+(`--staging`), in `live/<instance id>/`, flushed every second, and
+promotes them into the catalog every `--promotion-minutes` and when the
+node is disposed after a clean stop (`promote_on_close`), each staging
+file deleted once promoted (`delete_feather_after_promotion`). Promotion
+writes parquet files beside fill-catalog's, named by their interval.
+
+**What.** Quotes, trades, book deltas and depth, bars, mark and index
+prices, funding rates, and instrument definitions (`data_types`); not
+order and position events, account states or custom data, which the
+writer would stream unfiltered: the catalog holds market data. The
+venues' data clients publish their instruments' definitions at connect
+(IB's from its provider, OKX's as loaded, IC's as `ic/` loads them), so
+the catalog holds the definitions a backtest over the streamed data
+looks up, one per run, stamped when loaded.
+
+**Bars.** Bars the node builds (`…-INTERNAL`) are stored under the
+`EXTERNAL` aggregation source, as fill-catalog's venue bars are: a
+retrain reads the bars a live strategy built as
+`AUD/USD.SIM-1-SECOND-LAST-EXTERNAL`, not `…-INTERNAL`. The warmup's bars
+are not streamed: Nautilus builds them into the cache only (see
+`strategy::warmup`).
+
+**Readers.** Another process reading the catalog while the node runs
+sees each series up to the last promotion, a clean prefix of what the
+node received: no gap, no duplicate (`tests/live/streaming.rs`).
+
+**Instance id.** Nautilus names the staging run directory after the
+node's instance id and, at start, recovers and promotes only the files
+of its own directory. The node of a trader keeps one instance id across
+runs, in `<staging>/<trader id>.instance-id`, written once (temporary
+file, then rename): a run after a crash writes to the same directory,
+seals the files the crashed run left (`.feather.partial`, up to their
+last complete batch) and promotes them with its own; a crash loses at
+most the last second, unflushed. The same id is the logger's. A file
+that holds no instance id fails the start rather than being replaced:
+with a new id, what the old one left unpromoted would stay in staging.
+Two live processes at once each need their own trader (see "Cache in
+Redis"), so their staging runs differ.
+
+**Disk.** Staging holds at most a promotion interval of data. The tick
+directories of the catalog gain a file per promotion: consolidate them
+from time to time (`ParquetDataCatalog::consolidate_catalog` and its
+kin).
+
 ## Known limits
 
 Observed at the pinned `develop` commit; the code keeps the documented
@@ -316,14 +380,17 @@ the engine configs as `LiveNodeConfig` fields. It registers the one
 catalog, writable (`LiveNodeConfig::catalogs`, enabled by
 `nautilus-live`'s `streaming` feature; its path absolute, as the
 backtest's), so that the warmup reads it and IC's answers are written back
-(see "Warmup and live bars on IB" and `ic/README.md`).
+(see "Warmup and live bars on IB" and `ic/README.md`), and streams into it
+under the trader's kept instance id (see "Recording into the catalog").
 
 ```rust
 let config = LiveNodeConfig {
     environment: Environment::Live,
     trader_id,                                   // TraderId::from("HELIX-001")
+    instance_id: Some(instance_id),              // kept in the staging directory
     logging,
     catalogs: vec![DataCatalogConfig::new(catalog, None, None)], // absolute path
+    streaming: Some(recording.streaming(&catalog)?), // see "Recording into the catalog"
     cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
     data_engine: warmup::live_data_engine_config(&bar_types), // see the strategy README
     exec_engine: LiveExecutionEngineConfig {
@@ -450,12 +517,21 @@ LiveNodeHandle::stop(&self)
 
 ### Recording live data
 
-`with_streaming_config(StreamingConfig)` writes live data and events to
-Feather files under `writer_path`; with its `catalog` set it promotes them
-into that catalog. `StreamingConfig::new(writer_path, catalog:
+`LiveNodeConfig::streaming` (or `with_streaming_config(StreamingConfig)`)
+writes live data and events to Feather files under
+`<writer_path>/live/<instance id>/`; with its `catalog` set it promotes
+them into that catalog. `StreamingConfig::new(writer_path, catalog:
 Option<DataCatalogConfig>, flush_interval_ms, replace_existing,
-rotation_config)`; `RotationConfig` is by size, interval, scheduled dates,
-or none.
+rotation_config)`, then the public fields: `promotion_interval_ms`,
+`promote_on_close` (default on), `delete_feather_after_promotion`
+(default off), and the filters `data_types`, `record_types`,
+`instrument_types` and `record_filters` (unset: everything the bus
+carries). `RotationConfig` is by size, interval, scheduled dates, or none;
+with none, each promotion seals the files it promotes. The kernel creates
+the writer when the node is built (refusing an invalid config,
+`StreamingConfig::validate`), flushes it at stop and closes it, promoting
+the rest, at dispose. `replace_existing` empties the run directory first:
+off, so that a restart keeps what a crash left.
 
 ### Logging
 
@@ -496,19 +572,32 @@ tests: see [`okx/README.md`](okx/README.md).
 
 - Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file,
   for what needs no node and no broker.
-- No integration test runs a live node without a broker yet (the venue
-  tests below run `Live` against IB, OKX and IC's demo). One would sit in
-  `tests/live/`, a module of its own, one node per process: a node with no
-  broker client or a test data client, the strategy added, stopped through
-  `handle().stop()` from a spawned task, asserting on the result of
-  `run()`, under
-  `#[tokio::test(flavor = "current_thread")]`.
+- `tests/live/streaming.rs` runs a node without a broker, hermetic and
+  ungated: a stub data client on `SIM` sends numbered quotes, trades and
+  depth, an actor subscribes to them and to 1-second bars built from the
+  trades, and the node streams as `Recording` configures it. The node
+  runs in a child process (the test binary, filtered to `streamed_node`),
+  stopping itself through `handle().stop()` or killed, and the test reads
+  the catalog from its own process: a clean prefix of each series while
+  the node runs, everything after a clean stop with no staging file left,
+  the built bars under `EXTERNAL`, the instrument definition, and after a
+  crash and a restart the crashed run's staged data promoted.
 - Venue end-to-end tests are under "IB tests", "OKX tests" and "IC tests"
   in the venue READMEs; `ib_restart.rs` there checks the cache in Redis
   across restarts.
 
 ## Unverified
 
+- Streaming on IB and OKX: only IC's demo has streamed so far
+  (`ic/README.md`, "IC tests", `ic_live_demo.rs`), and a crash and
+  restart only on the stub client.
+- A promotion overlapping what the catalog already holds fails (Nautilus
+  refuses non-disjoint intervals), with a warning, and its file stays in
+  staging: observed for a definition re-sent with the time of one already
+  promoted (a stub stamping it at 0).
+  IC's warmup answer, written back up to the start, and the first
+  promoted quotes did not overlap in the one IC demo run; whether they
+  can is not known.
 - Whether IB's answer to a `30 D` request of 1-minute bars is complete
   (it raised no error, but the node panicked before the bars could be
   counted).

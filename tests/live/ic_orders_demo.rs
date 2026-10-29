@@ -254,6 +254,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     };
     // An empty catalog of its own: the venue answers the whole warmup.
     let catalog = tempfile::tempdir().unwrap();
+    // Outside the catalog, as `Live` requires.
+    let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
         account: None,
@@ -261,6 +263,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
+        recording: crate::recording(staging.path()),
     };
     // As Ctrl-C would, once the position closed or the deadline passed.
     let finished = Arc::clone(&done);

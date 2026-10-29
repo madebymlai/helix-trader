@@ -6,6 +6,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, ensure};
@@ -16,7 +17,7 @@ use helix_trader::{
         DatabentoHistory, IbHistory, IcConnection, IcHistory, NodeClient, NodeFill, OkxHistory,
         REQUEST_TIMEOUT, missing,
     },
-    live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live},
+    live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live, Recording},
     strategy::{
         DataRequirements, SeriesSlice,
         ema::{EmaCross, EmaCrossConfig},
@@ -161,6 +162,14 @@ struct LiveArgs {
     /// is read from it first, and IC's history is written back to it.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
+    /// The directory the node stages the data it streams into the
+    /// catalog, outside it; it also keeps each trader's instance id.
+    #[arg(long, default_value = "staging")]
+    staging: PathBuf,
+    /// How often, in minutes, the staged data is promoted into the
+    /// catalog: the delay before a retrain sees it.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
+    promotion_minutes: u64,
 }
 
 /// The strategies, by command-line name.
@@ -376,6 +385,10 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
         catalog: args.catalog,
+        recording: Recording {
+            staging: args.staging,
+            promotion_interval: Duration::from_secs(args.promotion_minutes * 60),
+        },
     };
     match args.strategy {
         Strategy::Ema => {
@@ -547,6 +560,33 @@ mod tests {
         assert_eq!(args.client_id, 1);
         assert_eq!(args.leverage, Decimal::ONE);
         assert_eq!(args.catalog, PathBuf::from("catalog"));
+    }
+
+    #[test]
+    fn live_stages_in_staging_and_promotes_every_five_minutes_unless_told_otherwise() {
+        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+        assert_eq!(args.staging, PathBuf::from("staging"));
+        assert_eq!(args.promotion_minutes, 5);
+        let args = parse_live(&[
+            "ema",
+            "--config",
+            "ema.toml",
+            "--staging",
+            "/data/staging",
+            "--promotion-minutes",
+            "15",
+        ])
+        .unwrap();
+        assert_eq!(args.staging, PathBuf::from("/data/staging"));
+        assert_eq!(args.promotion_minutes, 15);
+    }
+
+    #[test]
+    fn live_refuses_promoting_every_zero_minutes() {
+        let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", "0"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--promotion-minutes"), "{err}");
     }
 
     #[test]
