@@ -26,8 +26,6 @@ jiff = { version = "0.2", features = ["serde"] }
 # prettyplease 0.3: added beside bon's prettyplease 0.2, Cargo reused 0.2,
 # whose syn 2 does not build with bindgen's syn 3.
 lightgbm3 = "1.0.11"
-# Its C API, to build a dataset with the parameters, which lightgbm3 does not.
-lightgbm3-sys = "1.0.11"
 log = "0.4"
 nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
 nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["streaming"] }
