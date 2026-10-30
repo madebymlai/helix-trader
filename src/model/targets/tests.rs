@@ -907,13 +907,6 @@ fn a_label_reads_from_toml() {
     assert!(label(r#"label = "direction""#).is_err());
 }
 
-/// The fingerprint hashes this module's code: its tests live in a
-/// file of their own, so editing one changes no fingerprint.
-#[test]
-fn the_fingerprinted_code_holds_no_test() {
-    assert!(!include_str!("../targets.rs").contains("#[test]"));
-}
-
 /// 1000 AUD/USD with a stop 10 pips away: 1 USD at risk.
 #[test]
 fn a_stop_is_worth_its_distance_on_the_targets_quantity() {

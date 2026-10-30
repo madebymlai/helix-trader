@@ -7,10 +7,14 @@
 //! every strategy. Features and targets are list columns, so each strategy
 //! has the width of its own, and its rows are stored under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
-//! `targets::fingerprint` and the commission of its dataset runs,
-//! `Commission`): a change to the feature code, names or warmup, the
-//! decision rule, a target, what the strategy reads that a barrier's ATR is
-//! built from, or the commission finds no row, and the dataset is rebuilt.
+//! `targets::fingerprint`, the commission of its dataset runs,
+//! `Commission`, and the dataset `VERSION`): a change to the feature
+//! names, warmup or version, the decision rule, a target, what the
+//! strategy reads that a barrier's ATR is built from, the commission, or
+//! the dataset version finds no row, and the dataset is rebuilt. The
+//! config is read by value, the code by version: the dataset's for the
+//! code making every strategy's rows, the strategy's own for its features
+//! (`FeatureSetBuilder::version`), each bumped by hand.
 //! The feature names are in the metadata of the rows' data type, which
 //! the catalog stores with each file and gives back with each row, so the
 //! rows do not repeat them; `read` checks them.
@@ -89,6 +93,17 @@ use super::{
     targets::{self, TargetRow, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
+
+/// The version of the code that makes every strategy's rows: the
+/// decisions (`decide`), the targets (`targets`), the shared feature code
+/// (`features`), and the Nautilus they run on, its indicators, matching
+/// engine and fill model. In every dataset's fingerprint: bumped by hand
+/// whenever what that code makes of the same data and config changes,
+/// a Nautilus pin bump changing indicators or fills included, which then
+/// rebuilds every dataset and model. The golden rows
+/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
+/// without a bump.
+pub const VERSION: u32 = 1;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -542,12 +557,24 @@ impl DatasetRow {
 /// The fingerprint of a dataset of `features` deciding on `rule`, of
 /// `targets` for a strategy of `requirements`, net of `commission`: the
 /// decisions' (`decide::fingerprint`) extended by the targets'
-/// (`targets::fingerprint`) and the commission.
+/// (`targets::fingerprint`), the commission and the dataset `VERSION`.
 ///
 /// # Errors
 ///
 /// Returns an error as `targets::fingerprint` does.
 pub fn fingerprint(
+    features: &FeatureSet,
+    rule: DecisionRule,
+    targets: &TargetsConfig,
+    requirements: &DataRequirements,
+    commission: &Commission,
+) -> anyhow::Result<Fingerprint> {
+    versioned_fingerprint(VERSION, features, rule, targets, requirements, commission)
+}
+
+/// `fingerprint` at the dataset version `version`.
+fn versioned_fingerprint(
+    version: u32,
     features: &FeatureSet,
     rule: DecisionRule,
     targets: &TargetsConfig,
@@ -560,7 +587,8 @@ pub fn fingerprint(
         rule,
         requirements,
     )?
-    .with(commission.fingerprint_part().as_bytes()))
+    .with(commission.fingerprint_part().as_bytes())
+    .with(format!("dataset version {version}").as_bytes()))
 }
 
 /// The catalog type of the rows.
@@ -1056,6 +1084,35 @@ mod tests {
             ]
         );
         assert_eq!(manifest.fingerprint, dataset.fingerprint().to_string());
+    }
+
+    /// Bumping the dataset version is a new fingerprint, so every dataset
+    /// and model is rebuilt.
+    #[test]
+    fn bumping_the_dataset_version_changes_the_fingerprint() {
+        let rule = DecisionRule::Every(SignedDuration::from_hours(1));
+        let at = |version| {
+            versioned_fingerprint(
+                version,
+                &features(1),
+                rule,
+                &targets(),
+                &requirements(),
+                &commission(),
+            )
+            .unwrap()
+        };
+        let current = fingerprint(
+            &features(1),
+            rule,
+            &targets(),
+            &requirements(),
+            &commission(),
+        )
+        .unwrap();
+
+        assert_eq!(current, at(VERSION));
+        assert_ne!(current, at(VERSION + 1));
     }
 
     #[test]

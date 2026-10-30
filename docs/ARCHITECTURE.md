@@ -51,7 +51,11 @@ needs (nautilus_trader#5339, #5337) and the historical request groups,
 `on_data_response` and catalog write-back the warmup uses. Move back to
 crates.io at the next release. Their sources are under
 `~/.cargo/git/checkouts/nautilus_trader-*/04f766b/crates/`. An upgrade is
-one deliberate change: release notes read, full test suite green.
+one deliberate change: release notes read, full test suite green. A
+change of the golden rows (`tests/backtest/backtest_golden_rows.rs`)
+by a new pin, its indicators or fills, bumps the dataset version
+(`model::dataset::VERSION`, `src/strategy/README.md`, "Features and
+decisions").
 
 ## Build order
 
@@ -99,8 +103,6 @@ docs/         project docs
 ```
 
 Unit tests live in a `#[cfg(test)] mod tests` at the bottom of the module
-they test; a module whose code is hashed into a fingerprint
-(`include_str!`, the model's features, decisions and targets and a
-strategy's feature code) declares `#[cfg(test)] mod tests;` and keeps them
-in `<module>/tests.rs`, so editing a test changes no fingerprint. Tests
-check behaviour, not implementation.
+they test, or, for a long module (the model's features, decisions and
+targets), in `<module>/tests.rs`, declared by `#[cfg(test)] mod
+tests;`. Tests check behaviour, not implementation.

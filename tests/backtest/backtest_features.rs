@@ -72,7 +72,6 @@ impl FeatureProbe {
                 "close_2_hours",
                 SimpleMovingAverage::new(2, None),
             )
-            .code(include_str!("backtest_features.rs"))
             .build()
             .unwrap();
         let rows = Rc::new(RefCell::new(vec![]));

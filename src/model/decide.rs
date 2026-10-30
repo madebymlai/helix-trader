@@ -205,14 +205,12 @@ where
     Some(row)
 }
 
-/// The fingerprint of `features` and `rule`, with this module's code,
-/// which places the decisions.
+/// The fingerprint of `features` and `rule`.
 #[must_use]
 pub fn fingerprint(features: &FeatureSet, rule: DecisionRule) -> Fingerprint {
     features
         .fingerprint()
         .with(rule.fingerprint_part().as_bytes())
-        .with(include_str!("decide.rs").as_bytes())
 }
 
 impl FeatureRow {

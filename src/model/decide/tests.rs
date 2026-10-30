@@ -355,10 +355,3 @@ fn the_fingerprint_changes_with_the_rule() {
     );
     assert_ne!(fingerprint(&features, every(15)), features.fingerprint());
 }
-
-/// The fingerprint hashes this module's code: its tests live in a
-/// file of their own, so editing one changes no fingerprint.
-#[test]
-fn the_fingerprinted_code_holds_no_test() {
-    assert!(!include_str!("../decide.rs").contains("#[test]"));
-}

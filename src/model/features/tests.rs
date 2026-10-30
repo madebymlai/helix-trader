@@ -485,41 +485,48 @@ fn a_negative_warmup_is_an_error() {
     assert!(err.contains("warmup"), "{err}");
 }
 
-fn fingerprint(names: [&str; 2], code: &'static str) -> Fingerprint {
+fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
         .quotes(id(AUD), names[0], sma(1))
         .bars(BarType::from(AUD_BARS), names[1], sma(2))
-        .code(code)
+        .version(version)
         .build()
         .unwrap()
         .fingerprint()
 }
 
 #[test]
-fn the_fingerprint_is_the_same_for_the_same_names_and_code() {
-    assert_eq!(
-        fingerprint(["a", "b"], "code"),
-        fingerprint(["a", "b"], "code")
-    );
+fn the_fingerprint_is_the_same_for_the_same_names_and_version() {
+    assert_eq!(fingerprint(["a", "b"], 1), fingerprint(["a", "b"], 1));
 }
 
 #[test]
-fn the_fingerprint_changes_with_a_name_their_order_or_the_code() {
-    let base = fingerprint(["a", "b"], "code");
+fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
+    let base = fingerprint(["a", "b"], 1);
 
-    assert_ne!(base, fingerprint(["a", "c"], "code"));
-    assert_ne!(base, fingerprint(["b", "a"], "code"));
-    assert_ne!(base, fingerprint(["a", "b"], "code 2"));
+    assert_ne!(base, fingerprint(["a", "c"], 1));
+    assert_ne!(base, fingerprint(["b", "a"], 1));
+    assert_ne!(base, fingerprint(["a", "b"], 2));
     // Names are told apart from each other, not only concatenated.
-    assert_ne!(
-        fingerprint(["ab", "c"], "code"),
-        fingerprint(["a", "bc"], "code")
-    );
+    assert_ne!(fingerprint(["ab", "c"], 1), fingerprint(["a", "bc"], 1));
+}
+
+/// A set without a version is of version 0, as one given it.
+#[test]
+fn a_set_without_a_version_is_of_version_nought() {
+    let unversioned = FeatureSet::builder()
+        .quotes(id(AUD), "a", sma(1))
+        .bars(BarType::from(AUD_BARS), "b", sma(2))
+        .build()
+        .unwrap()
+        .fingerprint();
+
+    assert_eq!(unversioned, fingerprint(["a", "b"], 0));
 }
 
 #[test]
 fn a_fingerprint_extended_with_a_part_changes_with_the_part() {
-    let base = fingerprint(["a", "b"], "code");
+    let base = fingerprint(["a", "b"], 1);
 
     assert_ne!(base.with(b"rule"), base);
     assert_ne!(base.with(b"rule"), base.with(b"rule 2"));
@@ -647,11 +654,4 @@ fn declaring_a_rule_primary_changes_the_fingerprint() {
         .unwrap();
 
     assert_ne!(plain.fingerprint(), ruled.fingerprint());
-}
-
-/// The fingerprint hashes this module's code: its tests live in a
-/// file of their own, so editing one changes no fingerprint.
-#[test]
-fn the_fingerprinted_code_holds_no_test() {
-    assert!(!SHARED_CODE[0].contains("#[test]"));
 }

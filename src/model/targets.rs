@@ -901,8 +901,7 @@ impl ActorIndicator for BarrierAtr {
 }
 
 /// `fingerprint` extended with the targets of `config` deciding on `rule`
-/// for a strategy of `requirements`, and this module's code, which places
-/// and reads them.
+/// for a strategy of `requirements`.
 ///
 /// # Errors
 ///
@@ -915,9 +914,7 @@ pub fn fingerprint(
     requirements: &DataRequirements,
 ) -> anyhow::Result<Fingerprint> {
     let atr = config.atr_bars(rule, requirements)?;
-    Ok(fingerprint
-        .with(config.fingerprint_part(atr).as_bytes())
-        .with(include_str!("targets.rs").as_bytes()))
+    Ok(fingerprint.with(config.fingerprint_part(atr).as_bytes()))
 }
 
 impl Exit {

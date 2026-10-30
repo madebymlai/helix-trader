@@ -41,11 +41,10 @@
 //! build replays it before its first day (`dataset`).
 //!
 //! The fingerprint covers what makes the features what they are: their
-//! names in order, the strategy's feature code (given to the builder, such
-//! as `include_str!("features.rs")`), the warmup, and the shared indicator
-//! code (this module, and Nautilus' indicators, named by the source
-//! `Cargo.lock` pins). The tests of a hashed module live in its own
-//! `tests.rs`, so editing one changes no fingerprint.
+//! names in order, the warmup, and the version of the strategy's feature
+//! code (`FeatureSetBuilder::version`), bumped by hand when what it
+//! computes changes. The code shared by every set, this module and
+//! Nautilus' indicators, is versioned with the dataset (`dataset::VERSION`).
 //!
 //! A strategy whose primary is a rule of its own declares the primary's
 //! side and probability as the set's last two values (`primary`): the
@@ -78,14 +77,6 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 use sha2::{Digest, Sha256};
-
-/// The code every feature set runs on besides the strategy's own: this
-/// module, which feeds the features, and Nautilus' indicators, named by
-/// their source, a git commit (`build.rs`).
-const SHARED_CODE: [&str; 2] = [
-    include_str!("features.rs"),
-    env!("NAUTILUS_INDICATORS_SOURCE"),
-];
 
 /// The names of a primary's side and probability, the last values of a
 /// rule primary's set and of a meta model's rows.
@@ -143,7 +134,7 @@ pub struct FeatureSet {
 pub struct FeatureSetBuilder {
     names: Vec<String>,
     slots: Vec<Slot>,
-    code: Vec<&'static str>,
+    version: u32,
     warmup: SignedDuration,
     primary: bool,
 }
@@ -160,7 +151,7 @@ impl FeatureSet {
         FeatureSetBuilder {
             names: vec![],
             slots: vec![],
-            code: vec![],
+            version: 0,
             warmup: SignedDuration::ZERO,
             primary: false,
         }
@@ -222,7 +213,7 @@ impl FeatureSet {
     }
 
     /// The fingerprint of the feature names in order, the strategy's
-    /// feature code, the warmup and the shared indicator code.
+    /// feature version and the warmup.
     #[must_use]
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
@@ -481,10 +472,13 @@ impl FeatureSetBuilder {
         self
     }
 
-    /// Adds `code`, the strategy's feature code, to the fingerprint.
+    /// Sets the version of the strategy's feature code, in the
+    /// fingerprint: bumped by hand whenever what the features compute
+    /// changes, which then rebuilds the strategy's dataset and models. 0
+    /// unless given.
     #[must_use]
-    pub fn code(mut self, code: &'static str) -> Self {
-        self.code.push(code);
+    pub const fn version(mut self, version: u32) -> Self {
+        self.version = version;
         self
     }
 
@@ -518,14 +512,13 @@ impl FeatureSetBuilder {
             "the features' warmup {:#} is negative",
             self.warmup
         );
+        let version = format!("version {}", self.version);
         let warmup = format!("warmup {} ns", self.warmup.as_nanos());
         let fingerprint = self
             .names
             .iter()
             .map(String::as_str)
-            .chain(self.code.iter().copied())
-            .chain([warmup.as_str()])
-            .chain(SHARED_CODE)
+            .chain([version.as_str(), warmup.as_str()])
             .fold(Fingerprint::default(), |hash, part| {
                 hash.with(part.as_bytes())
             });

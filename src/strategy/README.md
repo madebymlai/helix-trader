@@ -574,9 +574,9 @@ of its choosing (`model::features`, `model::decide`).
   kind and source and a name: `.quotes(instrument_id, name, indicator)`,
   `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
   `.data(data_type, name, read)` for a raw feature of custom data, the last
-  value `read` from a data point. `.code(include_str!("features.rs"))` adds
-  the strategy's feature code to the fingerprint (its unit tests in
-  `features/tests.rs`, so editing one changes no fingerprint);
+  value `read` from a data point. `.version(n)` sets the version of the
+  strategy's feature code, in the fingerprint (0 if not given; see
+  "Versions" for when to bump it);
   `.warmup(span)` declares how much data the features read before a
   decision, which a dataset build replays before its first day (see
   "Dataset"): a strategy passes its own warmup, `model_ema/` its `warmup`;
@@ -644,21 +644,37 @@ of its choosing (`model::features`, `model::decide`).
   `FeatureRow` (the strategy id, the values, the decision time), custom
   data keyed by the strategy id (`FeatureRow::data_type`), and returns
   it. Cold features give no decision and publish nothing.
-- **Fingerprint.** `decide::fingerprint(&features, rule)` hashes the
-  feature names in order, the strategy's feature code, the features'
-  warmup, the shared indicator
-  code (`model::features` itself and Nautilus' indicators, named by the
-  git source `Cargo.lock` pins, through `build.rs`), the rule and
-  `model::decide`'s own code; `targets::fingerprint(fingerprint, &config,
-  rule, &requirements)` adds the targets, their barrier's ATR as it runs
-  (its period and its bars, whose source is what the strategy reads), and
-  `model::targets`' code, and `dataset::fingerprint(&features, rule,
-  &targets, &requirements, &commission)` all of it and the commission of
-  the dataset runs, as given, normalized (`Commission::PerOrder` or
-  `Commission::Rate`, `3 USD` for `3.00 USD`, `0.00003` for `0.000030`):
-  the targets are net of it, so rows and models of other costs are
-  never read. The runs' balance and leverage are not in it: large
-  enough, they deny no target.
+- **Fingerprint.** The config is hashed by value, the code by version.
+  `decide::fingerprint(&features, rule)` hashes the feature names in
+  order, the strategy's feature version, the features' warmup and the
+  rule; `targets::fingerprint(fingerprint, &config, rule, &requirements)`
+  adds the targets, their barrier's ATR as it runs (its period and its
+  bars, whose source is what the strategy reads), and
+  `dataset::fingerprint(&features, rule, &targets, &requirements,
+  &commission)` all of it, the commission of the dataset runs, as given,
+  normalized (`Commission::PerOrder` or `Commission::Rate`, `3 USD` for
+  `3.00 USD`, `0.00003` for `0.000030`), and the dataset version,
+  `dataset::VERSION`. The targets are net of the commission, so rows and
+  models of other costs are never read. The runs' balance and leverage
+  are not in it: large enough, they deny no target.
+- **Versions.** A change of the fingerprint rebuilds the dataset and its
+  models; a change of the code does not, until a version is bumped by
+  hand. A strategy author bumps their feature version (`.version(n)`,
+  `model_ema/` its `VERSION`) whenever what the features compute changes
+  and their names, warmup and config do not: another indicator, input or
+  formula under the same name. Renames, comments and refactors computing
+  the same values need no bump. The harness's `dataset::VERSION` is
+  bumped whenever the code making every strategy's rows changes what it
+  makes of the same data and config: the decisions (`model::decide`),
+  the targets (`model::targets`, their fills, exits, P&L and
+  commissions), the shared feature code (`model::features`), or a
+  Nautilus pin bump changing its indicators, matching engine or fill
+  model. The golden rows (`tests/backtest/backtest_golden_rows.rs`) build
+  three days of the `model_ema` dataset on a fixture catalog and compare
+  them with the committed `tests/backtest/golden_rows.csv`: a change of
+  the rows fails it, asking for a bump; after bumping, write the snapshot
+  again with `GOLDEN_ROWS=write cargo test --test backtest
+  backtest_golden_rows::` and commit both.
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
   venue with a large balance) each decision's targets come from real
   orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
@@ -1233,8 +1249,8 @@ data, and the strategy hands them the warmup's bars.
 ## Tests
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
-  each file, or in `<module>/tests.rs` for a module hashed into a
-  fingerprint (`docs/ARCHITECTURE.md`). `BarsConfig` and `Session` are unit tested where they live,
+  each file, or in `<module>/tests.rs` (`docs/ARCHITECTURE.md`).
+  `BarsConfig` and `Session` are unit tested where they live,
   `warmup::cache_config` too; a strategy's config tests cover only its own
   fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through
