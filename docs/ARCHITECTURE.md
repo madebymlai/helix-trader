@@ -35,7 +35,8 @@ Nautilus lacks.
   written then renamed, with its manifest and probes). Backtest and live
   read the same store, each decision using the latest model valid then,
   checked against the strategy's features and probes before use; a live
-  node retrains by starting `train` as a child process. A meta model
+  node retrains by starting `train` as a child process, at the last time
+  the catalog holds its data (live README, "Retraining"). A meta model
   (meta-labeling) is a second level of the same store, under its
   primary's directory, trained by the same `train` right after the
   primary; the config types allow no third. Nothing else passes from a

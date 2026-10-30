@@ -96,14 +96,15 @@ pub enum Mode {
     /// Trades live on the models of the store under `models` whose targets
     /// are net of `commission`, that of its retrains' dataset runs, deciding
     /// the live node's bar build delay late, and retrains on the
-    /// config's interval through `launcher`, each retrain launched
-    /// `catalog_delay` after its time: once the data the node received up
-    /// to then is in the catalog (`live::Recording::catalog_delay`).
+    /// config's interval through `launcher`, each retrain launched at its
+    /// time, trained at the last time the catalog at `catalog` holds for
+    /// every series the strategy reads, if before it
+    /// (`launcher::Retraining`).
     Live {
         models: PathBuf,
         commission: Commission,
         launcher: Launcher,
-        catalog_delay: SignedDuration,
+        catalog: PathBuf,
     },
     /// Opens each decision's targets, for a dataset run, and collects the
     /// rows they settle in `rows`.
@@ -324,12 +325,13 @@ impl ModelHandle {
                 models,
                 commission,
                 launcher,
-                catalog_delay,
+                catalog,
             } => Serving::Trading(Box::new(Trading {
                 retraining: Some(Retraining::new(
                     strategy_id,
                     retrain,
-                    catalog_delay,
+                    catalog,
+                    requirements.clone(),
                     launcher,
                 )),
                 primary: primary(&models, &commission)?,
@@ -648,6 +650,7 @@ mod tests {
         identifiers::{InstrumentId, TraderId},
         types::Price,
     };
+    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use nautilus_portfolio::portfolio::Portfolio;
     use nautilus_trading::{
         nautilus_strategy,
@@ -1149,27 +1152,57 @@ mod tests {
             }),
             at("2026-10-22T12:00:00.010Z")
         );
+        let catalog = tempfile::tempdir().unwrap();
         assert_eq!(
-            next(live(models, Launcher::in_process(|_| unreachable!()))),
+            next(live(
+                models,
+                catalog.path(),
+                Launcher::in_process(|_| unreachable!())
+            )),
             at("2026-10-22T12:00:05.010Z")
         );
     }
 
     /// Live trading on the models under `models`, retraining through
-    /// `launcher` 6 minutes after each retrain time.
-    fn live(models: PathBuf, launcher: Launcher) -> Mode {
+    /// `launcher` on the catalog at `catalog`.
+    fn live(models: PathBuf, catalog: &Path, launcher: Launcher) -> Mode {
         Mode::Live {
             models,
             commission: commission(),
             launcher,
-            catalog_delay: SignedDuration::from_mins(6),
+            catalog: catalog.to_path_buf(),
         }
     }
 
+    /// A catalog whose AUD/USD quotes end at `time`, the series the
+    /// strategy reads (`requirements`).
+    fn catalog_ending(time: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = UnixNanos::from(at(time));
+        let quote = QuoteTick::new(
+            InstrumentId::from(AUD),
+            Price::from("0.69990"),
+            Price::from("0.70010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            ts,
+            ts,
+        );
+        ParquetDataCatalog::new(dir.path(), None, None, None, None)
+            .write_to_parquet(&[quote], None, None, None)
+            .unwrap();
+        dir
+    }
+
     /// The probe's handle trading live on the models under `models`,
-    /// retraining through `launcher`, started, its features warm: a quote
-    /// came at the time of `probe`.
-    fn live_handle(probe: &mut Decider, models: &Path, launcher: Launcher) -> Rc<ModelHandle> {
+    /// retraining through `launcher` on the catalog at `catalog`, started,
+    /// its features warm: a quote came at the time of `probe`.
+    fn live_handle(
+        probe: &mut Decider,
+        models: &Path,
+        catalog: &Path,
+        launcher: Launcher,
+    ) -> Rc<ModelHandle> {
         let features = features();
         warm(&features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
@@ -1177,7 +1210,7 @@ mod tests {
             features,
             &config(),
             &requirements(),
-            live(models.to_path_buf(), launcher),
+            live(models.to_path_buf(), catalog, launcher),
         )
         .unwrap();
         handle.start(probe, &[]).unwrap();
@@ -1203,6 +1236,7 @@ mod tests {
     #[test]
     fn a_live_node_trades_from_its_first_decision_on_the_newest_model() {
         let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
         let store = store(models.path());
         store.publish(&baseline("2026-10-21T00:00:00Z", 7)).unwrap();
         store.publish(&baseline("2026-10-22T00:00:00Z", 8)).unwrap();
@@ -1210,6 +1244,7 @@ mod tests {
         let handle = live_handle(
             &mut probe,
             models.path(),
+            catalog.path(),
             Launcher::in_process(|_| unreachable!()),
         );
 
@@ -1217,23 +1252,26 @@ mod tests {
     }
 
     #[test]
-    fn the_retrain_timer_is_the_strategys_on_the_grid_the_catalog_delay_late() {
+    fn the_retrain_timer_is_the_strategys_on_the_grid() {
         let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
         live_handle(
             &mut probe,
             models.path(),
+            catalog.path(),
             Launcher::in_process(|_| unreachable!()),
         );
 
         let next = clock.borrow().next_time_ns("RETRAIN-HANDLE-001").unwrap();
 
-        assert_eq!(Timestamp::from(next), at("2026-10-23T00:06:00Z"));
+        assert_eq!(Timestamp::from(next), at("2026-10-23T00:00:00Z"));
     }
 
     #[test]
     fn a_model_a_live_retrain_publishes_is_used_from_the_next_decision() {
         let models = tempfile::tempdir().unwrap();
+        let catalog = catalog_ending("2026-10-22T23:00:00Z");
         store(models.path())
             .publish(&baseline("2026-10-22T10:00:00Z", 7))
             .unwrap();
@@ -1249,14 +1287,15 @@ mod tests {
             .into()
         });
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
-        let handle = live_handle(&mut probe, models.path(), launcher);
+        let handle = live_handle(&mut probe, models.path(), catalog.path(), launcher);
         let before = probability(handle.decide(&mut probe).unwrap());
 
-        run_to(&mut probe, &handle, &clock, "2026-10-23T00:06:00Z");
+        run_to(&mut probe, &handle, &clock, "2026-10-23T00:00:00Z");
         let trained_at = publishing.recv().unwrap();
         advance(&handle, &clock, "2026-10-23T01:00:00Z");
 
-        assert_eq!(trained_at, at("2026-10-23T00:00:00Z"));
+        // The catalog ends before the retrain's time: trained at its end.
+        assert_eq!(trained_at, at("2026-10-22T23:00:00Z"));
         assert_eq!(before, Some(0.7));
         assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.9));
     }
@@ -1264,6 +1303,7 @@ mod tests {
     #[test]
     fn a_live_retrain_keeping_the_model_leaves_the_current_one() {
         let models = tempfile::tempdir().unwrap();
+        let catalog = catalog_ending("2026-10-22T23:00:00Z");
         store(models.path())
             .publish(&baseline("2026-10-22T10:00:00Z", 7))
             .unwrap();
@@ -1277,9 +1317,9 @@ mod tests {
             .into()
         });
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
-        let handle = live_handle(&mut probe, models.path(), launcher);
+        let handle = live_handle(&mut probe, models.path(), catalog.path(), launcher);
 
-        run_to(&mut probe, &handle, &clock, "2026-10-23T00:06:00Z");
+        run_to(&mut probe, &handle, &clock, "2026-10-23T00:00:00Z");
         keeping.recv().unwrap();
         advance(&handle, &clock, "2026-10-23T01:00:00Z");
 

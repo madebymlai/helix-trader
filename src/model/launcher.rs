@@ -15,10 +15,15 @@
 //! `Retraining` is a live model handle's side of it: a Nautilus timer
 //! named after the strategy (`schedule::timer`), started on an
 //! epoch-aligned time (`schedule::start`), fires at every multiple of the
-//! retrain interval since the epoch, `delay` late, the time the data the
-//! node received up to then takes to reach the catalog; each firing launches the train at its
-//! grid time, unless one is still running: that one is skipped, with a
-//! warning. The handle polls it at each decision: a finished retrain is
+//! retrain interval since the epoch; each firing launches a train at once,
+//! at the last time the catalog holds for every series the strategy reads
+//! (the earliest of their last stored timestamps, Nautilus'
+//! `ParquetDataCatalog::query_last_timestamp`), never past the grid time:
+//! live, the data up to the last daily promotion (`live::Recording`). A
+//! firing is skipped, with a warning, if the catalog holds nothing of a
+//! series read, if that time is not past the previous retrain's, the
+//! catalog having gained nothing since, or if a retrain is still running.
+//! The handle polls it at each decision: a finished retrain is
 //! logged, as info when it published, as an error with its reason when it
 //! kept the current model, and the next may start. The model a retrain
 //! publishes is the handle's from its next decision, which lists the store
@@ -28,7 +33,7 @@
 //! is published, written whole, for the next start.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     ffi::OsString,
     fmt,
@@ -41,14 +46,20 @@ use std::{
     },
 };
 
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
+use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
+};
 
 use super::{schedule, train::Trained};
+use crate::strategy::DataRequirements;
 
 /// The most lines of a child's standard error kept for the reason it
 /// failed: the error it printed last is at their end.
@@ -202,58 +213,116 @@ fn ended() -> Retrained {
 pub(super) struct Retraining {
     timer: String,
     every: SignedDuration,
-    delay: SignedDuration,
+    catalog: PathBuf,
+    requirements: DataRequirements,
     launcher: Launcher,
     running: RefCell<Option<Running>>,
+    /// The time the last retrain launched trains at.
+    previous: Cell<Option<Timestamp>>,
 }
 
 impl Retraining {
-    /// The retrains of `strategy_id`, `every` interval, each launched
-    /// `delay` after its grid time by `launcher`.
+    /// The retrains of `strategy_id`, `every` interval, of a strategy of
+    /// `requirements` reading the catalog at `catalog`, launched by
+    /// `launcher`.
     pub(super) fn new(
         strategy_id: StrategyId,
         every: SignedDuration,
-        delay: SignedDuration,
+        catalog: PathBuf,
+        requirements: DataRequirements,
         launcher: Launcher,
     ) -> Self {
         Self {
             timer: schedule::timer(strategy_id),
             every,
-            delay,
+            catalog,
+            requirements,
             launcher,
             running: RefCell::default(),
+            previous: Cell::default(),
         }
     }
 
     /// Starts the retrain timer on `actor`, on the last grid time not
-    /// after now, `delay` late, so it first fires on the next one.
+    /// after now, so it first fires on the next one.
     ///
     /// # Errors
     ///
     /// Returns an error if Nautilus refuses the timer.
     pub(super) fn start<A: DataActor + DataActorNative>(&self, actor: &A) -> anyhow::Result<()> {
-        schedule::start(actor, &self.timer, self.every, self.delay)
+        schedule::start(actor, &self.timer, self.every)
     }
 
-    /// Launches the retrain at the grid time of `event`, if it is the
-    /// retrain timer's, unless one is running: then skipped, with a
-    /// warning.
+    /// Launches the retrain due at the grid time of `event`, if it is the
+    /// retrain timer's, at the catalog's end then (`stored_until`). Skipped,
+    /// with a warning, if the catalog holds nothing of a series read, if
+    /// its end is not past the previous retrain's time, or if one is
+    /// running.
     pub(super) fn on_time_event(&self, event: &TimeEvent) {
         if event.name != self.timer.as_str() {
             return;
         }
-        let at = Timestamp::from(event.ts_event) - self.delay;
+        let due = Timestamp::from(event.ts_event);
+        let at = match self.stored_until(due) {
+            Ok(at) => at,
+            Err(e) => {
+                log::warn!("the retrain at {due} skipped: {e:#}");
+                return;
+            }
+        };
+        if let Some(previous) = self.previous.get()
+            && at <= previous
+        {
+            log::warn!(
+                "the retrain at {due} skipped: the catalog holds nothing past {previous}, \
+                 the previous retrain's time"
+            );
+            return;
+        }
         self.poll();
         let mut running = self.running.borrow_mut();
         if let Some(running) = running.as_ref() {
             log::warn!(
-                "the retrain at {at} skipped: the retrain at {} is still running",
+                "the retrain at {due} skipped: the retrain at {} is still running",
                 running.at()
             );
             return;
         }
-        log::info!("retraining at {at}");
+        log::info!("retraining at {at}, the catalog's end, for the retrain due at {due}");
+        self.previous.set(Some(at));
         *running = Some(self.launcher.launch(at));
+    }
+
+    /// The time a retrain due at `due` trains at: the last time the
+    /// catalog holds for every series read at `due`, the earliest of their
+    /// last stored timestamps, or `due` if that is past it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read, or holds nothing of
+    /// a series read.
+    fn stored_until(&self, due: Timestamp) -> anyhow::Result<Timestamp> {
+        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+        let mut until = due;
+        for slice in self.requirements.slices(due, due)? {
+            let (data_type, identifier) = &slice.series;
+            let last = catalog
+                .query_last_timestamp(&data_type.clone().into(), Some(identifier))
+                .with_context(|| {
+                    format!(
+                        "reading the stored range of the {} of {identifier}",
+                        data_path_prefix(data_type)
+                    )
+                })?
+                .with_context(|| {
+                    format!(
+                        "the catalog holds no {} of {identifier}",
+                        data_path_prefix(data_type)
+                    )
+                })?;
+            until = until.min(Timestamp::from(UnixNanos::from(last)));
+        }
+        Ok(until)
     }
 
     /// Logs the running retrain if it finished, and makes way for the next.
@@ -293,12 +362,19 @@ impl fmt::Display for Retrained {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{path::Path, sync::Mutex};
 
-    use nautilus_core::UnixNanos;
+    use nautilus_model::{
+        data::{NautilusDataType, QuoteTick},
+        identifiers::InstrumentId,
+        types::{Price, Quantity},
+    };
 
     use super::*;
-    use crate::model::train::{Kept, Outcome};
+    use crate::{
+        model::train::{Kept, Outcome},
+        strategy::TickSeries,
+    };
 
     fn at(time: &str) -> Timestamp {
         time.parse().unwrap()
@@ -429,26 +505,83 @@ mod tests {
         )
     }
 
-    /// The retrains of `LIVE-001`, daily, launched on time by `launcher`.
-    fn daily(launcher: Launcher) -> Retraining {
+    const AUD: &str = "AUD/USD.SIM";
+    const EUR: &str = "EUR/USD.SIM";
+
+    /// Writes a quote of each of `quotes`, an instrument and its time, to
+    /// the catalog at `catalog`.
+    fn stored(catalog: &Path, quotes: &[(&str, &str)]) {
+        let catalog = ParquetDataCatalog::new(catalog, None, None, None, None);
+        for (instrument_id, time) in quotes {
+            let ts = UnixNanos::from(at(time));
+            let quote = QuoteTick::new(
+                InstrumentId::from(*instrument_id),
+                Price::from("0.69990"),
+                Price::from("0.70010"),
+                Quantity::from(1),
+                Quantity::from(1),
+                ts,
+                ts,
+            );
+            catalog
+                .write_to_parquet(&[quote], None, None, None)
+                .unwrap();
+        }
+    }
+
+    /// The retrains of `LIVE-001`, daily, of a strategy reading the quotes
+    /// of AUD/USD and EUR/USD from the catalog at `catalog`, launched by
+    /// `launcher`.
+    fn daily_on(catalog: &Path, launcher: Launcher) -> Retraining {
+        let quotes = |instrument_id| TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from(instrument_id),
+        };
         Retraining::new(
             StrategyId::from("LIVE-001"),
             SignedDuration::from_hours(24),
-            SignedDuration::ZERO,
+            catalog.to_path_buf(),
+            DataRequirements {
+                bar_types: vec![],
+                ticks: vec![quotes(AUD), quotes(EUR)],
+                warmup: SignedDuration::ZERO,
+            },
             launcher,
         )
     }
 
+    /// `daily_on` a catalog holding both series well past every retrain
+    /// of the tests, kept in `dir`.
+    fn daily(dir: &tempfile::TempDir, launcher: Launcher) -> Retraining {
+        stored(
+            dir.path(),
+            &[(AUD, "2026-12-01T00:00:00Z"), (EUR, "2026-12-01T00:00:00Z")],
+        );
+        daily_on(dir.path(), launcher)
+    }
+
+    /// A launcher handing each time it trains at to `finish`.
+    fn sending(finish: mpsc::Sender<Timestamp>) -> Launcher {
+        Launcher::in_process(move |at| {
+            finish.send(at).unwrap();
+            published(at)
+        })
+    }
+
     #[test]
     fn a_retrain_due_while_one_runs_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
         let (release, released) = mpsc::channel::<()>();
         let released = Mutex::new(released);
         let (finish, finished) = mpsc::channel();
-        let retraining = daily(Launcher::in_process(move |at| {
-            released.lock().unwrap().recv().unwrap();
-            finish.send(at).unwrap();
-            published(at)
-        }));
+        let retraining = daily(
+            &dir,
+            Launcher::in_process(move |at| {
+                released.lock().unwrap().recv().unwrap();
+                finish.send(at).unwrap();
+                published(at)
+            }),
+        );
 
         retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
         retraining.on_time_event(&fired("LIVE-001", "2026-10-23T00:00:00Z"));
@@ -462,37 +595,44 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
+    /// Fires the retrain timer of `retraining` at `time` until a train
+    /// sends its time to `finished` or a second passes: the time, if one
+    /// did. The outcome of a train reaches the handle just after it
+    /// finishes, so a retrain due right after one finishes may be skipped
+    /// as running.
+    fn fire_until_launched(
+        retraining: &Retraining,
+        finished: &Receiver<Timestamp>,
+        time: &str,
+    ) -> Option<Timestamp> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            retraining.on_time_event(&fired("LIVE-001", time));
+            if let Ok(at) = finished.recv_timeout(std::time::Duration::from_millis(10)) {
+                return Some(at);
+            }
+        }
+        None
+    }
+
     #[test]
     fn a_finished_retrain_makes_way_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
-        let retraining = daily(Launcher::in_process(move |at| {
-            finish.send(at).unwrap();
-            published(at)
-        }));
+        let retraining = daily(&dir, sending(finish));
         retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
         assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
 
-        // The first's outcome reaches the handle just after it finishes:
-        // the second fires until it is launched.
-        let second = loop {
-            assert!(std::time::Instant::now() < deadline, "never launched");
-            retraining.on_time_event(&fired("LIVE-001", "2026-10-23T00:00:00Z"));
-            if let Ok(at) = finished.recv_timeout(std::time::Duration::from_millis(10)) {
-                break at;
-            }
-        };
+        let second = fire_until_launched(&retraining, &finished, "2026-10-23T00:00:00Z");
 
-        assert_eq!(second, at("2026-10-23T00:00:00Z"));
+        assert_eq!(second, Some(at("2026-10-23T00:00:00Z")));
     }
 
     #[test]
     fn another_strategys_retrain_timer_launches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
-        let retraining = daily(Launcher::in_process(move |at| {
-            finish.send(at).unwrap();
-            published(at)
-        }));
+        let retraining = daily(&dir, sending(finish));
 
         retraining.on_time_event(&fired("LIVE-002", "2026-10-22T00:00:00Z"));
         drop(retraining);
@@ -501,20 +641,94 @@ mod tests {
     }
 
     #[test]
-    fn a_retrain_fired_late_trains_at_its_grid_time() {
+    fn a_retrain_trains_at_its_time_when_the_catalog_holds_past_it() {
+        let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
-        let retraining = Retraining::new(
-            StrategyId::from("LIVE-001"),
-            SignedDuration::from_hours(24),
-            SignedDuration::from_mins(6),
-            Launcher::in_process(move |at| {
-                finish.send(at).unwrap();
-                published(at)
-            }),
-        );
+        let retraining = daily(&dir, sending(finish));
 
-        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:06:00Z"));
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
 
         assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_retrain_trains_at_the_catalogs_end_when_it_ends_before_its_time() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
+        );
+        let (finish, finished) = mpsc::channel();
+        let retraining = daily_on(dir.path(), sending(finish));
+
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
+
+        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
+    }
+
+    #[test]
+    fn the_catalogs_end_is_the_earliest_last_time_of_the_series_read() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T09:30:00Z")],
+        );
+        let (finish, finished) = mpsc::channel();
+        let retraining = daily_on(dir.path(), sending(finish));
+
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
+
+        assert_eq!(finished.recv().unwrap(), at("2026-10-21T09:30:00Z"));
+    }
+
+    #[test]
+    fn a_retrain_is_skipped_when_the_catalog_holds_nothing_of_a_series_read() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(dir.path(), &[(AUD, "2026-10-21T13:00:00Z")]);
+        let (finish, finished) = mpsc::channel();
+        let retraining = daily_on(dir.path(), sending(finish));
+
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
+        drop(retraining);
+
+        assert_eq!(finished.recv(), Err(mpsc::RecvError));
+    }
+
+    #[test]
+    fn a_retrain_is_skipped_when_the_catalog_gained_nothing_since_the_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
+        );
+        let (finish, finished) = mpsc::channel();
+        let retraining = daily_on(dir.path(), sending(finish));
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
+        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
+
+        let second = fire_until_launched(&retraining, &finished, "2026-10-23T00:00:00Z");
+
+        assert_eq!(second, None);
+    }
+
+    #[test]
+    fn a_retrain_trains_at_what_the_catalog_gained_since_the_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
+        );
+        let (finish, finished) = mpsc::channel();
+        let retraining = daily_on(dir.path(), sending(finish));
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
+        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-22T13:00:00Z"), (EUR, "2026-10-22T13:00:00Z")],
+        );
+
+        let second = fire_until_launched(&retraining, &finished, "2026-10-23T00:00:00Z");
+
+        assert_eq!(second, Some(at("2026-10-22T13:00:00Z")));
     }
 }
