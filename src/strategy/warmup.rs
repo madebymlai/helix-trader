@@ -10,8 +10,10 @@
 //! chosen from the bar type alone: a composite bar type is built from its
 //! source bars, so their bars over `[now - warmup, now]` are requested
 //! (`request_bars` of `BarType::composite`); any other bar type is built
-//! from quotes (BID, ASK or MID), so the quotes of its instrument are
-//! requested (`request_quotes`), over the same window.
+//! from the ticks its price type names, as Nautilus builds it: LAST bars
+//! from trades, so the trades of its instrument are requested
+//! (`request_trades`), BID, ASK and MID bars from quotes, so its quotes
+//! are (`request_quotes`), over the same window.
 //!
 //! The window ends at `now`, given, not left open: the data engine trims a
 //! response to its request's bounds (`DataResponse::trim_to_bounds`), so
@@ -50,7 +52,7 @@
 //! config from `Warmup::cache_config`, which holds the whole warmup of
 //! every bar type the warmup builds.
 //!
-//! An hour with no quote or source bar at all means the market is closed
+//! An hour with no tick or source bar at all means the market is closed
 //! (a night, a weekend, a holiday): the data engine builds no bar for it,
 //! in the warmup as after it. Nautilus' default builds one, flat at the
 //! last close, which a session on the time of day alone would trade on. So
@@ -71,15 +73,12 @@
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it. The
 //! functions are its parts: `start` from `on_start`, `bars` from
-//! `on_historical_quotes` and `on_historical_bars`, and `finished` from
-//! `on_data_response`, then, on bars on a root, `continuous_bars`; in a
-//! backtest or a dataset run `subscribe` from `on_start` alone.
+//! `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
+//! and `finished` from `on_data_response`, then, on bars on a root,
+//! `continuous_bars`; in a backtest or a dataset run `subscribe` from
+//! `on_start` alone.
 
-use std::{
-    cell::Cell,
-    collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
-};
+use std::{cell::Cell, collections::BTreeMap, fmt::Debug};
 
 use anyhow::{Context, bail, ensure};
 use jiff::SignedDuration;
@@ -92,13 +91,16 @@ use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
-    data::{Bar, BarType, Data},
+    data::{Bar, BarType, Data, NautilusDataType},
     enums::AggregationSource,
-    identifiers::{InstrumentId, Venue},
+    identifiers::Venue,
 };
 use serde_json::{Value, json};
 
-use crate::{rolls::ContinuousBars, strategy::DataRequirements};
+use crate::{
+    rolls::ContinuousBars,
+    strategy::{DataRequirements, Source, bar_sources},
+};
 
 /// A strategy's warmup, built from its data requirements for a live node
 /// (`live`) or a replay (`replayed`, a backtest or a dataset run): the one
@@ -106,7 +108,7 @@ use crate::{rolls::ContinuousBars, strategy::DataRequirements};
 /// delegate to it. Nautilus delivers historical data only to the
 /// strategy's own hooks, so a strategy calls `start` from `on_start`,
 /// `on_data_response` from `on_data_response`, and `on_historical` from
-/// `on_historical_quotes` and `on_historical_bars`.
+/// `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads
 /// and of those the strategy's harness needs warm (`building`, the
@@ -231,10 +233,10 @@ impl Warmup {
         Ok(())
     }
 
-    /// Hands the warmup bars of `response`, the quotes or bars of a
-    /// response to `actor`'s warmup request, to the indicators the warmup
-    /// feeds, oldest first, from the actor's `on_historical_quotes` and
-    /// `on_historical_bars`.
+    /// Hands the warmup bars of `response`, the quotes, trades or bars of
+    /// a response to `actor`'s warmup request, to the indicators the
+    /// warmup feeds, oldest first, from the actor's `on_historical_quotes`,
+    /// `on_historical_trades` and `on_historical_bars`.
     ///
     /// # Errors
     ///
@@ -295,18 +297,19 @@ impl Debug for Warmup {
 
 /// Requests the warmup of `bar_types`, internal bar types, over
 /// `[now - warmup, now]` as the request group `group`, then subscribes
-/// `actor` to them from `now`. The bars of a composite bar type are built
-/// from its source bars, requested per source bar type; the bars on a root
-/// with continuous bars in `continuous` are its continuous future,
-/// requested per bar type with their `continuous_future_*` params; the
-/// others are built from quotes, requested per instrument. The warmup of
-/// each request arrives in `on_historical_bars` or `on_historical_quotes`,
-/// where `bars` returns it; the end of the group in `on_data_response`,
-/// where `finished` tells it. `group` is the caller's, stored before the
-/// call: a group whose requests are all answered at once ends before this
-/// returns. No bar types make no request and no group, which
-/// `DataActor::request_group` refuses empty: a strategy reading ticks
-/// alone has no warmup.
+/// `actor` to them from `now`. The bars on a root with continuous bars in
+/// `continuous` are its continuous future, requested per bar type with
+/// their `continuous_future_*` params; the others are requested per series
+/// they are built from (see `requests`): the source bars of a composite bar
+/// type, the trades of the instrument of LAST bars, the quotes of the
+/// instrument of BID, ASK and MID bars. The warmup of each request arrives
+/// in `on_historical_bars`, `on_historical_trades` or
+/// `on_historical_quotes`, where `bars` returns it; the end of the group
+/// in `on_data_response`, where `finished` tells it. `group` is the
+/// caller's, stored before the call: a group whose requests are all
+/// answered at once ends before this returns. No bar types make no
+/// request and no group, which `DataActor::request_group` refuses empty: a
+/// strategy reading ticks alone has no warmup.
 ///
 /// # Errors
 ///
@@ -324,35 +327,24 @@ where
 {
     let now = actor.clock().utc_now();
     let start = now.checked_sub(warmup)?;
-    let (composites, others): (Vec<BarType>, Vec<BarType>) = bar_types
+    for source in bar_types
         .iter()
-        .partition(|bar_type| bar_type.is_composite());
-    let (continuous_bars, of_quotes): (Vec<BarType>, Vec<BarType>) = others
-        .into_iter()
-        .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
-    let sources: BTreeSet<BarType> = composites.iter().map(BarType::composite).collect();
-    let mut requests = Vec::new();
-    for source in sources {
+        .filter(|bar_type| bar_type.is_composite())
+        .map(BarType::composite)
+    {
         ensure!(
             source.is_externally_aggregated(),
             "no warmup for bars built from {source}: the source bars of a \
              composite bar type must be external"
         );
-        let built = composites
-            .iter()
-            .filter(|bar_type| bar_type.composite() == source);
-        requests.push(actor.request_bars(
-            source,
-            Some(start),
-            Some(now),
-            None,
-            None,
-            Some(request_params(built, None)),
-        )?);
     }
+    let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = bar_types
+        .iter()
+        .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
+    let mut requested = Vec::new();
     for bar_type in &continuous_bars {
         let params = continuous.params(bar_type.instrument_id());
-        requests.push(actor.request_bars(
+        requested.push(actor.request_bars(
             *bar_type,
             Some(start),
             Some(now),
@@ -361,23 +353,35 @@ where
             Some(request_params([bar_type].into_iter(), params)),
         )?);
     }
-    let instruments: BTreeSet<InstrumentId> =
-        of_quotes.iter().map(BarType::instrument_id).collect();
-    for instrument_id in instruments {
-        let built = of_quotes
-            .iter()
-            .filter(|bar_type| bar_type.instrument_id() == instrument_id);
-        requests.push(actor.request_quotes(
-            instrument_id,
-            Some(start),
-            Some(now),
-            None,
-            None,
-            Some(request_params(built, None)),
-        )?);
+    for (source, built) in requests(&others) {
+        let params = Some(request_params(built.iter(), None));
+        requested.push(match source {
+            Source::Bars(source) => {
+                actor.request_bars(source, Some(start), Some(now), None, None, params)?
+            }
+            Source::Ticks(tick) => match tick.data {
+                NautilusDataType::TradeTick => actor.request_trades(
+                    tick.instrument_id,
+                    Some(start),
+                    Some(now),
+                    None,
+                    None,
+                    params,
+                )?,
+                NautilusDataType::QuoteTick => actor.request_quotes(
+                    tick.instrument_id,
+                    Some(start),
+                    Some(now),
+                    None,
+                    None,
+                    params,
+                )?,
+                data => unreachable!("bars are built from quotes or trades, not {data}"),
+            },
+        });
     }
-    if !requests.is_empty() {
-        actor.request_group(requests, Some(group))?;
+    if !requested.is_empty() {
+        actor.request_group(requested, Some(group))?;
     }
     subscribe_from(actor, bar_types, continuous, UnixNanos::from(now));
     Ok(())
@@ -427,6 +431,21 @@ fn subscribe_from<A>(
     for venue_bar_types in by_venue.into_values() {
         actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now, None)));
     }
+}
+
+/// The warmup requests of `bar_types`, internal bar types on no root: one
+/// per series they are built from, as Nautilus' data engine builds them
+/// (see `strategy::catalog_series`), with the bar types built from it, in
+/// the order the series first come.
+fn requests(bar_types: &[BarType]) -> Vec<(Source, Vec<BarType>)> {
+    let mut requests: Vec<(Source, Vec<BarType>)> = Vec::new();
+    for (source, bar_type) in bar_sources(bar_types).zip(bar_types) {
+        match requests.iter_mut().find(|(of, _)| *of == source) {
+            Some((_, built)) => built.push(*bar_type),
+            None => requests.push((source, vec![*bar_type])),
+        }
+    }
+    requests
 }
 
 /// The params of a warmup request building `bar_types`, with the
@@ -479,8 +498,9 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
     }
 }
 
-/// The warmup bars of the instrument of `response`, the bars or quotes of
-/// a response to `start`, oldest first.
+/// The warmup bars built from `response`, the bars, trades or quotes of a
+/// response to `start`, oldest first: those of the bar types of its
+/// instrument built from its series (see `built_from`).
 pub fn bars<A, D>(actor: &A, response: &[D]) -> Vec<Bar>
 where
     A: DataActor + DataActorNative,
@@ -489,16 +509,38 @@ where
     let Some(&first) = response.first() else {
         return vec![];
     };
-    let instrument_id = first.into().instrument_id();
+    let first: Data = first.into();
+    let instrument_id = first.instrument_id();
     let cache = actor.cache();
-    let mut bars: Vec<Bar> = cache
-        .bar_types(Some(&instrument_id), None, AggregationSource::Internal)
+    let cached = cache.bar_types(Some(&instrument_id), None, AggregationSource::Internal);
+    let mut bars: Vec<Bar> = built_from(&cached, first)
         .iter()
         .flat_map(|bar_type| cache.bars(bar_type).unwrap_or_default())
         .collect();
     // The cache holds the newest first.
     bars.sort_by_key(|bar| bar.ts_event);
     bars
+}
+
+/// Those of `bar_types` built from the series of `response`, the first
+/// datum of a response to `start`: its catalog series (see
+/// `strategy::catalog_series`), the bar type of source bars, the data type
+/// and instrument of ticks. Another response of the warmup on the same
+/// instrument builds the others.
+fn built_from(bar_types: &[BarType], response: Data) -> Vec<BarType> {
+    let series = match response {
+        Data::Bar(bar) => (NautilusDataType::Bar, bar.bar_type.to_string()),
+        data => (
+            NautilusDataType::from_data(&data),
+            data.instrument_id().to_string(),
+        ),
+    };
+    bar_types
+        .iter()
+        .zip(bar_sources(bar_types))
+        .filter(|(_, source)| source.series() == series)
+        .map(|(bar_type, _)| *bar_type)
+        .collect()
 }
 
 /// The warmup bars of those of `bar_types` on a root with continuous bars
@@ -624,9 +666,13 @@ mod tests {
     use std::rc::Rc;
 
     use nautilus_common::actor::indicators::ActorIndicator;
-    use nautilus_model::data::{QuoteTick, TradeTick};
+    use nautilus_model::{
+        data::{QuoteTick, TradeTick},
+        identifiers::InstrumentId,
+    };
 
     use super::*;
+    use crate::strategy::TickSeries;
 
     const DAY: SignedDuration = SignedDuration::from_hours(24);
 
@@ -694,6 +740,72 @@ mod tests {
             .building(minutes, Rc::new(Inert));
 
         assert_eq!(warmup.cache_config().unwrap().bar_capacity, 10_000 + 1_441);
+    }
+
+    /// The warmup requests each bar type's history from what Nautilus
+    /// builds it from: LAST bars from the instrument's trades, MID bars
+    /// from its quotes, bars of source bars from those, one request per
+    /// series building every bar type of it.
+    #[test]
+    fn each_bar_type_warms_up_on_what_its_price_type_builds_it_from() {
+        let hour_last = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL");
+        let minute_last = BarType::from("ESM4.CME-1-MINUTE-LAST-INTERNAL");
+        let hour_mid = BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL");
+        let composite = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
+        let ticks = |data, instrument_id: &str| {
+            Source::Ticks(TickSeries {
+                data,
+                instrument_id: InstrumentId::from(instrument_id),
+            })
+        };
+
+        let requested = requests(&[hour_last, hour_mid, composite, minute_last]);
+
+        assert_eq!(
+            requested,
+            vec![
+                (
+                    ticks(NautilusDataType::TradeTick, "ESM4.CME"),
+                    vec![hour_last, minute_last]
+                ),
+                (
+                    ticks(NautilusDataType::QuoteTick, "ESM4.CME"),
+                    vec![hour_mid]
+                ),
+                (
+                    Source::Bars(BarType::from("ESM4.CME-1-MINUTE-LAST-EXTERNAL")),
+                    vec![composite]
+                ),
+            ]
+        );
+    }
+
+    /// A response hands over the bars built from it alone: on an
+    /// instrument with LAST and MID bars, a trades response the LAST bars,
+    /// a quotes response the MID bars, so neither feeds the other's twice.
+    #[test]
+    fn a_response_hands_over_the_bars_built_from_its_series_alone() {
+        let hour_last = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL");
+        let hour_mid = BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL");
+        let composite = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
+        let cached = [hour_last, hour_mid, composite];
+        let instrument_id = InstrumentId::from("ESM4.CME");
+        let trade = TradeTick {
+            instrument_id,
+            ..TradeTick::default()
+        };
+        let quote = QuoteTick {
+            instrument_id,
+            ..QuoteTick::default()
+        };
+        let minute = Bar {
+            bar_type: BarType::from("ESM4.CME-1-MINUTE-LAST-EXTERNAL"),
+            ..Bar::default()
+        };
+
+        assert_eq!(built_from(&cached, trade.into()), [hour_last]);
+        assert_eq!(built_from(&cached, quote.into()), [hour_mid]);
+        assert_eq!(built_from(&cached, minute.into()), [composite]);
     }
 
     #[test]
