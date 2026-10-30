@@ -1,5 +1,10 @@
-//! The warmup of strategies on bars Nautilus builds (internal time bars),
-//! the same in a backtest and live.
+//! The warmup of strategies on bars Nautilus builds (internal time bars) on
+//! a live node: a warmup request at start, which hydrates the strategy's
+//! indicators before the live stream. A backtest or a dataset run makes no
+//! request: its strategy only subscribes (`subscribe`), and its indicators
+//! warm on the data replayed, from the run's start. Either way a strategy
+//! decides once its indicators are initialized (`indicators_initialized`),
+//! never on the end of a warmup.
 //!
 //! Owns Nautilus' protocol, so that no strategy names it. The request is
 //! chosen from the bar type alone: a composite bar type is built from its
@@ -24,10 +29,10 @@
 //! the data before `now - warmup`, is dropped) and `update_catalog` (with
 //! a catalog registered, the engine answers from it first and asks the
 //! venue only for what it lacks, then writes back the answers a data
-//! client certifies complete, as IC's does; a backtest's catalog answers
-//! are never written back). The bars a request builds reach only the
-//! cache: the response carries what was requested, and the built bars are
-//! in the cache when it arrives; Nautilus delivers no built bars.
+//! client certifies complete, as IC's does). The bars a request builds
+//! reach only the cache: the response carries what was requested, and the
+//! built bars are in the cache when it arrives; Nautilus delivers no built
+//! bars.
 //!
 //! The requests form one request group (`DataActor::request_group`):
 //! Nautilus calls `on_data_response` with the group once every request is
@@ -41,7 +46,7 @@
 //! bar since as live.
 //!
 //! The cache keeps at most `bar_capacity` bars per bar type and evicts the
-//! oldest beyond it, so the node running the strategy takes its cache
+//! oldest beyond it, so the live node running the strategy takes its cache
 //! config from `cache_config`, which holds the whole warmup.
 //!
 //! An hour with no quote or source bar at all means the market is closed
@@ -62,9 +67,10 @@
 //! answers it with no bars; `continuous_bars` reads them once the group
 //! ended.
 //!
-//! A strategy calls `start` from `on_start`, `bars` from
+//! A live strategy calls `start` from `on_start`, `bars` from
 //! `on_historical_quotes` and `on_historical_bars`, and `finished` from
-//! `on_data_response`, then, on bars on a root, `continuous_bars`.
+//! `on_data_response`, then, on bars on a root, `continuous_bars`; in a
+//! backtest or a dataset run it calls `subscribe` from `on_start` alone.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -172,33 +178,54 @@ where
         )?);
     }
     actor.request_group(requests, Some(group))?;
-    let now_ns = UnixNanos::from(now);
+    subscribe_from(actor, bar_types, continuous, UnixNanos::from(now));
+    Ok(())
+}
+
+/// Subscribes `actor` to `bar_types`, internal bar types, from now, with
+/// no warmup request: in a backtest or a dataset run, whose strategy warms
+/// up on the data replayed, and after `start`'s requests live, the live
+/// stream starting where the warmup ends. The bars on a root with
+/// continuous bars in `continuous` are subscribed per bar type with their
+/// `continuous_future_*` params, the others per venue.
+pub fn subscribe<A>(actor: &mut A, bar_types: &[BarType], continuous: &ContinuousBars)
+where
+    A: DataActor + DataActorNative + Debug + 'static,
+{
+    let now = UnixNanos::from(actor.clock().utc_now());
+    subscribe_from(actor, bar_types, continuous, now);
+}
+
+/// Subscribes `actor` to `bar_types` as `subscribe` does, from `now`.
+fn subscribe_from<A>(
+    actor: &mut A,
+    bar_types: &[BarType],
+    continuous: &ContinuousBars,
+    now: UnixNanos,
+) where
+    A: DataActor + DataActorNative + Debug + 'static,
+{
+    let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = bar_types
+        .iter()
+        .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
     // One subscription per continuous bar type: Nautilus takes the params
     // of a continuous future per bar type.
-    for &bar_type in &continuous_bars {
+    for bar_type in continuous_bars {
         let params = continuous.params(bar_type.instrument_id());
-        actor.subscribe_bars(bar_type, None, Some(subscription_params(now_ns, params)));
+        actor.subscribe_bars(bar_type, None, Some(subscription_params(now, params)));
     }
     // One subscription per venue for the others: Nautilus routes a list of
     // bar types to the client of their one venue.
     let mut by_venue: BTreeMap<Venue, Vec<BarType>> = BTreeMap::new();
-    let others = bar_types
-        .iter()
-        .filter(|bar_type| !continuous_bars.contains(bar_type));
     for bar_type in others {
         by_venue
             .entry(bar_type.instrument_id().venue)
             .or_default()
-            .push(*bar_type);
+            .push(bar_type);
     }
     for venue_bar_types in by_venue.into_values() {
-        actor.subscribe_bars(
-            venue_bar_types,
-            None,
-            Some(subscription_params(now_ns, None)),
-        );
+        actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now, None)));
     }
-    Ok(())
 }
 
 /// The params of a warmup request building `bar_types`, with the
@@ -294,10 +321,10 @@ where
     bars
 }
 
-/// The cache config of a node whose strategy warms up on `bar_types` over
-/// `warmup`: Nautilus' default, its bar capacity raised by the most bars
-/// the warmup builds of one bar type. The default capacity stays on top as
-/// headroom for the bars built while the warmup is pending.
+/// The cache config of a live node whose strategy warms up on `bar_types`
+/// over `warmup`: Nautilus' default, its bar capacity raised by the most
+/// bars the warmup builds of one bar type. The default capacity stays on
+/// top as headroom for the bars built while the warmup is pending.
 ///
 /// # Errors
 ///
@@ -446,6 +473,18 @@ mod tests {
         // 720 hours of 1-minute bars: 43,200, and one spanning the start.
         let cache = cache_config(&bar_types, SignedDuration::from_hours(720)).unwrap();
         assert_eq!(cache.bar_capacity, 10_000 + 43_201);
+    }
+
+    #[test]
+    fn a_warmup_the_cache_cannot_hold_is_an_error_naming_the_bars() {
+        // 1-second bars over twelve days: 1,036,801 bars, beyond the
+        // 1,000,000 a cache holds at most.
+        let bar_types = [BarType::from("SXR8.IBIS-1-SECOND-MID-INTERNAL")];
+        let err = cache_config(&bar_types, SignedDuration::from_hours(12 * 24)).unwrap_err();
+        let err = format!("{err:#}");
+        for part in ["SXR8.IBIS-1-SECOND-MID-INTERNAL", "1036801 bars", "1000000"] {
+            assert!(err.contains(part), "{err}");
+        }
     }
 
     #[test]

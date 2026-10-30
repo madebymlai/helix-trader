@@ -3,8 +3,8 @@
 //! fed the transition table with its roll prices read from the catalog,
 //! August's last trade of its slice (3992.00, 1 ns before the roll) and
 //! December's first (4041.00, at the roll), a spread of 49.00. 30-minute
-//! LAST bars over a run from 23:00 to 01:00 after a 30-minute warmup. One
-//! node per thread, so one run per test.
+//! LAST bars over a run from 23:00 to 01:00. One node per thread, so one
+//! run per test.
 
 use crate::common::{
     Ohlc, ohlc,
@@ -12,7 +12,7 @@ use crate::common::{
     rolls::{self, POST, ROOT, tuesday, wednesday},
 };
 use helix_trader::backtest::{Backtest, commission_rate, venue_oms_type};
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
     data::BarType,
@@ -26,10 +26,8 @@ use tempfile::TempDir;
 
 const BARS: &str = "GC.GLBX-30-MINUTE-LAST-INTERNAL";
 
-const WARMUP: SignedDuration = SignedDuration::from_mins(30);
-
 /// A backtest of the bars on the root over `[23:00 Tuesday, 01:00
-/// Wednesday]` on `catalog`, after `WARMUP`.
+/// Wednesday]` on `catalog`.
 fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),
@@ -37,7 +35,6 @@ fn backtest(catalog: &TempDir) -> Backtest {
         ticks: vec![],
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
-        warmup: WARMUP,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,
@@ -52,10 +49,8 @@ fn flat(close: Timestamp, price: &str) -> Ohlc {
     (close, price, price, price, price)
 }
 
-/// What a recorder of the root's bars got: its warmup bars, its bars and
-/// their volumes.
+/// What a recorder of the root's bars got: its bars and their volumes.
 struct Got {
-    warmup: Vec<Ohlc>,
     bars: Vec<Ohlc>,
     volumes: Vec<Quantity>,
 }
@@ -63,12 +58,10 @@ struct Got {
 /// Runs a recorder of the root's bars in `mode` through `backtest`.
 fn run(backtest: &Backtest, mode: ContinuousFutureAdjustmentType) -> Got {
     let continuous = backtest.continuous_bars(mode).unwrap();
-    let (recorder, record) = Recorder::continuous(BarType::from(BARS), WARMUP, continuous);
+    let (recorder, record) = Recorder::continuous(BarType::from(BARS), continuous);
     backtest.run(recorder).unwrap();
     let record = record.borrow();
-    assert_eq!(record.warmup_end, Some(Ok(())));
     Got {
-        warmup: record.warmup.iter().map(ohlc).collect(),
         bars: record.bars.iter().map(ohlc).collect(),
         volumes: record.bars.iter().map(|bar| bar.volume).collect(),
     }
@@ -125,12 +118,8 @@ fn backward_spread_bars_shift_the_pre_roll_bars_by_the_spread() {
         ContinuousFutureAdjustmentType::BackwardSpread,
     );
 
-    // August's trades plus 49.00, December's as they are. The warmup,
-    // from 22:29:59.999999999 to 22:59:59.999999999: the bar closing at
-    // 22:30 holds August's 3990.00, built on the trade of 22:45, whose bar
-    // the warmup does not close (a continuous request leaves out
-    // `update_subscriptions` and `skip_first_non_full_bar`).
-    assert_eq!(got.warmup, [flat(tuesday("22:30:00"), "4039.00")]);
+    // August's trades plus 49.00, December's as they are; those before
+    // 23:00 are not replayed.
     assert_eq!(
         got.bars,
         [
@@ -155,7 +144,6 @@ fn forward_spread_bars_shift_the_post_roll_bars_by_the_spread() {
     );
 
     // August's trades as they are, December's less 49.00.
-    assert_eq!(got.warmup, [flat(tuesday("22:30:00"), "3990.00")]);
     assert_eq!(
         got.bars,
         [

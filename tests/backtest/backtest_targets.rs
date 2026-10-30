@@ -323,7 +323,6 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
         }],
         start: ic::at("08:30:00"),
         end: ic::at("12:30:00"),
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("10000000 USD"),
         leverage: Decimal::ONE,

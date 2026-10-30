@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 #[test]
 fn two_overlapping_ic_trades_are_two_positions_at_their_own_prices() {
     let catalog = ic::catalog();
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(ic::HOUR_BARS),
         vec![
             (OrderSide::Buy, Quantity::from(10)),

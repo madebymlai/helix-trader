@@ -12,7 +12,7 @@ fn a_trade_size_off_the_share_grid_trades_the_rounded_size_and_the_run_completes
     let exits: Exits = trades::time_exit();
     let config = helix_trader::strategy::ema::EmaCrossConfig {
         trade_size: Quantity::from("10.5"),
-        ..common::ema_config(1, 2, trades::WARMUP, Some(common::session()), exits)
+        ..common::ema_config(1, 2, Some(common::session()), exits)
     };
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);

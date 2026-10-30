@@ -1,5 +1,5 @@
 //! An instrument the EMA crossover reads but does not trade: its bars are
-//! subscribed and warmed up, and their crosses send no order. SXR8.IBIS
+//! subscribed, and their crosses send no order. SXR8.IBIS
 //! traded on `common::trades`' time exit, EUNL.IBIS read, its levels
 //! turning every hour. One node per thread, so one run per test.
 
@@ -64,13 +64,7 @@ fn an_instrument_read_but_not_traded_sends_no_order() {
         )
         .unwrap();
     let read_bars = BarType::from(format!("{READ}-1-HOUR-MID-INTERNAL").as_str());
-    let base = common::ema_config(
-        1,
-        2,
-        trades::WARMUP,
-        Some(common::session()),
-        trades::time_exit(),
-    );
+    let base = common::ema_config(1, 2, Some(common::session()), trades::time_exit());
     let config = EmaCrossConfig {
         bars: BarsConfig {
             instrument_ids: vec![InstrumentId::from(INSTRUMENT_ID), read.id()],

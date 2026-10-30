@@ -581,7 +581,6 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         start,
         end,
         ticks: requirements.ticks,
-        warmup: requirements.warmup,
         fee_model,
         balance: args.balance,
         leverage: args.leverage,
@@ -748,7 +747,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     match args.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.config)?;
-            live.run(&config.bars.data_requirements(), EmaCross::new(config)?)
+            live.run(&config.bars.data_requirements(), EmaCross::live(config)?)
                 .await
         }
         Strategy::Learned => {
@@ -800,7 +799,6 @@ impl DatasetRun {
             ticks: requirements.ticks,
             start,
             end,
-            warmup: requirements.warmup,
             fee_model: self.fee_model.clone(),
             balance: self.balance,
             leverage: self.leverage,

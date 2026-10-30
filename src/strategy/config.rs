@@ -30,7 +30,9 @@ pub struct BarsConfig {
     /// `LAST` bar spec, as OKX's 1-minute candles are.
     #[serde(default)]
     pub composite: Option<CompositeSource>,
-    /// How far back the warmup history starts.
+    /// How far back the warmup history a live node requests at start
+    /// starts; a backtest requests none, its strategy warming on the
+    /// replay.
     pub warmup: SignedDuration,
     /// The tick series the strategy reads beside its bars, on any venue:
     /// `ticks = [{ data = "trades", instrument_id = "ESH4.CME" }]`, `data`

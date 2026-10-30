@@ -148,13 +148,15 @@ for the roots among the bar types' instruments, over the span:
   `FORWARD_SPREAD`, `BACKWARD_RATIO`, `FORWARD_RATIO`).
 
 `params(instrument_id)` gives the two entries of a root, none for a plain
-instrument. `warmup::start` adds them to the warmup request of each bar
-type on a root (`request_bars` of the bar type itself) and to its
-subscription (one `subscribe_bars` per such bar type, since Nautilus reads
-one continuous future per command), and the strategy reads the warmup
-bars from the cache with `warmup::continuous_bars` (`strategy/README.md`,
-"Bars on a root"). `Backtest::continuous_bars(mode)` reads them over the
-backtest's run and warmup, the span the backtest replays.
+instrument. Live, `warmup::start` adds them to the warmup request of each
+bar type on a root (`request_bars` of the bar type itself) and to its
+subscription (one `subscribe_bars` per such bar type, since Nautilus
+reads one continuous future per command), and the strategy reads the
+warmup bars from the cache with `warmup::continuous_bars`
+(`strategy/README.md`, "Bars on a root"); in a backtest
+`warmup::subscribe` adds them to the subscription alone.
+`Backtest::continuous_bars(mode)` reads them over the backtest's run, the
+span the backtest replays.
 
 Bars on a root must be built from its trades (internal, LAST, not
 composite): the rolls are priced from trades, and Nautilus builds the

@@ -10,9 +10,11 @@
 //! netting venue they add into one, as the venue keeps them.
 //!
 //! The config's `instrument_ids` are the instruments read, whose bars it
-//! subscribes to and warms up through `strategy::warmup`;
-//! `trade_instrument_id` is the one traded. A minimal strategy to drive
-//! data, backtest and paper.
+//! subscribes to through `strategy::warmup`, its warmup requested there
+//! live; `trade_instrument_id` is the one traded. Its signal is its
+//! Nautilus indicator, and it decides only once its indicators are
+//! initialized, on the replay in a backtest, on the warmup live. A
+//! minimal strategy to drive data, backtest and paper.
 
 mod bracket;
 mod config;
@@ -21,8 +23,14 @@ mod signal;
 pub use bracket::Bps;
 pub use config::EmaCrossConfig;
 
-use jiff::Timestamp;
-use nautilus_common::{actor::DataActor, messages::data::DataResponseEnvelope, timer::TimeEvent};
+use std::rc::Rc;
+
+use jiff::{SignedDuration, Timestamp};
+use nautilus_common::{
+    actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
+    messages::data::DataResponseEnvelope,
+    timer::TimeEvent,
+};
 use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Bar, QuoteTick},
@@ -48,12 +56,19 @@ const HOLD_ALERT: &str = "EMA-HOLD:";
 pub struct EmaCross {
     core: StrategyCore,
     config: EmaCrossConfig,
-    signal: Signal,
+    /// The crossover, registered with Nautilus as the strategy's indicator.
+    signal: Rc<Signal>,
+    /// The warmup requested at start, live; none in a backtest, whose
+    /// indicators warm on the replay.
+    warmup: Option<SignedDuration>,
     /// The request group of the warmup of the last start.
-    warmup: UUID4,
+    warmup_group: UUID4,
 }
 
 impl EmaCross {
+    /// The strategy as a backtest runs it: it requests no warmup, and its
+    /// indicators warm on the data replayed.
+    ///
     /// # Errors
     ///
     /// Returns an error if the config is invalid.
@@ -61,9 +76,24 @@ impl EmaCross {
         config.validate()?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
-            signal: Signal::new(&config),
+            signal: Rc::new(Signal::new(&config)),
             config,
-            warmup: UUID4::new(),
+            warmup: None,
+            warmup_group: UUID4::new(),
+        })
+    }
+
+    /// The strategy as a live node runs it: it requests its warmup
+    /// (`BarsConfig::warmup`) at start, which hydrates its indicators.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config is invalid.
+    pub fn live(config: EmaCrossConfig) -> anyhow::Result<Self> {
+        let warmup = config.bars.warmup;
+        Ok(Self {
+            warmup: Some(warmup),
+            ..Self::new(config)?
         })
     }
 
@@ -213,30 +243,43 @@ nautilus_strategy!(EmaCross, {
 
 impl DataActor for EmaCross {
     /// Sets the time exit of each trade still open again, as after a
-    /// restart, then starts the warmup.
+    /// restart, registers the signal for the traded instrument's bars,
+    /// then subscribes to the bars, live after requesting the warmup.
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.arm_open_trades()?;
-        let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
-        self.warmup = UUID4::new();
+        let bar_types = self.config.bars.bar_types();
+        for bar_type in &bar_types {
+            if bar_type.instrument_id() == self.config.trade_instrument_id {
+                let signal = Rc::clone(&self.signal) as SharedActorIndicator;
+                self.core_mut()
+                    .register_indicator_for_bars(*bar_type, signal);
+            }
+        }
         // Its bars are built from quotes or source bars, never from a root's
         // trades: no continuous bars.
-        warmup::start(
-            self,
-            &bar_types,
-            warmup,
-            &ContinuousBars::default(),
-            self.warmup,
-        )
+        let continuous = ContinuousBars::default();
+        match self.warmup {
+            Some(warmup) => {
+                self.warmup_group = UUID4::new();
+                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)
+            }
+            None => {
+                warmup::subscribe(self, &bar_types, &continuous);
+                Ok(())
+            }
+        }
     }
 
     /// Logs the end of the warmup; Nautilus logs a failed one as an error.
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup, response)? {
+        if warmup::finished(self.warmup_group, response)? {
             log::info!("Warmup complete");
         }
         Ok(())
     }
 
+    /// The warmup's bars reach only the cache: they are handed to the
+    /// signal here.
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
         for bar in warmup::bars(self, quotes) {
             self.signal.update(&bar);
@@ -251,8 +294,12 @@ impl DataActor for EmaCross {
         Ok(())
     }
 
+    /// Nautilus has fed the bar to the signal; the strategy decides on it
+    /// once its indicators are initialized.
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        self.signal.update(bar);
+        if !self.core().indicators_initialized()? {
+            return Ok(());
+        }
         match self.signal.cross(bar) {
             Some(side) => self.enter(bar, side),
             None => Ok(()),

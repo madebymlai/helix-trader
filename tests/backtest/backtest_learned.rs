@@ -2,7 +2,7 @@
 //! catalog of IC's gold: the binary's `train` subcommand trains its model
 //! at a time, replaying the strategy's dataset run, and a backtest of the
 //! strategy then trades on the store. Its features are averages of 1-minute
-//! bars, warm from the warmup's bars; the fake learner predicts the first,
+//! bars, warm from the bars replayed; the fake learner predicts the first,
 //! the gold price clamped to 1, so every holdout row ties (AUC 0.5, which
 //! the minimum of 0.5 publishes) and every decision from the model's
 //! valid-from is a long, closed 30 minutes later. A live node's launcher
@@ -54,9 +54,8 @@ const CONFIG: &str = r#"
 "#;
 
 /// Midnight of the 23rd: the window starts at 02:00 of the 21st, its
-/// first day's replay from 23:00 of the 20th, the strategy's warmup
-/// before the day, its warmup request from 22:00. The catalogs start an
-/// hour before.
+/// first day's replay from 23:00 of the 20th, the features' warmup
+/// before the day. The catalogs start two hours before.
 fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
@@ -106,17 +105,40 @@ fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
     assert_eq!(traded(&catalog, models), (6, 3));
 }
 
+/// A backtest from midnight of the 23rd, the model's valid-from, warms its
+/// features on its own 1-minute bars: at the decision of 00:00 it has none,
+/// and decides first at 01:00, its slow average of 30 bars initialized at
+/// 00:30. The decisions of 01:00 and 02:00 each a long and its close.
+#[test]
+fn a_backtest_from_the_valid_from_first_decides_once_its_features_are_initialized() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
+        t() + SignedDuration::from_hours(4),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    train(&config_path, catalog.path(), &models, t());
+
+    assert_eq!(traded_from(&catalog, models, t()), (4, 2));
+}
+
 /// The orders and positions of a backtest of the strategy on the models
 /// under `models`, from 22:00 of the 22nd to 03:00 of the 23rd.
 fn traded(catalog: &TempDir, models: PathBuf) -> (usize, usize) {
+    traded_from(catalog, models, t() - SignedDuration::from_hours(2))
+}
+
+/// The orders and positions of a backtest of the strategy on the models
+/// under `models`, from `start` to 03:00 of the 23rd.
+fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, usize) {
     let config: LearnedConfig = toml::from_str(CONFIG).unwrap();
     let requirements = config.bars.data_requirements();
     let backtest = Backtest {
         bar_types: requirements.bar_types,
         ticks: requirements.ticks,
-        start: t() - SignedDuration::from_hours(2),
+        start,
         end: t() + SignedDuration::from_hours(3),
-        warmup: requirements.warmup,
         balance: Money::from("100000 USD"),
         ..ic::backtest(catalog)
     };

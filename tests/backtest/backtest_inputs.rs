@@ -3,22 +3,6 @@
 //! share the file.
 
 use crate::common::trades;
-use jiff::SignedDuration;
-
-#[test]
-fn a_negative_warmup_is_refused() {
-    let levels = trades::TIME_EXIT;
-    let catalog = trades::catalog(&levels);
-    let mut backtest = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR");
-    backtest.warmup = SignedDuration::from_hours(-1);
-
-    let err = backtest
-        .run(trades::ema_cross(trades::time_exit()))
-        .unwrap_err();
-
-    let err = format!("{err:#}");
-    assert!(err.contains("negative warmup"), "{err}");
-}
 
 #[test]
 fn a_start_on_or_after_the_end_is_refused() {
@@ -34,6 +18,6 @@ fn a_start_on_or_after_the_end_is_refused() {
 
         let err = format!("{err:#}");
         let message = format!("backtest start {start} must be before its end {end}");
-        assert!(err.contains(&message), "{err}");
+        assert!(err.contains(message.as_str()), "{err}");
     }
 }

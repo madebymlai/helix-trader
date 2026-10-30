@@ -225,8 +225,8 @@ tells the strategy (`rolls/README.md`, "The roller"). Bars on a root are
 Nautilus' continuous bars, built from the trades of each contract in turn
 and adjusted across the rolls: the strategy is given the
 `rolls::ContinuousBars` of its bar types (`Backtest::continuous_bars(mode)`
-reads them over a backtest) and hands them to `warmup::start` (see Warmup
-and training, "Bars on a root").
+reads them over a backtest) and hands them to `warmup::subscribe` (see
+Warmup and training, "Bars on a root").
 
 ### Session
 
@@ -268,20 +268,31 @@ struct holding a `StrategyCore`, `nautilus_strategy!` to generate the
 pub struct Trend {
     core: StrategyCore,
     config: TrendConfig,
-    book: Book,
+    /// The pure core, the strategy's Nautilus indicator.
+    book: Rc<Book>,
+    /// The warmup requested at start, live; none in a backtest.
+    warmup: Option<SignedDuration>,
     /// The request group of the warmup of the last start.
-    warmup: UUID4,
+    warmup_group: UUID4,
 }
 
 impl Trend {
+    /// As a backtest runs it: no warmup request.
     pub fn new(config: TrendConfig) -> anyhow::Result<Self> {
         config.validate()?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
-            book: Book::new(&config),
+            book: Rc::new(Book::new(&config)),
             config,
-            warmup: UUID4::new(),
+            warmup: None,
+            warmup_group: UUID4::new(),
         })
+    }
+
+    /// As a live node runs it: its warmup requested at start.
+    pub fn live(config: TrendConfig) -> anyhow::Result<Self> {
+        let warmup = config.bars.warmup;
+        Ok(Self { warmup: Some(warmup), ..Self::new(config)? })
     }
 }
 
@@ -289,20 +300,27 @@ nautilus_strategy!(Trend);
 
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
-        self.warmup = UUID4::new();
+        let bar_types = self.config.bars.bar_types();
+        for bar_type in &bar_types {
+            let book = Rc::clone(&self.book) as SharedActorIndicator;
+            self.core_mut().register_indicator_for_bars(*bar_type, book);
+        }
         // No bars on a futures root: no continuous bars (see Warmup).
-        warmup::start(
-            self,
-            &bar_types,
-            warmup,
-            &ContinuousBars::default(),
-            self.warmup,
-        )
+        let continuous = ContinuousBars::default();
+        match self.warmup {
+            Some(warmup) => {
+                self.warmup_group = UUID4::new();
+                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)
+            }
+            None => {
+                warmup::subscribe(self, &bar_types, &continuous);
+                Ok(())
+            }
+        }
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup, response)? {
+        if warmup::finished(self.warmup_group, response)? {
             log::info!("Warmup complete");
         }
         Ok(())
@@ -323,8 +341,11 @@ impl DataActor for Trend {
     }
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        // Feed the bar to the pure core, then submit the orders it
-        // decides.
+        // Nautilus fed the bar to the book; decide once it is warm.
+        if !self.core().indicators_initialized()? {
+            return Ok(());
+        }
+        // Submit the orders the pure core decides.
         Ok(())
     }
 }
@@ -342,14 +363,28 @@ impl DataActor for Trend {
   `manage_gtd_expiry` is set); the Rust runtime does not call it, so a
   strategy that wants it calls `Strategy::on_start` from its
   `DataActor::on_start`.
+- **It decides only once its indicators are initialized.** This is the
+  contract of every strategy, as Nautilus documents it (Concepts ›
+  Strategies: "Check `indicators_initialized()` before acting on
+  indicator values"): its state is a Nautilus indicator, registered in
+  `on_start` (`register_indicator_for_*`, or `FeatureSet::register`),
+  which Nautilus feeds before the strategy's handler, and the strategy
+  acts only when `self.core().indicators_initialized()` is true, in a
+  backtest and live alike. Nautilus reports `false` while no indicator is
+  registered, so a strategy registers at least one. The end of a warmup
+  request opens nothing: live, the warmup hydrates the indicators; in a
+  backtest they warm on the replay (see "Warmup and training"). The EMA
+  checks it in `on_bar`, `learned` before each decision.
 - The warmup is shared as function calls, not as a hook implementation:
-  `on_start` hands `warmup::start` the bar types and warmup of `bars`, the
-  continuous bars of those on a futures root (none here), and a new
-  request group id, stored first; the two `on_historical_*` handlers
-  feed the bars `warmup::bars` returns to the strategy's own state; and
+  a strategy built for live (`Trend::live`) hands `warmup::start` the bar
+  types and warmup of `bars`, the continuous bars of those on a futures
+  root (none here), and a new request group id, stored first; built for
+  a backtest (`Trend::new`) it hands `warmup::subscribe` the bar types
+  alone, and requests nothing. The two `on_historical_*` handlers feed
+  the bars `warmup::bars` returns to the strategy's own state, and
   `on_data_response` asks `warmup::finished` whether the warmup ended (see
-  "Warmup and training"). Each strategy writes these four handlers itself,
-  so its `DataActor` impl stays plain Nautilus.
+  "Warmup and training"). Each strategy writes these handlers itself, so
+  its `DataActor` impl stays plain Nautilus.
 
 ### Orders and positions
 
@@ -409,8 +444,7 @@ way (backtest README, "Venue").
 
 The example strategy (`ema/`) trades one instrument, `trade_instrument_id`,
 which must be one of `instrument_ids`; the others are read only: their bars
-are subscribed and warmed up like the traded one's, and the EMA ignores
-them, as a strategy reading a signal instrument would read them.
+are subscribed like the traded one's, and the EMA ignores them, as a strategy reading a signal instrument would read them.
 
 A strategy reading an instrument's book lists it in `instrument_ids` too
 (CME gold, `GC.v.0.GLBX`, beside `XAUUSD.ICMARKETS`), no other config: a
@@ -427,7 +461,10 @@ subscription of the kind the data arrives as keeps the cache's book
 - **Entry.** On each bar of the traded instrument inside the session, the
   fast EMA above the slow one is long, otherwise short; a bar changing the
   side is a cross (`signal.rs`), the first warm bar setting the side
-  without one. A cross sends one bracket in its direction: a market entry
+  without one. The signal is the EMA's Nautilus indicator, registered for
+  the traded instrument's bars and initialized once both EMAs are, by
+  the bars inside the session; `on_bar` decides only once
+  `indicators_initialized()`. A cross sends one bracket in its direction: a market entry
   of `trade_size`, its stop loss `stop_loss_bps` and its take profit
   `take_profit_bps` from the decision bar's close (`bracket.rs`), rounded
   to the instrument's prices.
@@ -732,8 +769,9 @@ of its choosing (`model::features`, `model::decide`).
   on where the build started by up to about a third of the difference.
   A warmup of several times the longest recursive period, 5 to 10, makes
   them depend on it negligibly (e^-5 or less), not to the bit. The
-  catalog must cover the data from that warmup before the first day, and
-  the strategy's own warmup request before it. `write(rows, from, to)` files
+  catalog should hold the data from that warmup before the first day:
+  the replay makes no warmup request, and nothing checks the catalog
+  first (backtest README, "No check before the run"). `write(rows, from, to)` files
   only the days the replay settled (replayed whole, `to` the longest
   target past their end), each with the day's bounds, a day without rows
   within the file of the day before it (Nautilus writes no file without
@@ -934,19 +972,36 @@ of its choosing (`model::features`, `model::decide`).
 ## Warmup and training
 
 This is the single description of warmup; the backtest and live READMEs only
-say how to register the catalog that serves it.
+say where the data comes from.
 
 Warmup is the history a strategy needs before it trades: indicators to
-initialise and models to train. The module `strategy::warmup` is the one
-place that knows Nautilus' warmup protocol for the bars it builds; no
-strategy names the request params or reads the cache for its warmup. A
-strategy makes the three calls shown in Wiring: `warmup::start(self,
-&bar_types, warmup, &continuous, group)` in `on_start`, which requests the
-warmup as the request group `group` and subscribes to the bars; `warmup::bars(self,
+initialise and models to train. A strategy decides only once its
+indicators are initialized (see Wiring), wherever their data came from:
+
+- **Live**, the strategy requests its warmup at start, and the request
+  hydrates its indicators before the live stream.
+- **In a backtest**, there is no warmup: the run replays `[start, end]`
+  alone, the strategy requests nothing and only subscribes, and its
+  indicators warm on the replayed bars, so it decides from where they
+  initialize, an EMA after its period of bars. To trade from 10:00, start
+  the run earlier (backtest README, "Warmup").
+- **A dataset build** (and so a retrain) replays the features' warmup
+  before its first day, by starting its run that much earlier, and stores
+  no row decided before the day (see "Features and decisions",
+  "Dataset"); it makes no warmup request either.
+
+The module `strategy::warmup` is the one place that knows Nautilus'
+warmup protocol for the bars it builds; no strategy names the request
+params or reads the cache for its warmup. A live strategy makes the
+three calls shown in Wiring: `warmup::start(self, &bar_types, warmup,
+&continuous, group)` in `on_start`, which requests the warmup as the
+request group `group` and subscribes to the bars; `warmup::bars(self,
 response)` in `on_historical_quotes` and `on_historical_bars`, which
 returns the warmup bars of the response's instrument, oldest first; and
 `warmup::finished(group, response)` in `on_data_response`, which tells
-whether the warmup ended, complete or not.
+whether the warmup ended, complete or not. In a backtest it calls
+`warmup::subscribe(self, &bar_types, &continuous)` in `on_start` alone,
+which subscribes as `start` does, with no request.
 
 - **What `start` requests** is chosen from the bar type alone, never the
   venue. A composite bar type is built from its source bars: `start`
@@ -959,7 +1014,7 @@ whether the warmup ended, complete or not.
   internal bar type does not build bars from quotes; only a request of
   their source with `bar_types` does.
 - **The params.** Each request runs over `[now - warmup, now]`, where
-  `now` is `self.clock().utc_now()`, the simulated time in backtest. The
+  `now` is `self.clock().utc_now()`. The
   end is given so that the data engine trims a bar closing after `now`
   from the response: IB answers an open-ended request with the minute in
   progress, which the live stream then sends again. It carries three
@@ -972,7 +1027,7 @@ whether the warmup ended, complete or not.
   `skip_first_non_full_bar = true`, so that the oldest bar, missing the data
   before `now - warmup`, is dropped; `update_catalog = true`, so that an
   answer the data client certifies complete is written back to the
-  catalog (IC's, live; a backtest registers its catalog read-only). Then
+  catalog (IC's). Then
   `start` subscribes to the bar types, one `subscribe_bars` of a list per
   venue, with the param `start_ns` = `now`: the live stream starts where
   the warmup ends. Without it, a data engine with a catalog starts a
@@ -980,9 +1035,8 @@ whether the warmup ended, complete or not.
   (`subscribe_command_with_prefilled_start_ns`,
   `data/src/engine/streaming.rs`), which IB's data client honours by
   sending every bar since as live (`parse_start_ns`,
-  `adapters/interactive_brokers/src/data/core.rs`).
-  `backtest_bars.rs`, `backtest_bars_on_close.rs` and
-  `backtest_composite_warmup.rs` pin this.
+  `adapters/interactive_brokers/src/data/core.rs`). The gated live tests
+  `ib_minute_bars.rs` and `ic_live_demo.rs` (`tests/live/`) pin this.
 - **The request group.** The requests form one group
   (`DataActor::request_group`, with the strategy's id): once every request
   is answered, Nautilus calls `on_data_response` with a payload-free
@@ -990,8 +1044,9 @@ whether the warmup ended, complete or not.
   failed (its data received up to then delivered anyway).
   `warmup::finished` returns `Ok(true)` then, or an error naming the
   reason, which Nautilus logs; `Ok(false)` for any other response. A group
-  whose requests are all answered at once, as a backtest's catalog does,
-  ends inside `start`, hence the id stored before the call.
+  whose requests are all answered at once ends inside `start`, hence the
+  id stored before the call. Its end opens no decision: the strategy
+  decides once its indicators are initialized.
 - **What `bars` does.** The bars a request builds go to the cache only;
   they are there when the response arrives. `bars` reads the internal bars
   of the response's instrument from the cache (newest first there) and
@@ -1012,8 +1067,10 @@ whether the warmup ended, complete or not.
   the strategy calls `warmup::continuous_bars(self, &bar_types,
   &continuous)` once `finished` returns `Ok(true)`, which returns them
   oldest first. Each such bar type is subscribed on its own, with
-  `start_ns` and the same two params. `backtest_continuous_bars.rs` pins
-  this.
+  `start_ns` and the same two params, by `subscribe` too.
+  `backtest_continuous_bars.rs` pins the subscription in a backtest; live
+  refuses bars on a root (`rolls/README.md`), so no run makes this
+  request today.
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
   warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
@@ -1021,20 +1078,20 @@ whether the warmup ended, complete or not.
   the most bars the warmup builds of one bar type (warmup over bar length,
   plus the bar spanning the start), the default left on top as headroom.
   Past the cache's maximum of 1,000,000 it fails, naming the bar type, the
-  bars needed and the capacity, and the run does not start. The backtest
-  sets it on `BacktestEngineConfig::cache`, live on `LiveNodeConfig::cache`.
+  bars needed and the capacity, and the run does not start. The live
+  node sets it on `LiveNodeConfig::cache`; a backtest, which builds no
+  warmup bars, keeps Nautilus' default.
 - **Response.** One response per request, the catalog's part and the data
   client's merged, usually before the first `on_bar`. An `Err` returned
   from `on_historical_quotes`, `on_historical_bars` or `on_data_response`
   is logged, not propagated: a failed warmup does not stop the run. An
-  unanswered request never calls them, and its group never ends. Do not
-  trade until warmup has actually arrived.
+  unanswered request never calls them, and its group never ends. Neither
+  opens a decision: the indicators being initialized does.
 - **Who answers.** The data engine serves the request from a registered
   catalog and asks the data client only for the intervals the catalog
-  lacks. In backtest the client answers nothing, so the catalog must be
-  registered and cover the whole window, or no response comes (see the
-  backtest README). Live, the node registers the same catalog, and the
-  data client answers the rest (see the live README): OKX's adapter serves
+  lacks. A backtest makes no request: its data client answers none, and
+  no catalog is registered in it (backtest README, "Warmup"). Live, the
+  node registers the catalog, and the data client answers the rest (see the live README): OKX's adapter serves
   its candles up to now, IB's its 1-minute bars up to now
   (`request_bars`), IC's its quotes up to now from cTrader's tick history
   (`request_quotes`), written back. Neither OKX nor IB serves quote
@@ -1052,7 +1109,8 @@ data, and the strategy hands them the warmup's bars.
 
 1. Create `strategy/<name>/` following the layout above: a config embedding
    `BarsConfig` (see "Config"), the wiring calling `warmup` (see "Wiring"),
-   and the strategy's own decision and orders.
+   its state registered as a Nautilus indicator, and the strategy's own
+   decision and orders, made only once `indicators_initialized()`.
 2. Declare it in `strategy/mod.rs`.
 3. In `main.rs`, add a variant to `enum Strategy` and an arm to each `match`
    on it (fill-catalog, backtest, live, train), reading the data
@@ -1068,10 +1126,12 @@ data, and the strategy hands them the warmup's bars.
   fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through
   `Backtest::run` on a small fixture catalog of 1-minute quotes, one run per
-  test (one node per test thread, `tests/backtest/`). They test the warmup
-  module too: the fixture's prices are chosen so that the warmup bars, the
-  partial oldest bar, the bar at the run start and the session each change
-  the orders and the final balance. The EMA's own tests run it on fixtures
+  test (one node per test thread, `tests/backtest/`). The fixture's prices
+  are chosen so that the bars the indicators warm on, where the run
+  starts and the session each change the orders and the final balance
+  (`backtest_warmup.rs`: the EMA decides once its indicators initialize
+  on the replay). The live warmup request is pinned by the gated live
+  tests (`tests/live/`). The EMA's own tests run it on fixtures
   where each cross, stop loss, take profit and hold is worked out by hand
   (`backtest_ema_*.rs`, backtest README, "Tests"). A recording strategy in
   `tests/common` checks what the EMA cannot show: every price of the bars,
