@@ -14,7 +14,10 @@ use serde::{
     de::{self, DeserializeOwned, MapAccess, Visitor},
 };
 
-use super::{CompositeSource, DataRequirements, TickSeries, session::Session, tick_data};
+use super::{
+    CompositeSource, DataRequirements, IndicatorKind, IndicatorsConfig, TickSeries,
+    session::Session, tick_data,
+};
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
 /// names and types, and the strategy's own part `P` (see `Part`).
@@ -22,6 +25,9 @@ use super::{CompositeSource, DataRequirements, TickSeries, session::Session, tic
 /// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
 ///   one.
 /// - `[data]`: what the strategy reads (see `DataConfig`).
+/// - `[indicators]`: the indicators its code reads, by name (see
+///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
+///   without one.
 /// - `[trade]`: what it trades (see `TradeConfig`).
 /// - the strategy's own fields, `P` itself, at the top level beside them:
 ///   a TOML describes one strategy.
@@ -34,17 +40,22 @@ use super::{CompositeSource, DataRequirements, TickSeries, session::Session, tic
 pub struct StandardConfig<P: Part> {
     pub base: StrategyConfig,
     pub data: DataConfig,
+    pub indicators: IndicatorsConfig,
     pub trade: TradeConfig,
     pub own: P,
 }
 
 /// A strategy's part of its config: its own fields, at the top level of
 /// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
-/// how many instruments it trades, its default `[base]` and its own rules.
-/// The standard tables are not its to drop or rename.
+/// how many instruments it trades, the indicators it reads, its default
+/// `[base]` and its own rules. The standard tables are not its to drop or
+/// rename.
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
+    /// The indicators its code reads, by name and Nautilus type:
+    /// `[indicators]` configures these and no other.
+    const INDICATORS: &'static [(&'static str, IndicatorKind)] = &[];
     /// Its `[base]` when the TOML has none.
     fn default_base() -> StrategyConfig;
     /// Pushes onto `errors` every violation of its own rules in `config`,
@@ -68,13 +79,16 @@ impl<P: Part> StandardConfig<P> {
     /// # Errors
     ///
     /// Returns every violation of the rules of `[data]` (see
-    /// `DataConfig`), of `[trade]` (as many instruments as the strategy
-    /// trades, each `trade_size` positive) and of the strategy's own
-    /// (`Part::validate`): Nautilus' `ConfigError` of each, with its field,
-    /// as one `ConfigError::Multiple` if there are several.
+    /// `DataConfig`), of `[indicators]` (those the strategy reads, of
+    /// their types, their arguments taken by Nautilus; see
+    /// `IndicatorsConfig`), of `[trade]` (as many instruments as the
+    /// strategy trades, each `trade_size` positive) and of the strategy's
+    /// own (`Part::validate`): Nautilus' `ConfigError` of each, with its
+    /// field, as one `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);
+        self.indicators.validate(P::INDICATORS, &mut errors);
         self.trade.validate(P::INSTRUMENTS, &mut errors);
         P::validate(self, &mut errors);
         errors.into_result()
@@ -319,16 +333,17 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
     type Value = StandardConfig<P>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the tables base, data and trade, and the strategy's own fields")
+        f.write_str("the tables base, data, indicators and trade, and the strategy's own fields")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let (mut base, mut data, mut trade) = (None, None, None);
+        let (mut base, mut data, mut indicators, mut trade) = (None, None, None, None);
         let mut own = toml::Table::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "base" => base = Some(map.next_value()?),
                 "data" => data = Some(map.next_value()?),
+                "indicators" => indicators = Some(map.next_value()?),
                 "trade" => trade = Some(map.next_value()?),
                 _ => {
                     let value = map.next_value::<toml::Value>()?;
@@ -344,6 +359,7 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
         Ok(StandardConfig {
             base: base.unwrap_or_else(P::default_base),
             data: data.ok_or_else(|| de::Error::missing_field("data"))?,
+            indicators: indicators.unwrap_or_default(),
             trade: trade.ok_or_else(|| de::Error::missing_field("trade"))?,
             own,
         })

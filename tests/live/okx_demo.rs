@@ -53,6 +53,10 @@ fn x_perp_ema_cross() -> EmaCrossConfig {
         ]
         warmup = "30m"
 
+        [indicators]
+        fast = { kind = "ExponentialMovingAverage", period = 10 }
+        slow = { kind = "ExponentialMovingAverage", period = 30 }
+
         [trade]
         instruments = [{ instrument_id = "BTC-USD_UM_XPERP-310328.OKX", trade_size = "1" }]
         "#,

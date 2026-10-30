@@ -32,6 +32,7 @@ type or trait:
 ```
 strategy/
   standard.rs   StandardConfig: the standard tables, the strategy's Part
+  indicators.rs [indicators]: indicators by Nautilus type and arguments
   config.rs     BarsConfig: model_ema's flat bars config
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
@@ -62,7 +63,7 @@ and the strategy's own fields at its top level, since a TOML describes one
 strategy (`strategy::StandardConfig`, `strategy/standard.rs`):
 
 ```toml
-fast_period = 10   # the strategy's own fields, before any table
+# the strategy's own fields, if any, before any table: the EMA has none
 
 [base]      # Nautilus' StrategyConfig as is; optional, the strategy's default
 strategy_id = "EMA_CROSS-001"
@@ -75,6 +76,14 @@ series = [
 ]
 warmup = "720h"
 session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+
+[indicators.fast]   # an indicator its code reads, by name
+kind = "ExponentialMovingAverage"
+period = 10
+
+[indicators.slow]
+kind = "ExponentialMovingAverage"
+period = 30
 
 [trade]     # what it trades
 instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
@@ -90,6 +99,22 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   are (see `TickSeries` below). `warmup` is how far back a live start's
   history request goes (see "Warmup and training"), `session` the hours
   traded (see "Session").
+- `[indicators.<name>]` is an indicator the strategy's code reads, by
+  name: `kind` its Nautilus type, the other keys its Nautilus
+  constructor's arguments by their Nautilus names and types, those left
+  out taking Nautilus' defaults (`strategy::IndicatorConfig`,
+  `strategy/indicators.rs`). `ExponentialMovingAverage` takes `period`
+  and `price_type` (a `PriceType`); `AverageTrueRange` takes `period`,
+  `ma_type` (a `MovingAverageType` by the name its `FromStr` parses,
+  `"WILDER"`), `use_previous` and `value_floor`. The strategy declares the
+  ones it reads by name and type (`Part::INDICATORS`: `fast` and `slow`,
+  two `ExponentialMovingAverage`s, for the EMA) and receives them built
+  by name (`IndicatorsConfig::built`), each through its Nautilus
+  constructor: `new_checked` where Nautilus makes it public
+  (`ExponentialMovingAverage`), else `new` (`AverageTrueRange`, whose
+  `new` panics at load on an argument it refuses). The barrier's ATR of
+  a model strategy is not one of them: it is the harness', not the
+  strategy's code's.
 - `[trade] instruments` pairs each traded instrument with its
   `trade_size`, a Nautilus `Quantity` (a string, `"1"`).
 - The strategy's part (`strategy::Part`) is its own fields, at the top
@@ -97,8 +122,8 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   top-level key the standard tables and its fields do not take is
   refused); how many instruments it trades (`Part::INSTRUMENTS`, one for
   the EMA); its default base; and its own rules. It cannot drop or rename
-  the standard tables: the config reads `base`, `data` and `trade` as
-  them, and every other key as its own.
+  the standard tables: the config reads `base`, `data`, `indicators` and
+  `trade` as them, and every other key as its own.
 
 Loading is one step, `StandardConfig::load`: TOML text in, the validated
 config or every violation out.
@@ -115,15 +140,20 @@ config or every violation out.
   ticks with one. serde stops at the first such error.
 - The rules then run on Nautilus' `nautilus_common::config::ConfigErrorCollector`,
   each violation a `ConfigError` with its field (`data.series[1].bar_spec`,
-  `trade.instruments`, `fast_period`), all of them reported at once,
+  `indicators.slow`, `trade.instruments`), all of them reported at once,
   as Nautilus' own `HurstVpinDirectionalConfig::validate` does: at least
   one series; each bars series aggregated on time (the session needs the
   bar's length), priced `BID`, `ASK` or `MID` when built from quotes
   (`LAST` fails), on the venue of the first bars, and not built `from`
   bars beside a session (see "Session"); a positive warmup; a session, if
-  any, opening before it closes; as many traded instruments as the
-  strategy trades, each `trade_size` positive; then the strategy's own
-  rules (`Part::validate`).
+  any, opening before it closes; each indicator the strategy declares
+  present (`indicators.<name>`) and of its type (`indicators.<name>.kind`),
+  none it does not declare, and its arguments taken by its Nautilus
+  constructor (`ExponentialMovingAverage::new_checked` refuses `period =
+  0`, reported under `indicators.<name>`); as many traded instruments as
+  the strategy trades, each `trade_size` positive; then the strategy's
+  own rules (`Part::validate`: for the EMA, the fast period below the
+  slow one).
 
 `main` loads the config before anything else, so a bad config never
 starts a node, a backtest, a dataset or a training run.
@@ -479,9 +509,10 @@ subscription of the kind the data arrives as keeps the cache's book
 `subscribe_book_at_interval` keeps it from deltas only.
 
 - **Entry.** On each bar of the traded instrument inside the session, the
-  fast EMA above the slow one is long, otherwise short; a bar changing the
-  side is a cross (`signal.rs`), the first warm bar setting the side
-  without one. The signal is the EMA's Nautilus indicator, registered for
+  fast EMA above the slow one is long, otherwise short (the Nautilus
+  `ExponentialMovingAverage`s `[indicators.fast]` and `[indicators.slow]`,
+  of their closes); a bar changing the side is a cross (`signal.rs`),
+  the first warm bar setting the side without one. The signal is the EMA's Nautilus indicator, registered for
   the traded instrument's bars and initialized once both EMAs are, by
   the bars inside the session; `on_bar` decides only once
   `indicators_initialized()`. A cross sends one bracket in its direction: a market entry
@@ -510,15 +541,20 @@ subscription of the kind the data arrives as keeps the cache's book
   Backtests on IB data are unaffected.
 
 ```toml
-fast_period = 10
-slow_period = 30
-
 [data]
 series = [
     { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
     { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
 ]
 warmup = "72h"
+
+[indicators.fast]
+kind = "ExponentialMovingAverage"
+period = 10
+
+[indicators.slow]
+kind = "ExponentialMovingAverage"
+period = 30
 
 [trade]
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
