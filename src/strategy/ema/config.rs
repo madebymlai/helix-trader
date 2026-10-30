@@ -1,4 +1,5 @@
 use nautilus_common::config::{ConfigError, ConfigErrorCollector};
+use nautilus_indicators::average::ema::ExponentialMovingAverage;
 use nautilus_model::{
     data::BarType,
     identifiers::{InstrumentId, StrategyId},
@@ -7,27 +8,29 @@ use nautilus_model::{
 use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
-use crate::strategy::{Part, StandardConfig};
+use crate::strategy::{IndicatorKind, Part, StandardConfig};
 
 /// Config of the EMA crossover strategy, loaded from TOML: the standard
-/// tables and, at the top level, its own fields (`EmaParams`).
+/// tables, its EMAs in `[indicators]`, and no fields of its own
+/// (`EmaParams`).
 pub type EmaCrossConfig = StandardConfig<EmaParams>;
 
-/// The crossover's own fields: the periods of its fast and slow EMAs, in
-/// bars. It trades one instrument, the one of `[trade]`, on its one bars
-/// series of `[data]`; the other series are read only. Its exits are its
-/// code's (`bracket::STOP_LOSS`, `TAKE_PROFIT`, `HOLD`).
+/// The crossover's part: no fields of its own. It reads two Nautilus
+/// `ExponentialMovingAverage`s, `[indicators.fast]` and
+/// `[indicators.slow]`, the fast one of the shorter period; it trades one
+/// instrument, the one of `[trade]`, on its one bars series of `[data]`;
+/// the other series are read only. Its exits are its code's
+/// (`bracket::STOP_LOSS`, `TAKE_PROFIT`, `HOLD`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmaParams {
-    #[serde(default = "default_fast_period")]
-    pub fast_period: usize,
-    #[serde(default = "default_slow_period")]
-    pub slow_period: usize,
-}
+pub struct EmaParams {}
 
 impl Part for EmaParams {
     const INSTRUMENTS: usize = 1;
+    const INDICATORS: &'static [(&'static str, IndicatorKind)] = &[
+        ("fast", IndicatorKind::ExponentialMovingAverage),
+        ("slow", IndicatorKind::ExponentialMovingAverage),
+    ];
 
     /// The strategy's id and order tag. `oms_type` is left unset: Nautilus
     /// keeps the strategy's positions as the execution client of the venue
@@ -40,20 +43,19 @@ impl Part for EmaParams {
         }
     }
 
-    /// The periods out of order or the fast one zero, or the traded
-    /// instrument without exactly one bars series.
+    /// The fast period not below the slow one, or the traded instrument
+    /// without exactly one bars series.
     fn validate(config: &EmaCrossConfig, errors: &mut ConfigErrorCollector) {
-        let EmaParams {
-            fast_period,
-            slow_period,
-        } = config.own;
-        errors.check(
-            fast_period > 0 && fast_period < slow_period,
-            ConfigError::range(
-                "fast_period",
-                format!("must be positive and below the slow period {slow_period}"),
-            ),
-        );
+        let built = |name| config.indicators.built::<ExponentialMovingAverage>(name);
+        if let (Some(fast), Some(slow)) = (built("fast"), built("slow")) {
+            errors.check(
+                fast.period < slow.period,
+                ConfigError::range(
+                    "indicators.fast.period",
+                    format!("must be below the slow period {}", slow.period),
+                ),
+            );
+        }
         if let Some(traded) = config.trade.instruments.first() {
             let id = traded.instrument_id;
             let bars = config.data.bar_types().filter(|b| b.instrument_id() == id);
@@ -83,6 +85,31 @@ impl EmaCrossConfig {
         self.trade.instruments[0].trade_size
     }
 
+    /// The fast EMA, `[indicators.fast]`, built.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it is missing, of another type or of arguments Nautilus
+    /// refuses, which `validate` refuses.
+    #[must_use]
+    pub fn fast_ema(&self) -> ExponentialMovingAverage {
+        self.indicators
+            .built("fast")
+            .expect("the fast EMA validated")
+    }
+
+    /// The slow EMA, `[indicators.slow]`, built.
+    ///
+    /// # Panics
+    ///
+    /// As `fast_ema`.
+    #[must_use]
+    pub fn slow_ema(&self) -> ExponentialMovingAverage {
+        self.indicators
+            .built("slow")
+            .expect("the slow EMA validated")
+    }
+
     /// The bars of the traded instrument, the ones the crossover reads.
     ///
     /// # Panics
@@ -99,14 +126,6 @@ impl EmaCrossConfig {
     }
 }
 
-const fn default_fast_period() -> usize {
-    10
-}
-
-const fn default_slow_period() -> usize {
-    30
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +138,14 @@ mod tests {
         ]
         warmup = "720h"
         session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+
+        [indicators.fast]
+        kind = "ExponentialMovingAverage"
+        period = 10
+
+        [indicators.slow]
+        kind = "ExponentialMovingAverage"
+        period = 30
 
         [trade]
         instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
@@ -136,6 +163,8 @@ mod tests {
             .into_iter()
             .map(|err| match err {
                 ConfigError::Range { field, .. }
+                | ConfigError::MissingField { field }
+                | ConfigError::UnsupportedField { field, .. }
                 | ConfigError::InvalidReference { field, .. }
                 | ConfigError::InvalidValue { field, .. } => field,
                 err => panic!("unexpected config error {err:?}"),
@@ -144,10 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn loads_from_toml_with_defaults() {
+    fn loads_from_toml() {
         let config = EmaCrossConfig::load(TOML).unwrap();
-        assert_eq!(config.own.fast_period, 10);
-        assert_eq!(config.own.slow_period, 30);
         assert_eq!(config.trade_size(), Quantity::from(1));
         assert_eq!(config.trade_instrument_id(), InstrumentId::from("ESM4.CME"));
         assert_eq!(
@@ -163,13 +190,22 @@ mod tests {
             config.trade_bar_type(),
             BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")
         );
+        assert_eq!(
+            (config.fast_ema().period, config.slow_ema().period),
+            (10, 30)
+        );
     }
 
     #[test]
-    fn reads_its_periods_from_the_top_level() {
-        let toml = format!("fast_period = 5\nslow_period = 15\n{TOML}");
+    fn reads_its_emas_from_the_indicators() {
+        let toml = TOML
+            .replace("period = 10", "period = 5")
+            .replace("period = 30", "period = 15");
         let config = EmaCrossConfig::load(&toml).unwrap();
-        assert_eq!((config.own.fast_period, config.own.slow_period), (5, 15));
+        assert_eq!(
+            (config.fast_ema().period, config.slow_ema().period),
+            (5, 15)
+        );
     }
 
     #[test]
@@ -183,10 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_misspelt_period_at_load() {
-        let toml = format!("fast_perod = 5\n{TOML}");
+    fn rejects_a_period_at_the_top_level() {
+        let toml = format!("fast_period = 5\n{TOML}");
         let err = EmaCrossConfig::load(&toml).unwrap_err();
-        assert!(err.to_string().contains("fast_perod"), "{err}");
+        assert!(err.to_string().contains("fast_period"), "{err}");
     }
 
     #[test]
@@ -197,9 +233,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_missing_ema() {
+        let start = TOML.find("[indicators.slow]").unwrap();
+        let end = TOML.find("[trade]").unwrap();
+        let toml = format!("{}{}", &TOML[..start], &TOML[end..]);
+        assert_eq!(error_fields(&toml), ["indicators.slow"]);
+    }
+
+    #[test]
+    fn rejects_an_ema_of_another_type() {
+        let toml = TOML.replacen(
+            "kind = \"ExponentialMovingAverage\"\n        period = 10",
+            "kind = \"AverageTrueRange\"\n        period = 10",
+            1,
+        );
+        assert_eq!(error_fields(&toml), ["indicators.fast.kind"]);
+    }
+
+    #[test]
+    fn rejects_a_zero_period_by_nautilus_check() {
+        let toml = TOML.replace("period = 10", "period = 0");
+        assert_eq!(error_fields(&toml), ["indicators.fast"]);
+    }
+
+    #[test]
     fn rejects_fast_period_not_below_slow() {
-        let toml = format!("fast_period = 30\n{TOML}");
-        assert_eq!(error_fields(&toml), ["fast_period"]);
+        let toml = TOML.replace("period = 10", "period = 30");
+        assert_eq!(error_fields(&toml), ["indicators.fast.period"]);
     }
 
     #[test]
@@ -238,7 +298,12 @@ mod tests {
 
     #[test]
     fn reports_its_own_violations_with_the_standard_ones() {
-        let toml = format!("fast_period = 0\n{TOML}").replace("\"720h\"", "\"0s\"");
-        assert_eq!(error_fields(&toml), ["data.warmup", "fast_period"]);
+        let toml = TOML
+            .replace("period = 10", "period = 30")
+            .replace("\"720h\"", "\"0s\"");
+        assert_eq!(
+            error_fields(&toml),
+            ["data.warmup", "indicators.fast.period"]
+        );
     }
 }

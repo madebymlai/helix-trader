@@ -12,7 +12,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 
-use super::config::{EmaCrossConfig, EmaParams};
+use super::config::EmaCrossConfig;
 use crate::strategy::Session;
 
 /// The crossings of the fast EMA over the slow one on the traded
@@ -31,13 +31,9 @@ pub(super) struct Signal {
 
 impl Signal {
     pub(super) fn new(config: &EmaCrossConfig) -> Self {
-        let EmaParams {
-            fast_period,
-            slow_period,
-        } = config.own;
         Self {
             instrument_id: config.trade_instrument_id(),
-            crossover: RefCell::new(Crossover::new(fast_period, slow_period)),
+            crossover: RefCell::new(Crossover::new(config.fast_ema(), config.slow_ema())),
             session: config.data.session.clone(),
             bar_length: config.trade_bar_type().spec().timedelta(),
         }
@@ -112,10 +108,10 @@ struct Crossover {
 }
 
 impl Crossover {
-    fn new(fast_period: usize, slow_period: usize) -> Self {
+    const fn new(fast: ExponentialMovingAverage, slow: ExponentialMovingAverage) -> Self {
         Self {
-            fast: ExponentialMovingAverage::new(fast_period, None),
-            slow: ExponentialMovingAverage::new(slow_period, None),
+            fast,
+            slow,
             long: [None, None],
         }
     }
@@ -156,9 +152,6 @@ mod tests {
     fn config() -> EmaCrossConfig {
         EmaCrossConfig::load(
             r#"
-            fast_period = 1
-            slow_period = 2
-
             [data]
             series = [
                 { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
@@ -166,6 +159,10 @@ mod tests {
             ]
             warmup = "24h"
             session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
+
+            [indicators]
+            fast = { kind = "ExponentialMovingAverage", period = 1 }
+            slow = { kind = "ExponentialMovingAverage", period = 2 }
 
             [trade]
             instruments = [{ instrument_id = "ESM4.CME", trade_size = "3" }]

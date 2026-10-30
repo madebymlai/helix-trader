@@ -39,6 +39,10 @@ series = [
 ]
 warmup = "720h"
 
+[indicators]
+fast = { kind = "ExponentialMovingAverage", period = 10 }
+slow = { kind = "ExponentialMovingAverage", period = 30 }
+
 [trade]
 instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]
 EOF
@@ -50,12 +54,13 @@ target/release/helix-trader backtest ema --config ema.toml \
 target/release/helix-trader live ema --config ema.toml
 ```
 
-The config is the universe: instruments, cadence and warmup live there and
-nowhere else. `--help` on each subcommand lists every flag. A bars series
-without `from` is built by Nautilus from the instrument's ticks, as its
-price type names: `BID`, `ASK` and `MID` bars from quotes, `LAST` bars
-from trades (CME futures on GLBX); with `from`, from source bars, as
-OKX's candles above (`src/strategy/README.md`, "Bars built from ticks").
+The config is the universe: instruments, cadence, warmup and the
+strategy's indicators live there and nowhere else. `--help` on each
+subcommand lists every flag. A bars series without `from` is built by
+Nautilus from the instrument's ticks, as its price type names: `BID`,
+`ASK` and `MID` bars from quotes, `LAST` bars from trades (CME futures on
+GLBX); with `from`, from source bars, as OKX's candles above
+(`src/strategy/README.md`, "Bars built from ticks").
 
 ## Tests
 

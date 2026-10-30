@@ -12,7 +12,7 @@
 //! The config (`EmaCrossConfig`) lists the series read in `[data]`, whose
 //! bars it subscribes to through `strategy::warmup`, its warmup requested
 //! there live; `[trade]` names the one instrument traded, read on its one
-//! bars series, and its own fields the EMA periods. Its signal is its
+//! bars series, and `[indicators]` its fast and slow EMAs. Its signal is its
 //! Nautilus indicator, and it decides only once its indicators are
 //! initialized, on the replay in a backtest, on the warmup live. A
 //! minimal strategy to drive data, backtest and paper.
@@ -332,6 +332,10 @@ mod tests {
             { data = "bars", instrument_id = "GBP/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
         ]
         warmup = "1h"
+
+        [indicators]
+        fast = { kind = "ExponentialMovingAverage", period = 10 }
+        slow = { kind = "ExponentialMovingAverage", period = 30 }
 
         [trade]
         instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
