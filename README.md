@@ -51,7 +51,11 @@ target/release/helix-trader live ema --config ema.toml
 ```
 
 The config is the universe: instruments, cadence and warmup live there and
-nowhere else. `--help` on each subcommand lists every flag.
+nowhere else. `--help` on each subcommand lists every flag. A bars series
+without `from` is built by Nautilus from the instrument's ticks, as its
+price type names: `BID`, `ASK` and `MID` bars from quotes, `LAST` bars
+from trades (CME futures on GLBX); with `from`, from source bars, as
+OKX's candles above (`src/strategy/README.md`, "Bars built from ticks").
 
 ## Tests
 

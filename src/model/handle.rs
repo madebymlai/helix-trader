@@ -526,8 +526,9 @@ impl ModelHandle {
     }
 
     /// The strategy's warmup, which the handle builds and starts: its
-    /// strategy delegates `on_data_response`, `on_historical_quotes` and
-    /// `on_historical_bars` to it, and a live node sizes its cache from it.
+    /// strategy delegates `on_data_response`, `on_historical_quotes`,
+    /// `on_historical_trades` and `on_historical_bars` to it, and a live
+    /// node sizes its cache from it.
     #[must_use]
     pub fn warmup(&self) -> Rc<Warmup> {
         Rc::clone(&self.warmup)

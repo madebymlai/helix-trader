@@ -32,7 +32,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{Bar, QuoteTick},
+    data::{Bar, QuoteTick, TradeTick},
     enums::{ContingencyType, OrderSide},
     events::{OrderEventAny, OrderFilled},
     identifiers::ClientOrderId,
@@ -268,6 +268,10 @@ impl DataActor for EmaCross {
     /// the signal.
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
         self.warmup.on_historical(self, quotes)
+    }
+
+    fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
+        self.warmup.on_historical(self, trades)
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {

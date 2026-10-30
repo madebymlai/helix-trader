@@ -20,7 +20,8 @@
 //! `model::handle::ModelHandle`); `model_ema` is the example.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
-//! 1-minute bars, OKX's candles) or from quotes; a `warmup::Warmup`, which
+//! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
+//! LAST bars); a `warmup::Warmup`, which
 //! each strategy holds, asks for their history live and hands it back, so
 //! that no strategy knows how, and subscribes to them in a backtest, which
 //! requests none. The catalog

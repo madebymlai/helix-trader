@@ -6,8 +6,8 @@
 //! summary. Next to the PnL it prints the costs, which the result does not
 //! hold: from the fills (`OrderFilled`, with their commission) of the
 //! orders in the engine's cache, and the quotes they filled on, if the run
-//! replayed quotes of their instrument; a run on bars alone has no spread
-//! to measure.
+//! replayed quotes of their instrument; a run on bars or trades alone has
+//! no spread to measure.
 
 use std::{collections::BTreeMap, fmt::Write};
 
@@ -50,7 +50,7 @@ impl Outcome {
     /// `result` and the costs of every fill of the orders in `cache`, each
     /// on the last of `quotes` of its instrument stamped at or before the
     /// fill: the quote the venue filled it on. A fill of an instrument
-    /// with no quote in `quotes` (a run on bars) has no spread.
+    /// with no quote in `quotes` (a run on bars or trades) has no spread.
     ///
     /// # Errors
     ///
