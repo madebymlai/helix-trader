@@ -1,6 +1,6 @@
 archive/
 target/
-.claude/worktrees/
+.claude/
 .env
 /catalog/*
 !/catalog/.gitkeep
