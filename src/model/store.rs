@@ -5,16 +5,17 @@
 //! dataset: the features, the decision rule, the targets and the
 //! commission they are net of, see `dataset::fingerprint`) and training
 //! settings (the learner and its settings, the label, the window, the
-//! holdout and the minimum score, below which a model is never
-//! published), and side, the long or the short, so a model is only ever
-//! listed beside models of the same features, costs, training and side.
-//! Backtest and live read the same list.
+//! holdout and the minimums its holdout must meet to be published,
+//! `holdout::Minimums`), and side, the long or the short, keyed by its
+//! margin, which decides the trades its holdout is judged on, so a model
+//! is only ever listed beside models of the same features, costs,
+//! training, side and margin. Backtest and live read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory beside its primary's
 //! sides, under their training settings, keyed by its own (its learner and
-//! settings, window, holdout and minimum score) and the primary's margins,
-//! which make its rows; a rule primary has no store of its own, its
-//! meta's `meta/` sits under the strategy id and fingerprint. A meta model
+//! settings, window, holdout, threshold and minimums) and the primary's
+//! margins, which make its rows; a rule primary has no store of its own,
+//! its meta's `meta/` sits under the strategy id and fingerprint. A meta model
 //! is only ever listed beside meta models of the same primary.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
@@ -24,9 +25,9 @@
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
 //! target spec, label and side, the learner, the calibration of its
-//! predictions, a side's expected payoff, the holdout score and probe rows
-//! with the calibrated predictions the model made on them when fitted, and
-//! the model as its adapter saved it. A loaded model's every prediction is
+//! predictions, a side's expected payoff, its holdout (`holdout::Holdout`)
+//! and probe rows with the calibrated predictions the model made on them
+//! when fitted, and the model as its adapter saved it. A loaded model's every prediction is
 //! calibrated (`LoadedModel`). A reloaded model is checked by predicting
 //! the probes, never by its bytes. The file is written beside its name, then
 //! renamed onto it, so a reader sees a whole model or none. A missing
@@ -50,6 +51,7 @@ use super::{
     dataset::{self, Commission},
     decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
+    holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
     payoff::Payoff,
     targets::{Label, Side, TargetsConfig},
@@ -106,8 +108,8 @@ pub struct ModelManifest {
     /// A primary's expected win and loss of a trade of its side; none for
     /// a meta model.
     pub payoff: Option<Payoff>,
-    /// The model's AUC on the holdout, of its calibrated predictions.
-    pub score: f64,
+    /// The model's holdout, as its publication read it.
+    pub holdout: Holdout,
     /// Rows of the holdout and the model's calibrated predictions on them.
     pub probes: Vec<Probe>,
 }
@@ -207,12 +209,14 @@ impl ModelStore {
     /// The store, under `root`, of the `side` models of `strategy_id`
     /// deciding with `features` as `config` says, on targets for a strategy
     /// of `requirements`, net of `commission`, and trained as `config`
-    /// says: `long/` or `short/` in the directory of its training settings.
+    /// says: `long/` or `short/` in the directory of its training settings,
+    /// keyed by the side's margin, which decides the trades its holdout
+    /// is judged on.
     ///
     /// # Errors
     ///
-    /// Returns an error if the learner cannot be written as JSON, or as
-    /// `dataset::fingerprint` does.
+    /// Returns an error if the margins do not trade `side`, the learner
+    /// cannot be written as JSON, or as `dataset::fingerprint` does.
     pub fn new(
         root: &Path,
         strategy_id: StrategyId,
@@ -222,6 +226,10 @@ impl ModelStore {
         commission: &Commission,
         side: Side,
     ) -> anyhow::Result<Self> {
+        let margin = config
+            .margins
+            .of(side)
+            .with_context(|| format!("the margins trade no {}", side.name()))?;
         Ok(Self {
             directory: primary_directory(
                 root,
@@ -231,7 +239,12 @@ impl ModelStore {
                 requirements,
                 commission,
             )?
-            .join(side.name()),
+            .join(side.name())
+            .join(
+                Fingerprint::default()
+                    .with(&margin.to_le_bytes())
+                    .to_string(),
+            ),
         })
     }
 
@@ -393,7 +406,7 @@ fn dataset_directory(
 /// `strategy_id` deciding with `features` as `config` says, on targets for
 /// a strategy of `requirements`, net of `commission`: its dataset's, then
 /// its training settings, the learner and its settings, the label, the
-/// window, the holdout and the minimum score.
+/// window, the holdout and the minimums of its holdout.
 fn primary_directory(
     root: &Path,
     strategy_id: StrategyId,
@@ -407,7 +420,8 @@ fn primary_directory(
         .with(format!("{:?}", config.label).as_bytes())
         .with(&config.window.as_nanos().to_le_bytes())
         .with(&config.holdout.as_nanos().to_le_bytes())
-        .with(&config.min_score.to_le_bytes());
+        .with(&config.min_pnl.to_le_bytes())
+        .with(&config.min_trades.to_le_bytes());
     Ok(dataset_directory(
         root,
         strategy_id,
@@ -420,14 +434,17 @@ fn primary_directory(
     .join(settings.to_string()))
 }
 
-/// The training settings of `meta`: its learner, window, holdout and
-/// minimum score.
+/// The training settings of `meta`: its learner, window, holdout, and
+/// the threshold deciding the trades its holdout is judged on, and the
+/// minimums of its holdout.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
-        .with(&meta.min_score.to_le_bytes()))
+        .with(&meta.threshold.to_le_bytes())
+        .with(&meta.min_pnl.to_le_bytes())
+        .with(&meta.min_trades.to_le_bytes()))
 }
 
 /// The models of a store as a strategy swaps them in, decision by decision
@@ -547,6 +564,7 @@ mod tests {
     use super::*;
     use crate::model::{
         decide::DecisionRule,
+        holdout::Earnings,
         learner::{LearnerConfig, TrainingSet},
     };
 
@@ -582,7 +600,8 @@ mod tests {
                 long: Some(0.5),
                 short: Some(0.5),
             })
-            .min_score(0.5)
+            .min_pnl(1.0)
+            .min_trades(30)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -654,7 +673,12 @@ mod tests {
                     win: 1.5,
                     loss: 1.25,
                 }),
-                score: 0.625,
+                holdout: Holdout {
+                    earnings: Earnings::default(),
+                    log_loss: 0.6,
+                    baseline_log_loss: 0.69,
+                    auc: Some(0.625),
+                },
                 probes: rows
                     .iter()
                     .map(|row| Probe {
@@ -775,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn other_training_settings_targets_or_minimum_score_list_none_of_the_models() {
+    fn other_training_settings_targets_minimums_or_margin_list_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
@@ -807,11 +831,40 @@ mod tests {
                 "{other:?}"
             );
         }
-        let gated = ModelConfig {
-            min_score: 0.9,
+        let held_to_more = [
+            ModelConfig {
+                min_pnl: 2.0,
+                ..config()
+            },
+            ModelConfig {
+                min_trades: 50,
+                ..config()
+            },
+            ModelConfig {
+                margins: Margins {
+                    long: Some(0.75),
+                    short: Some(0.5),
+                },
+                ..config()
+            },
+        ];
+        for other in held_to_more {
+            assert!(
+                store(dir.path(), &other).valid_froms().unwrap().is_empty(),
+                "{other:?}"
+            );
+        }
+        let other_short = ModelConfig {
+            margins: Margins {
+                long: Some(0.5),
+                short: None,
+            },
             ..config()
         };
-        assert!(store(dir.path(), &gated).valid_froms().unwrap().is_empty());
+        assert_eq!(
+            store(dir.path(), &other_short).valid_froms().unwrap().len(),
+            1
+        );
     }
 
     /// The store of the meta model `meta` of `config`.
@@ -828,22 +881,23 @@ mod tests {
         .unwrap()
     }
 
-    /// A meta model published at one minimum score may score below
-    /// another, and the primary's margins make its rows: a meta of another
-    /// minimum or of other margins lists none of them.
+    /// A meta model published under one threshold and minimums may fall
+    /// short of others, and the primary's margins make its rows: a meta
+    /// of another threshold, minimums or margins lists none of them.
     #[test]
-    fn a_meta_model_of_another_minimum_score_or_other_margins_is_not_listed() {
+    fn a_meta_model_of_another_threshold_minimums_or_margins_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = |min_score| {
+        let meta = |threshold, min_pnl| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(12))
-                .threshold(0.55)
-                .min_score(min_score)
+                .threshold(threshold)
+                .min_pnl(min_pnl)
+                .min_trades(20)
                 .learner(LearnerConfig::Fake {})
                 .build()
         };
-        meta_store(dir.path(), &config(), &meta(0.5))
+        meta_store(dir.path(), &config(), &meta(0.55, 1.0))
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
         let long_only = ModelConfig {
@@ -854,7 +908,11 @@ mod tests {
             ..config()
         };
 
-        for (config, meta) in [(config(), meta(0.9)), (long_only, meta(0.5))] {
+        for (config, meta) in [
+            (config(), meta(0.55, 2.0)),
+            (config(), meta(0.6, 1.0)),
+            (long_only, meta(0.55, 1.0)),
+        ] {
             assert!(
                 meta_store(dir.path(), &config, &meta)
                     .valid_froms()

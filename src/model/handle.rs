@@ -813,12 +813,32 @@ mod tests {
     use crate::model::{
         calibration::Calibration,
         config::{Margins, Sizing},
+        holdout::{Earnings, Holdout, Refusal, Trades},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, Distance, Label, TargetsConfig},
     };
     use rust_decimal::Decimal;
+
+    /// The holdout of the models of the tests, as a train publishes it.
+    const HOLDOUT: Holdout = Holdout {
+        earnings: Earnings {
+            taken: NO_TRADE,
+            every: NO_TRADE,
+            taken_stressed: NO_TRADE,
+            every_stressed: NO_TRADE,
+        },
+        log_loss: 0.6,
+        baseline_log_loss: 0.69,
+        auc: Some(0.6),
+    };
+
+    const NO_TRADE: Trades = Trades {
+        count: 0,
+        expectancy: None,
+        win_rate: None,
+    };
 
     const STRATEGY: &str = "HANDLE-001";
     const AUD: &str = "AUD/USD.SIM";
@@ -937,7 +957,8 @@ mod tests {
                 long: Some(0.0),
                 short: Some(0.0),
             })
-            .min_score(0.5)
+            .min_pnl(0.0)
+            .min_trades(1)
             .learner(LearnerConfig::Baseline {})
             .build()
     }
@@ -1030,7 +1051,7 @@ mod tests {
                     win: 1.0,
                     loss: 1.0,
                 }),
-                score: 0.6,
+                holdout: HOLDOUT,
                 probes: vec![Probe {
                     row: vec![0.7],
                     prediction: CALIBRATION.apply(model.predict(&[0.7]).unwrap()),
@@ -1626,7 +1647,7 @@ mod tests {
             published.send(at).unwrap();
             crate::model::train::Outcome::Published {
                 valid_from: at,
-                score: 0.6,
+                holdout: HOLDOUT,
             }
             .into()
         });
@@ -1657,9 +1678,12 @@ mod tests {
         let (kept, keeping) = std::sync::mpsc::channel();
         let launcher = Launcher::in_process(move |at| {
             kept.send(at).unwrap();
-            crate::model::train::Outcome::Kept(crate::model::train::Kept::BelowMinScore {
-                score: 0.48,
-                min_score: 0.5,
+            crate::model::train::Outcome::Kept(crate::model::train::Kept::Refused {
+                why: Refusal::MinPnl {
+                    pnl: 0.25,
+                    min_pnl: 0.5,
+                },
+                holdout: HOLDOUT,
             })
             .into()
         });
@@ -1718,7 +1742,7 @@ mod tests {
                     win: 1.0,
                     loss: 1.0,
                 }),
-                score: 0.6,
+                holdout: HOLDOUT,
                 probes: vec![],
             },
             model: model.save().unwrap(),
@@ -1733,7 +1757,8 @@ mod tests {
             window: SignedDuration::from_hours(48),
             holdout: SignedDuration::from_hours(12),
             threshold: 0.6,
-            min_score: 0.5,
+            min_pnl: 0.0,
+            min_trades: 1,
             learner: LearnerConfig::Baseline {},
             size,
         }

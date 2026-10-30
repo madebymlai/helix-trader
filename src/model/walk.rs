@@ -24,8 +24,14 @@
 //! sample on its rows: trained at its valid-from on rows settled by then.
 //! Beside each, its side's baseline: the training mean, fitted at the
 //! start of each retrain period on the rows a model trained then is
-//! fitted and calibrated on, those before its holdout. The AUC and log loss (`score`) of both are given per side,
-//! per retrain period and over the span.
+//! fitted and calibrated on, those before its holdout. The AUC and
+//! log loss (`score`) of both are given per side, per retrain period and
+//! over the span, and what the model's decisions earned there
+//! (`holdout::Earnings`), its decision rule taking the trades it would
+//! have taken (`holdout::Rule`: a side's expected net P&L clearing its
+//! margin, a meta's probability its threshold), beside every trade of the
+//! rows it decided, at the commission and at 1.5 times it: the figures a
+//! train's holdout is judged on, out of sample.
 
 use std::{collections::BTreeSet, fmt, path::Path};
 
@@ -38,7 +44,8 @@ use super::{
     config::ModelConfig,
     dataset::{self, Commission, Dataset, DatasetRow},
     features::FeatureSet,
-    learner::{LearnerConfig, Model, TrainingSet},
+    holdout::{Earnings, Rule, STRESS},
+    learner::Model,
     meta::Meta,
     payoff::Realised,
     schedule, score,
@@ -56,8 +63,8 @@ pub struct WalkForward {
     /// How the rows' trades read: their labels and payoffs.
     realised: Realised,
     dataset: Dataset,
-    /// The store of each side traded.
-    stores: Vec<(Side, ModelStore)>,
+    /// Each side traded, its margin and its store.
+    stores: Vec<(Side, f64, ModelStore)>,
     /// The meta model, if any: trained with the primary.
     meta: Option<Meta>,
 }
@@ -83,6 +90,8 @@ pub struct ModelScores {
     pub model: Score,
     /// The baseline's over the span.
     pub baseline: Score,
+    /// What the model's decisions earned over the span.
+    pub earnings: Earnings,
 }
 
 /// The scores of one retrain period.
@@ -99,6 +108,8 @@ pub struct Period {
     pub model: Score,
     /// The baseline's, on every row of the period.
     pub baseline: Score,
+    /// What the model's decisions earned, on the rows decided with one.
+    pub earnings: Earnings,
 }
 
 /// How a model's probabilities do on rows of the dataset.
@@ -134,7 +145,7 @@ impl WalkForward {
         let stores = config
             .margins
             .sides()
-            .map(|(side, _)| {
+            .map(|(side, margin)| {
                 let store = ModelStore::new(
                     models,
                     strategy_id,
@@ -144,7 +155,7 @@ impl WalkForward {
                     commission,
                     side,
                 )?;
-                Ok((side, store))
+                Ok((side, margin, store))
             })
             .collect::<anyhow::Result<_>>()?;
         Ok(Self {
@@ -203,7 +214,7 @@ impl WalkForward {
             build(from, end)?;
         }
         let mut primary_missing = BTreeSet::new();
-        for (_, store) in &self.stores {
+        for (_, _, store) in &self.stores {
             primary_missing.extend(schedule::missing(&times, &store.valid_froms()?));
         }
         let meta_missing = match &self.meta {
@@ -252,19 +263,25 @@ impl WalkForward {
             short: None,
             meta: None,
         };
-        for (side, store) in &self.stores {
-            let examples: Vec<Example> = rows
+        for (side, margin, store) in &self.stores {
+            let examples = rows
                 .iter()
-                .map(|row| Example::of(row, self.realised.gained(row, *side)))
-                .collect();
+                .map(|row| Example::of_side(row, *side, &self.realised))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let models = Swap::new(
                 store.clone(),
                 self.feature_names.clone(),
                 fingerprint.clone(),
             );
-            let side_scores = score(&times, start, end, &examples, models, |at| {
-                self.baseline(*side, at)
-            })?;
+            let side_scores = score(
+                &times,
+                start,
+                end,
+                &examples,
+                models,
+                Rule::Margin(*margin),
+                |at| self.baseline(*side, at),
+            )?;
             match side {
                 Side::Long => scores.long = Some(side_scores),
                 Side::Short => scores.short = Some(side_scores),
@@ -277,9 +294,15 @@ impl WalkForward {
                 meta.feature_names().to_vec(),
                 fingerprint,
             );
-            scores.meta = Some(score(&times, start, end, &examples, models, |at| {
-                self.meta_baseline(meta, at)
-            })?);
+            scores.meta = Some(score(
+                &times,
+                start,
+                end,
+                &examples,
+                models,
+                Rule::Threshold(meta.config().threshold),
+                |at| self.meta_baseline(meta, at),
+            )?);
         }
         Ok(scores)
     }
@@ -291,7 +314,13 @@ impl WalkForward {
         let rows = self.settled(at - self.config.window, at)?;
         let examples = rows
             .iter()
-            .map(|row| Example::of(row, self.realised.gained(row, side)))
+            .map(|row| {
+                Example::of(
+                    row,
+                    self.realised.gained(row, side),
+                    self.realised.trade(row, side),
+                )
+            })
             .collect();
         let holdout = at - self.config.holdout;
         fit_baseline(
@@ -325,24 +354,26 @@ impl WalkForward {
 }
 
 /// The scores over `[start, end)`, retrained at `times`, of the models
-/// `models` swaps in on `examples`, in time order, beside the baseline
-/// `baseline` fits at each retrain time.
+/// `models` swaps in on `examples`, in time order, deciding by `rule`,
+/// beside the baseline `baseline` fits at each retrain time.
 fn score(
     times: &[Timestamp],
     start: Timestamp,
     end: Timestamp,
     examples: &[Example],
     mut models: Swap,
+    rule: Rule,
     baseline: impl Fn(Timestamp) -> anyhow::Result<Option<Model>>,
 ) -> anyhow::Result<ModelScores> {
     let valid_froms = models.store().valid_froms()?;
-    let (mut model_rows, mut baseline_rows) = (vec![], vec![]);
+    let (mut model_rows, mut baseline_rows, mut model_trades) = (vec![], vec![], vec![]);
     let mut periods = vec![];
     for (i, &at) in times.iter().enumerate() {
         let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
         let baseline = baseline(at)?;
-        let (mut period_models, mut by_model, mut by_baseline) = (BTreeSet::new(), vec![], vec![]);
+        let (mut period_models, mut by_model, mut by_baseline, mut trades) =
+            (BTreeSet::new(), vec![], vec![], vec![]);
         for example in examples
             .iter()
             .filter(|example| from_ns <= example.ts_event && example.ts_event < to_ns)
@@ -351,7 +382,9 @@ fn score(
                 models.at(Timestamp::from(example.ts_event), &valid_froms)
             {
                 period_models.insert(valid_from);
-                by_model.push((model.predict(&example.features)?, example.label));
+                let probability = model.predict(&example.features)?;
+                by_model.push((probability, example.label));
+                trades.push((rule.takes(model, probability, example)?, example.trade));
             }
             if let Some(baseline) = &baseline {
                 by_baseline.push((baseline.predict(&example.features)?, example.label));
@@ -363,14 +396,17 @@ fn score(
             models: period_models.into_iter().collect(),
             model: Score::of(&by_model),
             baseline: Score::of(&by_baseline),
+            earnings: Earnings::of(&trades),
         });
         model_rows.extend(by_model);
         baseline_rows.extend(by_baseline);
+        model_trades.extend(trades);
     }
     Ok(ModelScores {
         periods,
         model: Score::of(&model_rows),
         baseline: Score::of(&baseline_rows),
+        earnings: Earnings::of(&model_trades),
     })
 }
 
@@ -385,18 +421,7 @@ fn fit_baseline(
 ) -> anyhow::Result<Option<Model>> {
     let (fitted, calibrating, _) = train::split(examples, calibration, holdout);
     let trained: Vec<Example> = fitted.into_iter().chain(calibrating).collect();
-    if trained.is_empty() {
-        return Ok(None);
-    }
-    let set = TrainingSet::new(
-        width,
-        trained
-            .iter()
-            .flat_map(|row| row.features.clone())
-            .collect(),
-        trained.iter().map(|row| row.label).collect(),
-    )?;
-    Ok(Some(LearnerConfig::Baseline {}.fit(&set)?))
+    train::baseline(width, &trained)
 }
 
 impl Score {
@@ -445,10 +470,12 @@ fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &ModelScores) -> fm
         writeln!(f, "  Model valid from: {models}")?;
         lines(f, false, period.model)?;
         lines(f, true, period.baseline)?;
+        earned(f, &period.earnings)?;
     }
     writeln!(f, "\n{model} scores, out of sample, over the span")?;
     lines(f, false, scores.model)?;
-    lines(f, true, scores.baseline)
+    lines(f, true, scores.baseline)?;
+    earned(f, &scores.earnings)
 }
 
 /// The lines of `score`, the model's or the `baseline`'s.
@@ -462,6 +489,38 @@ fn lines(f: &mut fmt::Formatter<'_>, baseline: bool, score: Score) -> fmt::Resul
     writeln!(f, "  {auc}: {}", value(score.auc))?;
     writeln!(f, "  {log_loss}: {}", value(score.log_loss))?;
     writeln!(f, "  {rows}: {}", score.rows)
+}
+
+/// The lines of `earnings`: the trades the model's decisions took, every
+/// trade of the rows it decided, and both at `STRESS` times the commission.
+fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
+    let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
+    let Earnings {
+        taken,
+        every,
+        taken_stressed,
+        every_stressed,
+    } = earnings;
+    writeln!(f, "  Trades taken: {}", taken.count)?;
+    writeln!(f, "  Net P&L per trade taken: {}", value(taken.expectancy))?;
+    writeln!(f, "  Win rate of trades taken: {}", value(taken.win_rate))?;
+    writeln!(f, "  Every trade: {}", every.count)?;
+    writeln!(
+        f,
+        "  Net P&L per trade, every trade: {}",
+        value(every.expectancy)
+    )?;
+    writeln!(f, "  Win rate, every trade: {}", value(every.win_rate))?;
+    writeln!(
+        f,
+        "  Net P&L per trade taken at {STRESS}x the commission: {}",
+        value(taken_stressed.expectancy)
+    )?;
+    writeln!(
+        f,
+        "  Net P&L per trade, every trade, at {STRESS}x the commission: {}",
+        value(every_stressed.expectancy)
+    )
 }
 
 #[cfg(test)]
@@ -482,6 +541,8 @@ mod tests {
         calibration::Calibration,
         config::{Margins, MetaConfig},
         decide::{DecisionRule, FeatureRow},
+        holdout::{Holdout, Trades},
+        learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, StoredModel},
         targets::{Barrier, Distance, Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
@@ -502,8 +563,8 @@ mod tests {
     }
 
     /// The fake learner on hourly decisions, learning whether the long of
-    /// a horizon of 1 hour gains, retrained every day on the day before,
-    /// its last 6 hours held out.
+    /// a horizon of 1 hour gains, trading each side from an expected 0,
+    /// retrained every day on the day before, its last 6 hours held out.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -522,7 +583,8 @@ mod tests {
                 long: Some(0.0),
                 short: Some(0.0),
             })
-            .min_score(0.5)
+            .min_pnl(0.0)
+            .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -562,12 +624,14 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// The row of the decision at `time` on `feature`, its long gaining if
-    /// `wins`, settled an hour later.
+    /// The row of the decision at `time` on `feature`, its long gaining 1
+    /// USD if `wins`, else losing 1, the short the reverse, each net of 0.1
+    /// USD of commission, settled an hour later.
     fn row(time: &str, feature: f64, wins: bool) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let outcome = |pnl: &str| Outcome {
             pnl: Money::from(pnl),
+            commission: Money::from("0.1 USD"),
             exit: Exit::Time,
             distances: None,
         };
@@ -645,7 +709,12 @@ mod tests {
                     win: 1.0,
                     loss: 1.0,
                 }),
-                score: 0.5,
+                holdout: Holdout {
+                    earnings: Earnings::default(),
+                    log_loss: 0.6,
+                    baseline_log_loss: 0.69,
+                    auc: Some(0.5),
+                },
                 probes: vec![],
             },
             model: model.save().unwrap(),
@@ -655,7 +724,7 @@ mod tests {
     /// Publishes a fake model valid from `valid_from` for each side.
     fn publish(walk: &WalkForward, valid_from: Timestamp) {
         let fingerprint = walk.dataset.fingerprint().to_string();
-        for (_, store) in &walk.stores {
+        for (_, _, store) in &walk.stores {
             store
                 .publish(&model(walk, valid_from, fingerprint.clone()))
                 .unwrap();
@@ -664,7 +733,7 @@ mod tests {
 
     /// The store of the long models of `walk`.
     fn long(walk: &WalkForward) -> &ModelStore {
-        &walk.stores[0].1
+        &walk.stores[0].2
     }
 
     /// What `prepare` over the 7th and the 8th asked for: the spans built
@@ -782,6 +851,47 @@ mod tests {
         close(short.baseline.log_loss, 0.867_563);
     }
 
+    /// Worked by hand: each model expects a win and a loss of 1 USD, so a
+    /// side trades from a calibrated 1/2, a feature of 0.5. The 7th, the
+    /// long takes the win at 0.8 and the loss at 0.6, nought per trade,
+    /// every trade (with the loss at 0.3) -1/3; the 8th, the win at 0.9,
+    /// every trade (with the win at 0.2) 1; the span, two wins and a loss
+    /// taken, 1/3, of five trades, 1/5. At 1.5 times the commission of 0.1
+    /// each trade makes 0.05 less. The short, the reverse trades of the
+    /// same decisions, takes on the 7th a loss and a win, nought, every
+    /// trade 1/3.
+    #[test]
+    fn each_period_reports_what_the_models_decisions_earned_beside_every_trade() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk(dir.path());
+        prepare(&walk);
+
+        let scores = walk
+            .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
+
+        let long = scores.long.as_ref().unwrap();
+        let [first, second] = &long.periods[..] else {
+            panic!("{scores:?}");
+        };
+        let earned = |trades: Trades, count, expectancy| {
+            assert_eq!(trades.count, count, "{trades:?}");
+            close(trades.expectancy, expectancy);
+        };
+        earned(first.earnings.taken, 2, 0.0);
+        close(first.earnings.taken.win_rate, 0.5);
+        earned(first.earnings.every, 3, -1.0 / 3.0);
+        earned(first.earnings.taken_stressed, 2, -0.05);
+        earned(first.earnings.every_stressed, 3, -1.0 / 3.0 - 0.05);
+        earned(second.earnings.taken, 1, 1.0);
+        earned(second.earnings.every, 2, 1.0);
+        earned(long.earnings.taken, 3, 1.0 / 3.0);
+        earned(long.earnings.every, 5, 0.2);
+        let short = &scores.short.as_ref().unwrap().periods[0];
+        earned(short.earnings.taken, 2, 0.0);
+        earned(short.earnings.every, 3, 1.0 / 3.0);
+    }
+
     #[test]
     fn a_model_failing_its_checks_is_not_scored_and_the_current_one_is() {
         let dir = tempfile::tempdir().unwrap();
@@ -838,6 +948,17 @@ mod tests {
             auc: Some(0.75),
             log_loss: None,
         };
+        let trades = |count, expectancy| Trades {
+            count,
+            expectancy,
+            win_rate: expectancy.map(|_| 0.5),
+        };
+        let earnings = Earnings {
+            taken: trades(2, Some(0.5)),
+            every: trades(3, Some(-0.25)),
+            taken_stressed: trades(2, Some(0.45)),
+            every_stressed: trades(3, Some(-0.3)),
+        };
         let scores = Scores {
             long: None,
             short: Some(ModelScores {
@@ -847,9 +968,11 @@ mod tests {
                     models: vec![at("2026-01-07T00:00:00Z")],
                     model: score,
                     baseline: score,
+                    earnings,
                 }],
                 model: score,
                 baseline: Score::default(),
+                earnings: Earnings::default(),
             }),
             meta: None,
         };
@@ -865,6 +988,14 @@ Short model scores, out of sample, from 2026-01-07T00:00:00Z to 2026-01-08T00:00
   Baseline AUC: 0.750000
   Baseline log loss: n/a
   Baseline rows: 3
+  Trades taken: 2
+  Net P&L per trade taken: 0.500000
+  Win rate of trades taken: 0.500000
+  Every trade: 3
+  Net P&L per trade, every trade: -0.250000
+  Win rate, every trade: 0.500000
+  Net P&L per trade taken at 1.5x the commission: 0.450000
+  Net P&L per trade, every trade, at 1.5x the commission: -0.300000
 
 Short model scores, out of sample, over the span
   AUC: 0.750000
@@ -873,6 +1004,14 @@ Short model scores, out of sample, over the span
   Baseline AUC: n/a
   Baseline log loss: n/a
   Baseline rows: 0
+  Trades taken: 0
+  Net P&L per trade taken: n/a
+  Win rate of trades taken: n/a
+  Every trade: 0
+  Net P&L per trade, every trade: n/a
+  Win rate, every trade: n/a
+  Net P&L per trade taken at 1.5x the commission: n/a
+  Net P&L per trade, every trade, at 1.5x the commission: n/a
 "
         );
     }
@@ -892,7 +1031,8 @@ Short model scores, out of sample, over the span
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(6))
                 .threshold(0.5)
-                .min_score(0.5)
+                .min_pnl(0.0)
+                .min_trades(1)
                 .learner(LearnerConfig::Fake {})
                 .build(),
         );
@@ -1053,9 +1193,11 @@ Short model scores, out of sample, over the span
                 models: vec![],
                 model: score,
                 baseline: score,
+                earnings: Earnings::default(),
             }],
             model: score,
             baseline: score,
+            earnings: Earnings::default(),
         };
         let scores = Scores {
             long: Some(scores.clone()),

@@ -1,8 +1,8 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
 //! targets of its decisions and the one its model learns, how often a
-//! model is retrained and the window it is trained on, the gate it must
-//! pass, the margins its expected P&L must clear to trade a side, and its
-//! learner; and, optionally, the meta model filtering its trades.
+//! model is retrained and the window it is trained on, the least its
+//! holdout earns to be published, the margins its expected P&L must clear
+//! to trade a side, and its learner; and, optionally, the meta model filtering its trades.
 //!
 //! A strategy has at most two levels of models: a primary, its rule
 //! (`RuleConfig`) or a model (`ModelConfig`), and one meta model
@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use super::{
     decide::DecisionRule,
+    holdout::Minimums,
     learner::LearnerConfig,
     targets::{Label, Side, TargetsConfig},
 };
@@ -33,7 +34,8 @@ use crate::strategy::DataRequirements;
 /// window = "720h"
 /// holdout = "120h"
 /// margins = { long = 0.5, short = 0.5 }
-/// min_score = 0.55
+/// min_pnl = 1.0
+/// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
@@ -56,8 +58,13 @@ pub struct ModelConfig {
     pub holdout: SignedDuration,
     /// The sides traded, each with the expected net P&L it trades from.
     pub margins: Margins,
-    /// The lowest holdout AUC a model is published with.
-    pub min_score: f64,
+    /// The least net P&L per trade a side's decisions earn on the holdout
+    /// for its model to be published, in the targets' P&L currency
+    /// (`holdout`).
+    pub min_pnl: f64,
+    /// The fewest trades a side's decisions take on the holdout for its
+    /// model to be published.
+    pub min_trades: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
     /// The meta model deciding whether to take each trade of this one, a
@@ -80,7 +87,8 @@ pub struct ModelConfig {
 /// window = "720h"
 /// holdout = "120h"
 /// threshold = 0.55
-/// min_score = 0.52
+/// min_pnl = 1.0
+/// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
@@ -112,8 +120,13 @@ pub struct MetaConfig {
     pub holdout: SignedDuration,
     /// The probability from which the primary's trade is taken.
     pub threshold: f64,
-    /// The lowest holdout AUC a model is published with.
-    pub min_score: f64,
+    /// The least net P&L per trade the meta's decisions earn on the
+    /// holdout for its model to be published, in the targets' P&L
+    /// currency (`holdout`).
+    pub min_pnl: f64,
+    /// The fewest trades the meta's decisions take on the holdout for its
+    /// model to be published.
+    pub min_trades: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
     /// How a trade taken is sized from the probability; none trades the
@@ -178,9 +191,10 @@ impl ModelConfig {
     /// (the barrier's limit or the horizon) is not shorter than the
     /// window, the holdout is not positive or leaves no fitted row (see
     /// `validate_window`), the margins name no side or one is not finite,
-    /// the minimum score is not an AUC, the meta model is invalid (see
-    /// `MetaConfig::validate`), or the decisions are on events or a target
-    /// is not shorter than their cadence (see `validate_cadence`).
+    /// the minimums are invalid (see `validate_minimums`), the meta model is
+    /// invalid (see `MetaConfig::validate`), or the decisions are on events
+    /// or a target is not shorter than their cadence (see
+    /// `validate_cadence`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
         self.learner.validate()?;
@@ -201,11 +215,20 @@ impl ModelConfig {
                 side.name()
             );
         }
-        validate_min_score(self.min_score)?;
+        validate_minimums(self.minimums())?;
         if let Some(meta) = &self.meta {
             meta.validate(&self.targets)?;
         }
         validate_cadence(self.decision, &self.targets)
+    }
+
+    /// The least a side's model is published with, on its holdout.
+    #[must_use]
+    pub const fn minimums(&self) -> Minimums {
+        Minimums {
+            min_pnl: self.min_pnl,
+            min_trades: self.min_trades,
+        }
     }
 }
 
@@ -265,8 +288,9 @@ impl MetaConfig {
     /// model learns, the learner is invalid (see `LearnerConfig::validate`),
     /// a target is not shorter than the window, the holdout is not
     /// positive or leaves no fitted row, the threshold is not a
-    /// probability, the minimum score is not an AUC, or the sizing's
-    /// multiples are not positive with the minimum not above the maximum.
+    /// probability, the minimums are invalid (see `validate_minimums`), or the
+    /// sizing's multiples are not positive with the minimum not above the
+    /// maximum.
     pub fn validate(&self, targets: &TargetsConfig) -> anyhow::Result<()> {
         ensure!(
             targets.barrier.is_some(),
@@ -280,7 +304,7 @@ impl MetaConfig {
             "the meta threshold {} is not a probability",
             self.threshold
         );
-        validate_min_score(self.min_score)?;
+        validate_minimums(self.minimums())?;
         if let Some(Sizing { min, max }) = self.size {
             ensure!(
                 min.is_sign_positive() && !min.is_zero() && min <= max,
@@ -289,6 +313,15 @@ impl MetaConfig {
             );
         }
         Ok(())
+    }
+
+    /// The least a meta model is published with, on its holdout.
+    #[must_use]
+    pub const fn minimums(&self) -> Minimums {
+        Minimums {
+            min_pnl: self.min_pnl,
+            min_trades: self.min_trades,
+        }
     }
 
     /// The multiple of the targets' size a trade taken at `probability`
@@ -369,10 +402,18 @@ fn validate_window(
     Ok(())
 }
 
-fn validate_min_score(min_score: f64) -> anyhow::Result<()> {
+/// Checks that the minimum net P&L of `minimums` is a number and their
+/// minimum count of trades at least one.
+fn validate_minimums(minimums: Minimums) -> anyhow::Result<()> {
     ensure!(
-        (0.0..=1.0).contains(&min_score),
-        "the minimum score {min_score} is not an AUC"
+        minimums.min_pnl.is_finite(),
+        "the minimum net P&L per trade {} is not a number",
+        minimums.min_pnl
+    );
+    ensure!(
+        minimums.min_trades >= 1,
+        "the minimum count of trades is {}, not at least one",
+        minimums.min_trades
     );
     Ok(())
 }
@@ -397,7 +438,8 @@ mod tests {
         window = "48h"
         holdout = "12h"
         margins = { long = 0.5, short = 0.5 }
-        min_score = 0.55
+        min_pnl = 1.0
+        min_trades = 30
         learner = { kind = "fake" }
     "#;
 
@@ -456,7 +498,13 @@ mod tests {
                 short: Some(0.5)
             }
         );
-        assert_eq!(config.min_score, 0.55);
+        assert_eq!(
+            config.minimums(),
+            Minimums {
+                min_pnl: 1.0,
+                min_trades: 30
+            }
+        );
         assert_eq!(config.learner, LearnerConfig::Fake {});
     }
 
@@ -570,11 +618,20 @@ mod tests {
     }
 
     #[test]
-    fn a_minimum_score_outside_an_auc_is_refused() {
-        for score in ["1.5", "-0.1"] {
-            let toml = section(&format!("min_score = {score}"));
-            assert!(refused(&toml).contains("minimum score"), "{score}");
+    fn a_minimum_net_pnl_not_a_number_or_no_minimum_trade_is_refused() {
+        for line in ["min_pnl = nan", "min_pnl = -inf", "min_trades = 0"] {
+            assert!(refused(&section(line)).contains("minimum"), "{line}");
         }
+        assert!(load(&section("min_pnl = -0.5")).is_ok());
+    }
+
+    /// The holdout AUC no longer decides a publication: a section naming
+    /// its minimum is refused, not read past.
+    #[test]
+    fn a_section_naming_a_minimum_score_is_refused() {
+        let err = refused(&format!("{SECTION}\nmin_score = 0.55"));
+
+        assert!(err.contains("min_score"), "{err}");
     }
 
     #[test]
@@ -755,7 +812,8 @@ mod tests {
         window = "36h"
         holdout = "12h"
         threshold = 0.55
-        min_score = 0.52
+        min_pnl = 0.5
+        min_trades = 20
         learner = { kind = "baseline" }
     "#;
 
@@ -767,7 +825,13 @@ mod tests {
         assert_eq!(meta.window, SignedDuration::from_hours(36));
         assert_eq!(meta.holdout, SignedDuration::from_hours(12));
         assert_eq!(meta.threshold, 0.55);
-        assert_eq!(meta.min_score, 0.52);
+        assert_eq!(
+            meta.minimums(),
+            Minimums {
+                min_pnl: 0.5,
+                min_trades: 20
+            }
+        );
         assert_eq!(meta.learner, LearnerConfig::Baseline {});
         assert_eq!(meta.size, None);
     }
@@ -803,12 +867,14 @@ mod tests {
     }
 
     #[test]
-    fn a_meta_window_holdout_threshold_or_score_out_of_range_is_refused() {
+    fn a_meta_window_holdout_threshold_minimums_or_sizing_out_of_range_or_a_minimum_score_is_refused()
+     {
         for (line, why) in [
             (r#"window = "45m""#, "not shorter than the window"),
             (r#"holdout = "35h""#, "holdout"),
             ("threshold = 1.5", "threshold"),
-            ("min_score = -0.1", "minimum score"),
+            ("min_trades = 0", "minimum count of trades"),
+            ("min_score = 0.52", "min_score"),
             ("size = { min = 0, max = 2 }", "sizing"),
             ("size = { min = 2, max = 1 }", "sizing"),
         ] {
@@ -834,7 +900,8 @@ mod tests {
             window = "36h"
             holdout = "12h"
             threshold = 0.55
-            min_score = 0.52
+            min_pnl = 0.5
+            min_trades = 20
             learner = { kind = "fake" }
             size = { min = 0.5, max = 2 }
         "#;
@@ -874,7 +941,8 @@ mod tests {
             .window(SignedDuration::from_hours(36))
             .holdout(SignedDuration::from_hours(12))
             .threshold(0.6)
-            .min_score(0.5)
+            .min_pnl(0.0)
+            .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .size(Sizing {
                 min: Decimal::new(5, 1),

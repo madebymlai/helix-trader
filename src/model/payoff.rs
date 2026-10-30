@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     dataset::DatasetRow,
+    holdout::Trade,
     targets::{self, Label, Side, TargetsConfig},
 };
 
@@ -72,15 +73,16 @@ impl Payoff {
     }
 }
 
-/// How the trades of a dataset's rows are read in the unit of a payoff
-/// of their label: each side's realised value, its net P&L over its unit,
-/// the worth of its stop on a barrier (`targets::stop_worth`, the
-/// instrument the catalog holds), one on a horizon.
+/// How the trades of a dataset's rows are read: each side's trade of
+/// their label, its net P&L and commission (`holdout::Trade`), and the
+/// unit of its payoff, the worth of its stop on a barrier
+/// (`targets::stop_worth`, the instrument the catalog holds), one on a
+/// horizon, its realised value its net P&L over its unit.
 #[derive(Debug)]
 pub struct Realised {
-    /// Where each side's P&L and, on a barrier, its stop's distance are
-    /// among a row's target values, the long's first.
-    sides: [(usize, Option<usize>); 2],
+    /// Where each side's P&L, its commission and, on a barrier, its
+    /// stop's distance are among a row's target values, the long's first.
+    sides: [(usize, usize, Option<usize>); 2],
     /// On a barrier, the targets' instrument and quantity, which make a
     /// distance money.
     worth: Option<(InstrumentAny, Quantity)>,
@@ -99,10 +101,15 @@ impl Realised {
         let sides = Side::BOTH.map(|side| {
             (
                 targets.pnl_index(label, side),
+                targets.commission_index(label, side),
                 targets.stop_index(label, side),
             )
         });
-        let [(Some(long), long_stop), (Some(short), short_stop)] = sides else {
+        let [
+            (Some(long), Some(long_commission), long_stop),
+            (Some(short), Some(short_commission), short_stop),
+        ] = sides
+        else {
             anyhow::bail!("the label {label:?} has no target");
         };
         let worth = match label {
@@ -118,7 +125,10 @@ impl Realised {
             }
         };
         Ok(Self {
-            sides: [(long, long_stop), (short, short_stop)],
+            sides: [
+                (long, long_commission, long_stop),
+                (short, short_commission, short_stop),
+            ],
             worth,
         })
     }
@@ -130,13 +140,14 @@ impl Realised {
         row.targets[self.side(side).0] > 0.0
     }
 
-    /// The realised value of `side`'s trade in `row`: on a barrier, in R.
-    ///
-    /// # Errors
-    ///
-    /// As `unit`.
-    pub fn of(&self, row: &DatasetRow, side: Side) -> anyhow::Result<f64> {
-        Ok(row.targets[self.side(side).0] / self.unit(row, side)?)
+    /// `side`'s trade in `row`: its net P&L and its commission.
+    #[must_use]
+    pub fn trade(&self, row: &DatasetRow, side: Side) -> Trade {
+        let (pnl, commission, _) = self.side(side);
+        Trade {
+            pnl: row.targets[pnl],
+            commission: row.targets[commission],
+        }
     }
 
     /// The unit of `side`'s payoff in `row`, in money: the worth of the
@@ -147,7 +158,7 @@ impl Realised {
     /// Returns an error if the stop cannot be made in the instrument's
     /// prices.
     pub fn unit(&self, row: &DatasetRow, side: Side) -> anyhow::Result<f64> {
-        match (&self.worth, self.side(side).1) {
+        match (&self.worth, self.side(side).2) {
             (Some((instrument, quantity)), Some(stop)) => {
                 targets::stop_worth(instrument, *quantity, row.targets[stop])
             }
@@ -155,7 +166,7 @@ impl Realised {
         }
     }
 
-    const fn side(&self, side: Side) -> (usize, Option<usize>) {
+    const fn side(&self, side: Side) -> (usize, usize, Option<usize>) {
         match side {
             Side::Long => self.sides[0],
             Side::Short => self.sides[1],

@@ -263,9 +263,12 @@ fn decision(at: Timestamp, features: f64) -> FeatureRow {
     }
 }
 
-fn outcome(pnl: &str, exit: Exit) -> Outcome {
+/// The outcome of a position closed by `exit` with `pnl`, net of
+/// `commission`.
+fn outcome(pnl: &str, commission: &str, exit: Exit) -> Outcome {
     Outcome {
         pnl: Money::from(pnl),
+        commission: Money::from(commission),
         exit,
         distances: None,
     }
@@ -380,8 +383,8 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let flat = || {
         // 4000.20 to 4000.00 and back: 0.20 lost and two fees.
         outcomes(
-            outcome("-0.44 USD", Exit::Time),
-            outcome("-0.44 USD", Exit::Time),
+            outcome("-0.44 USD", "0.24 USD", Exit::Time),
+            outcome("-0.44 USD", "0.24 USD", Exit::Time),
         )
     };
     let expected = [
@@ -391,8 +394,8 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         row(
             decision(at("09:00"), 4000.10),
             barrier(
-                outcome("-3.64 USD", Exit::Stop),
-                outcome("2.66 USD", Exit::TakeProfit),
+                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
+                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
                 "3.00",
                 "3.00",
             ),
@@ -405,8 +408,8 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         row(
             decision(at("10:00"), 4000.10),
             barrier(
-                outcome("2.66 USD", Exit::TakeProfit),
-                outcome("-3.64 USD", Exit::Stop),
+                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
+                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
                 "3.00",
                 "3.00",
             ),
@@ -418,14 +421,14 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         row(
             decision(at("11:00"), 4000.10),
             barrier(
-                outcome("0.56 USD", Exit::Time),
-                outcome("-1.44 USD", Exit::Time),
+                outcome("0.56 USD", "0.24 USD", Exit::Time),
+                outcome("-1.44 USD", "0.24 USD", Exit::Time),
                 "3.00",
                 "3.00",
             ),
             outcomes(
-                outcome("0.56 USD", Exit::Time),
-                outcome("-1.44 USD", Exit::Time),
+                outcome("0.56 USD", "0.24 USD", Exit::Time),
+                outcome("-1.44 USD", "0.24 USD", Exit::Time),
             ),
             SignedDuration::from_mins(45),
         ),
@@ -564,8 +567,8 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let flat = || {
         outcomes(
-            outcome("-1 USDT", Exit::Time),
-            outcome("-1 USDT", Exit::Time),
+            outcome("-1 USDT", "1 USDT", Exit::Time),
+            outcome("-1 USDT", "1 USDT", Exit::Time),
         )
     };
     let expected = [
@@ -575,8 +578,8 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         row(
             decision(at("09:00"), 100_000.0),
             barrier(
-                outcome("-0.0005 USDT", Exit::TakeProfit),
-                outcome("-2.0005 USDT", Exit::Stop),
+                outcome("-0.0005 USDT", "1.0005 USDT", Exit::TakeProfit),
+                outcome("-2.0005 USDT", "1.0005 USDT", Exit::Stop),
                 "100",
                 "100",
             ),
@@ -588,8 +591,8 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         row(
             decision(at("10:00"), 100_000.0),
             barrier(
-                outcome("-1.9995 USDT", Exit::Stop),
-                outcome("0.0005 USDT", Exit::TakeProfit),
+                outcome("-1.9995 USDT", "0.9995 USDT", Exit::Stop),
+                outcome("0.0005 USDT", "0.9995 USDT", Exit::TakeProfit),
                 "100",
                 "100",
             ),
@@ -673,14 +676,14 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         row(
             decision(ic::at("10:00:00"), 4000.10),
             barrier(
-                outcome("0.46 USD", Exit::TakeProfit),
-                outcome("-1.34 USD", Exit::Stop),
+                outcome("0.46 USD", "0.24 USD", Exit::TakeProfit),
+                outcome("-1.34 USD", "0.24 USD", Exit::Stop),
                 "0.80",
                 "0.60",
             ),
             outcomes(
-                outcome("-0.44 USD", Exit::Time),
-                outcome("-0.44 USD", Exit::Time),
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
             ),
             SignedDuration::from_mins(30),
         ),
@@ -791,14 +794,14 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
         row(
             decision(ic::at("10:00:00"), 100_000.0),
             barrier(
-                outcome("0.09945 USDT", Exit::TakeProfit),
-                outcome("-2.2006 USDT", Exit::Stop),
+                outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
+                outcome("-2.2006 USDT", "1.0006 USDT", Exit::Stop),
                 "110",
                 "82.5",
             ),
             outcomes(
-                outcome("-1 USDT", Exit::Time),
-                outcome("-1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
             ),
             SignedDuration::from_mins(30),
         ),
@@ -864,14 +867,14 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         row(
             decision(ic::at("10:00:00"), 100_000.0),
             barrier(
-                outcome("0.09945 USDT", Exit::TakeProfit),
-                outcome("-1.8254125 USDT", Exit::Stop),
+                outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
+                outcome("-1.8254125 USDT", "1.0004125 USDT", Exit::Stop),
                 "110",
                 "82.5",
             ),
             outcomes(
-                outcome("-1 USDT", Exit::Time),
-                outcome("-1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
             ),
             SignedDuration::from_mins(30),
         ),

@@ -3,9 +3,10 @@
 //! trading in a backtest on the models of a store. On a fixed list of
 //! baseline long models, each predicting its own probability whatever the
 //! row, calibrated alike, each decision's probability names the model it
-//! used: the latest valid at or before it. A model LightGBM fitted by a
-//! train at t, reloaded in the node, predicts on the decisions of its
-//! probe rows exactly as at training, calibrated. The probe sends its
+//! used: the latest valid at or before it. A LightGBM model fitted on the
+//! dataset's rows and published as a train would, reloaded in the node,
+//! predicts on the decisions of its probe rows exactly as when fitted,
+//! calibrated. The probe sends its
 //! trades: on the hand-worked targets' quotes (`backtest_targets`), each
 //! trade of a model of either side realises the P&L the dataset row of
 //! its decision recorded of that side.
@@ -16,23 +17,19 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            STRATEGY, commission, config, features, replay, replay_of, requirements, targets,
-            trade, walk,
+            CALIBRATION, STRATEGY, baseline_of, commission, config, features, replay, replay_of,
+            requirements, targets, trade, walk,
         },
         ic,
     },
 };
 use helix_trader::model::{
-    calibration::Calibration,
     config::{Margins, ModelConfig},
-    dataset,
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-    payoff::Payoff,
-    store::{ModelManifest, ModelStore, Probe, StoredModel},
+    store::{ModelStore, Probe},
     targets::{Barrier, Distance, Side, TargetsConfig},
-    train::Training,
 };
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
 use nautilus_model::{identifiers::StrategyId, types::Money};
 use rust_decimal::Decimal;
@@ -48,51 +45,6 @@ fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
         side,
     )
     .unwrap()
-}
-
-/// The calibration of the baselines, `c(p) = 1 / (1 + e^(2 - 4p))`,
-/// increasing: c(0.5) = 0.5.
-const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
-
-/// A baseline model of `side` of the probe deciding as `config` says,
-/// valid from `valid_from`, predicting `trues` tenths whatever the row,
-/// calibrated by `CALIBRATION`, expecting a win and a loss of 1R: above
-/// 0.5 a trade expected to gain.
-fn baseline(config: &ModelConfig, side: Side, valid_from: Timestamp, trues: usize) -> StoredModel {
-    let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(1, vec![4000.0; 10], labels).unwrap();
-    let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
-    StoredModel {
-        manifest: ModelManifest {
-            strategy_id: StrategyId::from(STRATEGY),
-            valid_from,
-            fingerprint: dataset::fingerprint(
-                &features(),
-                config.decision,
-                &config.targets,
-                &requirements(),
-                &commission(),
-            )
-            .unwrap()
-            .to_string(),
-            feature_names: vec!["mid".to_string()],
-            targets: config.targets.clone(),
-            label: config.label,
-            side: Some(side),
-            learner: LearnerConfig::Baseline {},
-            calibration: CALIBRATION,
-            payoff: Some(Payoff {
-                win: 1.0,
-                loss: 1.0,
-            }),
-            score: 0.6,
-            probes: vec![Probe {
-                row: vec![4000.0],
-                prediction: CALIBRATION.apply(model.predict(&[4000.0]).unwrap()),
-            }],
-        },
-        model: model.save().unwrap(),
-    }
 }
 
 /// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late;
@@ -118,7 +70,13 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
         ("09:00:00", 9),
     ] {
         store
-            .publish(&baseline(&config, Side::Long, ic::at(valid_from), trues))
+            .publish(&baseline_of(
+                &features(),
+                &config,
+                Side::Long,
+                ic::at(valid_from),
+                trues,
+            ))
             .unwrap();
     }
 
@@ -153,15 +111,15 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     );
 }
 
-/// A train at t (16:00 of the 25th) with LightGBM on a window of 72
-/// hours, 48 before the calibration and the holdout, enough rows for its
-/// leaves of 20 rows to split, published
-/// whatever its score; the same model, valid from the holdout's start,
-/// then trades over the holdout, whose decisions are the probe rows'. The
-/// walk puts the holdout's mids on both sides of the fitted ones' split,
-/// so the probes fall in different leaves: the check is that the trees
-/// reloaded in the node give the bits they gave when fitted, on several
-/// predictions.
+/// A LightGBM model fitted on the rows of the 72 hours before t (16:00 of
+/// the 25th) but its last 12, enough for its leaves of 20 rows to split,
+/// whether each long gained, published as a train would, valid from the
+/// last 12 hours, whose decisions are its probe rows, calibrated by
+/// `CALIBRATION`; it then trades over them. The walk puts those mids on
+/// both sides of the fitted ones' split, so the probes fall in different
+/// leaves: the check is that the trees reloaded in the node give the bits
+/// they gave when fitted, on several predictions. The walk has no edge to
+/// earn, so no train would publish it: it is published straight.
 #[test]
 fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let catalog = walk(
@@ -170,10 +128,10 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     );
     let models = tempfile::tempdir().unwrap();
     let t = ic::at("00:00:00") + SignedDuration::from_hours(112);
+    let learner = LearnerConfig::LightGbm(LightGbmConfig::builder().num_iterations(20).build());
     let config = ModelConfig {
-        learner: LearnerConfig::LightGbm(LightGbmConfig::builder().num_iterations(20).build()),
+        learner: learner.clone(),
         window: SignedDuration::from_hours(72),
-        min_score: 0.0,
         // Every decision a long, to record its probability.
         margins: Margins {
             long: Some(f64::MIN),
@@ -181,28 +139,40 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         },
         ..config()
     };
-    let mut model = std::thread::scope(|scope| {
+    let holdout = t - config.holdout;
+    let rows = std::thread::scope(|scope| {
         scope
-            .spawn(|| {
-                let training = Training::new(
-                    catalog.path(),
-                    models.path(),
-                    StrategyId::from(STRATEGY),
-                    &features(),
-                    config.clone(),
-                    &requirements(),
-                    &commission(),
-                )
-                .unwrap();
-                let outcome = training.train_at(t, |from, to| replay(&catalog, from, to));
-                assert!(outcome.published(), "{outcome:?}");
-                training.store(Side::Long).unwrap().read(t).unwrap()
-            })
+            .spawn(|| replay(&catalog, t - config.window, t).unwrap())
             .join()
             .unwrap()
     });
-    let holdout = t - config.holdout;
-    model.manifest.valid_from = holdout;
+    let (fitted, held_out): (Vec<_>, Vec<_>) = rows
+        .iter()
+        .filter(|row| row.settled_at <= UnixNanos::from(t))
+        .partition(|row| row.decision.ts_event < UnixNanos::from(holdout));
+    let set = TrainingSet::new(
+        1,
+        fitted
+            .iter()
+            .flat_map(|row| row.decision.features.clone())
+            .collect(),
+        fitted
+            .iter()
+            .map(|row| row.barrier.unwrap().long.pnl.as_f64() > 0.0)
+            .collect(),
+    )
+    .unwrap();
+    let fitted = learner.fit(&set).unwrap();
+    let mut model = baseline_of(&features(), &config, Side::Long, holdout, 5);
+    model.manifest.learner = learner;
+    model.manifest.probes = held_out
+        .iter()
+        .map(|row| Probe {
+            row: row.decision.features.clone(),
+            prediction: CALIBRATION.apply(fitted.predict(&row.decision.features).unwrap()),
+        })
+        .collect();
+    model.model = fitted.save().unwrap();
     store(models.path(), &config, Side::Long)
         .publish(&model)
         .unwrap();
@@ -297,7 +267,7 @@ fn a_model_strategy_realises_per_trade_the_pnl_its_dataset_row_recorded() {
         let config = hand_worked(side);
         let models = tempfile::tempdir().unwrap();
         store(models.path(), &config, side)
-            .publish(&baseline(&config, side, from, 8))
+            .publish(&baseline_of(&features(), &config, side, from, 8))
             .unwrap();
         let record = std::thread::scope(|scope| {
             scope

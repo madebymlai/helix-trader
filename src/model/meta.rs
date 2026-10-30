@@ -37,6 +37,7 @@ use super::{
     config::{MetaConfig, ModelConfig, RuleConfig},
     dataset::{self, Commission, DatasetRow},
     features::{FeatureSet, PRIMARY_FEATURES, primary_values},
+    holdout::Trade,
     payoff::{self, Realised},
     store::{ModelStore, Swap},
     targets::{Label, Side, TargetsConfig},
@@ -53,9 +54,9 @@ pub struct Meta {
     /// The names of the meta's features, the primary's side and
     /// probability last.
     feature_names: Vec<String>,
-    /// Where the barrier's P&L of a long and of a short are among a row's
-    /// target values.
-    pnl: [usize; 2],
+    /// Where the barrier's P&L and commission of a long and of a short are
+    /// among a row's target values.
+    trades: [(usize, usize); 2],
     store: ModelStore,
 }
 
@@ -113,7 +114,7 @@ impl Meta {
         Ok(Some(Self {
             config: meta.clone(),
             feature_names: meta_names(features.names()),
-            pnl: pnl(&config.targets)?,
+            trades: trades(&config.targets)?,
             primary: Primary::Model {
                 sides,
                 feature_names: features.names().to_vec(),
@@ -165,7 +166,7 @@ impl Meta {
             config: config.meta.clone(),
             primary: Primary::Rule,
             feature_names: features.names().to_vec(),
-            pnl: pnl(&config.targets)?,
+            trades: trades(&config.targets)?,
             store: ModelStore::of_rule(
                 models,
                 strategy_id,
@@ -244,7 +245,7 @@ impl Meta {
                 .iter()
                 .map(|row| {
                     let side = rule_side(&row.features);
-                    Example::of(row, self.wins(row, side))
+                    self.example(row, side)
                 })
                 .collect()),
             Primary::Model {
@@ -281,7 +282,7 @@ impl Meta {
                     let side = side.order_side();
                     examples.push(Example {
                         features: meta_row(&row.features, side, probability),
-                        ..Example::of(row, self.wins(row, side))
+                        ..self.example(row, side)
                     });
                 }
                 Ok(examples)
@@ -289,11 +290,16 @@ impl Meta {
         }
     }
 
-    /// Whether the barrier's trade on `side` won in `row`.
-    fn wins(&self, row: &DatasetRow, side: OrderSide) -> bool {
-        let [long, short] = self.pnl;
-        let at = if side == OrderSide::Buy { long } else { short };
-        row.targets[at] > 0.0
+    /// The example of `row` on the barrier's trade on `side`: whether it
+    /// won, and the trade.
+    fn example(&self, row: &DatasetRow, side: OrderSide) -> Example {
+        let [long, short] = self.trades;
+        let (pnl, commission) = if side == OrderSide::Buy { long } else { short };
+        let trade = Trade {
+            pnl: row.targets[pnl],
+            commission: row.targets[commission],
+        };
+        Example::of(row, trade.pnl > 0.0, trade)
     }
 }
 
@@ -327,13 +333,16 @@ fn rule_side(features: &[f64]) -> OrderSide {
     }
 }
 
-/// Where the barrier's P&L of a long and of a short are among the values of
-/// a row of `targets`.
-fn pnl(targets: &TargetsConfig) -> anyhow::Result<[usize; 2]> {
+/// Where the barrier's P&L and commission of a long and of a short are
+/// among the values of a row of `targets`.
+fn trades(targets: &TargetsConfig) -> anyhow::Result<[(usize, usize); 2]> {
     Side::BOTH
-        .map(|side| targets.pnl_index(Label::Barrier, side))
+        .map(|side| {
+            let pnl = targets.pnl_index(Label::Barrier, side)?;
+            Some((pnl, targets.commission_index(Label::Barrier, side)?))
+        })
         .into_iter()
         .collect::<Option<Vec<_>>>()
-        .and_then(|pnl| pnl.try_into().ok())
+        .and_then(|trades| trades.try_into().ok())
         .context("the meta model learns whether the primary's barrier trade wins, and the targets have no barrier")
 }

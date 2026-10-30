@@ -915,7 +915,10 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use helix_trader::model::train::{Kept, Outcome};
+    use helix_trader::model::{
+        holdout::{Earnings, Holdout, Refusal},
+        train::{Kept, Outcome},
+    };
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]
@@ -1238,13 +1241,22 @@ mod tests {
 
     #[test]
     fn a_train_keeping_the_model_fails_with_the_reason() {
-        let kept = Outcome::Kept(Kept::BelowMinScore {
-            score: 0.48,
-            min_score: 0.55,
+        let holdout = Holdout {
+            earnings: Earnings::default(),
+            log_loss: 0.6,
+            baseline_log_loss: 0.69,
+            auc: Some(0.6),
+        };
+        let kept = Outcome::Kept(Kept::Refused {
+            why: Refusal::MinPnl {
+                pnl: 0.48,
+                min_pnl: 0.55,
+            },
+            holdout,
         });
         let published = Outcome::Published {
             valid_from: "2026-10-23T00:00:00Z".parse().unwrap(),
-            score: 0.6,
+            holdout,
         };
 
         let err = reported(&kept.clone().into()).unwrap_err().to_string();

@@ -73,7 +73,8 @@ mod tests {
         window = "48h"
         holdout = "12h"
         margins = { long = 0.5, short = 0.5 }
-        min_score = 0.5
+        min_pnl = 0.5
+        min_trades = 30
         learner = { kind = "baseline" }
     "#;
 
@@ -102,9 +103,9 @@ mod tests {
 
     #[test]
     fn rejects_a_misspelt_field_of_the_model_at_load() {
-        let toml = TOML.replace("min_score", "min_scor");
+        let toml = TOML.replace("min_pnl", "min_pn");
         let err = toml::from_str::<ModelEmaConfig>(&toml).unwrap_err();
-        assert!(err.to_string().contains("min_scor"), "{err}");
+        assert!(err.to_string().contains("min_pn"), "{err}");
     }
 
     #[test]
@@ -153,7 +154,8 @@ mod tests {
             window = "48h"
             holdout = "12h"
             threshold = 0.55
-            min_score = 0.5
+            min_pnl = 0.5
+            min_trades = 30
             learner = { kind = "baseline" }
         "#;
         let toml = format!(

@@ -47,8 +47,9 @@
 //! profit or stop. The outcome of a target is read from Nautilus' events
 //! alone: a closed position's opening order names its decision and side,
 //! its closing order the exit (a take profit, a stop, or a close tagged
-//! `TIME_TAG`), and Nautilus reports its realised P&L net of commission.
-//! The only state of our own is the rows being assembled.
+//! `TIME_TAG`), and Nautilus reports its realised P&L net of commission,
+//! the position the commissions it is net of. The only state of our own
+//! is the rows being assembled.
 //!
 //! Once every target of a decision has an outcome, the decision is settled
 //! and its row, a `TargetRow`, published on the message bus, custom data
@@ -225,6 +226,9 @@ pub struct Outcome {
     /// The position's realised P&L, net of its commissions, as Nautilus
     /// reports it.
     pub pnl: Money,
+    /// The position's commissions in the P&L's currency, those its
+    /// realised P&L is net of (Nautilus' `Position::commissions`).
+    pub commission: Money,
     pub exit: Exit,
     /// The barrier the decision set on the side; none for a horizon.
     pub distances: Option<Distances>,
@@ -515,10 +519,10 @@ impl TargetsConfig {
 
     /// The names of the values of a row (`TargetRow::values`), in their
     /// order: for the barrier, then the horizon, the long then the short,
-    /// each its P&L and its exit, and a barrier's the distances of its
-    /// take profit and its stop, such as `barrier_long_pnl`,
-    /// `barrier_long_exit`, `barrier_long_take_profit` and
-    /// `barrier_long_stop`.
+    /// each its P&L, its commission and its exit, and a barrier's the
+    /// distances of its take profit and its stop, such as
+    /// `barrier_long_pnl`, `barrier_long_commission`, `barrier_long_exit`,
+    /// `barrier_long_take_profit` and `barrier_long_stop`.
     #[must_use]
     pub fn target_names(&self) -> Vec<String> {
         self.kinds()
@@ -537,6 +541,14 @@ impl TargetsConfig {
     #[must_use]
     pub fn pnl_index(&self, label: Label, side: Side) -> Option<usize> {
         self.index(label, side, "pnl")
+    }
+
+    /// Where the commission of `label`'s target on `side` is among the
+    /// values of a row (`TargetRow::values`); none if the config has no
+    /// such target.
+    #[must_use]
+    pub fn commission_index(&self, label: Label, side: Side) -> Option<usize> {
+        self.index(label, side, "commission")
     }
 
     /// Where the stop's distance of `label`'s target on `side` is among the
@@ -1127,12 +1139,25 @@ impl Targets {
         let exit = event
             .closing_order_id
             .and_then(|closing| exit(strategy, target, closing));
-        let (Some(exit), Some(pnl)) = (exit, event.realized_pnl) else {
+        let commission = |pnl: Money| {
+            let position = strategy.cache().position(&event.position_id)?;
+            Some(
+                position
+                    .commissions()
+                    .into_iter()
+                    .find(|commission| commission.currency == pnl.currency)
+                    .unwrap_or_else(|| Money::zero(pnl.currency)),
+            )
+        };
+        let pnl = event
+            .realized_pnl
+            .and_then(|pnl| Some((pnl, commission(pnl)?)));
+        let (Some(exit), Some((pnl, commission))) = (exit, pnl) else {
             self.unsettle(
                 target.decision,
                 format_args!(
                     "the position {} of {} closed by {:?}: no exit of its target, or no \
-                     realised P&L",
+                     realised P&L, or no such position in the cache",
                     event.position_id,
                     target.order_id(Leg::Entry),
                     event.closing_order_id
@@ -1147,7 +1172,7 @@ impl Targets {
             };
             decision.outcomes.insert(
                 (target.kind, target.side),
-                decision.outcome(target, pnl, exit),
+                decision.outcome(target, pnl, commission, exit),
             );
             let barrier = decision.outcomes(Kind::Barrier);
             let horizon = decision.outcomes(Kind::Horizon);
@@ -1252,15 +1277,16 @@ impl Decision {
         }
     }
 
-    /// The outcome of its `target`, its position closed with `pnl` by
-    /// `exit`, a barrier's with the distances it set.
-    fn outcome(&self, target: Target, pnl: Money, exit: Exit) -> Outcome {
+    /// The outcome of its `target`, its position closed with `pnl`, net of
+    /// `commission`, by `exit`, a barrier's with the distances it set.
+    fn outcome(&self, target: Target, pnl: Money, commission: Money, exit: Exit) -> Outcome {
         let distances = match target.kind {
             Kind::Barrier => self.distances.get(&target.side).copied(),
             Kind::Horizon => None,
         };
         Outcome {
             pnl,
+            commission,
             exit,
             distances,
         }
@@ -1349,8 +1375,8 @@ impl Kind {
     /// side.
     const fn values(self) -> &'static [&'static str] {
         match self {
-            Self::Barrier => &["pnl", "exit", "take_profit", "stop"],
-            Self::Horizon => &["pnl", "exit"],
+            Self::Barrier => &["pnl", "commission", "exit", "take_profit", "stop"],
+            Self::Horizon => &["pnl", "commission", "exit"],
         }
     }
 }
@@ -1606,9 +1632,13 @@ impl TargetRow {
                     [distances.take_profit, distances.stop]
                         .map(|distance| distance.to_f64().unwrap_or(f64::NAN))
                 });
-                [outcome.pnl.as_f64(), outcome.exit.value()]
-                    .into_iter()
-                    .chain(distances)
+                [
+                    outcome.pnl.as_f64(),
+                    outcome.commission.as_f64(),
+                    outcome.exit.value(),
+                ]
+                .into_iter()
+                .chain(distances)
             })
             .collect()
     }

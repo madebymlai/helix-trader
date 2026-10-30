@@ -3,13 +3,15 @@
 //! at a time, replaying the strategy's dataset run, and a backtest of the
 //! strategy then trades on the store. Its features are averages of 1-minute
 //! bars, warm from the bars replayed; the fake learner predicts the first,
-//! the gold price clamped to 1, so every holdout row ties (AUC 0.5, which
-//! the minimum of 0.5 publishes) and every decision from the model's
-//! valid-from is a long on the horizon, closed 30 minutes later. A live
-//! node's launcher (`model::launcher`) starting that `train` as its child
-//! publishes the same model. The binary's `backtest` retrains on the
-//! schedule first, in child processes of its own, a retrain keeping the
-//! model no failure.
+//! the gold price clamped to 1, the same on every row, which earns no more
+//! than taking every trade: `train` refuses it, failing with the reason
+//! and the holdout's figures, as does a live node's launcher
+//! (`model::launcher`) starting that `train` as its child. A model
+//! published straight to the store, a baseline (`common::dataset`), trades
+//! from its valid-from: every decision a long on the horizon, closed 30
+//! minutes later. The binary's `backtest` builds its dataset and retrains
+//! on the schedule first, in child processes of its own, a retrain
+//! keeping the model no failure.
 
 use std::{
     ffi::OsStr,
@@ -18,7 +20,7 @@ use std::{
 };
 
 use crate::common::{
-    dataset::{commission, walk},
+    dataset::{baseline_stored, commission, walk},
     ic,
 };
 use helix_trader::{
@@ -26,8 +28,9 @@ use helix_trader::{
     model::{
         handle::Mode,
         launcher::{Launcher, Retrained},
+        targets::Side,
     },
-    strategy::model_ema::{ModelEma, ModelEmaConfig},
+    strategy::model_ema::{self, ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::Money;
@@ -51,7 +54,8 @@ const CONFIG: &str = r#"
     window = "46h"
     holdout = "12h"
     margins = { long = -1e9 }
-    min_score = 0.5
+    min_pnl = 0.0
+    min_trades = 1
     learner = { kind = "fake" }
 "#;
 
@@ -62,8 +66,9 @@ fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// The binary's `train` of the strategy of `config` at `at`; its stdout.
-fn train(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
+/// The binary's `train` of the strategy of `config` at `at`, which fails;
+/// its stderr.
+fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("train")
         .arg("model_ema")
@@ -77,17 +82,65 @@ fn train(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String 
         .args(["--commission-rate", "0.00003", "--balance", "10000000 USD"])
         .output()
         .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        output.status.success(),
-        "{stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "{}\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    stdout
+    stderr
 }
 
+/// Whether `text` reports a long model kept with its holdout's figures:
+/// its trades taken and every trade, at the commission and at 1.5 times
+/// it, its log loss and the baseline's, its AUC.
+fn kept_with_its_figures(text: &str) -> bool {
+    [
+        "kept the current model: ",
+        "taken ",
+        "every trade ",
+        "at 1.5x the commission",
+        "log loss ",
+        "baseline ",
+        "AUC ",
+    ]
+    .iter()
+    .all(|figure| text.contains(figure))
+}
+
+/// Publishes straight to the store under `models` a long model valid from
+/// `at`, a baseline of 0.6 on the strategy's features, as the dataset the
+/// `train` subcommand built in `catalog` names them.
+fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
+    let config: ModelEmaConfig = toml::from_str(CONFIG).unwrap();
+    let dataset = model_ema::dataset(&config, catalog.path(), &commission())
+        .unwrap()
+        .manifest()
+        .unwrap();
+    let model = baseline_stored(
+        dataset.strategy_id,
+        dataset.fingerprint,
+        dataset.feature_names,
+        &config.model,
+        Some(Side::Long),
+        at,
+        6,
+    );
+    model_ema::training(&config, catalog.path(), models, &commission())
+        .unwrap()
+        .store(Side::Long)
+        .unwrap()
+        .publish(&model)
+        .unwrap();
+}
+
+/// `train` at t refuses the fake, and its store stays empty: no trade.
+/// With a model published straight, valid from t, the decisions at 22:00
+/// and 23:00 have no model; those of 00:00, 01:00 and 02:00 each a long
+/// and its close.
 #[test]
-fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
+fn the_train_subcommand_refuses_a_model_without_an_edge_and_one_published_trades_from_its_valid_from()
+ {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(4),
@@ -96,14 +149,11 @@ fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
 
-    let stdout = train(&config_path, catalog.path(), &models, t());
+    let stderr = train_refused(&config_path, catalog.path(), &models, t());
 
-    assert!(
-        stdout.contains(&format!("published a model valid from {}", t())),
-        "{stdout}"
-    );
-    // The decisions at 22:00 and 23:00 have no model; those of 00:00, 01:00
-    // and 02:00 each a long and its close.
+    assert!(kept_with_its_figures(&stderr), "{stderr}");
+    assert_eq!(traded(&catalog, models.clone()), (0, 0));
+    publish(&catalog, &models, t());
     assert_eq!(traded(&catalog, models), (6, 3));
 }
 
@@ -120,7 +170,8 @@ fn a_backtest_from_the_valid_from_first_decides_once_its_features_are_initialize
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
-    train(&config_path, catalog.path(), &models, t());
+    train_refused(&config_path, catalog.path(), &models, t());
+    publish(&catalog, &models, t());
 
     assert_eq!(traded_from(&catalog, models, t()), (4, 2));
 }
@@ -157,7 +208,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
 }
 
 #[test]
-fn a_model_a_live_retrain_publishes_through_the_train_subcommand_is_traded() {
+fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_its_figures() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(4),
@@ -185,8 +236,11 @@ fn a_model_a_live_retrain_publishes_through_the_train_subcommand_is_traded() {
 
     let retrained = launcher.launch(t()).wait();
 
-    assert_eq!(retrained, Retrained::Published);
-    assert_eq!(traded(&catalog, models), (6, 3));
+    let Retrained::Kept(why) = retrained else {
+        panic!("{retrained:?}");
+    };
+    assert!(kept_with_its_figures(&why), "{why}");
+    assert_eq!(traded(&catalog, models), (0, 0));
 }
 
 /// The binary's `backtest` of the strategy of `config` over `[start,
@@ -219,14 +273,46 @@ fn backtest(
     (stdout, stderr)
 }
 
-/// A backtest from midnight of the 23rd to noon of the 24th retrains at
-/// midnight of each, in child processes of the binary: the dataset built
-/// from the first window, 02:00 of the 21st, to the end of the 24th plus
-/// the horizon, then a train at each time, then the run, its report
-/// followed by the scores of both periods. A second backtest of the span
-/// starts no child.
+/// A backtest from midnight of the 23rd to noon of the 24th builds its
+/// dataset, in a child process of the binary, from the first window,
+/// 02:00 of the 21st, to the end of the 24th plus the horizon, then
+/// retrains at midnight of each, in children too: without an edge, each
+/// keeps the current model, there being none, and the backtest goes on,
+/// each reason printed with its figures, to a run with no model, no
+/// period scored but by the baseline.
 #[test]
-fn the_binarys_backtest_retrains_in_child_processes_once() {
+fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
+        t() + SignedDuration::from_hours(51),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    let (start, end) = (t(), t() + SignedDuration::from_hours(36));
+
+    let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
+
+    assert!(stdout.contains("built 4 days of the dataset"), "{stdout}");
+    for at in [t(), t() + SignedDuration::from_hours(24)] {
+        let reason = format!("the retrain at {at}: kept the current model: ");
+        let line = stderr
+            .lines()
+            .find(|line| line.contains(&reason))
+            .unwrap_or_else(|| panic!("{stderr}"));
+        assert!(kept_with_its_figures(line), "{line}");
+    }
+    assert!(stdout.contains("Orders: 0"), "{stdout}");
+    assert!(stdout.contains("Model valid from: none"), "{stdout}");
+    assert!(!stdout.contains("published a model"), "{stdout}");
+}
+
+/// With a model in the store at each retrain time of the span, published
+/// straight once the dataset is built, a backtest starts no child: it
+/// builds and retrains nothing, and its report is followed by the scores
+/// of both periods, each of its model.
+#[test]
+fn the_binarys_backtest_on_a_store_holding_each_retrains_model_starts_no_child() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(51),
@@ -236,65 +322,24 @@ fn the_binarys_backtest_retrains_in_child_processes_once() {
     std::fs::write(&config_path, CONFIG).unwrap();
     let (start, end) = (t(), t() + SignedDuration::from_hours(36));
     let next = t() + SignedDuration::from_hours(24);
-
-    let (stdout, _) = backtest(&config_path, catalog.path(), &models, start, end);
-
-    assert!(stdout.contains("built 4 days of the dataset"), "{stdout}");
+    backtest(&config_path, catalog.path(), &models, start, end);
     for at in [t(), next] {
-        assert!(
-            stdout.contains(&format!("published a model valid from {at}")),
-            "{stdout}"
-        );
+        publish(&catalog, &models, at);
     }
+
+    let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
+
+    assert!(!stdout.contains("days of the dataset"), "{stdout}");
+    assert!(!stderr.contains("the retrain at"), "{stderr}");
     let scores = stdout.find("Long model scores").expect(&stdout);
     assert!(stdout.find("Final balances").unwrap() < scores, "{stdout}");
     for (from, to) in [(t(), next), (next, end)] {
         assert!(
             stdout.contains(&format!(
-                "Long model scores, out of sample, from {from} to {to}"
+                "Long model scores, out of sample, from {from} to {to}\n  Model valid from: {from}"
             )),
             "{stdout}"
         );
     }
     assert!(stdout.contains("over the span"), "{stdout}");
-
-    let (again, _) = backtest(&config_path, catalog.path(), &models, start, end);
-
-    assert!(!again.contains("days of the dataset"), "{again}");
-    assert!(!again.contains("published a model"), "{again}");
-    assert!(again.contains("over the span"), "{again}");
-}
-
-/// With a minimum score of 0.6, above the fake's 0.5, both retrains keep
-/// the current model, there being none: `train` fails with the reason,
-/// and the backtest goes on, its reason printed, to a run with no model,
-/// no period scored but by the baseline.
-#[test]
-fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(51),
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    std::fs::write(
-        &config_path,
-        CONFIG.replace("min_score = 0.5", "min_score = 0.6"),
-    )
-    .unwrap();
-    let (start, end) = (t(), t() + SignedDuration::from_hours(36));
-
-    let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
-
-    for at in [t(), t() + SignedDuration::from_hours(24)] {
-        assert!(
-            stderr.contains(&format!(
-                "the retrain at {at}: kept the current model: holdout AUC 0.5 below the minimum 0.6"
-            )),
-            "{stderr}"
-        );
-    }
-    assert!(stdout.contains("Orders: 0"), "{stdout}");
-    assert!(stdout.contains("Model valid from: none"), "{stdout}");
-    assert!(!stdout.contains("published a model"), "{stdout}");
 }

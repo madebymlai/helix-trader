@@ -1,21 +1,23 @@
 //! A backtest retraining on its schedule (`model::walk`), on a fixture
 //! catalog: the probe of `common::dataset` decides every hour on one
-//! feature, missing (NaN) from the first quote, so the fake learner
-//! predicts the mean of its training labels, calibrated to a constant:
-//! each long model's probability names it. Before the run, the dataset is
-//! built and a long model trained at each daily retrain time of the span;
-//! in the run, every decision of a period trades on the model trained at
-//! its start. A second backtest of the span builds and trains nothing, and
-//! the scores of each period are its model's, a constant ranking no row
-//! above another, as its baseline, the training mean.
+//! feature, missing (NaN) from the first quote. Before the run, the
+//! dataset is built and, at each daily retrain time of the span, a long
+//! model published as a train would: a baseline of its own probability,
+//! calibrated (`common::dataset::baseline_of`), which names it. The walk
+//! has no edge for a train to earn on, so its trains would publish none
+//! (`backtest_train` trains on one). In the run, every decision of a
+//! period trades on the model published at its start. A second backtest
+//! of the span builds and publishes nothing, and the scores of each period
+//! are its model's, a constant ranking no row above another, as its
+//! baseline, the training mean.
 //! One node per thread: each build, train and run on a thread of its own.
 
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, commission, config, replay_on, requirements, rule, targets, trade_on,
-        walk,
+        Missing, STRATEGY, baseline_of, commission, config, replay_on, requirements, rule, targets,
+        trade_on, walk,
     },
     ic,
 };
@@ -25,7 +27,6 @@ use helix_trader::model::{
     features::FeatureSet,
     store::ModelStore,
     targets::{Label, Side},
-    train::Training,
     walk::WalkForward,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -73,6 +74,20 @@ fn span() -> (Timestamp, Timestamp) {
     (start, start + SignedDuration::from_hours(72))
 }
 
+/// The store of the long models under `models`.
+fn long_store(models: &Path) -> ModelStore {
+    ModelStore::new(
+        models,
+        StrategyId::from(STRATEGY),
+        &features(),
+        &config_daily(),
+        &requirements(),
+        &commission(),
+        Side::Long,
+    )
+    .unwrap()
+}
+
 fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
     WalkForward::new(
         catalog.path(),
@@ -88,7 +103,8 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
 
 /// Prepares the backtest of the span, each build and train on a thread of
 /// its own, as a backtest's children each run a node of their own; the
-/// spans built and the times trained at.
+/// spans built and the times trained at, each publishing a baseline of
+/// `trues` tenths, 3 at the span's start and one more each day.
 fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
     let (start, end) = span();
     let (mut built, mut trained) = (vec![], vec![]);
@@ -122,26 +138,14 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
             },
             |at| {
                 trained.push(at);
-                let outcome = std::thread::scope(|scope| {
-                    scope
-                        .spawn(|| {
-                            Training::new(
-                                catalog.path(),
-                                models,
-                                StrategyId::from(STRATEGY),
-                                &features(),
-                                config_daily(),
-                                &requirements(),
-                                &commission(),
-                            )
-                            .unwrap()
-                            .train_at(at, |from, to| replay_on(catalog, features(), from, to))
-                        })
-                        .join()
-                        .unwrap()
-                });
-                assert!(outcome.published(), "{outcome:?}");
-                Ok(())
+                let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+                long_store(models).publish(&baseline_of(
+                    &features(),
+                    &config_daily(),
+                    Side::Long,
+                    at,
+                    trues,
+                ))
             },
         )
         .unwrap();
@@ -162,16 +166,7 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
     // 21st.
     assert_eq!(built, [(start - SignedDuration::from_hours(46), end)]);
     assert_eq!(trained, retrains);
-    let store = ModelStore::new(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(),
-        &config_daily(),
-        &requirements(),
-        &commission(),
-        Side::Long,
-    )
-    .unwrap();
+    let store = long_store(models.path());
     let means: Vec<f64> = retrains.iter().map(|&at| predicts(&store, at)).collect();
     assert!(
         means[0] != means[1] && means[1] != means[2] && means[0] != means[2],
@@ -250,16 +245,7 @@ fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
         .scores(start, end)
         .unwrap();
 
-    let store = ModelStore::new(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(),
-        &config_daily(),
-        &requirements(),
-        &commission(),
-        Side::Long,
-    )
-    .unwrap();
+    let store = long_store(models.path());
     let rows = Dataset::new(
         catalog.path(),
         StrategyId::from(STRATEGY),

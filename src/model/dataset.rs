@@ -688,6 +688,7 @@ mod tests {
         let loss = format!("-{pnl}");
         let outcome = |pnl: &str, exit, distances| Outcome {
             pnl: Money::from(&*format!("{pnl} USD")),
+            commission: Money::from("0.1 USD"),
             exit,
             distances,
         };
@@ -720,7 +721,7 @@ mod tests {
         DatasetRow {
             features,
             targets: vec![
-                pnl, 1.0, 3.0, 2.0, -pnl, -1.0, 3.0, 2.0, -pnl, 0.0, pnl, 0.0,
+                pnl, 0.1, 1.0, 3.0, 2.0, -pnl, 0.1, -1.0, 3.0, 2.0, -pnl, 0.1, 0.0, pnl, 0.1, 0.0,
             ],
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
             ts_event: ns,
@@ -1024,16 +1025,20 @@ mod tests {
             manifest.target_names,
             [
                 "barrier_long_pnl",
+                "barrier_long_commission",
                 "barrier_long_exit",
                 "barrier_long_take_profit",
                 "barrier_long_stop",
                 "barrier_short_pnl",
+                "barrier_short_commission",
                 "barrier_short_exit",
                 "barrier_short_take_profit",
                 "barrier_short_stop",
                 "horizon_long_pnl",
+                "horizon_long_commission",
                 "horizon_long_exit",
                 "horizon_short_pnl",
+                "horizon_short_commission",
                 "horizon_short_exit",
             ]
         );

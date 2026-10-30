@@ -782,9 +782,11 @@ fn a_decision_settles_within_its_longest_target() {
 }
 
 #[test]
-fn a_row_has_a_value_per_target_name_the_pnl_the_exit_and_a_barriers_distances_of_each_side() {
+fn a_row_has_a_value_per_target_name_the_pnl_the_commission_the_exit_and_a_barriers_distances_of_each_side()
+ {
     let outcome = |pnl: &str, exit, distances| Outcome {
         pnl: Money::from(pnl),
+        commission: Money::from("0.12 USD"),
         exit,
         distances,
     };
@@ -820,26 +822,31 @@ fn a_row_has_a_value_per_target_name_the_pnl_the_exit_and_a_barriers_distances_o
         config().target_names(),
         [
             "barrier_long_pnl",
+            "barrier_long_commission",
             "barrier_long_exit",
             "barrier_long_take_profit",
             "barrier_long_stop",
             "barrier_short_pnl",
+            "barrier_short_commission",
             "barrier_short_exit",
             "barrier_short_take_profit",
             "barrier_short_stop",
             "horizon_long_pnl",
+            "horizon_long_commission",
             "horizon_long_exit",
             "horizon_short_pnl",
+            "horizon_short_commission",
             "horizon_short_exit",
         ]
     );
     assert_eq!(
         row.values(),
         [
-            2.5, 1.0, 3.0, 1.5, -3.5, -1.0, 3.25, 1.75, -0.25, 0.0, 0.25, 0.0
+            2.5, 0.12, 1.0, 3.0, 1.5, -3.5, 0.12, -1.0, 3.25, 1.75, -0.25, 0.12, 0.0, 0.25, 0.12,
+            0.0
         ]
     );
-    assert_eq!(horizon.target_names().len(), 4);
+    assert_eq!(horizon.target_names().len(), 6);
 }
 
 #[test]
@@ -847,6 +854,7 @@ fn an_outcome_has_the_sign_of_its_pnl() {
     let sign = |pnl: &str| {
         Outcome {
             pnl: Money::from(pnl),
+            commission: Money::from("0.1 USD"),
             exit: Exit::Time,
             distances: None,
         }
@@ -859,9 +867,10 @@ fn an_outcome_has_the_sign_of_its_pnl() {
 }
 
 #[test]
-fn a_sides_pnl_and_stop_are_its_target_names_among_a_rows_values() {
+fn a_sides_pnl_commission_and_stop_are_its_target_names_among_a_rows_values() {
     let names = config().target_names();
     let pnl = |label, side| names[config().pnl_index(label, side).unwrap()].clone();
+    let commission = |label, side| names[config().commission_index(label, side).unwrap()].clone();
     let stop = |label, side| names[config().stop_index(label, side).unwrap()].clone();
     let horizon = TargetsConfig {
         barrier: None,
@@ -871,6 +880,14 @@ fn a_sides_pnl_and_stop_are_its_target_names_among_a_rows_values() {
     assert_eq!(pnl(Label::Barrier, Side::Long), "barrier_long_pnl");
     assert_eq!(pnl(Label::Barrier, Side::Short), "barrier_short_pnl");
     assert_eq!(pnl(Label::Horizon, Side::Short), "horizon_short_pnl");
+    assert_eq!(
+        commission(Label::Barrier, Side::Short),
+        "barrier_short_commission"
+    );
+    assert_eq!(
+        commission(Label::Horizon, Side::Long),
+        "horizon_long_commission"
+    );
     assert_eq!(stop(Label::Barrier, Side::Short), "barrier_short_stop");
     assert_eq!(config().stop_index(Label::Horizon, Side::Long), None);
     assert_eq!(horizon.pnl_index(Label::Horizon, Side::Long), Some(0));

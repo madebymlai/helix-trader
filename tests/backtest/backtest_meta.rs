@@ -1,16 +1,17 @@
 //! Meta-labeling on a fixture catalog (`model::meta`), its primary a model
-//! or a rule, every model the fake learner on a missing feature, so that
-//! each model's probability is the mean of its training labels, calibrated
-//! to a constant, and names it (`common::dataset::Missing`). Over a span of three days retrained
-//! every midnight, the dataset is built, then each retrain trains the
-//! primary and its meta model; in the run, a decision trades only if the
-//! meta model in use takes the primary's trade.
+//! or a rule, the features a missing one (`common::dataset::Missing`).
+//! Over a span of three days retrained every midnight, the dataset is
+//! built and the models trained; the fixture's walk has no edge, so a
+//! train refuses each model, and the models traded on are published
+//! straight, baselines whose probabilities name them
+//! (`common::dataset::baseline_of`). In the run, a decision trades only if
+//! the meta model in use takes the primary's trade.
 //!
-//! A model primary of the long alone trades long at every decision. Its meta model's rows
-//! carry the probability of the primary model in use at each, never of
-//! the one trained at the meta's own retrain: out of sample. Its first
-//! retrain has no primary model before it, so no meta model, and the
-//! first day no trade.
+//! A model primary of the long alone trades long at every decision. Its
+//! meta model's first retrain has no primary model before it, so no rows;
+//! the next ones hold out the primary's longs, every one of which the
+//! meta's threshold takes, refused for earning no more than every trade.
+//! With no meta model the first day, no trade.
 //!
 //! A rule primary, the probe's own, signals a long at even hours and a
 //! short at odd ones, but none every third hour: the dataset has a row of
@@ -23,8 +24,8 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, backtest, commission, config, replay_on, requirements, rule, targets,
-        trade_on, walk,
+        Missing, STRATEGY, backtest, baseline_of, commission, config, meta_baseline_of, replay_on,
+        requirements, rule, targets, trade_on, walk,
     },
     ic,
 };
@@ -34,6 +35,7 @@ use helix_trader::model::{
     decide,
     features::FeatureSet,
     handle::{Mode, ModelHandle, SettledRows, Trade},
+    holdout::Earnings,
     learner::LearnerConfig,
     store::ModelStore,
     targets::{Side, TargetRow},
@@ -68,15 +70,15 @@ fn features(rule: bool) -> Rc<FeatureSet> {
 }
 
 /// A meta model on 46 hours, the last 6 held out and the 6 before them
-/// calibrated on, the fake learner, published from an AUC of 0.5 (its
-/// probability the same on every row, its AUC 0.5), taking every trade, to
-/// record its probability.
+/// calibrated on, the fake learner, published from nought per trade over
+/// a trade, taking every trade, to record its probability.
 fn meta() -> MetaConfig {
     MetaConfig::builder()
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(6))
         .threshold(0.0)
-        .min_score(0.5)
+        .min_pnl(0.0)
+        .min_trades(1)
         .learner(LearnerConfig::Fake {})
         .build()
 }
@@ -153,8 +155,10 @@ fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64
 }
 
 /// Prepares the backtest of the span of the model primary: the dataset
-/// built, then the primary and its meta model trained at each retrain
-/// time; what each train did.
+/// built, then at each retrain time the primary's long model published
+/// straight, a baseline of `trues` tenths (3 at the span's start and one
+/// more each day), and the primary and its meta model trained; what each
+/// train did.
 fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let mut trained = vec![];
@@ -190,6 +194,14 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
             })
         },
         |at| {
+            let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+            primary_store(models).publish(&baseline_of(
+                &features(false),
+                &model_primary(),
+                Side::Long,
+                at,
+                trues,
+            ))?;
             let outcome = on_thread(|| {
                 Training::new(
                     catalog.path(),
@@ -211,8 +223,42 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
     trained
 }
 
+/// The store of the model primary's long models under `models`.
+fn primary_store(models: &Path) -> ModelStore {
+    ModelStore::new(
+        models,
+        StrategyId::from(STRATEGY),
+        &features(false),
+        &model_primary(),
+        &requirements(),
+        &commission(),
+        Side::Long,
+    )
+    .unwrap()
+}
+
+/// The store of the model primary's meta models under `models`.
+fn meta_store(models: &Path) -> ModelStore {
+    ModelStore::meta(
+        models,
+        StrategyId::from(STRATEGY),
+        &features(false),
+        &model_primary(),
+        &meta(),
+        &requirements(),
+        &commission(),
+    )
+    .unwrap()
+}
+
+/// The fixture has no edge: a train refuses each model it fits, the
+/// primary's and, from the second retrain, when the primary has a model
+/// before it, the meta's, whose threshold takes every trade of its
+/// holdout, the primary's longs, and so earns no more than every trade.
+/// With meta models published straight, a day's decisions trade only as
+/// the meta model in use takes the primary's.
 #[test]
-fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_takes_its_trades() {
+fn a_model_primarys_meta_model_trains_on_its_trades_and_takes_them_in_the_run() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();
@@ -225,7 +271,7 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
     assert!(
         trained
             .iter()
-            .all(|(_, trained)| matches!(trained.long, Some(Outcome::Published { .. }))),
+            .all(|(_, trained)| matches!(trained.long, Some(Outcome::Kept(Kept::Refused { .. })))),
         "{trained:?}"
     );
     assert!(
@@ -233,48 +279,29 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
         "no primary model before the first retrain: {:?}",
         trained[0].1
     );
-    assert!(
-        trained[1..].iter().all(|(_, trained)| trained.published()),
-        "{trained:?}"
-    );
-    let primary = ModelStore::new(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(false),
-        &model_primary(),
-        &requirements(),
-        &commission(),
-        Side::Long,
-    )
-    .unwrap();
-    let meta = ModelStore::meta(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(false),
-        &model_primary(),
-        &meta(),
-        &requirements(),
-        &commission(),
-    )
-    .unwrap();
+    for (at, trained) in &trained[1..] {
+        let Some(Outcome::Kept(Kept::Refused { holdout, .. })) = trained.meta else {
+            panic!("{at}: {trained:?}");
+        };
+        let Earnings { taken, every, .. } = holdout.earnings;
+        assert!(every.count > 0, "{at}: {holdout:?}");
+        assert_eq!(taken, every, "{at}: every trade taken");
+    }
+    let primary = primary_store(models.path());
+    let meta = meta_store(models.path());
+    assert!(meta.valid_froms().unwrap().is_empty());
     let means: Vec<f64> = retrains
         .iter()
         .map(|&at| predicts(&primary, &features(false), at, &[f64::NAN]))
         .collect();
-    assert!(
-        means[0] != means[1] && means[1] != means[2],
-        "the primary's models must differ to be told apart: {means:?}"
-    );
-    // Each meta model's holdout, the last 6 hours before its retrain, is
-    // of the decisions of the primary model trained a day before: its
-    // probability, never the one of the primary trained with the meta.
-    for (i, &at) in retrains.iter().enumerate().skip(1) {
-        let probes = meta.read(at).unwrap().manifest.probes;
-        assert!(!probes.is_empty(), "{at}");
-        for probe in probes {
-            assert!(probe.row[0].is_nan(), "{probe:?}");
-            assert_eq!(probe.row[1..], [1.0, means[i - 1]], "{at}: {probe:?}");
-        }
+    for (&at, trues) in retrains[1..].iter().zip([6, 8]) {
+        meta.publish(&meta_baseline_of(
+            &features(false),
+            &model_primary(),
+            at,
+            trues,
+        ))
+        .unwrap();
     }
 
     let record = on_thread(|| {
@@ -444,24 +471,19 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
             .build(first, last, |from, to| replay_rule(&catalog, from, to))
             .unwrap()
     });
-    let trained: Vec<Trained> = retrains
-        .iter()
-        .map(|&at| {
-            on_thread(|| {
-                Training::of_rule(
-                    catalog.path(),
-                    models.path(),
-                    StrategyId::from(STRATEGY),
-                    &features(true),
-                    rule_primary(),
-                    &requirements(),
-                    &commission(),
-                )
-                .unwrap()
-                .train_at(at, |from, to| replay_rule(&catalog, from, to))
-            })
-        })
-        .collect();
+    let trained = on_thread(|| {
+        Training::of_rule(
+            catalog.path(),
+            models.path(),
+            StrategyId::from(STRATEGY),
+            &features(true),
+            rule_primary(),
+            &requirements(),
+            &commission(),
+        )
+        .unwrap()
+        .train_at(start, |from, to| replay_rule(&catalog, from, to))
+    });
 
     let rows = rule_dataset(&catalog).read(start, end).unwrap();
     assert_eq!(rows.len(), 3 * 16, "16 signals a day");
@@ -474,12 +496,30 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
             "{row:?}"
         );
     }
-    assert!(
-        trained.iter().all(|trained| trained.long.is_none()
-            && trained.short.is_none()
-            && trained.published()),
-        "{trained:?}"
-    );
+    // The fixture has no edge, and the threshold takes every trade of the
+    // holdout: a meta model earns no more than every trade, and is refused.
+    assert_eq!((&trained.long, &trained.short), (&None, &None));
+    let Some(Outcome::Kept(Kept::Refused { holdout, .. })) = trained.meta else {
+        panic!("{trained:?}");
+    };
+    let Earnings { taken, every, .. } = holdout.earnings;
+    assert!(every.count > 0, "{holdout:?}");
+    assert_eq!(taken, every);
+    let store = ModelStore::of_rule(
+        models.path(),
+        StrategyId::from(STRATEGY),
+        &features(true),
+        &rule_primary(),
+        &requirements(),
+        &commission(),
+    )
+    .unwrap();
+    assert!(store.valid_froms().unwrap().is_empty());
+    for (&at, trues) in retrains.iter().zip([6, 7, 8]) {
+        store
+            .publish(&meta_baseline_of(&features(true), &config(), at, trues))
+            .unwrap();
+    }
 
     let trades = on_thread(|| {
         let (probe, trades) = rule_probe(Mode::Backtest {
@@ -490,15 +530,6 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
         trades.take()
     });
 
-    let store = ModelStore::of_rule(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(true),
-        &rule_primary(),
-        &requirements(),
-        &commission(),
-    )
-    .unwrap();
     let longs: Vec<f64> = retrains
         .iter()
         .map(|&at| predicts(&store, &features(true), at, &[f64::NAN, 1.0, f64::NAN]))

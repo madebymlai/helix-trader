@@ -13,8 +13,9 @@
 //! side a decision trades;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
-//! dataset and publishing in the `store` each whose holdout `score`
-//! passes the gate; `handle` is
+//! dataset and publishing in the `store` each whose `holdout`, what its
+//! decisions would have earned there and its `score`, meets the minimums;
+//! `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! targets in a dataset run; `schedule` is when a model is retrained, on
@@ -31,6 +32,7 @@ pub mod dataset;
 pub mod decide;
 pub mod features;
 pub mod handle;
+pub mod holdout;
 pub mod launcher;
 pub mod learner;
 pub mod meta;
