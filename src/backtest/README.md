@@ -1530,7 +1530,13 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     stale and store no row, nor does any decision to Sunday's open. On a
     feature of the mean of the last two hours of mids, a day built alone,
     replayed from the features' three-hour warmup before it, stores the
-    same 24 rows as inside a build from the day before.
+    same 24 rows as inside a build from the day before. A barrier ATR of
+    14 one-minute bars, with a warmup of 14 minutes, the shortest
+    validation accepts, is warm at a day's first decision in a build of
+    that day alone: the replay from 23:46 builds the 14 bars to midnight,
+    10 ms before it, and the decision opens its targets; with 13 minutes
+    it opens nothing. The quotes are off the minute, as a quote at the
+    replay's first instant would close one more bar.
   - `backtest_train.rs`: training at a time (strategy README, "Features
     and decisions"), with the probe of `backtest_dataset.rs`, shared from
     `common::dataset`, and the fake learner, whose prediction, the mid

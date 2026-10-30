@@ -1,9 +1,10 @@
 //! The model runs of the model tests: a probe deciding every hour on the
 //! last mid of IC's gold through its model handle (`model::handle`),
-//! either opening the targets of each decision in a dataset run
-//! (`Backtest::run_dataset`), the rows they settle collected, or trading
-//! on the models of a store, its decisions' rows and trades recorded; on
-//! IC's hedging venue both. And the random walk of quotes they replay.
+//! subscribed to the bars of its barrier's ATR, if any, either opening
+//! the targets of each decision in a dataset run (`Backtest::run_dataset`),
+//! the rows they settle collected, or trading on the models of a store,
+//! its decisions' rows and trades recorded; on IC's hedging venue both.
+//! And the random walk of quotes they replay.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -31,7 +32,7 @@ use nautilus_common::{
 use nautilus_core::UnixNanos;
 use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicator};
 use nautilus_model::{
-    data::{CustomData, NautilusDataType, QuoteTick},
+    data::{BarType, CustomData, NautilusDataType, QuoteTick},
     enums::{OmsType, PriceType},
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
@@ -52,6 +53,8 @@ pub const STRATEGY: &str = "DATASET-001";
 pub struct ModelProbe {
     core: StrategyCore,
     model: Rc<ModelHandle>,
+    /// The bars it subscribes to: its barrier ATR's, if any.
+    bar_types: Vec<BarType>,
     record: Rc<RefCell<Record>>,
 }
 
@@ -92,7 +95,11 @@ impl DataActor for ModelProbe {
         let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
         msgbus::subscribe_any(topic.into(), handler, None);
         self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
-        Rc::clone(&self.model).start(self, &[])
+        let bar_types = self.bar_types.clone();
+        for &bar_type in &bar_types {
+            self.subscribe_bars(bar_type, None, None);
+        }
+        Rc::clone(&self.model).start(self, &bar_types)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
@@ -208,9 +215,21 @@ fn probe(
             ..Default::default()
         }),
         model: ModelHandle::new(StrategyId::from(STRATEGY), features, config, mode).unwrap(),
+        bar_types: atr_bars(config),
         record: Rc::clone(&record),
     };
     (probe, record)
+}
+
+/// The bars of the barrier ATR of `config`, if any.
+fn atr_bars(config: &ModelConfig) -> Vec<BarType> {
+    config
+        .targets
+        .barrier
+        .and_then(|barrier| barrier.atr)
+        .map(|atr| atr.bar_type)
+        .into_iter()
+        .collect()
 }
 
 /// The commission of `backtest`, as given: 30 USD per million traded.
@@ -256,15 +275,32 @@ pub fn replay_on(
     from: Timestamp,
     to: Timestamp,
 ) -> anyhow::Result<Vec<TargetRow>> {
+    replay_of(catalog, features, &config(), from, to)
+}
+
+/// The replay of a build or a train of the probe deciding on `features`
+/// as `config` says, the bars of its barrier's ATR, if any, among the
+/// run's bar types.
+pub fn replay_of(
+    catalog: &tempfile::TempDir,
+    features: Rc<FeatureSet>,
+    config: &ModelConfig,
+    from: Timestamp,
+    to: Timestamp,
+) -> anyhow::Result<Vec<TargetRow>> {
     let rows = SettledRows::default();
     let (probe, _) = probe(
         features,
-        &config(),
+        config,
         Mode::Dataset {
             rows: Rc::clone(&rows),
         },
     );
-    backtest(catalog.path(), from, to).run_dataset(probe)?;
+    Backtest {
+        bar_types: atr_bars(config),
+        ..backtest(catalog.path(), from, to)
+    }
+    .run_dataset(probe)?;
     Ok(rows.take())
 }
 
