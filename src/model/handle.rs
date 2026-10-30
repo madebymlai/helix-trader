@@ -50,15 +50,18 @@
 //! did when fitted. A model failing a check is refused, logged as an
 //! error, and the current one kept; it is not read again (`store::Swap`).
 //!
-//! A live node builds composite bars `warmup::live_bar_build_delay` after
+//! A live node builds composite bars `Warmup::live_bar_build_delay` after
 //! their close, so a live handle starts the cadence with that delay, a
 //! backtest's and a dataset run's with none (see `decide`).
 //!
-//! Live, the strategy warms the barrier's ATR from its warmup request, as
-//! it does the features: the request builds the ATR's bars too
-//! (`warmup_bar_types`), and the strategy hands the bars of the response
-//! to `handle_warmup_bar`, so the first decision after a start sets the
-//! stop a dataset run sets there.
+//! The handle builds the strategy's warmup (`strategy::warmup::Warmup`)
+//! from its requirements and mode, and `start` starts it; the strategy
+//! delegates its historical-data hooks to it (`warmup`). Live, it warms
+//! the barrier's ATR from the warmup request, as it does the features: the
+//! request builds the ATR's bars too (`Stops::warmed`), and the warmup
+//! hands the bars of the response to both, so the first decision after a
+//! start sets the stop a dataset run sets there. A live node sizes its
+//! cache from the same warmup, the ATR's bars included.
 //!
 //! Live, the handle also retrains its model (`launcher::Retraining`): the
 //! retrain timer, keyed by the strategy, launches a train at each retrain
@@ -75,12 +78,12 @@ use std::{
 use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
+    actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{Bar, BarType, CustomData},
+    data::CustomData,
     enums::OrderSide,
     events::{OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
@@ -99,7 +102,7 @@ use super::{
     store::{LoadedModel, ModelStore, Swap},
     targets::{self, Label, Side, Stops, TargetRow, Targets, TargetsConfig, TradeTarget},
 };
-use crate::strategy::{DataRequirements, warmup};
+use crate::strategy::{DataRequirements, warmup::Warmup};
 
 /// Where a handle runs, and so what it does at a decision.
 #[derive(Debug, Clone)]
@@ -177,6 +180,9 @@ pub struct ModelHandle {
     /// The instrument traded, whose data makes a decision fresh.
     traded: InstrumentId,
     serving: Serving,
+    /// The strategy's warmup, which feeds the features and the barrier's
+    /// ATR the handle trades on.
+    warmup: Rc<Warmup>,
 }
 
 #[derive(Debug)]
@@ -186,6 +192,27 @@ enum Serving {
         targets: Rc<Targets>,
         rows: SettledRows,
     },
+}
+
+impl Serving {
+    /// The stops of the barrier the handle trades on, if any: none on a
+    /// horizon, and in a dataset run, which warms on its replay.
+    fn stops(&self) -> Option<&Stops> {
+        let Serving::Trading(trading) = self else {
+            return None;
+        };
+        match &trading.primary {
+            Primary::Model {
+                labelled: Labelled::Barrier(stops),
+                ..
+            }
+            | Primary::Rule { stops, .. } => Some(stops),
+            Primary::Model {
+                labelled: Labelled::Horizon(_),
+                ..
+            } => None,
+        }
+    }
 }
 
 /// The trading side of a handle.
@@ -385,6 +412,11 @@ impl ModelHandle {
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
         let traded = targets.instrument_id;
+        let warmup = match mode {
+            Mode::Live { .. } => Warmup::live(requirements),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
+        }
+        .feeding(Rc::clone(features) as SharedActorIndicator);
         ensure!(
             rule == DecisionRule::Event || features.reads(traded),
             "the features read no data of {traded}, the targets' instrument: \
@@ -419,33 +451,38 @@ impl ModelHandle {
                 rows,
             },
         };
+        let warmup = match serving.stops() {
+            Some(stops) => stops.warmed(warmup),
+            None => warmup,
+        };
         Ok(Rc::new(Self {
             strategy_id,
             features: Rc::clone(features),
             rule,
             traded,
             serving,
+            warmup: Rc::new(warmup),
         }))
     }
 
-    /// Starts the handle on `strategy`, reading `bar_types`, from
-    /// `on_start`: registers the features (and starts the barrier's ATR:
-    /// the stops', trading on a barrier, a rule's or a model's labelled on
-    /// it, or, in a dataset run, the targets', and collects the rows they
-    /// settle); trading, sets again the time close of each of its trades
-    /// still open, as after a restart (`targets::arm_open_trades`); then
-    /// starts the decision cadence, live
-    /// `warmup::live_bar_build_delay(bar_types)` late, and live the
-    /// retrain timer.
+    /// Starts the handle on `strategy`, from `on_start`: starts the
+    /// strategy's warmup (`Warmup::start`), registers the features (and
+    /// starts the barrier's ATR: the stops', trading on a barrier, a rule's
+    /// or a model's labelled on it, or, in a dataset run, the targets', and
+    /// collects the rows they settle); trading, sets again the time close
+    /// of each of its trades still open, as after a restart
+    /// (`targets::arm_open_trades`); then starts the decision cadence, live
+    /// `Warmup::live_bar_build_delay` late, and live the retrain timer.
     ///
     /// # Errors
     ///
-    /// Returns an error if Nautilus refuses a trade's time alert, the
-    /// cadence's timer or the retrain timer.
-    pub fn start<S>(&self, strategy: &mut S, bar_types: &[BarType]) -> anyhow::Result<()>
+    /// Returns an error if the warmup fails to start, or Nautilus refuses
+    /// a trade's time alert, the cadence's timer or the retrain timer.
+    pub fn start<S>(&self, strategy: &mut S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
+        self.warmup.start(strategy)?;
         self.features.register(strategy);
         let delay = match &self.serving {
             Serving::Trading(trading) => {
@@ -467,7 +504,7 @@ impl ModelHandle {
                 match &trading.retraining {
                     Some(retraining) => {
                         retraining.start(strategy)?;
-                        warmup::live_bar_build_delay(bar_types)
+                        self.warmup.live_bar_build_delay()
                     }
                     None => SignedDuration::ZERO,
                 }
@@ -488,54 +525,12 @@ impl ModelHandle {
         decide::start(strategy, self.rule, delay)
     }
 
-    /// The bar types a live warmup of a strategy reading `bar_types`
-    /// requests (`warmup::start`): those, then the bar type of the
-    /// barrier's ATR the handle trades on, if not among them, so that
-    /// Nautilus builds its bars from the warmup's history and goes on with
-    /// them live, the bar spanning the warmup's end once.
+    /// The strategy's warmup, which the handle builds and starts: its
+    /// strategy delegates `on_data_response`, `on_historical_quotes` and
+    /// `on_historical_bars` to it, and a live node sizes its cache from it.
     #[must_use]
-    pub fn warmup_bar_types(&self, bar_types: &[BarType]) -> Vec<BarType> {
-        let mut warmed = bar_types.to_vec();
-        if let Some(atr) = self.stops().and_then(Stops::atr_bar_type)
-            && !warmed.contains(&atr)
-        {
-            warmed.push(atr);
-        }
-        warmed
-    }
-
-    /// Hands `bar`, a bar of a live warmup (`warmup::bars`), to the
-    /// features and to the barrier's ATR the handle trades on, each of
-    /// which reads the bars of its own bar types alone.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a feature or the ATR fails to read the bar.
-    pub fn handle_warmup_bar(&self, bar: &Bar) -> anyhow::Result<()> {
-        self.features.handle_bar(bar)?;
-        match self.stops() {
-            Some(stops) => stops.handle_warmup_bar(bar),
-            None => Ok(()),
-        }
-    }
-
-    /// The stops of the barrier the handle trades on, if any: none on a
-    /// horizon, and in a dataset run, which warms on its replay.
-    fn stops(&self) -> Option<&Stops> {
-        let Serving::Trading(trading) = &self.serving else {
-            return None;
-        };
-        match &trading.primary {
-            Primary::Model {
-                labelled: Labelled::Barrier(stops),
-                ..
-            }
-            | Primary::Rule { stops, .. } => Some(stops),
-            Primary::Model {
-                labelled: Labelled::Horizon(_),
-                ..
-            } => None,
-        }
+    pub fn warmup(&self) -> Rc<Warmup> {
+        Rc::clone(&self.warmup)
     }
 
     /// Decides now, for `strategy`: the trade of the decision, if any.
@@ -847,7 +842,7 @@ mod tests {
     use nautilus_core::UnixNanos;
     use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        data::{Bar, QuoteTick},
+        data::{Bar, BarType, QuoteTick},
         enums::{ContingencyType, OmsType, OrderType, PriceType},
         events::OrderEventAny,
         identifiers::{
@@ -1417,7 +1412,7 @@ mod tests {
                 &barrier_config(stop),
                 (Some(8), None),
             );
-            handle.start(&mut probe, &[]).unwrap();
+            handle.start(&mut probe).unwrap();
             handle.decide(&mut probe).unwrap()
         };
 
@@ -1433,7 +1428,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle(&probe, models.path(), &barrier_config(10), (Some(8), None));
-        handle.start(&mut probe, &[]).unwrap();
+        handle.start(&mut probe).unwrap();
 
         let trade = handle.decide(&mut probe).unwrap().unwrap();
 
@@ -1478,30 +1473,57 @@ mod tests {
         )
     }
 
-    /// The bars a live warmup requests: the strategy's, and the hourly
-    /// bars of the barrier's ATR, once.
-    #[test]
-    fn a_live_warmup_requests_the_bars_of_the_barriers_atr() {
-        let models = tempfile::tempdir().unwrap();
-        let (probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle(&probe, models.path(), &atr_config(), (Some(8), None));
-        let minutes = BarType::from("AUD/USD.SIM-1-MINUTE-MID-INTERNAL");
-        let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
-
-        assert_eq!(handle.warmup_bar_types(&[minutes]), vec![minutes, hours]);
-        assert_eq!(handle.warmup_bar_types(&[hours]), vec![hours]);
+    /// The handle trading live on `config` for a strategy reading the
+    /// quotes and the hourly bars of AUD/USD with a warmup of a day.
+    fn hourly_live_handle(config: &ModelConfig, models: &Path, catalog: &Path) -> Rc<ModelHandle> {
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL")],
+            warmup: SignedDuration::from_hours(24),
+            ..requirements()
+        };
+        ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            config,
+            &requirements,
+            live(
+                models.to_path_buf(),
+                catalog,
+                Launcher::in_process(|_| unreachable!()),
+            ),
+        )
+        .unwrap()
     }
 
-    /// A barrier in basis points has no ATR: the warmup is the strategy's
-    /// bars alone.
+    /// Deciding every minute, the barrier's ATR is on 1-minute bars, finer
+    /// than the strategy's hourly bars: the live cache holds the day's
+    /// 1,440 of them, and one spanning the start, on top of Nautilus'
+    /// default 10,000, not the 25 hourly bars alone.
     #[test]
-    fn a_live_warmup_without_an_atr_requests_the_strategys_bars_alone() {
+    fn a_live_cache_holds_the_warmup_of_the_barriers_atr_on_finer_bars() {
         let models = tempfile::tempdir().unwrap();
-        let (probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle(&probe, models.path(), &barrier_config(10), (Some(8), None));
-        let minutes = BarType::from("AUD/USD.SIM-1-MINUTE-MID-INTERNAL");
+        let catalog = tempfile::tempdir().unwrap();
+        let mut config = atr_config();
+        config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+        let handle = hourly_live_handle(&config, models.path(), catalog.path());
 
-        assert_eq!(handle.warmup_bar_types(&[minutes]), vec![minutes]);
+        let cache = handle.warmup().cache_config().unwrap();
+
+        assert_eq!(cache.bar_capacity, 10_000 + 1_441);
+    }
+
+    /// A barrier in basis points has no ATR: the live cache holds the
+    /// warmup of the strategy's bars alone, 24 hourly bars and one
+    /// spanning the start.
+    #[test]
+    fn a_live_cache_without_an_atr_holds_the_warmup_of_the_strategys_bars() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
+        let handle = hourly_live_handle(&barrier_config(10), models.path(), catalog.path());
+
+        let cache = handle.warmup().cache_config().unwrap();
+
+        assert_eq!(cache.bar_capacity, 10_000 + 25);
     }
 
     /// Worked by hand. The warmup's response arrives at 12:00, Nautilus
@@ -1519,7 +1541,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle(&probe, models.path(), &atr_config(), (Some(8), None));
-        handle.start(&mut probe, &[]).unwrap();
+        handle.start(&mut probe).unwrap();
         probe
             .cache_rc()
             .borrow_mut()
@@ -1544,9 +1566,7 @@ mod tests {
             UnixNanos::from(at("2026-10-22T12:00:00Z")),
         )];
 
-        for bar in warmup::bars(&probe, &response) {
-            handle.handle_warmup_bar(&bar).unwrap();
-        }
+        handle.warmup().on_historical(&probe, &response).unwrap();
         let trade = handle.decide(&mut probe).unwrap().unwrap();
 
         assert_eq!(
@@ -1662,20 +1682,23 @@ mod tests {
     #[test]
     fn a_live_cadence_waits_for_composite_bars_a_backtests_does_not() {
         let models = tempfile::tempdir().unwrap();
-        let composite = [BarType::from(
-            "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-        )];
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from(
+                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..requirements()
+        };
         let next = |mode: Mode| {
             let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
             let handle = ModelHandle::new(
                 StrategyId::from(STRATEGY),
                 features(),
                 &config(),
-                &requirements(),
+                &requirements,
                 mode,
             )
             .unwrap();
-            handle.start(&mut probe, &composite).unwrap();
+            handle.start(&mut probe).unwrap();
             let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
             Timestamp::from(next)
         };
@@ -1749,7 +1772,7 @@ mod tests {
             live(models.to_path_buf(), catalog, launcher),
         )
         .unwrap();
-        handle.start(probe, &[]).unwrap();
+        handle.start(probe).unwrap();
         handle
     }
 
@@ -2264,7 +2287,7 @@ mod tests {
         open_trade(&probe, STRATEGY, "O-2", true, "2026-10-22T09:00:00Z");
         let handle = sides_handle(&probe, models.path(), &barrier_config(10), (None, None));
 
-        handle.start(&mut probe, &[]).unwrap();
+        handle.start(&mut probe).unwrap();
 
         assert_eq!(
             time_close(&clock, "O-1"),
@@ -2287,7 +2310,7 @@ mod tests {
         open_trade(&probe, "OTHER-001", "O-2", false, "2026-10-22T11:40:00Z");
         let handle = handle(&probe, models.path());
 
-        handle.start(&mut probe, &[]).unwrap();
+        handle.start(&mut probe).unwrap();
 
         assert_eq!(
             time_close(&clock, "O-1"),
@@ -2305,7 +2328,7 @@ mod tests {
         let (mut probe, clock) = registered(at(RESTART));
         open_trade(&probe, STRATEGY, "O-1", false, "2026-10-22T10:30:00Z");
         let handle = handle(&probe, models.path());
-        handle.start(&mut probe, &[]).unwrap();
+        handle.start(&mut probe).unwrap();
 
         let events = clock
             .borrow_mut()

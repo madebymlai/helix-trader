@@ -44,7 +44,10 @@ use rust_decimal::Decimal;
 use crate::{
     data::{IcHistory, OkxHistory, catalog_path},
     rolls::{Transition, contracts_at},
-    strategy::{DataRequirements, warmup},
+    strategy::{
+        DataRequirements,
+        warmup::{self, Warmup},
+    },
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
@@ -79,18 +82,19 @@ pub struct Live {
 impl Live {
     /// Sets up the clients of the instruments of `requirements`, OKX's, IC's
     /// then IB's, then runs `strategy` on a live node until SIGINT or
-    /// SIGTERM. The strategy's warmup requests go to the data clients. A
-    /// root's instruments are its contract in front at the start and the
-    /// next one (see `README.md`, "Rolled roots"). The node is built, and
-    /// what the last run left staged promoted (`promote_staged`), before it
-    /// runs.
+    /// SIGTERM, its cache sized for `warmup`, the strategy's (see
+    /// `Warmup::cache_config`). The strategy's warmup requests go to the
+    /// data clients. A root's instruments are its contract in front at the
+    /// start and the next one (see `README.md`, "Rolled roots"). The node is
+    /// built, and what the last run left staged promoted (`promote_staged`),
+    /// before it runs.
     ///
     /// # Errors
     ///
     /// Returns an error if a bar type is on a root (live builds no
     /// continuous bars), if the cache cannot hold the warmup bars of a bar
-    /// type (see `warmup::cache_config`), if the catalog cannot be created
-    /// or its path is not UTF-8, if the staging directory is inside the
+    /// type the warmup builds (see `Warmup::cache_config`), if the catalog
+    /// cannot be created or its path is not UTF-8, if the staging directory is inside the
     /// catalog, the trader's instance id cannot be kept (see `Recording`),
     /// if what the last run left staged cannot be promoted
     /// (`promote_staged`), if an IC bar type is not built from quotes or
@@ -101,11 +105,16 @@ impl Live {
     /// if the strategy trades IB instruments and no account is given, if
     /// IB's clients cannot be set up (see `ib::clients`), or if the node
     /// fails (see `node::build`, `node::run`).
-    pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
+    pub async fn run<S>(
+        &self,
+        requirements: &DataRequirements,
+        warmup: &Warmup,
+        strategy: S,
+    ) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
-        let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
+        let cache = warmup.cache_config()?;
         std::fs::create_dir_all(&self.catalog)
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         let catalog = DataCatalogConfig::new(catalog_path(&self.catalog)?, None, None);

@@ -204,9 +204,10 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
             .unwrap();
         assert!(status.success());
     });
+    let strategy = EmaCross::live(config).unwrap();
     let ran = tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
-        live.run(&requirements, EmaCross::live(config).unwrap()),
+        live.run(&requirements, &strategy.warmup(), strategy),
     )
     .await;
     let interrupted = interrupt.is_finished();

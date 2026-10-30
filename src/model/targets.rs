@@ -114,7 +114,7 @@ use super::{
     decide::{DecisionRule, FeatureRow},
     features::Fingerprint,
 };
-use crate::strategy::DataRequirements;
+use crate::strategy::{DataRequirements, warmup::Warmup};
 
 /// The prefix of a trade's time alert, followed by its entry's client
 /// order id, such as `TARGET-TIME:D12-BL-E`.
@@ -795,24 +795,15 @@ impl Stops {
         }
     }
 
-    /// The bar type of the barrier's ATR, if any: a live warmup requests
-    /// its bars, which `handle_warmup_bar` hands to the ATR.
+    /// `warmup` building the bars of the barrier's ATR, if any, and handing
+    /// them to it (`Warmup::building`): the warmup's bars reach only the
+    /// cache, and live the first decision after a start then sets the stop
+    /// a dataset run sets there.
     #[must_use]
-    pub fn atr_bar_type(&self) -> Option<BarType> {
-        self.atr.as_ref().map(|atr| atr.bar_type)
-    }
-
-    /// Hands `bar`, a bar of a live warmup, to the barrier's ATR, if any,
-    /// which reads the bars of its bar type alone: the warmup's bars reach
-    /// only the cache.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the ATR fails to read the bar.
-    pub fn handle_warmup_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+    pub fn warmed(&self, warmup: Warmup) -> Warmup {
         match &self.atr {
-            Some(atr) => atr.handle_bar(bar),
-            None => Ok(()),
+            Some(atr) => warmup.building(atr.bar_type, Rc::clone(atr) as SharedActorIndicator),
+            None => warmup,
         }
     }
 

@@ -767,8 +767,9 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     match args.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.config)?;
-            live.run(&config.bars.data_requirements(), EmaCross::live(config)?)
-                .await
+            let requirements = config.bars.data_requirements();
+            let strategy = EmaCross::live(config)?;
+            live.run(&requirements, &strategy.warmup(), strategy).await
         }
         Strategy::ModelEma => {
             let config = load_model_ema_config(&args.config)?;
@@ -779,11 +780,9 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
                 launcher: Launcher::process(program, retrain_args(&args)?),
                 catalog: args.catalog.clone(),
             };
-            live.run(
-                &config.bars.data_requirements(),
-                ModelEma::new(config, mode)?,
-            )
-            .await
+            let requirements = config.bars.data_requirements();
+            let strategy = ModelEma::new(config, mode)?;
+            live.run(&requirements, &strategy.warmup(), strategy).await
         }
     }
 }

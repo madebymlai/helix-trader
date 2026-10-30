@@ -19,9 +19,10 @@
 //! `model::handle::ModelHandle`); `model_ema` is the example.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
-//! 1-minute bars, OKX's candles) or from quotes; `warmup` asks for their
-//! history live and hands it back, so that no strategy knows how, and
-//! subscribes to them in a backtest, which requests none. The catalog
+//! 1-minute bars, OKX's candles) or from quotes; a `warmup::Warmup`, which
+//! each strategy holds, asks for their history live and hands it back, so
+//! that no strategy knows how, and subscribes to them in a backtest, which
+//! requests none. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
 mod config;
@@ -57,7 +58,7 @@ pub struct DataRequirements {
     /// The internal bar types the strategy reads and warms up on: their
     /// instruments are those it reads (see `instrument_ids`), and a live
     /// node sizes its cache to hold their warmup (see
-    /// `warmup::cache_config`).
+    /// `warmup::Warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
     /// of bars, book deltas and custom data among them (see

@@ -20,7 +20,11 @@
 use std::{path::PathBuf, process::Command, time::Duration};
 
 use crate::common::cache::delete_trader;
-use helix_trader::{data::IbAccount, live::Live, strategy::DataRequirements};
+use helix_trader::{
+    data::IbAccount,
+    live::Live,
+    strategy::{DataRequirements, warmup::Warmup},
+};
 use ibapi::{Client, accounts::PositionUpdate, contracts::Contract, orders::Orders};
 use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};
@@ -117,7 +121,11 @@ async fn phase() {
         recording: crate::recording(staging.path()),
     };
     let probe = Probe::new(step, PathBuf::from(std::env::var(STATE).unwrap()));
-    let ran = tokio::time::timeout(Duration::from_secs(300), live.run(&requirements, probe)).await;
+    let ran = tokio::time::timeout(
+        Duration::from_secs(300),
+        live.run(&requirements, &Warmup::live(&requirements), probe),
+    )
+    .await;
     ran.expect("the node stops within 5 minutes").unwrap();
     let report: Report =
         serde_json::from_str(&std::fs::read_to_string(report_path()).unwrap()).unwrap();

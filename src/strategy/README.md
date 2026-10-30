@@ -272,29 +272,40 @@ pub struct Trend {
     config: TrendConfig,
     /// The pure core, the strategy's Nautilus indicator.
     book: Rc<Book>,
-    /// The warmup requested at start, live; none in a backtest.
-    warmup: Option<SignedDuration>,
-    /// The request group of the warmup of the last start.
-    warmup_group: UUID4,
+    /// Its warmup, which feeds the book.
+    warmup: Rc<Warmup>,
 }
 
 impl Trend {
     /// As a backtest runs it: no warmup request.
     pub fn new(config: TrendConfig) -> anyhow::Result<Self> {
-        config.validate()?;
-        Ok(Self {
-            core: StrategyCore::new_checked(config.base.clone())?,
-            book: Rc::new(Book::new(&config)),
-            config,
-            warmup: None,
-            warmup_group: UUID4::new(),
-        })
+        Self::built(config, Warmup::replayed)
     }
 
     /// As a live node runs it: its warmup requested at start.
     pub fn live(config: TrendConfig) -> anyhow::Result<Self> {
-        let warmup = config.bars.warmup;
-        Ok(Self { warmup: Some(warmup), ..Self::new(config)? })
+        Self::built(config, Warmup::live)
+    }
+
+    fn built(
+        config: TrendConfig,
+        warmup: fn(&DataRequirements) -> Warmup,
+    ) -> anyhow::Result<Self> {
+        config.validate()?;
+        let book = Rc::new(Book::new(&config));
+        let warmup = warmup(&config.bars.data_requirements())
+            .feeding(Rc::clone(&book) as SharedActorIndicator);
+        Ok(Self {
+            core: StrategyCore::new_checked(config.base.clone())?,
+            book,
+            config,
+            warmup: Rc::new(warmup),
+        })
+    }
+
+    /// A live node sizes its cache from it.
+    pub fn warmup(&self) -> Rc<Warmup> {
+        Rc::clone(&self.warmup)
     }
 }
 
@@ -302,44 +313,23 @@ nautilus_strategy!(Trend);
 
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let bar_types = self.config.bars.bar_types();
-        for bar_type in &bar_types {
+        for bar_type in self.config.bars.bar_types() {
             let book = Rc::clone(&self.book) as SharedActorIndicator;
-            self.core_mut().register_indicator_for_bars(*bar_type, book);
+            self.core_mut().register_indicator_for_bars(bar_type, book);
         }
-        // No bars on a futures root: no continuous bars (see Warmup).
-        let continuous = ContinuousBars::default();
-        match self.warmup {
-            Some(warmup) => {
-                self.warmup_group = UUID4::new();
-                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)
-            }
-            None => {
-                warmup::subscribe(self, &bar_types, &continuous);
-                Ok(())
-            }
-        }
+        Rc::clone(&self.warmup).start(self)
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup_group, response)? {
-            log::info!("Warmup complete");
-        }
-        Ok(())
+        self.warmup.on_data_response(response)
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        for bar in warmup::bars(self, quotes) {
-            self.book.update(&bar);
-        }
-        Ok(())
+        self.warmup.on_historical(self, quotes)
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        for bar in warmup::bars(self, bars) {
-            self.book.update(&bar);
-        }
-        Ok(())
+        self.warmup.on_historical(self, bars)
     }
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
@@ -377,16 +367,18 @@ impl DataActor for Trend {
   request opens nothing: live, the warmup hydrates the indicators; in a
   backtest they warm on the replay (see "Warmup and training"). The EMA
   checks it in `on_bar`, `model_ema` before each decision.
-- The warmup is shared as function calls, not as a hook implementation:
-  a strategy built for live (`Trend::live`) hands `warmup::start` the bar
-  types and warmup of `bars`, the continuous bars of those on a futures
-  root (none here), and a new request group id, stored first; built for
-  a backtest (`Trend::new`) it hands `warmup::subscribe` the bar types
-  alone, and requests nothing. The two `on_historical_*` handlers feed
-  the bars `warmup::bars` returns to the strategy's own state, and
-  `on_data_response` asks `warmup::finished` whether the warmup ended (see
-  "Warmup and training"). Each strategy writes these handlers itself, so
-  its `DataActor` impl stays plain Nautilus.
+- The warmup is a type the strategy holds, not a hook implementation:
+  `warmup::Warmup`, built from the data requirements for a live node
+  (`Warmup::live`, in `Trend::live`) or a replay (`Warmup::replayed`, in
+  `Trend::new`), set to feed the strategy's indicators (`feeding`). Its
+  `start`, from `on_start`, requests the warmup live and subscribes to
+  the bars; on a replay it subscribes alone and requests nothing. The
+  hooks Nautilus delivers historical data to stay the strategy's, each
+  one line handing the data to the warmup: `on_historical` feeds the bars
+  of a response to the indicators, `on_data_response` logs the warmup's
+  end (see "Warmup and training"). A model strategy's `ModelHandle`
+  builds and starts the warmup itself (`model.warmup()`). The live node
+  takes the strategy's warmup to size its cache (`Live::run`).
 
 ### Orders and positions
 
@@ -612,7 +604,7 @@ of its choosing (`model::features`, `model::decide`).
   rule, delay)` in `on_start` sets a cadence's Nautilus timer
   (`DECISION_TIMER`) on an epoch-aligned time, so that it keeps the fixed
   UTC grid of the interval's multiples whatever the run start; `delay` is
-  `warmup::live_bar_build_delay(&bar_types)` live and zero in a backtest,
+  `Warmup::live_bar_build_delay()` live and zero in a backtest,
   so that a live decision sees the composite bar its backtest twin sees.
   Each decision fires 10 ms after its time and delay
   (`DECISION_MARGIN`): a bar closing on the grid is built by the data
@@ -946,10 +938,11 @@ of its choosing (`model::features`, `model::decide`).
 - **Model handle.** A strategy trading on its model holds a `ModelHandle`
   (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
   &requirements, mode)`, an `Rc`), the one place it decides:
-  `start(self, &bar_types)` in `on_start` registers the features (and,
-  trading on a barrier, the barrier's ATR, as the targets do) and
-  starts the cadence, live `warmup::live_bar_build_delay(&bar_types)`
-  late; `decide(self)` at each
+  `start(self)` in `on_start` starts the strategy's warmup, which the
+  handle builds (`model.warmup()`, see "Warmup and training"), registers
+  the features (and, trading on a barrier, the barrier's ATR, as the
+  targets do) and starts the cadence, live
+  `Warmup::live_bar_build_delay` late; `decide(self)` at each
   fresh decision, on data of the targets' instrument (`new` refuses a
   cadence on features reading none of it), snapshots the features and
   publishes their row, then, in
@@ -1139,16 +1132,18 @@ indicators are initialized (see Wiring), wherever their data came from:
 
 The module `strategy::warmup` is the one place that knows Nautilus'
 warmup protocol for the bars it builds; no strategy names the request
-params or reads the cache for its warmup. A live strategy makes the
-three calls shown in Wiring: `warmup::start(self, &bar_types, warmup,
-&continuous, group)` in `on_start`, which requests the warmup as the
-request group `group` and subscribes to the bars; `warmup::bars(self,
-response)` in `on_historical_quotes` and `on_historical_bars`, which
-returns the warmup bars of the response's instrument, oldest first; and
-`warmup::finished(group, response)` in `on_data_response`, which tells
-whether the warmup ended, complete or not. In a backtest it calls
-`warmup::subscribe(self, &bar_types, &continuous)` in `on_start` alone,
-which subscribes as `start` does, with no request.
+params or reads the cache for its warmup. Its `Warmup` type, which a
+strategy holds (see Wiring), runs the module's calls: live, its `start`
+calls `warmup::start(self, &bar_types, warmup, &continuous, group)`,
+which requests the warmup as a new request group `group` and subscribes
+to the bars; its `on_historical` hands the bars `warmup::bars(self,
+response)` returns, the warmup bars of the response's instrument, oldest
+first, to the indicators it feeds; and its `on_data_response` asks
+`warmup::finished(group, response)` whether the warmup ended, complete
+or not. In a backtest or a dataset run its `start` calls
+`warmup::subscribe(self, &bar_types, &continuous)` alone, which
+subscribes as `start` does, with no request. The strategies read no bars
+on a root, so a `Warmup` has no continuous bars; the functions take them.
 
 - **What `start` requests** is chosen from the bar type alone, never the
   venue. A composite bar type is built from its source bars: `start`
@@ -1220,22 +1215,23 @@ which subscribes as `start` does, with no request.
   request today.
 - **The barrier's ATR.** A strategy trading on a model of a barrier in
   ATRs (`ModelHandle`, "Model handle") warms the barrier's ATR from the
-  same request: it passes `start` its bar types with the ATR's added
-  (`model.warmup_bar_types(&bar_types)`, the targets' `AtrBars`, bars of
-  the decision cadence), so the data engine builds those bars from the
-  history into the cache and goes on with them live, the bar spanning the
-  warmup end once, and hands each bar `bars` returns to
-  `model.handle_warmup_bar(&bar)`, which feeds the features and the ATR,
-  each its own bar types, oldest first. The first decision after a
+  same request: its model handle builds the warmup with the ATR's bar type
+  added (`Stops::warmed`, `Warmup::building`, the targets' `AtrBars`,
+  bars of the decision cadence), so the data engine builds those bars from
+  the history into the cache and goes on with them live, the bar spanning
+  the warmup end once, and the warmup hands each bar `bars` returns to the
+  features and the ATR, each reading its own bar types, oldest first. The first decision after a
   start then sets the stop a dataset run sets there, not the ATR's
   period of the cadence later. The window needs no widening: the config
   is refused if the ATR's period of the cadence is longer than the
   warmup ("Model handle", `ModelConfig::validate`).
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
-  warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
-  gives the node its cache config: the default, its bar capacity raised by
-  the most bars the warmup builds of one bar type (warmup over bar length,
+  warmup would be cut silently. `Warmup::cache_config` gives the node its
+  cache config (`warmup::cache_config(bar_types, warmup)` of every bar type
+  the warmup builds, the barrier ATR's included, so a cadence finer than
+  the strategy's bars is not evicted): the default, its bar capacity
+  raised by the most bars the warmup builds of one bar type (warmup over bar length,
   plus the bar spanning the start), the default left on top as headroom.
   Past the cache's maximum of 1,000,000 it fails, naming the bar type, the
   bars needed and the capacity, and the run does not start. The live
@@ -1263,8 +1259,8 @@ strategy's dataset and publishes it as a file in the model store, which
 backtest and live share, and the strategy's model handle reads the latest
 valid one at each decision (see "Features and decisions"). Its features
 warm up as its indicators do: Nautilus feeds them the live and replayed
-data, and the strategy hands the warmup's bars to its model handle,
-which feeds them to the features and the barrier's ATR ("The barrier's
+data, and the warmup its model handle builds hands the warmup's bars to
+the features and the barrier's ATR ("The barrier's
 ATR" above).
 
 ## Adding a strategy

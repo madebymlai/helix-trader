@@ -214,7 +214,11 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         recording: crate::recording(staging.path()),
     };
     let started = Timestamp::now();
-    let ran = tokio::time::timeout(Duration::from_secs(600), live.run(&requirements, probe)).await;
+    let ran = tokio::time::timeout(
+        Duration::from_secs(600),
+        live.run(&requirements, &warmup::Warmup::live(&requirements), probe),
+    )
+    .await;
     common::cache::delete_trader(TRADER).await;
     ran.expect("the probe stops the node within 10 minutes")
         .unwrap();

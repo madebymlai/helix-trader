@@ -27,13 +27,11 @@ mod features;
 pub use config::ModelEmaConfig;
 
 use anyhow::Context;
-use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
-use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Bar, QuoteTick},
     events::{OrderDenied, OrderRejected, PositionClosed},
@@ -49,25 +47,19 @@ use crate::{
         train::Training,
         walk::WalkForward,
     },
-    rolls::ContinuousBars,
-    strategy::warmup,
+    strategy::warmup::Warmup,
 };
 
 #[derive(Debug)]
 pub struct ModelEma {
     core: StrategyCore,
-    config: ModelEmaConfig,
+    /// Its model handle, which owns its warmup.
     model: Rc<ModelHandle>,
-    /// The warmup requested at start, live; none in a backtest or a
-    /// dataset run, whose indicators warm on the replay.
-    warmup: Option<SignedDuration>,
-    /// The request group of the warmup of the last start.
-    warmup_group: UUID4,
 }
 
 impl ModelEma {
-    /// The strategy, its model handle in `mode`: live, it requests its
-    /// warmup (`BarsConfig::warmup`) at start, which hydrates its
+    /// The strategy, its model handle in `mode`: live, its warmup
+    /// (`BarsConfig::warmup`) is requested at start, which hydrates its
     /// indicators; otherwise they warm on the data replayed.
     ///
     /// # Errors
@@ -76,7 +68,6 @@ impl ModelEma {
     pub fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
         config.validate()?;
         let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
-        let warmup = matches!(mode, Mode::Live { .. }).then_some(config.bars.warmup);
         let model = ModelHandle::new(
             strategy_id(&config)?,
             features,
@@ -86,11 +77,15 @@ impl ModelEma {
         )?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
-            config,
             model,
-            warmup,
-            warmup_group: UUID4::new(),
         })
+    }
+
+    /// Its warmup, its model handle's: a live node sizes its cache from
+    /// it.
+    #[must_use]
+    pub fn warmup(&self) -> Rc<Warmup> {
+        self.model.warmup()
     }
 }
 
@@ -196,46 +191,27 @@ nautilus_strategy!(ModelEma, {
 });
 
 impl DataActor for ModelEma {
-    /// Subscribes to the bars, live after requesting the warmup of them
-    /// and of the barrier's ATR (`ModelHandle::warmup_bar_types`), then
-    /// starts the model handle: the features, registered as its Nautilus
-    /// indicator, and the decisions.
+    /// Starts the model handle, which starts the warmup: live, it requests
+    /// the warmup of the bars and of the barrier's ATR, then subscribes to
+    /// them; then the features, registered as its Nautilus indicator, and
+    /// the decisions.
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let bar_types = self.config.bars.bar_types();
-        let continuous = ContinuousBars::default();
-        match self.warmup {
-            Some(warmup) => {
-                self.warmup_group = UUID4::new();
-                let warmed = self.model.warmup_bar_types(&bar_types);
-                warmup::start(self, &warmed, warmup, &continuous, self.warmup_group)?;
-            }
-            None => warmup::subscribe(self, &bar_types, &continuous),
-        }
-        Rc::clone(&self.model).start(self, &bar_types)
+        Rc::clone(&self.model).start(self)
     }
 
     /// Logs the end of the warmup; Nautilus logs a failed one as an error.
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup_group, response)? {
-            log::info!("Warmup complete");
-        }
-        Ok(())
+        self.model.warmup().on_data_response(response)
     }
 
-    /// The warmup's bars reach only the cache: they are handed here to
-    /// the features and the barrier's ATR, through the model handle.
+    /// The warmup's bars reach only the cache: the warmup hands them to
+    /// the features and the barrier's ATR.
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        for bar in warmup::bars(self, quotes) {
-            self.model.handle_warmup_bar(&bar)?;
-        }
-        Ok(())
+        self.model.warmup().on_historical(self, quotes)
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        for bar in warmup::bars(self, bars) {
-            self.model.handle_warmup_bar(&bar)?;
-        }
-        Ok(())
+        self.model.warmup().on_historical(self, bars)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

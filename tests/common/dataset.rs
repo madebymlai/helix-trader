@@ -99,7 +99,7 @@ impl DataActor for ModelProbe {
         let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
         msgbus::subscribe_any(topic.into(), handler, None);
         self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
-        Rc::clone(&self.model).start(self, &[])
+        Rc::clone(&self.model).start(self)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

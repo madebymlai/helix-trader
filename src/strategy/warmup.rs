@@ -47,7 +47,8 @@
 //!
 //! The cache keeps at most `bar_capacity` bars per bar type and evicts the
 //! oldest beyond it, so the live node running the strategy takes its cache
-//! config from `cache_config`, which holds the whole warmup.
+//! config from `Warmup::cache_config`, which holds the whole warmup of
+//! every bar type the warmup builds.
 //!
 //! An hour with no quote or source bar at all means the market is closed
 //! (a night, a weekend, a holiday): the data engine builds no bar for it,
@@ -67,12 +68,15 @@
 //! answers it with no bars; `continuous_bars` reads them once the group
 //! ended.
 //!
-//! A live strategy calls `start` from `on_start`, `bars` from
+//! A strategy holds a `Warmup`, which runs these calls, and delegates its
+//! hooks to it; a model strategy's `ModelHandle` builds and owns it. The
+//! functions are its parts: `start` from `on_start`, `bars` from
 //! `on_historical_quotes` and `on_historical_bars`, and `finished` from
 //! `on_data_response`, then, on bars on a root, `continuous_bars`; in a
-//! backtest or a dataset run it calls `subscribe` from `on_start` alone.
+//! backtest or a dataset run `subscribe` from `on_start` alone.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
 };
@@ -80,7 +84,7 @@ use std::{
 use anyhow::{Context, bail, ensure};
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::{DataActor, DataActorNative},
+    actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
     cache::CacheConfig,
     messages::data::DataResponseEnvelope,
 };
@@ -94,7 +98,200 @@ use nautilus_model::{
 };
 use serde_json::{Value, json};
 
-use crate::rolls::ContinuousBars;
+use crate::{rolls::ContinuousBars, strategy::DataRequirements};
+
+/// A strategy's warmup, built from its data requirements for a live node
+/// (`live`) or a replay (`replayed`, a backtest or a dataset run): the one
+/// owner of the protocol above, so that a strategy holds one and its hooks
+/// delegate to it. Nautilus delivers historical data only to the
+/// strategy's own hooks, so a strategy calls `start` from `on_start`,
+/// `on_data_response` from `on_data_response`, and `on_historical` from
+/// `on_historical_quotes` and `on_historical_bars`.
+///
+/// Live, `start` requests the warmup of the bar types the strategy reads
+/// and of those the strategy's harness needs warm (`building`, the
+/// barrier's ATR's), and subscribes to them from the warmup's end; the
+/// bars of each response go to the indicators the warmup feeds
+/// (`feeding`, `building`), oldest first. On a replay `start` subscribes
+/// to the strategy's bar types alone: the harness subscribes to its own.
+/// The strategies read no bars on a root, so a warmup has no continuous
+/// bars. A live node sizes its cache from `cache_config`, which holds the
+/// warmup of every bar type the warmup builds.
+pub struct Warmup {
+    start: Start,
+    /// How far back the live request starts: the requirements' warmup.
+    length: SignedDuration,
+    /// The bar types the strategy reads.
+    bar_types: Vec<BarType>,
+    /// The bar types the harness needs warm beyond those.
+    harness: Vec<BarType>,
+    /// What the warmup's bars are handed to.
+    indicators: Vec<SharedActorIndicator>,
+    /// The request group of the last live start.
+    group: Cell<UUID4>,
+}
+
+/// What a warmup's `start` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// Requests the warmup, then subscribes from its end: a live node.
+    Request,
+    /// Subscribes alone: a replay, whose indicators warm on its data.
+    Subscribe,
+}
+
+impl Warmup {
+    /// The warmup of a strategy of `requirements` on a live node: its
+    /// start requests `requirements.warmup` of history.
+    #[must_use]
+    pub fn live(requirements: &DataRequirements) -> Self {
+        Self::of(requirements, Start::Request)
+    }
+
+    /// The warmup of a strategy of `requirements` in a backtest or a
+    /// dataset run: its start requests nothing.
+    #[must_use]
+    pub fn replayed(requirements: &DataRequirements) -> Self {
+        Self::of(requirements, Start::Subscribe)
+    }
+
+    fn of(requirements: &DataRequirements, start: Start) -> Self {
+        Self {
+            start,
+            length: requirements.warmup,
+            bar_types: requirements.bar_types.clone(),
+            harness: Vec::new(),
+            indicators: Vec::new(),
+            group: Cell::new(UUID4::new()),
+        }
+    }
+
+    /// The warmup handing its bars to `indicator` too, which reads the
+    /// bars of its own bar types alone.
+    #[must_use]
+    pub fn feeding(mut self, indicator: SharedActorIndicator) -> Self {
+        self.indicators.push(indicator);
+        self
+    }
+
+    /// The warmup building the bars of `bar_type` too, if the strategy
+    /// does not read it, for `indicator` of the harness, which it feeds:
+    /// live, the data engine builds them from the warmup's history and
+    /// goes on with them, the bar spanning the warmup's end once.
+    #[must_use]
+    pub fn building(mut self, bar_type: BarType, indicator: SharedActorIndicator) -> Self {
+        if !self.bar_types.contains(&bar_type) && !self.harness.contains(&bar_type) {
+            self.harness.push(bar_type);
+        }
+        self.feeding(indicator)
+    }
+
+    /// Starts the warmup of `actor`, from its `on_start`: live, requests it
+    /// as a new request group and subscribes to the bars it builds from
+    /// its end (see `start`); on a replay, subscribes to the strategy's
+    /// bar types (see `subscribe`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a live request fails (see `start`).
+    pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        let continuous = ContinuousBars::default();
+        match self.start {
+            Start::Request => {
+                self.group.set(UUID4::new());
+                start(
+                    actor,
+                    &self.built(),
+                    self.length,
+                    &continuous,
+                    self.group.get(),
+                )
+            }
+            Start::Subscribe => {
+                subscribe(actor, &self.bar_types, &continuous);
+                Ok(())
+            }
+        }
+    }
+
+    /// Logs the end of the warmup, if `response` ends it, from the actor's
+    /// `on_data_response`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the reason if the warmup ended incomplete
+    /// (see `finished`), which Nautilus logs.
+    pub fn on_data_response(&self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        if finished(self.group.get(), response)? {
+            log::info!("Warmup complete");
+        }
+        Ok(())
+    }
+
+    /// Hands the warmup bars of `response`, the quotes or bars of a
+    /// response to `actor`'s warmup request, to the indicators the warmup
+    /// feeds, oldest first, from the actor's `on_historical_quotes` and
+    /// `on_historical_bars`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an indicator fails to read a bar.
+    pub fn on_historical<A, D>(&self, actor: &A, response: &[D]) -> anyhow::Result<()>
+    where
+        A: DataActor + DataActorNative,
+        D: Copy + Into<Data>,
+    {
+        for bar in bars(actor, response) {
+            for indicator in &self.indicators {
+                indicator.handle_bar(&bar)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The cache config of a live node running the warmup: sized for the
+    /// warmup of every bar type it builds (see `cache_config`).
+    ///
+    /// # Errors
+    ///
+    /// As `cache_config`.
+    pub fn cache_config(&self) -> anyhow::Result<CacheConfig> {
+        cache_config(&self.built(), self.length)
+    }
+
+    /// How long after a bar's close a live node builds the strategy's
+    /// bars (see `live_bar_build_delay`).
+    #[must_use]
+    pub fn live_bar_build_delay(&self) -> SignedDuration {
+        live_bar_build_delay(&self.bar_types)
+    }
+
+    /// The bar types a live warmup builds: the strategy's, then the
+    /// harness's.
+    fn built(&self) -> Vec<BarType> {
+        self.bar_types
+            .iter()
+            .chain(&self.harness)
+            .copied()
+            .collect()
+    }
+}
+
+impl Debug for Warmup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(Warmup))
+            .field("start", &self.start)
+            .field("length", &self.length)
+            .field("bar_types", &self.bar_types)
+            .field("harness", &self.harness)
+            .field("indicators", &self.indicators.len())
+            .field("group", &self.group)
+            .finish()
+    }
+}
 
 /// Requests the warmup of `bar_types`, internal bar types, over
 /// `[now - warmup, now]` as the request group `group`, then subscribes
@@ -107,7 +304,9 @@ use crate::rolls::ContinuousBars;
 /// where `bars` returns it; the end of the group in `on_data_response`,
 /// where `finished` tells it. `group` is the caller's, stored before the
 /// call: a group whose requests are all answered at once ends before this
-/// returns.
+/// returns. No bar types make no request and no group, which
+/// `DataActor::request_group` refuses empty: a strategy reading ticks
+/// alone has no warmup.
 ///
 /// # Errors
 ///
@@ -177,7 +376,9 @@ where
             Some(request_params(built, None)),
         )?);
     }
-    actor.request_group(requests, Some(group))?;
+    if !requests.is_empty() {
+        actor.request_group(requests, Some(group))?;
+    }
     subscribe_from(actor, bar_types, continuous, UnixNanos::from(now));
     Ok(())
 }
@@ -420,9 +621,80 @@ fn warmup_bars(bar_type: &BarType, warmup: SignedDuration) -> anyhow::Result<usi
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
+    use nautilus_common::actor::indicators::ActorIndicator;
+    use nautilus_model::data::{QuoteTick, TradeTick};
+
     use super::*;
 
     const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+    /// An indicator reading nothing, for a warmup to feed.
+    struct Inert;
+
+    impl ActorIndicator for Inert {
+        fn key(&self) -> usize {
+            std::ptr::from_ref(self).addr()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn initialized(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        fn handle_quote(&self, _quote: &QuoteTick) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn handle_trade(&self, _trade: &TradeTick) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn handle_bar(&self, _bar: &Bar) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The requirements of a strategy reading `bar_types` over a day.
+    fn reading(bar_types: &[&str]) -> DataRequirements {
+        DataRequirements {
+            bar_types: bar_types.iter().map(|&b| BarType::from(b)).collect(),
+            ticks: vec![],
+            warmup: DAY,
+        }
+    }
+
+    /// The harness's bars are built after the strategy's, once, and not
+    /// again if the strategy reads them.
+    #[test]
+    fn a_warmup_builds_the_harness_bars_once_after_the_strategys() {
+        let minutes = BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL");
+        let hours = BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL");
+        let inert = || Rc::new(Inert) as SharedActorIndicator;
+
+        let warmup = Warmup::live(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]))
+            .building(minutes, inert())
+            .building(minutes, inert())
+            .building(hours, inert());
+
+        assert_eq!(warmup.built(), vec![hours, minutes]);
+    }
+
+    /// The cache holds the warmup of the harness's bars too: 1,440
+    /// 1-minute bars over a day, and one spanning the start.
+    #[test]
+    fn the_cache_holds_the_warmup_of_every_bar_type_the_warmup_builds() {
+        let minutes = BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL");
+
+        let warmup = Warmup::live(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]))
+            .building(minutes, Rc::new(Inert));
+
+        assert_eq!(warmup.cache_config().unwrap().bar_capacity, 10_000 + 1_441);
+    }
 
     #[test]
     fn the_warmup_finishes_on_its_groups_response_alone() {

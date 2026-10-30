@@ -385,7 +385,7 @@ nautilus_strategy!(RuleProbe, {
 impl DataActor for RuleProbe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
-        Rc::clone(&self.model).start(self, &[])
+        Rc::clone(&self.model).start(self)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

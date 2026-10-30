@@ -12,9 +12,9 @@
 //! depth, book deltas or custom data to indicators, so the strategy
 //! forwards those from its handlers (`handle_depth`, `handle_deltas`,
 //! `handle_data`); no kind takes both paths. Bars built from a warmup's
-//! quotes or source bars reach only the cache, not the indicators: a
-//! strategy warming bar features hands `warmup::bars` to `handle_bar` (a
-//! model strategy through `ModelHandle::handle_warmup_bar`).
+//! quotes or source bars reach only the cache, not the indicators: the
+//! strategy's warmup hands them to `handle_bar` (`Warmup::on_historical`,
+//! the warmup a model strategy's `ModelHandle` builds).
 //!
 //! Each update reaches only the features declared on its kind and source.
 //! An update of a kind or source no feature reads is a no-op, so the

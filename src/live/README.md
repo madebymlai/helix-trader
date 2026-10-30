@@ -468,7 +468,7 @@ let config = LiveNodeConfig {
     logging,
     catalogs: vec![DataCatalogConfig::new(catalog, None, None)], // absolute path
     streaming: Some(recording.streaming(&catalog)?), // see "Recording into the catalog"
-    cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
+    cache: Some(warmup.cache_config()?), // holds the warmup bars, the ATR's too
     data_engine: warmup::live_data_engine_config(&bar_types), // see the strategy README
     exec_engine: LiveExecutionEngineConfig {
         reconciliation: true,
