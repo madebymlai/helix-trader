@@ -9,12 +9,10 @@ fn a_start_on_or_after_the_end_is_refused() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     let end = trades::end(&levels);
-    for start in [end, trades::at("16:00")] {
+    for start in [end, trades::at("19:00")] {
         let backtest = trades::backtest(catalog.path(), start, &levels, "0 EUR");
 
-        let err = backtest
-            .run(trades::ema_cross(trades::time_exit()))
-            .unwrap_err();
+        let err = backtest.run(trades::ema_cross()).unwrap_err();
 
         let err = format!("{err:#}");
         let message = format!("backtest start {start} must be before its end {end}");

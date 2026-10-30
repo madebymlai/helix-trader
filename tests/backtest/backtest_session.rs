@@ -2,8 +2,8 @@
 //! nor trade; overnight, without quotes, there are no bars at all. One node
 //! per thread, so one run per test.
 
-use crate::common::{self, Exits, stepped_quotes, ts};
-use jiff::{SignedDuration, Timestamp};
+use crate::common::{self, stepped_quotes, ts};
+use jiff::Timestamp;
 
 /// Quoted from 07:00 to 17:00 UTC each day, nothing overnight; the hour
 /// bars close at their level + 0.60:
@@ -38,29 +38,34 @@ fn bars_outside_the_session_neither_move_the_emas_nor_trade() {
         ts("2026-01-08T10:00:00Z"),
     );
     let catalog = common::catalog(&stepped_quotes(from, end, level), from, end);
-    let exits = Exits::after(SignedDuration::from_mins(30));
 
     let result = common::backtest(catalog.path(), start, end, "0 EUR")
-        .run(common::shortest_ema_cross(exits))
+        .run(common::shortest_ema_cross())
         .unwrap()
         .result;
 
     // From 09:00 the run replays the bars closing 10:00 to 14:00: the
     // crossover, initialized at 11:00, is short there and stays short to
-    // 14:00, 590.60 below the slow EMA of 600.60, which goes to 593.93. Each trade is held 30
-    // minutes and closed at the 30th minute quote of the next bar:
+    // 14:00, 590.60 below the slow EMA of 600.60, which goes to 593.93.
+    // Each trade but the last ends at its stop loss, 50 bps away, on the
+    // first quote of the next bar, which jumps past it:
     //
-    // - 15:00: 610.60 above 593.93, cross up: buy 10 at 610.65, the EMA
-    //   going to 605.04; closed at 15:30 at the bid 600.25: −104.00;
-    // - 16:00: 600.60 below 605.04, cross down: sell 10 at 600.55, the EMA
-    //   going to 602.08; closed at 16:30 at the ask 620.35 (the 17:00 bar,
-    //   out of the session, still quoted): −198.00;
-    // - Thursday 09:00: 610.60 above 602.08, cross up: buy 10 at 610.65;
-    //   closed at 09:30 at the bid 615.25: +46.00.
+    // - 15:00: 610.60 above 593.93, cross up: buy 10 at 610.65, its stop
+    //   loss at 607.55, the EMA going to 605.04; stopped at 15:01 at the
+    //   bid 600.00 + 0.01 − 0.05 = 599.96: −106.90;
+    // - 16:00: 600.60 below 605.04, cross down: sell 10 at 600.55, its stop
+    //   loss at 603.60, the EMA going to 602.08; stopped at 16:01 at the
+    //   ask 620.00 + 0.01 + 0.05 = 620.06 (the 17:00 bar, out of the
+    //   session, still quoted): −195.10;
+    // - Thursday 09:00: 610.60 above 602.08, cross up: buy 10 at 610.65,
+    //   its stop loss at 607.55 and take profit at 616.71; 10:00 at 615.60
+    //   stays long, its bids, 614.96 to 615.55, touching neither, and the
+    //   run ends with the long open.
     //
-    // Three trades of 4 orders. Had the bars outside the session counted,
-    // 17:00 (620.60) would cross up, Thursday 08:00 (640.60) stay long and
-    // 09:00 (610.60, below the EMA of 631.87) cross down: four trades.
-    assert_eq!(result.total_orders, 12);
-    assert_eq!(common::balance(&result), "9744.00 EUR");
+    // Three brackets of 3 orders. Had the bars outside the session
+    // counted, 17:00 (620.60) would cross up, Thursday 08:00 (640.60) stay
+    // long and 09:00 (610.60, below the EMA of 631.88) cross down: four
+    // trades.
+    assert_eq!(result.total_orders, 9);
+    assert_eq!(common::balance(&result), "9698.00 EUR");
 }

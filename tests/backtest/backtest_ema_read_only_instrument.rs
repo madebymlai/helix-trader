@@ -3,18 +3,15 @@
 //! traded on `common::trades`' time exit, EUNL.IBIS read, its levels
 //! turning every hour. One node per thread, so one run per test.
 
-use crate::common::{self, INSTRUMENT_ID, MID_BAR_TYPE, trades, ts};
+use crate::common::{self, MID_BAR_TYPE, trades, ts};
 use helix_trader::{
     backtest::Backtest,
-    strategy::{
-        BarsConfig,
-        ema::{EmaCross, EmaCrossConfig},
-    },
+    strategy::{Series, ema::EmaCross},
 };
 use nautilus_model::{
     data::{BarType, QuoteTick},
     identifiers::{InstrumentId, Symbol},
-    instruments::{Instrument, InstrumentAny},
+    instruments::InstrumentAny,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
@@ -64,14 +61,8 @@ fn an_instrument_read_but_not_traded_sends_no_order() {
         )
         .unwrap();
     let read_bars = BarType::from(format!("{READ}-1-HOUR-MID-INTERNAL").as_str());
-    let base = common::ema_config(1, 2, Some(common::session()), trades::time_exit());
-    let config = EmaCrossConfig {
-        bars: BarsConfig {
-            instrument_ids: vec![InstrumentId::from(INSTRUMENT_ID), read.id()],
-            ..base.bars.clone()
-        },
-        ..base
-    };
+    let mut config = common::ema_config(1, 2, Some(common::session()));
+    config.data.series.push(Series::Bars(read_bars));
     let backtest = Backtest {
         bar_types: vec![BarType::from(MID_BAR_TYPE), read_bars],
         ..trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR")

@@ -12,9 +12,10 @@
 //! into decisions, tested without an engine.
 //!
 //! What most strategies share is a config struct and functions, never a
-//! base type or trait: `BarsConfig`, embedded in each strategy config with
-//! `#[serde(flatten)]`, holds the bars read, their warmup and their
-//! `Session`. The exception is a strategy trading on a learned model,
+//! base type: `StandardConfig`, the tables every strategy's TOML has, holds
+//! the series read, their warmup and their `Session`, and the instruments
+//! traded, beside the strategy's own table (its `Part`). `model_ema` still
+//! embeds the earlier `BarsConfig` with `#[serde(flatten)]`. The exception is a strategy trading on a learned model,
 //! which holds the harness' types (`model::features::FeatureSet`,
 //! `model::handle::ModelHandle`); `model_ema` is the example.
 //!
@@ -31,9 +32,11 @@ pub mod ema;
 pub mod gold_scalp;
 pub mod model_ema;
 mod session;
+mod standard;
 pub mod warmup;
 
 pub use config::{BarsConfig, CompositeSource};
+pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 pub use session::Session;
 
 use std::str::FromStr;
@@ -95,18 +98,23 @@ pub struct TickSeries {
 /// The data of a tick series: a Nautilus data type by any name Nautilus
 /// parses, one of those a strategy reads as they are (see `TickSeries`).
 fn series_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NautilusDataType, D::Error> {
-    let name = String::deserialize(deserializer)?;
-    let data = NautilusDataType::from_str(&name).map_err(de::Error::custom)?;
+    tick_data(&String::deserialize(deserializer)?).map_err(de::Error::custom)
+}
+
+/// The Nautilus data type `name` parses to, if a strategy reads it as it
+/// is (see `TickSeries`), or why not.
+fn tick_data(name: &str) -> Result<NautilusDataType, String> {
+    let data = NautilusDataType::from_str(name).map_err(|e| e.to_string())?;
     match data {
         NautilusDataType::QuoteTick
         | NautilusDataType::TradeTick
         | NautilusDataType::OrderBookDepth
         | NautilusDataType::OrderBookDelta
         | NautilusDataType::Custom { .. } => Ok(data),
-        _ => Err(de::Error::custom(format!(
+        _ => Err(format!(
             "{name} is not a series a strategy reads as it is: \
              quotes, trades, order_book_depths, order_book_deltas or Custom:<type name>"
-        ))),
+        )),
     }
 }
 

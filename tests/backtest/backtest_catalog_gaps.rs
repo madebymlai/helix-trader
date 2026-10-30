@@ -45,7 +45,7 @@ fn a_sliver_between_promoted_files_is_replayed_through() {
     assert!(missing.len() > 1, "{missing:?}");
 
     let result = trades::backtest(dir.path(), trades::at("10:00"), &levels, "0 EUR")
-        .run(trades::ema_cross(trades::time_exit()))
+        .run(trades::ema_cross())
         .unwrap()
         .result;
 

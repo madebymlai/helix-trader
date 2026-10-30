@@ -62,11 +62,11 @@ the balance of the dataset runs that build its targets, large enough
 that none is denied.
 
 On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
-1-HOUR-MID internal bars, 10 shares, stop loss and take profit 100 bps,
-held an hour, Xetra's session, run from 10:00, 3 EUR commission) it prints
-`Orders: 4` (the entry, its two legs, the close), `PnL (total):
-33.000000` (39.00 without commission, less 2 filled orders × 3 EUR) and a
-final balance of `10033.00 EUR` (`backtest_commission_per_order.rs`).
+1-HOUR-MID internal bars, 10 shares, the EMA's stop loss of 50 bps and
+take profit of 100 bps, held 4 hours, Xetra's session, run from 10:00, 3
+EUR commission) it prints `Orders: 4` (the entry, its two legs, the
+close), `PnL (total): 36.000000` (42.00 without commission, less 2 filled
+orders × 3 EUR) and a final balance of `10036.00 EUR` (`backtest_commission_per_order.rs`).
 
 ## The entry point
 
@@ -1325,7 +1325,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - the EMA's trades: `backtest_ema_entries.rs` (one bracket per cross, in
     its direction, none on a bar keeping the side), `backtest_ema_exits.rs`
     (a long ended by its take profit, a short by its stop loss, each on
-    the first minute quote reaching it, the other leg cancelled),
+    the first minute quote reaching it, the other leg cancelled; in
+    `backtest_ema_entries.rs`, `backtest_session.rs` and
+    `backtest_without_session.rs` a stop loss the next bar's first quote
+    jumps past fills at that quote),
     `backtest_ema_time_exit.rs` (a trade closed its hold after the entry
     filled, at the market then), `backtest_ema_overlap.rs` (on a hedging
     venue a short opened beside a long still held, each closed by its own

@@ -432,11 +432,7 @@ fn money_text(s: &str) -> Result<String, String> {
 
 /// Reads the EMA crossover config from `path` and validates it.
 fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
-    let read = || -> anyhow::Result<EmaCrossConfig> {
-        let config: EmaCrossConfig = toml::from_str(&fs::read_to_string(path)?)?;
-        config.validate()?;
-        Ok(config)
-    };
+    let read = || EmaCrossConfig::load(&fs::read_to_string(path)?);
     read().with_context(|| format!("loading the EMA config {}", path.display()))
 }
 
@@ -453,7 +449,7 @@ fn load_model_ema_config(path: &Path) -> anyhow::Result<ModelEmaConfig> {
 /// The data requirements of `strategy`'s config at `path`.
 fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequirements> {
     Ok(match strategy {
-        Strategy::Ema => load_ema_config(path)?.bars.data_requirements(),
+        Strategy::Ema => load_ema_config(path)?.data_requirements(),
         Strategy::ModelEma => load_model_ema_config(path)?.bars.data_requirements(),
     })
 }
@@ -613,7 +609,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     match args.run.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.run.config)?;
-            let outcome = backtest(config.bars.data_requirements()).run(EmaCross::new(config)?)?;
+            let outcome = backtest(config.data_requirements()).run(EmaCross::new(config)?)?;
             print!("{}", backtest::report(&outcome));
         }
         Strategy::ModelEma => {
@@ -767,7 +763,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     match args.strategy {
         Strategy::Ema => {
             let config = load_ema_config(&args.config)?;
-            let requirements = config.bars.data_requirements();
+            let requirements = config.data_requirements();
             let strategy = EmaCross::live(config)?;
             live.run(&requirements, &strategy.warmup(), strategy).await
         }
@@ -1175,21 +1171,18 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-            instrument_ids = []
-            trade_instrument_id = "ESM4.CME"
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-            trade_size = "1"
-            stop_loss_bps = 50
-            take_profit_bps = 50
-            hold = "1h"
+            [data]
+            series = []
             warmup = "720h"
-            session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+
+            [trade]
+            instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
             "#,
         )
         .unwrap();
         let err = format!("{:#}", load_ema_config(&path).unwrap_err());
         assert!(
-            err.contains("ema.toml") && err.contains("no instruments"),
+            err.contains("ema.toml") && err.contains("data.series"),
             "{err}"
         );
         let missing = dir.path().join("missing.toml");

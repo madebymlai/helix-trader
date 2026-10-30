@@ -15,26 +15,24 @@ fn a_commission_rate_charges_the_value_of_every_fill_and_the_report_shows_the_co
     // 2%, so that the commission of each fill is a whole cent.
     backtest.fee_model = commission_rate(Decimal::new(2, 2)).unwrap();
 
-    let outcome = backtest
-        .run(trades::ema_cross(trades::time_exit()))
-        .unwrap();
+    let outcome = backtest.run(trades::ema_cross()).unwrap();
     let result = &outcome.result;
 
     // The fills of the time exit: 10 bought at 620.65, then 10 sold at
-    // 624.55: 6,206.50 and 6,245.50 EUR, charged 124.13 and 124.91 EUR,
-    // 249.04 in all. Without commission the balance ends at 10039.00 EUR.
+    // 624.85: 6,206.50 and 6,248.50 EUR, charged 124.13 and 124.97 EUR,
+    // 249.10 in all. Without commission the balance ends at 10042.00 EUR.
     assert_eq!(result.total_orders, trades::TIME_EXIT_ORDERS);
-    assert_eq!(common::balance(result), "9789.96 EUR");
+    assert_eq!(common::balance(result), "9792.90 EUR");
 
     // Each fill paid the half spread, 0.05 EUR, on each share: 1.00 EUR
-    // on 20. The PnL of the run is -210.04 (9789.96 less 10,000); before
-    // the 249.04 of commission and the spread, 40.00. The cost per trade
-    // is commission and spread over the 2 fills: 250.04 / 2.
+    // on 20. The PnL of the run is -207.10 (9792.90 less 10,000); before
+    // the 249.10 of commission and the spread, 43.00. The cost per trade
+    // is commission and spread over the 2 fills: 250.10 / 2.
     let costs = "
 Costs (EUR)
-  Commission: 249.040000
-  Cost per trade: 125.020000
-  Gross PnL: 40.000000
+  Commission: 249.100000
+  Cost per trade: 125.050000
+  Gross PnL: 43.000000
   Spread: 1.000000
 ";
     let report = report(&outcome);

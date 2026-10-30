@@ -31,7 +31,8 @@ type or trait:
 
 ```
 strategy/
-  config.rs     BarsConfig: the bars read, their warmup and session
+  standard.rs   StandardConfig: the standard tables, the strategy's Part
+  config.rs     BarsConfig: model_ema's flat bars config
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
 ```
@@ -52,81 +53,100 @@ through the one function a dataset run sends its targets with
 ## Config
 
 The strategy config is the universe: the single source of the instruments
-and the bar spec, which are config values, never constants in code. Nautilus
+and the bar specs, which are config values, never constants in code. Nautilus
 has no universe type; `fill_catalog`, backtest and live get the instruments
-and the warmup from this config, through `main`, as Nautilus types. The
-instruments are those the strategy reads; which of them it trades is the
-strategy's own parameter (the EMA's `trade_instrument_id`), which nothing
-outside the strategy reads.
+and the warmup from this config, through `main`, as Nautilus types.
 
-It is a plain struct holding the Nautilus `StrategyConfig` (field `base`),
-the shared `strategy::BarsConfig` (field `bars`), and every parameter of the
-strategy, model hyperparameters included (`ema/config.rs`,
-`EmaCrossConfig`). It derives `serde::Deserialize` with
-`#[serde(deny_unknown_fields)]` and is loaded from a TOML file given on the
-command line; it also derives `bon::Builder` for tests, so a defaulted field
-carries both `#[serde(default = ...)]` and `#[builder(default = ...)]`.
-
-```rust
-#[derive(Debug, Clone, Deserialize, bon::Builder)]
-#[serde(deny_unknown_fields)]
-pub struct TrendConfig {
-    #[serde(default = "default_base")]
-    #[builder(default = default_base())]
-    pub base: StrategyConfig,
-    #[serde(flatten)]
-    pub bars: BarsConfig,
-    pub lookback: usize,
-}
-```
-
-- `base` stays in each strategy: its default carries the strategy's own
-  id and order tag (`EMA_CROSS-001`), and leaves `oms_type` unset (see
-  "Position mode: the venue's").
-- `bars` is flattened, so its keys (`instrument_ids`, `bar_spec`,
-  `composite`, `warmup`, `session`) sit at the top of the TOML with the
-  strategy's own. serde then buffers the keys the strategy config does not
-  name and hands them to `BarsConfig`, which takes those it knows; the
-  strategy config's `deny_unknown_fields` rejects any key left over, so a
-  typo such as `sesion` still fails at load (serde_derive's
-  `collected_deny_unknown_fields`). `BarsConfig` itself does not deny
-  unknown fields: flattened, it only ever sees its own keys.
-- `validate` checks the strategy's own fields after `self.bars.validate()`.
+Every strategy's TOML has the same tables, in Nautilus' names and types,
+and the strategy's own fields at its top level, since a TOML describes one
+strategy (`strategy::StandardConfig`, `strategy/standard.rs`):
 
 ```toml
-instrument_ids = ["ESH4.CME", "ESM4.CME"]
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
+fast_period = 10   # the strategy's own fields, before any table
+
+[base]      # Nautilus' StrategyConfig as is; optional, the strategy's default
+strategy_id = "EMA_CROSS-001"
+
+[data]      # what the strategy reads
+series = [
+    { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+    { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+    { data = "trades", instrument_id = "ESM4.CME" },
+]
 warmup = "720h"
 session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+
+[trade]     # what it trades
+instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
 ```
 
-- `StrategyConfig`, `InstrumentId` and `BarType` deserialize; `InstrumentId`
-  and `BarType` from their strings, a `BarType` through its checked parser.
-- `BarSpecification` deserializes from its three fields, validated by the
-  checked constructor, so a bad cadence such as `step = 60, aggregation =
-  "MINUTE"` fails at load. The enums parse case-insensitively.
-- `SignedDuration` (`jiff`, with its `serde` feature) parses a duration
-  string such as `"720h"`.
-- Loading then validates what serde cannot, `BarsConfig::validate`: at
-  least one instrument, all on one venue; a bar spec aggregated on time (the
-  session needs the bar's length) and, when built from quotes, priced
-  `BID`, `ASK` or `MID` (`LAST` fails at load); composite source bars
-  Nautilus accepts (`BarType::new_composite_checked`); a positive warmup; a
-  session, if any, opening before it closes; and no session together with
-  `composite` (see "Session").
+- `[base]` is Nautilus' `StrategyConfig` unchanged; without it the
+  strategy's default carries its own id and order tag (`EMA_CROSS-001`)
+  and leaves `oms_type` unset (see "Position mode: the venue's").
+- `[data] series` lists every series read, each a Nautilus data type by
+  the name Nautilus parses (`NautilusDataType::from_str`) and its
+  instrument: `bars`, with `bar_spec` in Nautilus' `BarSpecification`
+  fields and optionally `from` (see "Bar types"), or ticks read as they
+  are (see `TickSeries` below). `warmup` is how far back a live start's
+  history request goes (see "Warmup and training"), `session` the hours
+  traded (see "Session").
+- `[trade] instruments` pairs each traded instrument with its
+  `trade_size`, a Nautilus `Quantity` (a string, `"1"`).
+- The strategy's part (`strategy::Part`) is its own fields, at the top
+  level, each with its default if it has one (`deny_unknown_fields`: any
+  top-level key the standard tables and its fields do not take is
+  refused); how many instruments it trades (`Part::INSTRUMENTS`, one for
+  the EMA); its default base; and its own rules. It cannot drop or rename
+  the standard tables: the config reads `base`, `data` and `trade` as
+  them, and every other key as its own.
+
+Loading is one step, `StandardConfig::load`: TOML text in, the validated
+config or every violation out.
+
+- serde reads the shape and the types, with Nautilus types' own
+  deserializers: `StrategyConfig`, `InstrumentId` from its string,
+  `BarSpecification` from its three fields through its checked
+  constructor (a bad cadence such as `step = 60, aggregation = "MINUTE"`
+  fails), `Quantity`, the enums case-insensitively, and the composite bar
+  type of `from` through `BarType::new_composite_checked`. `SignedDuration`
+  (`jiff`) parses `"720h"`. Every table denies unknown keys, so a typo such
+  as `sesion` fails, naming it (all but Nautilus' `bar_spec`, whose
+  deserializer ignores a key beside its three); so do a bars series without `bar_spec` and
+  ticks with one. serde stops at the first such error.
+- The rules then run on Nautilus' `nautilus_common::config::ConfigErrorCollector`,
+  each violation a `ConfigError` with its field (`data.series[1].bar_spec`,
+  `trade.instruments`, `fast_period`), all of them reported at once,
+  as Nautilus' own `HurstVpinDirectionalConfig::validate` does: at least
+  one series; each bars series aggregated on time (the session needs the
+  bar's length), priced `BID`, `ASK` or `MID` when built from quotes
+  (`LAST` fails), on the venue of the first bars, and not built `from`
+  bars beside a session (see "Session"); a positive warmup; a session, if
+  any, opening before it closes; as many traded instruments as the
+  strategy trades, each `trade_size` positive; then the strategy's own
+  rules (`Part::validate`).
+
+`main` loads the config before anything else, so a bad config never
+starts a node, a backtest, a dataset or a training run.
+
+`model_ema` still reads the earlier flat config, the shared
+`strategy::BarsConfig` flattened into `ModelEmaConfig` (`instrument_ids`,
+`bar_spec`, `composite`, `warmup`, `ticks`, `session` at the top of its
+TOML, checked by `BarsConfig::validate`, which stops at the first error);
+its TOML examples below are in that shape.
 
 ### Bar types
 
-The config builds the bar types the strategy uses, one per instrument, all
-at the same spec: `BarType::new(id, bar_spec, AggregationSource::Internal)`,
-such as `SXR8.IBIS-1-HOUR-MID-INTERNAL`. With the optional `composite` line
-the bars are built from the instrument's source bars instead, a composite
-bar type (`BarType::new_composite`, its `composite_*` arguments):
+Nautilus builds the bar type of each bars series:
+`BarType::new(instrument_id, bar_spec, AggregationSource::Internal)`, such
+as `SXR8.IBIS-1-HOUR-MID-INTERNAL`, each series at its own spec. With
+`from` the bars are built from the instrument's source bars instead, a
+composite bar type (`BarType::new_composite`, `from` its `composite_*`
+arguments):
 
 ```toml
-instrument_ids = ["BTC-USDT-SWAP.OKX"]
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
+series = [
+    { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+]
 ```
 
 gives `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, the hour
@@ -135,12 +155,14 @@ those candles (see "Warmup and training"). On IB the bars are built the
 same way from IB's 1-minute TRADES bars:
 
 ```toml
-instrument_ids = ["SXR8.IBIS"]
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
+series = [
+    { data = "bars", instrument_id = "SXR8.IBIS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+]
 ```
 
-gives `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. Nautilus' risk
+gives `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. (`model_ema`'s
+flat config says the same with `instrument_ids`, one `bar_spec` for all,
+and `composite` for `from`.) Nautilus' risk
 engine prices a market order from the cached external LAST bar, so the
 strategy needs no quotes to trade. A bar type carries one price type, so
 LAST bars carry no spread: a strategy that needs it subscribes to the
@@ -148,29 +170,31 @@ instrument's quotes itself. Instruments IB serves no TRADES bars for
 (IDEALPRO forex, CMDTY spot metals) are not supported
 (`data/ib/README.md`).
 
-`BarsConfig` states what the strategy needs from data as one
+The config states what the strategy needs from data as one
 `strategy::DataRequirements`: its bar types, its tick series and its
 warmup, its instruments derived from the bar types and the ticks
 (`DataRequirements::instrument_ids`). `fill_catalog`, backtest and live
-read them from it (`main` calls `config.bars.data_requirements()`), never
-from the config's fields:
+read them from it (`main` calls `config.data_requirements()`, or
+`config.bars.data_requirements()` for `model_ema`), never from the
+config's fields:
 
 ```rust
 pub fn data_requirements(&self) -> DataRequirements {
     DataRequirements {
-        bar_types: self.bar_types(),
-        ticks: self.ticks.clone(),
-        warmup: self.warmup,
+        bar_types: self.data.bar_types().collect(),
+        ticks: /* the series that are not bars */,
+        warmup: self.data.warmup,
     }
 }
 ```
 
-A strategy reading ticks as they are, beside or instead of bars, declares
-them as `TickSeries`, a Nautilus data type (`NautilusDataType`) of one
+A strategy reading ticks as they are, beside or instead of bars, lists
+them in `[data] series` too (`ticks` in `model_ema`'s flat config), each
+a `TickSeries`, a Nautilus data type (`NautilusDataType`) of one
 instrument:
 
 ```toml
-ticks = [
+series = [
     { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
     { data = "trades", instrument_id = "GC.v.0.GLBX" },
     { data = "order_book_depths", instrument_id = "GC.v.0.GLBX" },
@@ -232,7 +256,7 @@ Warmup and training, "Bars on a root").
 
 ### Session
 
-`Session` (`strategy/session.rs`, the `session` field of `BarsConfig`) holds a `jiff::tz::TimeZone`, read from its IANA name with
+`Session` (`strategy/session.rs`, `[data] session`, the `session` field of `BarsConfig` in `model_ema`) holds a `jiff::tz::TimeZone`, read from its IANA name with
 `#[serde(with = "jiff::fmt::serde::tz::required")]` because `TimeZone` has
 no plain `Deserialize` (an unknown name fails at load), and `open` and
 `close` as `jiff::civil::Time` (`"08:30"`).
@@ -293,7 +317,7 @@ impl Trend {
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let book = Rc::new(Book::new(&config));
-        let warmup = warmup(&config.bars.data_requirements())
+        let warmup = warmup(&config.data_requirements())
             .feeding(Rc::clone(&book) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
@@ -436,11 +460,13 @@ way (backtest README, "Venue").
 
 #### The EMA crossover
 
-The example strategy (`ema/`) trades one instrument, `trade_instrument_id`,
-which must be one of `instrument_ids`; the others are read only: their bars
-are subscribed like the traded one's, and the EMA ignores them, as a strategy reading a signal instrument would read them.
+The example strategy (`ema/`) trades one instrument, the one of `[trade]
+instruments`, which must have exactly one bars series in `[data]`; the
+other series are read only: their bars are subscribed like the traded
+one's, and the EMA ignores them, as a strategy reading a signal instrument
+would read them.
 
-A strategy reading an instrument's book lists it in `instrument_ids` too
+A strategy reading an instrument's book lists it in `[data] series` too
 (CME gold, `GC.v.0.GLBX`, beside `XAUUSD.ICMARKETS`), no other config: a
 backtest replays the book depth the catalog stores of it, on a simulated
 venue of its own (backtest README, "Book data", "Several venues"), and
@@ -459,16 +485,16 @@ subscription of the kind the data arrives as keeps the cache's book
   the traded instrument's bars and initialized once both EMAs are, by
   the bars inside the session; `on_bar` decides only once
   `indicators_initialized()`. A cross sends one bracket in its direction: a market entry
-  of `trade_size`, its stop loss `stop_loss_bps` and its take profit
-  `take_profit_bps` from the decision bar's close (`bracket.rs`), rounded
-  to the instrument's prices.
+  of `trade_size`, its stop loss 50 bps and its take profit 100 bps from
+  the decision bar's close (`bracket::STOP_LOSS`, `TAKE_PROFIT`), rounded
+  to the instrument's prices. The exits are the code's, not the config's.
 - **Exit.** The stop loss or the take profit, the venue cancelling the
-  other leg; or the hold: the entry's first fill sets a time alert `hold`
-  later, named after the entry, which cancels the trade's legs still open
+  other leg; or the hold: the entry's first fill sets a time alert 4 hours
+  (`bracket::HOLD`) later, named after the entry, which cancels the trade's legs still open
   and closes its position by id (`close_position`). A leg's fill cancels
   the alert. At start (a restart) each trade of the strategy on the
   traded instrument still open gets its alert again, named after its
-  entry, `hold` after the entry's first fill, or at once if that has
+  entry, 4 hours after the entry's first fill, or at once if that has
   passed: each filled bracket entry in the cache whose position is open,
   not closed since the entry went in, and whose legs have not filled. On
   a netting venue each trade in the one position gets its own alert; a
@@ -484,17 +510,21 @@ subscription of the kind the data arrives as keeps the cache's book
   Backtests on IB data are unaffected.
 
 ```toml
-instrument_ids = ["XAUUSD.ICMARKETS", "EURUSD.ICMARKETS"]
-trade_instrument_id = "XAUUSD.ICMARKETS"
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
 fast_period = 10
 slow_period = 30
-trade_size = "1"
-stop_loss_bps = 50
-take_profit_bps = 100
-hold = "4h"
+
+[data]
+series = [
+    { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+    { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+]
 warmup = "72h"
+
+[trade]
+instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
 ```
+
+`config/ema.toml` is this example, commented.
 
 Limit and stop orders backtest less faithfully: see
 `docs/ARCHITECTURE.md`, "Orders", and the backtest README, "Fills".
@@ -1265,23 +1295,24 @@ ATR" above).
 
 ## Adding a strategy
 
-1. Create `strategy/<name>/` following the layout above: a config embedding
-   `BarsConfig` (see "Config"), the wiring calling `warmup` (see "Wiring"),
+1. Create `strategy/<name>/` following the layout above: its `Part`, the
+   own fields of a `StandardConfig` (see "Config"), the wiring calling `warmup` (see "Wiring"),
    its state registered as a Nautilus indicator, and the strategy's own
    decision and orders, made only once `indicators_initialized()`.
 2. Declare it in `strategy/mod.rs`.
 3. In `main.rs`, add a variant to `enum Strategy` and an arm to each `match`
    on it (fill-catalog, backtest, live, train), reading the data
-   requirements from `config.bars.data_requirements()`. A strategy with
+   requirements from `config.data_requirements()`. A strategy with
    no model refuses `train`.
 
 ## Tests
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
   each file, or in `<module>/tests.rs` (`docs/ARCHITECTURE.md`).
-  `BarsConfig` and `Session` are unit tested where they live,
-  `warmup::cache_config` too; a strategy's config tests cover only its own
-  fields and that typos are rejected through the flattened `bars`.
+  `StandardConfig`, `BarsConfig` and `Session` are unit tested where they
+  live, at the config load (TOML text in, the config or every
+  `ConfigError` out), `warmup::cache_config` too; a strategy's config
+  tests cover only its own fields and rules.
 - Wiring: integration tests in `tests/` run the real strategy through
   `Backtest::run` on a small fixture catalog of 1-minute quotes, one run per
   test (one node per test thread, `tests/backtest/`). The fixture's prices

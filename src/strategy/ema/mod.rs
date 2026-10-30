@@ -2,16 +2,17 @@
 //! fast EMA crosses the slow one on that instrument's bars, inside its
 //! session if it has one, it opens a trade in the cross direction, a
 //! Nautilus bracket (`OrderFactory::bracket`): a market entry, a stop loss
-//! and a take profit at given distances from the close of the bar it
-//! decided on. A trade not ended by either is closed `hold` after its entry
-//! filled (`close_position`, on a time alert), its legs cancelled; the
+//! and a take profit 50 and 100 bps from the close of the bar it decided on
+//! (`bracket::STOP_LOSS`, `TAKE_PROFIT`). A trade not ended by either is
+//! closed 4 hours (`bracket::HOLD`) after its entry filled (`close_position`, on a time alert), its legs cancelled; the
 //! alerts of the trades still open are set again at start. Trades
 //! may overlap: on a hedging venue each is a position of its own, on a
 //! netting venue they add into one, as the venue keeps them.
 //!
-//! The config's `instrument_ids` are the instruments read, whose bars it
-//! subscribes to through `strategy::warmup`, its warmup requested there
-//! live; `trade_instrument_id` is the one traded. Its signal is its
+//! The config (`EmaCrossConfig`) lists the series read in `[data]`, whose
+//! bars it subscribes to through `strategy::warmup`, its warmup requested
+//! there live; `[trade]` names the one instrument traded, read on its one
+//! bars series, and its own fields the EMA periods. Its signal is its
 //! Nautilus indicator, and it decides only once its indicators are
 //! initialized, on the replay in a backtest, on the warmup live. A
 //! minimal strategy to drive data, backtest and paper.
@@ -20,8 +21,7 @@ mod bracket;
 mod config;
 mod signal;
 
-pub use bracket::Bps;
-pub use config::EmaCrossConfig;
+pub use config::{EmaCrossConfig, EmaParams};
 
 use std::rc::Rc;
 
@@ -73,7 +73,7 @@ impl EmaCross {
     }
 
     /// The strategy as a live node runs it: it requests its warmup
-    /// (`BarsConfig::warmup`) at start, which hydrates its indicators.
+    /// (`DataConfig::warmup`) at start, which hydrates its indicators.
     ///
     /// # Errors
     ///
@@ -90,8 +90,8 @@ impl EmaCross {
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let signal = Rc::new(Signal::new(&config));
-        let warmup = warmup(&config.bars.data_requirements())
-            .feeding(Rc::clone(&signal) as SharedActorIndicator);
+        let warmup =
+            warmup(&config.data_requirements()).feeding(Rc::clone(&signal) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,
@@ -113,12 +113,12 @@ impl EmaCross {
     /// a trade size off that grid leaves, is an error and no order, logged
     /// by Nautilus.
     fn enter(&mut self, bar: &Bar, side: OrderSide) -> anyhow::Result<()> {
-        let instrument_id = self.config.trade_instrument_id;
+        let instrument_id = self.config.trade_instrument_id();
         let instrument = self
             .cache()
             .instrument(&instrument_id)
             .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?;
-        let size = self.config.trade_size.as_decimal();
+        let size = self.config.trade_size().as_decimal();
         let quantity = instrument
             .try_make_qty_from_decimal(size, None)
             // In the message, not as context: Nautilus logs only the top
@@ -127,8 +127,8 @@ impl EmaCross {
         let exits = Exits::new(
             bar.close.as_decimal(),
             side,
-            self.config.stop_loss_bps,
-            self.config.take_profit_bps,
+            bracket::STOP_LOSS,
+            bracket::TAKE_PROFIT,
         );
         let orders = self
             .order()
@@ -171,7 +171,7 @@ impl EmaCross {
     }
 
     /// Sets the time alert of each trade of the strategy on the traded
-    /// instrument still open, as on its entry's first fill: `hold` after
+    /// instrument still open, as on its entry's first fill: `HOLD` after
     /// it, or now if that has passed (the clock's `allow_past`). A trade
     /// is a filled bracket entry; it is still open while the position it
     /// went into is open, not closed since, and no leg of it has filled.
@@ -182,7 +182,7 @@ impl EmaCross {
             cache
                 .orders(
                     None,
-                    Some(&self.config.trade_instrument_id),
+                    Some(&self.config.trade_instrument_id()),
                     strategy_id.as_ref(),
                     None,
                     None,
@@ -212,12 +212,8 @@ impl EmaCross {
                 .collect()
         };
         for (entry, filled) in open {
-            self.clock().set_time_alert(
-                &hold_alert(entry),
-                filled + self.config.hold,
-                None,
-                None,
-            )?;
+            self.clock()
+                .set_time_alert(&hold_alert(entry), filled + bracket::HOLD, None, None)?;
         }
         Ok(())
     }
@@ -229,7 +225,7 @@ fn hold_alert(entry: ClientOrderId) -> String {
 }
 
 nautilus_strategy!(EmaCross, {
-    /// The first fill of an entry sets its trade's time alert, `hold`
+    /// The first fill of an entry sets its trade's time alert, `HOLD`
     /// later; the fill of a leg ends the trade, so cancels it.
     fn on_order_filled(&mut self, event: &OrderFilled) {
         let Some(order) = self.cache().order(&event.client_order_id) else {
@@ -241,7 +237,7 @@ nautilus_strategy!(EmaCross, {
         }
         let first_fill = order.filled_qty() == event.last_qty;
         if order.contingency_type() == Some(ContingencyType::Oto) && first_fill {
-            let at = Timestamp::from(event.ts_event) + self.config.hold;
+            let at = Timestamp::from(event.ts_event) + bracket::HOLD;
             let alert = hold_alert(event.client_order_id);
             if let Err(e) = self.clock().set_time_alert(&alert, at, None, None) {
                 log::error!("setting the time alert {alert}: {e}");
@@ -256,14 +252,10 @@ impl DataActor for EmaCross {
     /// then subscribes to the bars, live after requesting the warmup.
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.arm_open_trades()?;
-        let bar_types = self.config.bars.bar_types();
-        for bar_type in &bar_types {
-            if bar_type.instrument_id() == self.config.trade_instrument_id {
-                let signal = Rc::clone(&self.signal) as SharedActorIndicator;
-                self.core_mut()
-                    .register_indicator_for_bars(*bar_type, signal);
-            }
-        }
+        let bar_type = self.config.trade_bar_type();
+        let signal = Rc::clone(&self.signal) as SharedActorIndicator;
+        self.core_mut()
+            .register_indicator_for_bars(bar_type, signal);
         Rc::clone(&self.warmup).start(self)
     }
 
@@ -330,14 +322,15 @@ mod tests {
 
     /// Trades AUD/USD, reads GBP/USD too.
     const CONFIG: &str = r#"
-        instrument_ids = ["AUD/USD.SIM", "GBP/USD.SIM"]
-        trade_instrument_id = "AUD/USD.SIM"
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-        trade_size = "100000"
-        stop_loss_bps = 50
-        take_profit_bps = 50
-        hold = "1h"
+        [data]
+        series = [
+            { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+            { data = "bars", instrument_id = "GBP/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+        ]
         warmup = "1h"
+
+        [trade]
+        instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
     "#;
 
     const STRATEGY: &str = "EMA_CROSS-001";
@@ -491,7 +484,7 @@ mod tests {
     /// The strategy started at `NOW` on `cache`, as after a restart, and
     /// its clock.
     fn started(cache: Rc<RefCell<Cache>>) -> (EmaCross, Rc<RefCell<VirtualClock>>) {
-        let mut strategy = EmaCross::new(toml::from_str(CONFIG).unwrap()).unwrap();
+        let mut strategy = EmaCross::new(EmaCrossConfig::load(CONFIG).unwrap()).unwrap();
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
         clock.borrow_mut().advance_time(UnixNanos::from(NOW), true);
         clock
@@ -527,19 +520,19 @@ mod tests {
             &aud,
             STRATEGY,
             ("O-2", "P-2"),
-            NOW - 90 * MINUTE,
+            NOW - 300 * MINUTE,
             OmsType::Hedging,
         );
 
         let (_strategy, clock) = started(cache);
 
         let clock = clock.borrow();
-        // Opened 20 minutes ago: its hour ends in 40 minutes.
+        // Opened 20 minutes ago: its 4 hours end in 3 hours 40 minutes.
         assert_eq!(
             clock.next_time_ns("EMA-HOLD:O-1"),
-            Some(UnixNanos::from(NOW + 40 * MINUTE))
+            Some(UnixNanos::from(NOW + 220 * MINUTE))
         );
-        // Opened 90 minutes ago: its hour is over, so now.
+        // Opened 5 hours ago: its 4 hours are over, so now.
         assert_eq!(
             clock.next_time_ns("EMA-HOLD:O-2"),
             Some(UnixNanos::from(NOW))
@@ -602,11 +595,11 @@ mod tests {
         let clock = clock.borrow();
         assert_eq!(
             clock.next_time_ns("EMA-HOLD:O-1"),
-            Some(UnixNanos::from(NOW + 10 * MINUTE))
+            Some(UnixNanos::from(NOW + 190 * MINUTE))
         );
         assert_eq!(
             clock.next_time_ns("EMA-HOLD:O-2"),
-            Some(UnixNanos::from(NOW + 40 * MINUTE))
+            Some(UnixNanos::from(NOW + 220 * MINUTE))
         );
     }
 
@@ -640,12 +633,12 @@ mod tests {
         assert_eq!(clock.next_time_ns("EMA-HOLD:O-1"), None);
         assert_eq!(
             clock.next_time_ns("EMA-HOLD:O-2"),
-            Some(UnixNanos::from(NOW + 40 * MINUTE))
+            Some(UnixNanos::from(NOW + 220 * MINUTE))
         );
     }
 
-    /// The first trade's time exit closed the netting position; a later
-    /// cross opened it again under the same id.
+    /// The first trade's position was closed 30 minutes ago, inside its 4
+    /// hours; a later cross opened it again under the same id.
     #[test]
     fn a_restart_sets_no_time_exit_for_a_trade_of_a_netting_position_closed_since() {
         let cache = Rc::new(RefCell::new(Cache::default()));
@@ -675,7 +668,7 @@ mod tests {
         assert_eq!(clock.next_time_ns("EMA-HOLD:O-1"), None);
         assert_eq!(
             clock.next_time_ns("EMA-HOLD:O-3"),
-            Some(UnixNanos::from(NOW + 40 * MINUTE))
+            Some(UnixNanos::from(NOW + 220 * MINUTE))
         );
     }
 }

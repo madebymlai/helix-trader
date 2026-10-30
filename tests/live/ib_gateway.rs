@@ -142,22 +142,19 @@ async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
 /// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars, warmed
 /// up over two hours: its slow EMA needs 30 bars, so it never trades.
 fn never_trading_ema_cross() -> EmaCrossConfig {
-    let config: EmaCrossConfig = toml::from_str(
+    EmaCrossConfig::load(
         r#"
-        instrument_ids = ["SXR8.IBIS"]
-        trade_instrument_id = "SXR8.IBIS"
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-        composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
-        trade_size = "1"
-        stop_loss_bps = 100
-        take_profit_bps = 100
-        hold = "1h"
+        [data]
+        series = [
+            { data = "bars", instrument_id = "SXR8.IBIS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+        ]
         warmup = "2h"
+
+        [trade]
+        instruments = [{ instrument_id = "SXR8.IBIS", trade_size = "1" }]
         "#,
     )
-    .unwrap();
-    config.validate().unwrap();
-    config
+    .unwrap()
 }
 
 /// Long enough for the gateway and the node to start.
@@ -179,7 +176,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
         "{account} is not a paper account"
     );
     let config = never_trading_ema_cross();
-    let requirements = config.bars.data_requirements();
+    let requirements = config.data_requirements();
     // An empty catalog of its own: the venue answers the whole warmup.
     let catalog = tempfile::tempdir().unwrap();
     // Outside the catalog, as `Live` requires.

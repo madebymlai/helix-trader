@@ -33,15 +33,14 @@ cp .env.example .env    # IB paper login, OKX API key, IC cTrader app
 cargo build --release
 
 cat > ema.toml <<'EOF'
-instrument_ids = ["BTC-USDT-SWAP.OKX"]
-trade_instrument_id = "BTC-USDT-SWAP.OKX"
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
-trade_size = "0.01"
-stop_loss_bps = 100
-take_profit_bps = 200
-hold = "24h"
+[data]
+series = [
+    { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+]
 warmup = "720h"
+
+[trade]
+instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]
 EOF
 
 target/release/helix-trader fill-catalog ema --config ema.toml \

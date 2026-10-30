@@ -1,88 +1,101 @@
-use anyhow::ensure;
-use jiff::SignedDuration;
+use nautilus_common::config::{ConfigError, ConfigErrorCollector};
 use nautilus_model::{
+    data::BarType,
     identifiers::{InstrumentId, StrategyId},
     types::Quantity,
 };
 use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
-use super::bracket::Bps;
-use crate::strategy::BarsConfig;
+use crate::strategy::{Part, StandardConfig};
 
-/// Config of the EMA crossover strategy, loaded from TOML.
-#[derive(Debug, Clone, Deserialize, bon::Builder)]
+/// Config of the EMA crossover strategy, loaded from TOML: the standard
+/// tables and, at the top level, its own fields (`EmaParams`).
+pub type EmaCrossConfig = StandardConfig<EmaParams>;
+
+/// The crossover's own fields: the periods of its fast and slow EMAs, in
+/// bars. It trades one instrument, the one of `[trade]`, on its one bars
+/// series of `[data]`; the other series are read only. Its exits are its
+/// code's (`bracket::STOP_LOSS`, `TAKE_PROFIT`, `HOLD`).
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmaCrossConfig {
-    #[serde(default = "default_base")]
-    #[builder(default = default_base())]
-    pub base: StrategyConfig,
-    /// The bars read, their warmup and their session: those of every
-    /// instrument in `instrument_ids`.
-    #[serde(flatten)]
-    pub bars: BarsConfig,
-    /// The one instrument traded, among `instrument_ids`; the others are
-    /// read only.
-    pub trade_instrument_id: InstrumentId,
+pub struct EmaParams {
     #[serde(default = "default_fast_period")]
-    #[builder(default = default_fast_period())]
     pub fast_period: usize,
     #[serde(default = "default_slow_period")]
-    #[builder(default = default_slow_period())]
     pub slow_period: usize,
-    /// The size of each trade.
-    pub trade_size: Quantity,
-    /// The stop loss of each trade, this far from the close of the bar it
-    /// was decided on, against the trade.
-    pub stop_loss_bps: Bps,
-    /// The take profit of each trade, this far from the close of the bar
-    /// it was decided on, in the trade's favour.
-    pub take_profit_bps: Bps,
-    /// How long a trade is held after its entry fills, unless its stop
-    /// loss or take profit ends it first, such as `"1h"`.
-    pub hold: SignedDuration,
 }
 
-impl EmaCrossConfig {
-    /// # Errors
-    ///
-    /// Returns an error if the bars are inconsistent (see
-    /// `BarsConfig::validate`), the traded instrument not among those read,
-    /// the periods out of order, the size, the distances or the hold not
-    /// positive, or the stop loss of a long at or below zero.
-    pub fn validate(&self) -> anyhow::Result<()> {
-        self.bars.validate()?;
-        ensure!(
-            self.bars.instrument_ids.contains(&self.trade_instrument_id),
-            "trade instrument {} is not among the instrument ids",
-            self.trade_instrument_id
+impl Part for EmaParams {
+    const INSTRUMENTS: usize = 1;
+
+    /// The strategy's id and order tag. `oms_type` is left unset: Nautilus
+    /// keeps the strategy's positions as the execution client of the venue
+    /// does, netting or hedging, in a backtest as live.
+    fn default_base() -> StrategyConfig {
+        StrategyConfig {
+            strategy_id: Some(StrategyId::from("EMA_CROSS-001")),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The periods out of order or the fast one zero, or the traded
+    /// instrument without exactly one bars series.
+    fn validate(config: &EmaCrossConfig, errors: &mut ConfigErrorCollector) {
+        let EmaParams {
+            fast_period,
+            slow_period,
+        } = config.own;
+        errors.check(
+            fast_period > 0 && fast_period < slow_period,
+            ConfigError::range(
+                "fast_period",
+                format!("must be positive and below the slow period {slow_period}"),
+            ),
         );
-        ensure!(
-            self.fast_period > 0 && self.fast_period < self.slow_period,
-            "fast period must be positive and below the slow period"
-        );
-        ensure!(self.trade_size.is_positive(), "trade size must be positive");
-        ensure!(
-            self.stop_loss_bps.is_positive() && self.stop_loss_bps < Bps::WHOLE,
-            "stop loss must be above 0 and below 10000 bps"
-        );
-        ensure!(
-            self.take_profit_bps.is_positive(),
-            "take profit must be positive"
-        );
-        ensure!(self.hold.is_positive(), "hold must be positive");
-        Ok(())
+        if let Some(traded) = config.trade.instruments.first() {
+            let id = traded.instrument_id;
+            let bars = config.data.bar_types().filter(|b| b.instrument_id() == id);
+            let count = bars.count();
+            errors.check(
+                count == 1,
+                ConfigError::invalid_reference(
+                    "trade.instruments[0].instrument_id",
+                    id.to_string(),
+                    format!("has {count} bars series in data.series, the crossover reads one"),
+                ),
+            );
+        }
     }
 }
 
-/// The strategy's id and order tag. `oms_type` is left unset: Nautilus
-/// keeps the strategy's positions as the execution client of the venue
-/// does, netting or hedging, in a backtest as live.
-fn default_base() -> StrategyConfig {
-    StrategyConfig {
-        strategy_id: Some(StrategyId::from("EMA_CROSS-001")),
-        order_id_tag: Some("001".to_string()),
-        ..Default::default()
+impl EmaCrossConfig {
+    /// The one instrument traded.
+    #[must_use]
+    pub fn trade_instrument_id(&self) -> InstrumentId {
+        self.trade.instruments[0].instrument_id
+    }
+
+    /// The size of each trade.
+    #[must_use]
+    pub fn trade_size(&self) -> Quantity {
+        self.trade.instruments[0].trade_size
+    }
+
+    /// The bars of the traded instrument, the ones the crossover reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the traded instrument has no bars series, which
+    /// `validate` refuses.
+    #[must_use]
+    pub fn trade_bar_type(&self) -> BarType {
+        let id = self.trade_instrument_id();
+        self.data
+            .bar_types()
+            .find(|bar_type| bar_type.instrument_id() == id)
+            .expect("the traded instrument's bars validated")
     }
 }
 
@@ -96,134 +109,136 @@ const fn default_slow_period() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::data::BarType;
-    use rust_decimal::Decimal;
-
     use super::*;
 
     const TOML: &str = r#"
-        instrument_ids = ["ESH4.CME", "ESM4.CME"]
-        trade_instrument_id = "ESM4.CME"
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-        trade_size = "1"
-        stop_loss_bps = 50
-        take_profit_bps = "75.5"
-        hold = "1h"
+        [data]
+        series = [
+            { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+            { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+        ]
         warmup = "720h"
         session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+
+        [trade]
+        instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
     "#;
+
+    /// The fields of the config errors refusing `toml`.
+    fn error_fields(toml: &str) -> Vec<String> {
+        let err = EmaCrossConfig::load(toml).unwrap_err();
+        let errors = match err.downcast_ref::<ConfigError>() {
+            Some(ConfigError::Multiple { errors }) => errors.clone(),
+            Some(err) => vec![err.clone()],
+            None => panic!("not a config error: {err}"),
+        };
+        errors
+            .into_iter()
+            .map(|err| match err {
+                ConfigError::Range { field, .. }
+                | ConfigError::InvalidReference { field, .. }
+                | ConfigError::InvalidValue { field, .. } => field,
+                err => panic!("unexpected config error {err:?}"),
+            })
+            .collect()
+    }
 
     #[test]
     fn loads_from_toml_with_defaults() {
-        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
-        config.validate().unwrap();
-        assert_eq!(config.fast_period, 10);
-        assert_eq!(config.slow_period, 30);
-        assert_eq!(config.trade_size, Quantity::from(1));
-        assert_eq!(config.trade_instrument_id, InstrumentId::from("ESM4.CME"));
-        assert_eq!(config.stop_loss_bps, Bps::from(Decimal::from(50)));
-        assert_eq!(config.take_profit_bps, Bps::from(Decimal::new(755, 1)));
-        assert_eq!(config.hold, SignedDuration::from_hours(1));
-    }
-
-    #[test]
-    fn loads_the_bars_from_the_top_of_the_toml() {
-        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
+        let config = EmaCrossConfig::load(TOML).unwrap();
+        assert_eq!(config.own.fast_period, 10);
+        assert_eq!(config.own.slow_period, 30);
+        assert_eq!(config.trade_size(), Quantity::from(1));
+        assert_eq!(config.trade_instrument_id(), InstrumentId::from("ESM4.CME"));
         assert_eq!(
-            config.bars.data_requirements().bar_types,
-            [
-                BarType::from("ESH4.CME-1-HOUR-MID-INTERNAL"),
-                BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL")
-            ]
+            config.trade_bar_type(),
+            BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL")
         );
-        assert_eq!(config.bars.session.unwrap().open.to_string(), "08:30:00");
     }
 
     #[test]
-    fn leaves_the_oms_to_the_venue() {
-        let config: EmaCrossConfig = toml::from_str(TOML).unwrap();
+    fn the_example_config_loads() {
+        let config = EmaCrossConfig::load(include_str!("../../../config/ema.toml")).unwrap();
+        assert_eq!(
+            config.trade_bar_type(),
+            BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")
+        );
+    }
+
+    #[test]
+    fn reads_its_periods_from_the_top_level() {
+        let toml = format!("fast_period = 5\nslow_period = 15\n{TOML}");
+        let config = EmaCrossConfig::load(&toml).unwrap();
+        assert_eq!((config.own.fast_period, config.own.slow_period), (5, 15));
+    }
+
+    #[test]
+    fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
+        let config = EmaCrossConfig::load(TOML).unwrap();
+        assert_eq!(
+            config.base.strategy_id,
+            Some(StrategyId::from("EMA_CROSS-001"))
+        );
         assert_eq!(config.base.oms_type, None);
     }
 
     #[test]
-    fn rejects_a_misspelt_session_at_load() {
-        let toml = TOML.replace("session =", "sesion =");
-        let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
-        assert!(err.to_string().contains("sesion"), "{err}");
-    }
-
-    #[test]
     fn rejects_a_misspelt_period_at_load() {
-        let toml = format!("{TOML}\nfast_perod = 5");
-        let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
+        let toml = format!("fast_perod = 5\n{TOML}");
+        let err = EmaCrossConfig::load(&toml).unwrap_err();
         assert!(err.to_string().contains("fast_perod"), "{err}");
     }
 
     #[test]
-    fn rejects_an_unknown_time_zone_at_load() {
-        let toml = TOML.replace("America/Chicago", "America/Gotham");
-        let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
-        assert!(err.to_string().contains("America/Gotham"), "{err}");
-    }
-
-    #[test]
-    fn rejects_inconsistent_bars() {
-        let toml = TOML.replace("ESM4.CME", "ESM4.EUREX");
-        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("venue"), "{err}");
+    fn rejects_exits_in_the_toml() {
+        let toml = format!("hold = \"1h\"\n{TOML}");
+        let err = EmaCrossConfig::load(&toml).unwrap_err();
+        assert!(err.to_string().contains("hold"), "{err}");
     }
 
     #[test]
     fn rejects_fast_period_not_below_slow() {
-        let toml = format!("{TOML}\nfast_period = 30");
-        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
-        assert!(config.validate().is_err());
+        let toml = format!("fast_period = 30\n{TOML}");
+        assert_eq!(error_fields(&toml), ["fast_period"]);
     }
 
     #[test]
-    fn rejects_a_non_positive_trade_size() {
-        let toml = TOML.replace("trade_size = \"1\"", "trade_size = \"0\"");
-        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("trade size"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_trade_instrument_not_read() {
+    fn rejects_two_traded_instruments() {
         let toml = TOML.replace(
-            "trade_instrument_id = \"ESM4.CME\"",
-            "trade_instrument_id = \"ESU4.CME\"",
+            "instruments = [{ instrument_id = \"ESM4.CME\", trade_size = \"1\" }]",
+            "instruments = [{ instrument_id = \"ESM4.CME\", trade_size = \"1\" }, \
+             { instrument_id = \"ESH4.CME\", trade_size = \"1\" }]",
         );
-        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("ESU4.CME"), "{err}");
+        assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
     #[test]
-    fn rejects_a_missing_trade_instrument_at_load() {
-        let toml = TOML.replace("trade_instrument_id = \"ESM4.CME\"", "");
-        let err = toml::from_str::<EmaCrossConfig>(&toml).unwrap_err();
-        assert!(err.to_string().contains("trade_instrument_id"), "{err}");
+    fn rejects_a_trade_instrument_without_bars() {
+        let toml = TOML.replace(
+            "{ instrument_id = \"ESM4.CME\", trade_size",
+            "{ instrument_id = \"ESU4.CME\", trade_size",
+        );
+        assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
     }
 
     #[test]
-    fn rejects_non_positive_exits() {
-        for (from, to) in [
-            ("stop_loss_bps = 50", "stop_loss_bps = 0"),
-            ("take_profit_bps = \"75.5\"", "take_profit_bps = -1"),
-            ("hold = \"1h\"", "hold = \"0s\""),
-        ] {
-            let config: EmaCrossConfig = toml::from_str(&TOML.replace(from, to)).unwrap();
-            assert!(config.validate().is_err(), "{to}");
-        }
+    fn rejects_a_trade_instrument_with_two_bars_series() {
+        let toml = TOML
+            .replace(
+                "{ data = \"bars\", instrument_id = \"ESH4.CME\"",
+                "{ data = \"bars\", instrument_id = \"ESM4.CME\"",
+            )
+            .replacen(
+                "step = 1, aggregation = \"HOUR\"",
+                "step = 2, aggregation = \"HOUR\"",
+                1,
+            );
+        assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
     }
 
     #[test]
-    fn rejects_a_stop_loss_of_the_whole_price() {
-        let toml = TOML.replace("stop_loss_bps = 50", "stop_loss_bps = 10000");
-        let config: EmaCrossConfig = toml::from_str(&toml).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("stop loss"), "{err}");
+    fn reports_its_own_violations_with_the_standard_ones() {
+        let toml = format!("fast_period = 0\n{TOML}").replace("\"720h\"", "\"0s\"");
+        assert_eq!(error_fields(&toml), ["data.warmup", "fast_period"]);
     }
 }

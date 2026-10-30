@@ -1,21 +1,27 @@
+use jiff::SignedDuration;
 use nautilus_model::enums::OrderSide;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+
+/// The stop loss of each trade, this far from the close of the bar it was
+/// decided on, against the trade.
+pub(super) const STOP_LOSS: Bps = Bps(Decimal::from_parts(50, 0, 0, false, 0));
+
+/// The take profit of each trade, this far from the close of the bar it
+/// was decided on, in the trade's favour.
+pub(super) const TAKE_PROFIT: Bps = Bps(Decimal::from_parts(100, 0, 0, false, 0));
+
+/// How long a trade is held after its entry fills, unless its stop loss or
+/// take profit ends it first.
+pub(super) const HOLD: SignedDuration = SignedDuration::from_hours(4);
 
 /// A distance from a price in basis points, hundredths of a percent:
-/// `50` is 0.5%. Read from TOML as a number or a decimal string.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Deserialize)]
-#[serde(transparent)]
-pub struct Bps(Decimal);
+/// `50` is 0.5%.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub(super) struct Bps(Decimal);
 
 impl Bps {
     /// The whole price, 100%.
     pub const WHOLE: Self = Self(Decimal::from_parts(10_000, 0, 0, false, 0));
-
-    #[must_use]
-    pub fn is_positive(self) -> bool {
-        self.0 > Decimal::ZERO
-    }
 
     /// The distance as a fraction of the price.
     fn fraction(self) -> Decimal {
@@ -73,6 +79,15 @@ mod tests {
     }
 
     #[test]
+    fn each_trade_stops_half_a_percent_against_and_takes_profit_a_percent_in_favour() {
+        // 620.60 less 0.5%, plus 1%.
+        let exits = Exits::new(price("620.60"), OrderSide::Buy, STOP_LOSS, TAKE_PROFIT);
+        assert_eq!(exits.stop_loss, price("617.497"));
+        assert_eq!(exits.take_profit, price("626.806"));
+        assert_eq!(HOLD, SignedDuration::from_hours(4));
+    }
+
+    #[test]
     fn a_short_stops_above_the_close_and_takes_profit_below() {
         // 600.60 plus 1%, less 0.5%.
         let exits = Exits::new(price("600.60"), OrderSide::Sell, bps(100), bps(50));
@@ -84,6 +99,5 @@ mod tests {
     fn whole_is_ten_thousand_bps() {
         assert_eq!(Bps::WHOLE, bps(10_000));
         assert!(bps(9_999) < Bps::WHOLE);
-        assert!(!bps(0).is_positive());
     }
 }
