@@ -54,6 +54,12 @@
 //! their close, so a live handle starts the cadence with that delay, a
 //! backtest's and a dataset run's with none (see `decide`).
 //!
+//! Live, the strategy warms the barrier's ATR from its warmup request, as
+//! it does the features: the request builds the ATR's bars too
+//! (`warmup_bar_types`), and the strategy hands the bars of the response
+//! to `handle_warmup_bar`, so the first decision after a start sets the
+//! stop a dataset run sets there.
+//!
 //! Live, the handle also retrains its model (`launcher::Retraining`): the
 //! retrain timer, keyed by the strategy, launches a train at each retrain
 //! time, one at a time, and `decide` first polls the running one, so the
@@ -69,12 +75,12 @@ use std::{
 use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, DataActorNative},
+    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{BarType, CustomData},
+    data::{Bar, BarType, CustomData},
     enums::OrderSide,
     events::{OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
@@ -482,6 +488,56 @@ impl ModelHandle {
         decide::start(strategy, self.rule, delay)
     }
 
+    /// The bar types a live warmup of a strategy reading `bar_types`
+    /// requests (`warmup::start`): those, then the bar type of the
+    /// barrier's ATR the handle trades on, if not among them, so that
+    /// Nautilus builds its bars from the warmup's history and goes on with
+    /// them live, the bar spanning the warmup's end once.
+    #[must_use]
+    pub fn warmup_bar_types(&self, bar_types: &[BarType]) -> Vec<BarType> {
+        let mut warmed = bar_types.to_vec();
+        if let Some(atr) = self.stops().and_then(Stops::atr_bar_type)
+            && !warmed.contains(&atr)
+        {
+            warmed.push(atr);
+        }
+        warmed
+    }
+
+    /// Hands `bar`, a bar of a live warmup (`warmup::bars`), to the
+    /// features and to the barrier's ATR the handle trades on, each of
+    /// which reads the bars of its own bar types alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a feature or the ATR fails to read the bar.
+    pub fn handle_warmup_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        self.features.handle_bar(bar)?;
+        match self.stops() {
+            Some(stops) => stops.handle_warmup_bar(bar),
+            None => Ok(()),
+        }
+    }
+
+    /// The stops of the barrier the handle trades on, if any: none on a
+    /// horizon, and in a dataset run, which warms on its replay.
+    fn stops(&self) -> Option<&Stops> {
+        let Serving::Trading(trading) = &self.serving else {
+            return None;
+        };
+        match &trading.primary {
+            Primary::Model {
+                labelled: Labelled::Barrier(stops),
+                ..
+            }
+            | Primary::Rule { stops, .. } => Some(stops),
+            Primary::Model {
+                labelled: Labelled::Horizon(_),
+                ..
+            } => None,
+        }
+    }
+
     /// Decides now, for `strategy`: the trade of the decision, if any.
     /// Live, first logs the running retrain if it finished, whose model
     /// the store then lists. A handle whose primary is a rule makes no
@@ -791,7 +847,7 @@ mod tests {
     use nautilus_core::UnixNanos;
     use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        data::QuoteTick,
+        data::{Bar, QuoteTick},
         enums::{ContingencyType, OmsType, OrderType, PriceType},
         events::OrderEventAny,
         identifiers::{
@@ -818,7 +874,7 @@ mod tests {
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
-        targets::{Barrier, Distance, Label, TargetsConfig},
+        targets::{AtrConfig, Barrier, Distance, Label, TargetsConfig},
     };
     use rust_decimal::Decimal;
 
@@ -1391,6 +1447,115 @@ mod tests {
                     limit: SignedDuration::from_hours(2),
                 }
             )
+        );
+    }
+
+    /// `barrier_config` with a take profit 2 and a stop 1 average true
+    /// ranges away, the ATR of 2 hourly bars, the cadence's.
+    fn atr_config() -> ModelConfig {
+        let mut config = barrier_config(10);
+        config.targets.barrier = Some(Barrier {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::ONE),
+            limit: SignedDuration::from_hours(2),
+            atr: Some(AtrConfig { period: 2 }),
+        });
+        config
+    }
+
+    /// The hourly mid bar of AUD/USD closing at `close_at`.
+    fn hour_bar(close_at: &str, [open, high, low, close]: [&str; 4]) -> Bar {
+        let ts = UnixNanos::from(at(close_at));
+        Bar::new(
+            BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL"),
+            Price::from(open),
+            Price::from(high),
+            Price::from(low),
+            Price::from(close),
+            Quantity::from(1),
+            ts,
+            ts,
+        )
+    }
+
+    /// The bars a live warmup requests: the strategy's, and the hourly
+    /// bars of the barrier's ATR, once.
+    #[test]
+    fn a_live_warmup_requests_the_bars_of_the_barriers_atr() {
+        let models = tempfile::tempdir().unwrap();
+        let (probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &atr_config(), (Some(8), None));
+        let minutes = BarType::from("AUD/USD.SIM-1-MINUTE-MID-INTERNAL");
+        let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
+
+        assert_eq!(handle.warmup_bar_types(&[minutes]), vec![minutes, hours]);
+        assert_eq!(handle.warmup_bar_types(&[hours]), vec![hours]);
+    }
+
+    /// A barrier in basis points has no ATR: the warmup is the strategy's
+    /// bars alone.
+    #[test]
+    fn a_live_warmup_without_an_atr_requests_the_strategys_bars_alone() {
+        let models = tempfile::tempdir().unwrap();
+        let (probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &barrier_config(10), (Some(8), None));
+        let minutes = BarType::from("AUD/USD.SIM-1-MINUTE-MID-INTERNAL");
+
+        assert_eq!(handle.warmup_bar_types(&[minutes]), vec![minutes]);
+    }
+
+    /// Worked by hand. The warmup's response arrives at 12:00, Nautilus
+    /// having built from it the hourly bars closing 11:00 (high 0.70000,
+    /// low 0.69880, close 0.69950: a true range of 0.00120) and 12:00
+    /// (high 0.70020, low 0.69940, above and below the close before: a
+    /// true range of 0.00080) into the cache. The ATR of 2 bars, Wilder's
+    /// seeded by their mean, is 0.00100, as a dataset run replaying those
+    /// bars has it at 12:00: from the mid of 0.70000, the long's take
+    /// profit 0.00200 above, 0.70200, and its stop 0.00100 below, 0.69900,
+    /// worth 1 USD on 1000 AUD/USD, 0.537 USD expected, above the margin.
+    /// Without the warmup the ATR is cold and the decision no trade.
+    #[test]
+    fn a_live_warmup_sets_the_first_decisions_stop_from_the_barriers_atr() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &atr_config(), (Some(8), None));
+        handle.start(&mut probe, &[]).unwrap();
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_bars(&[
+                hour_bar(
+                    "2026-10-22T11:00:00Z",
+                    ["0.69900", "0.70000", "0.69880", "0.69950"],
+                ),
+                hour_bar(
+                    "2026-10-22T12:00:00Z",
+                    ["0.69950", "0.70020", "0.69940", "0.70000"],
+                ),
+            ])
+            .unwrap();
+        let response = [QuoteTick::new(
+            InstrumentId::from(AUD),
+            Price::from("0.69990"),
+            Price::from("0.70010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(at("2026-10-22T12:00:00Z")),
+            UnixNanos::from(at("2026-10-22T12:00:00Z")),
+        )];
+
+        for bar in warmup::bars(&probe, &response) {
+            handle.handle_warmup_bar(&bar).unwrap();
+        }
+        let trade = handle.decide(&mut probe).unwrap().unwrap();
+
+        assert_eq!(
+            trade.target,
+            TradeTarget::Barrier {
+                take_profit: Price::from("0.70200"),
+                stop: Price::from("0.69900"),
+                limit: SignedDuration::from_hours(2),
+            }
         );
     }
 

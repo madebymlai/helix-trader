@@ -795,6 +795,27 @@ impl Stops {
         }
     }
 
+    /// The bar type of the barrier's ATR, if any: a live warmup requests
+    /// its bars, which `handle_warmup_bar` hands to the ATR.
+    #[must_use]
+    pub fn atr_bar_type(&self) -> Option<BarType> {
+        self.atr.as_ref().map(|atr| atr.bar_type)
+    }
+
+    /// Hands `bar`, a bar of a live warmup, to the barrier's ATR, if any,
+    /// which reads the bars of its bar type alone: the warmup's bars reach
+    /// only the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ATR fails to read the bar.
+    pub fn handle_warmup_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        match &self.atr {
+            Some(atr) => atr.handle_bar(bar),
+            None => Ok(()),
+        }
+    }
+
     /// How long after its entry a barrier trade is closed: its limit.
     #[must_use]
     pub const fn limit(&self) -> SignedDuration {

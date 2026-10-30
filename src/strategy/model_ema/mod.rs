@@ -29,7 +29,7 @@ pub use config::ModelEmaConfig;
 use anyhow::Context;
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
+    actor::{DataActor, DataActorNative},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
@@ -45,7 +45,6 @@ use crate::{
     model::{
         dataset::{Dataset, DatasetVenue},
         decide,
-        features::FeatureSet,
         handle::{Mode, ModelHandle},
         train::Training,
         walk::WalkForward,
@@ -58,7 +57,6 @@ use crate::{
 pub struct ModelEma {
     core: StrategyCore,
     config: ModelEmaConfig,
-    features: Rc<FeatureSet>,
     model: Rc<ModelHandle>,
     /// The warmup requested at start, live; none in a backtest or a
     /// dataset run, whose indicators warm on the replay.
@@ -81,7 +79,7 @@ impl ModelEma {
         let warmup = matches!(mode, Mode::Live { .. }).then_some(config.bars.warmup);
         let model = ModelHandle::new(
             strategy_id(&config)?,
-            Rc::clone(&features),
+            features,
             &config.model,
             &config.bars.data_requirements(),
             mode,
@@ -89,7 +87,6 @@ impl ModelEma {
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             config,
-            features,
             model,
             warmup,
             warmup_group: UUID4::new(),
@@ -199,7 +196,8 @@ nautilus_strategy!(ModelEma, {
 });
 
 impl DataActor for ModelEma {
-    /// Subscribes to the bars, live after requesting the warmup, then
+    /// Subscribes to the bars, live after requesting the warmup of them
+    /// and of the barrier's ATR (`ModelHandle::warmup_bar_types`), then
     /// starts the model handle: the features, registered as its Nautilus
     /// indicator, and the decisions.
     fn on_start(&mut self) -> anyhow::Result<()> {
@@ -208,7 +206,8 @@ impl DataActor for ModelEma {
         match self.warmup {
             Some(warmup) => {
                 self.warmup_group = UUID4::new();
-                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)?;
+                let warmed = self.model.warmup_bar_types(&bar_types);
+                warmup::start(self, &warmed, warmup, &continuous, self.warmup_group)?;
             }
             None => warmup::subscribe(self, &bar_types, &continuous),
         }
@@ -223,18 +222,18 @@ impl DataActor for ModelEma {
         Ok(())
     }
 
-    /// The warmup's bars reach only the cache: they are handed to the
-    /// features here.
+    /// The warmup's bars reach only the cache: they are handed here to
+    /// the features and the barrier's ATR, through the model handle.
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
         for bar in warmup::bars(self, quotes) {
-            self.features.handle_bar(&bar)?;
+            self.model.handle_warmup_bar(&bar)?;
         }
         Ok(())
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
         for bar in warmup::bars(self, bars) {
-            self.features.handle_bar(&bar)?;
+            self.model.handle_warmup_bar(&bar)?;
         }
         Ok(())
     }

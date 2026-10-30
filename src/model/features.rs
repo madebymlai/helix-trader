@@ -13,7 +13,8 @@
 //! forwards those from its handlers (`handle_depth`, `handle_deltas`,
 //! `handle_data`); no kind takes both paths. Bars built from a warmup's
 //! quotes or source bars reach only the cache, not the indicators: a
-//! strategy warming bar features hands `warmup::bars` to `handle_bar`.
+//! strategy warming bar features hands `warmup::bars` to `handle_bar` (a
+//! model strategy through `ModelHandle::handle_warmup_bar`).
 //!
 //! Each update reaches only the features declared on its kind and source.
 //! An update of a kind or source no feature reads is a no-op, so the

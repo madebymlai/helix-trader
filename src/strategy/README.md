@@ -723,17 +723,17 @@ of its choosing (`model::features`, `model::decide`).
   replayed before the timer closing that bar, so the bar holds it and the
   decision 10 ms later reads it. The targets run only in dataset runs,
   backtests; a model trading on the barrier runs the same ATR for its
-  stops (`Stops`, "Model handle"), in a backtest and live, where it warms
-  on live bars alone: its warmup request does not build them.
+  stops (`Stops`, "Model handle"), in a backtest and live, where the
+  warmup request builds its bars too ("Warmup and training", "The
+  barrier's ATR").
   Each exit is on the instrument's nearest tick (Nautilus' tick grid,
   `next_bid_price` and `next_ask_price`), a tie away from the decision's
   price. The targets own the ATR: `start(self)` in `on_start` registers
   it with the strategy's Nautilus indicators and subscribes the strategy
   to its bars, and Nautilus feeds it each of those bars, as it does the
   features; a strategy subscribing to the same bars shares the one
-  subscription. Bars a warmup request builds reach only the cache, so they
-  do not warm it: a dataset run's replay of the warmup before its first
-  day does. A decision at which the ATR is not yet initialized opens no
+  subscription. In a dataset run the replay of the warmup before its
+  first day warms it. A decision at which the ATR is not yet initialized opens no
   target, logged at debug, as cold features give no decision, and so
   does one whose exit rounds onto the decision's price (no distance,
   a P&L in R of no stop). The
@@ -1218,6 +1218,19 @@ which subscribes as `start` does, with no request.
   `backtest_continuous_bars.rs` pins the subscription in a backtest; live
   refuses bars on a root (`rolls/README.md`), so no run makes this
   request today.
+- **The barrier's ATR.** A strategy trading on a model of a barrier in
+  ATRs (`ModelHandle`, "Model handle") warms the barrier's ATR from the
+  same request: it passes `start` its bar types with the ATR's added
+  (`model.warmup_bar_types(&bar_types)`, the targets' `AtrBars`, bars of
+  the decision cadence), so the data engine builds those bars from the
+  history into the cache and goes on with them live, the bar spanning the
+  warmup end once, and hands each bar `bars` returns to
+  `model.handle_warmup_bar(&bar)`, which feeds the features and the ATR,
+  each its own bar types, oldest first. The first decision after a
+  start then sets the stop a dataset run sets there, not the ATR's
+  period of the cadence later. The window needs no widening: the config
+  is refused if the ATR's period of the cadence is longer than the
+  warmup ("Model handle", `ModelConfig::validate`).
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
   warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
@@ -1250,7 +1263,9 @@ strategy's dataset and publishes it as a file in the model store, which
 backtest and live share, and the strategy's model handle reads the latest
 valid one at each decision (see "Features and decisions"). Its features
 warm up as its indicators do: Nautilus feeds them the live and replayed
-data, and the strategy hands them the warmup's bars.
+data, and the strategy hands the warmup's bars to its model handle,
+which feeds them to the features and the barrier's ATR ("The barrier's
+ATR" above).
 
 ## Adding a strategy
 
