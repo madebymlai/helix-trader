@@ -13,14 +13,16 @@
 //!
 //! What most strategies share is a config struct and functions, never a
 //! base type: `StandardConfig`, the tables every strategy's TOML has, holds
-//! the series read, their warmup and their `Session`, and the instruments
-//! traded, beside the strategy's own table (its `Part`). The exception is
-//! a strategy trading on a learned model, which holds the harness' types
-//! (`model::features::FeatureSet`, `model::handle::ModelHandle`);
-//! `model_ema` is the example, its `[model]` table its own part.
+//! the series read, their warmup and their `Session`, the indicators read
+//! (`IndicatorsConfig`) and the instruments traded, beside the strategy's
+//! own table (its `Part`). The exception is a strategy trading on a learned
+//! model, which holds the harness' types (`model::features::FeatureSet`,
+//! `model::handle::ModelHandle`); `model_ema` is the example, its
+//! `[model]` table its own part.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
-//! 1-minute bars, OKX's candles) or from quotes; a `warmup::Warmup`, which
+//! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
+//! LAST bars); a `warmup::Warmup`, which
 //! each strategy holds, asks for their history live and hands it back, so
 //! that no strategy knows how, and subscribes to them in a backtest, which
 //! requests none. The catalog
@@ -29,11 +31,13 @@
 pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
+mod indicators;
 pub mod model_ema;
 mod session;
 mod standard;
 pub mod warmup;
 
+pub use indicators::{Indicator, IndicatorConfig, IndicatorKind, IndicatorsConfig};
 pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 pub use session::Session;
 

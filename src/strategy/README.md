@@ -32,6 +32,7 @@ type or trait:
 ```
 strategy/
   standard.rs   StandardConfig: the standard tables, the strategy's Part
+  indicators.rs [indicators]: indicators by Nautilus type and arguments
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
 ```
@@ -61,7 +62,7 @@ and the strategy's own fields at its top level, since a TOML describes one
 strategy (`strategy::StandardConfig`, `strategy/standard.rs`):
 
 ```toml
-fast_period = 10   # the strategy's own fields, before any table
+# the strategy's own fields, if any, before any table: the EMA has none
 
 [base]      # Nautilus' StrategyConfig as is; optional, the strategy's default
 strategy_id = "EMA_CROSS-001"
@@ -74,6 +75,14 @@ series = [
 ]
 warmup = "720h"
 session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
+
+[indicators.fast]   # an indicator its code reads, by name
+kind = "ExponentialMovingAverage"
+period = 10
+
+[indicators.slow]
+kind = "ExponentialMovingAverage"
+period = 30
 
 [trade]     # what it trades
 instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
@@ -89,6 +98,22 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   are (see `TickSeries` below). `warmup` is how far back a live start's
   history request goes (see "Warmup and training"), `session` the hours
   traded (see "Session").
+- `[indicators.<name>]` is an indicator the strategy's code reads, by
+  name: `kind` its Nautilus type, the other keys its Nautilus
+  constructor's arguments by their Nautilus names and types, those left
+  out taking Nautilus' defaults (`strategy::IndicatorConfig`,
+  `strategy/indicators.rs`). `ExponentialMovingAverage` takes `period`
+  and `price_type` (a `PriceType`); `AverageTrueRange` takes `period`,
+  `ma_type` (a `MovingAverageType` by the name its `FromStr` parses,
+  `"WILDER"`), `use_previous` and `value_floor`. The strategy declares the
+  ones it reads by name and type (`Part::INDICATORS`: `fast` and `slow`,
+  two `ExponentialMovingAverage`s, for the EMA) and receives them built
+  by name (`IndicatorsConfig::built`), each through its Nautilus
+  constructor: `new_checked` where Nautilus makes it public
+  (`ExponentialMovingAverage`), else `new` (`AverageTrueRange`, whose
+  `new` panics at load on an argument it refuses). The barrier's ATR of
+  a model strategy is not one of them: it is the harness', not the
+  strategy's code's.
 - `[trade] instruments` pairs each traded instrument with its
   `trade_size`, a Nautilus `Quantity` (a string, `"1"`).
 - The strategy's part (`strategy::Part`) is its own fields, at the top
@@ -96,8 +121,8 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   top-level key the standard tables and its fields do not take is
   refused); how many instruments it trades (`Part::INSTRUMENTS`, one for
   the EMA); its default base; and its own rules. It cannot drop or rename
-  the standard tables: the config reads `base`, `data` and `trade` as
-  them, and every other key as its own.
+  the standard tables: the config reads `base`, `data`, `indicators` and
+  `trade` as them, and every other key as its own.
 
 Loading is one step, `StandardConfig::load`: TOML text in, the validated
 config or every violation out.
@@ -114,15 +139,20 @@ config or every violation out.
   ticks with one. serde stops at the first such error.
 - The rules then run on Nautilus' `nautilus_common::config::ConfigErrorCollector`,
   each violation a `ConfigError` with its field (`data.series[1].bar_spec`,
-  `trade.instruments`, `fast_period`), all of them reported at once,
+  `indicators.slow`, `trade.instruments`), all of them reported at once,
   as Nautilus' own `HurstVpinDirectionalConfig::validate` does: at least
   one series; each bars series aggregated on time (the session needs the
-  bar's length), priced `BID`, `ASK` or `MID` when built from quotes
-  (`LAST` fails), on the venue of the first bars, and not built `from`
+  bar's length), not priced `MARK` when built from ticks (no tick builds
+  it), on the venue of the first bars, and not built `from`
   bars beside a session (see "Session"); a positive warmup; a session, if
-  any, opening before it closes; as many traded instruments as the
-  strategy trades, each `trade_size` positive; then the strategy's own
-  rules (`Part::validate`).
+  any, opening before it closes; each indicator the strategy declares
+  present (`indicators.<name>`) and of its type (`indicators.<name>.kind`),
+  none it does not declare, and its arguments taken by its Nautilus
+  constructor (`ExponentialMovingAverage::new_checked` refuses `period =
+  0`, reported under `indicators.<name>`); as many traded instruments as
+  the strategy trades, each `trade_size` positive; then the strategy's
+  own rules (`Part::validate`: for the EMA, the fast period below the
+  slow one).
 
 `main` loads the config before anything else, so a bad config never
 starts a node, a backtest, a dataset or a training run.
@@ -274,7 +304,7 @@ own, and venues trading around the clock simply apply no filter. Closures
 and maintenance windows still yield no bar (see "Hours without quotes").
 
 A session is refused with `composite`: live composite bars are stamped 5 s
-after their close (see "Bars built from quotes"), so the session would drop
+after their close (see "Bars built from ticks"), so the session would drop
 their last bar live but not in a backtest. Bars on IB are composite, so a
 strategy on IB has no session: hours without IB bars (nights, weekends,
 holidays) build no bar (see "Hours without quotes").
@@ -476,9 +506,10 @@ subscription of the kind the data arrives as keeps the cache's book
 `subscribe_book_at_interval` keeps it from deltas only.
 
 - **Entry.** On each bar of the traded instrument inside the session, the
-  fast EMA above the slow one is long, otherwise short; a bar changing the
-  side is a cross (`signal.rs`), the first warm bar setting the side
-  without one. The signal is the EMA's Nautilus indicator, registered for
+  fast EMA above the slow one is long, otherwise short (the Nautilus
+  `ExponentialMovingAverage`s `[indicators.fast]` and `[indicators.slow]`,
+  of their closes); a bar changing the side is a cross (`signal.rs`),
+  the first warm bar setting the side without one. The signal is the EMA's Nautilus indicator, registered for
   the traded instrument's bars and initialized once both EMAs are, by
   the bars inside the session; `on_bar` decides only once
   `indicators_initialized()`. A cross sends one bracket in its direction: a market entry
@@ -507,15 +538,20 @@ subscription of the kind the data arrives as keeps the cache's book
   Backtests on IB data are unaffected.
 
 ```toml
-fast_period = 10
-slow_period = 30
-
 [data]
 series = [
     { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
     { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
 ]
 warmup = "72h"
+
+[indicators.fast]
+kind = "ExponentialMovingAverage"
+period = 10
+
+[indicators.slow]
+kind = "ExponentialMovingAverage"
+period = 30
 
 [trade]
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
@@ -538,29 +574,41 @@ tests cover them without running Nautilus.
   in backtest it is not simulated time.
 - Log through the `log` macros.
 
-## Bars built from quotes
+## Bars built from ticks
 
 Strategies trade on bars Nautilus builds: internally aggregated time bars,
-from quotes (priced `BID`, `ASK` or `MID`, such as
-`SXR8.IBIS-1-HOUR-MID-INTERNAL`) or, for a composite bar type, from source
-bars (see "Composite bars"; the venues serve no quote history, so this is
-how IB and OKX bars are built). Subscribing to one makes the data engine
-aggregate the replayed data into it in a backtest and the broker's data
-live, so the same bar definition runs in both.
+from the ticks their price type names, as Nautilus' data engine builds
+them (`BarAggregator`s fed by `SubscribeQuotes` or `SubscribeTrades`):
+
+| Price type | Built from | Example |
+|---|---|---|
+| `BID`, `ASK`, `MID` | the instrument's quotes | `SXR8.IBIS-1-HOUR-MID-INTERNAL` |
+| `LAST` | the instrument's trades | `ESM4.CME-1-HOUR-LAST-INTERNAL` |
+
+A composite bar type (`from`) is built from source bars instead, whatever
+its price type (see "Composite bars"; the venues serve no quote history,
+so this is how IB and OKX bars are built). Subscribing to a bar type
+makes the data engine aggregate the replayed data into it in a backtest
+and the broker's data live, so the same bar definition runs in both.
 
 - A bar closes at the end of its period and is stamped there (`ts_event`);
-  it holds the quotes stamped in `(open, close]`.
+  it holds the ticks stamped in `(open, close]`.
 - Quote-built bars sum the quoted sizes, not traded volume: nothing reads
-  it.
+  it. Trade-built bars sum the traded sizes.
+- `LAST` bars carry no spread, and a catalog holding only trades has no
+  quote: the backtest venue fills on the trades (Nautilus'
+  `trade_execution`, its bid and ask moved to each trade's price), and
+  the report has no spread to measure. So a futures venue whose main
+  data is trades (CME on GLBX) feeds bar strategies.
 - A composite bar of 1-minute source bars sees the market a minute at a
   time, in a backtest as live: its high and low are those of the minutes.
 
 ### Hours without quotes
 
-An hour with no quote at all, or no source bar, yields no bar. IB sends
-quotes, hence 1-minute bars, all through the trading day, even for illiquid
-instruments, so an hour without any means the market is closed: a night, a
-weekend, a holiday. By default Nautilus would
+An hour with no tick at all (quote or trade, as the bars are built), or
+no source bar, yields no bar. IB sends quotes, hence 1-minute bars, all
+through the trading day, even for illiquid instruments, so an hour
+without any means the market is closed: a night, a weekend, a holiday. By default Nautilus would
 still build a bar, flat at the last close (`time_bars_build_with_no_updates
 = true`), and since the session checks the time of day only, on a Saturday
 the strategy would trade on Friday's last quote. The backtest and the live
@@ -1171,8 +1219,9 @@ strategy holds (see Wiring), runs the module's calls: live, its `start`
 calls `warmup::start(self, &bar_types, warmup, &continuous, group)`,
 which requests the warmup as a new request group `group` and subscribes
 to the bars; its `on_historical` hands the bars `warmup::bars(self,
-response)` returns, the warmup bars of the response's instrument, oldest
-first, to the indicators it feeds; and its `on_data_response` asks
+response)` returns, the warmup bars built from the response (those of
+its instrument's bar types built from its series), oldest first, to the
+indicators it feeds; and its `on_data_response` asks
 `warmup::finished(group, response)` whether the warmup ended, complete
 or not. In a backtest or a dataset run its `start` calls
 `warmup::subscribe(self, &bar_types, &continuous)` alone, which
@@ -1183,11 +1232,16 @@ on a root, so a `Warmup` has no continuous bars; the functions take them.
   venue. A composite bar type is built from its source bars: `start`
   requests those (`request_bars` of `BarType::composite`, such as
   `BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL`), and the response comes to
-  `on_historical_bars`. Any other bar type is built from quotes: `start`
-  requests the instrument's quotes (`request_quotes`), and the response
-  comes to `on_historical_quotes`. Source bars that are themselves internal
+  `on_historical_bars`. Any other bar type is built from the ticks its
+  price type names: for `LAST` bars `start` requests the instrument's
+  trades (`request_trades`), the response coming to
+  `on_historical_trades`; for `BID`, `ASK` and `MID` bars its quotes
+  (`request_quotes`), the response coming to `on_historical_quotes`. One
+  request per series builds every bar type of it (the data engine feeds
+  a trades response to the `LAST` aggregators of `bar_types` only, a
+  quotes response to the others). Source bars that are themselves internal
   are refused (nothing stores them to request). `request_bars` of an
-  internal bar type does not build bars from quotes; only a request of
+  internal bar type does not build bars from ticks; only a request of
   their source with `bar_types` does.
 - **The params.** Each request runs over `[now - warmup, now]`, where
   `now` is `self.clock().utc_now()`. The

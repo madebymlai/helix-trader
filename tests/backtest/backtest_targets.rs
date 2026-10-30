@@ -11,12 +11,13 @@
 //! barriers in basis points and exits in average true ranges of hourly
 //! bars, the cadence's, which the targets subscribe to themselves, built
 //! from the quotes, from the trades alone and from minute bars alone, no
-//! order before the ATR is initialized. Orders the risk engine denies
-//! drop their decisions, unsettled, before any time alert could. Over two
-//! days of a random walk the targets are the same with the execution
-//! engine purging closed orders and positions as without, while the purge
-//! keeps the cache to the last minutes' orders. One node per thread, so
-//! one run per test, or per thread of a test.
+//! order before the ATR is initialized; deciding on LAST bars the run
+//! builds from the trades alone is deciding on the trades. Orders the
+//! risk engine denies drop their decisions, unsettled, before any time
+//! alert could. Over two days of a random walk the targets are the same
+//! with the execution engine purging closed orders and positions as
+//! without, while the purge keeps the cache to the last minutes' orders.
+//! One node per thread, so one run per test, or per thread of a test.
 
 use std::{cell::RefCell, collections::BTreeSet, path::PathBuf, rc::Rc, thread};
 
@@ -817,7 +818,40 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
 
     backtest.run_dataset(probe).unwrap();
 
-    let expected = [
+    let record = record.borrow();
+    assert_eq!(record.rows, btc_trades_atr_rows());
+    // The 09:00 decision sent no order: the first fill is the 10:00 one's.
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
+}
+
+/// The probe deciding on the close of BTC's hourly LAST bars, which the
+/// run builds from its trades alone (the strategy reads no trade): each
+/// bar closes on the hour's last trade, 100,000 at 09:59:55, so the
+/// decisions, their ATR and their targets are those of the probe deciding
+/// on the trades themselves.
+#[test]
+fn targets_on_last_bars_of_trades_are_those_on_the_trades() {
+    let catalog = btc_trades_catalog();
+    let hour_last = BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL");
+    let backtest = Backtest {
+        bar_types: vec![hour_last],
+        ticks: vec![],
+        end: ic::at("10:50:00"),
+        ..btc_backtest(&catalog)
+    };
+    let (probe, record) = TargetProbe::new(Source::Bars(hour_last), btc_atr_targets());
+
+    backtest.run_dataset(probe).unwrap();
+
+    assert_eq!(record.borrow().rows, btc_trades_atr_rows());
+}
+
+/// The rows of the probe on BTC's trades, an ATR of 55 at 10:00.
+fn btc_trades_atr_rows() -> [TargetRow; 1] {
+    [
         // Both enter at the last trade, 100,000: the long's take profit a
         // sell limit at 100,110, its stop at 99,917.5; the short's take
         // profit at 99,890, its stop a buy stop at 100,082.5. The trade at
@@ -839,14 +873,7 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
             ),
             SignedDuration::from_mins(30),
         ),
-    ];
-    let record = record.borrow();
-    assert_eq!(record.rows, expected);
-    // The 09:00 decision sent no order: the first fill is the 10:00 one's.
-    assert_eq!(
-        record.fills.first(),
-        Some(&UnixNanos::from(ic::at("10:00:00.010")))
-    );
+    ]
 }
 
 /// BTC's minute bars as `btc_bar`, flat at 100,000, but for the minutes

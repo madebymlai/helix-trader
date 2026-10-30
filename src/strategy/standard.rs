@@ -14,7 +14,9 @@ use serde::{
     de::{self, DeserializeOwned, MapAccess, Visitor},
 };
 
-use super::{DataRequirements, TickSeries, session::Session, tick_data};
+use super::{
+    DataRequirements, IndicatorKind, IndicatorsConfig, TickSeries, session::Session, tick_data,
+};
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
 /// names and types, and the strategy's own part `P` (see `Part`).
@@ -22,6 +24,9 @@ use super::{DataRequirements, TickSeries, session::Session, tick_data};
 /// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
 ///   one.
 /// - `[data]`: what the strategy reads (see `DataConfig`).
+/// - `[indicators]`: the indicators its code reads, by name (see
+///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
+///   without one.
 /// - `[trade]`: what it trades (see `TradeConfig`).
 /// - the strategy's own fields, `P` itself, at the top level beside them:
 ///   a TOML describes one strategy.
@@ -34,17 +39,22 @@ use super::{DataRequirements, TickSeries, session::Session, tick_data};
 pub struct StandardConfig<P: Part> {
     pub base: StrategyConfig,
     pub data: DataConfig,
+    pub indicators: IndicatorsConfig,
     pub trade: TradeConfig,
     pub own: P,
 }
 
 /// A strategy's part of its config: its own fields, at the top level of
 /// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
-/// how many instruments it trades, its default `[base]` and its own rules.
-/// The standard tables are not its to drop or rename.
+/// how many instruments it trades, the indicators it reads, its default
+/// `[base]` and its own rules. The standard tables are not its to drop or
+/// rename.
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
+    /// The indicators its code reads, by name and Nautilus type:
+    /// `[indicators]` configures these and no other.
+    const INDICATORS: &'static [(&'static str, IndicatorKind)] = &[];
     /// Its `[base]` when the TOML has none.
     fn default_base() -> StrategyConfig;
     /// Pushes onto `errors` every violation of its own rules in `config`,
@@ -68,13 +78,16 @@ impl<P: Part> StandardConfig<P> {
     /// # Errors
     ///
     /// Returns every violation of the rules of `[data]` (see
-    /// `DataConfig`), of `[trade]` (as many instruments as the strategy
-    /// trades, each `trade_size` positive) and of the strategy's own
-    /// (`Part::validate`): Nautilus' `ConfigError` of each, with its field,
-    /// as one `ConfigError::Multiple` if there are several.
+    /// `DataConfig`), of `[indicators]` (those the strategy reads, of
+    /// their types, their arguments taken by Nautilus; see
+    /// `IndicatorsConfig`), of `[trade]` (as many instruments as the
+    /// strategy trades, each `trade_size` positive) and of the strategy's
+    /// own (`Part::validate`): Nautilus' `ConfigError` of each, with its
+    /// field, as one `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);
+        self.indicators.validate(P::INDICATORS, &mut errors);
         self.trade.validate(P::INSTRUMENTS, &mut errors);
         P::validate(self, &mut errors);
         errors.into_result()
@@ -127,11 +140,11 @@ impl DataConfig {
 
     /// Pushes the violations of `[data]`: no series; a bars series not
     /// aggregated on time (the session needs the bar's span), built from
-    /// quotes but not priced on them (BID, ASK or MID), on a venue other
-    /// than the first bars', or built from bars beside a session (live,
-    /// such bars arrive after their close, so a session would drop its
-    /// last bar there but not in a backtest); a non-positive warmup; a
-    /// session not opening before it closes.
+    /// ticks but priced MARK (Nautilus builds bars from quotes or trades
+    /// alone), on a venue other than the first bars', or built from bars
+    /// beside a session (live, such bars arrive after their close, so a
+    /// session would drop its last bar there but not in a backtest); a
+    /// non-positive warmup; a session not opening before it closes.
     fn validate(&self, errors: &mut ConfigErrorCollector) {
         errors.check(
             !self.series.is_empty(),
@@ -155,14 +168,13 @@ impl DataConfig {
                 ),
             );
             errors.check(
-                bar_type.is_composite()
-                    || matches!(
-                        spec.price_type,
-                        PriceType::Bid | PriceType::Ask | PriceType::Mid
-                    ),
+                bar_type.is_composite() || spec.price_type != PriceType::Mark,
                 ConfigError::invalid_value(
                     field("bar_spec"),
-                    format!("{spec} is not priced BID, ASK or MID: its bars are built from quotes"),
+                    format!(
+                        "{spec} is priced MARK: bars are built from quotes (BID, ASK or MID) \
+                         or from trades (LAST)"
+                    ),
                 ),
             );
             let instrument_id = bar_type.instrument_id();
@@ -197,12 +209,13 @@ impl DataConfig {
 /// parses (`NautilusDataType::from_str`).
 ///
 /// - `bars`, with `bar_spec` in Nautilus' `BarSpecification` fields, are
-///   bars Nautilus builds of the instrument: from its quotes, or, with
-///   `from`, from its source bars, the composite part of Nautilus' bar type
-///   (`BarType::new_composite`). `from = { step = 1, aggregation =
-///   "MINUTE", aggregation_source = "EXTERNAL" }` of a `1-HOUR` `LAST` bar
-///   spec makes `<instrument>-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, as
-///   OKX's 1-minute candles are.
+///   bars Nautilus builds of the instrument: from the ticks their price
+///   type names (its trades if LAST, its quotes if BID, ASK or MID), or,
+///   with `from`, from its source bars, the composite part of Nautilus'
+///   bar type (`BarType::new_composite`). `from = { step = 1, aggregation
+///   = "MINUTE", aggregation_source = "EXTERNAL" }` of a `1-HOUR` `LAST`
+///   bar spec makes `<instrument>-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`,
+///   as OKX's 1-minute candles are.
 /// - Any other is ticks the strategy reads as they are (see `TickSeries`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "SeriesFields")]
@@ -329,16 +342,17 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
     type Value = StandardConfig<P>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the tables base, data and trade, and the strategy's own fields")
+        f.write_str("the tables base, data, indicators and trade, and the strategy's own fields")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let (mut base, mut data, mut trade) = (None, None, None);
+        let (mut base, mut data, mut indicators, mut trade) = (None, None, None, None);
         let mut own = toml::Table::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "base" => base = Some(map.next_value()?),
                 "data" => data = Some(map.next_value()?),
+                "indicators" => indicators = Some(map.next_value()?),
                 "trade" => trade = Some(map.next_value()?),
                 _ => {
                     let value = map.next_value::<toml::Value>()?;
@@ -354,6 +368,7 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
         Ok(StandardConfig {
             base: base.unwrap_or_else(P::default_base),
             data: data.ok_or_else(|| de::Error::missing_field("data"))?,
+            indicators: indicators.unwrap_or_default(),
             trade: trade.ok_or_else(|| de::Error::missing_field("trade"))?,
             own,
         })
@@ -671,9 +686,20 @@ mod tests {
     }
 
     #[test]
-    fn bars_of_quotes_not_priced_on_them_are_refused() {
-        let toml = TOML.replace("price_type = \"MID\"", "price_type = \"LAST\"");
+    fn bars_of_ticks_priced_mark_are_refused() {
+        let toml = TOML.replace("price_type = \"MID\"", "price_type = \"MARK\"");
         assert_eq!(error_fields(&toml), ["data.series[0].bar_spec"]);
+    }
+
+    /// LAST bars without `from` are built from the instrument's trades.
+    #[test]
+    fn bars_of_ticks_priced_last_load() {
+        let toml = TOML.replace("price_type = \"MID\"", "price_type = \"LAST\"");
+        let config = load(&toml).unwrap();
+        assert_eq!(
+            config.data.bar_types().next(),
+            Some(BarType::from("ESH4.CME-1-HOUR-LAST-INTERNAL"))
+        );
     }
 
     #[test]
@@ -730,7 +756,7 @@ mod tests {
     fn every_violation_is_reported_at_once() {
         let toml = TOML
             .replace("\"720h\"", "\"0s\"")
-            .replace("price_type = \"MID\"", "price_type = \"LAST\"")
+            .replace("price_type = \"MID\"", "price_type = \"MARK\"")
             .replace("trade_size = \"2\"", "trade_size = \"0\"")
             .replace("{ instrument_id = \"ESH4.CME\", trade_size = \"1\" },", "")
             .replace("spread = 3", "spread = 0");

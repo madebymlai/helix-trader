@@ -18,12 +18,13 @@ pub mod ic;
 pub mod recorder;
 pub mod rolls;
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use helix_trader::{
     backtest::{Backtest, commission_per_order, venue_oms_type},
     strategy::{
-        DataConfig, Part, Series, Session, TradeConfig, TradedInstrument,
+        DataConfig, IndicatorConfig, IndicatorsConfig, Part, Series, Session, TradeConfig,
+        TradedInstrument,
         ema::{EmaCross, EmaCrossConfig, EmaParams},
     },
 };
@@ -236,16 +237,22 @@ pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCros
             warmup: LIVE_WARMUP,
             session,
         },
+        indicators: IndicatorsConfig(BTreeMap::from([("fast", fast), ("slow", slow)].map(
+            |(name, period)| {
+                let ema = IndicatorConfig::ExponentialMovingAverage {
+                    period,
+                    price_type: None,
+                };
+                (name.to_string(), ema)
+            },
+        ))),
         trade: TradeConfig {
             instruments: vec![TradedInstrument {
                 instrument_id,
                 trade_size: Quantity::from(10),
             }],
         },
-        own: EmaParams {
-            fast_period: fast,
-            slow_period: slow,
-        },
+        own: EmaParams {},
     }
 }
 

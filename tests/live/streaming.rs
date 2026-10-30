@@ -531,6 +531,10 @@ const EMA_CONFIG: &str = r#"
     ]
     warmup = "1s"
 
+    [indicators]
+    fast = { kind = "ExponentialMovingAverage", period = 10 }
+    slow = { kind = "ExponentialMovingAverage", period = 30 }
+
     [trade]
     instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
 "#;

@@ -32,7 +32,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{Bar, QuoteTick},
+    data::{Bar, QuoteTick, TradeTick},
     events::{OrderDenied, OrderRejected, PositionClosed},
 };
 use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
@@ -204,6 +204,10 @@ impl DataActor for ModelEma {
     /// the features and the barrier's ATR.
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
         self.model.warmup().on_historical(self, quotes)
+    }
+
+    fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
+        self.model.warmup().on_historical(self, trades)
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {

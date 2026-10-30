@@ -150,6 +150,10 @@ fn never_trading_ema_cross() -> EmaCrossConfig {
         ]
         warmup = "2h"
 
+        [indicators]
+        fast = { kind = "ExponentialMovingAverage", period = 10 }
+        slow = { kind = "ExponentialMovingAverage", period = 30 }
+
         [trade]
         instruments = [{ instrument_id = "SXR8.IBIS", trade_size = "1" }]
         "#,
