@@ -18,12 +18,15 @@
 //! (`reference`): the mid of the instrument's last quote, else its last
 //! trade, else the close of its last bar. Each distance is relative
 //! (`Distance`): basis points of that price, or multiples of an average
-//! true range, Nautilus' `AverageTrueRange` on the bars of a bar type the
-//! barrier declares, which the targets own and Nautilus feeds once
-//! `Targets::register` has registered it. A decision at which that ATR is
-//! not yet initialized opens no target, as a decision on cold features is
-//! none. Each exit is on the instrument's nearest tick (Nautilus' tick
-//! grid), a tie away from the decision's price.
+//! true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR_PERIOD` bars
+//! unless the barrier gives another period. Its bars are the mids of the
+//! instrument built from its quotes at the decision cadence
+//! (`TargetsConfig::atr_bars`), so a decision reads the bar closing at its
+//! time; the targets own the ATR, and `Targets::start` registers it and
+//! subscribes to its bars, which no strategy declares. A decision at which
+//! that ATR is not yet initialized opens no target, as a decision on cold
+//! features is none. Each exit is on the instrument's nearest tick
+//! (Nautilus' tick grid), a tie away from the decision's price.
 //!
 //! Each order's client order id names its decision, target, side and leg,
 //! `D{n}-{B|H}{L|S}-{E|TP|SL}`: the decision's number in the run, `B` a
@@ -72,8 +75,11 @@ use nautilus_common::{
 use nautilus_core::UnixNanos;
 use nautilus_indicators::{indicator::Indicator, volatility::atr::AverageTrueRange};
 use nautilus_model::{
-    data::{Bar, BarType, CustomData, CustomDataTrait, DataType, HasTsInit, QuoteTick, TradeTick},
-    enums::{AggregationSource, OrderSide, PriceType},
+    data::{
+        Bar, BarSpecification, BarType, CustomData, CustomDataTrait, DataType, HasTsInit,
+        QuoteTick, TradeTick,
+    },
+    enums::{AggregationSource, BarAggregation, OrderSide, PriceType},
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{ClientOrderId, InstrumentId, PositionId, StrategyId},
     instruments::{Instrument, InstrumentAny},
@@ -86,7 +92,10 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
-use super::{decide::FeatureRow, features::Fingerprint};
+use super::{
+    decide::{DecisionRule, FeatureRow},
+    features::Fingerprint,
+};
 
 /// The prefix of a target's time alert, followed by its decision and
 /// target, such as `TARGET-TIME:D12-B`.
@@ -111,9 +120,9 @@ pub struct TargetsConfig {
 }
 
 /// A triple barrier: the exits of a bracket, each a distance from the
-/// decision's price, and its time limit, such as `{ take_profit = { bps =
-/// 20 }, stop = { atr = 1.5 }, limit = "2h", atr = { bar_type =
-/// "...-1-MINUTE-MID-INTERNAL", period = 14 } }`.
+/// decision's price, and its time limit, such as `{ take_profit = { atr =
+/// 2.0 }, stop = { bps = 20 }, limit = "2h" }`, or with the ATR's period
+/// given, `{ .., atr = { period = 20 } }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Barrier {
@@ -123,8 +132,8 @@ pub struct Barrier {
     pub stop: Distance,
     /// How long after the decision what is still open is closed.
     pub limit: SignedDuration,
-    /// The average true range the `atr` distances are multiples of: there
-    /// exactly when a distance is one.
+    /// The average true range the `atr` distances are multiples of, if
+    /// not of `DEFAULT_ATR_PERIOD` bars: only with a distance in ATRs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atr: Option<AtrConfig>,
 }
@@ -143,11 +152,23 @@ pub enum Distance {
 }
 
 /// The average true range of a barrier: Nautilus' `AverageTrueRange`, of
-/// its default moving average (Wilder's), on the bars of `bar_type`, the
-/// targets' instrument's, over `period` bars.
+/// its default moving average (Wilder's), over `period` bars, `{ period =
+/// 20 }`. Its bars are the decision cadence's (`AtrBars`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtrConfig {
+    pub period: usize,
+}
+
+/// The period of a barrier's ATR without an `atr` table: Wilder's 14 bars.
+pub const DEFAULT_ATR_PERIOD: usize = 14;
+
+/// The average true range a barrier runs: over `period` bars of
+/// `bar_type`, the mids of the targets' instrument built from its quotes
+/// at the decision cadence, so that a decision reads the bar closing at
+/// its time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtrBars {
     pub bar_type: BarType,
     pub period: usize,
 }
@@ -261,10 +282,10 @@ impl TargetsConfig {
     /// # Errors
     ///
     /// Returns an error if there is no target, or the size, a barrier's
-    /// distance, its limit or the horizon is not positive, or the barrier
-    /// has an average true range no distance uses, or an `atr` distance
-    /// without one, or one of another instrument's bars or of no bars.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// distance, its limit, its ATR's period or the horizon is not
+    /// positive, or the barrier has an `atr` table no distance uses, or
+    /// an ATR without bars at the cadence of `rule` (see `atr_bars`).
+    pub fn validate(&self, rule: DecisionRule) -> anyhow::Result<()> {
         ensure!(
             self.barrier.is_some() || self.horizon.is_some(),
             "no target: neither a barrier nor a horizon"
@@ -283,23 +304,15 @@ impl TargetsConfig {
                 "the barrier's limit {:#} is not positive",
                 barrier.limit
             );
-            match (barrier.uses_atr(), barrier.atr) {
-                (true, None) => bail!(
-                    "the barrier has a distance in ATRs but no ATR: declare its bar type and \
-                     period, `atr = {{ bar_type = .., period = .. }}`"
-                ),
-                (false, Some(_)) => bail!("the barrier has an ATR no distance uses"),
-                (true, Some(atr)) => {
-                    ensure!(
-                        atr.bar_type.instrument_id() == self.instrument_id,
-                        "the barrier's ATR is on {}, not on the targets' instrument {}",
-                        atr.bar_type,
-                        self.instrument_id
-                    );
-                    ensure!(atr.period > 0, "the barrier's ATR period must be positive");
-                }
-                (false, None) => {}
-            }
+            ensure!(
+                barrier.uses_atr() || barrier.atr.is_none(),
+                "the barrier has an ATR no distance uses"
+            );
+            ensure!(
+                barrier.atr_period() != Some(0),
+                "the barrier's ATR period must be positive"
+            );
+            self.atr_bars(rule)?;
         }
         if let Some(horizon) = self.horizon {
             ensure!(
@@ -310,10 +323,65 @@ impl TargetsConfig {
         Ok(())
     }
 
-    /// The config as the fingerprint reads it.
+    /// The barrier's average true range deciding on `rule`, if a distance
+    /// is in ATRs: its period, and its bars, the mids of the targets'
+    /// instrument built from its quotes (internal) at the decision cadence,
+    /// such as `EURUSD.ICMARKETS-15-MINUTE-MID-INTERNAL` every 15 minutes.
+    /// The step is the cadence in its largest whole unit, from days to
+    /// milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the decisions are on events, with no cadence to
+    /// build bars at, or Nautilus builds no bars of the cadence: a step
+    /// must divide the next unit (`BarSpecification::new_checked`), so
+    /// that bars close on the decisions' grid.
+    pub fn atr_bars(&self, rule: DecisionRule) -> anyhow::Result<Option<AtrBars>> {
+        let Some(period) = self.barrier.and_then(|barrier| barrier.atr_period()) else {
+            return Ok(None);
+        };
+        let DecisionRule::Every(cadence) = rule else {
+            bail!(
+                "the barrier's ATR is on bars of the decision cadence, and decisions on events \
+                 have none"
+            );
+        };
+        let units = [
+            (BarAggregation::Day, SignedDuration::from_hours(24)),
+            (BarAggregation::Hour, SignedDuration::from_hours(1)),
+            (BarAggregation::Minute, SignedDuration::from_mins(1)),
+            (BarAggregation::Second, SignedDuration::from_secs(1)),
+            (BarAggregation::Millisecond, SignedDuration::from_millis(1)),
+        ];
+        let nanos = cadence.as_nanos();
+        let Some((aggregation, step)) = units
+            .into_iter()
+            .find(|(_, unit)| nanos % unit.as_nanos() == 0)
+            .map(|(aggregation, unit)| (aggregation, nanos / unit.as_nanos()))
+        else {
+            bail!(
+                "the barrier's ATR has no bars of the decision cadence {cadence:#}, not whole \
+                 milliseconds"
+            );
+        };
+        let spec = usize::try_from(step)
+            .map_err(anyhow::Error::from)
+            .and_then(|step| BarSpecification::new_checked(step, aggregation, PriceType::Mid))
+            .with_context(|| {
+                format!("the barrier's ATR has no bars of the decision cadence {cadence:#}")
+            })?;
+        Ok(Some(AtrBars {
+            bar_type: BarType::new(self.instrument_id, spec, AggregationSource::Internal),
+            period,
+        }))
+    }
+
+    /// The config as the fingerprint reads it: the ATR's period as it
+    /// runs, given or the default. Its bars are the cadence's, which the
+    /// decisions' fingerprint holds.
     fn fingerprint_part(&self) -> String {
         let barrier = self.barrier.map(|b| {
-            let atr = b.atr.map(|atr| format!("{} {}", atr.bar_type, atr.period));
+            let atr = b.atr_period();
             format!(
                 "take profit {} stop {} limit {} ns atr {atr:?}",
                 b.take_profit,
@@ -394,6 +462,13 @@ impl Barrier {
         [self.take_profit, self.stop]
             .iter()
             .any(|distance| matches!(distance, Distance::Atr(_)))
+    }
+
+    /// The period of its ATR, if a distance is in ATRs: its `atr` table's,
+    /// else `DEFAULT_ATR_PERIOD`.
+    fn atr_period(&self) -> Option<usize> {
+        self.uses_atr()
+            .then(|| self.atr.map_or(DEFAULT_ATR_PERIOD, |atr| atr.period))
     }
 
     /// The take profit and stop of each side, the long then the short,
@@ -493,10 +568,10 @@ struct BarrierAtr {
 }
 
 impl BarrierAtr {
-    fn new(config: AtrConfig) -> Self {
+    fn new(bars: AtrBars) -> Self {
         Self {
-            bar_type: config.bar_type,
-            indicator: RefCell::new(AverageTrueRange::new(config.period, None, None, None)),
+            bar_type: bars.bar_type,
+            indicator: RefCell::new(AverageTrueRange::new(bars.period, None, None, None)),
         }
     }
 
@@ -574,12 +649,14 @@ impl Outcome {
 }
 
 impl Targets {
+    /// The targets of `config`, for decisions on `rule`.
+    ///
     /// # Errors
     ///
-    /// Returns an error if `config` is invalid.
-    pub fn new(config: TargetsConfig) -> anyhow::Result<Rc<Self>> {
-        config.validate()?;
-        let atr = config.barrier.and_then(|barrier| barrier.atr);
+    /// Returns an error if `config` is invalid for `rule`.
+    pub fn new(config: TargetsConfig, rule: DecisionRule) -> anyhow::Result<Rc<Self>> {
+        config.validate(rule)?;
+        let atr = config.atr_bars(rule)?;
         Ok(Rc::new(Self {
             config,
             atr: atr.map(|atr| Rc::new(BarrierAtr::new(atr))),
@@ -587,18 +664,24 @@ impl Targets {
         }))
     }
 
-    /// Registers the barrier's average true range, if any, with `actor`'s
-    /// Nautilus indicators for the bars of its bar type, which `actor`
-    /// subscribes to: the data engine then hands it each of those bars
-    /// before the actor's own handler. Nautilus registers an indicator
-    /// once per bar type, so registering again, on a restart, feeds it
+    /// Starts the barrier's average true range, if any, on `actor`, from
+    /// its `on_start`: registers it with the actor's Nautilus indicators
+    /// for its bars and subscribes the actor to them, so the data engine
+    /// builds them from the quotes and hands it each before the actor's
+    /// own handler. Nautilus registers an indicator once per bar type and
+    /// keeps one subscription per bar type and actor, so starting again,
+    /// on a restart, or a strategy subscribing to the same bars, feeds it
     /// each bar once.
-    pub fn register<A: DataActorNative>(&self, actor: &mut A) {
+    pub fn start<A>(&self, actor: &mut A)
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
         if let Some(atr) = &self.atr {
             let shared = Rc::clone(atr) as SharedActorIndicator;
             actor
                 .core_mut()
                 .register_indicator_for_bars(atr.bar_type, shared);
+            actor.subscribe_bars(atr.bar_type, None, None);
         }
     }
 

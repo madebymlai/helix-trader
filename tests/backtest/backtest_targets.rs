@@ -8,9 +8,10 @@
 //! nanosecond of the time limit (inside the window), barriers left alone
 //! (closed by time), a bar touching both barriers (the venue replays its
 //! high before its low), the last decision unsettled at the end of data,
-//! barriers in basis points and a stop in average true ranges, no order
-//! before the ATR is initialized. Orders the risk engine denies drop their
-//! decisions, unsettled, before any time alert could. Over two
+//! barriers in basis points and exits in average true ranges of hourly
+//! bars, the cadence's, which the targets subscribe to themselves, no
+//! order before the ATR is initialized. Orders the risk engine denies
+//! drop their decisions, unsettled, before any time alert could. Over two
 //! days of a random walk the targets are the same with the execution
 //! engine purging closed orders and positions as without, while the purge
 //! keeps the cache to the last minutes' orders. One node per thread, so
@@ -93,7 +94,18 @@ struct TargetProbe {
 }
 
 impl TargetProbe {
+    /// The probe deciding every hour on `source`, opening `targets`.
     fn new(source: Source, targets: TargetsConfig) -> (Self, Rc<RefCell<Record>>) {
+        Self::every(source, targets, SignedDuration::from_hours(1))
+    }
+
+    /// The probe deciding every `every` on `source`, opening `targets`,
+    /// whose ATR, if any, is on bars of `every`.
+    fn every(
+        source: Source,
+        targets: TargetsConfig,
+        every: SignedDuration,
+    ) -> (Self, Rc<RefCell<Record>>) {
         let features = match source {
             Source::Quotes(id) => FeatureSet::builder().quotes(
                 id,
@@ -114,16 +126,12 @@ impl TargetProbe {
                 ..Default::default()
             }),
             source,
-            every: SignedDuration::from_hours(1),
+            every,
             features,
-            targets: Targets::new(targets).unwrap(),
+            targets: Targets::new(targets, DecisionRule::Every(every)).unwrap(),
             record: Rc::clone(&record),
         };
         (probe, record)
-    }
-
-    fn every(self, every: SignedDuration) -> Self {
-        Self { every, ..self }
     }
 }
 
@@ -150,7 +158,7 @@ impl DataActor for TargetProbe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let features = Rc::clone(&self.features);
         features.register(self);
-        Rc::clone(&self.targets).register(self);
+        Rc::clone(&self.targets).start(self);
         let record = Rc::clone(&self.record);
         let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
             let row = data.data.as_any().downcast_ref::<TargetRow>().unwrap();
@@ -546,73 +554,76 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     assert_eq!(record.rows[1].barrier.unwrap().short.sign(), 1);
 }
 
-/// The minute bar opening at `open`: opening and closing at 100,000, its
-/// high 100,030.1 and its low 99,970.0, a true range of 60.1, but the one
-/// opening 10:20 reaching 100,095.0.
-fn btc_ranging_bar(open: Timestamp) -> Bar {
-    let high = if open == ic::at("10:20:00") {
-        100_095.0
-    } else {
-        100_030.1
-    };
-    Bar {
-        high: Price::new(high, 1),
-        low: Price::new(99_970.0, 1),
-        ..btc_bar(open)
-    }
+// ------------------------------------------------------------------- atr
+
+/// IC's gold as `gold_quotes`, 4000.10 its mid, ranging in the hours
+/// before 10:00: from 08:30, the run's start, to 09:00 between 4000.00
+/// (08:40) and 4000.30 (08:50), to 10:00 between 3999.90 (09:20) and
+/// 4000.40 (09:40); and a rise to 4000.90/4001.10 at 10:20.
+fn ranging_quotes() -> Vec<QuoteTick> {
+    gold_quotes(
+        |t| match t {
+            t if t == ic::at("08:40:00") => Some(("3999.90", "4000.10")),
+            t if t == ic::at("08:50:00") => Some(("4000.20", "4000.40")),
+            t if t == ic::at("09:20:00") => Some(("3999.80", "4000.00")),
+            t if t == ic::at("09:40:00") => Some(("4000.30", "4000.50")),
+            t if t == ic::at("10:20:00") => Some(("4000.90", "4001.10")),
+            _ => None,
+        },
+        &[],
+    )
 }
 
-/// One contract (0.01 BTC) on minute bars alone, until 10:50: a take
-/// profit 10 bps, 100, from the close of 100,000, and a stop 1.3 average
-/// true ranges of 75 minute bars, ranging 60.1 each, 78.13, on the nearest
-/// tenth: the long's at 99,921.9, the short's at 100,078.1. The ATR has
-/// fewer than 75 bars at 09:00: that decision opens no target. Each fill
-/// pays OKX's 0.05% of its value.
+/// One ounce of gold, deciding every hour, until 10:50: a take profit 2
+/// and a stop 1.5 average true ranges away, the ATR of 2 hourly bars of
+/// the mids, which the targets subscribe to and the probe does not. The
+/// bar closing 09:00, from the run's start, ranges 0.30; the one closing
+/// 10:00 from 3999.90 to 4000.40 past the close before, 4000.10, 0.50:
+/// an ATR of 0.40, the exits 0.80 and 0.60 from 4000.10. The ATR has one
+/// bar at 09:00: that decision opens no target. Each fill pays 30 USD per
+/// million of its value, 0.12 USD at these prices.
 #[test]
-fn targets_an_atr_away_are_the_outcomes_worked_out_by_hand() {
-    let catalog = btc_catalog(btc_ranging_bar);
+fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_of(ranging_quotes(), from, to);
     let backtest = Backtest {
         end: ic::at("10:50:00"),
-        ..btc_backtest(&catalog)
+        ..gold_backtest(catalog.path().to_path_buf())
     };
     let config = TargetsConfig::builder()
-        .instrument_id(InstrumentId::from(BTC))
-        .quantity(Quantity::from("1.00"))
+        .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
+        .quantity(Quantity::from(1))
         .barrier(Barrier {
-            take_profit: Distance::BasisPoints(Decimal::from(10)),
-            stop: Distance::Atr(Decimal::new(13, 1)),
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_mins(45),
-            atr: Some(AtrConfig {
-                bar_type: BarType::from(BTC_MINUTE),
-                period: 75,
-            }),
+            atr: Some(AtrConfig { period: 2 }),
         })
         .horizon(SignedDuration::from_mins(30))
         .build();
-    let source = Source::Bars(BarType::from(BTC_MINUTE));
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(source, config);
 
     backtest.run_dataset(probe).unwrap();
 
-    let flat = || {
-        outcomes(
-            outcome("-1 USDT", Exit::Time),
-            outcome("-1 USDT", Exit::Time),
-        )
-    };
     let expected = [
-        // The bar opening 10:20 reaches 100,095.0, past the short's stop,
-        // short of the long's take profit, 100,100: the short's stop fills
-        // at its trigger, 100,078.1 (-0.781 - 0.5 - 0.5003905); the long
-        // closes by time at 100,000.
+        // The long enters at 4000.20, its take profit a sell limit at
+        // 4000.90, its stop at 3999.50; the short at 4000.00, its take
+        // profit at 3999.30, its stop a buy stop at 4000.70. The rise at
+        // 10:20 fills the long's take profit at its limit (+0.70 - 0.24)
+        // and the short's stop at the ask, 4001.10 (-1.10 - 0.24). The
+        // horizon closes both on the flat quote at 10:30.
         row(
-            decision(ic::at("10:00:00"), 100_000.0),
+            decision(ic::at("10:00:00"), 4000.10),
             outcomes(
-                outcome("-1 USDT", Exit::Time),
-                outcome("-1.7813905 USDT", Exit::Stop),
+                outcome("0.46 USD", Exit::TakeProfit),
+                outcome("-1.34 USD", Exit::Stop),
             ),
-            flat(),
-            SignedDuration::from_mins(45),
+            outcomes(
+                outcome("-0.44 USD", Exit::Time),
+                outcome("-0.44 USD", Exit::Time),
+            ),
+            SignedDuration::from_mins(30),
         ),
     ];
     let record = record.borrow();
@@ -666,8 +677,7 @@ fn walk_run(
             .horizon(SignedDuration::from_hours(1))
             .build();
         let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-        let (probe, record) = TargetProbe::new(source, config);
-        let probe = probe.every(SignedDuration::from_mins(15));
+        let (probe, record) = TargetProbe::every(source, config, SignedDuration::from_mins(15));
         if dataset {
             backtest.run_dataset(probe).unwrap();
         } else {
