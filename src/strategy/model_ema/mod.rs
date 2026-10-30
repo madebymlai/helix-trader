@@ -1,4 +1,4 @@
-//! Learned, an example strategy trading on a learned model: at each
+//! Model EMA, an example strategy trading on a learned model: at each
 //! decision of its model section, its model handle (`model::handle`)
 //! predicts on its features, the averages of its bars (`features.rs`),
 //! and a probability past a threshold is a trade, a market order of the
@@ -20,7 +20,7 @@
 mod config;
 mod features;
 
-pub use config::LearnedConfig;
+pub use config::ModelEmaConfig;
 
 use std::{path::Path, rc::Rc};
 
@@ -59,12 +59,12 @@ use crate::{
 
 /// The prefix of a trade's time alert, followed by its order's client
 /// order id.
-const HOLD_ALERT: &str = "LEARNED-HOLD:";
+const HOLD_ALERT: &str = "MODEL_EMA-HOLD:";
 
 #[derive(Debug)]
-pub struct Learned {
+pub struct ModelEma {
     core: StrategyCore,
-    config: LearnedConfig,
+    config: ModelEmaConfig,
     features: Rc<FeatureSet>,
     model: Rc<ModelHandle>,
     /// The warmup requested at start, live; none in a backtest or a
@@ -74,7 +74,7 @@ pub struct Learned {
     warmup_group: UUID4,
 }
 
-impl Learned {
+impl ModelEma {
     /// The strategy, its model handle in `mode`: live, it requests its
     /// warmup (`BarsConfig::warmup`) at start, which hydrates its
     /// indicators; otherwise they warm on the data replayed.
@@ -82,7 +82,7 @@ impl Learned {
     /// # Errors
     ///
     /// Returns an error if the config is invalid.
-    pub fn new(config: LearnedConfig, mode: Mode) -> anyhow::Result<Self> {
+    pub fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
         config.validate()?;
         let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
         let warmup = matches!(mode, Mode::Live { .. }).then_some(config.bars.warmup);
@@ -157,7 +157,7 @@ impl Learned {
 ///
 /// Returns an error if the config is invalid, or as `Training::new` does.
 pub fn training(
-    config: &LearnedConfig,
+    config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
     commission: &Commission,
@@ -184,7 +184,7 @@ pub fn training(
 /// Returns an error if the config is invalid, or as `WalkForward::new`
 /// does.
 pub fn walk_forward(
-    config: &LearnedConfig,
+    config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
     commission: &Commission,
@@ -210,7 +210,7 @@ pub fn walk_forward(
 ///
 /// Returns an error if the config is invalid, or as `Dataset::new` does.
 pub fn dataset(
-    config: &LearnedConfig,
+    config: &ModelEmaConfig,
     catalog: &Path,
     commission: &Commission,
 ) -> anyhow::Result<Dataset> {
@@ -228,7 +228,7 @@ pub fn dataset(
 }
 
 /// The strategy's id, from its base.
-fn strategy_id(config: &LearnedConfig) -> anyhow::Result<nautilus_model::identifiers::StrategyId> {
+fn strategy_id(config: &ModelEmaConfig) -> anyhow::Result<nautilus_model::identifiers::StrategyId> {
     config
         .base
         .strategy_id
@@ -240,7 +240,7 @@ fn hold_alert(entry: ClientOrderId) -> String {
     format!("{HOLD_ALERT}{entry}")
 }
 
-nautilus_strategy!(Learned, {
+nautilus_strategy!(ModelEma, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
         self.model.on_order_filled(event);
     }
@@ -258,7 +258,7 @@ nautilus_strategy!(Learned, {
     }
 });
 
-impl DataActor for Learned {
+impl DataActor for ModelEma {
     /// Subscribes to the bars, live after requesting the warmup, then
     /// starts the model handle: the features, registered as its Nautilus
     /// indicator, and the decisions.

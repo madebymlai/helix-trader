@@ -1510,8 +1510,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     LightGBM fitted by a train at midnight on a 94-hour window, published
     again valid from its holdout's start, predicts in the node, on the
     holdout's decisions, each probe row's prediction to the bit.
-  - `backtest_learned.rs`: the learned strategy end to end: the binary's
-    `train learned --at` on a fixture config publishes a model (fake
+  - `backtest_model_ema.rs`: the `model_ema` strategy end to end: the
+    binary's `train model_ema --at` on a fixture config publishes a model (fake
     learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
     backtest of the strategy on that store from two hours before the
     model's valid-from trades only from it, a long at each of its three
@@ -1520,7 +1520,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     first decision and it trades the next two: 4 orders, 2 positions. The same
     `train`, started as a live node starts it, by
     `Launcher::process` on the test binary's `helix-trader`, publishes,
-    and the backtest trades the same. The binary's `backtest learned` from midnight of the 23rd to noon of the
+    and the backtest trades the same. The binary's `backtest model_ema` from midnight of the 23rd to noon of the
     24th, retrained daily, builds the 4 days from its first window, trains
     at both midnights and prints both periods' scores after the report,
     in child processes; a second run starts none. With a minimum score above

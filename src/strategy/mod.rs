@@ -16,7 +16,7 @@
 //! `#[serde(flatten)]`, holds the bars read, their warmup and their
 //! `Session`. The exception is a strategy trading on a learned model,
 //! which holds the harness' types (`model::features::FeatureSet`,
-//! `model::handle::ModelHandle`); `learned` is the example.
+//! `model::handle::ModelHandle`); `model_ema` is the example.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from quotes; `warmup` asks for their
@@ -28,7 +28,7 @@ mod config;
 pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
-pub mod learned;
+pub mod model_ema;
 mod session;
 pub mod warmup;
 

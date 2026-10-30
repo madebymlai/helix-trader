@@ -1,6 +1,6 @@
-//! The learned strategy's features: on the bars of each bar type it reads,
-//! a fast and a slow exponential moving average of the closes, named after
-//! the bar type, such as `XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:ema_10`.
+//! The `model_ema` strategy's features: on the bars of each bar type it
+//! reads, a fast and a slow exponential moving average of the closes, named
+//! after the bar type, such as `XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:ema_10`.
 
 use std::rc::Rc;
 

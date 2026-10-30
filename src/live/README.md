@@ -673,7 +673,7 @@ tests: see [`okx/README.md`](okx/README.md).
 - Retraining needs no node: the launcher and the handle's retrains are
   unit tests (`model::launcher`, `model::handle`) on an in-process
   launcher, a `sh` child and a clock driven by hand, and
-  `tests/backtest/backtest_learned.rs` starts the real `train` as a live
+  `tests/backtest/backtest_model_ema.rs` starts the real `train` as a live
   node does and backtests on the model it publishes.
 - Venue end-to-end tests are under "IB tests", "OKX tests" and "IC tests"
   in the venue READMEs; `ib_restart.rs` there checks the cache in Redis

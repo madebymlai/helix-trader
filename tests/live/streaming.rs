@@ -551,9 +551,9 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
         .unwrap()
 }
 
-/// The learned strategy on the stub's AUD/USD: a decision every second on
-/// its 1-second bars, each target held a second.
-const LEARNED_CONFIG: &str = r#"
+/// The `model_ema` strategy on the stub's AUD/USD: a decision every second
+/// on its 1-second bars, each target held a second.
+const MODEL_EMA_CONFIG: &str = r#"
     instrument_ids = ["AUD/USD.SIM"]
     bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" }
     warmup = "1s"
@@ -571,14 +571,14 @@ const LEARNED_CONFIG: &str = r#"
     learner = { kind = "fake" }
 "#;
 
-/// The binary's dataset build of the learned strategy (`LEARNED_CONFIG`)
-/// over the days of `[start, end]` of the catalog of `root`, in a process of
-/// its own.
+/// The binary's dataset build of the `model_ema` strategy
+/// (`MODEL_EMA_CONFIG`) over the days of `[start, end]` of the catalog of
+/// `root`, in a process of its own.
 fn dataset(root: &Path, start: Timestamp, end: Timestamp) -> Output {
-    let config = root.join("learned.toml");
-    std::fs::write(&config, LEARNED_CONFIG).unwrap();
+    let config = root.join("model_ema.toml");
+    std::fs::write(&config, MODEL_EMA_CONFIG).unwrap();
     Command::new(env!("CARGO_BIN_EXE_helix-trader"))
-        .args(["dataset", "learned", "--config"])
+        .args(["dataset", "model_ema", "--config"])
         .arg(&config)
         .arg("--catalog")
         .arg(root.join("catalog"))
