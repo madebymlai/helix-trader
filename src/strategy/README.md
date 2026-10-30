@@ -32,7 +32,7 @@ type or trait:
 ```
 strategy/
   standard.rs   StandardConfig: the standard tables, the strategy's Part
-  indicators.rs [indicators]: indicators by Nautilus type and arguments
+  indicators.rs [indicators]: indicators declared by name and arguments
   config.rs     BarsConfig: model_ema's flat bars config
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
@@ -78,11 +78,9 @@ warmup = "720h"
 session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 
 [indicators.fast]   # an indicator its code reads, by name
-kind = "ExponentialMovingAverage"
 period = 10
 
 [indicators.slow]
-kind = "ExponentialMovingAverage"
 period = 30
 
 [trade]     # what it trades
@@ -100,21 +98,38 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   history request goes (see "Warmup and training"), `session` the hours
   traded (see "Session").
 - `[indicators.<name>]` is an indicator the strategy's code reads, by
-  name: `kind` its Nautilus type, the other keys its Nautilus
-  constructor's arguments by their Nautilus names and types, those left
-  out taking Nautilus' defaults (`strategy::IndicatorConfig`,
-  `strategy/indicators.rs`). `ExponentialMovingAverage` takes `period`
-  and `price_type` (a `PriceType`); `AverageTrueRange` takes `period`,
-  `ma_type` (a `MovingAverageType` by the name its `FromStr` parses,
-  `"WILDER"`), `use_previous` and `value_floor`. The strategy declares the
-  ones it reads by name and type (`Part::INDICATORS`: `fast` and `slow`,
-  two `ExponentialMovingAverage`s, for the EMA) and receives them built
-  by name (`IndicatorsConfig::built`), each through its Nautilus
-  constructor: `new_checked` where Nautilus makes it public
-  (`ExponentialMovingAverage`), else `new` (`AverageTrueRange`, whose
-  `new` panics at load on an argument it refuses). The barrier's ATR of
-  a model strategy is not one of them: it is the harness', not the
-  strategy's code's.
+  name: its arguments only, the strategy's code saying what it is. The
+  strategy declares each name with its arguments type and lists it in
+  `Part::INDICATORS` (`strategy::Declared`, `strategy/indicators.rs`):
+
+  ```rust
+  const FAST: Declared<EmaArgs> = Declared::new("fast");
+  const SLOW: Declared<EmaArgs> = Declared::new("slow");
+
+  impl Part for EmaParams {
+      const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &SLOW];
+      ...
+  }
+
+  let fast: ExponentialMovingAverage = config.indicators.build(FAST);
+  ```
+
+  The arguments type (`strategy::IndicatorArgs`, any `Deserialize`)
+  parses the table and builds the indicator, a Nautilus `Indicator`
+  registered by the strategy as Nautilus' own are
+  (`register_indicator_for_bars`, `_quotes`, `_trades`, an
+  `Rc<RefCell<_>>` of it or a type holding it). For Nautilus' indicators
+  the crate has its constructor's arguments by their Nautilus names,
+  those left out taking Nautilus' defaults: `EmaArgs`, `period` and
+  `price_type` (a `PriceType`), built by
+  `ExponentialMovingAverage::new_checked`; `AtrArgs`, `period`, `ma_type`
+  (a `MovingAverageType` by the name its `FromStr` parses, `"WILDER"`),
+  `use_previous` and `value_floor`, built by `AverageTrueRange::new`,
+  which panics at load on an argument it refuses (its `new_checked` is
+  not public). A custom indicator brings its own arguments type. The
+  shared config keeps each table as written (`IndicatorsConfig`) and
+  knows no indicator type. The barrier's ATR of a model strategy is not
+  one of them: it is the harness', not the strategy's code's.
 - `[trade] instruments` pairs each traded instrument with its
   `trade_size`, a Nautilus `Quantity` (a string, `"1"`).
 - The strategy's part (`strategy::Part`) is its own fields, at the top
@@ -147,10 +162,10 @@ config or every violation out.
   (`LAST` fails), on the venue of the first bars, and not built `from`
   bars beside a session (see "Session"); a positive warmup; a session, if
   any, opening before it closes; each indicator the strategy declares
-  present (`indicators.<name>`) and of its type (`indicators.<name>.kind`),
-  none it does not declare, and its arguments taken by its Nautilus
-  constructor (`ExponentialMovingAverage::new_checked` refuses `period =
-  0`, reported under `indicators.<name>`); as many traded instruments as
+  present, its table parsed by its arguments type (an unknown or
+  mistyped argument fails) and built (`ExponentialMovingAverage::new_checked`
+  refuses `period = 0`), each reported under `indicators.<name>`, and
+  none it does not declare; as many traded instruments as
   the strategy trades, each `trade_size` positive; then the strategy's
   own rules (`Part::validate`: for the EMA, the fast period below the
   slow one).
@@ -549,11 +564,9 @@ series = [
 warmup = "72h"
 
 [indicators.fast]
-kind = "ExponentialMovingAverage"
 period = 10
 
 [indicators.slow]
-kind = "ExponentialMovingAverage"
 period = 30
 
 [trade]

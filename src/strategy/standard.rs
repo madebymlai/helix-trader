@@ -15,8 +15,8 @@ use serde::{
 };
 
 use super::{
-    CompositeSource, DataRequirements, IndicatorKind, IndicatorsConfig, TickSeries,
-    session::Session, tick_data,
+    CompositeSource, DataRequirements, Declaration, IndicatorsConfig, TickSeries, session::Session,
+    tick_data,
 };
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
@@ -53,9 +53,9 @@ pub struct StandardConfig<P: Part> {
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
-    /// The indicators its code reads, by name and Nautilus type:
-    /// `[indicators]` configures these and no other.
-    const INDICATORS: &'static [(&'static str, IndicatorKind)] = &[];
+    /// The indicators its code reads, each by name and arguments
+    /// (`Declared`): `[indicators]` configures these and no other.
+    const INDICATORS: &'static [&'static dyn Declaration] = &[];
     /// Its `[base]` when the TOML has none.
     fn default_base() -> StrategyConfig;
     /// Pushes onto `errors` every violation of its own rules in `config`,
@@ -79,12 +79,12 @@ impl<P: Part> StandardConfig<P> {
     /// # Errors
     ///
     /// Returns every violation of the rules of `[data]` (see
-    /// `DataConfig`), of `[indicators]` (those the strategy reads, of
-    /// their types, their arguments taken by Nautilus; see
-    /// `IndicatorsConfig`), of `[trade]` (as many instruments as the
-    /// strategy trades, each `trade_size` positive) and of the strategy's
-    /// own (`Part::validate`): Nautilus' `ConfigError` of each, with its
-    /// field, as one `ConfigError::Multiple` if there are several.
+    /// `DataConfig`), of `[indicators]` (those the strategy declares, each
+    /// table parsed and built by its declaration; see `IndicatorsConfig`),
+    /// of `[trade]` (as many instruments as the strategy trades, each
+    /// `trade_size` positive) and of the strategy's own (`Part::validate`):
+    /// Nautilus' `ConfigError` of each, with its field, as one
+    /// `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);

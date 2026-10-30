@@ -38,7 +38,7 @@ mod standard;
 pub mod warmup;
 
 pub use config::{BarsConfig, CompositeSource};
-pub use indicators::{Indicator, IndicatorConfig, IndicatorKind, IndicatorsConfig};
+pub use indicators::{AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig};
 pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 pub use session::Session;
 

@@ -161,8 +161,8 @@ mod tests {
             session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
 
             [indicators]
-            fast = { kind = "ExponentialMovingAverage", period = 1 }
-            slow = { kind = "ExponentialMovingAverage", period = 2 }
+            fast = { period = 1 }
+            slow = { period = 2 }
 
             [trade]
             instruments = [{ instrument_id = "ESM4.CME", trade_size = "3" }]

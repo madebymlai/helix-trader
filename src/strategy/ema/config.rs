@@ -8,7 +8,7 @@ use nautilus_model::{
 use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
-use crate::strategy::{IndicatorKind, Part, StandardConfig};
+use crate::strategy::{Declaration, Declared, EmaArgs, Part, StandardConfig};
 
 /// Config of the EMA crossover strategy, loaded from TOML: the standard
 /// tables, its EMAs in `[indicators]`, and no fields of its own
@@ -25,12 +25,14 @@ pub type EmaCrossConfig = StandardConfig<EmaParams>;
 #[serde(deny_unknown_fields)]
 pub struct EmaParams {}
 
+/// The fast EMA, `[indicators.fast]`.
+const FAST: Declared<EmaArgs> = Declared::new("fast");
+/// The slow EMA, `[indicators.slow]`.
+const SLOW: Declared<EmaArgs> = Declared::new("slow");
+
 impl Part for EmaParams {
     const INSTRUMENTS: usize = 1;
-    const INDICATORS: &'static [(&'static str, IndicatorKind)] = &[
-        ("fast", IndicatorKind::ExponentialMovingAverage),
-        ("slow", IndicatorKind::ExponentialMovingAverage),
-    ];
+    const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &SLOW];
 
     /// The strategy's id and order tag. `oms_type` is left unset: Nautilus
     /// keeps the strategy's positions as the execution client of the venue
@@ -46,8 +48,8 @@ impl Part for EmaParams {
     /// The fast period not below the slow one, or the traded instrument
     /// without exactly one bars series.
     fn validate(config: &EmaCrossConfig, errors: &mut ConfigErrorCollector) {
-        let built = |name| config.indicators.built::<ExponentialMovingAverage>(name);
-        if let (Some(fast), Some(slow)) = (built("fast"), built("slow")) {
+        let args = |declared| config.indicators.args(declared);
+        if let (Some(fast), Some(slow)) = (args(FAST), args(SLOW)) {
             errors.check(
                 fast.period < slow.period,
                 ConfigError::range(
@@ -89,13 +91,11 @@ impl EmaCrossConfig {
     ///
     /// # Panics
     ///
-    /// Panics if it is missing, of another type or of arguments Nautilus
-    /// refuses, which `validate` refuses.
+    /// Panics if it is missing or of arguments it or Nautilus refuses,
+    /// which `validate` refuses.
     #[must_use]
     pub fn fast_ema(&self) -> ExponentialMovingAverage {
-        self.indicators
-            .built("fast")
-            .expect("the fast EMA validated")
+        self.indicators.build(FAST)
     }
 
     /// The slow EMA, `[indicators.slow]`, built.
@@ -105,9 +105,7 @@ impl EmaCrossConfig {
     /// As `fast_ema`.
     #[must_use]
     pub fn slow_ema(&self) -> ExponentialMovingAverage {
-        self.indicators
-            .built("slow")
-            .expect("the slow EMA validated")
+        self.indicators.build(SLOW)
     }
 
     /// The bars of the traded instrument, the ones the crossover reads.
@@ -140,11 +138,9 @@ mod tests {
         session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 
         [indicators.fast]
-        kind = "ExponentialMovingAverage"
         period = 10
 
         [indicators.slow]
-        kind = "ExponentialMovingAverage"
         period = 30
 
         [trade]
@@ -241,13 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_ema_of_another_type() {
+    fn rejects_an_ema_of_average_true_range_arguments() {
         let toml = TOML.replacen(
-            "kind = \"ExponentialMovingAverage\"\n        period = 10",
-            "kind = \"AverageTrueRange\"\n        period = 10",
+            "period = 10",
+            "period = 10\n        ma_type = \"SIMPLE\"",
             1,
         );
-        assert_eq!(error_fields(&toml), ["indicators.fast.kind"]);
+        assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
     #[test]

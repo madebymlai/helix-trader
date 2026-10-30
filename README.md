@@ -40,8 +40,8 @@ series = [
 warmup = "720h"
 
 [indicators]
-fast = { kind = "ExponentialMovingAverage", period = 10 }
-slow = { kind = "ExponentialMovingAverage", period = 30 }
+fast = { period = 10 }
+slow = { period = 30 }
 
 [trade]
 instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]

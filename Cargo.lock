@@ -3125,6 +3125,7 @@ dependencies = [
  "libc",
  "log",
  "nautilus-core",
+ "nautilus-indicators",
  "nautilus-model",
  "parking_lot 0.13.0",
  "regex",

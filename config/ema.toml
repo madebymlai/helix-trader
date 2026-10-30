@@ -27,11 +27,9 @@ warmup = "72h"
 # `price_type`, the price it reads of quotes (LAST by default; bars give
 # their close).
 [indicators.fast]
-kind = "ExponentialMovingAverage"
 period = 10
 
 [indicators.slow]
-kind = "ExponentialMovingAverage"
 period = 30
 
 [trade]
