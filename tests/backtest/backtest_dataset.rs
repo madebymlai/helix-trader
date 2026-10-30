@@ -4,25 +4,36 @@
 //! rows published for it; a dataset build replays the days it lacks
 //! through it and stores the rows in the catalog. A second build of the
 //! same span replays no day, and the rows read back are those the replay
-//! settled over the days built. One node per thread: the second build
-//! runs none.
+//! settled over the days built. A barrier ATR warming over exactly the
+//! warmup opens the targets of a day's first decision. One node per
+//! thread: the second build runs none.
 
 use std::{collections::VecDeque, rc::Rc};
 
 use crate::common::{
-    dataset::{Lcg, STRATEGY, commission, features, replay, replay_on, rule, targets, walk},
+    dataset::{
+        Lcg, STRATEGY, commission, config, features, replay, replay_of, replay_on, rule, targets,
+        walk,
+    },
     ic,
 };
-use helix_trader::model::{
-    dataset::{Dataset, DatasetRow},
-    features::{Feature, FeatureSet},
+use helix_trader::{
+    model::{
+        config::ModelConfig,
+        dataset::{Dataset, DatasetRow},
+        features::{Feature, FeatureSet},
+        targets::{AtrConfig, Barrier, Distance, TargetsConfig},
+    },
+    strategy::{DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp, civil::Date};
-use nautilus_indicators::indicator::Indicator;
+use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicator};
 use nautilus_model::{
-    data::QuoteTick,
+    data::{BarType, NautilusDataType, QuoteTick},
+    enums::PriceType,
     identifiers::{InstrumentId, StrategyId},
 };
+use rust_decimal::Decimal;
 
 /// Two days, the 21st and 22nd of October 2026, quotes from 23:00 the day
 /// before (the engine starts 1 ns before the run) to 03:00 of the 23rd:
@@ -296,5 +307,123 @@ fn a_closed_market_stores_no_row() {
             on(sunday, "22:00:00") + margin,
             on(sunday, "23:00:00") + margin,
         ]
+    );
+}
+
+/// The bars of the barrier's ATR: IC's gold's one-minute mids.
+const ATR_BARS: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
+
+/// The probe's config with the bracket 1.5 ATRs of 14 bars of `ATR_BARS`
+/// away on both sides.
+fn atr_config() -> ModelConfig {
+    let barrier = Barrier {
+        take_profit: Distance::Atr(Decimal::new(15, 1)),
+        stop: Distance::Atr(Decimal::new(15, 1)),
+        limit: SignedDuration::from_hours(2),
+        atr: Some(AtrConfig {
+            bar_type: BarType::from(ATR_BARS),
+            period: 14,
+        }),
+    };
+    ModelConfig {
+        targets: TargetsConfig {
+            barrier: Some(barrier),
+            ..targets()
+        },
+        ..config()
+    }
+}
+
+/// The probe's one feature, the last mid of IC's gold, with a warmup of
+/// `warmup`.
+fn mid_warming_for(warmup: SignedDuration) -> Rc<FeatureSet> {
+    FeatureSet::builder()
+        .quotes(
+            InstrumentId::from(ic::INSTRUMENT_ID),
+            "mid",
+            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+        )
+        .warmup(warmup)
+        .build()
+        .unwrap()
+}
+
+/// When each row of Thursday 22 October 2026 stored by a build of that
+/// day alone, from scratch, was decided, the features and the strategy
+/// warming for `warmup`, on `walk` from 23:00:02.5 on Wednesday: on a
+/// thread of its own, one node per thread.
+fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> {
+    std::thread::spawn(move || {
+        let thursday = Date::constant(2026, 10, 22);
+        let catalog = walk(
+            on(Date::constant(2026, 10, 21), "23:00:02.500"),
+            on(Date::constant(2026, 10, 23), "03:00:00"),
+        );
+        let config = atr_config();
+        let dataset = Dataset::new(
+            catalog.path(),
+            StrategyId::from(STRATEGY),
+            &mid_warming_for(warmup),
+            config.decision,
+            config.targets.clone(),
+            &commission(),
+        )
+        .unwrap();
+        dataset
+            .build(thursday, thursday, |from, to| {
+                replay_of(&catalog, mid_warming_for(warmup), &config, from, to)
+            })
+            .unwrap();
+        dataset
+            .read(on(thursday, "00:00:00"), on(thursday, "23:59:59"))
+            .unwrap()
+            .iter()
+            .map(|row| Timestamp::from(row.ts_event))
+            .collect()
+    })
+    .join()
+    .unwrap()
+}
+
+/// The data requirements of a strategy reading `ATR_BARS` and IC's gold's
+/// quotes, warming for `warmup`.
+fn reading_atr_bars(warmup: SignedDuration) -> DataRequirements {
+    DataRequirements {
+        bar_types: vec![BarType::from(ATR_BARS)],
+        ticks: vec![TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
+        }],
+        warmup,
+    }
+}
+
+/// A barrier ATR of 14 one-minute bars warms over exactly a warmup of 14
+/// minutes, which validation accepts: a build of a day alone replays from
+/// 23:46 the day before, and the data engine builds the 14 bars after it,
+/// each over its minute's quotes, the last at midnight, 10 ms before the
+/// day's first decision, which opens its targets. The quotes are 2.5 s
+/// off the minute: one at 23:46 itself, the replay's first, would close a
+/// 15th bar, the minute before, and hide a warmup a bar short. A minute
+/// shorter, validation refuses the warmup, and that decision opens
+/// nothing, the ATR a bar short.
+#[test]
+fn a_barrier_atr_warming_over_exactly_the_warmup_opens_the_day_s_first_decision() {
+    let (thursday, margin) = (
+        Date::constant(2026, 10, 22),
+        SignedDuration::from_millis(10),
+    );
+    let (warmup, shorter) = (SignedDuration::from_mins(14), SignedDuration::from_mins(13));
+    assert!(atr_config().validate(&reading_atr_bars(warmup)).is_ok());
+    assert!(atr_config().validate(&reading_atr_bars(shorter)).is_err());
+
+    let decided = thursday_decided_after_a_warmup_of(warmup);
+    let decided_shorter = thursday_decided_after_a_warmup_of(shorter);
+
+    assert_eq!(decided.first(), Some(&(on(thursday, "00:00:00") + margin)));
+    assert_eq!(decided.len(), 24, "{decided:#?}");
+    assert_eq!(
+        decided_shorter.first(),
+        Some(&(on(thursday, "01:00:00") + margin))
     );
 }
