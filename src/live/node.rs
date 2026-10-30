@@ -195,8 +195,6 @@ fn config(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::live::Recording;
 
@@ -206,7 +204,6 @@ mod tests {
         let catalog = DataCatalogConfig::new("/data/catalog".to_string(), None, None);
         let recording = Recording {
             staging: "/data/staging".into(),
-            promotion_interval: Duration::from_secs(5 * 60),
         };
         config(
             TraderId::from("HELIX-001"),

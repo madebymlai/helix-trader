@@ -25,7 +25,6 @@ data/
   mod.rs           declares the modules, exposes only what others call
   node_fill.rs     the fill through a node: what the catalog lacks, the node, the actor asking one window at a time
   fill_catalog.rs  source-agnostic, any Nautilus data type: resume, check, sort, write (IB, OKX)
-  live_runs.rs     the live runs' starts in the catalog, and the gaps they streamed across joined
   databento/
     mod.rs         Databento of GLBX instruments: its data client for the node, cost quotes, the dataset's end
     publishers.json Nautilus' Databento publishers, read by the client
@@ -193,15 +192,15 @@ impl NodeFill {
 
 - **What is missing.** `missing` asks the catalog what it lacks of each
   slice, by Nautilus' own count (`get_missing_intervals_for_request`,
-  the call behind the data engine's catalog lookup), once the gaps a live
-  run streamed across are joined (`live_runs.rs`; `live/README.md`,
-  "Recording into the catalog"), so that the venue is not asked for
-  them: contract by contract,
+  the call behind the data engine's catalog lookup), contract by contract:
   its definition over the span of what it lacks, then each series'
-  missing intervals. A rolled root's contracts come each over its slice;
-  `DataRequirements::slices` has already merged one contract's slices of
-  a series from two tables, so no window is asked twice. A
-  covered window asks for nothing: no node is built. Quotes, trades, book
+  missing intervals. The slivers a live node's daily promotions leave
+  between its files (`live/README.md`, "Recording into the catalog") are
+  among them: each is asked once, and its write-back closes it, so the
+  next fill asks nothing for it. A rolled root's contracts come each
+  over its slice; `DataRequirements::slices` has already merged one
+  contract's slices of a series from two tables, so no window is asked
+  twice. A covered window asks for nothing: no node is built. Quotes, trades, book
   depths and book deltas only (`FillData`): a source filling bars or
   funding through the node does not exist yet, and no source serves
   custom data, refused naming it (`FillData::of`).
@@ -489,9 +488,11 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   empty catalog lacks (a definition, then each series over its slice, a
   rolled root's contracts each over its own), only what is outside a
   stored interval, nothing (not even a definition) for a covered window;
-  book deltas asked as deltas; bars and custom data refused, naming the
-  series; the coverage check failing a window answered with rows but not
-  stored, not a definition or an empty window.
+  a sliver between a live node's promoted files asked once, beside a
+  leftover run-start directory of older nodes, and nothing once its
+  write-back is recorded; book deltas asked as deltas; bars and custom
+  data refused, naming the series; the coverage check failing a window
+  answered with rows but not stored, not a definition or an empty window.
 - `tests/node_fill/`, fill-catalog's fill at its seam: `missing`, then a
   `NodeFill` whose live node holds a fake data client answering as
   Databento's, and the catalog:

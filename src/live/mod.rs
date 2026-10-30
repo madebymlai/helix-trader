@@ -27,10 +27,7 @@ pub use recording::{Recording, promote_staged};
 
 pub use crate::data::IbAccount;
 
-use std::{
-    fmt::Debug,
-    path::{Path, PathBuf},
-};
+use std::{fmt::Debug, path::PathBuf};
 
 use anyhow::{Context, bail};
 use jiff::Timestamp;
@@ -40,16 +37,14 @@ use nautilus_common::{
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
-use nautilus_persistence::{
-    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
-};
+use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    data::{IcHistory, OkxHistory, catalog_path, live_runs, record_run_start},
+    data::{IcHistory, OkxHistory, catalog_path},
     rolls::{Transition, contracts_at},
-    strategy::{DataRequirements, SeriesSlice, warmup},
+    strategy::{DataRequirements, warmup},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
@@ -76,8 +71,8 @@ pub struct Live {
     /// the warmup, and keeps the history the venues certify complete (see
     /// `node::run`). Created if missing.
     pub catalog: PathBuf,
-    /// Where the node stages the data it streams into the catalog, and how
-    /// often it promotes it there; also keeps the trader's instance id.
+    /// Where the node stages the data it streams into the catalog, which it
+    /// promotes there daily; also keeps the trader's instance id.
     pub recording: Recording,
 }
 
@@ -86,11 +81,9 @@ impl Live {
     /// then IB's, then runs `strategy` on a live node until SIGINT or
     /// SIGTERM. The strategy's warmup requests go to the data clients. A
     /// root's instruments are its contract in front at the start and the
-    /// next one (see `README.md`, "Rolled roots"). Once the node is built,
-    /// with what the last run left staged promoted (`promote_staged`), the
-    /// gaps the last runs streamed across in the series of the warmup are
-    /// joined, and the run's start is recorded in the catalog
-    /// (`data::live_runs`), before it runs.
+    /// next one (see `README.md`, "Rolled roots"). The node is built, and
+    /// what the last run left staged promoted (`promote_staged`), before it
+    /// runs.
     ///
     /// # Errors
     ///
@@ -98,13 +91,11 @@ impl Live {
     /// continuous bars), if the cache cannot hold the warmup bars of a bar
     /// type (see `warmup::cache_config`), if the catalog cannot be created
     /// or its path is not UTF-8, if the staging directory is inside the
-    /// catalog, the trader's instance id or the run's start cannot be kept
-    /// (see `Recording`, `data::record_run_start`), if what the last run left
-    /// staged cannot be promoted (`promote_staged`), if a gap cannot be
-    /// joined (`data::live_runs::join`), if an IC bar type
-    /// is not built from quotes or IC's environment or credential is missing
-    /// (see `ic::clients`, checked before anything connects), if
-    /// OKX's clients cannot be set up or the OKX account does not suit the
+    /// catalog, the trader's instance id cannot be kept (see `Recording`),
+    /// if what the last run left staged cannot be promoted
+    /// (`promote_staged`), if an IC bar type is not built from quotes or
+    /// IC's environment or credential is missing (see `ic::clients`,
+    /// checked before anything connects), if OKX's clients cannot be set up or the OKX account does not suit the
     /// run (see `okx::clients`), if IC is unreachable or its account is not
     /// hedging or not `IC_ACCOUNT_ID`'s (see `ic::IcClients::check_account`),
     /// if the strategy trades IB instruments and no account is given, if
@@ -165,7 +156,7 @@ impl Live {
             clients.push(ib.into_node_clients());
         }
         // Built first, which promotes what the last run left staged: the
-        // gaps are joined, and the warmup reads the catalog, with it there.
+        // warmup reads the catalog with it there.
         let node = node::build(
             self.trader_id,
             instance_id,
@@ -177,35 +168,8 @@ impl Live {
             clients,
         )
         .await?;
-        join_warmup(&self.catalog, requirements)?;
-        // Before the node runs, which starts the recording.
-        record_run_start(&self.catalog)?;
         node::run(node, &instrument_ids, strategy).await
     }
-}
-
-/// Joins the gaps the last live runs streamed across in the series the
-/// warmup of `requirements` reads in the catalog at `catalog` (see
-/// `data::live_runs`): the warmup reads the catalog first and asks the
-/// venue for what it lacks, a request per gap, whose answer would hold the
-/// quotes the node received after it.
-///
-/// # Errors
-///
-/// Returns an error if the window cannot be sliced (see
-/// `DataRequirements::slices`) or a gap cannot be joined.
-fn join_warmup(catalog: &Path, requirements: &DataRequirements) -> anyhow::Result<()> {
-    let now = Timestamp::now();
-    let reader = ParquetDataCatalog::new(catalog, None, None, None, None);
-    for SeriesSlice {
-        series: (data_type, identifier),
-        ..
-    } in requirements.slices(now.checked_sub(requirements.warmup)?, now)?
-    {
-        live_runs::join(&reader, &data_type, &identifier)
-            .with_context(|| format!("joining the live runs of the {data_type} of {identifier}"))?;
-    }
-    Ok(())
 }
 
 /// The instruments the node loads, at `now`: each one `requirements`

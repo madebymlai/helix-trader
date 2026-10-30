@@ -9,8 +9,6 @@ mod databento;
 pub use databento::DatabentoHistory;
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
-pub(crate) mod live_runs;
-pub use live_runs::record_run_start;
 mod ib;
 pub use ib::{IbAccount, IbHistory};
 pub(crate) use ib::{IbGateway, data_client_config};

@@ -8,7 +8,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
-    time::Duration,
 };
 
 use anyhow::{Context, bail, ensure};
@@ -275,16 +274,6 @@ struct LiveArgs {
     /// catalog, outside it; it also keeps each trader's instance id.
     #[arg(long, default_value = "staging")]
     staging: PathBuf,
-    /// How often, in minutes, the staged data is promoted into the
-    /// catalog: the delay before a retrain sees it. At most as many as fit
-    /// in u64 milliseconds, as Nautilus takes the interval, which keeps a
-    /// retrain's wait, the interval and a margin, in range too.
-    #[arg(
-        long,
-        default_value_t = 5,
-        value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 60_000)
-    )]
-    promotion_minutes: u64,
     /// The model store a strategy trading on a model reads its models
     /// from, at each decision the latest valid then, and its retrains
     /// publish in.
@@ -316,12 +305,10 @@ struct RetrainCosts {
 }
 
 impl LiveArgs {
-    /// The recording of the live node: staged in `--staging`, promoted
-    /// every `--promotion-minutes`.
+    /// The recording of the live node: staged in `--staging`.
     fn recording(&self) -> Recording {
         Recording {
             staging: self.staging.clone(),
-            promotion_interval: Duration::from_secs(self.promotion_minutes * 60),
         }
     }
 }
@@ -930,7 +917,6 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use helix_trader::model::train::{Kept, Outcome};
-    use jiff::SignedDuration;
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]
@@ -1092,59 +1078,21 @@ mod tests {
     }
 
     #[test]
-    fn live_stages_in_staging_and_promotes_every_five_minutes_unless_told_otherwise() {
+    fn live_stages_in_staging_unless_told_otherwise() {
         let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("staging"));
-        assert_eq!(args.promotion_minutes, 5);
-        let args = parse_live(&[
-            "ema",
-            "--config",
-            "ema.toml",
-            "--staging",
-            "/data/staging",
-            "--promotion-minutes",
-            "15",
-        ])
-        .unwrap();
+        let args =
+            parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("/data/staging"));
-        assert_eq!(args.promotion_minutes, 15);
     }
 
+    /// The node promotes daily: no setting.
     #[test]
-    fn live_refuses_promoting_every_zero_minutes() {
-        let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", "0"])
+    fn live_takes_no_promotion_interval() {
+        let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", "5"])
             .unwrap_err()
             .to_string();
         assert!(err.contains("--promotion-minutes"), "{err}");
-    }
-
-    /// The interval goes to Nautilus in milliseconds, and a retrain waits
-    /// it and a margin: more minutes than fit in u64 milliseconds are
-    /// refused as given, and the most taken has a catalog delay.
-    #[test]
-    fn live_refuses_more_promotion_minutes_than_fit_in_milliseconds() {
-        let promoting = |minutes: u64| {
-            let minutes = minutes.to_string();
-            parse_live(&[
-                "ema",
-                "--config",
-                "ema.toml",
-                "--promotion-minutes",
-                &minutes,
-            ])
-        };
-        let most = u64::MAX / 60_000;
-        let recording = promoting(most).unwrap().recording();
-        assert_eq!(
-            recording.catalog_delay(),
-            SignedDuration::from_mins(i64::try_from(most).unwrap() + 1)
-        );
-
-        // 153722867280912930 overflowed the delay's seconds.
-        for over in [most + 1, 153_722_867_280_912_930, u64::MAX / 60] {
-            let err = promoting(over).unwrap_err().to_string();
-            assert!(err.contains("--promotion-minutes"), "{over}: {err}");
-        }
     }
 
     #[test]

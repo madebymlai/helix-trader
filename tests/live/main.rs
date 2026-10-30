@@ -19,7 +19,7 @@
 //! child processes, none in this one, so it claims nothing and runs beside
 //! any module.
 
-use std::{path::Path, sync::OnceLock, time::Duration};
+use std::{path::Path, sync::OnceLock};
 
 use helix_trader::live::Recording;
 
@@ -54,10 +54,9 @@ fn claim_process(module: &'static str) {
 }
 
 /// The recording of a venue test's node: staged in `staging`, a directory
-/// of the test's own, promoted every minute.
+/// of the test's own, promoted daily, as every node, and on its stop.
 fn recording(staging: &Path) -> Recording {
     Recording {
         staging: staging.to_path_buf(),
-        promotion_interval: Duration::from_secs(60),
     }
 }
