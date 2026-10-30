@@ -435,13 +435,13 @@ fn validate_decisions(
         // A dataset run replays the warmup before its first day, and no
         // more: an ATR still cold then opens no target at the day's first
         // decisions, which a longer build would.
-        let warms = i32::try_from(atr.config.period)
+        let warms = i32::try_from(atr.args.period)
             .ok()
             .and_then(|period| atr.bar_type.spec().timedelta().checked_mul(period));
         ensure!(
             warms.is_some_and(|warms| warms <= requirements.warmup),
             "the barrier's ATR of {} bars of {} warms over longer than the warmup {:#}",
-            atr.config.period,
+            atr.args.period,
             atr.bar_type,
             requirements.warmup
         );

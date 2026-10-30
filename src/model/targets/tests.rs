@@ -44,7 +44,10 @@ fn config() -> TargetsConfig {
             take_profit: Distance::BasisPoints(Decimal::from(20)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_hours(2),
-            atr: Some(AtrConfig::over(14)),
+            atr: Some(AtrArgs {
+                period: 14,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_hours(1))
         .build()
@@ -134,7 +137,7 @@ fn atr_bars_reading(
     config
         .atr_bars(rule, requirements)
         .unwrap()
-        .map(|atr| (atr.bar_type.to_string(), atr.config.period))
+        .map(|atr| (atr.bar_type.to_string(), atr.args.period))
 }
 
 /// The bar type of the ATR of `config()` deciding on `rule`, for a
@@ -323,7 +326,10 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     };
     let overridden = TargetsConfig {
         barrier: Some(Barrier {
-            atr: Some(AtrConfig::over(20)),
+            atr: Some(AtrArgs {
+                period: 20,
+                ..DEFAULT_ATR
+            }),
             ..barrier
         }),
         ..config()
@@ -495,7 +501,10 @@ fn sizes_distances_and_times_must_be_positive() {
 #[should_panic(expected = "period")]
 fn an_atr_of_no_bars_panics_as_validated() {
     let barrier = Barrier {
-        atr: Some(AtrConfig::over(0)),
+        atr: Some(AtrArgs {
+            period: 0,
+            ..DEFAULT_ATR
+        }),
         ..config().barrier.unwrap()
     };
     let config = TargetsConfig {
@@ -509,9 +518,12 @@ fn an_atr_of_no_bars_panics_as_validated() {
 #[should_panic(expected = "value_floor")]
 fn an_atr_floor_nautilus_refuses_panics_as_validated() {
     let barrier = Barrier {
-        atr: Some(AtrConfig {
+        atr: Some(AtrArgs {
             value_floor: Some(f64::NAN),
-            ..AtrConfig::over(14)
+            ..AtrArgs {
+                period: 14,
+                ..DEFAULT_ATR
+            }
         }),
         ..config().barrier.unwrap()
     };
@@ -538,7 +550,7 @@ fn an_atr_reads_nautilus_arguments_from_toml() {
 
     assert_eq!(
         atr,
-        Some(AtrConfig {
+        Some(AtrArgs {
             period: 20,
             ma_type: Some(MovingAverageType::Exponential),
             use_previous: Some(false),
@@ -761,16 +773,22 @@ fn the_fingerprint_changes_with_every_target_spec() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig::over(15)),
+                atr: Some(AtrArgs {
+                    period: 15,
+                    ..DEFAULT_ATR
+                }),
                 ..barrier
             }),
             ..config()
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig {
+                atr: Some(AtrArgs {
                     ma_type: Some(MovingAverageType::Simple),
-                    ..AtrConfig::over(14)
+                    ..AtrArgs {
+                        period: 14,
+                        ..DEFAULT_ATR
+                    }
                 }),
                 ..barrier
             }),
@@ -778,9 +796,12 @@ fn the_fingerprint_changes_with_every_target_spec() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig {
+                atr: Some(AtrArgs {
                     use_previous: Some(false),
-                    ..AtrConfig::over(14)
+                    ..AtrArgs {
+                        period: 14,
+                        ..DEFAULT_ATR
+                    }
                 }),
                 ..barrier
             }),
@@ -788,9 +809,12 @@ fn the_fingerprint_changes_with_every_target_spec() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig {
+                atr: Some(AtrArgs {
                     value_floor: Some(0.5),
-                    ..AtrConfig::over(14)
+                    ..AtrArgs {
+                        period: 14,
+                        ..DEFAULT_ATR
+                    }
                 }),
                 ..barrier
             }),
@@ -853,7 +877,7 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
     };
     let written_out = TargetsConfig {
         barrier: Some(Barrier {
-            atr: Some(AtrConfig {
+            atr: Some(AtrArgs {
                 period: 14,
                 ma_type: Some(MovingAverageType::Wilder),
                 use_previous: Some(true),

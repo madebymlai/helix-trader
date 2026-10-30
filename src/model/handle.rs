@@ -870,8 +870,9 @@ mod tests {
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
-        targets::{AtrConfig, Barrier, Distance, Label, TargetsConfig},
+        targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
     };
+    use crate::strategy::AtrArgs;
     use rust_decimal::Decimal;
 
     /// The holdout of the models of the tests, as a train publishes it.
@@ -1454,7 +1455,10 @@ mod tests {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::ONE),
             limit: SignedDuration::from_hours(2),
-            atr: Some(AtrConfig::over(2)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         });
         config
     }

@@ -94,8 +94,9 @@ mod tests {
     use crate::model::{
         decide::DecisionRule,
         learner::LearnerConfig,
-        targets::{AtrConfig, Barrier, Distance},
+        targets::{Barrier, Distance},
     };
+    use crate::strategy::AtrArgs;
 
     const TOML: &str = r#"
         [data]
@@ -273,7 +274,7 @@ mod tests {
                 take_profit: Distance::Atr(2.into()),
                 stop: Distance::Atr(rust_decimal::Decimal::new(15, 1)),
                 limit: SignedDuration::from_mins(45),
-                atr: Some(AtrConfig {
+                atr: Some(AtrArgs {
                     period: 3,
                     ma_type: Some(MovingAverageType::Simple),
                     use_previous: Some(false),

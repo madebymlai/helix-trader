@@ -334,8 +334,8 @@ mod tests {
         warmup = "1h"
 
         [indicators]
-        fast = { kind = "ExponentialMovingAverage", period = 10 }
-        slow = { kind = "ExponentialMovingAverage", period = 30 }
+        fast = { period = 10 }
+        slow = { period = 30 }
 
         [trade]
         instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]

@@ -1,176 +1,195 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, marker::PhantomData};
 
 use nautilus_common::config::{ConfigError, ConfigErrorCollector};
 use nautilus_indicators::{
     average::{MovingAverageType, ema::ExponentialMovingAverage},
+    indicator::Indicator,
     volatility::atr::AverageTrueRange,
 };
 use nautilus_model::enums::PriceType;
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::DeserializeOwned};
 
-/// `[indicators]`: the indicators the strategy's code reads, each in its
-/// own `[indicators.<name>]` table, by name (see `IndicatorConfig`).
+/// `[indicators]`: each `[indicators.<name>]` table as the TOML has it,
+/// the arguments of the indicator the strategy declares by that name
+/// (`Part::INDICATORS`), which parses and builds it (see `IndicatorArgs`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(transparent)]
-pub struct IndicatorsConfig(pub BTreeMap<String, IndicatorConfig>);
+pub struct IndicatorsConfig(pub BTreeMap<String, toml::Table>);
 
-/// An indicator: `kind` its Nautilus type, the other keys its Nautilus
-/// constructor's arguments, by their Nautilus names and types, those left
-/// out taking Nautilus' defaults. `build` makes it.
-///
-/// - `ExponentialMovingAverage`: `period`, `price_type` (a Nautilus
-///   `PriceType`, of the quotes it reads).
-/// - `AverageTrueRange`: `period`, `ma_type` (a Nautilus
-///   `MovingAverageType`, such as `"WILDER"`), `use_previous`,
-///   `value_floor`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum IndicatorConfig {
-    ExponentialMovingAverage {
-        period: usize,
-        #[serde(default)]
-        price_type: Option<PriceType>,
-    },
-    AverageTrueRange {
-        period: usize,
-        #[serde(default, deserialize_with = "moving_average_type")]
-        ma_type: Option<MovingAverageType>,
-        #[serde(default)]
-        use_previous: Option<bool>,
-        #[serde(default)]
-        value_floor: Option<f64>,
-    },
-}
+/// The arguments of an indicator, its `[indicators.<name>]` table, and how
+/// it is built: a Nautilus `Indicator`, Nautilus' own or the strategy's,
+/// registered by the strategy as any other. For Nautilus' indicators the
+/// arguments are its constructor's, by their Nautilus names (`EmaArgs`,
+/// `AtrArgs`); a custom indicator brings its own.
+pub trait IndicatorArgs: DeserializeOwned {
+    type Indicator: Indicator;
 
-/// The Nautilus type of an indicator, as a strategy declares the ones it
-/// reads (`Part::INDICATORS`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndicatorKind {
-    ExponentialMovingAverage,
-    AverageTrueRange,
-}
-
-impl fmt::Display for IndicatorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-
-/// An indicator built, of the type its config names.
-#[derive(Debug)]
-pub enum Indicator {
-    ExponentialMovingAverage(ExponentialMovingAverage),
-    AverageTrueRange(AverageTrueRange),
-}
-
-impl TryFrom<Indicator> for ExponentialMovingAverage {
-    type Error = Indicator;
-
-    fn try_from(indicator: Indicator) -> Result<Self, Indicator> {
-        match indicator {
-            Indicator::ExponentialMovingAverage(ema) => Ok(ema),
-            indicator => Err(indicator),
-        }
-    }
-}
-
-impl TryFrom<Indicator> for AverageTrueRange {
-    type Error = Indicator;
-
-    fn try_from(indicator: Indicator) -> Result<Self, Indicator> {
-        match indicator {
-            Indicator::AverageTrueRange(atr) => Ok(atr),
-            indicator => Err(indicator),
-        }
-    }
-}
-
-impl IndicatorConfig {
-    #[must_use]
-    pub const fn kind(&self) -> IndicatorKind {
-        match self {
-            Self::ExponentialMovingAverage { .. } => IndicatorKind::ExponentialMovingAverage,
-            Self::AverageTrueRange { .. } => IndicatorKind::AverageTrueRange,
-        }
-    }
-
-    /// The indicator, built by its Nautilus constructor: `new_checked`
-    /// where Nautilus makes it public, else `new`.
-    ///
     /// # Errors
     ///
-    /// Returns the error of `new_checked` on an argument it refuses.
+    /// Returns the error of an argument the indicator refuses.
+    fn build(self) -> anyhow::Result<Self::Indicator>;
+}
+
+/// An indicator the strategy reads, by its name in `[indicators]` and its
+/// arguments `A`: a strategy declares it as a constant, lists it in
+/// `Part::INDICATORS` and receives it built (`IndicatorsConfig::build`).
+#[derive(Debug)]
+pub struct Declared<A> {
+    name: &'static str,
+    args: PhantomData<fn() -> A>,
+}
+
+impl<A> Declared<A> {
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            args: PhantomData,
+        }
+    }
+}
+
+impl<A> Clone for Declared<A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A> Copy for Declared<A> {}
+
+/// A declared indicator, of whatever arguments, as `[indicators]` checks
+/// it: its name, and its table parsed and built.
+pub trait Declaration {
+    fn name(&self) -> &'static str;
+
+    /// # Errors
     ///
-    /// # Panics
-    ///
-    /// Panics on an `AverageTrueRange` argument its `new` refuses: its
-    /// `new_checked` is not public.
-    pub fn build(&self) -> anyhow::Result<Indicator> {
-        Ok(match *self {
-            Self::ExponentialMovingAverage { period, price_type } => {
-                Indicator::ExponentialMovingAverage(ExponentialMovingAverage::new_checked(
-                    period, price_type,
-                )?)
-            }
-            Self::AverageTrueRange {
-                period,
-                ma_type,
-                use_previous,
-                value_floor,
-            } => Indicator::AverageTrueRange(AverageTrueRange::new(
-                period,
-                ma_type,
-                use_previous,
-                value_floor,
-            )),
-        })
+    /// Returns the error parsing `table` into the arguments, or building
+    /// the indicator of them.
+    fn check(&self, table: &toml::Table) -> anyhow::Result<()>;
+}
+
+impl<A: IndicatorArgs> Declaration for Declared<A> {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn check(&self, table: &toml::Table) -> anyhow::Result<()> {
+        parse::<A>(table)?.build()?;
+        Ok(())
+    }
+}
+
+/// The arguments of a Nautilus `ExponentialMovingAverage`, built by its
+/// `new_checked`: `period`, and `price_type`, the price it reads of quotes
+/// (`LAST` left out; bars give their close).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmaArgs {
+    pub period: usize,
+    #[serde(default)]
+    pub price_type: Option<PriceType>,
+}
+
+impl IndicatorArgs for EmaArgs {
+    type Indicator = ExponentialMovingAverage;
+
+    fn build(self) -> anyhow::Result<ExponentialMovingAverage> {
+        ExponentialMovingAverage::new_checked(self.period, self.price_type)
+    }
+}
+
+/// The arguments of a Nautilus `AverageTrueRange`, built by its `new`
+/// (its `new_checked` is not public, so an argument it refuses panics):
+/// `period`, `ma_type` (a `MovingAverageType` by the name its `FromStr`
+/// parses, `"WILDER"` left out), `use_previous` and `value_floor`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AtrArgs {
+    pub period: usize,
+    #[serde(
+        default,
+        deserialize_with = "moving_average_type",
+        serialize_with = "moving_average_type_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ma_type: Option<MovingAverageType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_previous: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_floor: Option<f64>,
+}
+
+impl IndicatorArgs for AtrArgs {
+    type Indicator = AverageTrueRange;
+
+    fn build(self) -> anyhow::Result<AverageTrueRange> {
+        Ok(AverageTrueRange::new(
+            self.period,
+            self.ma_type,
+            self.use_previous,
+            self.value_floor,
+        ))
     }
 }
 
 impl IndicatorsConfig {
-    /// The indicator `name`, built, if it is configured, of type `T`, and
-    /// Nautilus takes its arguments.
+    /// The arguments of `declared`, if its table is there and parses.
     #[must_use]
-    pub fn built<T: TryFrom<Indicator>>(&self, name: &str) -> Option<T> {
-        self.0.get(name)?.build().ok()?.try_into().ok()
+    pub fn args<A: IndicatorArgs>(&self, declared: Declared<A>) -> Option<A> {
+        parse(self.0.get(declared.name)?).ok()
+    }
+
+    /// The indicator `declared`, built of its table.
+    ///
+    /// # Panics
+    ///
+    /// Panics if its table is missing, does not parse or is refused by its
+    /// builder, which `validate` refuses of a declared indicator.
+    #[must_use]
+    pub fn build<A: IndicatorArgs>(&self, declared: Declared<A>) -> A::Indicator {
+        let table = &self.0[declared.name];
+        parse::<A>(table)
+            .and_then(A::build)
+            .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))
     }
 
     /// Pushes the violations of `[indicators]` against the indicators the
-    /// strategy reads, `declared`: one of them missing or of another type,
-    /// one configured it does not read, and the arguments of each Nautilus
-    /// refuses, each under the indicator's name.
+    /// strategy declares: one of them missing, or its table refused by its
+    /// arguments or its builder, and a table it does not declare, each
+    /// under `indicators.<name>`.
     pub(super) fn validate(
         &self,
-        declared: &[(&str, IndicatorKind)],
+        declared: &[&dyn Declaration],
         errors: &mut ConfigErrorCollector,
     ) {
-        for &(name, kind) in declared {
-            let field = format!("indicators.{name}");
-            let Some(config) = self.0.get(name) else {
+        for declaration in declared {
+            let field = format!("indicators.{}", declaration.name());
+            let Some(table) = self.0.get(declaration.name()) else {
                 errors.push(ConfigError::missing_field(field));
                 continue;
             };
-            if config.kind() != kind {
-                errors.push(ConfigError::invalid_value(
-                    format!("{field}.kind"),
-                    format!("is {}, the strategy reads {name} as {kind}", config.kind()),
-                ));
-                continue;
-            }
-            if let Err(e) = config.build() {
+            if let Err(e) = declaration.check(table) {
                 errors.push(ConfigError::invalid_value(field, e.to_string()));
             }
         }
         for name in self.0.keys() {
             errors.check(
-                declared.iter().any(|&(read, _)| read == name),
+                declared
+                    .iter()
+                    .any(|declaration| declaration.name() == name),
                 ConfigError::unsupported_field(
                     format!("indicators.{name}"),
-                    "not read by the strategy",
+                    "not declared by the strategy",
                 ),
             );
         }
     }
+}
+
+/// The arguments `table` holds.
+fn parse<A: DeserializeOwned>(table: &toml::Table) -> anyhow::Result<A> {
+    Ok(toml::Value::Table(table.clone()).try_into()?)
 }
 
 /// A Nautilus `MovingAverageType` by the name its `FromStr` parses: it has
@@ -184,24 +203,90 @@ fn moving_average_type<'de, D: Deserializer<'de>>(
         .map_err(|e| de::Error::custom(format!("invalid ma_type {name}: {e}")))
 }
 
+/// A Nautilus `MovingAverageType` by the name its `Display` writes, which
+/// its `FromStr` parses back (`moving_average_type`).
+fn moving_average_type_name<S: Serializer>(
+    ma_type: &Option<MovingAverageType>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    ma_type
+        .map(|ma_type| ma_type.to_string())
+        .serialize(serializer)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use nautilus_common::actor::indicators::SharedActorIndicator;
+    use nautilus_model::data::{Bar, BarType};
     use nautilus_trading::strategy::StrategyConfig;
 
     use super::*;
     use crate::strategy::{Part, StandardConfig};
 
-    /// A strategy reading an EMA `fast` and an ATR `range`.
+    /// A custom Nautilus indicator: initialized once a bar closes above
+    /// its `level`.
+    #[derive(Debug)]
+    struct Breakout {
+        level: f64,
+        broken: bool,
+    }
+
+    impl Indicator for Breakout {
+        fn name(&self) -> String {
+            "Breakout".to_string()
+        }
+
+        fn has_inputs(&self) -> bool {
+            self.broken
+        }
+
+        fn initialized(&self) -> bool {
+            self.broken
+        }
+
+        fn handle_bar(&mut self, bar: &Bar) {
+            self.broken |= bar.close.as_f64() > self.level;
+        }
+
+        fn reset(&mut self) {
+            self.broken = false;
+        }
+    }
+
+    /// The custom indicator's own arguments: a positive `level`.
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BreakoutArgs {
+        level: f64,
+    }
+
+    impl IndicatorArgs for BreakoutArgs {
+        type Indicator = Breakout;
+
+        fn build(self) -> anyhow::Result<Breakout> {
+            anyhow::ensure!(self.level > 0.0, "level must be positive");
+            Ok(Breakout {
+                level: self.level,
+                broken: false,
+            })
+        }
+    }
+
+    const FAST: Declared<EmaArgs> = Declared::new("fast");
+    const RANGE: Declared<AtrArgs> = Declared::new("range");
+    const BREAKOUT: Declared<BreakoutArgs> = Declared::new("breakout");
+
+    /// A strategy reading an EMA `fast`, an ATR `range` and a custom
+    /// `breakout`.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Trend {}
 
     impl Part for Trend {
         const INSTRUMENTS: usize = 1;
-        const INDICATORS: &'static [(&'static str, IndicatorKind)] = &[
-            ("fast", IndicatorKind::ExponentialMovingAverage),
-            ("range", IndicatorKind::AverageTrueRange),
-        ];
+        const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &RANGE, &BREAKOUT];
 
         fn default_base() -> StrategyConfig {
             StrategyConfig::default()
@@ -218,15 +303,16 @@ mod tests {
         warmup = "24h"
 
         [indicators.fast]
-        kind = "ExponentialMovingAverage"
         period = 5
         price_type = "BID"
 
         [indicators.range]
-        kind = "AverageTrueRange"
         period = 14
         ma_type = "SIMPLE"
         use_previous = false
+
+        [indicators.breakout]
+        level = 100.5
 
         [trade]
         instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
@@ -234,6 +320,14 @@ mod tests {
 
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Trend>> {
         StandardConfig::load(toml)
+    }
+
+    /// The TOML without the table `[indicators.<name>]`.
+    fn without(name: &str) -> String {
+        let header = format!("[indicators.{name}]");
+        let start = TOML.find(&header).unwrap();
+        let end = start + 1 + TOML[start + 1..].find('[').unwrap();
+        format!("{}{}", &TOML[..start], &TOML[end..])
     }
 
     /// The fields of the config errors refusing `toml`, in order.
@@ -256,12 +350,25 @@ mod tests {
             .collect()
     }
 
+    fn bar(close: &str) -> Bar {
+        Bar::new(
+            BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL"),
+            close.into(),
+            close.into(),
+            close.into(),
+            close.into(),
+            "1".into(),
+            0.into(),
+            0.into(),
+        )
+    }
+
     #[test]
-    fn the_strategy_receives_its_indicators_built_by_name_with_their_arguments() {
+    fn the_strategy_receives_nautilus_indicators_built_from_their_tables() {
         let config = load(TOML).unwrap();
-        let fast: ExponentialMovingAverage = config.indicators.built("fast").unwrap();
+        let fast = config.indicators.build(FAST);
         assert_eq!((fast.period, fast.price_type), (5, PriceType::Bid));
-        let range: AverageTrueRange = config.indicators.built("range").unwrap();
+        let range = config.indicators.build(RANGE);
         assert_eq!(
             (
                 range.period,
@@ -274,15 +381,26 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_indicator_is_received_built_from_its_table_and_registers_as_nautilus_ones() {
+        let config = load(TOML).unwrap();
+        let breakout = config.indicators.build(BREAKOUT);
+        assert_eq!(breakout.level, 100.5);
+        let registered = Rc::new(RefCell::new(breakout)) as SharedActorIndicator;
+        registered.handle_bar(&bar("100.5")).unwrap();
+        assert!(!registered.initialized().unwrap());
+        registered.handle_bar(&bar("101")).unwrap();
+        assert!(registered.initialized().unwrap());
+    }
+
+    #[test]
     fn arguments_left_out_take_nautilus_defaults() {
         let toml = TOML
             .replace("price_type = \"BID\"\n", "")
             .replace("ma_type = \"SIMPLE\"\n", "")
             .replace("use_previous = false\n", "");
         let config = load(&toml).unwrap();
-        let fast: ExponentialMovingAverage = config.indicators.built("fast").unwrap();
-        assert_eq!(fast.price_type, PriceType::Last);
-        let range: AverageTrueRange = config.indicators.built("range").unwrap();
+        assert_eq!(config.indicators.build(FAST).price_type, PriceType::Last);
+        let range = config.indicators.build(RANGE);
         assert_eq!(
             (range.ma_type, range.use_previous),
             (MovingAverageType::Wilder, true)
@@ -290,50 +408,39 @@ mod tests {
     }
 
     #[test]
-    fn an_indicator_of_another_type_is_not_received() {
+    fn the_strategy_reads_an_indicator_s_arguments() {
         let config = load(TOML).unwrap();
-        assert!(
-            config
-                .indicators
-                .built::<AverageTrueRange>("fast")
-                .is_none()
+        assert_eq!(
+            config.indicators.args(FAST).map(|args| args.period),
+            Some(5)
         );
     }
 
     #[test]
     fn a_missing_indicator_is_refused_naming_it() {
-        let start = TOML.find("[indicators.range]").unwrap();
-        let end = TOML.find("[trade]").unwrap();
-        let toml = format!("{}{}", &TOML[..start], &TOML[end..]);
-        assert_eq!(error_fields(&toml), ["indicators.range"]);
+        assert_eq!(error_fields(&without("breakout")), ["indicators.breakout"]);
     }
 
     #[test]
-    fn an_indicator_of_the_wrong_type_is_refused_naming_it() {
-        let toml = TOML
-            .replace(
-                "kind = \"ExponentialMovingAverage\"",
-                "kind = \"AverageTrueRange\"",
-            )
-            .replace("price_type = \"BID\"\n", "");
-        assert_eq!(error_fields(&toml), ["indicators.fast.kind"]);
-    }
-
-    #[test]
-    fn an_indicator_the_strategy_does_not_read_is_refused_naming_it() {
-        let toml = TOML.replace(
-            "[trade]",
-            "[indicators.slow]\nkind = \"ExponentialMovingAverage\"\nperiod = 30\n\n[trade]",
-        );
+    fn an_indicator_the_strategy_does_not_declare_is_refused_naming_it() {
+        let toml = TOML.replace("[trade]", "[indicators.slow]\nperiod = 30\n\n[trade]");
         assert_eq!(error_fields(&toml), ["indicators.slow"]);
     }
 
     #[test]
-    fn an_argument_new_checked_refuses_is_refused_naming_the_indicator() {
+    fn an_argument_nautilus_refuses_is_refused_naming_the_indicator() {
         let toml = TOML.replace("period = 5", "period = 0");
         let err = load(&toml).unwrap_err();
         assert!(err.to_string().contains("period"), "{err}");
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
+    }
+
+    #[test]
+    fn an_argument_a_custom_builder_refuses_is_refused_naming_the_indicator() {
+        let toml = TOML.replace("level = 100.5", "level = -1.0");
+        let err = load(&toml).unwrap_err();
+        assert!(err.to_string().contains("level must be positive"), "{err}");
+        assert_eq!(error_fields(&toml), ["indicators.breakout"]);
     }
 
     /// `AverageTrueRange::new_checked` is not public: its `new` panics.
@@ -344,11 +451,26 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_argument_is_refused_naming_it() {
+    fn an_unknown_argument_is_refused_naming_the_indicator_and_the_argument() {
         let toml = TOML.replace("period = 5", "period = 5\nperiods = 6");
         let err = load(&toml).unwrap_err();
-        assert!(err.downcast_ref::<ConfigError>().is_none(), "{err}");
         assert!(err.to_string().contains("periods"), "{err}");
+        assert_eq!(error_fields(&toml), ["indicators.fast"]);
+    }
+
+    #[test]
+    fn a_kind_is_an_unknown_argument() {
+        let toml = TOML.replace(
+            "period = 5",
+            "kind = \"ExponentialMovingAverage\"\nperiod = 5",
+        );
+        assert_eq!(error_fields(&toml), ["indicators.fast"]);
+    }
+
+    #[test]
+    fn an_argument_of_the_wrong_type_is_refused_naming_the_indicator() {
+        let toml = TOML.replace("level = 100.5", "level = \"high\"");
+        assert_eq!(error_fields(&toml), ["indicators.breakout"]);
     }
 
     #[test]
@@ -356,28 +478,23 @@ mod tests {
         let toml = TOML.replace("\"SIMPLE\"", "\"TRIANGULAR\"");
         let err = load(&toml).unwrap_err();
         assert!(err.to_string().contains("TRIANGULAR"), "{err}");
-    }
-
-    #[test]
-    fn an_unknown_kind_is_refused_naming_it() {
-        let toml = TOML.replace(
-            "kind = \"ExponentialMovingAverage\"",
-            "kind = \"KalmanFilter\"",
-        );
-        let err = load(&toml).unwrap_err();
-        assert!(err.to_string().contains("KalmanFilter"), "{err}");
+        assert_eq!(error_fields(&toml), ["indicators.range"]);
     }
 
     #[test]
     fn indicator_violations_are_reported_with_the_others_at_once() {
-        let start = TOML.find("[indicators.range]").unwrap();
-        let end = TOML.find("[trade]").unwrap();
-        let toml = format!("{}{}", &TOML[..start], &TOML[end..])
+        let toml = without("breakout")
             .replace("period = 5", "period = 0")
-            .replace("\"24h\"", "\"0s\"");
+            .replace("\"24h\"", "\"0s\"")
+            .replace("[trade]", "[indicators.slow]\nperiod = 30\n\n[trade]");
         assert_eq!(
             error_fields(&toml),
-            ["data.warmup", "indicators.fast", "indicators.range"]
+            [
+                "data.warmup",
+                "indicators.fast",
+                "indicators.breakout",
+                "indicators.slow"
+            ]
         );
     }
 }

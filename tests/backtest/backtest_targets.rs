@@ -28,11 +28,11 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
         targets::{
-            AtrConfig, Barrier, Distance, Distances, Exit, Outcome, Outcomes, TargetRow, Targets,
+            Barrier, DEFAULT_ATR, Distance, Distances, Exit, Outcome, Outcomes, TargetRow, Targets,
             TargetsConfig,
         },
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -658,7 +658,10 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_mins(45),
-            atr: Some(AtrConfig::over(2)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_mins(30))
         .build();
@@ -718,7 +721,10 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(1, 2)),
             limit: SignedDuration::from_mins(45),
-            atr: Some(AtrConfig::over(2)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_mins(30))
         .build();
@@ -743,7 +749,10 @@ fn btc_atr_targets() -> TargetsConfig {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_mins(45),
-            atr: Some(AtrConfig::over(2)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_mins(30))
         .build()
