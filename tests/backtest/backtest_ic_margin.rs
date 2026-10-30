@@ -19,7 +19,7 @@ fn an_ic_position_locks_ic_s_margin_and_an_order_beyond_it_is_denied() {
     let catalog = ic::catalog();
     let mut backtest = ic::backtest(&catalog);
     backtest.balance = Money::from("1000 USD");
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(ic::HOUR_BARS),
         vec![
             (OrderSide::Buy, Quantity::from(5)),

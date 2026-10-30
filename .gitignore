@@ -4,5 +4,6 @@ target/
 .env
 /catalog/*
 !/catalog/.gitkeep
+/staging/
 /docs/research/
 /src/strategy/gold_scalp/

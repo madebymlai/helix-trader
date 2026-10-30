@@ -28,8 +28,19 @@ Nautilus lacks.
 - **One simulator.** Nautilus runs both backtest and live, and the same
   strategy type runs in backtest, paper and live.
 - **One crate.** All code lives under `src/`.
-- **No lock.** A backtest produces no lock or provenance files for live to
-  consume.
+- **Model files, one shared store.** A strategy trading on a learned
+  model reads its models from files, never trains in the trading process:
+  `train` publishes each model in the model store (one directory per
+  strategy, fingerprint and training settings; one file per valid-from,
+  written then renamed, with its manifest and probes). Backtest and live
+  read the same store, each decision using the latest model valid then,
+  checked against the strategy's features and probes before use; a live
+  node retrains by starting `train` as a child process, at the last time
+  the catalog holds its data (live README, "Retraining"). A meta model
+  (meta-labeling) is a second level of the same store, under its
+  primary's directory, trained by the same `train` right after the
+  primary; the config types allow no third. Nothing else passes from a
+  backtest to live: no lock or provenance files.
 
 ## Version
 
@@ -77,7 +88,8 @@ Build a thin slice; each step works end to end before the next starts.
 
 ```
 Cargo.toml    crate manifest
-build.rs      compiles Spotware's cTrader protos for src/data/ic/ (needs protoc)
+build.rs      compiles Spotware's cTrader protos for src/data/ic/ (needs protoc),
+              names the pinned source of Nautilus' indicators for src/model/
 src/          crate code, unit tests included
 tests/        integration tests: full runs through Nautilus, two binaries
   backtest/   the backtests, a node per test, in parallel
@@ -87,4 +99,8 @@ docs/         project docs
 ```
 
 Unit tests live in a `#[cfg(test)] mod tests` at the bottom of the module
-they test. Tests check behaviour, not implementation.
+they test; a module whose code is hashed into a fingerprint
+(`include_str!`, the model's features, decisions and targets and a
+strategy's feature code) declares `#[cfg(test)] mod tests;` and keeps them
+in `<module>/tests.rs`, so editing a test changes no fingerprint. Tests
+check behaviour, not implementation.

@@ -7,6 +7,14 @@
 //! added through `get_engine_mut`, `run`, which returns the `BacktestResult`.
 //! The engine is kept after the run, so that the report reads the fills
 //! from its cache, then disposed.
+//!
+//! Custom data is the exception: `BacktestDataConfig` refuses it, so the
+//! run reads it from the catalog itself (`custom_data`) and adds it to the
+//! node's engine before `run`, through the engine's own `add_data`, which
+//! replays it in time order with the rest, routed to its subscribers by
+//! its data type. A streaming run clears the engine's data after each
+//! chunk, dropping what was added before, so a run with custom data loads
+//! all its data at once (no `chunk_size`).
 
 use std::{collections::BTreeSet, fmt::Debug, str::FromStr, sync::Arc};
 
@@ -19,12 +27,13 @@ use nautilus_backtest::{
 };
 use nautilus_common::{actor::DataActorNative, component::Component};
 use nautilus_core::UnixNanos;
+use nautilus_execution::engine::config::ExecutionEngineConfig;
 use nautilus_model::{
     data::{Data, NautilusDataType},
     enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
 };
-use nautilus_persistence::config::DataCatalogConfig;
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
@@ -41,6 +50,15 @@ const RUN_ID: &str = "backtest";
 /// snapshots, beyond 16 GB loaded at once.
 const CHUNK_SIZE: usize = 100_000;
 
+/// How often a dataset run's execution engine purges the closed orders and
+/// positions from the cache, and how long after closing one is purged, in
+/// minutes (live keeps a week: `live::node`). Its targets are read from
+/// events as they come, never from the cache afterwards. Kept, they slow
+/// the run more than in proportion to its days: 16 days of quotes every
+/// 5 s and targets every 15 minutes took 70 s against 25 s purged, 2 days
+/// 4.2 s against 3.1 s.
+const DATASET_PURGE_MINS: u32 = 1;
+
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
 /// says of it, each with the run's balance, leverage (Nautilus' default
@@ -50,17 +68,38 @@ const CHUNK_SIZE: usize = 100_000;
 /// replayed: the data engine builds the strategy's bars from them and
 /// keeps the books the strategy subscribes to, the venue settles the
 /// funding; see `Backtest::series` and `data_config`), each over its
-/// slice, and the catalog registered in the
-/// engine, read-only, so that it serves the strategy's warmup requests and
-/// takes no write-back, with a cache
-/// holding the warmup bars (`warmup::cache_config`) and a data engine
-/// building no bar for an hour without quotes
-/// (`warmup::data_engine_config`). The engine starts
-/// 1 ns before `start` (see `Backtest::engine_start`), which must be before
-/// `end`. The data is streamed `CHUNK_SIZE` points at a time. Build and
-/// run errors are raised, not only logged; the engine outlives the run
-/// (see `run`).
+/// slice of `[start, end]`, the window the engine runs, `start` before
+/// `end`. No catalog is registered in the engine: it serves no request,
+/// and the strategy warms up on the replay. The cache is Nautilus'
+/// default, the data engine builds no bar for an hour without quotes
+/// (`warmup::data_engine_config`). The data is streamed `CHUNK_SIZE`
+/// points at a time, unless the run replays custom data, which
+/// `BacktestDataConfig` refuses: then the custom series are left out
+/// (see `custom_data`) and the data is loaded at once. Build and run errors are raised, not only logged; the engine
+/// outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+    config(backtest, None)
+}
+
+/// The run config of a dataset run of `backtest`: that of `run_config`,
+/// its execution engine purging closed orders and positions
+/// `DATASET_PURGE_MINS` after they close, every `DATASET_PURGE_MINS`.
+pub(super) fn dataset_run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
+    let exec_engine = ExecutionEngineConfig::builder()
+        .purge_closed_orders_interval_mins(DATASET_PURGE_MINS)
+        .purge_closed_orders_buffer_mins(DATASET_PURGE_MINS)
+        .purge_closed_positions_interval_mins(DATASET_PURGE_MINS)
+        .purge_closed_positions_buffer_mins(DATASET_PURGE_MINS)
+        .build()?;
+    config(backtest, Some(exec_engine))
+}
+
+/// The run config of `backtest` (see `run_config`), with `exec_engine`, or
+/// Nautilus' default execution engine.
+fn config(
+    backtest: &Backtest,
+    exec_engine: Option<ExecutionEngineConfig>,
+) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
     let (start, end) = (backtest.start, backtest.end);
@@ -76,18 +115,15 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .into_iter()
         .map(|venue| venue_config(backtest, venue))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
-    let data = backtest
-        .series()?
+    let (custom, series): (Vec<SeriesSlice>, Vec<SeriesSlice>) =
+        backtest.series()?.into_iter().partition(is_custom);
+    let data = series
         .into_iter()
         .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let engine_config = BacktestEngineConfig::builder()
-        .cache(cache)
         .data_engine(warmup::data_engine_config())
-        .catalogs(vec![
-            DataCatalogConfig::new(catalog, None, None).with_read_only(true),
-        ])
+        .maybe_exec_engine(exec_engine)
         .logging(backtest.logging.clone())
         .build();
     Ok(BacktestRunConfig::builder()
@@ -95,9 +131,9 @@ pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfi
         .venues(venues)
         .data(data)
         .engine(engine_config)
-        .start(UnixNanos::from(backtest.engine_start()?))
-        .end(UnixNanos::from(backtest.end))
-        .chunk_size(CHUNK_SIZE)
+        .start(UnixNanos::from(start))
+        .end(UnixNanos::from(end))
+        .maybe_chunk_size(custom.is_empty().then_some(CHUNK_SIZE))
         .raise_exception(true)
         .dispose_on_completion(false)
         .build()?)
@@ -149,26 +185,63 @@ fn data_config(catalog: &str, series: SeriesSlice) -> anyhow::Result<BacktestDat
     Ok(config?)
 }
 
-/// Runs `config` with `strategy` on a new `BacktestNode` and returns its
+/// Whether `series` is of custom data, which `BacktestDataConfig` refuses.
+fn is_custom(series: &SeriesSlice) -> bool {
+    matches!(series.series.0, NautilusDataType::Custom { .. })
+}
+
+/// The custom data `backtest` replays (see `Backtest::series`), read from
+/// its catalog, each series over its slice, both ends included: the data
+/// the node cannot load (see `run_config`). Nautilus decodes each type by
+/// its name, so the strategy registers its custom types with Nautilus
+/// before (`nautilus_serialization::ensure_custom_data_registered`).
+///
+/// # Errors
+///
+/// Returns an error if the series cannot be worked out, or if the catalog
+/// cannot be read or a stored type is not registered, naming the series.
+pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
+    let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
+    let mut data = Vec::new();
+    for series in backtest.series()?.into_iter().filter(is_custom) {
+        let SeriesSlice {
+            series: (data_type, identifier),
+            slice,
+        } = series;
+        let NautilusDataType::Custom { type_name } = &data_type else {
+            unreachable!("a custom series");
+        };
+        let read = catalog
+            .query_custom_data_dynamic(
+                type_name,
+                Some(std::slice::from_ref(&identifier)),
+                Some(UnixNanos::from(slice.from)),
+                Some(UnixNanos::from(slice.to)),
+                None,
+                None,
+                true,
+            )
+            .with_context(|| format!("reading the {data_type} of {identifier}"))?;
+        data.extend(read);
+    }
+    Ok(data)
+}
+
+/// Runs `config` with `strategy` on a new `BacktestNode`, `custom` (see
+/// `custom_data`) added to its engine, and returns its
 /// one result, its return statistics with `MaxDrawdown` (registered with
 /// the portfolio before the run), with the costs of the fills in the
 /// engine's cache, each on the quotes the run replayed, if any, loaded
 /// again as the node loads them (the other series are not).
-pub(super) fn run<S>(config: BacktestRunConfig, strategy: S) -> anyhow::Result<Outcome>
+pub(super) fn run<S>(
+    config: BacktestRunConfig,
+    custom: Vec<Data>,
+    strategy: S,
+) -> anyhow::Result<Outcome>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let mut node = BacktestNode::new(vec![config])?;
-    node.build()?;
-    let engine = node
-        .get_engine_mut(RUN_ID)
-        .context("no engine for the run")?;
-    engine
-        .kernel_mut()
-        .portfolio
-        .borrow_mut()
-        .register_statistic(Arc::new(MaxDrawdown::new()));
-    engine.add_strategy(strategy)?;
+    let mut node = build(config, custom, strategy)?;
     let results = node.run()?;
     let [result] = <[BacktestResult; 1]>::try_from(results)
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;
@@ -189,6 +262,51 @@ where
     let outcome = Outcome::new(result, &engine.kernel().cache.borrow(), &quotes);
     node.dispose();
     outcome
+}
+
+/// Runs `config` with `strategy` on a new `BacktestNode`, `custom` added
+/// to its engine, as `run` does, for what the strategy does alone: a
+/// dataset run, whose cache is purged as it goes, has no result to read
+/// from it.
+pub(super) fn run_dataset<S>(
+    config: BacktestRunConfig,
+    custom: Vec<Data>,
+    strategy: S,
+) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+{
+    let mut node = build(config, custom, strategy)?;
+    node.run()?;
+    node.dispose();
+    Ok(())
+}
+
+/// A built `BacktestNode` of `config`, `MaxDrawdown` registered with the
+/// portfolio, `strategy` added and `custom` added to its engine.
+fn build<S>(
+    config: BacktestRunConfig,
+    custom: Vec<Data>,
+    strategy: S,
+) -> anyhow::Result<BacktestNode>
+where
+    S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+{
+    let mut node = BacktestNode::new(vec![config])?;
+    node.build()?;
+    let engine = node
+        .get_engine_mut(RUN_ID)
+        .context("no engine for the run")?;
+    engine
+        .kernel_mut()
+        .portfolio
+        .borrow_mut()
+        .register_statistic(Arc::new(MaxDrawdown::new()));
+    engine.add_strategy(strategy)?;
+    if !custom.is_empty() {
+        engine.add_data(custom, None, false, true)?;
+    }
+    Ok(node)
 }
 
 #[cfg(test)]
@@ -214,7 +332,6 @@ mod tests {
                 BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
             ],
             ticks: vec![],
-            warmup: jiff::SignedDuration::from_hours(720),
             fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),
             leverage: Decimal::ONE,
@@ -364,14 +481,16 @@ mod tests {
         let absolute = std::env::current_dir().unwrap().join("catalog");
         let absolute = absolute.to_str().unwrap();
         assert_eq!(config.data()[0].catalog_path(), absolute);
-        assert_eq!(config.engine().catalogs[0].path(), absolute);
     }
 
+    /// Its data comes from the data configs alone: no catalog serves a
+    /// request, and the cache keeps Nautilus' default.
     #[test]
-    fn the_catalog_is_registered_read_only() {
+    fn no_catalog_is_registered_to_serve_requests() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
-        assert!(config.engine().catalogs[0].read_only());
+        assert!(config.engine().catalogs.is_empty());
+        assert_eq!(config.engine().cache, None);
     }
 
     #[test]
@@ -382,6 +501,32 @@ mod tests {
     }
 
     #[test]
+    fn a_trading_run_keeps_its_closed_orders_and_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        assert!(config.engine().exec_engine.is_none());
+    }
+
+    /// Every minute, those closed a minute or more before.
+    #[test]
+    fn a_dataset_run_purges_its_closed_orders_and_positions_every_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dataset_run_config(&backtest(dir.path())).unwrap();
+        let exec = config.engine().exec_engine.clone().unwrap();
+        let purge = [
+            exec.purge_closed_orders_interval_mins,
+            exec.purge_closed_orders_buffer_mins,
+            exec.purge_closed_positions_interval_mins,
+            exec.purge_closed_positions_buffer_mins,
+        ];
+        assert_eq!(purge, [Some(1); 4]);
+        // The rest of the run is a trading run's.
+        let trading = run_config(&backtest(dir.path())).unwrap();
+        assert_eq!(config.venues().len(), trading.venues().len());
+        assert_eq!(config.data().len(), trading.data().len());
+    }
+
+    #[test]
     fn the_data_is_streamed_in_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -389,12 +534,36 @@ mod tests {
     }
 
     #[test]
-    fn runs_from_one_nanosecond_before_the_start_to_the_end_and_raises_errors() {
+    fn a_run_of_custom_data_loads_the_other_series_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            ticks: vec![crate::strategy::TickSeries {
+                data: NautilusDataType::Custom {
+                    type_name: "Imbalance".to_string(),
+                },
+                instrument_id: InstrumentId::from("SXR8.IBIS"),
+            }],
+            ..backtest(dir.path())
+        };
+        let config = run_config(&backtest).unwrap();
+        assert_eq!(config.chunk_size(), None);
+        assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
+    }
+
+    #[test]
+    fn runs_and_reads_each_series_from_the_start_to_the_end_and_raises_errors() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let ns = |ts: &str| UnixNanos::from(ts.parse::<Timestamp>().unwrap());
-        assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
-        assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
+        let (start, end) = (ns("2026-07-01T00:00:00Z"), ns("2026-10-01T00:00:00Z"));
+        assert_eq!(config.start(), Some(start));
+        assert_eq!(config.end(), Some(end));
+        for data in config.data() {
+            assert_eq!(
+                (data.start_time(), data.end_time()),
+                (Some(start), Some(end))
+            );
+        }
         assert!(config.raise_exception());
         assert!(!config.dispose_on_completion());
     }

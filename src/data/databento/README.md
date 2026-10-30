@@ -14,13 +14,16 @@ before the node starts, and the period each series is asked in.
 |---|---|---|---|
 | `Instrument` | `request_instrument` | `definition` | the instrument, the latest definition of the window, once per id |
 | `Depth` | `request_book_depth`, depth 10 | `mbp-10` | `OrderBookDepth` (10 levels a side), `data/order_book_depths/{id}/` |
+| `Deltas` | `request_book_deltas` | `mbo` | `OrderBookDelta`, `data/order_book_deltas/{id}/` |
 | `Trades` | `request_trades` | `trades` | `TradeTick`, `data/trades/{id}/` |
 | `Quotes` | `request_quotes` | `mbp-1` | `QuoteTick`, `data/quotes/{id}/` |
 
 `fill-catalog` picks this source for every `….GLBX` instrument of the
 strategy config (`DatabentoHistory::serves`) and fills the series the
-config declares for it, no other: the book (`depth`) and trades of a tick
-series, or the quotes or trades its bars are built from. The API key is
+config declares for it, no other: the book (`order_book_depths`,
+`order_book_deltas`) and trades of a tick series, or the quotes or trades
+its bars are built from. Custom data of a GLBX instrument is refused:
+Nautilus' client has no history of it to ask. The API key is
 `DATABENTO_API_KEY`, from the environment or `.env`; it is never logged.
 
 ## Interface
@@ -110,7 +113,7 @@ fill"), so the client fetches no definitions of its own to learn it
 
 Without network:
 
-- `serves`: `GLBX` ids only; `period`: a day of MBP-10, trades and
+- `serves`: `GLBX` ids only; `period`: a day of MBP-10, MBO, trades and
   quotes; the schema each series is quoted in; a quote's range
   ending 1 ns after its request;
 - an `end` past the dataset's end refused; a request of another venue

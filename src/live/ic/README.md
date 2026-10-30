@@ -536,7 +536,12 @@ limits") away from IC, however long the history takes.
   prefilled to 10 min before now (2026-10-26, 22:33 UTC, 157 s): 1,056
   warmup quotes, 657 of them the catalog's, 29 warmup bars, live quotes
   after; IC's answer written back, the catalog's quotes then ending at the
-  request's end. Skipped unless `NAUTILUS_IC_RUN=1` is set in
+  request's end. With the node streaming into the catalog (2026-10-29,
+  12:42-12:45 UTC, 157 s): 4,045 warmup quotes, 2,545 of them the
+  catalog's, IC's 1,500 written back as answered; 328 live quotes, all in
+  the catalog after the stop, in order, followed by 11 more the node
+  received after the strategy stopped (339 streamed); no promotion
+  warning. Skipped unless `NAUTILUS_IC_RUN=1` is set in
   the shell:
 
   ```sh

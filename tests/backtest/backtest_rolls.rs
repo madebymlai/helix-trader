@@ -5,23 +5,29 @@
 //! subscriptions from one contract to the next at the roll and tells it.
 //! One node per thread, so one run per test.
 
-use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
+use std::{cell::RefCell, num::NonZeroUsize, path::Path, rc::Rc, sync::Arc};
 
-use crate::common::rolls::{self, NANOSECOND, POST, PRE, ROOT, roll, tuesday, wednesday};
+use crate::common::{
+    glbx::{self, Imbalance},
+    rolls::{self, NANOSECOND, POST, PRE, ROOT, roll, tuesday, wednesday},
+};
 use helix_trader::{
     backtest::{Backtest, commission_rate, venue_oms_type},
     rolls::{Roller, Transition},
-    strategy::{TickData, TickSeries},
+    strategy::TickSeries,
 };
-use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarType, OrderBookDepth, TradeTick},
-    enums::BookType,
+    data::{
+        BarType, BookOrder, CustomData, DataType, NautilusDataType, OrderBookDelta,
+        OrderBookDeltas, OrderBookDepth, TradeTick,
+    },
+    enums::{BookAction, BookType, OrderSide, RecordFlag},
     identifiers::{InstrumentId, StrategyId},
-    types::Money,
+    types::{Money, Price, Quantity},
 };
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
@@ -34,7 +40,7 @@ enum Got {
     /// The times of the clock's alerts once started.
     Alerts(Vec<UnixNanos>),
     /// A tick: its kind, its instrument, its time.
-    Tick(TickData, InstrumentId, UnixNanos),
+    Tick(NautilusDataType, InstrumentId, UnixNanos),
     /// A roll the roller returned, and the clock's time then.
     Roll(Transition, UnixNanos),
 }
@@ -105,7 +111,7 @@ impl DataActor for RollProbe {
 
     fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
         self.record(Got::Tick(
-            TickData::Trades,
+            NautilusDataType::TradeTick,
             trade.instrument_id,
             trade.ts_init,
         ));
@@ -114,9 +120,28 @@ impl DataActor for RollProbe {
 
     fn on_book_depth(&mut self, depth: &OrderBookDepth) -> anyhow::Result<()> {
         self.record(Got::Tick(
-            TickData::Depth,
+            NautilusDataType::OrderBookDepth,
             depth.instrument_id,
             depth.ts_init,
+        ));
+        Ok(())
+    }
+
+    fn on_book_deltas(&mut self, deltas: &OrderBookDeltas) -> anyhow::Result<()> {
+        self.record(Got::Tick(
+            NautilusDataType::OrderBookDelta,
+            deltas.instrument_id,
+            deltas.ts_init,
+        ));
+        Ok(())
+    }
+
+    fn on_data(&mut self, data: &CustomData) -> anyhow::Result<()> {
+        let id = data.data_type.identifier().expect("an instrument id");
+        self.record(Got::Tick(
+            imbalances(),
+            InstrumentId::from(id),
+            data.data.ts_init(),
         ));
         Ok(())
     }
@@ -124,12 +149,15 @@ impl DataActor for RollProbe {
 
 /// The trades and book depth of `instrument_id`.
 fn ticks(instrument_id: &str) -> Vec<TickSeries> {
-    [TickData::Trades, TickData::Depth]
-        .map(|data| TickSeries {
-            data,
-            instrument_id: InstrumentId::from(instrument_id),
-        })
-        .to_vec()
+    [
+        NautilusDataType::TradeTick,
+        NautilusDataType::OrderBookDepth,
+    ]
+    .map(|data| TickSeries {
+        data,
+        instrument_id: InstrumentId::from(instrument_id),
+    })
+    .to_vec()
 }
 
 /// A backtest over `[23:00 Tuesday, 01:00 Wednesday]` on `catalog`,
@@ -141,7 +169,6 @@ fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
         ticks,
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,
@@ -167,7 +194,7 @@ fn run(backtest: &Backtest, subscribe: Subscribe) -> Vec<Got> {
     got.take()
 }
 
-fn tick(data: TickData, instrument_id: &str, time: &str) -> Got {
+fn tick(data: NautilusDataType, instrument_id: &str, time: &str) -> Got {
     let time = if let Some(time) = time.strip_prefix("thu ") {
         tuesday(time)
     } else {
@@ -195,12 +222,12 @@ fn a_rolled_root_replays_each_contract_only_within_its_slice() {
         got,
         [
             Got::Alerts(vec![]),
-            tick(TickData::Trades, PRE, "thu 23:30:00"),
-            tick(TickData::Depth, PRE, "thu 23:45:00"),
-            tick(TickData::Trades, PRE, "thu 23:59:59.999999999"),
-            tick(TickData::Trades, POST, "00:00:00"),
-            tick(TickData::Depth, POST, "00:20:00"),
-            tick(TickData::Trades, POST, "00:45:00"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:30:00"),
+            tick(NautilusDataType::OrderBookDepth, PRE, "thu 23:45:00"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:59:59.999999999"),
+            tick(NautilusDataType::TradeTick, POST, "00:00:00"),
+            tick(NautilusDataType::OrderBookDepth, POST, "00:20:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:45:00"),
         ]
     );
 }
@@ -218,9 +245,9 @@ fn the_roller_switches_the_subscriptions_at_the_roll_and_tells_the_strategy() {
         got,
         [
             Got::Alerts(vec![before_roll()]),
-            tick(TickData::Trades, PRE, "thu 23:30:00"),
-            tick(TickData::Depth, PRE, "thu 23:45:00"),
-            tick(TickData::Trades, PRE, "thu 23:59:59.999999999"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:30:00"),
+            tick(NautilusDataType::OrderBookDepth, PRE, "thu 23:45:00"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:59:59.999999999"),
             Got::Roll(
                 Transition {
                     time: roll(),
@@ -229,9 +256,9 @@ fn the_roller_switches_the_subscriptions_at_the_roll_and_tells_the_strategy() {
                 },
                 before_roll(),
             ),
-            tick(TickData::Trades, POST, "00:00:00"),
-            tick(TickData::Depth, POST, "00:20:00"),
-            tick(TickData::Trades, POST, "00:45:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:00:00"),
+            tick(NautilusDataType::OrderBookDepth, POST, "00:20:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:45:00"),
         ]
     );
 }
@@ -251,9 +278,9 @@ fn the_roller_alone_keeps_the_strategy_on_the_contract_standing_for_the_root() {
         got,
         [
             Got::Alerts(vec![before_roll()]),
-            tick(TickData::Trades, PRE, "thu 23:30:00"),
-            tick(TickData::Depth, PRE, "thu 23:45:00"),
-            tick(TickData::Trades, PRE, "thu 23:59:59.999999999"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:30:00"),
+            tick(NautilusDataType::OrderBookDepth, PRE, "thu 23:45:00"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:59:59.999999999"),
             Got::Roll(
                 Transition {
                     time: roll(),
@@ -262,9 +289,9 @@ fn the_roller_alone_keeps_the_strategy_on_the_contract_standing_for_the_root() {
                 },
                 before_roll(),
             ),
-            tick(TickData::Trades, POST, "00:00:00"),
-            tick(TickData::Depth, POST, "00:20:00"),
-            tick(TickData::Trades, POST, "00:45:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:00:00"),
+            tick(NautilusDataType::OrderBookDepth, POST, "00:20:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:45:00"),
         ]
     );
 }
@@ -282,11 +309,11 @@ fn the_roller_of_a_plain_instrument_subscribes_once_and_sets_no_alert() {
         got,
         [
             Got::Alerts(vec![]),
-            tick(TickData::Trades, POST, "thu 23:15:00"),
-            tick(TickData::Depth, POST, "thu 23:50:00"),
-            tick(TickData::Trades, POST, "00:00:00"),
-            tick(TickData::Depth, POST, "00:20:00"),
-            tick(TickData::Trades, POST, "00:45:00"),
+            tick(NautilusDataType::TradeTick, POST, "thu 23:15:00"),
+            tick(NautilusDataType::OrderBookDepth, POST, "thu 23:50:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:00:00"),
+            tick(NautilusDataType::OrderBookDepth, POST, "00:20:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:45:00"),
         ]
     );
 }
@@ -305,12 +332,12 @@ fn ticks_of(got: &[Got], instrument_id: &str) -> Vec<Got> {
 /// the roll and the ticks after it included.
 fn pre_ticks_of_the_run() -> Vec<Got> {
     vec![
-        tick(TickData::Trades, PRE, "thu 23:30:00"),
-        tick(TickData::Depth, PRE, "thu 23:45:00"),
-        tick(TickData::Trades, PRE, "thu 23:59:59.999999999"),
-        tick(TickData::Trades, PRE, "00:00:00"),
-        tick(TickData::Depth, PRE, "00:10:00"),
-        tick(TickData::Trades, PRE, "00:30:00"),
+        tick(NautilusDataType::TradeTick, PRE, "thu 23:30:00"),
+        tick(NautilusDataType::OrderBookDepth, PRE, "thu 23:45:00"),
+        tick(NautilusDataType::TradeTick, PRE, "thu 23:59:59.999999999"),
+        tick(NautilusDataType::TradeTick, PRE, "00:00:00"),
+        tick(NautilusDataType::OrderBookDepth, PRE, "00:10:00"),
+        tick(NautilusDataType::TradeTick, PRE, "00:30:00"),
     ]
 }
 
@@ -360,22 +387,110 @@ fn bars_on_a_root_built_from_quotes_are_refused_naming_the_bar_type() {
     assert!(err.contains(bars), "{err}");
 }
 
-#[test]
-fn a_contract_missing_part_of_its_slice_is_refused_naming_the_slice() {
-    let catalog = rolls::catalog_storing(false);
+fn imbalances() -> NautilusDataType {
+    NautilusDataType::Custom {
+        type_name: glbx::IMBALANCE.to_string(),
+    }
+}
 
-    let err = backtest(&catalog, ticks(ROOT))
-        .run(RollProbe {
-            core: StrategyCore::new(StrategyConfig::default()),
-            subscribe: Subscribe::Contracts,
-            got: Rc::default(),
+/// The book deltas and imbalances of `instrument_id`.
+fn deltas_and_imbalances(instrument_id: &str) -> Vec<TickSeries> {
+    [NautilusDataType::OrderBookDelta, imbalances()]
+        .map(|data| TickSeries {
+            data,
+            instrument_id: InstrumentId::from(instrument_id),
         })
-        .unwrap_err()
-        .to_string();
+        .to_vec()
+}
 
-    assert!(err.contains(&format!("trades of {POST}")), "{err}");
-    assert!(
-        err.contains("[2026-07-29T00:00:00Z, 2026-07-29T01:00:00Z] is missing"),
-        "{err}"
+/// Writes a delta event of `instrument_id` at each of `deltas` and an
+/// imbalance at each of `imbalances` into the catalog in `dir`, stored over
+/// 22:00 Tuesday to 02:00 Wednesday.
+fn store_deltas_and_imbalances(
+    dir: &Path,
+    instrument_id: &str,
+    deltas: &[&str],
+    imbalances: &[&str],
+) {
+    nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    let (from, to) = (
+        Some(tuesday("22:00:00").into()),
+        Some(wednesday("02:00:00").into()),
+    );
+    let id = InstrumentId::from(instrument_id);
+    let at = |time: &&str| -> UnixNanos {
+        let Got::Tick(_, _, at) = tick(NautilusDataType::OrderBookDelta, instrument_id, time)
+        else {
+            unreachable!()
+        };
+        at
+    };
+    let deltas: Vec<OrderBookDelta> = deltas
+        .iter()
+        .map(|time| {
+            let order =
+                BookOrder::new(OrderSide::Buy, Price::from("4000.00"), Quantity::from(1), 1);
+            let flags = RecordFlag::F_LAST as u8;
+            OrderBookDelta::new(id, BookAction::Add, order, flags, 1, at(time), at(time))
+        })
+        .collect();
+    catalog.write_to_parquet(&deltas, from, to, None).unwrap();
+    let data_type = DataType::new(glbx::IMBALANCE, None, Some(instrument_id.to_string()));
+    let imbalances: Vec<CustomData> = imbalances
+        .iter()
+        .map(|time| {
+            let imbalance = Imbalance::new(0.5, at(time), at(time));
+            CustomData::new(Arc::new(imbalance), data_type.clone())
+        })
+        .collect();
+    catalog
+        .write_custom_data_batch(imbalances, from, to, None)
+        .unwrap();
+}
+
+#[test]
+fn the_roller_rolls_book_deltas_and_custom_data_keyed_by_the_contract() {
+    let catalog = rolls::catalog();
+    store_deltas_and_imbalances(
+        catalog.path(),
+        PRE,
+        &["thu 23:40:00", "00:05:00"],
+        &["thu 23:42:00", "00:07:00"],
+    );
+    store_deltas_and_imbalances(
+        catalog.path(),
+        POST,
+        &["thu 23:35:00", "00:15:00"],
+        &["thu 23:37:00", "00:17:00"],
+    );
+    // Both contracts declared as themselves: each replayed over the whole
+    // run, so what reaches the probe is what the roller subscribes to.
+    let declared = [deltas_and_imbalances(PRE), deltas_and_imbalances(POST)].concat();
+    let backtest = backtest(&catalog, declared);
+
+    let got = run(
+        &backtest,
+        Subscribe::Roller(Roller::new(deltas_and_imbalances(ROOT))),
+    );
+
+    // August's before the roll, December's after.
+    assert_eq!(
+        got,
+        [
+            Got::Alerts(vec![before_roll()]),
+            tick(NautilusDataType::OrderBookDelta, PRE, "thu 23:40:00"),
+            tick(imbalances(), PRE, "thu 23:42:00"),
+            Got::Roll(
+                Transition {
+                    time: roll(),
+                    pre: InstrumentId::from(PRE),
+                    post: InstrumentId::from(POST),
+                },
+                before_roll(),
+            ),
+            tick(NautilusDataType::OrderBookDelta, POST, "00:15:00"),
+            tick(imbalances(), POST, "00:17:00"),
+        ]
     );
 }

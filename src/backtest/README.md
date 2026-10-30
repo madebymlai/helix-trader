@@ -14,25 +14,25 @@ sources; *unverified* marks what the sources did not confirm.
 backtest/
   mod.rs      Backtest: the one public type
   node.rs     the BacktestRunConfig and the BacktestNode run
-  coverage.rs the check that the catalog can serve the run
   costs.rs    fee and fill models of the simulated venue
   report.rs   Outcome, the result and the costs; report(&Outcome) -> String
 ```
 
 `nautilus-backtest` needs its `streaming` feature, which enables the `node`
-module and catalog registration.
+module.
 
 ## The command
 
 ```
 helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
   [--catalog catalog] (--commission "3 EUR" | --commission-rate 0.0005) \
-  --balance "10000 EUR" [--leverage 10]
+  --balance "10000 EUR" [--leverage 10] [--models models] \
+  [--dataset-balance "10000000 EUR"]
 ```
 
 `main` loads and validates the strategy's config, builds the `Backtest`
-from its data requirements (instruments and warmup), runs the strategy and
-prints `report`, in this order:
+from its data requirements (its bar types and ticks: a backtest requests
+no warmup), runs the strategy and prints `report`, in this order:
 
 1. `Orders` and `Positions`;
 2. the PnL statistics, one section per currency;
@@ -52,9 +52,18 @@ or negative one (`--commission="-3 EUR"`, `--commission-rate=-0.0005`)
 fails there. `--leverage` is a `Decimal`, 1 (no leverage) if not given;
 Nautilus refuses one that is not positive before the run.
 
+`--models` (default `models`) is the model store a strategy trading on a
+model reads, at each decision the latest model valid then (strategy
+README, "Features and decisions", "Model handle"); `train` publishes
+them. The EMA reads none. A strategy trading on a model is retrained on
+its schedule before the run, and its scores follow the report (see
+"Retraining on the schedule"); `--dataset-balance`, required then, is
+the balance of the dataset runs that build its targets, large enough
+that none is denied.
+
 On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
 1-HOUR-MID internal bars, 10 shares, stop loss and take profit 100 bps,
-held an hour, warmup 3h, Xetra's session, 3 EUR commission) it prints
+held an hour, Xetra's session, run from 10:00, 3 EUR commission) it prints
 `Orders: 4` (the entry, its two legs, the close), `PnL (total):
 33.000000` (39.00 without commission, less 2 filled orders × 3 EUR) and a
 final balance of `10033.00 EUR` (`backtest_commission_per_order.rs`).
@@ -75,11 +84,23 @@ impl Backtest {
 `Outcome` is Nautilus' `BacktestResult` (public `result`) plus the costs of
 the fills, private: `report` prints them (see Costs in the report).
 
-`run` fails before building the node when there are no instruments, the
-warmup is negative, `start` is not before
-`end`, the leverage is not positive (Nautilus' check), the cache cannot
-hold the warmup (`strategy/README.md`, "Warmup and training"), or the
-catalog cannot serve the run (see Coverage check).
+`run_dataset` runs a strategy the same way for what it does alone, as a
+dataset run builds the training table from its targets (`model::targets`,
+strategy README, "Features and decisions"): its execution engine purges
+closed orders and positions (see Engine config), so it returns no
+`Outcome`, whose statistics and costs read them from the cache.
+
+```rust
+impl Backtest {
+    pub fn run_dataset<S>(&self, strategy: S) -> anyhow::Result<()>
+    where S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static;
+}
+```
+
+`run` fails before building the node when there are no instruments,
+`start` is not before `end`, or the leverage is not positive (Nautilus'
+check). It checks nothing of the catalog: Nautilus' node fails or warns
+as it does (see No check before the run).
 
 A relative catalog path is made absolute: with a relative one, the node's
 DataFusion reader finds no object store for `file://catalog/...`.
@@ -91,9 +112,10 @@ composite bar type (`...-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` replays
 quotes of their instruments. The data engine builds the strategy's
 internal bars from them, and orders fill on them (see Fills). It replays
 the tick series the strategy declares (`Backtest::ticks`, the requirements'
-`ticks`: quotes, trades or book depth of an instrument), one
-`BacktestDataConfig` each, as declared and with no bar types needed
-(`backtest_ticks.rs`). It also replays the book depth of each instrument of
+`ticks`: quotes, trades, book depth, book deltas or custom data of an
+instrument), one `BacktestDataConfig` each but custom data (see Custom
+data), as declared and with no bar types needed (`backtest_ticks.rs`,
+`backtest_book_deltas_and_custom_data.rs`). It also replays the book depth of each instrument of
 the bar types whose catalog stores one (see Book data) and the funding of
 each instrument whose catalog stores funding (`Backtest::series`; see OKX
 on candles), and nothing else: an instrument of the ticks alone has no
@@ -103,7 +125,7 @@ Venue).
 
 A declared instrument may be a futures root (`GC.GLBX`, `rolls/README.md`).
 Every series replayed goes through its instrument's transition table over
-`[start − 1 ns − warmup, end]` (`DataRequirements::slices`): a root's
+`[start, end]` (`DataRequirements::slices`): a root's
 series is replayed as each contract's series over its slice, one
 `BacktestDataConfig` per contract and slice, bounded by the slice's
 `start_time` and `end_time` (both included; the node clamps them to the
@@ -118,7 +140,7 @@ its slices from both tables merged, so its data is replayed once
 Bars on a root are Nautilus' continuous bars. The bar sources replayed are
 the contracts' trades, each over its slice, as for ticks, and the strategy
 reads its bars through `Backtest::continuous_bars(mode)`: the root's
-transitions over `[start − 1 ns − warmup, end]`, priced from the catalog,
+transitions over `[start, end]`, priced from the catalog,
 in the adjustment mode `mode` (`rolls/README.md`, "Continuous bars"). It
 fails before the run if a roll has no trade to price it
 (`backtest_continuous_bars.rs`). The run refuses bars on a root not built
@@ -175,10 +197,10 @@ let run_config = BacktestRunConfig::builder()
     .id(RUN_ID.to_string())       // read back by get_engine_mut
     .venues(venue_configs)        // one simulated venue per venue of the instruments
     .data(data_configs)           // what to load from the catalog
-    .engine(engine_config)        // logging, warmup catalog, cache and data engine from strategy::warmup
-    .start(engine_start)          // start − 1 ns (see The engine start)
+    .engine(engine_config)        // logging, and the data engine from strategy::warmup
+    .start(start)                 // the window replayed (see The window)
     .end(end)
-    .chunk_size(CHUNK_SIZE)       // 100,000: streamed, not loaded at once
+    .maybe_chunk_size(chunk_size) // 100,000: streamed, not loaded at once; none with custom data
     .raise_exception(true)
     .dispose_on_completion(false) // the cache outlives run
     .build()?;
@@ -190,35 +212,31 @@ time instead of loading them all first (Nautilus' streaming mode,
 `run_streaming` in `backtest/src/node.rs`). A day of CME gold's book is
 7.4 million snapshots; loaded at once it went past 16 GB and the run was
 killed. The order of the replay is the same: the suite's results did not
-change. With the default `raise_exception = false`, a build or run error is
+change. A run replaying custom data loads all its data at once instead
+(see Custom data). With the default `raise_exception = false`, a build or run error is
 only logged, the run is skipped and `node.run()` returns `Ok` with no
 result; we set it `true` so the error is returned.
 
-**The engine start.** The engine starts 1 ns before `start`
-(`Backtest::engine_start`). It skips data before its start, and in a
-catalog of quotes (the test fixtures; `fill-catalog` stored IB's that way
-until 2026-10-26) a minute's quote is stamped 1 ns before the minute's
-close: a run starting exactly on
-a bar's close would otherwise skip the quote closing that bar and reject an
-order sent on the bar (`No market`). The strategy's clock, and so its
-warmup request, starts there too: the warmup covers `[start − 1 ns −
-warmup, start − 1 ns]` and the coverage check follows. The quote stamped
-`start − 1 ns` is in both the warmup and the replay: the bar spanning them
-counts it twice in its volume, which nothing reads; its prices are right.
+**The window.** The engine runs `[start, end]`, and every series is read
+over its slice of that window (`BacktestDataConfig::start_time` and
+`end_time`, both included): no data before `start` is replayed, and the
+backtest has no warmup. The strategy's indicators warm on the replayed
+data, and the strategy decides once they are initialized (strategy
+README, "Warmup and training"); to trade from 10:00, start the run
+earlier. In a catalog of quotes (the test fixtures; `fill-catalog`
+stored IB's that way until 2026-10-26) a minute's quote is stamped 1 ns
+before the minute's close: a run starting exactly on a bar's close
+replays none of that bar, and its first bar, closing an hour later,
+holds its whole hour (`backtest_bars_on_close.rs`). A run starting off a
+bar's close gets a first bar of the quotes from `start` on, partial, as
+Nautilus builds it by default (`backtest_bars.rs`).
 
 **Why not Nautilus' build delay.** Nautilus documents
 `DataEngineConfig::time_bars_build_delay` for data stamped on a bar
 boundary (Concepts › Backtesting › Bar execution, "Internal bar
-aggregation timing"). A probe on 0.66.0 with quotes stamped at the close
-and a 1 µs delay passed for a run starting off the hour but failed for one
-starting on a bar close: the warmup lost its first full bar
-(`skip_first_non_full_bar` drops it once the delay shifts the first
-close), and when the warmup request's aggregator moved to the engine clock
-it restarted its timer at `start`, merging the bar closing at `start` into
-the next one, so the order decided on it went an hour late. The delay also
-stamps every bar 1 µs after its close, which the session would read as
-past the close, and loses the bar closing at `end`. Stamping the quote
-1 ns early has none of these effects.
+aggregation timing"). The delay stamps every bar 1 µs after its close,
+which the session would read as past the close, and loses the bar
+closing at `end`. Stamping the quote 1 ns early has neither effect.
 
 ### Venue
 
@@ -327,7 +345,7 @@ let bars = BacktestDataConfig::builder()            // bars: by bar type
   (`BacktestDataConfig::query_identifiers`).
 - The node queries the catalog over the engine's window only (intersected
   with `start_time`, `end_time` if set): quotes before it are not loaded.
-  Indicators warm up from the strategy's request, not the replay.
+  Indicators warm up on the replay (see Warmup).
 - The node loads the catalog's instruments in `build`, so fill-catalog
   must have written them.
 
@@ -345,34 +363,81 @@ let book = BacktestDataConfig::builder()            // book depth: by instrument
     .build()?;
 ```
 
-A strategy declaring the book as a tick series (`depth`) gets it as
+A strategy declaring the book as a tick series (`order_book_depths`) gets it as
 declared; otherwise no config field asks for it: the strategy lists the
 instrument among its `instrument_ids`, and the catalog decides. Nautilus replays the snapshots
 with the other data, in time order: to the instrument's venue, and to the
 data engine, which publishes them to a strategy subscribed with
 `subscribe_book_depth` (`on_book_depth`) and, the subscription managed,
 keeps the cache's book (`cache.order_book`) as the last snapshot
-(`backtest_book_depth.rs`). The coverage check asks the snapshots over the
-window, as every series replayed.
+(`backtest_book_depth.rs`).
 
 An instrument read for its book alone has its bars left out: when none of
 the series its bars are built from is stored but its book is (CME gold's
-MID bars, with no quotes of gold), no bar type of it is replayed or
-checked. Its warmup request, which the catalog cannot answer, goes to
-the venue's backtest data client, which refuses it ("does not support
-RequestQuotes"): the warmup's request group ends failed, which a strategy
-calling `warmup::finished` logs as an error ("the warmup is incomplete"),
-and the run goes on. An instrument with neither is refused by the
-coverage check, as before.
+MID bars, with no quotes of gold), no bar type of it is replayed. An
+instrument with neither has nothing replayed (see No check before the
+run).
+
+### Book deltas
+
+A strategy declaring book deltas (`order_book_deltas`, Databento's MBO)
+gets them from one `BacktestDataConfig` of `OrderBookDelta` by
+instrument. Nautilus' node regroups the catalog's flat deltas into an
+`OrderBookDeltas` per event, closed by the delta flagged `F_LAST`
+(`batch_deltas`, its default), replays each at its closing delta to the
+venue and the data engine, which publishes it to a strategy subscribed
+with `subscribe_book_deltas` (`on_book_deltas`). Deltas ending without an
+`F_LAST` fail the run (Nautilus: "Order book deltas end without an
+`F_LAST` delta").
+
+### Custom data
+
+A strategy declaring custom data (`Custom:<type name>` of an instrument,
+`strategy/README.md`) gets it replayed in time order with the other
+series, to `on_data` of a subscription to
+`DataType::new(type_name, None, Some(instrument_id))`. Nautilus' node
+cannot load it: `BacktestDataConfig` refuses `NautilusDataType::Custom`
+("is not supported by BacktestDataConfig", `BacktestDataConfig::validate`
+in `backtest/src/config.rs`; Nautilus' develop branch too, 2026-10-29). Its
+engine replays it, though: `BacktestEngine::add_data` takes custom data
+(no instrument needed), merges it by `ts_init` with the rest and hands it
+to the data engine, which publishes it on its data type's topic. So
+`node::custom_data` reads each custom series from the catalog over its
+slice (`ParquetDataCatalog::query_custom_data_dynamic`, which decodes by
+the registered type name: the strategy registers its types with
+`nautilus_serialization::ensure_custom_data_registered` first) and
+`node::run` adds it to the built engine before `node.run()`.
+
+A streaming run (`chunk_size`) clears the engine's data after every chunk
+(`stream_chunks` in `backtest/src/node.rs` calls `clear_data`), so data
+added before the run would be gone after the first chunk. A run with
+custom data therefore has no `chunk_size`: the node loads every series at
+once (`run_oneshot`, which adds its series beside what the engine holds
+and runs). That is the memory of the whole window: fine for bars, quotes
+and custom data, not for months of MBP-10 depth beside them (a day of
+gold's depth went past 16 GB).
 
 ### Engine config
 
 `BacktestEngineConfig` (`nautilus_backtest::config`), `bon` builder and
-`Default`. We set `catalogs: Vec<DataCatalogConfig>` (serves warmup
-requests, see Warmup catalog), `logging: LoggerConfig`
-(`Backtest::logging`), `cache` (`warmup::cache_config`) and `data_engine`
-(`warmup::data_engine_config`, no bar for an hour without quotes; see
-"Weekends and holidays, found and fixed").
+`Default`. We set `logging: LoggerConfig` (`Backtest::logging`) and
+`data_engine` (`warmup::data_engine_config`, no bar for an hour without
+quotes; see "Weekends and holidays, found and fixed"). No `catalogs`: the
+engine serves no request (see Warmup); the `cache` is Nautilus' default,
+the bars reaching the strategy as they are built.
+
+`exec_engine` is Nautilus' default in a trading run, which keeps every
+closed order and position: the result's statistics and the report's costs
+read them from the cache at the end. A dataset run (`run_dataset`) sets
+the execution engine's own purge: every minute, the closed orders and
+positions closed a minute or more before (`DATASET_PURGE_MINS`; live keeps
+a week, `live/README.md`). Its targets are read from events as they come,
+so they are the same purged or not (`backtest_targets.rs`), and the run
+takes time in proportion to its days. Kept, the closed orders slow it more
+than that: 2, 4, 8 and 16 days of IC's gold quoted every 5 s, with a
+bracket and a horizon trade on each side every 15 minutes, took 3.1, 6.3,
+12.6 and 25.4 s purged against 4.2, 10.7, 31.9 and 69.7 s kept (debug
+build).
 
 The node's kernel installs Nautilus' logger from `logging` when it is
 built. Installing one before (`init_logging`, as `fill-catalog` does)
@@ -380,61 +445,43 @@ would not fail, the kernel would reuse it, but its own config would be
 ignored; so the command passes the `NAUTILUS_LOG` config through
 `Backtest` and installs nothing itself.
 
-## Warmup catalog
+## Warmup
 
-Warmup itself is in `strategy/README.md`, "Warmup and training". On the
-backtest side the catalog is registered in
-`BacktestEngineConfig::catalogs`, read-only, so that no answer is ever
-written back to it (the warmup asks for write-back, which live IC
-answers take):
+A backtest has no warmup: it makes no warmup request, and no catalog is
+registered in the engine to serve one (catalog-served historical
+requests are documented for live nodes, `LiveNodeConfig::catalogs`; a
+backtest's data client answers none). The strategy only subscribes to
+its bars (`warmup::subscribe`), its indicators warm on the data the run
+replays, from `start`, and it decides once they are initialized, as
+Nautilus documents (Concepts › Strategies, "Check
+`indicators_initialized()` before acting on indicator values"; the
+strategy README, "Warmup and training"). So a strategy trades from where
+its indicators initialize, an EMA after its period of bars, and a run
+meant to trade from 10:00 starts earlier (`backtest_warmup.rs`: the EMA
+1/2 run from 10:00 trades at 13:00, from 12:30 it is cold until 14:00
+and does not). A dataset build replays the features' warmup before its
+first day the same way, by starting its run earlier (strategy README,
+"Dataset"). Live, the strategy requests its warmup at start.
 
-```rust
-DataCatalogConfig::new(path: String, fs_protocol: Option<String>,
-                       catalog_backend: Option<CatalogBackendType>) -> DataCatalogConfig
-config.with_read_only(true)    // rejects response write-back
-```
+## No check before the run
 
-The request window is clamped to simulated now, the engine start
-(`start − 1 ns`) when `on_start` runs, so warmup data must predate the run
-start; later bars are built from the replay. What the strategy receives:
-
-- **Catalog covers the window** (the stored intervals of every series span
-  `[start − 1 ns − warmup, start − 1 ns]`): one `on_historical_quotes`
-  (`on_historical_bars` for source bars) per instrument before the first
-  `on_bar`, the warmup bars in the cache, the partial oldest one dropped,
-  then the warmup's request group ends complete in `on_data_response`
-  (`backtest_long_warmup.rs`, `backtest_composite_warmup.rs`). The bar
-  spanning the warmup end and the run start comes once, complete, in
-  `on_bar`.
-- **Catalog not registered, or a gap in the window**: the data engine asks
-  the venue's backtest data client for the missing part, which answers
-  nothing (seen with bar requests, before quotes: no response ever came,
-  not even with the stored part). The run would go on with cold
-  indicators, which is why the coverage check refuses it.
-
-## Coverage check
-
-Before building the node, `run` checks the catalog (`coverage.rs`) and
-fails on the first miss: an instrument not stored (the error names its
-id; a root's contracts must be, the root not), or a series not covered
-over its slice of `[start − 1 ns − warmup, end]`, the warmup and the run
-(the whole of it for a plain instrument, the part a contract stands for
-its root otherwise; the error names the series, such as `the quotes of
-SXR8.IBIS`, `the bars of SXR8.IBIS-1-MINUTE-LAST-EXTERNAL`, `the
-funding_rates of BTC-USDT-SWAP.OKX`, and the first missing range).
-
-Coverage is the stored intervals of the series, by data type and
-identifier (inclusive nanoseconds; `fill_catalog` records each fill over
-the window asked for). Gaps come from the catalog's
-`get_missing_intervals_for_request`, which goes through the
-`missing_intervals` behind the data engine's own catalog lookup. A series
-not stored misses the whole range. Adjacent intervals (`end + 1 == start`,
-as a resumed fill writes them) and overlapping ones cover as one; a 1 ns
-gap is a gap; an interval ending exactly at `end` covers it. The two
-ranges are checked whole because the warmup request asks for all of
-`[start − 1 ns − warmup, start − 1 ns]` and the replay reads the engine's
-window. Coverage is of ranges, not of single minutes: a minute without a
-quote inside a covered range passes (see Fills).
+Nothing of ours checks the catalog before a backtest or a dataset build:
+the node reads the rows each `BacktestDataConfig` asks for over its
+slice, and Nautilus' own `BacktestNode` behaviour stands. It fails when
+none of the instruments a data config names is in the catalog ("No
+instruments found in catalog for requested IDs", `load_instruments` in
+`backtest/src/node.rs`), and only warns when a series has no data over
+the window ("No data found for config"), the run going on without it. A
+window the catalog only partly holds runs on what exists: before the
+stored data and after it nothing is replayed, and a hole inside it, a
+crash or a disconnect of a recording live node, replays as a quiet
+period, no bar built for an hour without data. The catalog's stored
+intervals are Nautilus' request bookkeeping, not a completeness claim:
+the gaps between the files a live node promoted, each named by its rows'
+first and last `ts_init`, are read through like any other stretch
+without rows (`backtest_catalog_gaps.rs`, `tests/live/streaming.rs`).
+A wrong `--start`, a fill missing, gives a short or empty run with
+Nautilus' warning only.
 
 ## Costs
 
@@ -514,8 +561,7 @@ Known limits of fills on quotes:
   within a minute fills only if a minute's closing quote crosses it.
 - **Missing quotes.** A minute without a quote fills on the last earlier
   one, silently, stale by the gap (overnight, at the open); with no quote
-  yet in the run the order is rejected (`No market`). The coverage check
-  sees ranges, not single minutes.
+  yet in the run the order is rejected (`No market`).
 - **Nominal sizes.** Quote sizes are stated, not observed (IB gives none):
   no depth, so large orders on illiquid instruments look too easy.
 
@@ -686,10 +732,7 @@ What the probe established:
   quote 715.50/715.54; with `bar_execution` on both filled at 710.00. This
   is the first known limit in Fills.
 
-The run start on a bar's close also showed the warmup response holding the
-bar at `start`, which the replay delivered again: both are why the engine
-starts 1 ns earlier (see The engine start). How the quotes are built from
-IB's bars is in `data/ib/README.md`.
+How the quotes are built from IB's bars is in `data/ib/README.md`.
 
 ## IC on ticks
 
@@ -756,12 +799,11 @@ must be filled again into a new directory (`data/okx/README.md`).
   replayed at its close (`ts_init`), so the hour bar closing 10:00 holds
   the minutes opening 09:00 to 09:59 and is built at 10:00, after its last
   minute closed: nothing of 10:00-10:01 is in it (`backtest_okx_swap.rs`).
-  Since the engine starts 1 ns before `start`, a run starting on the hour
-  replays the minute closing then: its first hour bar holds that minute
-  alone.
-- **Warmup.** The warmup of a composite bar type requests its minute bars
-  (`strategy/README.md`), so the catalog must hold them from `start -
-  warmup`, as for quotes.
+  A run starting on the hour replays the minute closing then, replayed at
+  `start`: its first hour bar holds that minute alone.
+- **Warmup.** A backtest requests none (see Warmup): the strategy warms
+  on the hour bars of the replayed minutes. Live, the warmup of a
+  composite bar type requests its minute bars (`strategy/README.md`).
 
 ### Funding
 
@@ -784,14 +826,13 @@ that time's funding: the fill and the settlement share the timestamp and
 Nautilus settles after the fill, while on OKX an order sent after the
 00:00 close comes after the settlement.
 
-The stored funding must cover the whole window, as the bars do, else the
-run is refused naming `the funding_rates of …` and the missing range.
-The stored funding reaches the last funding time before the catalog fill
-ran, but an X-Perp's starts only about 3 months before its first fill (all
-OKX keeps, `data/okx/README.md`): use the swap for longer studies.
+Funding the catalog does not store is not settled: nothing checks the
+window (see No check before the run). The stored funding reaches the
+last funding time before the catalog fill ran, but an X-Perp's starts
+only about 3 months before its first fill (all OKX keeps,
+`data/okx/README.md`): use the swap for longer studies.
 `backtest_okx_swap_funding.rs` and `backtest_okx_xperp_funding.rs` check a
-long paying and receiving at two funding times, and a window the funding
-does not cover refused.
+long paying and receiving at two funding times.
 
 ### Fills on candles
 
@@ -852,10 +893,11 @@ helix-trader backtest ema --config swap.toml --catalog okx-cat \
 | Max drawdown | 0.66% | 0.66% |
 | Final balance | 9941.94 USDT | 9941.90 USD |
 
-Warm from the start: the first order fills at 2026-10-14 00:00, on the
-first hour bar of the run. Before the warmup served composite bar types,
-the same window started cold and gave 8 orders, -65.06 USDT and -64.86
-USD. Two X-Perp buys of 200 contracts met thin minutes: 10 and 18
+These runs requested the strategy's warmup, which a backtest no longer
+does: warm from the start, the first order filled at 2026-10-14 00:00, on
+the first hour bar of the run. Before the warmup served composite bar
+types, the same window started cold, as a backtest now does, and gave 8
+orders, -65.06 USDT and -64.86 USD. Two X-Perp buys of 200 contracts met thin minutes: 10 and 18
 contracts filled at the close, the rest (190, 182) one tick higher.
 
 Checked against the stored minute bars, outside Nautilus, on the cold runs
@@ -938,6 +980,81 @@ A registration outlives the analyzer's resets (`Portfolio::register_statistic`).
 The engine also logs its statistics, `Max Drawdown` included, at the end of
 the run.
 
+### Retraining on the schedule
+
+A backtest of a strategy trading on a model retrains it as live would,
+at every multiple of the model section's `retrain` since the Unix epoch,
+whatever the run start: the times Nautilus fires the retrain timer
+started on an epoch-aligned time (`model::schedule`), on a virtual clock
+over the span, each model valid from the time it was trained at; `main`
+runs the steps of `model::walk`:
+
+1. If the dataset lacks a day from the window of the first retrain time
+   (the last grid time not after `--start`, less `window`, or the meta
+   model's `window` if longer) to `--end`, a child process builds them,
+   once, to the last day's end plus the longest target: the last
+   retrain period then has its targets to score. The build replays the
+   features' warmup before its first day, so the catalog should hold the
+   data from there: what it lacks is not replayed, nothing refuses it.
+2. For each retrain time before `--end` the store has no model valid
+   from (the primary's, or its meta model's after the primary's first
+   model: before it the meta has no row), in time order, a child
+   process, `train <strategy> --at t`, trains at it (the primary, then
+   its meta model); its window's days already built, it replays none. A
+   model in the store is reused, so a second backtest of the span starts
+   no child. A train that kept the current model (below the minimum
+   score, failed) published none and is no failure of the backtest: its
+   reason goes to standard error, `the retrain at t: ..`, and the next
+   backtest trains at that time again.
+3. The run, on the store: at each decision the latest model valid then.
+4. The scores (`WalkForward::scores`), after the report: per retrain
+   period (`from` its retrain time or `--start`, `to` the next or
+   `--end`) and over the span, the AUC and log loss (`model::score`) of
+   the model in use at each decision of the dataset in the span, against
+   its label, the model chosen as the handle chooses it (the latest
+   valid, one failing its checks refused); beside it the baseline, the
+   training mean fitted at each retrain time on the rows a model trained
+   then is fitted on. Every model is out of sample on its period: trained
+   on rows settled by its valid-from. Live, a model is valid only once
+   its train finishes; a backtest takes it valid from its retrain time, a
+   small optimism.
+
+   With a meta model, the meta's scores follow, the same sections
+   headed `Meta model scores`: on the rows the primary in use made a
+   trade of (`model::meta`), the meta model in use at each, against
+   whether the barrier on the primary's side won, beside the baseline
+   fitted on the rows a meta trained then is fitted on.
+
+Each child is this binary (`std::env::current_exe`), on the backtest's
+strategy, config, catalog, store, commission flag (normalized) and leverage,
+with `--dataset-balance` as its balance; it inherits the backtest's
+environment and output, so its log and outcome come before the run's. A
+train runs through `Launcher::process`, as live's does: `train` fails
+when it keeps the model, the error it printed last the reason. The
+build runs `dataset`, an internal entry the backtest spawns, not listed
+by `--help`; a build that fails stops the backtest. One process per
+Nautilus node: the build and each train run a node, the backtest
+another.
+
+A period of the scores prints as, for example:
+
+```
+Model scores, out of sample, from 2026-10-23T00:00:00Z to 2026-10-24T00:00:00Z
+  Model valid from: 2026-10-23T00:00:00Z
+  AUC: 0.512346
+  Log loss: 0.701234
+  Rows: 24
+  Baseline AUC: 0.500000
+  Baseline log loss: 0.693147
+  Baseline rows: 24
+```
+
+A period without a model has no model score (`n/a`, `Model valid from:
+none`); an AUC needs a row of each label. The economics are the run's
+report above, from the same Nautilus backtest, its fee and fill models;
+an economic statistic beyond Nautilus' defaults is registered with the
+portfolio, as `MaxDrawdown` is.
+
 ### Costs in the report
 
 The result has no costs, so `report.rs` works them out after the run from
@@ -980,7 +1097,9 @@ too high by the open position's size times half the spread.
 The runs below, and those on OKX data above, were made with the EMA as it
 was then: a rebalancer, long or short `trade_size` on every listed
 instrument, turning at each cross with no stop loss, take profit or hold.
-Their configs predate `trade_instrument_id` and the exits.
+Their configs predate `trade_instrument_id` and the exits, and they
+requested the strategy's `warmup`, which a backtest no longer does (see
+Warmup): run now, each warms on its own first bars instead.
 
 The runs on internal MID bars further below filled on quotes
 `fill-catalog` made from IB's BID and ASK closes until 2026-10-26; a
@@ -1142,9 +1261,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
 ## Rules
 
 - **Costs always explicit.** A fee model always, even a zero one.
-- **Warmup before the start.** Warmup data must predate the run start,
-  and the catalog must cover the whole warmup window: `run` refuses
-  otherwise.
+- **No warmup.** A backtest replays `[start, end]` alone and requests no
+  warmup: start it early enough for the strategy's indicators to
+  initialize before the trades that matter.
 - **Seed all randomness**: the fill model and the strategy config.
 - The plain Nautilus API and one run per process, no parameter sweeps:
   `docs/ARCHITECTURE.md`.
@@ -1155,19 +1274,20 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   pure code: the run config from our inputs; the cost models (a negative
   commission or rate rejected, a fixed commission charged on the first
   fill only, a rate on the value of every fill, maker and taker alike);
-  the coverage check (gaps on the intervals alone, then on a temporary
-  catalog: missing instrument, quotes 1 ns short at either end, missing,
-  or with a gap, the source bars of a composite bar type, stored funding
-  short of the window); the run's series (the stored funding of a traded
+  the run over `[start, end]`, each series read over it, no catalog
+  registered and Nautilus' default cache; the run's series (the stored funding of a traded
   instrument added, none without; the stored book depth of an
   instrument added beside the source of its bars, or alone when none is
   stored); the data configs (quotes by instrument,
-  a composite bar type's source bars by bar type); the report of a
+  a composite bar type's source bars by bar type, a run of custom data
+  loaded at once); the report of a
   hand-built `Outcome` (sections, sorted names, max drawdown, the costs and
   the gross PnL); the venue at the run's leverage with no margin model of
   ours; instruments on two venues a venue each, as each keeps positions,
   with the run's balance, leverage and fee model; a leverage not positive
-  refused. The command line is tested in
+  refused; a trading run keeping its closed orders and positions, a
+  dataset run purging them every minute, its run otherwise the same. The
+  command line is tested in
   `main.rs`: required flags, exactly one commission flag, malformed
   `Money`, the window check, `--leverage` 1 unless given.
 - Integration tests in `tests/backtest/`, one node per test, run the real EMA
@@ -1177,7 +1297,8 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   `ParquetDataCatalog::write_to_parquet`). The strategy trades on
   1-HOUR-MID internal bars, the shortest crossover (1/2) on steps, a level
   per hour chosen so that every cross, exit and fill is worked out by hand
-  (`common::trades`, three hours of warmup, the run from 12:30), and so
+  (`common::trades`, the run from 10:00, the crossover warming on the bars
+  closing 11:00 and 12:00), and so
   that what is tested changes the orders and the final balance:
   - the EMA's trades: `backtest_ema_entries.rs` (one bracket per cross, in
     its direction, none on a bar keeping the side), `backtest_ema_exits.rs`
@@ -1188,12 +1309,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     venue a short opened beside a long still held, each closed by its own
     alert), `backtest_ema_read_only_instrument.rs` (a second instrument
     read, its bars crossing every hour, sends no order);
-  - the warmup: `backtest_warmup.rs` (a run off an hour: warmup from the
-    cache, the partial oldest bar dropped, the bar spanning the warmup end
-    traded, buys at the ask and sells at the bid of the quote 1 ns before
-    the bar's close), `backtest_start_on_close.rs` (the same on a run
-    starting exactly on an hour's close: the one-quote oldest bar dropped,
-    the bar at the start traded on its closing quote);
+  - the warmup: `backtest_warmup.rs` (no warmup request, the crossover
+    warming on the replay and deciding once initialized: a run from 10:00
+    trades at 13:00, buying at the ask and selling at the bid of the quote
+    1 ns before the bar's close; a run from 12:30 is cold until 14:00 and
+    sends no order);
   - the session: `backtest_session.rs` (bars outside the session neither
     move the EMAs nor trade; overnight, without quotes, there are no bars),
     `backtest_without_session.rs` (without a session every bar counts, the
@@ -1207,31 +1327,37 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     `backtest_max_drawdown.rs` checks that the result's `stats_returns`
     hold `Max Drawdown`, the largest fall from a peak of the equity
     compounded over its returns series.
-  - `backtest_coverage.rs`: a warmup longer than the stored quotes, or a
-    catalog without quotes, is refused before the node is built, naming
-    the instrument's quotes and the missing interval.
-  - `backtest_inputs.rs`: a negative warmup, or a start on or after the
-    end, is refused before the node is built.
+  - `backtest_catalog_gaps.rs`: no check of ours before a run: the time
+    exit's quotes in two files with a sliver between them, as a live node
+    promotes them, trade as one file; a window reaching past the stored
+    quotes gets the bars of what is stored; a catalog without quotes runs
+    with no bar; a dataset build of a day replays through a sliver and
+    stores its 24 rows.
+  - Streamed data, in the live test binary (`tests/live/streaming.rs`, a
+    stub node in a child process, promoting every second rather than
+    daily): the binary's backtest and dataset build over what the node
+    streamed across several promotions run through the slivers between
+    them, which stay in the catalog, and a backtest over a crash and a
+    restart through the crash's gap.
+  - `backtest_inputs.rs`: a start on or after the end is refused before
+    the node is built.
 
   The EMA reads bar closes only, so the bars' opens, highs and lows, and
   orders of a chosen side and size, are tested with a recording strategy
   (`tests/common/recorder.rs`)
-  that warms up through `strategy::warmup` like a real one, records every
-  bar it gets and can rest a sell stop or send market orders:
+  that subscribes through `strategy::warmup` as a real one does in a
+  backtest, records every bar it gets and can rest a sell stop or send
+  market orders:
   - `backtest_bars.rs` and `backtest_bars_on_close.rs` (noise, a mid of
-    its own every minute; runs from 12:30 and from 13:00): every warmup and
-    replayed bar has the open, high, low and close worked out from its
-    hour's minute quotes, the partial oldest bar left out, and the bar
-    spanning the warmup end comes once, complete, as the first replayed
-    bar. With `update_subscriptions` off both fail: that bar comes out
-    holding only the replayed half hour, or one quote on a run starting on
-    its close.
+    its own every minute; runs from 12:30 and from 13:00): every bar has
+    the open, high, low and close worked out from its hour's minute quotes
+    from the run start on: off an hour the first bar holds the half hour
+    replayed, on a close the first bar is the next, whole.
   - `backtest_stop.rs` (a fall of 0.50 a minute): a sell stop rested on
     the 13:00 bar fills at the bid of the first minute quote at or below
     it, 13:39:59.999999999, not at the next bar.
   - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
-    in one hour of the warmup and one of the replay): neither hour yields
-    a bar; every other bar is as worked out from its hour's quotes.
+    in two hours of the run): neither hour yields a bar; every other bar is as worked out from its hour's quotes.
   - `backtest_ib_minute_bars.rs`: `fill_catalog` stores the one series
     `catalog_series` lists for a composite
     `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, minute bars stamped
@@ -1241,11 +1367,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_composite_bars.rs`: `fill_catalog` stores the external
     minute bars a fake source returns for a composite
     `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, and a recorder
-    without warmup gets hour bars with the open, high, low and close of
+    gets hour bars with the open, high, low and close of
     their minute bars.
   - `backtest_okx_swap.rs`: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` with
     margins of 1, on minute bars stamped as `fill-catalog` stores OKX's
-    candles (open, close). A recorder without warmup on the composite hour
+    candles (open, close). A recorder on the composite hour
     bars buys 2 contracts on the first and sells 3 on the second: each
     hour bar holds the minutes opening in its hour (a minute moved by one
     shows in a high or a low), the fills at the close of the hour's last
@@ -1254,8 +1380,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_okx_swap_funding.rs`: the same swap held long across two
     funding times with stored funding: a Nautilus funding settlement at
     each, -0.2 USDT at +0.01% on 2,000 USDT, +0.404 at -0.02% on 2,020, in
-    the final balance; and a window the stored funding does not cover,
-    refused naming it and the missing range.
+    the final balance.
   - `backtest_okx_xperp.rs`: the same bars and orders on
     BTC-USD_UM_XPERP-310404.OKX, a `CryptoFuture` of 0.0001 BTC a contract
     settled in USD, with margins of 1: 200 contracts bought and 300 sold,
@@ -1264,7 +1389,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_ic_quotes.rs`: XAUUSD.ICMARKETS, a `CurrencyPair` with
     IC's margins on the demo (1 / 30), unleveraged, on irregular millisecond quotes sized 10,000 as IC's fill
     stores them, written through `fill_catalog` (`common::ic`). A recorder
-    without warmup on hour MID bars buys 10,000 oz on the first bar and
+    on hour MID bars buys 10,000 oz on the first bar and
     closes that position by its id on the second (`close_position`), the
     venue hedging: each fills whole at the ask, then the bid, of the last quote
     before the bar's close, 30 USD per million is charged on each fill's
@@ -1278,6 +1403,13 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     a strategy subscribed to its book depth, managed, gets the snapshots
     of the run's window in order, the cache's book holding each as it
     arrives; gold's MID bars, without a source, are left out.
+  - `backtest_book_deltas_and_custom_data.rs`: CME gold's book deltas
+    (an event before the run, an event of two deltas, one of one) and its
+    `Imbalance`s, a custom data type of the tests' (`common::glbx`),
+    declared beside IC's gold quotes: the strategy gets the deltas of the
+    run's window as an event each, the imbalances of the window in
+    `on_data`, among the quotes in time order; undeclared, neither is
+    replayed.
   - `backtest_two_venues.rs`: gold's book from `GLBX` and IC's gold
     quotes (`common::ic`) in one catalog: a strategy reading the book buys
     10 oz of XAUUSD on IC's first hour bar; two venues, the trade on
@@ -1288,3 +1420,131 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     margin, 667.68 USD; a second of 5 oz at 4012.15 is denied by the risk
     engine (`INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=331.72 USD,
     margin=668.69 USD`).
+  - `backtest_features.rs`: a strategy's feature set and its decisions
+    (strategy README, "Features and decisions"), on a ramp of SXR8.IBIS
+    mids a cent a minute: a moving average of the last three quote mids
+    and one of the last two hour MID bars' closes, both registered with
+    Nautilus, a decision every 30 minutes. Each decision fires 10 ms after
+    its half hour and publishes one row: the mean of the three quotes up
+    to it (the mid a minute before, so no later quote), and of the two
+    hour closes up to it, the bar closing on the decision included; no row
+    before the second bar. Without the 10 ms the decision on the hour
+    comes before that hour's bar: a backtest runs the timers of one time in
+    the order of their names.
+  - `backtest_targets.rs`: targets from orders (strategy README,
+    "Features and decisions"), through `run_dataset` on a hedging venue: a
+    probe decides every hour and opens a bracket (45 minutes) and a
+    horizon trade (30 minutes) on each side. On IC's gold quoted every
+    5 s, barriers 7.5 bps from the mid of 4000.10, 3.000075, on the
+    nearest cent: a dip ends the long by its stop at the bid and the short
+    by its take profit at its limit; a spike at the very nanosecond of the
+    bracket's time limit comes before the alert, so the long's take profit
+    and the short's stop count; barriers left alone close by time; each
+    P&L net of 30 USD per million on each fill; the decision still open at
+    the end has no row. On minute bars alone (BTC-USDT-SWAP.OKX), barriers
+    10 bps, 100, from the close: a bar touching both barriers fills the
+    long's take profit and the short's stop, its high replayed first, at
+    their limit and trigger; a take profit losing net of 0.05% fees has a
+    negative sign. On IC's gold, hourly decisions with a take profit 2
+    and a stop 1.5 average true ranges of 2 hourly bars of the mids away,
+    bars the targets subscribe to and the probe does not: the bars
+    closing 09:00 and 10:00 range 0.30 and 0.50, an ATR of 0.40, the
+    exits 0.80 and 0.60 from 4000.10; the decision at 09:00, the ATR a
+    bar short, sends no order, and at 10:00 a rise fills the long's take
+    profit at its limit and stops the short at the ask. The same barrier
+    on BTC-USDT-SWAP.OKX read without quotes: on its trades alone, the
+    ATR's bars the last prices (`..-1-HOUR-LAST-INTERNAL`), hours ranging
+    30 and 80, an ATR of 55, the exits 110 and 82.5 from the last trade,
+    100,000, a trade at 100,120 filling the long's take profit at its
+    limit and the short's stop at the trade; on its minute bars alone,
+    the ATR's bars composite (`..-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`)
+    on the same ranges, the 10:00 hour's high in its last minute, stamped
+    at 10:00 and replayed before the timer closing the hour, and a minute
+    reaching 100,120 filling the take profit at its limit and the stop at
+    its trigger. Orders above the
+    instrument's largest are denied, logged, and the denial drops each
+    decision, unsettled: the run ends before the first decision's horizon, so no
+    time alert can have, and no decision is open at the stop
+    (`Targets::open_decisions`). Over
+    two days of a random walk, the rows are the same from a dataset run
+    and from a trading run, every decision whose time limit passes before
+    the end settled on 10M USD, while the purge leaves the cache a few
+    closed orders against thousands.
+  - `backtest_dataset.rs`: the dataset store (strategy README, "Features
+    and decisions"): a probe like `backtest_targets.rs`' decides every
+    hour on IC's gold, a random walk, and a dataset build of two days
+    replays them once through `run_dataset`, to the second's end plus the
+    bracket's two hours, and stores the 48 rows; a second build of the
+    same days replays none, and the rows read back are those the replay
+    settled. Over a weekend without quotes, a build cut on Friday and one
+    cut on Monday store the same 22 rows of Friday: the decision at the
+    close settles at its time limits, the time close filled on the last
+    quote, and the two after it, with no quote since the one before, are
+    stale and store no row, nor does any decision to Sunday's open. On a
+    feature of the mean of the last two hours of mids, a day built alone,
+    replayed from the features' three-hour warmup before it, stores the
+    same 24 rows as inside a build from the day before. A barrier ATR of
+    its default 14 bars of the hourly cadence, declared by no bar type,
+    with a warmup of 14 hours, the shortest validation accepts, is warm at
+    a day's first decision in a build of that day alone: the replay from
+    10:00 builds the 14 bars to midnight on the targets' subscription,
+    10 ms before it, and the decision opens its targets; with 13 hours it
+    opens nothing. The quotes are off the hour, as a quote at the
+    replay's first instant would close one more bar.
+  - `backtest_train.rs`: training at a time (strategy README, "Features
+    and decisions"), with the probe of `backtest_dataset.rs`, shared from
+    `common::dataset`, and the fake learner, whose prediction, the mid
+    clamped to 1, ties every row: the holdout AUC is 0.5 exactly. A train
+    at midnight on a 46-hour window replays the days it lacks through
+    `run_dataset` and publishes a model whose reload predicts its
+    manifest's probes to the bit; with a minimum score of 0.6, a train an
+    hour later keeps the current model, that model published in the
+    gated store (the minimum score keys it), the store unchanged.
+  - `backtest_model.rs`: a strategy trading on its models (strategy
+    README, "Features and decisions", "Model handle"), the probe of
+    `common::dataset`, its model handle in a backtest. On baseline models
+    valid from 02:00, 04:00, 04:30 and 09:00, each predicting its own
+    probability, the hourly decisions of 00:00 to 06:00 trade none before
+    02:00, then each on the latest model valid at or before it (0.7, 0.7,
+    0.8, 0.9, 0.9); the one after the run is never used. Parity: a model
+    LightGBM fitted by a train at midnight on a 94-hour window, published
+    again valid from its holdout's start, predicts in the node, on the
+    holdout's decisions, each probe row's prediction to the bit.
+  - `backtest_learned.rs`: the learned strategy end to end: the binary's
+    `train learned --at` on a fixture config publishes a model (fake
+    learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
+    backtest of the strategy on that store from two hours before the
+    model's valid-from trades only from it, a long at each of its three
+    decisions, closed 30 minutes later: 6 orders, 3 positions; from the
+    valid-from itself its features, of 1-minute bars, are cold at the
+    first decision and it trades the next two: 4 orders, 2 positions. The same
+    `train`, started as a live node starts it, by
+    `Launcher::process` on the test binary's `helix-trader`, publishes,
+    and the backtest trades the same. The binary's `backtest learned` from midnight of the 23rd to noon of the
+    24th, retrained daily, builds the 4 days from its first window, trains
+    at both midnights and prints both periods' scores after the report,
+    in child processes; a second run starts none. With a minimum score above
+    the fake's 0.5, both retrains keep no model, each reason printed, and
+    the backtest runs on, no order, no model scored.
+  - `backtest_retrain.rs`: retraining on the schedule (`model::walk`):
+    the probe of `common::dataset` on one feature missing from the first
+    quote, so the fake learner predicts its training mean, each model's
+    own. Over three days retrained at each midnight, the build and the
+    trains run on threads of their own, then every decision of a day
+    trades on the model trained at its midnight, and a second
+    preparation builds and trains nothing; each period scores its model
+    as the baseline fitted at its start, the same mean.
+  - `backtest_meta.rs`: meta-labeling (`model::meta`) on the fixture of
+    `backtest_retrain.rs`, every model the fake learner on the missing
+    feature, three days retrained at each midnight. A model primary,
+    long at every decision, with a meta model: the first retrain has no
+    primary model before it and publishes no meta model, the others do;
+    each meta model's holdout carries the probability of the primary
+    model trained a day before it, never of the one trained with it, and
+    the run trades no decision of the first day and every decision of
+    the others, long, at the probability of the meta model of its day.
+    A rule primary, the test's probe signalling a long at even hours, a
+    short at odd ones and none every third hour: its dataset holds the
+    16 signals of each day alone, their side among the features, and the
+    run trades each signal on its side at the probability of the meta
+    model of its day.

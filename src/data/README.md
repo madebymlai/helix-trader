@@ -192,14 +192,18 @@ impl NodeFill {
 
 - **What is missing.** `missing` asks the catalog what it lacks of each
   slice, by Nautilus' own count (`get_missing_intervals_for_request`,
-  the call behind the data engine's catalog lookup): contract by contract,
+  the call behind the data engine's catalog lookup), contract by contract:
   its definition over the span of what it lacks, then each series'
-  missing intervals. A rolled root's contracts come each over its slice;
-  `DataRequirements::slices` has already merged one contract's slices of
-  a series from two tables, so no window is asked twice. A
-  covered window asks for nothing: no node is built. Quotes, trades and
-  book depths only (`FillData`): a source filling bars or funding through
-  the node does not exist yet.
+  missing intervals. The slivers a live node's daily promotions leave
+  between its files (`live/README.md`, "Recording into the catalog") are
+  among them: each is asked once, and its write-back closes it, so the
+  next fill asks nothing for it. A rolled root's contracts come each
+  over its slice; `DataRequirements::slices` has already merged one
+  contract's slices of a series from two tables, so no window is asked
+  twice. A covered window asks for nothing: no node is built. Quotes, trades, book
+  depths and book deltas only (`FillData`): a source filling bars or
+  funding through the node does not exist yet, and no source serves
+  custom data, refused naming it (`FillData::of`).
 - **Windows.** `add` cuts each series request into windows of the
   source's period (`DatabentoHistory::period`: a day; `IcHistory::period`:
   a week), aligned on multiples
@@ -365,10 +369,12 @@ more.
 
 A fill over `[start, end]` therefore records a series over `[start, end]`,
 whatever its stamps. IB's bars are stamped at their close, so the bar
-closing at `end` belongs to this fill, not the next. The backtest requires
-every series over `[start − 1 ns − warmup, end]` of its run, so start the
-fill (or the earlier fill the catalog resumes from) at least the warmup
-before the run (see `src/backtest/README.md`, "Coverage check").
+closing at `end` belongs to this fill, not the next. A backtest replays
+what the catalog stores over `[start, end]` of its run and checks nothing
+before (see `src/backtest/README.md`, "No check before the run"): fill
+from the run's start, and for a dataset build from the features'
+warmup before its first day; a live start asks the venue for what its
+warmup misses.
 
 ### Writing
 
@@ -445,7 +451,7 @@ after OKX's fill and before IB's.
 - `okx/` fills OKX swaps' and X-Perps' candles and funding from OKX's
   archive and API: see [`okx/README.md`](okx/README.md).
 - GLBX instruments' series as declared (MBP-10 book as `OrderBookDepth`,
-  trades, quotes), with their definitions, fill through the node by
+  MBO book as `OrderBookDelta`, trades, quotes), with their definitions, fill through the node by
   Nautilus' Databento data client, a day a request, after `databento/` checks the dataset's end and
   logs Databento's quote for every request: see
   [`databento/README.md`](databento/README.md). The GLBX series come from
@@ -482,9 +488,11 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   empty catalog lacks (a definition, then each series over its slice, a
   rolled root's contracts each over its own), only what is outside a
   stored interval, nothing (not even a definition) for a covered window;
-  bars refused, naming the
-  series; the coverage check failing a window answered with rows but not
-  stored, not a definition or an empty window.
+  a sliver between a live node's promoted files asked once, beside a
+  leftover run-start directory of older nodes, and nothing once its
+  write-back is recorded; book deltas asked as deltas; bars and custom
+  data refused, naming the series; the coverage check failing a window
+  answered with rows but not stored, not a definition or an empty window.
 - `tests/node_fill/`, fill-catalog's fill at its seam: `missing`, then a
   `NodeFill` whose live node holds a fake data client answering as
   Databento's, and the catalog:
@@ -494,6 +502,7 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
     the catalog); the same fill again building no node;
   - a client answering 50 ms later asked one window at a time, in order;
     empty windows before any stored data recorded only once they touch it;
+  - book deltas a day a request, written back;
   - a failed request (`RequestFailed`, a failure envelope, a refused
     request) failing the fill naming the request and its reason, writing
     nothing, asking nothing after it; a silent client failing it after the

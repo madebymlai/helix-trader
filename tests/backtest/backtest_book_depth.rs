@@ -9,7 +9,6 @@ use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
 use crate::common::{glbx, ic::at};
 use helix_trader::backtest::{Backtest, commission_rate, venue_oms_type};
-use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -80,7 +79,6 @@ fn a_strategy_subscribed_to_golds_book_gets_its_stored_snapshots() {
         start: at("09:00:00"),
         end: at("12:00:00"),
         ticks: vec![],
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,

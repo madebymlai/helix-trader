@@ -7,6 +7,9 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+# The arrow schema Nautilus' custom data macros generate, for the dataset
+# rows and the custom data of the backtest tests.
+arrow = { version = "59.3", default-features = false }
 # The `DataClient` trait of the IC data client.
 async-trait = "0.1"
 # The version and features of Nautilus' IB gateway.
@@ -18,6 +21,11 @@ csv = "1"
 databento = "=0.63.0"
 dotenvy = "0.15"
 jiff = { version = "0.2", features = ["serde"] }
+# LightGBM, built from its C++ sources (needs cmake and clang) without OpenMP:
+# one thread, so training is deterministic. Cargo.lock gives its bindgen
+# prettyplease 0.3: added beside bon's prettyplease 0.2, Cargo reused 0.2,
+# whose syn 2 does not build with bindgen's syn 3.
+lightgbm3 = "1.0.11"
 log = "0.4"
 nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
 nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["streaming"] }
@@ -39,11 +47,18 @@ nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", 
 # (high-precision) for the whole build.
 nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
 nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+# Nautilus' custom data registry and arrow encoding, to store the dataset rows
+# in the catalog.
+nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["arrow"] }
 nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+# PerpetualBooster: the 3.0 release candidate, the only version that builds
+# on stable Rust.
+perpetual = "=3.0.0-rc.2"
 prost = "0.14"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Floats read back to the bit: the probes of a stored model.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # The fingerprint of the IC token pair that seeded the token file.
 sha2 = "0.11"
 tempfile = "3"

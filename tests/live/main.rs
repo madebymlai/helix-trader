@@ -14,8 +14,14 @@
 //! "Nautilus v2 constraints"), and modules of one venue read and trade the
 //! same account. So the first module to opt in claims the process
 //! (`claim_process`), and another module's test fails before connecting.
+//!
+//! `streaming` is the exception: hermetic and ungated, it runs its nodes in
+//! child processes, none in this one, so it claims nothing and runs beside
+//! any module.
 
-use std::sync::OnceLock;
+use std::{path::Path, sync::OnceLock};
+
+use helix_trader::live::Recording;
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -27,6 +33,7 @@ mod ic_demo;
 mod ic_live_demo;
 mod ic_orders_demo;
 mod okx_demo;
+mod streaming;
 
 /// The module whose gated tests run in this process.
 static CLAIMED: OnceLock<&'static str> = OnceLock::new();
@@ -44,4 +51,12 @@ fn claim_process(module: &'static str) {
         "{owner} runs in this process: run one live module at a time, \
          `cargo test --test live <module>::`"
     );
+}
+
+/// The recording of a venue test's node: staged in `staging`, a directory
+/// of the test's own, promoted daily, as every node, and on its stop.
+fn recording(staging: &Path) -> Recording {
+    Recording {
+        staging: staging.to_path_buf(),
+    }
 }

@@ -4,10 +4,11 @@
 //!
 //! `missing` turns series slices (`strategy::SeriesSlice`) into what the
 //! catalog lacks of them, by Nautilus' own count
-//! (`get_missing_intervals_for_request`): per contract its definitions,
-//! then each series' missing windows. A `NodeFill` gathers each source's
-//! data client with its requests, cut into windows of the source's period,
-//! and `run` builds a live node with those clients and the catalog, and an
+//! (`get_missing_intervals_for_request`): per contract its definitions, then
+//! each series' missing windows, the slivers between a live node's promoted
+//! files among them, each asked once and closed by its write-back. A
+//! `NodeFill` gathers each source's data client with its requests, cut into
+//! windows of the source's period, and `run` builds a live node with those clients and the catalog, and an
 //! actor asking for one window at a time with `update_catalog`. The data
 //! engine serves what the catalog holds, asks the client for the rest and
 //! writes the answer back over the window asked for. The actor records the
@@ -75,17 +76,20 @@ pub enum FillData {
     Trades,
     /// `OrderBookDepth` snapshots of 10 levels (`request_book_depth`).
     Depth,
+    /// `OrderBookDelta`s (`request_book_deltas`).
+    Deltas,
 }
 
 impl FillData {
     /// The series of `data_type`; an error for a data type no node source
-    /// serves here (bars, funding).
+    /// serves here (bars, funding, custom data).
     fn of(data_type: &NautilusDataType) -> anyhow::Result<Self> {
         Ok(match data_type {
             NautilusDataType::QuoteTick => Self::Quotes,
             NautilusDataType::TradeTick => Self::Trades,
             NautilusDataType::OrderBookDepth => Self::Depth,
-            other => bail!("no source filled through the node serves {other:?}"),
+            NautilusDataType::OrderBookDelta => Self::Deltas,
+            other => bail!("no source filled through the node serves {other}"),
         })
     }
 
@@ -97,6 +101,7 @@ impl FillData {
             Self::Quotes => Some(NautilusDataType::QuoteTick),
             Self::Trades => Some(NautilusDataType::TradeTick),
             Self::Depth => Some(NautilusDataType::OrderBookDepth),
+            Self::Deltas => Some(NautilusDataType::OrderBookDelta),
         }
     }
 }
@@ -108,6 +113,7 @@ impl fmt::Display for FillData {
             Self::Quotes => "quotes",
             Self::Trades => "trades",
             Self::Depth => "book depths",
+            Self::Deltas => "book deltas",
         })
     }
 }
@@ -163,8 +169,8 @@ impl FillRequest {
 ///
 /// # Errors
 ///
-/// Returns an error if a series is not the quotes, trades or book depths
-/// of its slice's contract, or if the catalog cannot be read.
+/// Returns an error if a series is not the quotes, trades, book depths or
+/// book deltas of its slice's contract, or if the catalog cannot be read.
 pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -176,16 +182,17 @@ pub fn missing(
     } in slices
     {
         let id = slice.instrument_id;
-        let data = FillData::of(data_type)
-            .with_context(|| format!("the {data_type:?} of {identifier}"))?;
+        let data =
+            FillData::of(data_type).with_context(|| format!("the {data_type} of {identifier}"))?;
         ensure!(
             *identifier == id.to_string(),
             "the {data} of {identifier} on a slice of {id}"
         );
+        let (from, to) = (nanos(slice.from), nanos(slice.to));
         let gaps = catalog
             .get_missing_intervals_for_request(
-                nanos(slice.from),
-                nanos(slice.to),
+                from,
+                to,
                 &data_type.clone().into(),
                 Some(identifier),
             )
@@ -472,6 +479,9 @@ impl FillActor {
                 None,
                 params,
             ),
+            FillData::Deltas => {
+                self.request_book_deltas(instrument_id, from, to, None, None, params)
+            }
         }
     }
 
@@ -512,6 +522,7 @@ impl DataActor for FillActor {
             Some(DataResponse::Quotes(answer)) => answer.data.len(),
             Some(DataResponse::Trades(answer)) => answer.data.len(),
             Some(DataResponse::BookDepth(answer)) => answer.data.len(),
+            Some(DataResponse::BookDeltas(answer)) => answer.data.len(),
             _ => 0,
         };
         log::info!("{request}: {rows} rows");
@@ -538,6 +549,10 @@ mod tests {
         enums::AggressorSide,
         identifiers::TradeId,
         types::{Price, Quantity},
+    };
+
+    use nautilus_persistence::{
+        backend::parquet::paths::timestamps_to_filename, catalog::traits::CatalogWriter,
     };
 
     use super::*;
@@ -766,6 +781,74 @@ mod tests {
         assert_eq!(missing(&catalog, &slices).unwrap(), []);
     }
 
+    /// Quote files of `id` in the catalog in `dir` over the intervals of
+    /// `files`, each named as a live node's promotion names it: its
+    /// interval and a replay identity. The files are empty: coverage reads
+    /// their names.
+    fn promoted_quotes(dir: &Path, id: &str, files: &[(&str, &str)]) {
+        let quotes = dir.join("data/quotes").join(id.replace('/', ""));
+        std::fs::create_dir_all(&quotes).unwrap();
+        for &(first, last) in files {
+            let name = timestamps_to_filename(ts(first).into(), ts(last).into())
+                .replace(".parquet", "_0123456789abcdef.parquet");
+            std::fs::write(quotes.join(name), b"").unwrap();
+        }
+    }
+
+    /// The slivers a live node's daily promotions leave between their files
+    /// are what the catalog lacks, each asked of the venue once: its
+    /// write-back (`update_catalog`) closes it, so the next fill asks
+    /// nothing. A run-start directory an older node left is ignored.
+    #[test]
+    fn a_sliver_between_promoted_files_is_asked_once_and_its_write_back_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("live-runs/1792540800000000000")).unwrap();
+        promoted_quotes(
+            dir.path(),
+            "XAUUSD.ICMARKETS",
+            &[
+                ("2026-10-21T00:00:00Z", "2026-10-21T23:59:59.5Z"),
+                ("2026-10-21T23:59:59.7Z", "2026-10-22T23:59:59Z"),
+            ],
+        );
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let slices = [slice(
+            NautilusDataType::QuoteTick,
+            "XAUUSD.ICMARKETS",
+            "2026-10-21T00:00:00Z",
+            "2026-10-22T23:59:59Z",
+        )];
+
+        let first = missing(&catalog, &slices).unwrap();
+        let sliver = request(
+            FillData::Quotes,
+            "XAUUSD.ICMARKETS",
+            "2026-10-21T23:59:59.500000001Z",
+            "2026-10-21T23:59:59.699999999Z",
+        );
+        assert_eq!(
+            first,
+            [
+                FillRequest {
+                    data: FillData::Instrument,
+                    ..sliver
+                },
+                sliver
+            ]
+        );
+        // The venue's empty answer, recorded as the data engine records it.
+        catalog
+            .record_empty_coverage(
+                NautilusDataType::QuoteTick,
+                Some("XAUUSD.ICMARKETS"),
+                sliver.from.into(),
+                sliver.to.into(),
+            )
+            .unwrap();
+
+        assert_eq!(missing(&catalog, &slices).unwrap(), []);
+    }
+
     #[test]
     fn bars_are_refused_naming_the_series() {
         let dir = tempfile::tempdir().unwrap();
@@ -783,6 +866,49 @@ mod tests {
         let err = missing(&catalog, &slices).unwrap_err();
 
         assert!(format!("{err:#}").contains(bars), "{err:#}");
+    }
+
+    #[test]
+    fn book_deltas_are_asked_as_deltas_over_their_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let slices = [slice(
+            NautilusDataType::OrderBookDelta,
+            "GCZ6.GLBX",
+            "2026-10-21T00:00:00Z",
+            "2026-10-22T00:00:00Z",
+        )];
+
+        let asked = missing(&catalog, &slices).unwrap();
+
+        assert_eq!(
+            asked[1],
+            request(
+                FillData::Deltas,
+                "GCZ6.GLBX",
+                "2026-10-21T00:00:00Z",
+                "2026-10-22T00:00:00Z"
+            )
+        );
+    }
+
+    #[test]
+    fn custom_data_is_refused_naming_its_type_and_instrument() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let slices = [slice(
+            NautilusDataType::Custom {
+                type_name: "Imbalance".to_string(),
+            },
+            "GCZ6.GLBX",
+            "2026-10-21T00:00:00Z",
+            "2026-10-22T00:00:00Z",
+        )];
+
+        let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
+
+        assert!(err.contains("Imbalance"), "{err}");
+        assert!(err.contains("GCZ6.GLBX"), "{err}");
     }
 
     #[test]

@@ -4,13 +4,12 @@
 //! Generic over the strategy: any Nautilus strategy runs, none is named here.
 
 mod costs;
-mod coverage;
 mod node;
 mod report;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
@@ -43,17 +42,17 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Backtest {
     /// The catalog directory: instruments, the series the bars are built
-    /// from, the instruments' book and funding are read from it, and it
-    /// serves the strategy's warmup requests.
+    /// from, the instruments' book and funding are read from it, over the
+    /// window alone. It serves no request: the strategy warms up on the
+    /// replay.
     pub catalog: PathBuf,
-    /// The internal bar types the strategy trades and warms up on. Their
-    /// instruments are those the strategy reads, on one venue or several,
-    /// each a simulated venue of the run. The series Nautilus builds the
+    /// The internal bar types the strategy trades on. Their instruments
+    /// are those the strategy reads, on one venue or several, each a
+    /// simulated venue of the run. The series Nautilus builds the
     /// bars from (see `strategy::catalog_series`: the quotes of their
     /// instrument, or the source bars of a composite bar type) are
     /// replayed, as is the book of each instrument the catalog stores one
-    /// of (see `series`). The engine's cache is sized to hold their warmup
-    /// bars, which reach the strategy only through it.
+    /// of (see `series`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are: each replayed as
     /// declared, beside the series of the bar types, a root's as its
@@ -62,9 +61,6 @@ pub struct Backtest {
     pub ticks: Vec<TickSeries>,
     pub start: Timestamp,
     pub end: Timestamp,
-    /// The strategy's warmup: the catalog must cover the series from
-    /// `start - warmup`, so that the warmup request is answered.
-    pub warmup: SignedDuration,
     /// The commission: `commission_per_order` or `commission_rate`.
     pub fee_model: FeeModelAny,
     /// The starting balance of the account of each venue.
@@ -105,71 +101,53 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error if the inputs are inconsistent (no instruments, a
-    /// negative warmup, `start` not before
-    /// `end`, a leverage not positive), if the cache cannot hold the warmup bars of a bar type (see
-    /// `warmup::cache_config`), if the catalog misses an instrument or part of a series
-    /// over its slice of `[start - 1 ns - warmup, end]`, if the node fails to build
-    /// or run, or if a fill of an instrument with quotes has none before
-    /// it.
+    /// Returns an error if the inputs are inconsistent (no instruments,
+    /// `start` not before `end`, a leverage not positive), if the node
+    /// fails to build or run (Nautilus' own errors: none of a data
+    /// config's instruments in the catalog, say; a series without data it
+    /// only warns of), or if a fill of an instrument with quotes has none before it.
     pub fn run<S>(&self, strategy: S) -> anyhow::Result<Outcome>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
         let config = node::run_config(self)?;
-        coverage::check(self)?;
-        node::run(config, strategy)
+        node::run(config, node::custom_data(self)?, strategy)
     }
 
-    /// The continuous bars of the bar types on roots over the run and its
-    /// warmup, adjusted in `mode`, their roll prices read from the catalog
-    /// (see `rolls::ContinuousBars::read`): the strategy passes them to
-    /// `warmup::start`.
+    /// Runs `strategy` over the window on a `BacktestNode` as `run` does,
+    /// for what the strategy does alone, as a dataset run builds the
+    /// training table (`model::targets`): the execution engine purges the
+    /// closed orders and positions from the cache a minute after they
+    /// close, so that the run takes time in proportion to its days, and
+    /// there is no result to read from it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the warmup is negative, or as
-    /// `ContinuousBars::read` does: a root without a roll over
-    /// `[warmup start, end]`, a roll without a trade to price it. A bar type
-    /// on a root not built from trades is refused by `run` (see
+    /// Returns an error as `run` does, but for the costs of the fills.
+    pub fn run_dataset<S>(&self, strategy: S) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+    {
+        let config = node::dataset_run_config(self)?;
+        node::run_dataset(config, node::custom_data(self)?, strategy)
+    }
+
+    /// The continuous bars of the bar types on roots over the run,
+    /// adjusted in `mode`, their roll prices read from the catalog (see
+    /// `rolls::ContinuousBars::read`): the strategy passes them to
+    /// `warmup::subscribe`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error as `ContinuousBars::read` does: a root without a
+    /// roll over `[start, end]`, a roll without a trade to price it. A bar
+    /// type on a root not built from trades is refused by `run` (see
     /// `DataRequirements::slices`).
     pub fn continuous_bars(
         &self,
         mode: ContinuousFutureAdjustmentType,
     ) -> anyhow::Result<ContinuousBars> {
-        ContinuousBars::read(
-            &self.catalog,
-            &self.bar_types,
-            self.warmup_start()?,
-            self.end,
-            mode,
-        )
-    }
-
-    /// When the engine starts: 1 ns before `start`. A minute's quote is
-    /// stamped 1 ns before its close, and the engine skips data before its
-    /// start, so a run starting on a bar's close would otherwise miss the
-    /// quote that closes that bar, and reject an order sent on it. The
-    /// strategy's warmup ends here too.
-    fn engine_start(&self) -> anyhow::Result<Timestamp> {
-        self.start
-            .checked_sub(SignedDuration::from_nanos(1))
-            .with_context(|| format!("no engine start before {}", self.start))
-    }
-
-    /// When the warmup starts: `warmup` before the engine start. The
-    /// series replayed are sliced over `[warmup start, end]` (see
-    /// `series`), and the catalog must cover them there.
-    fn warmup_start(&self) -> anyhow::Result<Timestamp> {
-        ensure!(
-            !self.warmup.is_negative(),
-            "warmup {:#} is negative",
-            self.warmup
-        );
-        let engine_start = self.engine_start()?;
-        engine_start
-            .checked_sub(self.warmup)
-            .with_context(|| format!("no warmup of {:#} before {engine_start}", self.warmup))
+        ContinuousBars::read(&self.catalog, &self.bar_types, self.start, self.end, mode)
     }
 
     /// The instruments the strategy reads: those of the bar types and of
@@ -179,31 +157,18 @@ impl Backtest {
     }
 
     /// The bar types and the ticks as data requirements, which expand them
-    /// into the contracts standing for their instruments.
+    /// into the contracts standing for their instruments. A backtest
+    /// requests no warmup: none.
     fn requirements(&self) -> DataRequirements {
         DataRequirements {
             bar_types: self.bar_types.clone(),
             ticks: self.ticks.clone(),
-            warmup: self.warmup,
+            warmup: SignedDuration::ZERO,
         }
     }
 
-    /// The instruments the run replays, each once: the contracts standing
-    /// for each declared instrument over `[warmup start, end]` (see
-    /// `strategy::DataRequirements::contract_slices`), a plain instrument
-    /// standing for itself. A root is none of them.
-    fn instruments(&self) -> anyhow::Result<BTreeSet<InstrumentId>> {
-        let (from, to) = (self.warmup_start()?, self.end);
-        Ok(self
-            .requirements()
-            .contract_slices(from, to)
-            .into_iter()
-            .map(|slice| slice.instrument_id)
-            .collect())
-    }
-
     /// The catalog series the run replays, each over the slice of
-    /// `[warmup start, end]` its contract stands for its instrument (see
+    /// `[start, end]` its contract stands for its instrument (see
     /// `strategy::DataRequirements::slices`), the slices of one series
     /// merged (`SeriesSlice::merged`): those the bars are built from (see
     /// `strategy::catalog_series`) and the ticks as declared, then the
@@ -221,11 +186,11 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error if the warmup is negative, as
-    /// `DataRequirements::slices` does (bars on a root not built from its
-    /// trades), or if what the catalog stores cannot be read.
+    /// Returns an error as `DataRequirements::slices` does (bars on a root
+    /// not built from its trades), or if what the catalog stores cannot be
+    /// read.
     fn series(&self) -> anyhow::Result<Vec<SeriesSlice>> {
-        let (from, to) = (self.warmup_start()?, self.end);
+        let (from, to) = (self.start, self.end);
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
         let stored = |series: &SeriesSlice| {
             let (data_type, identifier) = &series.series;
@@ -256,7 +221,7 @@ impl Backtest {
             DataRequirements {
                 bar_types,
                 ticks,
-                warmup: self.warmup,
+                warmup: SignedDuration::ZERO,
             }
             .slices(from, to)
         };
@@ -304,7 +269,6 @@ impl Backtest {
 
 #[cfg(test)]
 mod tests {
-    use jiff::SignedDuration;
     use nautilus_common::logging::logger::LoggerConfig;
     use nautilus_core::UnixNanos;
     use nautilus_model::{
@@ -331,7 +295,6 @@ mod tests {
             start: "2026-09-01T00:00:00Z".parse().unwrap(),
             end: "2026-09-30T00:00:00Z".parse().unwrap(),
             ticks: vec![],
-            warmup: SignedDuration::ZERO,
             fee_model: commission_rate(Decimal::ZERO).unwrap(),
             balance: Money::from("10000 USDT"),
             leverage: Decimal::ONE,
@@ -341,8 +304,7 @@ mod tests {
     }
 
     /// Each of `series`, of plain instruments, over the whole span of
-    /// `backtest`: from 1 ns before its start, its warmup being zero, to its
-    /// end.
+    /// `backtest`: from its start to its end.
     fn whole(backtest: &Backtest, series: Vec<(NautilusDataType, String)>) -> Vec<SeriesSlice> {
         series
             .into_iter()
@@ -356,7 +318,7 @@ mod tests {
                     series: (data_type, identifier),
                     slice: Slice {
                         instrument_id,
-                        from: backtest.start - SignedDuration::from_nanos(1),
+                        from: backtest.start,
                         to: backtest.end,
                     },
                 }
@@ -479,7 +441,7 @@ mod tests {
         let backtest = Backtest {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![TickSeries {
-                data: crate::strategy::TickData::Trades,
+                data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("GCQ6.GLBX"),
             }],
             start: "2026-07-20T00:00:00Z".parse().unwrap(),
@@ -495,7 +457,7 @@ mod tests {
                 to,
             },
         };
-        let from = backtest.start - SignedDuration::from_nanos(1);
+        let from = backtest.start;
         assert_eq!(
             backtest.series().unwrap(),
             [
@@ -522,7 +484,7 @@ mod tests {
         let backtest = Backtest {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![TickSeries {
-                data: crate::strategy::TickData::Depth,
+                data: NautilusDataType::OrderBookDepth,
                 instrument_id: InstrumentId::from("GCQ6.GLBX"),
             }],
             start: "2026-07-20T00:00:00Z".parse().unwrap(),
@@ -536,7 +498,7 @@ mod tests {
                 series: (NautilusDataType::OrderBookDepth, "GCQ6.GLBX".to_string()),
                 slice: Slice {
                     instrument_id: InstrumentId::from("GCQ6.GLBX"),
-                    from: backtest.start - SignedDuration::from_nanos(1),
+                    from: backtest.start,
                     to: backtest.end,
                 },
             }]

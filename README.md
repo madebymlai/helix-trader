@@ -1,4 +1,4 @@
-<p align="center">
+and publishes it in the model store, or keeps the current one and fails with why. Backtest and live read the same store (`--models`); a live node retrains on its model's interval by starting `train` as a child process. |<p align="center">
   <img src="docs/assets/banner.svg" alt="helix trader" width="100%">
 </p>
 
@@ -18,11 +18,12 @@ per process. Each takes the strategy name and its TOML config.
 | `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, IC Markets' cTrader for IC instruments (tick quotes), Interactive Brokers for the rest. |
 | `backtest` | Runs the strategy over a window of the catalog, with commissions, leverage and funding, and prints the results. |
 | `live` | Runs the strategy on a live node against IB, OKX or IC Markets, until Ctrl-C, warmed up from the same catalog and the venues for the rest; IC's answers are written back to the catalog. |
+| `train` | Trains a model strategy's model at a time (`--at`) on the window of its dataset ending then, replaying the days it lacks, and publishes it in the model store or keeps the current one, printing why. Backtest and live read the same store (`--models`). |
 
 ## Quick start
 
-Requires Rust 1.99+, `clang` and `mold` (the linker set in
-`.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
+Requires Rust 1.99+, `clang`, `cmake` (to build LightGBM), `mold` (the linker
+set in `.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
 Podman for the IB Gateway and for the Redis that holds the live node's cache
 (`docker pull docker.io/library/redis:7.4.11-alpine` once; see
 `src/live/README.md`).

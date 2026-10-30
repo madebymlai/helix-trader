@@ -5,10 +5,8 @@
 //! replays the funding with the bars. A recorder on the hour bars buys
 //! 1,000 contracts (0.1 BTC) on the first one and holds them across two
 //! funding times, at each of which the venue settles funding on the
-//! position in USD, priced at the last bar's close. OKX keeps about 3
-//! months of an X-Perp's funding, so a run starting before the stored
-//! funding is refused. One node per thread, so one run per test; the
-//! refused window builds no node.
+//! position in USD, priced at the last bar's close. One node per thread,
+//! so one run per test.
 
 use std::path::Path;
 
@@ -141,7 +139,6 @@ fn backtest(dir: &Path) -> Backtest {
         start: at("07:00"),
         end: at("17:00"),
         ticks: vec![],
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("100000 USD"),
         leverage: Decimal::ONE,
@@ -154,7 +151,7 @@ fn backtest(dir: &Path) -> Backtest {
 fn a_held_x_perp_pays_and_receives_funding_in_usd_at_each_funding_time() {
     let dir = tempfile::tempdir().unwrap();
     catalog(dir.path(), at("06:00"));
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(HOUR_BARS),
         vec![(OrderSide::Buy, Quantity::from("1000"))],
     );
@@ -194,25 +191,4 @@ fn a_held_x_perp_pays_and_receives_funding_in_usd_at_each_funding_time() {
         outcome.result.summary["account.OKX.balance.USD.total"],
         "100001.02 USD"
     );
-}
-
-#[test]
-fn a_run_starting_before_the_stored_funding_is_refused_naming_it() {
-    let dir = tempfile::tempdir().unwrap();
-    catalog(dir.path(), at("07:30"));
-    let (recorder, _) = Recorder::without_warmup(BarType::from(HOUR_BARS));
-
-    let err = backtest(dir.path()).run(recorder).unwrap_err().to_string();
-
-    assert!(
-        err.contains(&format!("funding_rates of {INSTRUMENT_ID}")),
-        "{err}"
-    );
-    let nanosecond = SignedDuration::from_nanos(1);
-    let missing = format!(
-        "[{}, {}] is missing",
-        at("07:00") - nanosecond,
-        at("07:30") - nanosecond
-    );
-    assert!(err.contains(&missing), "{err}");
 }

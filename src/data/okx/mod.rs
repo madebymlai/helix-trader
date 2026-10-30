@@ -358,7 +358,7 @@ fn candle_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Re
             "OKX's archive serves 1-minute candles only, the bars of \
              `<instrument>-1-MINUTE-LAST-EXTERNAL`: trade OKX on a composite bar type built \
              from them, such as `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, \
-             not on the {data_type:?} of {identifier}"
+             not on the {data_type} of {identifier}"
         )
     };
     ensure!(*data_type == NautilusDataType::Bar, served());
@@ -1052,6 +1052,17 @@ pub(super) mod tests {
             "BTC-USD_UM_XPERP-310404.OKX-1-MINUTE-LAST-EXTERNAL",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn book_deltas_and_custom_data_are_refused() {
+        let imbalance = NautilusDataType::Custom {
+            type_name: "Imbalance".to_string(),
+        };
+        for data_type in [NautilusDataType::OrderBookDelta, imbalance] {
+            let err = candle_bar_type(&data_type, "BTC-USDT-SWAP.OKX").unwrap_err();
+            assert!(err.to_string().contains("BTC-USDT-SWAP.OKX"), "{err}");
+        }
     }
 
     #[test]

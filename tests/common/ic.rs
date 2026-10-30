@@ -104,16 +104,23 @@ pub fn quotes() -> Vec<QuoteTick> {
 /// over that window as fill-catalog's node writes them back, written
 /// through `fill_catalog`.
 pub fn catalog() -> TempDir {
+    catalog_of(quotes(), at("08:00:00"), at("12:00:00"))
+}
+
+/// A catalog of the instrument and `quotes`, stored over `[from, to]` as
+/// fill-catalog's node writes them back, written through `fill_catalog`.
+pub fn catalog_of(quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let series = [(NautilusDataType::QuoteTick, INSTRUMENT_ID.to_owned())];
+    let data: Vec<Data> = quotes.into_iter().map(Data::Quote).collect();
     let fill = fill_catalog(
         &mut catalog,
         vec![instrument()],
         &series,
-        at("08:00:00"),
-        at("12:00:00"),
-        async |_, _, _, _| Ok(quotes().into_iter().map(Data::Quote).collect()),
+        from,
+        to,
+        async |_, _, _, _| Ok(data.clone()),
     );
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -133,7 +140,6 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         start: at("09:00:00"),
         end: at("12:00:00"),
         ticks: vec![],
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("2000000 USD"),
         leverage: Decimal::ONE,

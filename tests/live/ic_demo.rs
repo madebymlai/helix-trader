@@ -24,7 +24,7 @@ use helix_trader::{
     live::{
         IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
     },
-    strategy::{DataRequirements, TickData, TickSeries},
+    strategy::{DataRequirements, TickSeries},
 };
 use jiff::Timestamp;
 use nautilus_common::{
@@ -126,7 +126,7 @@ pub(crate) async fn fill_quotes_through_node(
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: vec![TickSeries {
-            data: TickData::Quotes,
+            data: NautilusDataType::QuoteTick,
             instrument_id,
         }],
         warmup: jiff::SignedDuration::ZERO,

@@ -9,8 +9,16 @@
 //!
 //! Also sets the `gold_scalp` cfg when `src/strategy/gold_scalp/` exists: that
 //! strategy is kept out of the repository, and a checkout without it builds.
+//!
+//! And names the source of Nautilus' indicators, as `Cargo.lock` pins it, in
+//! `NAUTILUS_INDICATORS_SOURCE`: the feature fingerprint covers the shared
+//! indicator code through it (`model::features`).
 
-use std::{io::Result, path::Path};
+use std::{
+    fs,
+    io::{Error, Result},
+    path::Path,
+};
 
 const PROTO_DIR: &str = "src/data/ic/proto";
 
@@ -23,6 +31,10 @@ fn main() -> Result<()> {
     if Path::new(GOLD_SCALP_DIR).is_dir() {
         println!("cargo:rustc-cfg=gold_scalp");
     }
+    println!("cargo:rerun-if-changed=Cargo.lock");
+    let lock = fs::read_to_string("Cargo.lock")?;
+    let source = locked_source(&lock, "nautilus-indicators")?;
+    println!("cargo:rustc-env=NAUTILUS_INDICATORS_SOURCE={source}");
     prost_build::Config::new()
         .default_package_filename("ctrader_open_api")
         .compile_protos(
@@ -32,4 +44,19 @@ fn main() -> Result<()> {
             ],
             &[PROTO_DIR],
         )
+}
+
+/// The `source` of the package `name` in the lock file `lock`: for a git
+/// dependency, its repository and the commit it is pinned to.
+fn locked_source<'a>(lock: &'a str, name: &str) -> Result<&'a str> {
+    let package = format!("name = \"{name}\"");
+    lock.split("[[package]]")
+        .find(|block| block.lines().any(|line| line == package))
+        .and_then(|block| {
+            block
+                .lines()
+                .find_map(|line| line.strip_prefix("source = "))
+        })
+        .map(|source| source.trim_matches('"'))
+        .ok_or_else(|| Error::other(format!("no source of {name} in Cargo.lock")))
 }

@@ -32,7 +32,7 @@ const READ_WINDOW: SignedDuration = SignedDuration::from_hours(24);
 /// The continuous futures of a strategy's bars on roots over a span: the
 /// `continuous_future_*` params Nautilus' data engine builds a root's bars
 /// from (see `docs/concepts/continuous_futures.md` in Nautilus), the same
-/// for its warmup request and its subscription. The default holds none: a
+/// for a live warmup request and the subscription. The default holds none: a
 /// strategy reading no root.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContinuousBars {

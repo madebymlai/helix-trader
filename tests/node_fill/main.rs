@@ -24,7 +24,7 @@ use std::{
 
 use helix_trader::{
     data::{FillData, NodeClient, NodeFill, missing},
-    strategy::{DataRequirements, TickData, TickSeries},
+    strategy::{DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -36,16 +36,19 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            BookDepthResponse, DataRequestFailed, DataResponseEnvelope, InstrumentResponse,
-            RequestBookDepth, RequestInstrument, RequestTrades, TradesResponse,
+            BookDeltasResponse, BookDepthResponse, DataRequestFailed, DataResponseEnvelope,
+            InstrumentResponse, RequestBookDeltas, RequestBookDepth, RequestInstrument,
+            RequestTrades, TradesResponse,
         },
     },
 };
 use nautilus_core::{Params, UnixNanos, datetime::datetime_to_unix_nanos};
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
-    data::{NautilusDataType, OrderBookDepth, TradeTick, stubs::stub_depth10},
-    enums::AggressorSide,
+    data::{
+        BookOrder, NautilusDataType, OrderBookDelta, OrderBookDepth, TradeTick, stubs::stub_depth10,
+    },
+    enums::{AggressorSide, BookAction, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, TradeId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::futures_contract_es},
     types::{Price, Quantity},
@@ -96,6 +99,20 @@ fn depth(at: &str) -> OrderBookDepth {
     depth.ts_event = ts(at).into();
     depth.ts_init = ts(at).into();
     depth
+}
+
+/// A bid of one contract at 4000.00 added to GCZ6's book at `at`, the
+/// last delta of its event.
+fn delta(at: &str) -> OrderBookDelta {
+    OrderBookDelta::new(
+        InstrumentId::from(GCZ6),
+        BookAction::Add,
+        BookOrder::new(OrderSide::Buy, Price::from("4000.00"), Quantity::from(1), 1),
+        RecordFlag::F_LAST as u8,
+        1,
+        ts(at).into(),
+        ts(at).into(),
+    )
 }
 
 fn trade(id: &str, at: &str) -> TradeTick {
@@ -357,6 +374,32 @@ impl DataClient for FakeClient {
         )
     }
 
+    /// One delta, on Monday at 10:00, if the window holds it.
+    fn request_book_deltas(&self, request: RequestBookDeltas) -> anyhow::Result<()> {
+        let (start, end) = window(request.start, request.end);
+        let rows: Vec<OrderBookDelta> = [delta("2025-10-20T10:00:00Z")]
+            .into_iter()
+            .filter(|d| (start..=end).contains(&d.ts_init.as_u64()))
+            .collect();
+        let response = DataResponse::BookDeltas(BookDeltasResponse::new(
+            request.request_id,
+            self.id,
+            request.single_instrument_id()?,
+            rows,
+            Some(UnixNanos::from(start)),
+            Some(UnixNanos::from(end)),
+            UnixNanos::from(end),
+            request.params.clone(),
+        ));
+        self.answer(
+            FillData::Deltas,
+            request.request_id,
+            (start, end),
+            request.params.as_ref(),
+            response,
+        )
+    }
+
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
         let of = if self.venue.borrow().answer == Answer::OtherContract {
@@ -385,7 +428,7 @@ impl DataClient for FakeClient {
 }
 
 /// The requirements reading `data` of GCZ6.
-fn reading(data: TickData) -> DataRequirements {
+fn reading(data: NautilusDataType) -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
         ticks: vec![TickSeries {
@@ -450,7 +493,7 @@ fn stored_book(dir: &Path) -> Vec<u64> {
 fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
-    let book_of = reading(TickData::Depth);
+    let book_of = reading(NautilusDataType::OrderBookDepth);
 
     fill(
         dir.path(),
@@ -541,7 +584,7 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     fill(
         dir.path(),
         &venue,
-        &reading(TickData::Depth),
+        &reading(NautilusDataType::OrderBookDepth),
         morning,
         three_hours,
         TIMEOUT,
@@ -551,7 +594,7 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     fill(
         dir.path(),
         &venue,
-        &reading(TickData::Depth),
+        &reading(NautilusDataType::OrderBookDepth),
         morning,
         three_hours,
         TIMEOUT,
@@ -618,7 +661,7 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
         let err = fill(
             dir.path(),
             &venue,
-            &reading(TickData::Depth),
+            &reading(NautilusDataType::OrderBookDepth),
             (ts(FRI), end_before(SUN)),
             DAY,
             TIMEOUT,
@@ -646,7 +689,7 @@ fn a_client_that_never_answers_fails_the_fill_after_the_timeout() {
     let err = fill(
         dir.path(),
         &venue,
-        &reading(TickData::Depth),
+        &reading(NautilusDataType::OrderBookDepth),
         (ts(FRI), end_before(SAT)),
         DAY,
         SignedDuration::from_secs(1),
@@ -667,7 +710,7 @@ fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
     let err = fill(
         dir.path(),
         &venue,
-        &reading(TickData::Trades),
+        &reading(NautilusDataType::TradeTick),
         (ts(FRI), end_before(SAT)),
         DAY,
         TIMEOUT,
@@ -686,7 +729,7 @@ fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
 fn a_covered_window_builds_no_node() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
-    let book_of = reading(TickData::Depth);
+    let book_of = reading(NautilusDataType::OrderBookDepth);
     fill(
         dir.path(),
         &venue,
@@ -711,4 +754,35 @@ fn a_covered_window_builds_no_node() {
     .unwrap();
 
     assert_eq!(venue.borrow().asked.len(), asked);
+}
+
+#[test]
+fn book_deltas_are_asked_a_day_a_request_and_written_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Data);
+
+    fill(
+        dir.path(),
+        &venue,
+        &reading(NautilusDataType::OrderBookDelta),
+        (ts(MON), end_before(WED)),
+        DAY,
+        TIMEOUT,
+    )
+    .unwrap();
+
+    let precision = Some(2);
+    assert_eq!(
+        venue.borrow().asked,
+        [
+            (FillData::Instrument, ns(MON), before(WED), None),
+            (FillData::Deltas, ns(MON), before(TUE), precision),
+            (FillData::Deltas, ns(TUE), before(WED), precision),
+        ]
+    );
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let stored: Vec<OrderBookDelta> = catalog
+        .order_book_deltas(Some(vec![GCZ6.to_string()]), None, None)
+        .unwrap();
+    assert_eq!(stored, [delta("2025-10-20T10:00:00Z")]);
 }

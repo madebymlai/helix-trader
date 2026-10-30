@@ -39,6 +39,14 @@ strategy/
 Orders stay in each strategy, on Nautilus' own API (see "Orders and
 positions"): there are no shared trading helpers.
 
+The one exception is a strategy trading on a learned model: its features
+are a type, `model::features::FeatureSet`, built once and shared with
+Nautilus as an indicator, and its features implement a trait,
+`model::features::Feature`; it holds a type, `model::handle::ModelHandle`,
+the one place it decides, which serves its models or, in a dataset run,
+opens its targets (see "Features and decisions"). Its orders stay its
+own. `learned/` is the example.
+
 ## Config
 
 The strategy config is the universe: the single source of the instruments
@@ -156,26 +164,48 @@ pub fn data_requirements(&self) -> DataRequirements {
 ```
 
 A strategy reading ticks as they are, beside or instead of bars, declares
-them as `TickSeries`, a Nautilus data type of one instrument:
+them as `TickSeries`, a Nautilus data type (`NautilusDataType`) of one
+instrument:
 
 ```toml
 ticks = [
     { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
     { data = "trades", instrument_id = "GC.v.0.GLBX" },
-    { data = "depth", instrument_id = "GC.v.0.GLBX" },
+    { data = "order_book_depths", instrument_id = "GC.v.0.GLBX" },
+    { data = "order_book_deltas", instrument_id = "GC.v.0.GLBX" },
+    { data = "Custom:Imbalance", instrument_id = "GC.v.0.GLBX" },
 ]
 ```
 
-`data` is `quotes` (`QuoteTick`), `trades` (`TradeTick`) or `depth`
-(`OrderBookDepth10`). fill-catalog asks each source for them: OKX, IC and
-IB fetch the declared series and refuse those they do not serve, while
-Databento fetches a GLBX instrument's MBP-10 book and trades whatever is
-declared. A backtest replays each as declared, one `BacktestDataConfig`
-per series, beside the series the bars are built from; the strategy
-subscribes to them itself. They have no warmup of their own: a strategy
-reading ticks alone gets the default cache. Live sets up the clients of
-their instruments, as of every instrument of the requirements, but
-subscribes to none of them.
+`data` is a name Nautilus parses (`NautilusDataType::from_str`) of one of
+the series a strategy reads as they are: `quotes` (`QuoteTick`), `trades`
+(`TradeTick`), `order_book_depths` (`OrderBookDepth10`),
+`order_book_deltas` (`OrderBookDelta`) or `Custom:<type name>`, custom
+data of the instrument. Any other data type, or a name Nautilus does not
+parse, fails the config's load. Custom data is keyed by the instrument
+id, in the catalog and on the message bus, as Nautilus' Databento client
+keys its own: the strategy subscribes to
+`DataType::new(type_name, None, Some(instrument_id))` and gets it in
+`on_data`, and registers the type with Nautilus
+(`nautilus_serialization::ensure_custom_data_registered`) before a
+backtest reads it from the catalog.
+
+fill-catalog asks each source for them: OKX, IC and IB fetch the declared
+series and refuse those they do not serve, while Databento fetches a GLBX
+instrument's MBP-10 book (depth), MBO book (deltas) and trades, whichever
+are declared. No source serves custom data: fill-catalog refuses it,
+naming it; it reaches the catalog otherwise (written by whatever makes
+it). A backtest replays each as declared, beside the series the bars are
+built from, in time order with them: one `BacktestDataConfig` per series,
+deltas grouped into an event per `F_LAST` (`OrderBookDeltas`, in
+`on_book_deltas`); custom data, which `BacktestDataConfig` refuses, read
+from the catalog by the backtest and added to the node's engine (see
+`src/backtest/README.md`, "Custom data"). The strategy subscribes to them
+itself. They have no warmup of their own: a strategy reading ticks alone
+gets the default cache. Live sets up the clients of their instruments, as
+of every instrument of the requirements, but subscribes to none of them;
+live custom data reaches the strategy as it is published on the message
+bus.
 
 An instrument may be a futures root (`GC.GLBX`), listed in the roll
 calendar, rather than a dated contract. `DataRequirements::slices(start,
@@ -195,8 +225,8 @@ tells the strategy (`rolls/README.md`, "The roller"). Bars on a root are
 Nautilus' continuous bars, built from the trades of each contract in turn
 and adjusted across the rolls: the strategy is given the
 `rolls::ContinuousBars` of its bar types (`Backtest::continuous_bars(mode)`
-reads them over a backtest) and hands them to `warmup::start` (see Warmup
-and training, "Bars on a root").
+reads them over a backtest) and hands them to `warmup::subscribe` (see
+Warmup and training, "Bars on a root").
 
 ### Session
 
@@ -238,20 +268,31 @@ struct holding a `StrategyCore`, `nautilus_strategy!` to generate the
 pub struct Trend {
     core: StrategyCore,
     config: TrendConfig,
-    book: Book,
+    /// The pure core, the strategy's Nautilus indicator.
+    book: Rc<Book>,
+    /// The warmup requested at start, live; none in a backtest.
+    warmup: Option<SignedDuration>,
     /// The request group of the warmup of the last start.
-    warmup: UUID4,
+    warmup_group: UUID4,
 }
 
 impl Trend {
+    /// As a backtest runs it: no warmup request.
     pub fn new(config: TrendConfig) -> anyhow::Result<Self> {
         config.validate()?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
-            book: Book::new(&config),
+            book: Rc::new(Book::new(&config)),
             config,
-            warmup: UUID4::new(),
+            warmup: None,
+            warmup_group: UUID4::new(),
         })
+    }
+
+    /// As a live node runs it: its warmup requested at start.
+    pub fn live(config: TrendConfig) -> anyhow::Result<Self> {
+        let warmup = config.bars.warmup;
+        Ok(Self { warmup: Some(warmup), ..Self::new(config)? })
     }
 }
 
@@ -259,20 +300,27 @@ nautilus_strategy!(Trend);
 
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
-        self.warmup = UUID4::new();
+        let bar_types = self.config.bars.bar_types();
+        for bar_type in &bar_types {
+            let book = Rc::clone(&self.book) as SharedActorIndicator;
+            self.core_mut().register_indicator_for_bars(*bar_type, book);
+        }
         // No bars on a futures root: no continuous bars (see Warmup).
-        warmup::start(
-            self,
-            &bar_types,
-            warmup,
-            &ContinuousBars::default(),
-            self.warmup,
-        )
+        let continuous = ContinuousBars::default();
+        match self.warmup {
+            Some(warmup) => {
+                self.warmup_group = UUID4::new();
+                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)
+            }
+            None => {
+                warmup::subscribe(self, &bar_types, &continuous);
+                Ok(())
+            }
+        }
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup, response)? {
+        if warmup::finished(self.warmup_group, response)? {
             log::info!("Warmup complete");
         }
         Ok(())
@@ -293,8 +341,11 @@ impl DataActor for Trend {
     }
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        // Feed the bar to the pure core, then submit the orders it
-        // decides.
+        // Nautilus fed the bar to the book; decide once it is warm.
+        if !self.core().indicators_initialized()? {
+            return Ok(());
+        }
+        // Submit the orders the pure core decides.
         Ok(())
     }
 }
@@ -312,14 +363,28 @@ impl DataActor for Trend {
   `manage_gtd_expiry` is set); the Rust runtime does not call it, so a
   strategy that wants it calls `Strategy::on_start` from its
   `DataActor::on_start`.
+- **It decides only once its indicators are initialized.** This is the
+  contract of every strategy, as Nautilus documents it (Concepts ›
+  Strategies: "Check `indicators_initialized()` before acting on
+  indicator values"): its state is a Nautilus indicator, registered in
+  `on_start` (`register_indicator_for_*`, or `FeatureSet::register`),
+  which Nautilus feeds before the strategy's handler, and the strategy
+  acts only when `self.core().indicators_initialized()` is true, in a
+  backtest and live alike. Nautilus reports `false` while no indicator is
+  registered, so a strategy registers at least one. The end of a warmup
+  request opens nothing: live, the warmup hydrates the indicators; in a
+  backtest they warm on the replay (see "Warmup and training"). The EMA
+  checks it in `on_bar`, `learned` before each decision.
 - The warmup is shared as function calls, not as a hook implementation:
-  `on_start` hands `warmup::start` the bar types and warmup of `bars`, the
-  continuous bars of those on a futures root (none here), and a new
-  request group id, stored first; the two `on_historical_*` handlers
-  feed the bars `warmup::bars` returns to the strategy's own state; and
+  a strategy built for live (`Trend::live`) hands `warmup::start` the bar
+  types and warmup of `bars`, the continuous bars of those on a futures
+  root (none here), and a new request group id, stored first; built for
+  a backtest (`Trend::new`) it hands `warmup::subscribe` the bar types
+  alone, and requests nothing. The two `on_historical_*` handlers feed
+  the bars `warmup::bars` returns to the strategy's own state, and
   `on_data_response` asks `warmup::finished` whether the warmup ended (see
-  "Warmup and training"). Each strategy writes these four handlers itself,
-  so its `DataActor` impl stays plain Nautilus.
+  "Warmup and training"). Each strategy writes these handlers itself, so
+  its `DataActor` impl stays plain Nautilus.
 
 ### Orders and positions
 
@@ -379,8 +444,7 @@ way (backtest README, "Venue").
 
 The example strategy (`ema/`) trades one instrument, `trade_instrument_id`,
 which must be one of `instrument_ids`; the others are read only: their bars
-are subscribed and warmed up like the traded one's, and the EMA ignores
-them, as a strategy reading a signal instrument would read them.
+are subscribed like the traded one's, and the EMA ignores them, as a strategy reading a signal instrument would read them.
 
 A strategy reading an instrument's book lists it in `instrument_ids` too
 (CME gold, `GC.v.0.GLBX`, beside `XAUUSD.ICMARKETS`), no other config: a
@@ -397,7 +461,10 @@ subscription of the kind the data arrives as keeps the cache's book
 - **Entry.** On each bar of the traded instrument inside the session, the
   fast EMA above the slow one is long, otherwise short; a bar changing the
   side is a cross (`signal.rs`), the first warm bar setting the side
-  without one. A cross sends one bracket in its direction: a market entry
+  without one. The signal is the EMA's Nautilus indicator, registered for
+  the traded instrument's bars and initialized once both EMAs are, by
+  the bars inside the session; `on_bar` decides only once
+  `indicators_initialized()`. A cross sends one bracket in its direction: a market entry
   of `trade_size`, its stop loss `stop_loss_bps` and its take profit
   `take_profit_bps` from the decision bar's close (`bracket.rs`), rounded
   to the instrument's prices.
@@ -492,24 +559,457 @@ OKX's confirmed 1-minute candles arrived 0.3 to 1.5 s after their close on
 (`warmup::live_data_engine_config`, Nautilus' `time_bars_build_delay`);
 otherwise the last minute would land in the next bar. Such a live bar is
 stamped 5 s after its close, its backtest twin on the close. Bars built
-from quotes keep no delay.
+from quotes keep no delay. `warmup::live_bar_build_delay` gives that
+delay, for decisions to wait for it (see "Features and decisions").
+
+## Features and decisions
+
+A strategy trading on a learned model declares its features once, as
+Nautilus indicators, and decides on them on a clock cadence or on an event
+of its choosing (`model::features`, `model::decide`).
+
+- **Declaring.** `FeatureSet::builder()` takes each feature with its data
+  kind and source and a name: `.quotes(instrument_id, name, indicator)`,
+  `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
+  `.data(data_type, name, read)` for a raw feature of custom data, the last
+  value `read` from a data point. `.code(include_str!("features.rs"))` adds
+  the strategy's feature code to the fingerprint (its unit tests in
+  `features/tests.rs`, so editing one changes no fingerprint);
+  `.warmup(span)` declares how much data the features read before a
+  decision, which a dataset build replays before its first day (see
+  "Dataset"): a strategy passes its own warmup, `learned/` its `warmup`;
+  none unless given. For a recursive indicator, an exponential average or
+  Wilder's ATR, give several times its period, 5 to 10: its first value
+  keeps a weight that decays only exponentially, e^-1 to e^-2 a period
+  (see "Dataset"). `build()` refuses an empty set, two features of one
+  name and a negative warmup. The names and their order are fixed there, and the values come in that order. A feature is a Nautilus
+  `Indicator` exposing its value (`Feature`), which every Nautilus moving
+  average does as it is; another indicator, or one of ours, implements
+  `Feature::value`. A strategy whose primary is its own rule declares
+  `.primary()`: the set's last two values are then the rule's side and
+  probability, `primary_side` and `primary_probability`, given at each
+  decision on a side (see "Meta-labeling"), the set having no values
+  without one.
+- **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
+  indicator: `features.register(self)` in `on_start` registers it for the
+  quotes and trades of each instrument and the bars of each bar type it
+  reads (Nautilus' `register_indicator_for_*`). The data engine then feeds
+  it each of those before the strategy's handler, replayed, live and in a
+  request's response (a warmup's quotes), with no strategy code. Nautilus
+  routes no depth, deltas or custom data to indicators: the strategy
+  forwards them from `on_book_depth`, `on_book_deltas` and `on_data`
+  (`handle_depth`, `handle_deltas`, `handle_data`). Bars a warmup builds
+  reach only the cache: a strategy hands those of `warmup::bars` to
+  `handle_bar`. An update reaches only the features declared on its kind
+  and source; an undeclared one is a no-op, never a panic of the
+  indicator trait's defaults. The set never returns an error, since
+  Nautilus skips the strategy's quote, trade or bar handler after an
+  indicator's error: a feature's error is logged.
+- **Deciding.** The rule comes from the config, `decision = { every =
+  "15m" }` or `decision = "event"` (`DecisionRule`). `decide::start(self,
+  rule, delay)` in `on_start` sets a cadence's Nautilus timer
+  (`DECISION_TIMER`) on an epoch-aligned time, so that it keeps the fixed
+  UTC grid of the interval's multiples whatever the run start; `delay` is
+  `warmup::live_bar_build_delay(&bar_types)` live and zero in a backtest,
+  so that a live decision sees the composite bar its backtest twin sees.
+  Each decision fires 10 ms after its time and delay
+  (`DECISION_MARGIN`): a bar closing on the grid is built by the data
+  engine's timer of the same time, which a backtest may run after the
+  strategy's (it orders the timers of one time by name), and a live node
+  as their tasks wake. `on_time_event` calls `decide::decide(self,
+  &features, rule, instrument_id)`, `instrument_id` the one traded, when
+  `decide::is_decision(event)`; an event strategy calls it from any
+  handler. A strategy trading on its model does both through its model
+  handle (see "Model handle").
+- **Fresh decisions.** A decision of a cadence is skipped, logged at
+  debug, unless the features read market data of the traded instrument
+  made (`ts_init`) after the previous decision of the grid, an interval
+  before: a closed market, a weekend's or a night's, would otherwise
+  decide on its last quote, and its targets would be the spread and the
+  fees. The market data is the quotes, trades, bars, depth and deltas of
+  the traded instrument a feature reads (`FeatureSet::last_update`),
+  whatever their kind or venue, with no calendar of sessions; not another
+  instrument's, which may trade while the traded one is closed, nor
+  custom data, which may come on a weekend. The data engine builds no bar
+  for a period without data (see "Hours without quotes"), so a bar is
+  data. The previous decision is the grid's whether the strategy ran
+  then or not, so the first decision of a run is judged as any other: a
+  warmup's data makes it fresh only if made within that interval. A
+  decision on an event is fresh. The rule holds in every mode: a stale
+  decision gives no row, no targets and no trade.
+- **Rows.** `decide` snapshots the features if the decision is fresh and
+  every one is initialized, and publishes them on the message bus as a
+  `FeatureRow` (the strategy id, the values, the decision time), custom
+  data keyed by the strategy id (`FeatureRow::data_type`), and returns
+  it. Cold features give no decision and publish nothing.
+- **Fingerprint.** `decide::fingerprint(&features, rule)` hashes the
+  feature names in order, the strategy's feature code, the features'
+  warmup, the shared indicator
+  code (`model::features` itself and Nautilus' indicators, named by the
+  git source `Cargo.lock` pins, through `build.rs`), the rule and
+  `model::decide`'s own code; `targets::fingerprint(fingerprint, &config,
+  rule, &requirements)` adds the targets, their barrier's ATR as it runs
+  (its period and its bars, whose source is what the strategy reads), and
+  `model::targets`' code, and `dataset::fingerprint(&features, rule,
+  &targets, &requirements, &commission)` all of it and the commission of
+  the dataset runs, as given, normalized (`Commission::PerOrder` or
+  `Commission::Rate`, `3 USD` for `3.00 USD`, `0.00003` for `0.000030`):
+  the targets are net of it, so rows and models of other costs are
+  never read. The runs' balance and leverage are not in it: large
+  enough, they deny no target.
+- **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
+  venue with a large balance) each decision's targets come from real
+  orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
+  slippage and funding are in them. The config (`TargetsConfig`, from
+  TOML) names the instrument, the size of every order, and a triple
+  barrier, a horizon, `horizon = "1h"`, or both. The barrier's take
+  profit and stop are distances from the decision's price (the last
+  quote's mid, else the last trade, else the last bar's close), each in
+  one unit (`Distance`): basis points of that price, `{ bps = 20 }`, or
+  multiples of an average true range, `{ atr = 2.0 }`. The ATR is
+  Nautilus' `AverageTrueRange` (Wilder's average) of 14 bars of the
+  targets' instrument at the decision cadence, built by Nautilus from
+  what the strategy reads of that instrument (its `DataRequirements`,
+  the bars' sources among them), the first that applies
+  (`TargetsConfig::atr_bars`), deciding every 15 minutes:
+
+  | The strategy reads | The ATR's bars | Such as |
+  |---|---|---|
+  | its quotes | their mids | `EURUSD.ICMARKETS-15-MINUTE-MID-INTERNAL` |
+  | its trades, no quotes | their last prices | `ESZ6.CME-15-MINUTE-LAST-INTERNAL` |
+  | its source bars alone | composite bars of them, priced as they are | `BTC-USDT-SWAP.OKX-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL` |
+
+  Quotes or trades read through bars built from them count. Of several
+  source bars, the ATR's are built from the longest whose length the
+  cadence is a whole multiple of, the first in `catalog_series` order at
+  a tie. The bars are not declared anywhere:
+
+  ```toml
+  [barrier]
+  take_profit = { atr = 2.0 }
+  stop = { atr = 1.5 }
+  limit = "2h"
+  ```
+
+  An `atr` table sets another period, `atr = { period = 20 }`, and is
+  refused without an `atr` distance; decisions on events, with no
+  cadence, are refused with an ATR, and so are a cadence Nautilus builds
+  no bars of (a step must divide the next unit: 15 minutes, not 90), a
+  strategy reading neither quotes, trades nor bars of the instrument,
+  and, on source bars alone, a cadence that is a whole multiple of none
+  of them (hourly decisions on 2-hour bars), the error naming both. In a
+  backtest, a source bar stamped at the close of a bar of the cadence is
+  replayed before the timer closing that bar, so the bar holds it and the
+  decision 10 ms later reads it. The targets run only in dataset runs,
+  backtests: live, no ATR bars are built.
+  Each exit is on the instrument's nearest tick (Nautilus' tick grid,
+  `next_bid_price` and `next_ask_price`), a tie away from the decision's
+  price. The targets own the ATR: `start(self)` in `on_start` registers
+  it with the strategy's Nautilus indicators and subscribes the strategy
+  to its bars, and Nautilus feeds it each of those bars, as it does the
+  features; a strategy subscribing to the same bars shares the one
+  subscription. Bars a warmup request builds reach only the cache, so they
+  do not warm it: a dataset run's replay of the warmup before its first
+  day does. A decision at which the ATR is not yet initialized opens no
+  target, logged at debug, as cold features give no decision. The
+  strategy shares a `Targets` (`Targets::new(config, rule,
+  &requirements)`, an `Rc`),
+  calls `open(self, row)`
+  with each row `decide` returns, and hands it
+  `on_time_event`, `on_order_filled`, `on_order_denied`,
+  `on_order_rejected`, `on_position_closed` and `on_stop`; it sends no
+  orders of its own then. For each target and side, a long and a short,
+  `open` sends a bracket (market entry, take-profit limit, stop, the exits
+  one-updates-the-other) or a market entry, client order ids
+  `D{n}-{B|H}{L|S}-{E|TP|SL}`, and sets a time alert at the limit or
+  horizon that closes the decision's positions still open
+  (`close_position`, tagged) and cancels its legs by their ids. A closed
+  position's opening order names its decision and side, its closing order
+  the exit: take profit, stop or time; the only state kept is each open
+  target's position id, from its entry's fill. Once all its targets are
+  closed, the decision's `TargetRow` (its `FeatureRow`, per target and
+  side the realised P&L net of commission as Nautilus reports it and the
+  exit, the settling time) is published on the message bus, keyed by the
+  strategy id (`TargetRow::data_type`); `Outcome::sign` is the P&L's
+  sign. A denied or rejected order, or an entry not filled by its time,
+  leaves the decision unsettled, logged, and so do positions still open
+  at the stop (`open_decisions()` counts the decisions still open). A
+  barrier hit at the same nanosecond as the time limit
+  counts: Nautilus hands the venue the quote before the alert. On bars
+  alone the venue fills an entry at the last close, a take profit at its
+  limit and a stop at its trigger, a bar's high before its low: as
+  optimistic as any bars-only backtest.
+- **Dataset.** The settled rows are stored by day in the catalog
+  (`model::dataset`), as Nautilus custom data, `DatasetRow`: the feature
+  values, the target values in the order of
+  `TargetsConfig::target_names` (per target, the barrier then the
+  horizon, the long then the short, its P&L and its exit, 1 a take
+  profit, -1 a stop, 0 the time; `TargetRow::values`), the settling and
+  decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
+  &features, rule, targets, &requirements, &commission)`) stores them
+  under the strategy id and the fingerprint, so another strategy, of
+  another width, has its own, and a change to the features, the rule,
+  the targets, what the strategy reads under an ATR or the commission
+  finds none; the
+  feature names go in the data type's metadata, not in each row. The
+  catalog's coverage is the day cache: `missing(first, last)` gives the
+  days it lacks, from the catalog's missing intervals, and `build(first,
+  last, replay)` has `replay` run the strategy once over them, from the
+  features' warmup before the first's start to the last's end plus the
+  longest target (`settles_within`), then `write`s them, the rows decided
+  before the first day not. So the indicators read at a day's first
+  decisions the data before it, as inside a longer build: a day built
+  alone is stored as inside a longer build, row for row, for a feature
+  whose value is a function of the data within the warmup; one keeping a
+  running sum, as Nautilus' simple moving average does, may still differ
+  in its last bits. A recursive one, an exponential average or Wilder's
+  ATR (the barrier's), never forgets the value it started from: its
+  weight decays by e^-1 (Wilder's) to e^-2 (an exponential average's) a
+  period, so a warmup of one period leaves a day's first rows depending
+  on where the build started by up to about a third of the difference.
+  A warmup of several times the longest recursive period, 5 to 10, makes
+  them depend on it negligibly (e^-5 or less), not to the bit. The
+  catalog should hold the data from that warmup before the first day:
+  the replay makes no warmup request, and nothing checks the catalog
+  first (backtest README, "No check before the run"). `write(rows, from, to)` files
+  only the days the replay settled (replayed whole, `to` the longest
+  target past their end), each with the day's bounds, a day without rows
+  within the file of the day before it (Nautilus writes no file without
+  rows), and deletes what the catalog holds over them first: Nautilus
+  skips a file it already has, so a recomputed day would keep its old
+  rows. The directory is never consolidated, which would lose the days'
+  intervals. `read(from, to)` gives the rows back bit for bit, NaN
+  included; `manifest()` the dataset's `manifest.json` beside its files:
+  strategy, fingerprint, feature names, target spec and names, the days
+  held. `settled(from, at, replay)` gives the rows a train at `at` sees,
+  those of the decisions in `[from, at)` settled by `at`: `replay` runs
+  once from the warmup before the first missing day's start to `at`, no
+  further, the days
+  it settled are written, and the rows of the days it did not (the last
+  before `at`) come from the replay alone, so the next train replays them
+  again. `read` refuses rows of other feature names or widths with a
+  `SchemaMismatch`.
+- **Model config.** The model section of a strategy's TOML is a
+  `ModelConfig` (`model::config`): `decision`, `targets`, `label`
+  (`"barrier"` or `"horizon"`: the model learns whether that target's long
+  gains, net of costs), `retrain`, `window` and `holdout` (durations),
+  `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
+  and `learner`. `validate(&requirements)` refuses a retrain interval not
+  positive, a traded instrument the strategy does not read, a barrier ATR
+  without bars built from what it reads of that instrument (above) or
+  whose period of bars, the given or the default, at the
+  decision cadence is longer than the strategy's warmup (a dataset run
+  replays only the warmup before its first day, so the ATR would be cold
+  at its first decisions; as long is enough), a label of a
+  target the config lacks, a barrier limit or horizon not shorter than
+  the window, a holdout leaving no fitted row, thresholds that are not
+  probabilities with the short below the long, and a minimum score
+  outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
+  meta model, below.
+- **Training.** `Training::new(catalog, models, strategy_id, &features,
+  config, &requirements, &commission)` and `train_at(t, replay)`
+  (`model::train`) train at `t`: the rows of the window ending at `t`
+  settled by `t` (`Dataset::settled`),
+  so the purge between them and the model's first use is the longest
+  target; the model fitted on those before the holdout, the window's
+  last part, settled by its start, the same gap; scored by the AUC of its
+  predictions on the holdout (`score::auc`). At or above `min_score` the
+  model is published, valid from `t`; else, and on any error, the current
+  model is kept with the reason (`Kept`: below the minimum score, failed,
+  or schema mismatch). A train returns what it did, `Trained`: the
+  `Outcome` of each model, never an error. With a meta model the primary
+  trains first, then the meta, on the rows of the one replay (see
+  "Meta-labeling"); `Training::of_rule` trains a rule primary's meta
+  alone.
+- **Model store.** `ModelStore` (`model::store`) holds the published
+  models under `<models>/<strategy id>/<fingerprint>/<settings>/` (the
+  dataset's fingerprint, the commission in it), the settings a hash of the
+  learner and its settings, the label, the window, the holdout and the
+  minimum score: a model published at a lower minimum may score below a
+  higher one, so a stricter gate lists none of it. Each model is one
+  file, `<valid from>.json`, written beside its name and renamed onto
+  it: its manifest (strategy, valid
+  from, fingerprint, feature names, target spec, label, learner, holdout
+  AUC, and up to 16 holdout rows with the model's predictions on them, a
+  missing value written `"NaN"`) and the model as its adapter saved it.
+  A reloaded model is checked by predicting the probes, not by its bytes.
+  `valid_froms()` lists the models in time order, `read(valid_from)` gives
+  one back. `StoredModel::load(feature_names, fingerprint)` loads it with
+  the checks a handle makes before use (below). A meta model's store is
+  `meta/<settings>` under its primary's directory (`ModelStore::meta`),
+  its settings its learner, window, holdout and minimum score and the
+  primary's thresholds; a rule primary's under the strategy id and
+  fingerprint (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
+  strategy does, decision by decision: the latest valid, checked, a
+  model failing a check refused and the current one kept; the handle,
+  the backtest's scores and the meta's rows all use it.
+- **Model handle.** A strategy trading on its model holds a `ModelHandle`
+  (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
+  &requirements, mode)`, an `Rc`), the one place it decides:
+  `start(self, &bar_types)` in `on_start` registers the features and
+  starts the cadence, live `warmup::live_bar_build_delay(&bar_types)`
+  late; `decide(self)` at each
+  fresh decision, on data of the targets' instrument (`new` refuses a
+  cadence on features reading none of it), snapshots the features and
+  publishes their row, then, in
+  `Mode::Backtest { models, commission }` or `Mode::Live { models,
+  commission, .. }`, takes the
+  latest model of
+  the store valid at the decision, predicts, and returns the `Trade`
+  (side, the targets' size, the probability) that `Thresholds::side`
+  makes of the probability: a buy at or above `long`, a sell at or below
+  `short`. No model valid yet, a stale decision, cold features or a
+  probability between the thresholds give no trade, never an error. The store is listed again
+  at each decision, so a model published meanwhile is used from the first
+  decision at or after its valid-from, and a model is swapped in only
+  there, before predicting: no decision mixes two models. Before use a
+  model is checked: its feature names in order and its fingerprint are
+  the strategy's, its width theirs, and it predicts each probe to the bit
+  as when fitted (parity, in the node). One failing is refused, logged as
+  an error, never read again, and the current model kept. In
+  `Mode::Dataset { rows }` (the replay of a train) `decide` opens the
+  decision's targets instead and returns no trade, and the rows they
+  settle are collected in `rows`; the strategy hands the handle its
+  `on_time_event`, `on_order_filled`, `on_order_denied`,
+  `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
+  trading. The trades are the strategy's own orders: `learned/` sends a
+  market order and closes it `hold` later.
+- **Meta-labeling.** A primary picks the side, a meta model decides
+  whether to take the trade (`model::meta`). The primary is a model, to
+  which a `[model.meta]` table alone adds a meta model, or the
+  strategy's rule: its model section is a `RuleConfig` (`decision`,
+  `targets`, `retrain` and a required `[model.meta]`), its features
+  declare `.primary()`, its handle is `ModelHandle::of_rule`, and it
+  calls `decide_on(self, side)` only when its rule signals (`decide`
+  makes no decision then). The meta table (`MetaConfig`): `window`,
+  `holdout`, `threshold` (the probability from which a trade is taken),
+  `min_score`, `learner`, and an optional `size = { min = 0.5, max = 2 }`,
+  the trade a multiple of the targets' size, `min` at the threshold to
+  `max` at a probability of 1, linear between. The meta model decides
+  only when the primary signals, on the primary's features with its side
+  (1 a buy, -1 a sell) and probability (missing for a rule) after them,
+  and learns whether the triple-barrier trade on the primary's side won:
+  the targets need a barrier, and a dataset row, which opens a long and a
+  short at every decision, has either side's, so the meta's rows need no
+  replay of their own. A rule primary's rows are its decisions on a side.
+  A model primary's are its dataset's rows, each with the prediction of
+  the primary model the strategy used then (`Swap`), out of sample by
+  construction, none before the primary's first model, which the meta's
+  window never starts before; a row the primary makes no trade of is
+  none. Trading, the handle takes the primary's trade if the meta model
+  in use predicts at least `threshold`, sized if it sizes; no meta model
+  valid yet is no trade. Two levels at most, by the types: `MetaConfig`
+  has no meta, so `[model.meta.meta]` is refused at load as an unknown
+  field.
+- **Schedule.** A model is retrained every `retrain` (`model::schedule`),
+  at its multiples since the Unix epoch, whatever the run start, in a
+  backtest as live: the times of a Nautilus timer named after the
+  strategy (`timer(strategy_id)`, `RETRAIN-<strategy id>`, so several
+  strategies can retrain in one process), that `start(actor, timer,
+  every)` sets from the last grid time not after now
+  (`last_grid_time`). `times(every, from, to)` gives those a run
+  over `[from, to)` uses, from the last at or before `from`, firing such
+  a timer on a virtual clock; `missing(times, published)` those the
+  store has no model valid from. A model is the same whatever interval
+  its time came from, so the interval does not key the store.
+- **Retraining backtest.** `WalkForward` (`model::walk`,
+  `WalkForward::new(catalog, models, strategy_id, &features, config,
+  &requirements, &commission)`)
+  holds a backtest's retrains and scores: `prepare(start, end, build,
+  train)` has `build` build the dataset from the first retrain's window
+  to `end` if it lacks a day, then `train` train at each missing retrain
+  time; `scores(start, end)` scores each decision of the dataset in the
+  span with the model the handle used at it, beside the baseline fitted
+  at each retrain time, per retrain period and over the span (backtest
+  README, "Retraining on the schedule"). With a meta model, `prepare`
+  builds from the longer of the two windows and trains at each time
+  either store lacks, the meta's only after the primary's first model as
+  the earlier trains of the span leave it (before, its window has no
+  row, so it never publishes there), and the
+  meta's scores follow the primary's.
+- **Live retraining.** In `Mode::Live { models, commission, launcher,
+  catalog }` the handle retrains too (`model::launcher`): `start`
+  sets the strategy's retrain timer (`schedule::start`) on the grid of
+  `retrain`; each firing at a grid time T, handed on by the strategy's
+  `on_time_event`, launches a train through the `Launcher` at once, at
+  the last time the catalog at `catalog` holds for every series the
+  strategy reads (`DataRequirements::slices` at T: the contracts standing
+  then), the earliest of their last stored timestamps (Nautilus'
+  `ParquetDataCatalog::query_last_timestamp`), or at T if that is past
+  it. Live, the catalog gains the node's data at each daily promotion
+  (live README, "Recording into the catalog"), so a live retrain's data
+  ends at the last one, at most a day before T, and never reaches past
+  what is stored. A retrain is skipped, with a warning, if a series has
+  nothing stored, if that time is not past the time of the handle's
+  previous retrain (the catalog gained nothing since), or if one is
+  still running. `decide` first polls the
+  running retrain: a finished one is logged, as info when it published,
+  as an error with the reason when it kept the current model or failed,
+  and the next may start. The model it published is used from that
+  decision on (the store is listed again); live validity starts when the
+  train finishes, a backtest's at its time. `Launcher::process` runs the binary's `train` as a child (one
+  node per process), `--at` and the time appended to its arguments, its
+  exit status the outcome, the error it printed last the reason; a child
+  still running when the node stops runs to its end.
+  `Launcher::in_process` trains on a thread instead, for tests. A node
+  starting with models in the store trades from its first decision on
+  the latest valid then. Don't backtest a strategy on the store and
+  catalog its live node retrains into at the same time: two processes
+  building one strategy's dataset at once may both replay a day, and
+  nothing orders their writes of its file and of the manifest.
+- **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
+  at `t`: `Training::new` on the strategy's features and model section,
+  `train_at` with a replay through `Backtest::run_dataset` of the strategy
+  in `Mode::Dataset` on hedging venues, the costs and balance given as to
+  a backtest (`--commission` or `--commission-rate`, `--balance`); it
+  prints what it did when every model it trained published, and fails
+  with a kept one, its reason, each model's outcome named.
+  `backtest` and `live` take `--models` (default `models`), the store
+  root, beside `train`'s; `live` takes the costs of its retrains'
+  dataset runs (`--retrain-commission` or `--retrain-commission-rate`,
+  `--retrain-balance`), needed by a strategy trading on a model, and
+  passes them, its `--config`, `--catalog`, `--models` and `--leverage`
+  to the `train` it starts; its handle reads the models of that
+  commission. `backtest` of a strategy trading on a model
+  builds its dataset and runs `train` in child processes first, with
+  its `--dataset-balance`, and trades on the models of its own
+  commission, each train through `Launcher::process` as
+  live's: one keeping the model is a kept retrain, not a failed backtest
+  (backtest README, "Retraining on the schedule").
 
 ## Warmup and training
 
 This is the single description of warmup; the backtest and live READMEs only
-say how to register the catalog that serves it.
+say where the data comes from.
 
 Warmup is the history a strategy needs before it trades: indicators to
-initialise and models to train. The module `strategy::warmup` is the one
-place that knows Nautilus' warmup protocol for the bars it builds; no
-strategy names the request params or reads the cache for its warmup. A
-strategy makes the three calls shown in Wiring: `warmup::start(self,
-&bar_types, warmup, &continuous, group)` in `on_start`, which requests the
-warmup as the request group `group` and subscribes to the bars; `warmup::bars(self,
+initialise and models to train. A strategy decides only once its
+indicators are initialized (see Wiring), wherever their data came from:
+
+- **Live**, the strategy requests its warmup at start, and the request
+  hydrates its indicators before the live stream.
+- **In a backtest**, there is no warmup: the run replays `[start, end]`
+  alone, the strategy requests nothing and only subscribes, and its
+  indicators warm on the replayed bars, so it decides from where they
+  initialize, an EMA after its period of bars. To trade from 10:00, start
+  the run earlier (backtest README, "Warmup").
+- **A dataset build** (and so a retrain) replays the features' warmup
+  before its first day, by starting its run that much earlier, and stores
+  no row decided before the day (see "Features and decisions",
+  "Dataset"); it makes no warmup request either.
+
+The module `strategy::warmup` is the one place that knows Nautilus'
+warmup protocol for the bars it builds; no strategy names the request
+params or reads the cache for its warmup. A live strategy makes the
+three calls shown in Wiring: `warmup::start(self, &bar_types, warmup,
+&continuous, group)` in `on_start`, which requests the warmup as the
+request group `group` and subscribes to the bars; `warmup::bars(self,
 response)` in `on_historical_quotes` and `on_historical_bars`, which
 returns the warmup bars of the response's instrument, oldest first; and
 `warmup::finished(group, response)` in `on_data_response`, which tells
-whether the warmup ended, complete or not.
+whether the warmup ended, complete or not. In a backtest it calls
+`warmup::subscribe(self, &bar_types, &continuous)` in `on_start` alone,
+which subscribes as `start` does, with no request.
 
 - **What `start` requests** is chosen from the bar type alone, never the
   venue. A composite bar type is built from its source bars: `start`
@@ -522,7 +1022,7 @@ whether the warmup ended, complete or not.
   internal bar type does not build bars from quotes; only a request of
   their source with `bar_types` does.
 - **The params.** Each request runs over `[now - warmup, now]`, where
-  `now` is `self.clock().utc_now()`, the simulated time in backtest. The
+  `now` is `self.clock().utc_now()`. The
   end is given so that the data engine trims a bar closing after `now`
   from the response: IB answers an open-ended request with the minute in
   progress, which the live stream then sends again. It carries three
@@ -535,7 +1035,7 @@ whether the warmup ended, complete or not.
   `skip_first_non_full_bar = true`, so that the oldest bar, missing the data
   before `now - warmup`, is dropped; `update_catalog = true`, so that an
   answer the data client certifies complete is written back to the
-  catalog (IC's, live; a backtest registers its catalog read-only). Then
+  catalog (IC's). Then
   `start` subscribes to the bar types, one `subscribe_bars` of a list per
   venue, with the param `start_ns` = `now`: the live stream starts where
   the warmup ends. Without it, a data engine with a catalog starts a
@@ -543,9 +1043,8 @@ whether the warmup ended, complete or not.
   (`subscribe_command_with_prefilled_start_ns`,
   `data/src/engine/streaming.rs`), which IB's data client honours by
   sending every bar since as live (`parse_start_ns`,
-  `adapters/interactive_brokers/src/data/core.rs`).
-  `backtest_bars.rs`, `backtest_bars_on_close.rs` and
-  `backtest_composite_warmup.rs` pin this.
+  `adapters/interactive_brokers/src/data/core.rs`). The gated live tests
+  `ib_minute_bars.rs` and `ic_live_demo.rs` (`tests/live/`) pin this.
 - **The request group.** The requests form one group
   (`DataActor::request_group`, with the strategy's id): once every request
   is answered, Nautilus calls `on_data_response` with a payload-free
@@ -553,8 +1052,9 @@ whether the warmup ended, complete or not.
   failed (its data received up to then delivered anyway).
   `warmup::finished` returns `Ok(true)` then, or an error naming the
   reason, which Nautilus logs; `Ok(false)` for any other response. A group
-  whose requests are all answered at once, as a backtest's catalog does,
-  ends inside `start`, hence the id stored before the call.
+  whose requests are all answered at once ends inside `start`, hence the
+  id stored before the call. Its end opens no decision: the strategy
+  decides once its indicators are initialized.
 - **What `bars` does.** The bars a request builds go to the cache only;
   they are there when the response arrives. `bars` reads the internal bars
   of the response's instrument from the cache (newest first there) and
@@ -575,8 +1075,10 @@ whether the warmup ended, complete or not.
   the strategy calls `warmup::continuous_bars(self, &bar_types,
   &continuous)` once `finished` returns `Ok(true)`, which returns them
   oldest first. Each such bar type is subscribed on its own, with
-  `start_ns` and the same two params. `backtest_continuous_bars.rs` pins
-  this.
+  `start_ns` and the same two params, by `subscribe` too.
+  `backtest_continuous_bars.rs` pins the subscription in a backtest; live
+  refuses bars on a root (`rolls/README.md`), so no run makes this
+  request today.
 - **Cache capacity.** The cache keeps `CacheConfig::bar_capacity` bars per
   bar type (default 10,000) and evicts the oldest beyond it, so a longer
   warmup would be cut silently. `warmup::cache_config(bar_types, warmup)`
@@ -584,53 +1086,60 @@ whether the warmup ended, complete or not.
   the most bars the warmup builds of one bar type (warmup over bar length,
   plus the bar spanning the start), the default left on top as headroom.
   Past the cache's maximum of 1,000,000 it fails, naming the bar type, the
-  bars needed and the capacity, and the run does not start. The backtest
-  sets it on `BacktestEngineConfig::cache`, live on `LiveNodeConfig::cache`.
+  bars needed and the capacity, and the run does not start. The live
+  node sets it on `LiveNodeConfig::cache`; a backtest, which builds no
+  warmup bars, keeps Nautilus' default.
 - **Response.** One response per request, the catalog's part and the data
   client's merged, usually before the first `on_bar`. An `Err` returned
   from `on_historical_quotes`, `on_historical_bars` or `on_data_response`
   is logged, not propagated: a failed warmup does not stop the run. An
-  unanswered request never calls them, and its group never ends. Do not
-  trade until warmup has actually arrived.
+  unanswered request never calls them, and its group never ends. Neither
+  opens a decision: the indicators being initialized does.
 - **Who answers.** The data engine serves the request from a registered
   catalog and asks the data client only for the intervals the catalog
-  lacks. In backtest the client answers nothing, so the catalog must be
-  registered and cover the whole window, or no response comes (see the
-  backtest README). Live, the node registers the same catalog, and the
-  data client answers the rest (see the live README): OKX's adapter serves
+  lacks. A backtest makes no request: its data client answers none, and
+  no catalog is registered in it (backtest README, "Warmup"). Live, the
+  node registers the catalog, and the data client answers the rest (see the live README): OKX's adapter serves
   its candles up to now, IB's its 1-minute bars up to now
   (`request_bars`), IC's its quotes up to now from cTrader's tick history
   (`request_quotes`), written back. Neither OKX nor IB serves quote
   history, so on them only composite bar types get a warmup; on IC only
   bar types built from quotes do.
 
-A model is trained by the strategy itself, retrained on a rolling window of
-the bars received in `on_bar`, every N bars as the config says. The model
-lives only in memory, with no model files, so backtest and live run the
-same code and nothing passes from backtest to live.
+A model is never trained inside the strategy: `train` fits it on the
+strategy's dataset and publishes it as a file in the model store, which
+backtest and live share, and the strategy's model handle reads the latest
+valid one at each decision (see "Features and decisions"). Its features
+warm up as its indicators do: Nautilus feeds them the live and replayed
+data, and the strategy hands them the warmup's bars.
 
 ## Adding a strategy
 
 1. Create `strategy/<name>/` following the layout above: a config embedding
    `BarsConfig` (see "Config"), the wiring calling `warmup` (see "Wiring"),
-   and the strategy's own decision and orders.
+   its state registered as a Nautilus indicator, and the strategy's own
+   decision and orders, made only once `indicators_initialized()`.
 2. Declare it in `strategy/mod.rs`.
 3. In `main.rs`, add a variant to `enum Strategy` and an arm to each `match`
-   on it (fill-catalog, backtest, live), reading the data requirements from
-   `config.bars.data_requirements()`.
+   on it (fill-catalog, backtest, live, train), reading the data
+   requirements from `config.bars.data_requirements()`. A strategy with
+   no model refuses `train`.
 
 ## Tests
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
-  each file. `BarsConfig` and `Session` are unit tested where they live,
+  each file, or in `<module>/tests.rs` for a module hashed into a
+  fingerprint (`docs/ARCHITECTURE.md`). `BarsConfig` and `Session` are unit tested where they live,
   `warmup::cache_config` too; a strategy's config tests cover only its own
   fields and that typos are rejected through the flattened `bars`.
 - Wiring: integration tests in `tests/` run the real strategy through
   `Backtest::run` on a small fixture catalog of 1-minute quotes, one run per
-  test (one node per test thread, `tests/backtest/`). They test the warmup
-  module too: the fixture's prices are chosen so that the warmup bars, the
-  partial oldest bar, the bar at the run start and the session each change
-  the orders and the final balance. The EMA's own tests run it on fixtures
+  test (one node per test thread, `tests/backtest/`). The fixture's prices
+  are chosen so that the bars the indicators warm on, where the run
+  starts and the session each change the orders and the final balance
+  (`backtest_warmup.rs`: the EMA decides once its indicators initialize
+  on the replay). The live warmup request is pinned by the gated live
+  tests (`tests/live/`). The EMA's own tests run it on fixtures
   where each cross, stop loss, take profit and hold is worked out by hand
   (`backtest_ema_*.rs`, backtest README, "Tests"). A recording strategy in
   `tests/common` checks what the EMA cannot show: every price of the bars,
