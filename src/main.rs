@@ -744,7 +744,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
                 models: args.models.clone(),
                 commission: args.retrain.commission()?,
                 launcher: Launcher::process(program, retrain_args(&args)?),
-                catalog_delay: live.recording.catalog_delay(),
+                catalog: args.catalog.clone(),
             };
             live.run(
                 &config.bars.data_requirements(),

@@ -7,7 +7,7 @@ strategy and the node. The node registers the catalog fill-catalog fills
 and backtests read (`--catalog`, default `catalog`): it serves the warmup
 first, the venues' data clients what it lacks, and IC's answers are
 written back to it. The node streams the market data it receives into it,
-so that a retrain the node starts replays up to the present (see
+so that a retrain the node starts replays up to its last daily promotion (see
 "Recording into the catalog").
 Clients go by venue: OKX instruments to OKX's clients, IC instruments
 (`….ICMARKETS`) to IC's, all others to IB's, and a strategy trading several
@@ -312,7 +312,7 @@ database, every trader's keys.
 ## Recording into the catalog
 
 The node streams the market data it receives into the catalog it
-registers, so that a retrain the node starts replays up to the present
+registers, so that a retrain the node starts replays up to its last promotion
 (`recording.rs`, `Recording`): Nautilus' streaming writer
 (`LiveNodeConfig::streaming`, a `StreamingConfig`) appends what the
 message bus carries to Feather files under the staging directory
@@ -400,15 +400,21 @@ per series: consolidate them from time to time
 A strategy trading on a model retrains live on its model section's
 `retrain` interval: its model handle (`Mode::Live`) sets a Nautilus timer
 named after the strategy, `RETRAIN-<strategy id>`, on the epoch-aligned
-grid of the interval (`model::schedule`, shared with the backtest), and each firing starts this binary's `train` at
-the grid time as a child process (`model::launcher`), with the node's
+grid of the interval (`model::schedule`, shared with the backtest), and each firing starts this binary's `train`
+as a child process (`model::launcher`), with the node's
 `--config`, `--catalog`, `--models` and `--leverage` and the retrain
 costs: the replay runs a Nautilus node of its own, which this process,
-holding the live one, cannot. The timer fires
-`Recording::catalog_delay` after the grid time, a day and a minute: by
-then the data the node received up to that time is in the catalog for
-the replay. One retrain per strategy runs at a time: one due
-while another runs is skipped, with a warning. The strategy polls the
+holding the live one, cannot. The retrain starts at its grid time T and
+trains `--at` the last time the catalog holds for every series the
+strategy reads (the earliest of their last stored timestamps, Nautilus'
+`ParquetDataCatalog::query_last_timestamp`, of the contracts standing at
+T), or at T if the catalog holds them past it: its data ends at the last
+daily promotion (see "Recording into the catalog"), at most a day before T, and it never
+reads beyond what is stored. A retrain is skipped, with a warning, if a
+series has nothing stored, or if that time is not past the time of the
+node's previous retrain, the catalog having gained nothing since. One
+retrain per strategy runs at a time: one due while another runs is
+skipped, with a warning. The strategy polls the
 child at each decision: a finished child is logged, as info when it
 published (exit status success), as an error with the error it printed
 last when it kept the current model or failed (with a meta model, the

@@ -5,13 +5,13 @@
 //! (`StreamingConfig`): Feather files appended under a staging directory
 //! outside the catalog, in `live/<instance id>/`, promoted into the catalog
 //! the node registers daily and on a clean stop, each staging file deleted
-//! once promoted. A retrain the node starts then replays up to the last
-//! promotion: it waits `Recording::catalog_delay` after its time for the
-//! data up to it. Each promotion names its files by their rows, so a run's
-//! files of a series leave a sliver between them, one a day, which the
-//! catalog counts as missing: a backtest replays the rows through it, and
-//! the live warmup and fill-catalog ask the venue for it once, its answer
-//! written back over it.
+//! once promoted. A retrain the node starts then trains on the data up to
+//! the last promotion, at most a day old (`model::launcher`). Each
+//! promotion names its files by their rows, so a run's files of a series
+//! leave a sliver between them, one a day, which the catalog counts as
+//! missing: a backtest replays the rows through it, and the live warmup
+//! and fill-catalog ask the venue for it once, its answer written back
+//! over it.
 //!
 //! The node keeps one instance id per trader across restarts, in a file in
 //! the staging directory: a run after a crash writes to the same
@@ -83,15 +83,6 @@ impl Recording {
             .validate()
             .context("Nautilus refuses the streaming config")?;
         Ok(streaming)
-    }
-
-    /// How long after a time the data the node received up to it is in
-    /// the catalog: `PROMOTION_INTERVAL`, the promotions not being on a
-    /// grid, and `PROMOTION_MARGIN` past it. A retrain the node starts at a
-    /// time waits that long, so that its replay finds the data up to it.
-    #[must_use]
-    pub fn catalog_delay(&self) -> SignedDuration {
-        PROMOTION_INTERVAL + PROMOTION_MARGIN
     }
 
     /// The instance id of `trader_id`'s node: the one its last run kept in
@@ -172,12 +163,6 @@ const FLUSH_INTERVAL_MS: u64 = 1_000;
 /// holds at most a day.
 const PROMOTION_INTERVAL: SignedDuration = SignedDuration::from_hours(24);
 
-/// How long past `PROMOTION_INTERVAL` the data received up to a time is
-/// surely in the catalog: past its flush (`FLUSH_INTERVAL_MS`), the live
-/// node's bar build delay for the bars it builds, and the promotion's own
-/// writing.
-const PROMOTION_MARGIN: SignedDuration = SignedDuration::from_mins(1);
-
 /// The data the node streams: the market data its strategy can read and
 /// backtests replay, and the instrument definitions, which a backtest over
 /// the catalog needs.
@@ -222,15 +207,6 @@ mod tests {
         assert_eq!(streaming.promotion_interval_ms, Some(24 * 60 * 60 * 1_000));
         assert!(streaming.promote_on_close);
         assert!(streaming.delete_feather_after_promotion);
-    }
-
-    #[test]
-    fn data_is_in_the_catalog_a_day_and_a_minute_after_it_arrives() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            recording(dir.path().join("staging")).catalog_delay(),
-            SignedDuration::from_hours(24) + SignedDuration::from_mins(1)
-        );
     }
 
     #[test]

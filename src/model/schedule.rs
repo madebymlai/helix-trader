@@ -6,10 +6,10 @@
 //! (`timer`, so several strategies retrain in one process), which `start`
 //! sets on a clock from an epoch-aligned time (`last_grid_time`): Nautilus
 //! fires it at that time plus whole intervals. A live node's clock fires
-//! it as it goes, a delay late (`launcher`); a backtest, which trains
-//! before its run, takes the times the same timer fires over its span on
-//! a virtual clock of its own (`times`). Each time is trained at once:
-//! `missing` gives those the store has no model valid from.
+//! it as it goes (`launcher`); a backtest, which trains before its run,
+//! takes the times the same timer fires over its span on a virtual clock
+//! of its own (`times`). Each time is trained at once: `missing` gives
+//! those the store has no model valid from.
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -30,8 +30,7 @@ pub fn timer(strategy_id: StrategyId) -> String {
 }
 
 /// Starts the retrain timer `timer` of `every` on `actor`'s clock, from
-/// the last grid time not after now, `delay` late, so it first fires on
-/// the next one.
+/// the last grid time not after now, so it first fires on the next one.
 ///
 /// # Errors
 ///
@@ -41,10 +40,9 @@ pub fn start<A: DataActor + DataActorNative>(
     actor: &A,
     timer: &str,
     every: SignedDuration,
-    delay: SignedDuration,
 ) -> anyhow::Result<()> {
     let clock = actor.clock();
-    let start = last_grid_time(clock.timestamp_ns(), every, delay)?;
+    let start = last_grid_time(clock.timestamp_ns(), every)?;
     clock.set_timer_ns(
         timer,
         DurationNanos::try_from(every)?,
@@ -71,11 +69,7 @@ pub fn times(
     to: Timestamp,
 ) -> anyhow::Result<Vec<Timestamp>> {
     anyhow::ensure!(from < to, "the span {from} to {to} is empty");
-    let first = Timestamp::from(last_grid_time(
-        UnixNanos::from(from),
-        every,
-        SignedDuration::ZERO,
-    )?);
+    let first = Timestamp::from(last_grid_time(UnixNanos::from(from), every)?);
     let mut clock = VirtualClock::new();
     clock.register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
     // Started, as `start` starts it, a grid time before the first, the
@@ -85,7 +79,7 @@ pub fn times(
     clock.set_timer_ns(
         GRID,
         DurationNanos::try_from(every)?,
-        Some(last_grid_time(before, every, SignedDuration::ZERO)?),
+        Some(last_grid_time(before, every)?),
         None,
         None,
         Some(true),
@@ -110,24 +104,19 @@ pub fn missing(times: &[Timestamp], published: &[Timestamp]) -> Vec<Timestamp> {
         .collect()
 }
 
-/// The last multiple of `every` since the epoch, plus `delay`, not after
-/// `now`.
+/// The last multiple of `every` since the epoch not after `now`.
 ///
 /// # Errors
 ///
 /// Returns an error if `every` is not positive, or the time is before the
 /// epoch.
-pub fn last_grid_time(
-    now: UnixNanos,
-    every: SignedDuration,
-    delay: SignedDuration,
-) -> anyhow::Result<UnixNanos> {
+pub fn last_grid_time(now: UnixNanos, every: SignedDuration) -> anyhow::Result<UnixNanos> {
     anyhow::ensure!(
         every.is_positive(),
         "the retrain interval {every:#} is not positive"
     );
-    let (every, delay) = (every.as_nanos(), delay.as_nanos());
-    let start = (i128::from(now.as_u64()) - delay).div_euclid(every) * every + delay;
+    let every = every.as_nanos();
+    let start = i128::from(now.as_u64()).div_euclid(every) * every;
     Ok(UnixNanos::from(u64::try_from(start)?))
 }
 
@@ -207,21 +196,16 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_time_is_the_last_multiple_since_the_epoch_plus_the_delay() {
+    fn the_grid_time_is_the_last_multiple_since_the_epoch() {
         let last = |now: &str| {
             Timestamp::from(
-                last_grid_time(
-                    UnixNanos::from(at(now)),
-                    SignedDuration::from_hours(24),
-                    SignedDuration::from_mins(6),
-                )
-                .unwrap(),
+                last_grid_time(UnixNanos::from(at(now)), SignedDuration::from_hours(24)).unwrap(),
             )
         };
 
-        assert_eq!(last("2026-10-22T13:00:00Z"), at("2026-10-22T00:06:00Z"));
-        assert_eq!(last("2026-10-22T00:06:00Z"), at("2026-10-22T00:06:00Z"));
-        assert_eq!(last("2026-10-22T00:05:59Z"), at("2026-10-21T00:06:00Z"));
+        assert_eq!(last("2026-10-22T13:00:00Z"), at("2026-10-22T00:00:00Z"));
+        assert_eq!(last("2026-10-22T00:00:00Z"), at("2026-10-22T00:00:00Z"));
+        assert_eq!(last("2026-10-21T23:59:59Z"), at("2026-10-21T00:00:00Z"));
     }
 
     #[test]

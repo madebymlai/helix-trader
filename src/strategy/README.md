@@ -905,9 +905,9 @@ of its choosing (`model::features`, `model::decide`).
   at its multiples since the Unix epoch, whatever the run start, in a
   backtest as live: the times of a Nautilus timer named after the
   strategy (`timer(strategy_id)`, `RETRAIN-<strategy id>`, so several
-  strategies can retrain in one process), that `start(clock, timer,
-  every, delay)` sets from the last grid time not after now, plus the
-  delay (`last_grid_time`). `times(every, from, to)` gives those a run
+  strategies can retrain in one process), that `start(actor, timer,
+  every)` sets from the last grid time not after now
+  (`last_grid_time`). `times(every, from, to)` gives those a run
   over `[from, to)` uses, from the last at or before `from`, firing such
   a timer on a virtual clock; `missing(times, published)` those the
   store has no model valid from. A model is the same whatever interval
@@ -928,13 +928,21 @@ of its choosing (`model::features`, `model::decide`).
   row, so it never publishes there), and the
   meta's scores follow the primary's.
 - **Live retraining.** In `Mode::Live { models, commission, launcher,
-  catalog_delay }` the handle retrains too (`model::launcher`): `start`
+  catalog }` the handle retrains too (`model::launcher`): `start`
   sets the strategy's retrain timer (`schedule::start`) on the grid of
-  `retrain`, `catalog_delay` late (`Recording::catalog_delay`: the data
-  the node received up to a time reaches the catalog that much later);
-  each firing, handed on by the strategy's `on_time_event`, launches a
-  train at its grid time through the `Launcher`, unless one is still
-  running: that one is skipped, with a warning. `decide` first polls the
+  `retrain`; each firing at a grid time T, handed on by the strategy's
+  `on_time_event`, launches a train through the `Launcher` at once, at
+  the last time the catalog at `catalog` holds for every series the
+  strategy reads (`DataRequirements::slices` at T: the contracts standing
+  then), the earliest of their last stored timestamps (Nautilus'
+  `ParquetDataCatalog::query_last_timestamp`), or at T if that is past
+  it. Live, the catalog gains the node's data at each daily promotion
+  (live README, "Recording into the catalog"), so a live retrain's data
+  ends at the last one, at most a day before T, and never reaches past
+  what is stored. A retrain is skipped, with a warning, if a series has
+  nothing stored, if that time is not past the time of the handle's
+  previous retrain (the catalog gained nothing since), or if one is
+  still running. `decide` first polls the
   running retrain: a finished one is logged, as info when it published,
   as an error with the reason when it kept the current model or failed,
   and the next may start. The model it published is used from that
