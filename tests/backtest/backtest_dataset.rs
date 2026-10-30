@@ -36,7 +36,7 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 /// Two days, the 21st and 22nd of October 2026, quotes from 23:00 the day
-/// before (the engine starts 1 ns before the run) to 03:00 of the 23rd:
+/// before to 03:00 of the 23rd:
 /// the replay runs to 02:00, the end of the 22nd plus the bracket's two
 /// hours, and every decision of the two days settles by then.
 #[test]

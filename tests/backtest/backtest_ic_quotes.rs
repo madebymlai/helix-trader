@@ -28,7 +28,7 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
         (backtest.venue_oms)(Venue::from("ICMARKETS")),
         OmsType::Hedging
     );
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(ic::HOUR_BARS),
         vec![(OrderSide::Buy, Quantity::from(10_000))],
     );
@@ -36,8 +36,7 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     let outcome = backtest.run(recorder.closing_on(vec![1])).unwrap();
 
     let record = record.borrow();
-    // The engine starts 1 ns before 09:00, so the first hour bar closes at
-    // 10:00. Each order fills whole, in one fill, at its bar's close: the
+    // The run starts at 09:00, so the first hour bar closes at 10:00. Each order fills whole, in one fill, at its bar's close: the
     // buy at the ask of the last quote before 10:00, the close at the bid of
     // the last before 11:00.
     let fills: Vec<_> = record

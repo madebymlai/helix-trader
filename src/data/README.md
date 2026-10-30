@@ -370,10 +370,12 @@ more.
 
 A fill over `[start, end]` therefore records a series over `[start, end]`,
 whatever its stamps. IB's bars are stamped at their close, so the bar
-closing at `end` belongs to this fill, not the next. The backtest requires
-every series over `[start − 1 ns − warmup, end]` of its run, so start the
-fill (or the earlier fill the catalog resumes from) at least the warmup
-before the run (see `src/backtest/README.md`, "Coverage check").
+closing at `end` belongs to this fill, not the next. A backtest replays
+what the catalog stores over `[start, end]` of its run and checks nothing
+before (see `src/backtest/README.md`, "No check before the run"): fill
+from the run's start, and for a dataset build from the features'
+warmup before its first day; a live start asks the venue for what its
+warmup misses.
 
 ### Writing
 

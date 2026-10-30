@@ -1,25 +1,23 @@
-//! A recording strategy: it warms up through `strategy::warmup` as a real
-//! strategy does, on a plain instrument or, given its continuous bars, on a
-//! root, or only subscribes to its bars, records every bar it
-//! gets, warmup and replayed, every fill, and on stop the adjustments of
-//! its positions (funding), the orders denied and its account's margins,
-//! and can rest a sell stop on its first replayed
-//! bar or send market orders of its choosing on the first replayed bars,
-//! close its positions by their ids on given bars, and on stop its
-//! positions. It leaves its `oms_type` unset, so it keeps
-//! positions as the venue does. For the tests that need what the EMA
-//! crossover cannot show: the bars' open, high and low, stop orders, fills
-//! of a given side and size, funding, and positions.
+//! A recording strategy: it subscribes to its bars through
+//! `strategy::warmup` as a real strategy does in a backtest, on a plain
+//! instrument or, given its continuous bars, on a root, records every bar
+//! it gets, every fill, and on stop the adjustments of its positions
+//! (funding), the orders denied and its account's margins, and can rest a
+//! sell stop on its first bar or send market orders of its choosing on the
+//! first bars, close its positions by their ids on given bars, and on stop
+//! its positions. It leaves its `oms_type` unset, so it keeps positions as
+//! the venue does. For the tests that need what the EMA crossover cannot
+//! show: the bars' open, high and low, stop orders, fills of a given side
+//! and size, funding, and positions.
 
 use std::{cell::RefCell, rc::Rc};
 
 use helix_trader::{rolls::ContinuousBars, strategy::warmup};
-use jiff::SignedDuration;
-use nautilus_common::{actor::DataActor, messages::data::DataResponseEnvelope};
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_common::actor::DataActor;
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     accounts::AccountAny,
-    data::{Bar, BarType, QuoteTick},
+    data::{Bar, BarType},
     enums::OrderSide,
     events::{OrderDenied, OrderFilled, PositionAdjusted},
     identifiers::StrategyId,
@@ -34,11 +32,6 @@ use nautilus_trading::{
 /// What the recorder got, in order.
 #[derive(Debug, Default)]
 pub struct Record {
-    /// The warmup bars `warmup::bars` returned.
-    pub warmup: Vec<Bar>,
-    /// How the warmup ended (`warmup::finished`): `Ok` complete, or the
-    /// error; `None` while pending or without a warmup.
-    pub warmup_end: Option<Result<(), String>>,
     /// The bars of `on_bar`.
     pub bars: Vec<Bar>,
     /// Side, price and time of every fill.
@@ -58,31 +51,22 @@ pub struct Record {
 pub struct Recorder {
     core: StrategyCore,
     bar_type: BarType,
-    /// The warmup through `strategy::warmup`; without one, it only
-    /// subscribes to the bars.
-    warmup: Option<SignedDuration>,
-    /// The request group of the warmup.
-    warmup_group: UUID4,
     /// The continuous bars of its bar type, if on a root.
     continuous: ContinuousBars,
     /// The trigger of the sell stop of 10 shares sent on the first bar.
     stop: Option<Price>,
-    /// The market order sent on each of the first replayed bars, in order.
+    /// The market order sent on each of the first bars, in order.
     market: Vec<(OrderSide, Quantity)>,
-    /// The replayed bars, by index, on which it closes its open positions
+    /// The bars, by index, on which it closes its open positions
     /// (`close_position`), before any market order of the bar.
     close_on: Vec<usize>,
     record: Rc<RefCell<Record>>,
 }
 
 impl Recorder {
-    /// A recorder of `bar_type` after `warmup`, resting a sell stop at
-    /// `stop` if given, and the record it fills.
-    pub fn new(
-        bar_type: BarType,
-        warmup: SignedDuration,
-        stop: Option<Price>,
-    ) -> (Self, Rc<RefCell<Record>>) {
+    /// A recorder of `bar_type`, resting a sell stop at `stop` if given,
+    /// and the record it fills.
+    pub fn new(bar_type: BarType, stop: Option<Price>) -> (Self, Rc<RefCell<Record>>) {
         let record = Rc::new(RefCell::new(Record::default()));
         let recorder = Self {
             core: StrategyCore::new(StrategyConfig {
@@ -91,8 +75,6 @@ impl Recorder {
                 ..Default::default()
             }),
             bar_type,
-            warmup: Some(warmup),
-            warmup_group: UUID4::new(),
             continuous: ContinuousBars::default(),
             stop,
             market: vec![],
@@ -102,14 +84,13 @@ impl Recorder {
         (recorder, record)
     }
 
-    /// A recorder of `bar_type`, on a root, after `warmup`, its bars
-    /// Nautilus' continuous bars of `continuous`, and the record it fills.
+    /// A recorder of `bar_type`, on a root, its bars Nautilus' continuous
+    /// bars of `continuous`, and the record it fills.
     pub fn continuous(
         bar_type: BarType,
-        warmup: SignedDuration,
         continuous: ContinuousBars,
     ) -> (Self, Rc<RefCell<Record>>) {
-        let (recorder, record) = Self::new(bar_type, warmup, None);
+        let (recorder, record) = Self::new(bar_type, None);
         (
             Self {
                 continuous,
@@ -119,43 +100,18 @@ impl Recorder {
         )
     }
 
-    /// A recorder of `bar_type` from the run start, with no warmup request,
-    /// and the record it fills.
-    pub fn without_warmup(bar_type: BarType) -> (Self, Rc<RefCell<Record>>) {
-        let (recorder, record) = Self::new(bar_type, SignedDuration::ZERO, None);
-        (
-            Self {
-                warmup: None,
-                ..recorder
-            },
-            record,
-        )
-    }
-
-    /// A recorder of `bar_type` after `warmup` sending the market order
-    /// `market[i]` on the `i`-th replayed bar, and the record it fills.
+    /// A recorder of `bar_type` sending the market order `market[i]` on
+    /// the `i`-th bar, and the record it fills.
     pub fn trading(
         bar_type: BarType,
-        warmup: SignedDuration,
         market: Vec<(OrderSide, Quantity)>,
     ) -> (Self, Rc<RefCell<Record>>) {
-        let (recorder, record) = Self::new(bar_type, warmup, None);
-        (Self { market, ..recorder }, record)
-    }
-
-    /// A recorder of `bar_type` from the run start, with no warmup request,
-    /// sending the market order `market[i]` on the `i`-th bar, and the
-    /// record it fills.
-    pub fn trading_without_warmup(
-        bar_type: BarType,
-        market: Vec<(OrderSide, Quantity)>,
-    ) -> (Self, Rc<RefCell<Record>>) {
-        let (recorder, record) = Self::without_warmup(bar_type);
+        let (recorder, record) = Self::new(bar_type, None);
         (Self { market, ..recorder }, record)
     }
 
     /// The recorder closing its open positions, each by its id
-    /// (`close_position`), on the replayed bars of `close_on`.
+    /// (`close_position`), on the bars of `close_on`.
     pub fn closing_on(self, close_on: Vec<usize>) -> Self {
         Self { close_on, ..self }
     }
@@ -179,30 +135,7 @@ nautilus_strategy!(Recorder, {
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let Some(warmup) = self.warmup else {
-            self.subscribe_bars(self.bar_type, None, None);
-            return Ok(());
-        };
-        let bar_types = [self.bar_type];
-        warmup::start(
-            self,
-            &bar_types,
-            warmup,
-            &self.continuous.clone(),
-            self.warmup_group,
-        )
-    }
-
-    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        let end = match warmup::finished(self.warmup_group, response) {
-            Ok(false) => return Ok(()),
-            Ok(true) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        let continuous = warmup::continuous_bars(self, &[self.bar_type], &self.continuous);
-        let mut record = self.record.borrow_mut();
-        record.warmup.extend(continuous);
-        record.warmup_end = Some(end);
+        warmup::subscribe(self, &[self.bar_type], &self.continuous.clone());
         Ok(())
     }
 
@@ -222,18 +155,6 @@ impl DataActor for Recorder {
                 .flat_map(|position| position.adjustments.iter().cloned()),
         );
         record.positions = positions;
-        Ok(())
-    }
-
-    fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        let bars = warmup::bars(self, quotes);
-        self.record.borrow_mut().warmup.extend(bars);
-        Ok(())
-    }
-
-    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        let bars = warmup::bars(self, bars);
-        self.record.borrow_mut().warmup.extend(bars);
         Ok(())
     }
 

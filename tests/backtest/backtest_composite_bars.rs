@@ -91,21 +91,15 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
         .block_on(fill)
         .unwrap();
 
-    let (recorder, record) = Recorder::without_warmup(BarType::from(COMPOSITE));
-    let mut backtest = common::backtest(
-        dir.path(),
-        at("10:30"),
-        at("15:00"),
-        SignedDuration::ZERO,
-        "0 EUR",
-    );
+    let (recorder, record) = Recorder::new(BarType::from(COMPOSITE), None);
+    let mut backtest = common::backtest(dir.path(), at("10:30"), at("15:00"), "0 EUR");
     backtest.bar_types = bar_types.to_vec();
     backtest.run(recorder).unwrap();
 
     let record = record.borrow();
     let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
-    // The engine starts at 10:29:59.999999999: the bar closing 11:00 lacks
-    // the minutes before it; those closing 12:00 to 15:00 are whole.
+    // The run starts at 10:30: the bar closing 11:00 lacks the minutes
+    // before it; those closing 12:00 to 15:00 are whole.
     let closes: Vec<Timestamp> = replay.iter().map(|bar| bar.0).collect();
     assert_eq!(
         closes,

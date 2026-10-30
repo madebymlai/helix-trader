@@ -9,7 +9,7 @@ use nautilus_model::{data::BarType, enums::OrderSide, types::Price};
 fn a_sell_stop_fills_at_the_bid_of_the_first_minute_quote_crossing_it() {
     let catalog = fall::catalog();
     let stop = Price::from("600.00");
-    let (recorder, record) = Recorder::new(BarType::from(MID_BAR_TYPE), fall::WARMUP, Some(stop));
+    let (recorder, record) = Recorder::new(BarType::from(MID_BAR_TYPE), Some(stop));
 
     fall::backtest(catalog.path()).run(recorder).unwrap();
 

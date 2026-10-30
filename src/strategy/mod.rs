@@ -20,7 +20,8 @@
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from quotes; `warmup` asks for their
-//! history and hands it back, so that no strategy knows how. The catalog
+//! history live and hands it back, so that no strategy knows how, and
+//! subscribes to them in a backtest, which requests none. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
 mod config;
@@ -54,8 +55,9 @@ use crate::rolls::{Slice, Transition, TransitionTable};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
     /// The internal bar types the strategy reads and warms up on: their
-    /// instruments are those it reads (see `instrument_ids`), and the node
-    /// sizes its cache to hold their warmup (see `warmup::cache_config`).
+    /// instruments are those it reads (see `instrument_ids`), and a live
+    /// node sizes its cache to hold their warmup (see
+    /// `warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
     /// of bars, book deltas and custom data among them (see
@@ -66,7 +68,8 @@ pub struct DataRequirements {
     /// instruments are read too: live sets up their clients but subscribes
     /// to none of the ticks.
     pub ticks: Vec<TickSeries>,
-    /// How far back before the run the warmup history starts.
+    /// How far back before a live start the warmup history starts: a
+    /// backtest requests none.
     pub warmup: SignedDuration,
 }
 

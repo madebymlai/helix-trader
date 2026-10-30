@@ -33,9 +33,7 @@ use nautilus_model::{
     enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
 };
-use nautilus_persistence::{
-    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
-};
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, costs, report::Outcome};
@@ -70,17 +68,14 @@ const DATASET_PURGE_MINS: u32 = 1;
 /// replayed: the data engine builds the strategy's bars from them and
 /// keeps the books the strategy subscribes to, the venue settles the
 /// funding; see `Backtest::series` and `data_config`), each over its
-/// slice, and the catalog registered in the
-/// engine, read-only, so that it serves the strategy's warmup requests and
-/// takes no write-back, with a cache
-/// holding the warmup bars (`warmup::cache_config`) and a data engine
-/// building no bar for an hour without quotes
-/// (`warmup::data_engine_config`). The engine starts
-/// 1 ns before `start` (see `Backtest::engine_start`), which must be before
-/// `end`. The data is streamed `CHUNK_SIZE` points at a time, unless the
-/// run replays custom data, which `BacktestDataConfig` refuses: then the
-/// custom series are left out (see `custom_data`) and the data is loaded
-/// at once. Build and run errors are raised, not only logged; the engine
+/// slice of `[start, end]`, the window the engine runs, `start` before
+/// `end`. No catalog is registered in the engine: it serves no request,
+/// and the strategy warms up on the replay. The cache is Nautilus'
+/// default, the data engine builds no bar for an hour without quotes
+/// (`warmup::data_engine_config`). The data is streamed `CHUNK_SIZE`
+/// points at a time, unless the run replays custom data, which
+/// `BacktestDataConfig` refuses: then the custom series are left out
+/// (see `custom_data`) and the data is loaded at once. Build and run errors are raised, not only logged; the engine
 /// outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     config(backtest, None)
@@ -120,7 +115,6 @@ fn config(
         .into_iter()
         .map(|venue| venue_config(backtest, venue))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let cache = warmup::cache_config(&backtest.bar_types, backtest.warmup)?;
     let (custom, series): (Vec<SeriesSlice>, Vec<SeriesSlice>) =
         backtest.series()?.into_iter().partition(is_custom);
     let data = series
@@ -128,12 +122,8 @@ fn config(
         .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let engine_config = BacktestEngineConfig::builder()
-        .cache(cache)
         .data_engine(warmup::data_engine_config())
         .maybe_exec_engine(exec_engine)
-        .catalogs(vec![
-            DataCatalogConfig::new(catalog, None, None).with_read_only(true),
-        ])
         .logging(backtest.logging.clone())
         .build();
     Ok(BacktestRunConfig::builder()
@@ -141,8 +131,8 @@ fn config(
         .venues(venues)
         .data(data)
         .engine(engine_config)
-        .start(UnixNanos::from(backtest.engine_start()?))
-        .end(UnixNanos::from(backtest.end))
+        .start(UnixNanos::from(start))
+        .end(UnixNanos::from(end))
         .maybe_chunk_size(custom.is_empty().then_some(CHUNK_SIZE))
         .raise_exception(true)
         .dispose_on_completion(false)
@@ -342,7 +332,6 @@ mod tests {
                 BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
             ],
             ticks: vec![],
-            warmup: jiff::SignedDuration::from_hours(720),
             fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
             balance: Money::from("10000 EUR"),
             leverage: Decimal::ONE,
@@ -492,14 +481,16 @@ mod tests {
         let absolute = std::env::current_dir().unwrap().join("catalog");
         let absolute = absolute.to_str().unwrap();
         assert_eq!(config.data()[0].catalog_path(), absolute);
-        assert_eq!(config.engine().catalogs[0].path(), absolute);
     }
 
+    /// Its data comes from the data configs alone: no catalog serves a
+    /// request, and the cache keeps Nautilus' default.
     #[test]
-    fn the_catalog_is_registered_read_only() {
+    fn no_catalog_is_registered_to_serve_requests() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
-        assert!(config.engine().catalogs[0].read_only());
+        assert!(config.engine().catalogs.is_empty());
+        assert_eq!(config.engine().cache, None);
     }
 
     #[test]
@@ -560,12 +551,19 @@ mod tests {
     }
 
     #[test]
-    fn runs_from_one_nanosecond_before_the_start_to_the_end_and_raises_errors() {
+    fn runs_and_reads_each_series_from_the_start_to_the_end_and_raises_errors() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let ns = |ts: &str| UnixNanos::from(ts.parse::<Timestamp>().unwrap());
-        assert_eq!(config.start(), Some(ns("2026-06-30T23:59:59.999999999Z")));
-        assert_eq!(config.end(), Some(ns("2026-10-01T00:00:00Z")));
+        let (start, end) = (ns("2026-07-01T00:00:00Z"), ns("2026-10-01T00:00:00Z"));
+        assert_eq!(config.start(), Some(start));
+        assert_eq!(config.end(), Some(end));
+        for data in config.data() {
+            assert_eq!(
+                (data.start_time(), data.end_time()),
+                (Some(start), Some(end))
+            );
+        }
         assert!(config.raise_exception());
         assert!(!config.dispose_on_completion());
     }

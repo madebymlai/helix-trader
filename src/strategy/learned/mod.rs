@@ -3,7 +3,9 @@
 //! predicts on its features, the averages of its bars (`features.rs`),
 //! and a probability past a threshold is a trade, a market order of the
 //! targets' instrument and size on its side, closed `hold` after it is
-//! sent (`close_position`, on a time alert). Trades may overlap: on a
+//! sent (`close_position`, on a time alert). It decides only once its
+//! indicators are initialized: warm from the replay in a backtest or a
+//! dataset run, from its warmup request live. Trades may overlap: on a
 //! hedging venue each is a position of its own, on a netting venue they
 //! add into one, which the first close then closes. A restart does not set
 //! again the alerts of the trades still open.
@@ -23,9 +25,9 @@ pub use config::LearnedConfig;
 use std::{path::Path, rc::Rc};
 
 use anyhow::Context;
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, indicators::ActorIndicator},
+    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
@@ -65,12 +67,17 @@ pub struct Learned {
     config: LearnedConfig,
     features: Rc<FeatureSet>,
     model: Rc<ModelHandle>,
+    /// The warmup requested at start, live; none in a backtest or a
+    /// dataset run, whose indicators warm on the replay.
+    warmup: Option<SignedDuration>,
     /// The request group of the warmup of the last start.
-    warmup: UUID4,
+    warmup_group: UUID4,
 }
 
 impl Learned {
-    /// The strategy, its model handle in `mode`.
+    /// The strategy, its model handle in `mode`: live, it requests its
+    /// warmup (`BarsConfig::warmup`) at start, which hydrates its
+    /// indicators; otherwise they warm on the data replayed.
     ///
     /// # Errors
     ///
@@ -78,6 +85,7 @@ impl Learned {
     pub fn new(config: LearnedConfig, mode: Mode) -> anyhow::Result<Self> {
         config.validate()?;
         let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+        let warmup = matches!(mode, Mode::Live { .. }).then_some(config.bars.warmup);
         let model = ModelHandle::new(
             strategy_id(&config)?,
             Rc::clone(&features),
@@ -90,7 +98,8 @@ impl Learned {
             config,
             features,
             model,
-            warmup: UUID4::new(),
+            warmup,
+            warmup_group: UUID4::new(),
         })
     }
 
@@ -250,24 +259,25 @@ nautilus_strategy!(Learned, {
 });
 
 impl DataActor for Learned {
-    /// Starts the warmup, then the model handle: the features and the
-    /// decisions.
+    /// Subscribes to the bars, live after requesting the warmup, then
+    /// starts the model handle: the features, registered as its Nautilus
+    /// indicator, and the decisions.
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let (bar_types, warmup) = (self.config.bars.bar_types(), self.config.bars.warmup);
-        self.warmup = UUID4::new();
-        warmup::start(
-            self,
-            &bar_types,
-            warmup,
-            &ContinuousBars::default(),
-            self.warmup,
-        )?;
+        let bar_types = self.config.bars.bar_types();
+        let continuous = ContinuousBars::default();
+        match self.warmup {
+            Some(warmup) => {
+                self.warmup_group = UUID4::new();
+                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)?;
+            }
+            None => warmup::subscribe(self, &bar_types, &continuous),
+        }
         Rc::clone(&self.model).start(self, &bar_types)
     }
 
     /// Logs the end of the warmup; Nautilus logs a failed one as an error.
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup, response)? {
+        if warmup::finished(self.warmup_group, response)? {
             log::info!("Warmup complete");
         }
         Ok(())
@@ -291,6 +301,11 @@ impl DataActor for Learned {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
+            // It decides only once its indicators are initialized: the
+            // features, and in a dataset run the barrier's ATR.
+            if !self.core().indicators_initialized()? {
+                return Ok(());
+            }
             return match Rc::clone(&self.model).decide(self)? {
                 Some(trade) => self.enter(trade),
                 None => Ok(()),

@@ -127,7 +127,6 @@ fn an_okx_swap_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commiss
         start,
         end,
         ticks: vec![],
-        warmup: SignedDuration::ZERO,
         // OKX's taker fee, 0.05%.
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USDT"),
@@ -135,7 +134,7 @@ fn an_okx_swap_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commiss
         venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
     };
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(HOUR_BARS),
         vec![
             (OrderSide::Buy, Quantity::from("2.00")),
@@ -146,9 +145,9 @@ fn an_okx_swap_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commiss
     let outcome = backtest.run(recorder).unwrap();
 
     let record = record.borrow();
-    // The engine starts at 08:59:59.999999999: the first bar seen is the
-    // minute opening 08:59, which closes at 09:00, so the hour bar closing
-    // 09:00 holds it alone. Each hour bar holds the minutes opening in its
+    // The run starts at 09:00: the first bar replayed is the minute opening
+    // 08:59, stamped (`ts_init`) at its close, 09:00, so the hour bar
+    // closing 09:00 holds it alone. Each hour bar holds the minutes opening in its
     // hour: 10:00 has 09:00 to 09:59, not the minute opening at 10:00.
     let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
     assert_eq!(

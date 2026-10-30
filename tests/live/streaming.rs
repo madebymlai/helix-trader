@@ -34,7 +34,7 @@ use helix_trader::{
     data::record_run_start,
     live::{Recording, promote_staged},
 };
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
     cache::CacheView,
@@ -223,8 +223,11 @@ fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back(
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
+/// No check of ours stands before a backtest: one across a crash runs on
+/// what the catalog stores, the gap the crash left replayed as a quiet
+/// period.
 #[test]
-fn a_backtest_across_a_crash_finds_the_gap_it_left() {
+fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     let dir = tempfile::tempdir().unwrap();
     let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
@@ -238,27 +241,18 @@ fn a_backtest_across_a_crash_finds_the_gap_it_left() {
     let (crashed_run, restart): (Vec<&QuoteTick>, Vec<&QuoteTick>) = quotes
         .iter()
         .partition(|q| q.bid_size.as_f64() < 1_000_000.0);
-    let (crash, back) = (
-        Timestamp::from(crashed_run.last().unwrap().ts_init),
-        Timestamp::from(restart.first().unwrap().ts_init),
-    );
-    let start = crash + SignedDuration::from_secs(1) + SignedDuration::from_nanos(1);
+    let crash = Timestamp::from(crashed_run.last().unwrap().ts_init);
 
-    let backtest = backtest(dir.path(), start, restart.last().unwrap().ts_init.into());
+    let backtest = backtest(dir.path(), crash, restart.last().unwrap().ts_init.into());
 
-    let output = backtest_output(&backtest);
-    assert!(!backtest.status.success(), "{output}");
-    let gap = format!(
-        "[{}, {}] is missing",
-        crash + SignedDuration::from_nanos(1),
-        back - SignedDuration::from_nanos(1)
-    );
-    assert!(output.contains("quotes of AUD/USD.SIM"), "{output}");
-    assert!(output.contains(&gap), "{gap} not in {output}");
+    assert!(backtest.status.success(), "{}", backtest_output(&backtest));
 }
 
+/// A backtest over the streamed data runs through the gaps between the
+/// files Nautilus promoted, which stay in the catalog: it reads the rows,
+/// not the catalog's intervals.
 #[test]
-fn a_backtest_over_the_streamed_data_finds_it_covered_across_promotions() {
+fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(5_000), 0);
     assert!(node.wait().unwrap().success());
@@ -267,30 +261,19 @@ fn a_backtest_over_the_streamed_data_finds_it_covered_across_promotions() {
         .unwrap();
     assert!(promoted.len() >= 2, "one promotion: {promoted:?}");
     let (first, last) = streamed_span(dir.path());
-    // Its slice of the warmup starts at the first tick, the run ends on
-    // the last.
-    let start = first + SignedDuration::from_secs(1) + SignedDuration::from_nanos(1);
 
-    let backtest = backtest(dir.path(), start, last);
+    let backtest = backtest(dir.path(), first, last);
 
     assert!(backtest.status.success(), "{}", backtest_output(&backtest));
-    // Covered in the catalog itself, as the data engine's warmup lookup
-    // reads it.
-    for data_type in [
-        NautilusDataType::QuoteTick,
-        NautilusDataType::TradeTick,
-        NautilusDataType::OrderBookDepth,
-    ] {
-        let missing = catalog(dir.path())
-            .get_missing_intervals_for_request(
-                UnixNanos::from(first).as_u64(),
-                UnixNanos::from(last).as_u64(),
-                &data_type.clone().into(),
-                Some(INSTRUMENT_ID),
-            )
-            .unwrap();
-        assert_eq!(missing, [], "{data_type}");
-    }
+    let missing = catalog(dir.path())
+        .get_missing_intervals_for_request(
+            UnixNanos::from(first).as_u64(),
+            UnixNanos::from(last).as_u64(),
+            &NautilusDataType::QuoteTick.into(),
+            Some(INSTRUMENT_ID),
+        )
+        .unwrap();
+    assert!(!missing.is_empty(), "no gap between promotions");
 }
 
 /// Not a test: the node the tests above run in a child process. Passes at
@@ -519,8 +502,7 @@ fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
 }
 
 /// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes,
-/// warmed up a second, its trades and its stored depth replayed as they
-/// are. Too slow to trade in a few seconds.
+/// its trades and its stored depth replayed as they are. Too slow to trade in a few seconds.
 const EMA_CONFIG: &str = r#"
     instrument_ids = ["AUD/USD.SIM"]
     trade_instrument_id = "AUD/USD.SIM"

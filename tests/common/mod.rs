@@ -115,10 +115,10 @@ pub fn ohlc(bar: &Bar) -> Ohlc {
     (bar.ts_event.into(), bar.open, bar.high, bar.low, bar.close)
 }
 
-/// The hour MID bars of `quotes` stamped at or after `from`, worked out
-/// here from the quotes alone: each bar holds the quotes of its hour,
-/// `(close − 1 h, close]` less the 1 ns stamp; the oldest bar, which lacks
-/// the quotes before `from`, is left out.
+/// The hour MID bars of the `quotes` stamped at or after `from`, as a run
+/// from `from` replays them, worked out here from the quotes alone: each
+/// bar holds the quotes of its hour, `(close − 1 h, close]` less the 1 ns
+/// stamp, the oldest only those from `from` on.
 pub fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
     let mut bars: Vec<Ohlc> = vec![];
     for quote in quotes {
@@ -140,7 +140,6 @@ pub fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
             _ => bars.push((close, mid, mid, mid, mid)),
         }
     }
-    bars.remove(0);
     bars
 }
 
@@ -188,22 +187,15 @@ pub fn catalog(quotes: &[QuoteTick], from: Timestamp, to: Timestamp) -> TempDir 
     dir
 }
 
-/// A backtest of the instrument over `[start, end]` after `warmup` of its
-/// hour MID bars, with `commission` per order and 10,000 EUR to start.
-pub fn backtest(
-    catalog: &Path,
-    start: Timestamp,
-    end: Timestamp,
-    warmup: SignedDuration,
-    commission: &str,
-) -> Backtest {
+/// A backtest of the instrument's hour MID bars over `[start, end]`, with
+/// `commission` per order and 10,000 EUR to start.
+pub fn backtest(catalog: &Path, start: Timestamp, end: Timestamp, commission: &str) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
         bar_types: vec![BarType::from(MID_BAR_TYPE)],
         start,
         end,
         ticks: vec![],
-        warmup,
         fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),
         leverage: Decimal::ONE,
@@ -243,13 +235,16 @@ impl Exits {
     }
 }
 
+/// The warmup of the EMA configs: a live node requests it, a backtest
+/// requests none.
+pub const LIVE_WARMUP: SignedDuration = SignedDuration::from_hours(1);
+
 /// The config of the EMA crossover reading and trading the instrument on
 /// its 1-hour MID bars: `fast` against `slow` bars, trades of 10 shares
-/// ending by `exits`, inside `session` if given, after `warmup`.
+/// ending by `exits`, inside `session` if given.
 pub fn ema_config(
     fast: usize,
     slow: usize,
-    warmup: SignedDuration,
     session: Option<Session>,
     exits: Exits,
 ) -> EmaCrossConfig {
@@ -260,7 +255,7 @@ pub fn ema_config(
             BarAggregation::Hour,
             PriceType::Mid,
         ))
-        .warmup(warmup)
+        .warmup(LIVE_WARMUP)
         .maybe_session(session)
         .build();
     EmaCrossConfig::builder()
@@ -275,15 +270,9 @@ pub fn ema_config(
         .build()
 }
 
-/// The EMA crossover of `ema_config`.
-pub fn ema_cross(
-    fast: usize,
-    slow: usize,
-    warmup: SignedDuration,
-    session: Option<Session>,
-    exits: Exits,
-) -> EmaCross {
-    EmaCross::new(ema_config(fast, slow, warmup, session, exits)).unwrap()
+/// The EMA crossover of `ema_config`, as a backtest runs it.
+pub fn ema_cross(fast: usize, slow: usize, session: Option<Session>, exits: Exits) -> EmaCross {
+    EmaCross::new(ema_config(fast, slow, session, exits)).unwrap()
 }
 
 /// The shortest crossover, 1 against 2 bars, inside the session: the fast
@@ -291,8 +280,8 @@ pub fn ema_cross(
 /// closes and then moves two thirds of the way to each new close. So once
 /// two bars are in, a bar closing above the slow EMA of the bars before it
 /// is long, at or below it short, and a bar changing the side is a cross.
-pub fn shortest_ema_cross(warmup: SignedDuration, exits: Exits) -> EmaCross {
-    ema_cross(1, 2, warmup, Some(session()), exits)
+pub fn shortest_ema_cross(exits: Exits) -> EmaCross {
+    ema_cross(1, 2, Some(session()), exits)
 }
 
 /// The final EUR balance of the account.
@@ -302,12 +291,10 @@ pub fn balance(result: &nautilus_backtest::result::BacktestResult) -> String {
 
 /// The wave: a mid of 600 EUR plus 5 EUR of sine over 30 hours, quoted
 /// every minute for 192 hours from Monday 5 January 2026; the run starts
-/// half an hour after the 71st hour and ends with the quotes, after 48
-/// hours of warmup.
+/// half an hour after the 71st hour and ends with the quotes; the
+/// crossover warms on its first bars.
 pub mod wave {
     use super::*;
-
-    pub const WARMUP: SignedDuration = SignedDuration::from_hours(48);
 
     fn first() -> Timestamp {
         ts("2026-01-05T00:00:00Z")
@@ -335,7 +322,7 @@ pub mod wave {
     }
 
     pub fn backtest(catalog: &Path, commission: &str) -> Backtest {
-        super::backtest(catalog, start(), end(), WARMUP, commission)
+        super::backtest(catalog, start(), end(), commission)
     }
 
     /// The EMA crossover on the wave: 5 against 15 bars, stop loss and
@@ -346,7 +333,7 @@ pub mod wave {
             take_profit_bps: 50,
             hold: SignedDuration::from_hours(4),
         };
-        super::ema_cross(5, 15, WARMUP, Some(session()), exits)
+        super::ema_cross(5, 15, Some(session()), exits)
     }
 }
 
@@ -356,8 +343,6 @@ pub mod wave {
 /// recorder's overlapping trades (`overlap`).
 pub mod steps {
     use super::*;
-
-    pub const WARMUP: SignedDuration = SignedDuration::from_hours(2);
 
     /// `hh:mm` UTC on the day of the steps.
     pub fn at(hh_mm: &str) -> Timestamp {
@@ -389,37 +374,33 @@ pub mod steps {
 
     /// A backtest of the steps without commission, from `start`.
     pub fn backtest(catalog: &Path, start: Timestamp) -> Backtest {
-        super::backtest(catalog, start, end(), WARMUP, "0 EUR")
+        super::backtest(catalog, start, end(), "0 EUR")
     }
 }
 
 /// The EMA's trades on Wednesday 7 January 2026, all hours inside the
 /// session, quoted from 09:00 UTC in steps (each hour bar closes at its
-/// level + 0.60). With three hours of warmup and a run from 12:30, the
-/// warmup holds the bars closing:
-///
-/// - 10:00 at 800.60, partial (from 09:30; one quote on a run from 13:00),
-///   dropped;
-/// - 11:00 at 610.60 and 12:00 at 600.60: the shortest crossover is warm
-///   at 12:00, its slow EMA at 605.60, short (600.60 below it).
+/// level + 0.60). A run from 10:00 replays no quote before it, so not the
+/// bar closing 10:00 at 800.60, and warms the shortest crossover on the
+/// bars closing 11:00 at 610.60 and 12:00 at 600.60: initialized at 12:00,
+/// its slow EMA at 605.60, short (600.60 below it), its first decision.
 ///
 /// The hours from 13:00 are each test's `levels`, the bar closing at
 /// 13:00 + i hours on `levels[i]`, and the run ends with the last. Had the
-/// partial bar counted, the slow EMA would be 705.60 at 11:00 and 635.60
-/// at 12:00.
+/// run started at 09:00, the bar closing 10:00 would count, and the slow
+/// EMA would be 705.60 at 11:00 and 635.60 at 12:00.
 pub mod trades {
     use super::*;
-
-    pub const WARMUP: SignedDuration = SignedDuration::from_hours(3);
 
     /// `hh:mm` UTC on the day of the trades.
     pub fn at(hh_mm: &str) -> Timestamp {
         ts(&format!("2026-01-07T{hh_mm}:00Z"))
     }
 
-    /// The run start: off an hour, so the 13:00 bar spans the warmup end.
+    /// The run start: on the close of the bar of 10:00, so that the first
+    /// bar replayed, closing 11:00, holds its whole hour.
     pub fn start() -> Timestamp {
-        at("12:30")
+        at("10:00")
     }
 
     /// The close of the last hour of `levels`.
@@ -455,7 +436,7 @@ pub mod trades {
         levels: &[f64],
         commission: &str,
     ) -> Backtest {
-        super::backtest(catalog, start, end(levels), WARMUP, commission)
+        super::backtest(catalog, start, end(levels), commission)
     }
 
     /// A trade ended by time:
@@ -472,10 +453,11 @@ pub mod trades {
     ///   and cancels its stop loss and take profit.
     ///
     /// The 10 shares gain 3.90 each: the balance ends at 10039.00 EUR,
-    /// after 4 orders (the entry, its two legs, the close). Had the
-    /// partial bar counted, 13:00 to 15:00 would all be short (below 635.60,
-    /// 625.60, 624.93): no trade; without the warmup, the crossover would
-    /// be cold until 14:00, then long: no trade either.
+    /// after 4 orders (the entry, its two legs, the close). Had the run
+    /// started at 09:00, 13:00 to 15:00 would all be short (below 635.60,
+    /// 625.60, 624.93): no trade; had it started at 12:30, the crossover
+    /// would be cold until 14:00, then long: no trade either
+    /// (`backtest_warmup.rs`).
     pub const TIME_EXIT: [f64; 3] = [620.0, 624.0, 624.2];
     pub const TIME_EXIT_ORDERS: usize = 4;
     pub const TIME_EXIT_BALANCE: &str = "10039.00 EUR";
@@ -489,9 +471,9 @@ pub mod trades {
         }
     }
 
-    /// The shortest crossover with `exits`, after the warmup.
+    /// The shortest crossover with `exits`.
     pub fn ema_cross(exits: Exits) -> EmaCross {
-        shortest_ema_cross(WARMUP, exits)
+        shortest_ema_cross(exits)
     }
 }
 
@@ -500,8 +482,6 @@ pub mod trades {
 /// that every hour bar has its own open, high, low and close.
 pub mod noise {
     use super::*;
-
-    pub const WARMUP: SignedDuration = SignedDuration::from_hours(4);
 
     /// `hh:mm` UTC on the day of the noise.
     pub fn at(hh_mm: &str) -> Timestamp {
@@ -520,21 +500,21 @@ pub mod noise {
     }
 
     pub fn backtest(catalog: &Path, start: Timestamp) -> Backtest {
-        super::backtest(catalog, start, at("15:00"), WARMUP, "0 EUR")
+        super::backtest(catalog, start, at("15:00"), "0 EUR")
     }
 
-    /// The bars a run from `start` should get, warmup and replay: those
-    /// from the warmup start, 1 ns before `start` less the warmup.
+    /// The bars a run from `start` should get: those of the quotes from
+    /// `start` on.
     pub fn expected_bars(start: Timestamp) -> Vec<Ohlc> {
-        hour_bars(&quotes(), start - NANOSECOND - WARMUP)
+        hour_bars(&quotes(), start)
     }
 
-    /// A recorder of the MID bars after the warmup, without orders.
+    /// A recorder of the MID bars, without orders.
     pub fn recorder() -> (
         recorder::Recorder,
         std::rc::Rc<std::cell::RefCell<recorder::Record>>,
     ) {
-        recorder::Recorder::new(BarType::from(MID_BAR_TYPE), WARMUP, None)
+        recorder::Recorder::new(BarType::from(MID_BAR_TYPE), None)
     }
 }
 
@@ -543,8 +523,6 @@ pub mod noise {
 /// 13:40, 590.00 from 14:00 to 15:00.
 pub mod fall {
     use super::*;
-
-    pub const WARMUP: SignedDuration = SignedDuration::from_hours(2);
 
     /// `hh:mm` UTC on the day of the fall.
     pub fn at(hh_mm: &str) -> Timestamp {
@@ -563,11 +541,11 @@ pub mod fall {
     }
 
     pub fn backtest(catalog: &Path) -> Backtest {
-        super::backtest(catalog, at("12:30"), at("15:00"), WARMUP, "0 EUR")
+        super::backtest(catalog, at("12:30"), at("15:00"), "0 EUR")
     }
 }
 
-/// Two overlapping trades on the steps, from 12:30 without warmup: a
+/// Two overlapping trades on the steps, from 12:30: a
 /// recorder, its `oms_type` unset, buys 10 shares on the 13:00 bar, at the
 /// ask of the quote closing it, 620.65, and 10 more on the 14:00 bar, at
 /// 580.65, and closes neither. A netting venue holds them as one long
@@ -588,7 +566,7 @@ pub mod overlap {
             venue_oms,
             ..steps::backtest(catalog.path(), steps::at("12:30"))
         };
-        let (recorder, record) = recorder::Recorder::trading_without_warmup(
+        let (recorder, record) = recorder::Recorder::trading(
             BarType::from(MID_BAR_TYPE),
             vec![
                 (OrderSide::Buy, Quantity::from(10)),

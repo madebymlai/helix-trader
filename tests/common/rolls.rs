@@ -79,9 +79,9 @@ fn depth(id: &str, time: Timestamp) -> OrderBookDepth {
     depth
 }
 
-/// The trades of August's contract: two before the backtests' start, in
-/// a warmup of 30 minutes, two in its slice (the last at its last
-/// nanosecond), two after the roll.
+/// The trades of August's contract: two before the backtests' start, not
+/// replayed, two in its slice (the last at its last nanosecond), two after
+/// the roll.
 pub fn pre_trades() -> Vec<TradeTick> {
     vec![
         trade(PRE, tuesday("22:30:00"), "3990.00"),

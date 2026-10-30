@@ -16,7 +16,6 @@ use helix_trader::{
     rolls::{Roller, Transition},
     strategy::TickSeries,
 };
-use jiff::SignedDuration;
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -170,7 +169,6 @@ fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
         ticks,
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,
@@ -387,26 +385,6 @@ fn bars_on_a_root_built_from_quotes_are_refused_naming_the_bar_type() {
         .to_string();
 
     assert!(err.contains(bars), "{err}");
-}
-
-#[test]
-fn a_contract_missing_part_of_its_slice_is_refused_naming_the_slice() {
-    let catalog = rolls::catalog_storing(false);
-
-    let err = backtest(&catalog, ticks(ROOT))
-        .run(RollProbe {
-            core: StrategyCore::new(StrategyConfig::default()),
-            subscribe: Subscribe::Contracts,
-            got: Rc::default(),
-        })
-        .unwrap_err()
-        .to_string();
-
-    assert!(err.contains(&format!("trades of {POST}")), "{err}");
-    assert!(
-        err.contains("[2026-07-29T00:00:00Z, 2026-07-29T01:00:00Z] is missing"),
-        "{err}"
-    );
 }
 
 fn imbalances() -> NautilusDataType {

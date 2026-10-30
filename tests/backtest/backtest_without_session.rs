@@ -7,7 +7,7 @@ use jiff::{SignedDuration, Timestamp};
 
 /// Quoted from Wednesday 7 January 2026, 19:00 UTC, to Thursday 02:00,
 /// all outside Xetra's session; the hour bars close at their level + 0.60:
-/// up to 20:00: 600.60; 21:00: 610.60; 22:00: 600.60 (the warmup); 23:00:
+/// up to 20:00: 600.60; 21:00: 610.60; 22:00: 600.60 (initialized); 23:00:
 /// 620.60; Thursday 00:00, from 23:00 across midnight: 600.60; 01:00:
 /// 610.60; 02:00: 615.60.
 fn level(close: Timestamp) -> Option<f64> {
@@ -27,20 +27,20 @@ fn level(close: Timestamp) -> Option<f64> {
 fn without_a_session_every_bar_counts_across_midnight() {
     let (from, start, end) = (
         ts("2026-01-07T19:00:00Z"),
-        ts("2026-01-07T22:30:00Z"),
+        ts("2026-01-07T20:00:00Z"),
         ts("2026-01-08T02:00:00Z"),
     );
-    let warmup = SignedDuration::from_hours(3);
     let catalog = common::catalog(&stepped_quotes(from, end, level), from, end);
     let exits = Exits::after(SignedDuration::from_mins(30));
 
-    let result = common::backtest(catalog.path(), start, end, warmup, "0 EUR")
-        .run(common::ema_cross(1, 2, warmup, None, exits))
+    let result = common::backtest(catalog.path(), start, end, "0 EUR")
+        .run(common::ema_cross(1, 2, None, exits))
         .unwrap()
         .result;
 
-    // The warmup, the partial 20:00 bar dropped, ends short: 600.60 below
-    // the slow EMA of 605.60. Each trade is held 30 minutes and closed at
+    // From 20:00 the run replays the bars closing 21:00 and 22:00: the
+    // crossover, initialized at 22:00, is short: 600.60 below the slow
+    // EMA of 605.60. Each trade is held 30 minutes and closed at
     // the 30th minute quote of the next bar:
     //
     // - 23:00: 620.60 above 605.60, cross up: buy 10 at 620.65, the EMA

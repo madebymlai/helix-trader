@@ -349,15 +349,15 @@ node received: no gap, no duplicate (`tests/live/streaming.rs`).
 **Coverage.** Promotion names each file by the `ts_init` of its first
 and last row, so the files of a series leave a gap between them, from
 one's last row to the next one's first, which Nautilus counts as missing
-(a 1 ns gap is a gap): a backtest, or a retrain's replay, over streamed
-data would be refused, and a warmup over it asks the venue for every
-gap. The node records the start of each run in the catalog before it is
+(a 1 ns gap is a gap): a warmup over it asks the venue for every gap,
+and fill-catalog would fetch each again. A backtest, or a retrain's
+replay, reads the rows and not the intervals, and runs through the gaps
+(backtest README, "No check before the run"). The node records the start of each run in the catalog before it is
 built (`data::record_run_start`, `live-runs/<ns>` beside `data/`), and a
 reader joins the gaps a run streamed across before it reads
-(`data::live_runs::join`, with Nautilus' `extend_file_name`): the
-backtest's coverage check, the dataset's replay through it,
-fill-catalog's node fill, and the node's own start over the series of its
-warmup. A gap is joined when the file after it was promoted, the file
+(`data::live_runs::join`, with Nautilus' `extend_file_name`):
+fill-catalog's node fill, and the node's own start over the series of
+its warmup. A gap is joined when the file after it was promoted, the file
 before it ends after the run's start (the run's own, or the warmup it
 wrote back), and no run started inside it. A join covers the whole
 series at once, every gap judged by the file names before it: the file
@@ -657,9 +657,9 @@ tests: see [`okx/README.md`](okx/README.md).
   crash and a restart the crashed run's staged data promoted, before an
   answer written back over what the catalog lacks up to the start, as
   IC's warmup writes it back, lands after it. The
-  binary's backtest over data streamed across several promotions runs,
-  and leaves the catalog covering it by Nautilus' own count; across a
-  crash and a restart it is refused, naming the crash's gap.
+  binary's backtest over data streamed across several promotions runs
+  through the gaps between them, which it leaves in the catalog, and
+  across a crash and a restart through the crash's gap.
 - Retraining needs no node: the launcher and the handle's retrains are
   unit tests (`model::launcher`, `model::handle`) on an in-process
   launcher, a `sh` child and a clock driven by hand, and
@@ -671,16 +671,15 @@ tests: see [`okx/README.md`](okx/README.md).
 
 ## Unverified
 
-- A live retrain against a real venue: none has run. The gaps between
-  promoted files that refused a backtest over streamed data are joined
-  (see "Coverage"), shown on the stub client only.
+- A live retrain against a real venue: none has run. A backtest over
+  streamed data running through the gaps between promoted files is shown
+  on the stub client only.
 - A disconnect inside a run reads as covered once joined, as it does
   inside one promoted file: Nautilus names a file by its rows, and no
   client tells the node it lost data. A crash or a stop reads as a gap.
 - Joining renames files (Nautilus' `extend_file_name`): a reader that
-  listed a series just before another process joined it (two backtests
-  at once, a backtest and a start) can fail to open a file and must read
-  again. Promotion and the node's retrains, one at a time, do not race
+  listed a series just before another process joined it (a backtest
+  and a start, two fills) can fail to open a file and must read again. Promotion and the node's retrains, one at a time, do not race
   it.
 - Streaming on IB and OKX: only IC's demo has streamed so far
   (`ic/README.md`, "IC tests", `ic_live_demo.rs`), and a crash and

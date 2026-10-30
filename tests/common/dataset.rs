@@ -178,9 +178,14 @@ impl Lcg {
     }
 }
 
-/// IC's gold over `[from, to)`, a quote every 5 s, the bid a random walk
-/// of up to 0.30 a step, the ask 0.20 above.
+/// IC's gold over `[from, to)` in a catalog, the quotes of `walk_quotes`.
 pub fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
+    ic::catalog_of(walk_quotes(from, to), from, to)
+}
+
+/// IC's gold's quotes over `[from, to)`, one every 5 s, the bid a random
+/// walk of up to 0.30 a step, the ask 0.20 above.
+pub fn walk_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     let mut walk = Lcg(7);
     let mut bid = 4000.0_f64;
     let mut quotes = vec![];
@@ -191,7 +196,7 @@ pub fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
         quotes.push(ic::quote(time, &b, &a));
         time += SignedDuration::from_secs(5);
     }
-    ic::catalog_of(quotes, from, to)
+    quotes
 }
 
 /// The probe deciding on `features` as `config` says, in `mode`, and what
@@ -247,7 +252,6 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         ticks: requirements().ticks,
         start: from,
         end: to,
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("10000000 USD"),
         leverage: Decimal::ONE,

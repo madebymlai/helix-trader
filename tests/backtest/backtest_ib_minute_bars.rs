@@ -91,27 +91,21 @@ fn orders_on_hour_bars_of_ib_minute_bars_fill_at_the_close_of_the_hours_last_min
         .block_on(fill)
         .unwrap();
 
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(COMPOSITE),
         vec![
             (OrderSide::Buy, Quantity::from(10)),
             (OrderSide::Sell, Quantity::from(10)),
         ],
     );
-    let mut backtest = common::backtest(
-        dir.path(),
-        at("11:00"),
-        at("15:00"),
-        SignedDuration::ZERO,
-        "0 EUR",
-    );
+    let mut backtest = common::backtest(dir.path(), at("11:00"), at("15:00"), "0 EUR");
     backtest.bar_types = bar_types.to_vec();
     let outcome = backtest.run(recorder).unwrap();
 
     let record = record.borrow();
     let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
-    // The engine starts at 10:59:59.999999999: the bar closing 11:00 holds
-    // the minute closing then alone; those closing 12:00 to 15:00 are whole.
+    // The run starts at 11:00: the bar closing 11:00 holds the minute bar
+    // stamped then alone; those closing 12:00 to 15:00 are whole.
     let closes: Vec<Timestamp> = replay.iter().map(|bar| bar.0).collect();
     assert_eq!(
         closes,

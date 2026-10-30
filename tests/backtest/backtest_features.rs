@@ -123,19 +123,12 @@ impl DataActor for FeatureProbe {
 #[test]
 fn each_decision_publishes_the_features_of_the_data_up_to_it() {
     let quotes = minute_quotes(at("09:00"), at("13:00"), |close| Some(mid(close)));
-    // Stored from 08:00: the run reads from 1 ns before its start.
     let catalog = catalog(&quotes, at("08:00"), at("13:00"));
     let (probe, rows) = FeatureProbe::new();
 
-    backtest(
-        catalog.path(),
-        at("09:00"),
-        at("12:45"),
-        SignedDuration::ZERO,
-        "0 EUR",
-    )
-    .run(probe)
-    .unwrap();
+    backtest(catalog.path(), at("09:00"), at("12:45"), "0 EUR")
+        .run(probe)
+        .unwrap();
 
     // A decision on the half hour fires 10 ms after it. Then the last three
     // quotes close on it and the two minutes before, a mean of the mid a

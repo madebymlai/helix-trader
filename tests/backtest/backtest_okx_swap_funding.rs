@@ -7,8 +7,7 @@
 //! `FundingSettlement` on the position, priced at the last bar's close (no
 //! mark price: the mid of the book the bars set), which adjusts the
 //! position and the balance. A long pays a positive rate and receives a
-//! negative one. One node per thread, so one run per test; the refused
-//! window builds no node.
+//! negative one. One node per thread, so one run per test.
 
 use std::path::Path;
 
@@ -139,7 +138,6 @@ fn backtest(dir: &Path, end: &str) -> Backtest {
         start: at("07:00"),
         end: at(end),
         ticks: vec![],
-        warmup: SignedDuration::ZERO,
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("10000 USDT"),
         leverage: Decimal::ONE,
@@ -152,7 +150,7 @@ fn backtest(dir: &Path, end: &str) -> Backtest {
 fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() {
     let dir = tempfile::tempdir().unwrap();
     catalog(dir.path(), "17:00", "17:00");
-    let (recorder, record) = Recorder::trading_without_warmup(
+    let (recorder, record) = Recorder::trading(
         BarType::from(HOUR_BARS),
         vec![(OrderSide::Buy, Quantity::from("2.00"))],
     );
@@ -195,27 +193,4 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
         summary["account.OKX.balance.USDT.total"],
         "10000.20400000 USDT"
     );
-}
-
-#[test]
-fn a_window_the_stored_funding_does_not_cover_is_refused_naming_it() {
-    let dir = tempfile::tempdir().unwrap();
-    catalog(dir.path(), "18:00", "17:00");
-    let (recorder, _) = Recorder::without_warmup(BarType::from(HOUR_BARS));
-
-    let err = backtest(dir.path(), "18:00")
-        .run(recorder)
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        err.contains(&format!("funding_rates of {INSTRUMENT_ID}")),
-        "{err}"
-    );
-    let missing = format!(
-        "[{}, {}] is missing",
-        at("17:00") + SignedDuration::from_nanos(1),
-        at("18:00")
-    );
-    assert!(err.contains(&missing), "{err}");
 }
