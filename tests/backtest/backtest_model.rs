@@ -10,7 +10,9 @@
 use std::path::Path;
 
 use crate::common::{
-    dataset::{STRATEGY, commission, config, features, replay, rule, targets, trade, walk},
+    dataset::{
+        STRATEGY, commission, config, features, replay, requirements, rule, targets, trade, walk,
+    },
     ic,
 };
 use helix_trader::model::{
@@ -30,6 +32,7 @@ fn store(models: &Path, config: &ModelConfig) -> ModelStore {
         StrategyId::from(STRATEGY),
         &features(),
         config,
+        &requirements(),
         &commission(),
     )
     .unwrap()
@@ -45,8 +48,15 @@ fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
         manifest: ModelManifest {
             strategy_id: StrategyId::from(STRATEGY),
             valid_from,
-            fingerprint: dataset::fingerprint(&features(), rule(), &targets(), &commission())
-                .to_string(),
+            fingerprint: dataset::fingerprint(
+                &features(),
+                rule(),
+                &targets(),
+                &requirements(),
+                &commission(),
+            )
+            .unwrap()
+            .to_string(),
             feature_names: vec!["mid".to_string()],
             targets: targets(),
             label: config().label,
@@ -153,6 +163,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
                     StrategyId::from(STRATEGY),
                     &features(),
                     config.clone(),
+                    &requirements(),
                     &commission(),
                 )
                 .unwrap();

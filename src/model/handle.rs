@@ -82,7 +82,7 @@ use super::{
     store::{ModelStore, Swap},
     targets::{TargetRow, Targets, TargetsConfig},
 };
-use crate::strategy::warmup;
+use crate::strategy::{DataRequirements, warmup};
 
 /// Where a handle runs, and so what it does at a decision.
 #[derive(Debug, Clone)]
@@ -180,7 +180,7 @@ struct MetaModels {
 
 impl ModelHandle {
     /// The handle of `strategy_id`, deciding on `features` as `config`
-    /// says, in `mode`.
+    /// says, for a strategy of `requirements`, in `mode`.
     ///
     /// # Errors
     ///
@@ -193,17 +193,37 @@ impl ModelHandle {
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
         config: &ModelConfig,
+        requirements: &DataRequirements,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
         let primary = |models: &Path, commission: &Commission| -> anyhow::Result<Primary> {
-            let fingerprint =
-                dataset::fingerprint(&features, config.decision, &config.targets, commission)
-                    .to_string();
-            let meta = Meta::of_model(models, strategy_id, &features, config, commission)?
-                .map(|meta| MetaModels::of(&meta, &fingerprint));
+            let fingerprint = dataset::fingerprint(
+                &features,
+                config.decision,
+                &config.targets,
+                requirements,
+                commission,
+            )?
+            .to_string();
+            let meta = Meta::of_model(
+                models,
+                strategy_id,
+                &features,
+                config,
+                requirements,
+                commission,
+            )?
+            .map(|meta| MetaModels::of(&meta, &fingerprint));
             Ok(Primary::Model {
                 models: Models::new(
-                    ModelStore::new(models, strategy_id, &features, config, commission)?,
+                    ModelStore::new(
+                        models,
+                        strategy_id,
+                        &features,
+                        config,
+                        requirements,
+                        commission,
+                    )?,
                     features.names().to_vec(),
                     fingerprint,
                 ),
@@ -215,14 +235,15 @@ impl ModelHandle {
             strategy_id,
             &features,
             (config.decision, &config.targets, config.retrain),
+            requirements,
             mode,
             primary,
         )
     }
 
     /// The handle of `strategy_id`, whose primary is its rule, deciding on
-    /// `features` as `config` says, in `mode`: the strategy decides through
-    /// `decide_on`.
+    /// `features` as `config` says, for a strategy of `requirements`, in
+    /// `mode`: the strategy decides through `decide_on`.
     ///
     /// # Errors
     ///
@@ -234,6 +255,7 @@ impl ModelHandle {
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
         config: &RuleConfig,
+        requirements: &DataRequirements,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
         ensure!(
@@ -242,10 +264,22 @@ impl ModelHandle {
              (`FeatureSetBuilder::primary`)"
         );
         let primary = |models: &Path, commission: &Commission| -> anyhow::Result<Primary> {
-            let meta = Meta::of_rule(models, strategy_id, &features, config, commission)?;
-            let fingerprint =
-                dataset::fingerprint(&features, config.decision, &config.targets, commission)
-                    .to_string();
+            let meta = Meta::of_rule(
+                models,
+                strategy_id,
+                &features,
+                config,
+                requirements,
+                commission,
+            )?;
+            let fingerprint = dataset::fingerprint(
+                &features,
+                config.decision,
+                &config.targets,
+                requirements,
+                commission,
+            )?
+            .to_string();
             Ok(Primary::Rule {
                 meta: MetaModels::of(&meta, &fingerprint),
             })
@@ -254,19 +288,22 @@ impl ModelHandle {
             strategy_id,
             &features,
             (config.decision, &config.targets, config.retrain),
+            requirements,
             mode,
             primary,
         )
     }
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
-    /// `targets`, retrained every `retrain`, in `mode`: trading on the
-    /// models `primary` reads under the store's root, of the targets net of
-    /// the mode's commission, or opening the targets.
+    /// `targets`, retrained every `retrain`, for a strategy of
+    /// `requirements`, in `mode`: trading on the models `primary` reads
+    /// under the store's root, of the targets net of the mode's
+    /// commission, or opening the targets.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
         (rule, targets, retrain): (DecisionRule, &TargetsConfig, SignedDuration),
+        requirements: &DataRequirements,
         mode: Mode,
         primary: impl FnOnce(&Path, &Commission) -> anyhow::Result<Primary>,
     ) -> anyhow::Result<Rc<Self>> {
@@ -299,7 +336,7 @@ impl ModelHandle {
                 quantity: targets.quantity,
             })),
             Mode::Dataset { rows } => Serving::Dataset {
-                targets: Targets::new(targets.clone(), rule)?,
+                targets: Targets::new(targets.clone(), rule, requirements)?,
                 rows,
             },
         };
@@ -736,9 +773,22 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features(),
             &config(),
+            &requirements(),
             &commission(),
         )
         .unwrap()
+    }
+
+    /// What the strategy reads: the quotes of AUD/USD.
+    fn requirements() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![crate::strategy::TickSeries {
+                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(AUD),
+            }],
+            warmup: SignedDuration::ZERO,
+        }
     }
 
     /// A commission rate of 30 per million.
@@ -762,8 +812,10 @@ mod tests {
                     &features(),
                     config.decision,
                     &config.targets,
+                    &requirements(),
                     &commission(),
                 )
+                .unwrap()
                 .to_string(),
                 feature_names: vec!["mid".to_string()],
                 targets: config.targets,
@@ -788,6 +840,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             &config(),
+            &requirements(),
             Mode::Backtest {
                 models: models.to_path_buf(),
                 commission: commission(),
@@ -826,6 +879,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             &config(),
+            &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 commission: Commission::PerOrder("3 USD".to_string()),
@@ -865,6 +919,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features(),
             &config(),
+            &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 commission: commission(),
@@ -908,6 +963,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             &config(),
+            &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 commission: commission(),
@@ -1072,8 +1128,14 @@ mod tests {
         )];
         let next = |mode: Mode| {
             let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-            let handle =
-                ModelHandle::new(StrategyId::from(STRATEGY), features(), &config(), mode).unwrap();
+            let handle = ModelHandle::new(
+                StrategyId::from(STRATEGY),
+                features(),
+                &config(),
+                &requirements(),
+                mode,
+            )
+            .unwrap();
             handle.start(&mut probe, &composite).unwrap();
             let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
             Timestamp::from(next)
@@ -1114,6 +1176,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             &config(),
+            &requirements(),
             live(models.to_path_buf(), launcher),
         )
         .unwrap();
@@ -1246,8 +1309,15 @@ mod tests {
             manifest: ModelManifest {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from: at(valid_from),
-                fingerprint: dataset::fingerprint(features, decision, targets, &commission())
-                    .to_string(),
+                fingerprint: dataset::fingerprint(
+                    features,
+                    decision,
+                    targets,
+                    &requirements(),
+                    &commission(),
+                )
+                .unwrap()
+                .to_string(),
                 feature_names: feature_names.iter().map(ToString::to_string).collect(),
                 targets: targets.clone(),
                 label: Label::Barrier,
@@ -1302,6 +1372,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features,
             config,
+            &requirements(),
             &commission(),
         )
         .unwrap()
@@ -1319,6 +1390,7 @@ mod tests {
                 StrategyId::from(STRATEGY),
                 &features,
                 config,
+                &requirements(),
                 &commission(),
             )
             .unwrap()
@@ -1338,6 +1410,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             config,
+            &requirements(),
             Mode::Backtest {
                 models: models.to_path_buf(),
                 commission: commission(),
@@ -1431,6 +1504,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features,
             &config,
+            &requirements(),
             &commission(),
         )
         .unwrap()
@@ -1447,6 +1521,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             &config,
+            &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 commission: commission(),
@@ -1477,6 +1552,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features(),
             &rule_config(),
+            &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 commission: commission(),

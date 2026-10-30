@@ -1,5 +1,8 @@
+use std::str::FromStr;
+
 use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
+    data::NautilusDataType,
     enums::PriceType,
     identifiers::Symbol,
     instruments::{CryptoPerpetual, InstrumentAny},
@@ -7,7 +10,10 @@ use nautilus_model::{
 };
 
 use super::*;
-use crate::model::{decide, features::FeatureSet};
+use crate::{
+    model::{decide, features::FeatureSet},
+    strategy::TickSeries,
+};
 
 const GOLD: &str = "XAUUSD.ICMARKETS";
 
@@ -78,13 +84,61 @@ fn a_barrier_atr_naming_its_bar_type_is_refused_at_load() {
     assert!(err.to_string().contains("bar_type"), "{err}");
 }
 
-/// The ATR of `config` deciding on `rule`: its bar type, as text, and its
-/// period.
+/// The requirements of a strategy reading `ticks` of gold, each by the
+/// name Nautilus parses (`"quotes"`, `"trades"`, ..), and `bar_types`.
+fn reading(ticks: &[&str], bar_types: &[&str]) -> DataRequirements {
+    DataRequirements {
+        bar_types: bar_types
+            .iter()
+            .map(|&bar_type| BarType::from(bar_type))
+            .collect(),
+        ticks: ticks
+            .iter()
+            .map(|data| TickSeries {
+                data: NautilusDataType::from_str(data).unwrap(),
+                instrument_id: InstrumentId::from(GOLD),
+            })
+            .collect(),
+        warmup: SignedDuration::ZERO,
+    }
+}
+
+/// What every test's strategy reads but where it says: the quotes of
+/// gold.
+fn quotes() -> DataRequirements {
+    reading(&["quotes"], &[])
+}
+
+/// The ATR of `config` deciding on `rule`, for a strategy reading the
+/// quotes of gold: its bar type, as text, and its period.
 fn atr_bars(config: &TargetsConfig, rule: DecisionRule) -> Option<(String, usize)> {
+    atr_bars_reading(config, rule, &quotes())
+}
+
+/// The ATR of `config` deciding on `rule`, for a strategy of
+/// `requirements`: its bar type, as text, and its period.
+fn atr_bars_reading(
+    config: &TargetsConfig,
+    rule: DecisionRule,
+    requirements: &DataRequirements,
+) -> Option<(String, usize)> {
     config
-        .atr_bars(rule)
+        .atr_bars(rule, requirements)
         .unwrap()
         .map(|atr| (atr.bar_type.to_string(), atr.period))
+}
+
+/// The bar type of the ATR of `config()` deciding on `rule`, for a
+/// strategy of `requirements`, as text.
+fn atr_bar_type(rule: DecisionRule, requirements: &DataRequirements) -> String {
+    atr_bars_reading(&config(), rule, requirements).unwrap().0
+}
+
+/// The refusal of the ATR of `config()` deciding on `rule`, for a
+/// strategy of `requirements`, by `validate` and by `Targets::new`.
+fn atr_refused(rule: DecisionRule, requirements: &DataRequirements) -> String {
+    assert!(Targets::new(config(), rule, requirements).is_err());
+    format!("{:#}", config().validate(rule, requirements).unwrap_err())
 }
 
 #[test]
@@ -103,6 +157,147 @@ fn the_atr_is_on_the_instruments_mids_built_at_the_decision_cadence() {
         on(DecisionRule::Every(SignedDuration::from_millis(250))),
         "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
     );
+}
+
+/// Quotes read through bars built from them count as quotes read.
+#[test]
+fn the_atr_of_a_strategy_on_bars_of_quotes_is_on_the_mids() {
+    let requirements = reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-BID-INTERNAL"]);
+
+    assert_eq!(
+        atr_bar_type(rule(), &requirements),
+        "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+    );
+}
+
+/// Quotes come first: with trades read beside them, the ATR is still on
+/// the mids.
+#[test]
+fn the_atr_of_a_strategy_reading_quotes_and_trades_is_on_the_mids() {
+    let requirements = reading(&["trades", "quotes"], &[]);
+
+    assert_eq!(
+        atr_bar_type(rule(), &requirements),
+        "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+    );
+}
+
+#[test]
+fn the_atr_of_a_strategy_reading_trades_alone_is_on_the_last_prices() {
+    for requirements in [
+        reading(&["trades"], &[]),
+        reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL"]),
+    ] {
+        assert_eq!(
+            atr_bar_type(rule(), &requirements),
+            "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL",
+            "{requirements:?}"
+        );
+    }
+}
+
+/// On bars alone, the ATR's bars are Nautilus' composite bars of the
+/// cadence built from the source bars the strategy reads, priced as they
+/// are.
+#[test]
+fn the_atr_of_a_strategy_reading_bars_alone_is_built_from_its_source_bars() {
+    let requirements = reading(
+        &[],
+        &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
+    );
+
+    assert_eq!(
+        atr_bar_type(rule(), &requirements),
+        "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+    );
+    assert_eq!(
+        atr_bar_type(every(60), &requirements),
+        "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+    );
+}
+
+/// Of several source bars, those whose length divides the cadence, the
+/// longest: the fewest source bars to a bar of the cadence.
+#[test]
+fn the_atr_on_bars_alone_is_built_from_the_longest_source_bars_dividing_the_cadence() {
+    let requirements = reading(
+        &[],
+        &[
+            "XAUUSD.ICMARKETS-1-HOUR-BID-INTERNAL@1-MINUTE-EXTERNAL",
+            "XAUUSD.ICMARKETS-4-HOUR-ASK-INTERNAL@5-MINUTE-EXTERNAL",
+            "XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL",
+        ],
+    );
+
+    assert_eq!(
+        atr_bar_type(rule(), &requirements),
+        "XAUUSD.ICMARKETS-15-MINUTE-ASK-INTERNAL@5-MINUTE-EXTERNAL"
+    );
+    assert_eq!(
+        atr_bar_type(every(120), &requirements),
+        "XAUUSD.ICMARKETS-2-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL"
+    );
+    assert_eq!(
+        atr_bar_type(every(3), &requirements),
+        "XAUUSD.ICMARKETS-3-MINUTE-BID-INTERNAL@1-MINUTE-EXTERNAL"
+    );
+}
+
+/// The ATR's bars are of the cadence: source bars it is not a whole
+/// multiple of cannot build them, nor bars of no length.
+#[test]
+fn an_atr_on_bars_alone_not_dividing_the_cadence_is_refused_naming_both() {
+    let hours = reading(
+        &[],
+        &["XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL"],
+    );
+    let err = atr_refused(rule(), &hours);
+    assert!(err.contains("15m"), "{err}");
+    assert!(
+        err.contains("XAUUSD.ICMARKETS-1-HOUR-LAST-EXTERNAL"),
+        "{err}"
+    );
+
+    let ticks = reading(
+        &[],
+        &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@100-TICK-EXTERNAL"],
+    );
+    let err = atr_refused(rule(), &ticks);
+    assert!(
+        err.contains("XAUUSD.ICMARKETS-100-TICK-LAST-EXTERNAL"),
+        "{err}"
+    );
+}
+
+/// Neither quotes, trades nor bars of the targets' instrument: nothing to
+/// build the ATR's bars from, whatever else the strategy reads.
+#[test]
+fn an_atr_on_an_instrument_the_strategy_reads_no_prices_of_is_refused() {
+    let elsewhere = DataRequirements {
+        bar_types: vec![BarType::from(
+            "EURUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+        )],
+        ticks: vec![
+            TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
+            },
+            TickSeries {
+                data: NautilusDataType::OrderBookDepth,
+                instrument_id: InstrumentId::from(GOLD),
+            },
+        ],
+        warmup: SignedDuration::ZERO,
+    };
+
+    let err = atr_refused(rule(), &elsewhere);
+
+    assert!(err.contains(GOLD), "{err}");
+    let bps = TargetsConfig {
+        barrier: Some(in_bps(20, 10)),
+        ..config()
+    };
+    assert!(bps.validate(rule(), &elsewhere).is_ok());
 }
 
 /// Wilder's period: an `atr` distance without an `atr` table has an ATR of
@@ -125,7 +320,7 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
         ..config()
     };
 
-    assert!(default.validate(rule()).is_ok());
+    assert!(default.validate(rule(), &quotes()).is_ok());
     assert_eq!(atr_bars(&default, rule()).unwrap().1, 14);
     assert_eq!(atr_bars(&overridden, rule()).unwrap().1, 20);
     assert_eq!(
@@ -149,22 +344,27 @@ fn an_atr_distance_without_an_atr_table_reads_from_toml() {
     "#;
     let config = toml::from_str::<TargetsConfig>(toml).unwrap();
 
-    assert!(config.validate(rule()).is_ok());
+    assert!(config.validate(rule(), &quotes()).is_ok());
     assert_eq!(atr_bars(&config, rule()).unwrap().1, 14);
 }
 
 /// Decisions on events have no cadence to build the ATR's bars at.
 #[test]
 fn an_atr_with_decisions_on_events_is_refused() {
-    let err = format!("{:#}", config().validate(DecisionRule::Event).unwrap_err());
+    let err = format!(
+        "{:#}",
+        config()
+            .validate(DecisionRule::Event, &quotes())
+            .unwrap_err()
+    );
     let bps = TargetsConfig {
         barrier: Some(in_bps(20, 10)),
         ..config()
     };
 
     assert!(err.contains("ATR"), "{err}");
-    assert!(Targets::new(config(), DecisionRule::Event).is_err());
-    assert!(bps.validate(DecisionRule::Event).is_ok());
+    assert!(Targets::new(config(), DecisionRule::Event, &quotes()).is_err());
+    assert!(bps.validate(DecisionRule::Event, &quotes()).is_ok());
 }
 
 /// Nautilus builds only bars whose step divides the next unit
@@ -172,7 +372,10 @@ fn an_atr_with_decisions_on_events_is_refused() {
 #[test]
 fn an_atr_on_a_cadence_nautilus_builds_no_bars_of_is_refused() {
     for minutes in [90, 7] {
-        let err = format!("{:#}", config().validate(every(minutes)).unwrap_err());
+        let err = format!(
+            "{:#}",
+            config().validate(every(minutes), &quotes()).unwrap_err()
+        );
         assert!(err.contains("ATR"), "{minutes}: {err}");
     }
 }
@@ -221,9 +424,9 @@ fn either_target_alone_is_valid() {
         ..config()
     };
 
-    assert!(config().validate(rule()).is_ok());
-    assert!(barrier.validate(rule()).is_ok());
-    assert!(horizon.validate(rule()).is_ok());
+    assert!(config().validate(rule(), &quotes()).is_ok());
+    assert!(barrier.validate(rule(), &quotes()).is_ok());
+    assert!(horizon.validate(rule(), &quotes()).is_ok());
 }
 
 #[test]
@@ -234,7 +437,7 @@ fn a_config_without_a_target_is_invalid() {
         ..config()
     };
 
-    assert!(none.validate(rule()).is_err());
+    assert!(none.validate(rule(), &quotes()).is_err());
 }
 
 #[test]
@@ -281,8 +484,8 @@ fn sizes_distances_and_times_must_be_positive() {
     ];
 
     for config in invalid {
-        assert!(config.validate(rule()).is_err(), "{config:?}");
-        assert!(Targets::new(config, rule()).is_err());
+        assert!(config.validate(rule(), &quotes()).is_err(), "{config:?}");
+        assert!(Targets::new(config, rule(), &quotes()).is_err());
     }
 }
 
@@ -311,11 +514,11 @@ fn an_atr_table_is_refused_unless_a_distance_uses_the_atr() {
     };
 
     for config in valid {
-        assert!(config.validate(rule()).is_ok(), "{config:?}");
+        assert!(config.validate(rule(), &quotes()).is_ok(), "{config:?}");
     }
-    let err = format!("{:#}", unused.validate(rule()).unwrap_err());
+    let err = format!("{:#}", unused.validate(rule(), &quotes()).unwrap_err());
     assert!(err.contains("no distance uses"), "{err}");
-    assert!(Targets::new(unused, rule()).is_err());
+    assert!(Targets::new(unused, rule(), &quotes()).is_err());
 }
 
 /// A perpetual priced in half points, 0.5 a tick, as some futures are.
@@ -471,12 +674,18 @@ fn the_fingerprint_changes_with_every_target_spec() {
         },
     ];
 
-    assert_eq!(fingerprint(base, &config()), fingerprint(base, &config()));
-    assert_ne!(fingerprint(base, &config()), base);
+    assert_eq!(
+        fingerprint(base, &config(), rule(), &quotes()).unwrap(),
+        fingerprint(base, &config(), rule(), &quotes()).unwrap()
+    );
+    assert_ne!(
+        fingerprint(base, &config(), rule(), &quotes()).unwrap(),
+        base
+    );
     for config in changed {
         assert_ne!(
-            fingerprint(base, &config),
-            fingerprint(base, &self::config()),
+            fingerprint(base, &config, rule(), &quotes()).unwrap(),
+            fingerprint(base, &self::config(), rule(), &quotes()).unwrap(),
             "{config:?}"
         );
     }
@@ -504,7 +713,10 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
         ..config()
     };
 
-    assert_eq!(fingerprint(base, &default), fingerprint(base, &config()));
+    assert_eq!(
+        fingerprint(base, &default, rule(), &quotes()).unwrap(),
+        fingerprint(base, &config(), rule(), &quotes()).unwrap()
+    );
 }
 
 /// The ATR's bars are the cadence's: deciding every hour, not every 15
@@ -520,9 +732,42 @@ fn a_cadence_change_changes_the_fingerprint_of_targets_with_an_atr() {
         )
         .build()
         .unwrap();
-    let keyed = |rule| fingerprint(decide::fingerprint(&features, rule), &config());
+    let keyed = |rule| {
+        fingerprint(
+            decide::fingerprint(&features, rule),
+            &config(),
+            rule,
+            &quotes(),
+        )
+        .unwrap()
+    };
 
     assert_ne!(keyed(every(15)), keyed(every(60)));
+}
+
+/// The ATR's bars are built from what the strategy reads: the same config
+/// on quotes, on trades and on bars keys three targets, whose rows differ.
+/// Targets without an ATR are keyed alike whatever the strategy reads.
+#[test]
+fn the_source_of_the_atrs_bars_changes_the_fingerprint() {
+    let base = Fingerprint::default();
+    let keyed = |config: &TargetsConfig, requirements: &DataRequirements| {
+        fingerprint(base, config, rule(), requirements).unwrap()
+    };
+    let trades = reading(&["trades"], &[]);
+    let bars = reading(
+        &[],
+        &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
+    );
+
+    assert_ne!(keyed(&config(), &quotes()), keyed(&config(), &trades));
+    assert_ne!(keyed(&config(), &quotes()), keyed(&config(), &bars));
+    assert_ne!(keyed(&config(), &trades), keyed(&config(), &bars));
+    let bps = TargetsConfig {
+        barrier: Some(in_bps(20, 10)),
+        ..config()
+    };
+    assert_eq!(keyed(&bps, &quotes()), keyed(&bps, &trades));
 }
 
 #[test]

@@ -38,6 +38,7 @@ use super::{
     targets::{Label, TargetsConfig},
     train::Example,
 };
+use crate::strategy::DataRequirements;
 
 /// A strategy's meta model: how its rows are made from the primary's, and
 /// its store.
@@ -70,8 +71,9 @@ enum Primary {
 
 impl Meta {
     /// The meta model of `config`, the model of `strategy_id` deciding
-    /// with `features` on targets net of `commission`, its models in the
-    /// store under `models`; none if `config` has no meta section.
+    /// with `features` on targets for a strategy of `requirements`, net of
+    /// `commission`, its models in the store under `models`; none if
+    /// `config` has no meta section.
     ///
     /// # Errors
     ///
@@ -82,12 +84,20 @@ impl Meta {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &ModelConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Option<Self>> {
         let Some(meta) = &config.meta else {
             return Ok(None);
         };
-        let primary = ModelStore::new(models, strategy_id, features, config, commission)?;
+        let primary = ModelStore::new(
+            models,
+            strategy_id,
+            features,
+            config,
+            requirements,
+            commission,
+        )?;
         let store = primary.meta(meta, config.thresholds)?;
         Ok(Some(Self {
             config: meta.clone(),
@@ -100,8 +110,9 @@ impl Meta {
                     features,
                     config.decision,
                     &config.targets,
+                    requirements,
                     commission,
-                )
+                )?
                 .to_string(),
                 thresholds: config.thresholds,
             },
@@ -110,8 +121,9 @@ impl Meta {
     }
 
     /// The meta model of `config`, of `strategy_id`, whose primary is its
-    /// rule, deciding with `features` on targets net of `commission`, its
-    /// models in the store under `models`.
+    /// rule, deciding with `features` on targets for a strategy of
+    /// `requirements`, net of `commission`, its models in the store under
+    /// `models`.
     ///
     /// # Errors
     ///
@@ -123,6 +135,7 @@ impl Meta {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &RuleConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
         ensure!(
@@ -135,7 +148,14 @@ impl Meta {
             primary: Primary::Rule,
             feature_names: features.names().to_vec(),
             pnl: pnl(&config.targets)?,
-            store: ModelStore::of_rule(models, strategy_id, features, config, commission)?,
+            store: ModelStore::of_rule(
+                models,
+                strategy_id,
+                features,
+                config,
+                requirements,
+                commission,
+            )?,
         })
     }
 

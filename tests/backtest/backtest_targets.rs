@@ -1,15 +1,16 @@
 //! Targets from orders (`model::targets`): a probe decides every hour on
-//! one feature, the last mid or close, and opens at each decision a
+//! one feature, the last mid, trade or close, and opens at each decision a
 //! triple-barrier bracket and a horizon trade on each side, on a hedging
 //! venue, through `Backtest::run_dataset`; it records the target rows
-//! published for it. On quotes and on minute bars, with barriers and
+//! published for it. On quotes, trades and minute bars, with barriers and
 //! paths chosen so that each target is worked out by hand: a long ended by
 //! its stop and a short by its take profit, a barrier hit at the very
 //! nanosecond of the time limit (inside the window), barriers left alone
 //! (closed by time), a bar touching both barriers (the venue replays its
 //! high before its low), the last decision unsettled at the end of data,
 //! barriers in basis points and exits in average true ranges of hourly
-//! bars, the cadence's, which the targets subscribe to themselves, no
+//! bars, the cadence's, which the targets subscribe to themselves, built
+//! from the quotes, from the trades alone and from minute bars alone, no
 //! order before the ATR is initialized. Orders the risk engine denies
 //! drop their decisions, unsettled, before any time alert could. Over two
 //! days of a random walk the targets are the same with the execution
@@ -30,7 +31,7 @@ use helix_trader::{
             TargetsConfig,
         },
     },
-    strategy::TickSeries,
+    strategy::{DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -42,10 +43,10 @@ use nautilus_common::{
 use nautilus_core::UnixNanos;
 use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
-    data::{Bar, BarType, CustomData, NautilusDataType, QuoteTick},
-    enums::{OmsType, PriceType},
+    data::{Bar, BarType, CustomData, NautilusDataType, QuoteTick, TradeTick},
+    enums::{AggressorSide, OmsType, PriceType},
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
-    identifiers::{InstrumentId, StrategyId, Symbol},
+    identifiers::{InstrumentId, StrategyId, Symbol, TradeId},
     instruments::{CryptoPerpetual, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
@@ -59,11 +60,43 @@ use rust_decimal::Decimal;
 const STRATEGY: &str = "TARGETS-001";
 
 /// What the probe decides on: the mid of the last quote of an instrument,
-/// or the close of the last bar of a bar type.
+/// the price of its last trade, or the close of the last bar of a bar
+/// type.
 #[derive(Debug, Clone, Copy)]
 enum Source {
     Quotes(InstrumentId),
+    Trades(InstrumentId),
     Bars(BarType),
+}
+
+impl Source {
+    /// What a strategy deciding on it reads, as the run replays it.
+    fn requirements(self) -> DataRequirements {
+        let ticks = |data, instrument_id| DataRequirements {
+            bar_types: vec![],
+            ticks: vec![TickSeries {
+                data,
+                instrument_id,
+            }],
+            warmup: SignedDuration::ZERO,
+        };
+        match self {
+            Self::Quotes(id) => ticks(NautilusDataType::QuoteTick, id),
+            Self::Trades(id) => ticks(NautilusDataType::TradeTick, id),
+            Self::Bars(bar_type) => DataRequirements {
+                bar_types: vec![bar_type],
+                ticks: vec![],
+                warmup: SignedDuration::ZERO,
+            },
+        }
+    }
+
+    fn instrument_id(self) -> InstrumentId {
+        match self {
+            Self::Quotes(id) | Self::Trades(id) => id,
+            Self::Bars(bar_type) => bar_type.instrument_id(),
+        }
+    }
 }
 
 /// What the probe recorded.
@@ -112,6 +145,9 @@ impl TargetProbe {
                 "mid",
                 SimpleMovingAverage::new(1, Some(PriceType::Mid)),
             ),
+            Source::Trades(id) => {
+                FeatureSet::builder().trades(id, "last", SimpleMovingAverage::new(1, None))
+            }
             Source::Bars(bar_type) => {
                 FeatureSet::builder().bars(bar_type, "close", SimpleMovingAverage::new(1, None))
             }
@@ -128,7 +164,8 @@ impl TargetProbe {
             source,
             every,
             features,
-            targets: Targets::new(targets, DecisionRule::Every(every)).unwrap(),
+            targets: Targets::new(targets, DecisionRule::Every(every), &source.requirements())
+                .unwrap(),
             record: Rc::clone(&record),
         };
         (probe, record)
@@ -168,6 +205,7 @@ impl DataActor for TargetProbe {
         msgbus::subscribe_any(topic.into(), handler, None);
         match self.source {
             Source::Quotes(id) => self.subscribe_quotes(id, None, None),
+            Source::Trades(id) => self.subscribe_trades(id, None, None),
             Source::Bars(bar_type) => self.subscribe_bars(bar_type, None, None),
         }
         decide::start(self, DecisionRule::Every(self.every), SignedDuration::ZERO)
@@ -175,10 +213,7 @@ impl DataActor for TargetProbe {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            let instrument_id = match self.source {
-                Source::Quotes(id) => id,
-                Source::Bars(bar_type) => bar_type.instrument_id(),
-            };
+            let instrument_id = self.source.instrument_id();
             let rule = DecisionRule::Every(self.every);
             if let Some(row) = decide::decide(self, &self.features, rule, instrument_id) {
                 self.record.borrow_mut().decisions += 1;
@@ -629,6 +664,192 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     let record = record.borrow();
     assert_eq!(record.rows, expected);
     // The 09:00 decision sent no order: the first fill is the 10:00 one's.
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
+}
+
+/// The barrier of the ATR tests on BTC: a take profit 2 and a stop 1.5
+/// average true ranges of 2 hourly bars away, closed 45 minutes after its
+/// decision, beside a horizon of 30 minutes, of one contract.
+fn btc_atr_targets() -> TargetsConfig {
+    TargetsConfig::builder()
+        .instrument_id(InstrumentId::from(BTC))
+        .quantity(Quantity::from("1.00"))
+        .barrier(Barrier {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(15, 1)),
+            limit: SignedDuration::from_mins(45),
+            atr: Some(AtrConfig { period: 2 }),
+        })
+        .horizon(SignedDuration::from_mins(30))
+        .build()
+}
+
+/// A trade of one contract of BTC-USDT-SWAP at `time` and `price`, of no
+/// aggressor: the venue's bid and ask both move to it.
+fn btc_trade(time: Timestamp, price: f64) -> TradeTick {
+    TradeTick::new(
+        InstrumentId::from(BTC),
+        Price::new(price, 1),
+        Quantity::from("1.00"),
+        AggressorSide::NoAggressor,
+        TradeId::from(time.as_millisecond().to_string().as_str()),
+        time.into(),
+        time.into(),
+    )
+}
+
+/// BTC-USDT-SWAP trading every 5 s over `[08:00, 13:00)` at 100,000, but
+/// for single trades ranging in the hours before 10:00: to 09:00 between
+/// 99,990 (08:40) and 100,020 (08:50), to 10:00 between 99,970 (09:20)
+/// and 100,050 (09:40); and a rise to 100,120 at 10:20. In a catalog
+/// with the instrument.
+fn btc_trades_catalog() -> tempfile::TempDir {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let mut trades = vec![];
+    let mut time = from;
+    while time < to {
+        let price = match time {
+            t if t == ic::at("08:40:00") => 99_990.0,
+            t if t == ic::at("08:50:00") => 100_020.0,
+            t if t == ic::at("09:20:00") => 99_970.0,
+            t if t == ic::at("09:40:00") => 100_050.0,
+            t if t == ic::at("10:20:00") => 100_120.0,
+            _ => 100_000.0,
+        };
+        trades.push(btc_trade(time, price));
+        time += SignedDuration::from_secs(5);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    catalog.write_instruments(vec![btc()]).unwrap();
+    catalog
+        .write_to_parquet(&trades, Some(from.into()), Some(to.into()), None)
+        .unwrap();
+    dir
+}
+
+/// On BTC's trades alone, no quote, until 10:50: the ATR's bars are the
+/// last prices of the trades at the cadence,
+/// `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL`. The bar closing 09:00, from
+/// the run's start, ranges 30; the one closing 10:00 from 99,970 to
+/// 100,050 past the close before, 100,000, 80: an ATR of 55, Wilder's
+/// average of 30 and 80, the exits 110 and 82.5 from the last trade,
+/// 100,000. The ATR has one bar at 09:00: that decision opens no target.
+/// Each fill pays OKX's 0.05% of its value, 0.5 USDT at 100,000.
+#[test]
+fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_hand() {
+    let catalog = btc_trades_catalog();
+    let backtest = Backtest {
+        bar_types: vec![],
+        ticks: vec![TickSeries {
+            data: NautilusDataType::TradeTick,
+            instrument_id: InstrumentId::from(BTC),
+        }],
+        end: ic::at("10:50:00"),
+        ..btc_backtest(&catalog)
+    };
+    let source = Source::Trades(InstrumentId::from(BTC));
+    let (probe, record) = TargetProbe::new(source, btc_atr_targets());
+
+    backtest.run_dataset(probe).unwrap();
+
+    let expected = [
+        // Both enter at the last trade, 100,000: the long's take profit a
+        // sell limit at 100,110, its stop at 99,917.5; the short's take
+        // profit at 99,890, its stop a buy stop at 100,082.5. The trade at
+        // 100,120 at 10:20 fills the long's take profit at its limit
+        // (+1.10 - 0.5 - 0.50055) and the short's stop at the trade,
+        // 100,120 (-1.20 - 0.5 - 0.5006). The horizon closes both on the
+        // flat trade at 10:30, its two fees lost.
+        row(
+            decision(ic::at("10:00:00"), 100_000.0),
+            outcomes(
+                outcome("0.09945 USDT", Exit::TakeProfit),
+                outcome("-2.2006 USDT", Exit::Stop),
+            ),
+            outcomes(
+                outcome("-1 USDT", Exit::Time),
+                outcome("-1 USDT", Exit::Time),
+            ),
+            SignedDuration::from_mins(30),
+        ),
+    ];
+    let record = record.borrow();
+    assert_eq!(record.rows, expected);
+    // The 09:00 decision sent no order: the first fill is the 10:00 one's.
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
+}
+
+/// BTC's minute bars as `btc_bar`, flat at 100,000, but for the minutes
+/// ranging in the hours before 10:00: the one opening 08:40 from 99,990
+/// to 100,020, the one opening 09:20 down to 99,970 and the hour's last,
+/// opening 09:59 and stamped at 10:00, up to 100,050; and the one opening
+/// 10:20 rising to 100,120.
+fn ranging_btc_bar(open: Timestamp) -> Bar {
+    let (high, low) = match open {
+        t if t == ic::at("08:40:00") => (100_020.0, 99_990.0),
+        t if t == ic::at("09:20:00") => (100_000.0, 99_970.0),
+        t if t == ic::at("09:59:00") => (100_050.0, 100_000.0),
+        t if t == ic::at("10:20:00") => (100_120.0, 100_000.0),
+        _ => (100_000.0, 100_000.0),
+    };
+    Bar {
+        high: Price::new(high, 1),
+        low: Price::new(low, 1),
+        ..btc_bar(open)
+    }
+}
+
+/// On BTC's minute bars alone, until 10:50: the ATR's bars are Nautilus'
+/// composite bars of the cadence built from them,
+/// `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`; the probe
+/// reads the minute bars alone. The hour closing 09:00, from the run's
+/// start, ranges 30; the one closing 10:00 from 99,970 to 100,050 past
+/// the close before, 100,000, 80, its high in the minute replayed at
+/// 10:00, before the timer closing the hour: an ATR of 55, the exits 110
+/// and 82.5 from the last close, 100,000. The ATR has one bar at 09:00:
+/// that decision opens no target. Each fill pays OKX's 0.05% of its value,
+/// 0.5 USDT at 100,000.
+#[test]
+fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_out_by_hand() {
+    let catalog = btc_catalog(ranging_btc_bar);
+    let backtest = Backtest {
+        end: ic::at("10:50:00"),
+        ..btc_backtest(&catalog)
+    };
+    let source = Source::Bars(BarType::from(BTC_MINUTE));
+    let (probe, record) = TargetProbe::new(source, btc_atr_targets());
+
+    backtest.run_dataset(probe).unwrap();
+
+    let expected = [
+        // Both enter at the last close, 100,000, the exits as on trades.
+        // The minute opening 10:20 replays its high, 100,120, first: the
+        // long's take profit fills at its limit, 100,110 (+1.10 - 0.5 -
+        // 0.50055), the short's stop at its trigger, 100,082.5 (-0.825 -
+        // 0.5 - 0.5004125). The horizon closes both on the flat close at
+        // 10:30, its two fees lost.
+        row(
+            decision(ic::at("10:00:00"), 100_000.0),
+            outcomes(
+                outcome("0.09945 USDT", Exit::TakeProfit),
+                outcome("-1.8254125 USDT", Exit::Stop),
+            ),
+            outcomes(
+                outcome("-1 USDT", Exit::Time),
+                outcome("-1 USDT", Exit::Time),
+            ),
+            SignedDuration::from_mins(30),
+        ),
+    ];
+    let record = record.borrow();
+    assert_eq!(record.rows, expected);
     assert_eq!(
         record.fills.first(),
         Some(&UnixNanos::from(ic::at("10:00:00.010")))

@@ -12,7 +12,10 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{Missing, STRATEGY, commission, config, replay_on, rule, targets, trade_on, walk},
+    dataset::{
+        Missing, STRATEGY, commission, config, replay_on, requirements, rule, targets, trade_on,
+        walk,
+    },
     ic,
 };
 use helix_trader::model::{
@@ -76,6 +79,7 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
         StrategyId::from(STRATEGY),
         &features(),
         config_daily(),
+        &requirements(),
         &commission(),
     )
     .unwrap()
@@ -102,6 +106,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                                 &features(),
                                 rule(),
                                 targets(),
+                                &requirements(),
                                 &commission(),
                             )?;
                             let (first, last) = dataset::days(from, to);
@@ -125,6 +130,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                                 StrategyId::from(STRATEGY),
                                 &features(),
                                 config_daily(),
+                                &requirements(),
                                 &commission(),
                             )
                             .unwrap()
@@ -160,6 +166,7 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
         StrategyId::from(STRATEGY),
         &features(),
         &config_daily(),
+        &requirements(),
         &commission(),
     )
     .unwrap();

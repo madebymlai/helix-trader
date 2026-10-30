@@ -1510,7 +1510,17 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     closing 09:00 and 10:00 range 0.30 and 0.50, an ATR of 0.40, the
     exits 0.80 and 0.60 from 4000.10; the decision at 09:00, the ATR a
     bar short, sends no order, and at 10:00 a rise fills the long's take
-    profit at its limit and stops the short at the ask. Orders above the
+    profit at its limit and stops the short at the ask. The same barrier
+    on BTC-USDT-SWAP.OKX read without quotes: on its trades alone, the
+    ATR's bars the last prices (`..-1-HOUR-LAST-INTERNAL`), hours ranging
+    30 and 80, an ATR of 55, the exits 110 and 82.5 from the last trade,
+    100,000, a trade at 100,120 filling the long's take profit at its
+    limit and the short's stop at the trade; on its minute bars alone,
+    the ATR's bars composite (`..-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`)
+    on the same ranges, the 10:00 hour's high in its last minute, stamped
+    at 10:00 and replayed before the timer closing the hour, and a minute
+    reaching 100,120 filling the take profit at its limit and the stop at
+    its trigger. Orders above the
     instrument's largest are denied, logged, and the denial drops each
     decision, unsettled: the run ends before the first decision's horizon, so no
     time alert can have, and no decision is open at the stop

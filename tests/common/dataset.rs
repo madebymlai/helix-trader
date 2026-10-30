@@ -20,7 +20,7 @@ use helix_trader::{
         learner::LearnerConfig,
         targets::{Barrier, Distance, Label, TargetRow, TargetsConfig},
     },
-    strategy::TickSeries,
+    strategy::{DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -208,10 +208,29 @@ fn probe(
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
-        model: ModelHandle::new(StrategyId::from(STRATEGY), features, config, mode).unwrap(),
+        model: ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            config,
+            &requirements(),
+            mode,
+        )
+        .unwrap(),
         record: Rc::clone(&record),
     };
     (probe, record)
+}
+
+/// What the probe reads, as `backtest` replays it: IC's gold quotes.
+pub fn requirements() -> DataRequirements {
+    DataRequirements {
+        bar_types: vec![],
+        ticks: vec![TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
+        }],
+        warmup: SignedDuration::ZERO,
+    }
 }
 
 /// The commission of `backtest`, as given: 30 USD per million traded.
@@ -225,10 +244,7 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
         bar_types: vec![],
-        ticks: vec![TickSeries {
-            data: NautilusDataType::QuoteTick,
-            instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
-        }],
+        ticks: requirements().ticks,
         start: from,
         end: to,
         warmup: SignedDuration::ZERO,
