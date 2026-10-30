@@ -22,14 +22,14 @@ use helix_trader::{
         config::ModelConfig,
         dataset::{Dataset, DatasetRow},
         features::{Feature, FeatureSet},
-        targets::{AtrConfig, Barrier, Distance, TargetsConfig},
+        targets::{Barrier, Distance, TargetsConfig},
     },
     strategy::{DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp, civil::Date};
 use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicator};
 use nautilus_model::{
-    data::{BarType, NautilusDataType, QuoteTick},
+    data::{NautilusDataType, QuoteTick},
     enums::PriceType,
     identifiers::{InstrumentId, StrategyId},
 };
@@ -310,20 +310,15 @@ fn a_closed_market_stores_no_row() {
     );
 }
 
-/// The bars of the barrier's ATR: IC's gold's one-minute mids.
-const ATR_BARS: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
-
-/// The probe's config with the bracket 1.5 ATRs of 14 bars of `ATR_BARS`
-/// away on both sides.
+/// The probe's config with the bracket 1.5 ATRs away on both sides, the
+/// ATR of its default 14 bars of the probe's hourly cadence, which it
+/// declares nowhere: the targets subscribe to IC's gold's hourly mids.
 fn atr_config() -> ModelConfig {
     let barrier = Barrier {
         take_profit: Distance::Atr(Decimal::new(15, 1)),
         stop: Distance::Atr(Decimal::new(15, 1)),
         limit: SignedDuration::from_hours(2),
-        atr: Some(AtrConfig {
-            bar_type: BarType::from(ATR_BARS),
-            period: 14,
-        }),
+        atr: None,
     };
     ModelConfig {
         targets: TargetsConfig {
@@ -350,13 +345,13 @@ fn mid_warming_for(warmup: SignedDuration) -> Rc<FeatureSet> {
 
 /// When each row of Thursday 22 October 2026 stored by a build of that
 /// day alone, from scratch, was decided, the features and the strategy
-/// warming for `warmup`, on `walk` from 23:00:02.5 on Wednesday: on a
+/// warming for `warmup`, on `walk` from 09:00:02.5 on Wednesday: on a
 /// thread of its own, one node per thread.
 fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> {
     std::thread::spawn(move || {
         let thursday = Date::constant(2026, 10, 22);
         let catalog = walk(
-            on(Date::constant(2026, 10, 21), "23:00:02.500"),
+            on(Date::constant(2026, 10, 21), "09:00:02.500"),
             on(Date::constant(2026, 10, 23), "03:00:00"),
         );
         let config = atr_config();
@@ -385,11 +380,11 @@ fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> 
     .unwrap()
 }
 
-/// The data requirements of a strategy reading `ATR_BARS` and IC's gold's
-/// quotes, warming for `warmup`.
-fn reading_atr_bars(warmup: SignedDuration) -> DataRequirements {
+/// The data requirements of a strategy reading IC's gold's quotes alone,
+/// no bars, warming for `warmup`.
+fn reading_quotes(warmup: SignedDuration) -> DataRequirements {
     DataRequirements {
-        bar_types: vec![BarType::from(ATR_BARS)],
+        bar_types: vec![],
         ticks: vec![TickSeries {
             data: NautilusDataType::QuoteTick,
             instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
@@ -398,24 +393,28 @@ fn reading_atr_bars(warmup: SignedDuration) -> DataRequirements {
     }
 }
 
-/// A barrier ATR of 14 one-minute bars warms over exactly a warmup of 14
-/// minutes, which validation accepts: a build of a day alone replays from
-/// 23:46 the day before, and the data engine builds the 14 bars after it,
-/// each over its minute's quotes, the last at midnight, 10 ms before the
-/// day's first decision, which opens its targets. The quotes are 2.5 s
-/// off the minute: one at 23:46 itself, the replay's first, would close a
-/// 15th bar, the minute before, and hide a warmup a bar short. A minute
-/// shorter, validation refuses the warmup, and that decision opens
-/// nothing, the ATR a bar short.
+/// A barrier ATR of its default 14 bars, hours at the probe's cadence,
+/// warms over exactly a warmup of 14 hours, which validation accepts: a
+/// build of a day alone replays from 10:00 the day before, and the data
+/// engine builds the 14 hourly bars after it, on the targets'
+/// subscription alone, each over its hour's quotes, the last at midnight,
+/// 10 ms before the day's first decision, which opens its targets. The
+/// quotes are 2.5 s off the hour: one at 10:00 itself, the replay's
+/// first, would close a 15th bar, the hour before, and hide a warmup a
+/// bar short. An hour shorter, validation refuses the warmup, and that
+/// decision opens nothing, the ATR a bar short.
 #[test]
 fn a_barrier_atr_warming_over_exactly_the_warmup_opens_the_day_s_first_decision() {
     let (thursday, margin) = (
         Date::constant(2026, 10, 22),
         SignedDuration::from_millis(10),
     );
-    let (warmup, shorter) = (SignedDuration::from_mins(14), SignedDuration::from_mins(13));
-    assert!(atr_config().validate(&reading_atr_bars(warmup)).is_ok());
-    assert!(atr_config().validate(&reading_atr_bars(shorter)).is_err());
+    let (warmup, shorter) = (
+        SignedDuration::from_hours(14),
+        SignedDuration::from_hours(13),
+    );
+    assert!(atr_config().validate(&reading_quotes(warmup)).is_ok());
+    assert!(atr_config().validate(&reading_quotes(shorter)).is_err());
 
     let decided = thursday_decided_after_a_warmup_of(warmup);
     let decided_shorter = thursday_decided_after_a_warmup_of(shorter);

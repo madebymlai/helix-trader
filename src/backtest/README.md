@@ -1504,13 +1504,15 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     10 bps, 100, from the close: a bar touching both barriers fills the
     long's take profit and the short's stop, its high replayed first, at
     their limit and trigger; a take profit losing net of 0.05% fees has a
-    negative sign. On minute bars ranging 60.1 each, a stop 1.3 average
-    true ranges of 75 bars away, 78.13, on the nearest tenth, beside a
-    take profit of 10 bps: the decision before the ATR has its 75 bars
-    sends no order, the next one's short is stopped at 100,078.1 by a bar
-    short of the long's take profit. Orders above the instrument's
-    largest are denied, logged, and the denial drops each decision,
-    unsettled: the run ends before the first decision's horizon, so no
+    negative sign. On IC's gold, hourly decisions with a take profit 2
+    and a stop 1.5 average true ranges of 2 hourly bars of the mids away,
+    bars the targets subscribe to and the probe does not: the bars
+    closing 09:00 and 10:00 range 0.30 and 0.50, an ATR of 0.40, the
+    exits 0.80 and 0.60 from 4000.10; the decision at 09:00, the ATR a
+    bar short, sends no order, and at 10:00 a rise fills the long's take
+    profit at its limit and stops the short at the ask. Orders above the
+    instrument's largest are denied, logged, and the denial drops each
+    decision, unsettled: the run ends before the first decision's horizon, so no
     time alert can have, and no decision is open at the stop
     (`Targets::open_decisions`). Over
     two days of a random walk, the rows are the same from a dataset run
@@ -1531,11 +1533,12 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     feature of the mean of the last two hours of mids, a day built alone,
     replayed from the features' three-hour warmup before it, stores the
     same 24 rows as inside a build from the day before. A barrier ATR of
-    14 one-minute bars, with a warmup of 14 minutes, the shortest
-    validation accepts, is warm at a day's first decision in a build of
-    that day alone: the replay from 23:46 builds the 14 bars to midnight,
-    10 ms before it, and the decision opens its targets; with 13 minutes
-    it opens nothing. The quotes are off the minute, as a quote at the
+    its default 14 bars of the hourly cadence, declared by no bar type,
+    with a warmup of 14 hours, the shortest validation accepts, is warm at
+    a day's first decision in a build of that day alone: the replay from
+    10:00 builds the 14 bars to midnight on the targets' subscription,
+    10 ms before it, and the decision opens its targets; with 13 hours it
+    opens nothing. The quotes are off the hour, as a quote at the
     replay's first instant would close one more bar.
   - `backtest_train.rs`: training at a time (strategy README, "Features
     and decisions"), with the probe of `backtest_dataset.rs`, shared from

@@ -627,27 +627,36 @@ of its choosing (`model::features`, `model::decide`).
   profit and stop are distances from the decision's price (the last
   quote's mid, else the last trade, else the last bar's close), each in
   one unit (`Distance`): basis points of that price, `{ bps = 20 }`, or
-  multiples of an average true range, `{ atr = 1.5 }`; a barrier with an
-  `atr` distance declares its ATR, Nautilus' `AverageTrueRange` (Wilder's
-  average) on bars of the instrument, and only then:
+  multiples of an average true range, `{ atr = 2.0 }`. The ATR is
+  Nautilus' `AverageTrueRange` (Wilder's average) of 14 bars, the mids
+  of the targets' instrument built from its quotes at the decision
+  cadence (`TargetsConfig::atr_bars`): deciding every 15 minutes,
+  `EURUSD.ICMARKETS-15-MINUTE-MID-INTERNAL`. The bars are not declared
+  anywhere:
 
   ```toml
   [barrier]
-  take_profit = { bps = 20 }
+  take_profit = { atr = 2.0 }
   stop = { atr = 1.5 }
   limit = "2h"
-  atr = { bar_type = "EURUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 }
   ```
 
+  An `atr` table sets another period, `atr = { period = 20 }`, and is
+  refused without an `atr` distance; decisions on events, with no
+  cadence, are refused with an ATR, and so is a cadence Nautilus builds
+  no bars of (a step must divide the next unit: 15 minutes, not 90).
   Each exit is on the instrument's nearest tick (Nautilus' tick grid,
   `next_bid_price` and `next_ask_price`), a tie away from the decision's
-  price. The targets own the ATR: the strategy registers it with
-  `register(self)` in `on_start` and subscribes to its bar type, and
-  Nautilus feeds it each of those bars, as it does the features (bars a
-  warmup builds reach only the cache, so they do not warm it). A
-  decision at which the ATR is not yet initialized opens no target, logged
-  at debug, as cold features give no decision. The strategy shares a
-  `Targets` (`Targets::new(config)`, an `Rc`), calls `open(self, row)`
+  price. The targets own the ATR: `start(self)` in `on_start` registers
+  it with the strategy's Nautilus indicators and subscribes the strategy
+  to its bars, and Nautilus feeds it each of those bars, as it does the
+  features; a strategy subscribing to the same bars shares the one
+  subscription. Bars a warmup request builds reach only the cache, so they
+  do not warm it: a dataset run's replay of the warmup before its first
+  day does. A decision at which the ATR is not yet initialized opens no
+  target, logged at debug, as cold features give no decision. The
+  strategy shares a `Targets` (`Targets::new(config, rule)`, an `Rc`),
+  calls `open(self, row)`
   with each row `decide` returns, and hands it
   `on_time_event`, `on_order_filled`, `on_order_denied`,
   `on_order_rejected`, `on_position_closed` and `on_stop`; it sends no
@@ -727,10 +736,11 @@ of its choosing (`model::features`, `model::decide`).
   `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
   and `learner`. `validate(&requirements)` refuses a retrain interval not
   positive, a traded instrument the strategy does not read, a barrier ATR
-  on a bar type it does not read (its bars feed the ATR) or whose period
-  of bars is longer than the strategy's warmup (a dataset run replays
-  only the warmup before its first day, so the ATR would be cold at its
-  first decisions), a label of a
+  on an instrument whose quotes it does not read (they build the ATR's
+  bars) or whose period of bars, the given or the default, at the
+  decision cadence is longer than the strategy's warmup (a dataset run
+  replays only the warmup before its first day, so the ATR would be cold
+  at its first decisions; as long is enough), a label of a
   target the config lacks, a barrier limit or horizon not shorter than
   the window, a holdout leaving no fitted row, thresholds that are not
   probabilities with the short below the long, and a minimum score

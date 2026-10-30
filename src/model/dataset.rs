@@ -202,7 +202,7 @@ impl Dataset {
         targets: TargetsConfig,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
-        targets.validate()?;
+        targets.validate(rule)?;
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
         Ok(Self {
             catalog: catalog.to_path_buf(),

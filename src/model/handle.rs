@@ -3,12 +3,12 @@
 //!
 //! The strategy shares a `ModelHandle` (an `Rc`), built from its features
 //! and the model section of its config, in a `Mode`. `start` from
-//! `on_start` registers the features (and the targets' ATR, in a dataset
-//! run) and starts the decision cadence; `decide`, at each decision (the
-//! cadence's timer, `decide::is_decision`, or an event of the strategy's
-//! choosing), snapshots the features, if the decision is fresh (data of
-//! the targets' instrument since the previous) and every one is
-//! initialized, and publishes their row (`decide::decide`), then:
+//! `on_start` registers the features (and starts the targets' ATR, in a
+//! dataset run) and starts the decision cadence; `decide`, at each
+//! decision (the cadence's timer, `decide::is_decision`, or an event of
+//! the strategy's choosing), snapshots the features, if the decision is
+//! fresh (data of the targets' instrument since the previous) and every
+//! one is initialized, and publishes their row (`decide::decide`), then:
 //!
 //! - trading (`Mode::Backtest`, `Mode::Live`): takes the latest model of
 //!   the store (`store::ModelStore`) valid at the decision, predicts on the
@@ -51,6 +51,7 @@
 
 use std::{
     cell::RefCell,
+    fmt::Debug,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -298,7 +299,7 @@ impl ModelHandle {
                 quantity: targets.quantity,
             })),
             Mode::Dataset { rows } => Serving::Dataset {
-                targets: Targets::new(targets.clone())?,
+                targets: Targets::new(targets.clone(), rule)?,
                 rows,
             },
         };
@@ -312,7 +313,7 @@ impl ModelHandle {
     }
 
     /// Starts the handle on `strategy`, reading `bar_types`, from
-    /// `on_start`: registers the features (and, in a dataset run, the
+    /// `on_start`: registers the features (and, in a dataset run, starts the
     /// targets' ATR, and collects the rows they settle), then starts the
     /// decision cadence, live `warmup::live_bar_build_delay(bar_types)`
     /// late, and live the retrain timer.
@@ -323,7 +324,7 @@ impl ModelHandle {
     /// retrain timer.
     pub fn start<S>(&self, strategy: &mut S, bar_types: &[BarType]) -> anyhow::Result<()>
     where
-        S: DataActor + DataActorNative,
+        S: DataActor + DataActorNative + Debug + 'static,
     {
         self.features.register(strategy);
         let delay = match &self.serving {
@@ -335,7 +336,7 @@ impl ModelHandle {
                 None => SignedDuration::ZERO,
             },
             Serving::Dataset { targets, rows } => {
-                targets.register(strategy);
+                targets.start(strategy);
                 let rows = Rc::clone(rows);
                 let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
                     if let Some(row) = data.data.as_any().downcast_ref::<TargetRow>() {

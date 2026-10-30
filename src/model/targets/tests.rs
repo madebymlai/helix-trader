@@ -7,12 +7,21 @@ use nautilus_model::{
 };
 
 use super::*;
-use crate::model::features::FeatureSet;
+use crate::model::{decide, features::FeatureSet};
 
 const GOLD: &str = "XAUUSD.ICMARKETS";
-const GOLD_MINUTE: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
 
-/// A take profit 20 bps away, a stop 1.5 ATRs of 14 minute bars.
+/// Deciding every `minutes` minutes.
+fn every(minutes: i64) -> DecisionRule {
+    DecisionRule::Every(SignedDuration::from_mins(minutes))
+}
+
+/// The decisions of every test but where it says: every 15 minutes.
+fn rule() -> DecisionRule {
+    every(15)
+}
+
+/// A take profit 20 bps away, a stop 1.5 ATRs of 14 bars.
 fn config() -> TargetsConfig {
     TargetsConfig::builder()
         .instrument_id(InstrumentId::from(GOLD))
@@ -21,10 +30,7 @@ fn config() -> TargetsConfig {
             take_profit: Distance::BasisPoints(Decimal::from(20)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_hours(2),
-            atr: Some(AtrConfig {
-                bar_type: BarType::from(GOLD_MINUTE),
-                period: 14,
-            }),
+            atr: Some(AtrConfig { period: 14 }),
         })
         .horizon(SignedDuration::from_hours(1))
         .build()
@@ -52,10 +58,123 @@ fn a_config_reads_from_toml() {
         take_profit = { bps = 20 }
         stop = { atr = 1.5 }
         limit = "2h"
-        atr = { bar_type = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 }
+        atr = { period = 14 }
     "#;
 
     assert_eq!(toml::from_str::<TargetsConfig>(toml).unwrap(), config());
+}
+
+/// The ATR's bars are the decision cadence's: naming them is refused.
+#[test]
+fn a_barrier_atr_naming_its_bar_type_is_refused_at_load() {
+    let toml = r#"
+        instrument_id = "XAUUSD.ICMARKETS"
+        quantity = "1"
+        barrier = { take_profit = { atr = 2 }, stop = { atr = 1.5 }, limit = "2h", atr = { bar_type = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 } }
+    "#;
+
+    let err = toml::from_str::<TargetsConfig>(toml).unwrap_err();
+
+    assert!(err.to_string().contains("bar_type"), "{err}");
+}
+
+/// The ATR of `config` deciding on `rule`: its bar type, as text, and its
+/// period.
+fn atr_bars(config: &TargetsConfig, rule: DecisionRule) -> Option<(String, usize)> {
+    config
+        .atr_bars(rule)
+        .unwrap()
+        .map(|atr| (atr.bar_type.to_string(), atr.period))
+}
+
+#[test]
+fn the_atr_is_on_the_instruments_mids_built_at_the_decision_cadence() {
+    let on = |rule| atr_bars(&config(), rule).unwrap().0;
+
+    assert_eq!(on(every(15)), "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL");
+    assert_eq!(on(every(60)), "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
+    assert_eq!(on(every(120)), "XAUUSD.ICMARKETS-2-HOUR-MID-INTERNAL");
+    assert_eq!(on(every(24 * 60)), "XAUUSD.ICMARKETS-1-DAY-MID-INTERNAL");
+    assert_eq!(
+        on(DecisionRule::Every(SignedDuration::from_secs(30))),
+        "XAUUSD.ICMARKETS-30-SECOND-MID-INTERNAL"
+    );
+    assert_eq!(
+        on(DecisionRule::Every(SignedDuration::from_millis(250))),
+        "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
+    );
+}
+
+/// Wilder's period: an `atr` distance without an `atr` table has an ATR of
+/// 14 bars, which `atr = { period = .. }` overrides.
+#[test]
+fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
+    let barrier = config().barrier.unwrap();
+    let default = TargetsConfig {
+        barrier: Some(Barrier {
+            atr: None,
+            ..barrier
+        }),
+        ..config()
+    };
+    let overridden = TargetsConfig {
+        barrier: Some(Barrier {
+            atr: Some(AtrConfig { period: 20 }),
+            ..barrier
+        }),
+        ..config()
+    };
+
+    assert!(default.validate(rule()).is_ok());
+    assert_eq!(atr_bars(&default, rule()).unwrap().1, 14);
+    assert_eq!(atr_bars(&overridden, rule()).unwrap().1, 20);
+    assert_eq!(
+        atr_bars(
+            &TargetsConfig {
+                barrier: Some(in_bps(20, 10)),
+                ..config()
+            },
+            rule()
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_atr_distance_without_an_atr_table_reads_from_toml() {
+    let toml = r#"
+        instrument_id = "XAUUSD.ICMARKETS"
+        quantity = "1"
+        barrier = { take_profit = { atr = 2.0 }, stop = { atr = 1.5 }, limit = "2h" }
+    "#;
+    let config = toml::from_str::<TargetsConfig>(toml).unwrap();
+
+    assert!(config.validate(rule()).is_ok());
+    assert_eq!(atr_bars(&config, rule()).unwrap().1, 14);
+}
+
+/// Decisions on events have no cadence to build the ATR's bars at.
+#[test]
+fn an_atr_with_decisions_on_events_is_refused() {
+    let err = format!("{:#}", config().validate(DecisionRule::Event).unwrap_err());
+    let bps = TargetsConfig {
+        barrier: Some(in_bps(20, 10)),
+        ..config()
+    };
+
+    assert!(err.contains("ATR"), "{err}");
+    assert!(Targets::new(config(), DecisionRule::Event).is_err());
+    assert!(bps.validate(DecisionRule::Event).is_ok());
+}
+
+/// Nautilus builds only bars whose step divides the next unit
+/// (`BarSpecification::new_checked`): neither 90 nor 7 minutes divide an hour.
+#[test]
+fn an_atr_on_a_cadence_nautilus_builds_no_bars_of_is_refused() {
+    for minutes in [90, 7] {
+        let err = format!("{:#}", config().validate(every(minutes)).unwrap_err());
+        assert!(err.contains("ATR"), "{minutes}: {err}");
+    }
 }
 
 #[test]
@@ -102,9 +221,9 @@ fn either_target_alone_is_valid() {
         ..config()
     };
 
-    assert!(config().validate().is_ok());
-    assert!(barrier.validate().is_ok());
-    assert!(horizon.validate().is_ok());
+    assert!(config().validate(rule()).is_ok());
+    assert!(barrier.validate(rule()).is_ok());
+    assert!(horizon.validate(rule()).is_ok());
 }
 
 #[test]
@@ -115,7 +234,7 @@ fn a_config_without_a_target_is_invalid() {
         ..config()
     };
 
-    assert!(none.validate().is_err());
+    assert!(none.validate(rule()).is_err());
 }
 
 #[test]
@@ -143,10 +262,7 @@ fn sizes_distances_and_times_must_be_positive() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig {
-                    period: 0,
-                    ..barrier.atr.unwrap()
-                }),
+                atr: Some(AtrConfig { period: 0 }),
                 ..barrier
             }),
             ..config()
@@ -165,13 +281,13 @@ fn sizes_distances_and_times_must_be_positive() {
     ];
 
     for config in invalid {
-        assert!(config.validate().is_err(), "{config:?}");
-        assert!(Targets::new(config).is_err());
+        assert!(config.validate(rule()).is_err(), "{config:?}");
+        assert!(Targets::new(config, rule()).is_err());
     }
 }
 
 #[test]
-fn an_atr_is_declared_on_the_instruments_bars_exactly_when_a_distance_uses_it() {
+fn an_atr_table_is_refused_unless_a_distance_uses_the_atr() {
     let barrier = config().barrier.unwrap();
     let valid = [
         TargetsConfig {
@@ -186,55 +302,20 @@ fn an_atr_is_declared_on_the_instruments_bars_exactly_when_a_distance_uses_it() 
             ..config()
         },
     ];
-    let invalid = [
-        // An ATR distance with no ATR.
-        TargetsConfig {
-            barrier: Some(Barrier {
-                atr: None,
-                ..barrier
-            }),
-            ..config()
-        },
-        // An ATR no distance uses.
-        TargetsConfig {
-            barrier: Some(Barrier {
-                atr: barrier.atr,
-                ..in_bps(20, 10)
-            }),
-            ..config()
-        },
-        // An ATR of another instrument's bars.
-        TargetsConfig {
-            barrier: Some(Barrier {
-                atr: Some(AtrConfig {
-                    bar_type: BarType::from("EURUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
-                    period: 14,
-                }),
-                ..barrier
-            }),
-            ..config()
-        },
-    ];
+    let unused = TargetsConfig {
+        barrier: Some(Barrier {
+            atr: barrier.atr,
+            ..in_bps(20, 10)
+        }),
+        ..config()
+    };
 
     for config in valid {
-        assert!(config.validate().is_ok(), "{config:?}");
+        assert!(config.validate(rule()).is_ok(), "{config:?}");
     }
-    for config in invalid {
-        assert!(config.validate().is_err(), "{config:?}");
-        assert!(Targets::new(config).is_err());
-    }
-}
-
-#[test]
-fn a_config_with_an_atr_distance_without_its_atr_is_refused_at_load() {
-    let toml = r#"
-        instrument_id = "XAUUSD.ICMARKETS"
-        quantity = "1"
-        barrier = { take_profit = { bps = 20 }, stop = { atr = 1.5 }, limit = "2h" }
-    "#;
-    let config = toml::from_str::<TargetsConfig>(toml).unwrap();
-
-    assert!(config.validate().is_err());
+    let err = format!("{:#}", unused.validate(rule()).unwrap_err());
+    assert!(err.contains("no distance uses"), "{err}");
+    assert!(Targets::new(unused, rule()).is_err());
 }
 
 /// A perpetual priced in half points, 0.5 a tick, as some futures are.
@@ -368,20 +449,7 @@ fn the_fingerprint_changes_with_every_target_spec() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig {
-                    period: 15,
-                    ..barrier.atr.unwrap()
-                }),
-                ..barrier
-            }),
-            ..config()
-        },
-        TargetsConfig {
-            barrier: Some(Barrier {
-                atr: Some(AtrConfig {
-                    bar_type: BarType::from("XAUUSD.ICMARKETS-5-MINUTE-MID-INTERNAL"),
-                    ..barrier.atr.unwrap()
-                }),
+                atr: Some(AtrConfig { period: 15 }),
                 ..barrier
             }),
             ..config()
@@ -412,6 +480,49 @@ fn the_fingerprint_changes_with_every_target_spec() {
             "{config:?}"
         );
     }
+}
+
+/// The ATR's period is fingerprinted as it runs: left to its default it
+/// keys the same targets as 14 written out.
+#[test]
+fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
+    let base = FeatureSet::builder()
+        .quotes(
+            InstrumentId::from(GOLD),
+            "mid",
+            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+        )
+        .build()
+        .unwrap()
+        .fingerprint();
+    let barrier = config().barrier.unwrap();
+    let default = TargetsConfig {
+        barrier: Some(Barrier {
+            atr: None,
+            ..barrier
+        }),
+        ..config()
+    };
+
+    assert_eq!(fingerprint(base, &default), fingerprint(base, &config()));
+}
+
+/// The ATR's bars are the cadence's: deciding every hour, not every 15
+/// minutes, keys other targets, through the decisions' fingerprint they
+/// extend, as `dataset::fingerprint` composes them.
+#[test]
+fn a_cadence_change_changes_the_fingerprint_of_targets_with_an_atr() {
+    let features = FeatureSet::builder()
+        .quotes(
+            InstrumentId::from(GOLD),
+            "mid",
+            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+        )
+        .build()
+        .unwrap();
+    let keyed = |rule| fingerprint(decide::fingerprint(&features, rule), &config());
+
+    assert_ne!(keyed(every(15)), keyed(every(60)));
 }
 
 #[test]
