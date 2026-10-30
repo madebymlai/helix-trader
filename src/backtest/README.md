@@ -1517,7 +1517,13 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     run is never used. Parity: a long model LightGBM fitted by a train at
     16:00 of the 25th on a 72-hour window, published again valid from its
     holdout's start, predicts in the node, on the holdout's decisions,
-    each probe row's calibrated prediction to the bit.
+    each probe row's calibrated prediction to the bit. The probe sends
+    each trade it is given: on the quotes of `backtest_targets.rs`'s
+    hand-worked targets, a barrier 7.5 bps away closed after 45 minutes,
+    a model of either side trading every hourly decision realises at
+    09:00, 10:00 and 11:00 the P&L the dataset row of that decision
+    recorded of its side, worked out by hand (the long -3.64, 2.66 and
+    0.56 USD, the short 2.66, -3.64 and -1.44).
   - `backtest_model_ema.rs`: the `model_ema` strategy end to end: the
     binary's `train model_ema --at` on a fixture config of the long alone
     publishes a model (fake learner, AUC 0.5 at a minimum of 0.5) after

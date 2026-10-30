@@ -3,8 +3,9 @@
 //! either opening the targets of each decision in a dataset run
 //! (`Backtest::run_dataset`), the targets subscribing to the bars of
 //! their ATR, if any, the rows they settle collected, or trading on the
-//! models of a store, its decisions' rows and trades recorded; on IC's
-//! hedging venue both. And the random walk of quotes they replay.
+//! models of a store, sending its trades, its decisions' rows, trades and
+//! closed positions recorded; on IC's hedging venue both. And the
+//! random walk of quotes they replay.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -34,7 +35,7 @@ use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicato
 use nautilus_model::{
     data::{CustomData, NautilusDataType, QuoteTick},
     enums::{OmsType, PriceType},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    events::{OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Money, Quantity},
 };
@@ -48,7 +49,7 @@ pub const STRATEGY: &str = "DATASET-001";
 
 /// Decides every hour on the last mid of IC's gold through its model
 /// handle; records the rows published for its decisions and the trades
-/// they make, which it does not send.
+/// they make, which it sends, and the positions they closed.
 #[derive(Debug)]
 pub struct ModelProbe {
     core: StrategyCore,
@@ -63,13 +64,11 @@ pub struct Record {
     pub rows: Vec<FeatureRow>,
     /// The trade of each decision making one, and its time.
     pub trades: Vec<(UnixNanos, Trade)>,
+    /// Each position closed, when it opened and its realised P&L.
+    pub closed: Vec<(UnixNanos, Money)>,
 }
 
 nautilus_strategy!(ModelProbe, {
-    fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.model.on_order_filled(event);
-    }
-
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.model.on_order_denied(&event);
     }
@@ -79,6 +78,9 @@ nautilus_strategy!(ModelProbe, {
     }
 
     fn on_position_closed(&mut self, event: PositionClosed) {
+        if let Some(pnl) = event.realized_pnl {
+            self.record.borrow_mut().closed.push((event.ts_opened, pnl));
+        }
         Rc::clone(&self.model).on_position_closed(self, &event);
     }
 });
@@ -101,6 +103,7 @@ impl DataActor for ModelProbe {
             if let Some(trade) = Rc::clone(&self.model).decide(self)? {
                 let now = self.clock().timestamp_ns();
                 self.record.borrow_mut().trades.push((now, trade));
+                trade.send(self)?;
             }
             return Ok(());
         }

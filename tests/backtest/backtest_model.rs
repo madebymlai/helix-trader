@@ -5,15 +5,22 @@
 //! row, calibrated alike, each decision's probability names the model it
 //! used: the latest valid at or before it. A model LightGBM fitted by a
 //! train at t, reloaded in the node, predicts on the decisions of its
-//! probe rows exactly as at training, calibrated.
+//! probe rows exactly as at training, calibrated. The probe sends its
+//! trades: on the hand-worked targets' quotes (`backtest_targets`), each
+//! trade of a model of either side realises the P&L the dataset row of
+//! its decision recorded of that side.
 
 use std::path::Path;
 
-use crate::common::{
-    dataset::{
-        STRATEGY, commission, config, features, replay, requirements, rule, targets, trade, walk,
+use crate::{
+    backtest_targets::hand_worked_quotes,
+    common::{
+        dataset::{
+            STRATEGY, commission, config, features, replay, replay_of, requirements, targets,
+            trade, walk,
+        },
+        ic,
     },
-    ic,
 };
 use helix_trader::model::{
     calibration::Calibration,
@@ -22,14 +29,15 @@ use helix_trader::model::{
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
     payoff::Payoff,
     store::{ModelManifest, ModelStore, Probe, StoredModel},
-    targets::Side,
+    targets::{Barrier, Distance, Side, TargetsConfig},
     train::Training,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
-use nautilus_model::identifiers::StrategyId;
+use nautilus_model::{identifiers::StrategyId, types::Money};
+use rust_decimal::Decimal;
 
-fn store(models: &Path, config: &ModelConfig) -> ModelStore {
+fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
     ModelStore::new(
         models,
         StrategyId::from(STRATEGY),
@@ -37,7 +45,7 @@ fn store(models: &Path, config: &ModelConfig) -> ModelStore {
         config,
         &requirements(),
         &commission(),
-        Side::Long,
+        side,
     )
     .unwrap()
 }
@@ -46,10 +54,11 @@ fn store(models: &Path, config: &ModelConfig) -> ModelStore {
 /// increasing: c(0.5) = 0.5.
 const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
 
-/// A baseline long model of the probe valid from `valid_from`, predicting
-/// `trues` tenths whatever the row, calibrated by `CALIBRATION`, expecting
-/// a win and a loss of 1R: above 0.5 a long expected to gain.
-fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
+/// A baseline model of `side` of the probe deciding as `config` says,
+/// valid from `valid_from`, predicting `trues` tenths whatever the row,
+/// calibrated by `CALIBRATION`, expecting a win and a loss of 1R: above
+/// 0.5 a trade expected to gain.
+fn baseline(config: &ModelConfig, side: Side, valid_from: Timestamp, trues: usize) -> StoredModel {
     let labels = (0..10).map(|i| i < trues).collect();
     let set = TrainingSet::new(1, vec![4000.0; 10], labels).unwrap();
     let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
@@ -59,17 +68,17 @@ fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
             valid_from,
             fingerprint: dataset::fingerprint(
                 &features(),
-                rule(),
-                &targets(),
+                config.decision,
+                &config.targets,
                 &requirements(),
                 &commission(),
             )
             .unwrap()
             .to_string(),
             feature_names: vec!["mid".to_string()],
-            targets: targets(),
-            label: config().label,
-            side: Some(Side::Long),
+            targets: config.targets.clone(),
+            label: config.label,
+            side: Some(side),
             learner: LearnerConfig::Baseline {},
             calibration: CALIBRATION,
             payoff: Some(Payoff {
@@ -101,14 +110,16 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
         learner: LearnerConfig::Baseline {},
         ..config()
     };
-    let store = store(models.path(), &config);
+    let store = store(models.path(), &config, Side::Long);
     for (valid_from, trues) in [
         ("02:00:00", 7),
         ("04:00:00", 8),
         ("04:30:00", 9),
         ("09:00:00", 9),
     ] {
-        store.publish(&baseline(ic::at(valid_from), trues)).unwrap();
+        store
+            .publish(&baseline(&config, Side::Long, ic::at(valid_from), trues))
+            .unwrap();
     }
 
     let record = trade(
@@ -192,7 +203,9 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     });
     let holdout = t - config.holdout;
     model.manifest.valid_from = holdout;
-    store(models.path(), &config).publish(&model).unwrap();
+    store(models.path(), &config, Side::Long)
+        .publish(&model)
+        .unwrap();
 
     let record = trade(&catalog, holdout, t, &config, models.path());
 
@@ -217,5 +230,99 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
             probe.prediction.to_bits(),
             "{probe:?}"
         );
+    }
+}
+
+/// The hand-worked targets' barrier (`backtest_targets`): 7.5 bps of the
+/// decision's mid away on both sides, 3.00 USD on one ounce of gold,
+/// closed after 45 minutes, and a horizon of 30, both inside the hourly
+/// cadence; learning the barrier, and trading `side` alone at every
+/// decision.
+fn hand_worked(side: Side) -> ModelConfig {
+    let traded = Some(f64::MIN);
+    let margins = match side {
+        Side::Long => Margins {
+            long: traded,
+            short: None,
+        },
+        Side::Short => Margins {
+            long: None,
+            short: traded,
+        },
+    };
+    let bps = Distance::BasisPoints(Decimal::new(75, 1));
+    ModelConfig {
+        targets: TargetsConfig {
+            barrier: Some(Barrier {
+                take_profit: bps,
+                stop: bps,
+                limit: SignedDuration::from_mins(45),
+                atr: None,
+            }),
+            horizon: Some(SignedDuration::from_mins(30)),
+            ..targets()
+        },
+        learner: LearnerConfig::Baseline {},
+        margins,
+        ..config()
+    }
+}
+
+/// Worked by hand on the quotes of the hand-worked targets: a dip at
+/// 09:20, a spike at 10:45:00.010 and a rise from 11:20. Over 08:30 to
+/// 12:30 a model of one side, trading every decision on its barrier,
+/// realises at the decisions of 09:00, 10:00 and 11:00 the P&L the
+/// dataset row of that decision recorded of that side: the long stopped
+/// (-3.64 USD), taking profit (2.66) and closed by time (0.56), the short
+/// taking profit (2.66), stopped (-3.64) and closed by time (-1.44). The
+/// 12:00 decision's trade is still open at the end, as its row is
+/// unsettled.
+#[test]
+fn a_model_strategy_realises_per_trade_the_pnl_its_dataset_row_recorded() {
+    let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
+    let (from, to) = (ic::at("08:30:00"), ic::at("12:30:00"));
+    let decision = |hour: &str| UnixNanos::from(ic::at(&format!("{hour}:00:00.010")));
+    let rows = std::thread::scope(|scope| {
+        scope
+            .spawn(|| replay_of(&catalog, features(), &hand_worked(Side::Long), from, to))
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+
+    for (side, pnls) in [
+        (Side::Long, ["-3.64 USD", "2.66 USD", "0.56 USD"]),
+        (Side::Short, ["2.66 USD", "-3.64 USD", "-1.44 USD"]),
+    ] {
+        let config = hand_worked(side);
+        let models = tempfile::tempdir().unwrap();
+        store(models.path(), &config, side)
+            .publish(&baseline(&config, side, from, 8))
+            .unwrap();
+        let record = std::thread::scope(|scope| {
+            scope
+                .spawn(|| trade(&catalog, from, to, &config, models.path()))
+                .join()
+                .unwrap()
+        });
+
+        let expected: Vec<(UnixNanos, Money)> = ["09", "10", "11"]
+            .into_iter()
+            .zip(pnls)
+            .map(|(hour, pnl)| (decision(hour), Money::from(pnl)))
+            .collect();
+        let recorded: Vec<(UnixNanos, Money)> = rows
+            .iter()
+            .map(|row| {
+                let outcomes = row.barrier.unwrap();
+                let outcome = match side {
+                    Side::Long => outcomes.long,
+                    Side::Short => outcomes.short,
+                };
+                (row.decision.ts_event, outcome.pnl)
+            })
+            .collect();
+        assert_eq!(recorded, expected, "{side:?}");
+        assert_eq!(record.closed, expected, "{side:?}");
     }
 }

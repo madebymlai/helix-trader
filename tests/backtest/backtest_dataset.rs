@@ -313,19 +313,21 @@ fn a_closed_market_stores_no_row() {
     );
 }
 
-/// The probe's config with the bracket 1.5 ATRs away on both sides, the
-/// ATR of its default 14 bars of the probe's hourly cadence, which it
+/// The probe's config with the bracket 1.5 ATRs away on both sides,
+/// closed after 45 minutes, and a horizon of 30, both inside the hourly
+/// cadence, the ATR of its default 14 bars of that cadence, which it
 /// declares nowhere: the targets subscribe to IC's gold's hourly mids.
 fn atr_config() -> ModelConfig {
     let barrier = Barrier {
         take_profit: Distance::Atr(Decimal::new(15, 1)),
         stop: Distance::Atr(Decimal::new(15, 1)),
-        limit: SignedDuration::from_hours(2),
+        limit: SignedDuration::from_mins(45),
         atr: None,
     };
     ModelConfig {
         targets: TargetsConfig {
             barrier: Some(barrier),
+            horizon: Some(SignedDuration::from_mins(30)),
             ..targets()
         },
         ..config()

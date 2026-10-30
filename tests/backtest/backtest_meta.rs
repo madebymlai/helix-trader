@@ -45,7 +45,7 @@ use nautilus_common::{actor::DataActor, timer::TimeEvent};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::OrderSide,
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    events::{OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
@@ -343,10 +343,6 @@ struct RuleProbe {
 type Trades = Rc<RefCell<Vec<(UnixNanos, Trade)>>>;
 
 nautilus_strategy!(RuleProbe, {
-    fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.model.on_order_filled(event);
-    }
-
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.model.on_order_denied(&event);
     }

@@ -5,10 +5,11 @@
 //! bars, warm from the bars replayed; the fake learner predicts the first,
 //! the gold price clamped to 1, so every holdout row ties (AUC 0.5, which
 //! the minimum of 0.5 publishes) and every decision from the model's
-//! valid-from is a long, closed 30 minutes later. A live node's launcher
-//! (`model::launcher`) starting that `train` as its child publishes the
-//! same model. The binary's `backtest` retrains on the schedule first, in
-//! child processes of its own, a retrain keeping the model no failure.
+//! valid-from is a long on the horizon, closed 30 minutes later. A live
+//! node's launcher (`model::launcher`) starting that `train` as its child
+//! publishes the same model. The binary's `backtest` retrains on the
+//! schedule first, in child processes of its own, a retrain keeping the
+//! model no failure.
 
 use std::{
     ffi::OsStr,
@@ -33,7 +34,7 @@ use nautilus_model::types::Money;
 use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, warmed up an hour,
-/// trades held 30 minutes; learning whether the horizon's long gains, on
+/// learning whether the long of a 30-minute horizon gains, its trades, on
 /// a window of 46 hours, the last 12 held out and the 12 before them
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
@@ -41,11 +42,10 @@ const CONFIG: &str = r#"
     instrument_ids = ["XAUUSD.ICMARKETS"]
     bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" }
     warmup = "1h"
-    hold = "30m"
 
     [model]
     decision = { every = "1h" }
-    targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
+    targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "30m" }
     label = "horizon"
     retrain = "24h"
     window = "46h"

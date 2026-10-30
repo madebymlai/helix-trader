@@ -175,7 +175,6 @@ impl TargetProbe {
 nautilus_strategy!(TargetProbe, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
         self.record.borrow_mut().fills.push(event.ts_event);
-        self.targets.on_order_filled(event);
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
@@ -348,7 +347,7 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
 /// The quotes of the hand-worked targets: a dip at 09:20, a spike at
 /// 10:45:00.010, the time limit of the 10:00 decision, and a rise of 0.90
 /// from 11:20 on.
-fn hand_worked_quotes() -> Vec<QuoteTick> {
+pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
     gold_quotes(
         |t| match t {
             t if t == ic::at("09:20:00") => Some(("3996.80", "3997.00")),

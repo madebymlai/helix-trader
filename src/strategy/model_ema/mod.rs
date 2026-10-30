@@ -2,14 +2,17 @@
 //! decision of its model section, its model handle (`model::handle`)
 //! predicts each side on its features, the averages of its bars
 //! (`features.rs`), and a side expected to clear its margin is a trade,
-//! a market order of the targets' instrument and size on its side,
-//! closed `hold` after it is sent (`close_position`, on a time alert).
-//! It decides only once its indicators are initialized: warm from the
-//! replay in a backtest or a dataset run, from its warmup request live.
-//! Trades may overlap: on a hedging venue each is a position of its own,
-//! on a netting venue they add into one, which the first close then
-//! closes. A restart does not set again the alerts of the trades still
-//! open.
+//! which it sends as given (`Trade::send`): the target its model was
+//! labelled on, as a dataset run sets it at the decision on that side, a
+//! bracket closed at the barrier's limit or a market entry closed at the
+//! horizon, the time alert handed to the handle. Every target closes
+//! before the next decision (`ModelConfig::validate`), so trades do not
+//! overlap, on a hedging venue as on a netting one. It decides only once
+//! its indicators are initialized: warm from the replay in a backtest or
+//! a dataset run, from its warmup request live. A restart does not set
+//! again the alerts of the trades still open. Nautilus' IB execution
+//! client denies the reduce-only orders a bracket's legs and a time close
+//! are: it cannot trade live on IB (`live/ib/README.md`).
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
 //! or leaves each trade of the model (`model::meta`), and may size it.
@@ -23,10 +26,8 @@ mod features;
 
 pub use config::ModelEmaConfig;
 
-use std::{path::Path, rc::Rc};
-
 use anyhow::Context;
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::ActorIndicator},
     messages::data::DataResponseEnvelope,
@@ -35,32 +36,23 @@ use nautilus_common::{
 use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Bar, QuoteTick},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
-    identifiers::ClientOrderId,
-    instruments::Instrument,
-    orders::Order,
+    events::{OrderDenied, OrderRejected, PositionClosed},
 };
-use nautilus_trading::{
-    nautilus_strategy,
-    strategy::{Strategy, StrategyCore},
-};
+use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
+use std::{path::Path, rc::Rc};
 
 use crate::{
     model::{
         dataset::{Commission, Dataset},
         decide,
         features::FeatureSet,
-        handle::{Mode, ModelHandle, Trade},
+        handle::{Mode, ModelHandle},
         train::Training,
         walk::WalkForward,
     },
     rolls::ContinuousBars,
     strategy::warmup,
 };
-
-/// The prefix of a trade's time alert, followed by its order's client
-/// order id.
-const HOLD_ALERT: &str = "MODEL_EMA-HOLD:";
 
 #[derive(Debug)]
 pub struct ModelEma {
@@ -102,50 +94,6 @@ impl ModelEma {
             warmup,
             warmup_group: UUID4::new(),
         })
-    }
-
-    /// Sends `trade`: a market order of its size on its side, and the time
-    /// alert closing it `hold` later. The size is rounded to the
-    /// instrument's size precision.
-    fn enter(&mut self, trade: Trade) -> anyhow::Result<()> {
-        let instrument_id = self.config.model.targets.instrument_id;
-        let instrument = self
-            .cache()
-            .instrument(&instrument_id)
-            .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?;
-        let size = trade.quantity.as_decimal();
-        let quantity = instrument
-            .try_make_qty_from_decimal(size, None)
-            // In the message, not as context: Nautilus logs only the top
-            // error of the chain.
-            .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
-        let order = self.order().market(
-            instrument_id,
-            trade.side,
-            quantity,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let id = order.client_order_id();
-        self.submit_order(order, None, None, None)?;
-        let at = Timestamp::from(self.clock().timestamp_ns()) + self.config.hold;
-        self.clock().set_time_alert(&hold_alert(id), at, None, None)
-    }
-
-    /// Closes the position the order `entry` went into, if it is open.
-    fn exit(&mut self, entry: ClientOrderId) -> anyhow::Result<()> {
-        let position = self.cache().position_for_order(&entry);
-        match position {
-            Some(position) if position.is_open() => {
-                self.close_position(&position, None, None, None, None, None, None)
-            }
-            _ => Ok(()),
-        }
     }
 }
 
@@ -236,16 +184,7 @@ fn strategy_id(config: &ModelEmaConfig) -> anyhow::Result<nautilus_model::identi
         .context("the strategy has no id to key its models")
 }
 
-/// The name of the time alert closing the trade of `entry`.
-fn hold_alert(entry: ClientOrderId) -> String {
-    format!("{HOLD_ALERT}{entry}")
-}
-
 nautilus_strategy!(ModelEma, {
-    fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.model.on_order_filled(event);
-    }
-
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.model.on_order_denied(&event);
     }
@@ -308,14 +247,11 @@ impl DataActor for ModelEma {
                 return Ok(());
             }
             return match Rc::clone(&self.model).decide(self)? {
-                Some(trade) => self.enter(trade),
+                Some(trade) => trade.send(self),
                 None => Ok(()),
             };
         }
-        match event.name.strip_prefix(HOLD_ALERT) {
-            Some(entry) => self.exit(ClientOrderId::new_checked(entry)?),
-            None => Rc::clone(&self.model).on_time_event(self, event),
-        }
+        Rc::clone(&self.model).on_time_event(self, event)
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {

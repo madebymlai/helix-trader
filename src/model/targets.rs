@@ -4,15 +4,23 @@
 //! In a dataset run, at each decision `Targets::open` sends, for each
 //! target of the config and on each side, a long and a short, the orders
 //! whose outcome is the target, on a hedging margin account so that each
-//! is a position of its own:
+//! is a position of its own, each the trade a strategy trading on a model
+//! of that target would place (`TradeTarget::send`, the one sending of
+//! both):
 //!
 //! - a triple barrier (`Barrier`): a bracket, a market entry, a take-profit
 //!   limit and a stop, the two exits one-updates-the-other, and a time
-//!   alert at the limit that closes the decision's position still open
-//!   (`close_position`, tagged `TIME_TAG`) and cancels the decision's legs
-//!   still open by their ids (cancelling every order of the instrument
-//!   would cancel the legs of the overlapping decisions too);
+//!   alert at the limit that closes the position its entry opened, if
+//!   still open (`close_position`, tagged `TIME_TAG`), and cancels the
+//!   entry and its legs still open (cancelling every order of the
+//!   instrument would cancel the legs of the overlapping decisions too);
 //! - a horizon: a market entry closed by a time alert at the horizon.
+//!
+//! The time close finds the trade's position and orders among those open
+//! in the cache, never purged, by its entry: the position it opened, the
+//! legs whose parent it is. Nautilus' IB execution client denies the
+//! reduce-only orders a bracket's legs and `close_position` are (see
+//! `live/ib/README.md`): a model strategy cannot trade live on IB.
 //!
 //! The exits are `take_profit` and `stop` away from the decision's price
 //! (`reference`): the mid of the instrument's last quote, else its last
@@ -40,9 +48,7 @@
 //! alone: a closed position's opening order names its decision and side,
 //! its closing order the exit (a take profit, a stop, or a close tagged
 //! `TIME_TAG`), and Nautilus reports its realised P&L net of commission.
-//! The only state of our own besides the rows being assembled is each
-//! open target's position id, from its entry's fill, which its time close
-//! needs.
+//! The only state of our own is the rows being assembled.
 //!
 //! Once every target of a decision has an outcome, the decision is settled
 //! and its row, a `TargetRow`, published on the message bus, custom data
@@ -50,7 +56,7 @@
 //! outcomes carry the distances its decision set on each side
 //! (`Distances`), in price from the decision's price: what makes a
 //! trade's P&L a multiple of its stop. A strategy trading on a model of
-//! the barrier sets the same stops at its decisions (`Stops`), and
+//! the barrier sets the same exits at its decisions (`Stops`), and
 //! `stop_worth` makes a stop's distance money. A decision whose
 //! order the risk engine denies or the venue rejects, or whose entry has
 //! not filled by its time limit, is unsettled: logged, and no row. So is a
@@ -66,7 +72,7 @@ use std::{
     any::Any,
     cell::RefCell,
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt::{self, Debug, Display},
     rc::Rc,
     sync::Arc,
@@ -90,8 +96,8 @@ use nautilus_model::{
         NautilusDataType, QuoteTick, TradeTick,
     },
     enums::{AggregationSource, BarAggregation, OrderSide, PriceType},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
-    identifiers::{ClientOrderId, InstrumentId, PositionId, StrategyId},
+    events::{OrderDenied, OrderRejected, PositionClosed},
+    identifiers::{ClientOrderId, InstrumentId, StrategyId},
     instruments::{Instrument, InstrumentAny},
     orders::Order,
     position::Position,
@@ -108,8 +114,8 @@ use super::{
 };
 use crate::strategy::DataRequirements;
 
-/// The prefix of a target's time alert, followed by its decision and
-/// target, such as `TARGET-TIME:D12-B`.
+/// The prefix of a trade's time alert, followed by its entry's client
+/// order id, such as `TARGET-TIME:D12-BL-E`.
 const TIME_ALERT: &str = "TARGET-TIME:";
 
 /// The tag of the order closing a target at its time.
@@ -272,9 +278,6 @@ struct State {
     /// The decisions opened and not yet settled or unsettled, by number,
     /// each with the outcomes it has.
     open: BTreeMap<u64, Decision>,
-    /// The position of each target whose entry filled, until it closes or
-    /// its time comes.
-    positions: HashMap<Target, PositionId>,
 }
 
 /// An open decision.
@@ -306,6 +309,20 @@ enum Kind {
 pub enum Side {
     Long,
     Short,
+}
+
+/// The target of a trade as its decision set it: a barrier's exits, on
+/// the instrument's ticks, and its time limit, or a horizon. What a
+/// dataset run opens on each side, and a strategy trading on a model of
+/// the target sends on the side it picks (`send`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeTarget {
+    Barrier {
+        take_profit: Price,
+        stop: Price,
+        limit: SignedDuration,
+    },
+    Horizon(SignedDuration),
 }
 
 /// An order of a target.
@@ -710,10 +727,11 @@ impl BarrierAtr {
     }
 }
 
-/// The stop a decision of a trading strategy sets on each side of the
+/// The exits a decision of a trading strategy sets on each side of the
 /// barrier, as a dataset run's would: from the decision's price
-/// (`reference`) and the barrier's ATR, on the instrument's ticks, and
-/// worth in money (`stop_worth`). What an expected P&L in R is weighed by.
+/// (`reference`) and the barrier's ATR, on the instrument's ticks; and
+/// its stop's worth in money (`stop_worth`), what an expected P&L in R is
+/// weighed by.
 pub struct Stops {
     instrument_id: InstrumentId,
     quantity: Quantity,
@@ -757,15 +775,16 @@ impl Stops {
         }
     }
 
-    /// The worth of the stop of `side` at a decision of `strategy` now;
-    /// none with no price of the instrument yet or the ATR not yet
-    /// initialized, as a dataset run opens no target then.
+    /// The barrier of `side` at a decision of `strategy` now, as a trade's
+    /// target, and the worth of its stop; none with no price of the
+    /// instrument yet or the ATR not yet initialized, as a dataset run
+    /// opens no target then.
     ///
     /// # Errors
     ///
-    /// Returns an error if the instrument is not in the cache, or the stop
-    /// is outside its prices or has no worth.
-    pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<f64>>
+    /// Returns an error if the instrument is not in the cache, or an exit
+    /// is outside its prices or the stop has no worth.
+    pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<(TradeTarget, f64)>>
     where
         S: DataActor + DataActorNative,
     {
@@ -786,17 +805,22 @@ impl Stops {
         };
         let reference = reference.as_decimal();
         let exits = self.barrier.exits(&instrument, reference, atr)?;
-        let (_, _, stop) = exits
+        let (_, take_profit, stop) = exits
             .into_iter()
             .find(|(of, _, _)| *of == side)
             .expect("a barrier has exits on both sides");
         let distance = (stop.as_decimal() - reference).abs();
-        stop_worth(
+        let worth = stop_worth(
             &instrument,
             self.quantity,
             distance.to_f64().unwrap_or(f64::NAN),
-        )
-        .map(Some)
+        )?;
+        let target = TradeTarget::Barrier {
+            take_profit,
+            stop,
+            limit: self.barrier.limit,
+        };
+        Ok(Some((target, worth)))
     }
 }
 
@@ -956,8 +980,9 @@ impl Targets {
     /// # Errors
     ///
     /// Returns an error if the instrument is not in the cache or an exit
-    /// price or the size cannot be made in it, before any order, or if
-    /// Nautilus refuses an order or an alert, which unsettles the decision.
+    /// price cannot be made in it, before any order, or if the size cannot
+    /// be made in it or Nautilus refuses an order or an alert, which
+    /// unsettles the decision.
     pub fn open<S>(&self, strategy: &mut S, row: FeatureRow) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
@@ -997,10 +1022,6 @@ impl Targets {
             return Ok(());
         };
         let reference = reference.as_decimal();
-        let size = self.config.quantity.as_decimal();
-        let quantity = instrument
-            .try_make_qty_from_decimal(size, None)
-            .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
         let exits = match self.config.barrier {
             Some(barrier) => barrier.exits(&instrument, reference, atr)?,
             None => vec![],
@@ -1009,76 +1030,56 @@ impl Targets {
             .borrow_mut()
             .open
             .insert(decision, Decision::new(row, &exits, reference));
-        let sent = self.send(strategy, decision, quantity, &exits);
+        let sent = self.send(strategy, decision, &exits);
         if let Err(e) = &sent {
             self.unsettle(decision, format_args!("sending its orders: {e}"));
         }
         sent
     }
 
-    /// Sends the orders of `decision`, `quantity` each, the brackets with
-    /// `exits`, and sets the time alert of each target.
+    /// Sends the trades of `decision`, the brackets with `exits`, each
+    /// target on each side named by its ids.
     fn send<S>(
         &self,
         strategy: &mut S,
         decision: u64,
-        quantity: Quantity,
         exits: &[(Side, Price, Price)],
     ) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
-        let instrument_id = self.config.instrument_id;
-        for &(side, take_profit, stop) in exits {
-            let target = Target::new(decision, Kind::Barrier, side);
-            let orders = strategy
-                .order()
-                .bracket()
-                .instrument_id(instrument_id)
-                .order_side(side.order_side())
-                .quantity(quantity)
-                .entry_client_order_id(target.order_id(Leg::Entry))
-                .tp_client_order_id(target.order_id(Leg::TakeProfit))
-                .sl_client_order_id(target.order_id(Leg::Stop))
-                .tp_price(take_profit)
-                .sl_trigger_price(stop)
-                .call();
-            strategy.submit_order_list(orders, None, None, None)?;
-        }
-        if self.config.horizon.is_some() {
-            for side in Side::BOTH {
-                let target = Target::new(decision, Kind::Horizon, side);
-                let order = strategy.order().market(
-                    instrument_id,
-                    side.order_side(),
-                    quantity,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(target.order_id(Leg::Entry)),
-                );
-                strategy.submit_order(order, None, None, None)?;
-            }
-        }
-        let now = Timestamp::from(strategy.clock().timestamp_ns());
-        for (kind, after) in self.config.kinds() {
-            strategy.clock().set_time_alert(
-                &time_alert(decision, kind),
-                now + after,
-                None,
-                None,
+        let barriers = self.config.barrier.into_iter().flat_map(|barrier| {
+            exits.iter().map(move |&(side, take_profit, stop)| {
+                let target = TradeTarget::Barrier {
+                    take_profit,
+                    stop,
+                    limit: barrier.limit,
+                };
+                (Target::new(decision, Kind::Barrier, side), target)
+            })
+        });
+        let horizons = self.config.horizon.into_iter().flat_map(|horizon| {
+            Side::BOTH.map(|side| {
+                let target = TradeTarget::Horizon(horizon);
+                (Target::new(decision, Kind::Horizon, side), target)
+            })
+        });
+        let trades: Vec<(Target, TradeTarget)> = barriers.chain(horizons).collect();
+        for (named, target) in trades {
+            target.send_as(
+                strategy,
+                self.config.instrument_id,
+                named.side.order_side(),
+                self.config.quantity,
+                Some(named),
             )?;
         }
         Ok(())
     }
 
-    /// At a target's time alert, closes its position on each side still
-    /// open and cancels its legs still open; a side whose entry has not
-    /// filled leaves its decision unsettled. Another event is not the
-    /// targets'.
+    /// At a target's time alert, closes its trade (`close_trade`); a target
+    /// whose entry opened no position by then, and has no outcome, leaves
+    /// its decision unsettled. Another event is not the targets'.
     ///
     /// # Errors
     ///
@@ -1087,53 +1088,19 @@ impl Targets {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
-        let Some((decision, kind)) = parse_time_alert(&event.name) else {
+        let Some(entry) = trade_alert_entry(&event.name) else {
             return Ok(());
         };
-        for side in Side::BOTH {
-            let target = Target::new(decision, kind, side);
-            let position_id = self.state.borrow_mut().positions.remove(&target);
-            let (legs, position) = {
-                let cache = strategy.cache();
-                let legs: Vec<ClientOrderId> = kind
-                    .legs()
-                    .iter()
-                    .map(|&leg| target.order_id(leg))
-                    .filter(|id| cache.order(id).is_some_and(|order| order.is_open()))
-                    .collect();
-                let position = position_id
-                    .and_then(|id| cache.position(&id))
-                    .filter(Position::is_open);
-                (legs, position)
-            };
-            if position_id.is_none() && !self.has_outcome(target) {
-                let entry = target.order_id(Leg::Entry);
-                self.unsettle(
-                    decision,
-                    format_args!("the entry {entry} has not filled by its time"),
-                );
-            }
-            if !legs.is_empty() {
-                strategy.cancel_orders(legs, None, None)?;
-            }
-            if let Some(position) = position {
-                let tags = Some(vec![Ustr::from(TIME_TAG)]);
-                strategy.close_position(&position, None, tags, None, None, None, None)?;
-            }
+        let Some((target, Leg::Entry)) = Target::parse(entry) else {
+            return Ok(());
+        };
+        if trade_position(strategy, entry).is_none() && !self.has_outcome(target) {
+            self.unsettle(
+                target.decision,
+                format_args!("the entry {entry} has not filled by its time"),
+            );
         }
-        Ok(())
-    }
-
-    /// Keeps the position of a target's entry, from its fill.
-    pub fn on_order_filled(&self, event: &OrderFilled) {
-        if let Some((target, Leg::Entry)) = Target::parse(event.client_order_id)
-            && let Some(position_id) = event.position_id
-        {
-            self.state
-                .borrow_mut()
-                .positions
-                .insert(target, position_id);
-        }
+        close_trade(strategy, entry)
     }
 
     /// A target's order denied by the risk engine unsettles its decision.
@@ -1157,7 +1124,6 @@ impl Targets {
         let Some((target, Leg::Entry)) = Target::parse(event.opening_order_id) else {
             return;
         };
-        self.state.borrow_mut().positions.remove(&target);
         let exit = event
             .closing_order_id
             .and_then(|closing| exit(strategy, target, closing));
@@ -1387,14 +1353,6 @@ impl Kind {
             Self::Horizon => &["pnl", "exit"],
         }
     }
-
-    /// The legs of a target of this kind.
-    fn legs(self) -> &'static [Leg] {
-        match self {
-            Self::Barrier => &[Leg::Entry, Leg::TakeProfit, Leg::Stop],
-            Self::Horizon => &[Leg::Entry],
-        }
-    }
 }
 
 impl Side {
@@ -1428,21 +1386,170 @@ impl Side {
     }
 }
 
-/// The name of the time alert of `decision`'s target of `kind`.
-fn time_alert(decision: u64, kind: Kind) -> String {
-    format!("{TIME_ALERT}D{decision}-{}", kind.letter())
+impl TradeTarget {
+    /// How long after its decision the trade is closed: the barrier's
+    /// limit or the horizon.
+    #[must_use]
+    pub const fn after(self) -> SignedDuration {
+        match self {
+            Self::Barrier { limit, .. } => limit,
+            Self::Horizon(horizon) => horizon,
+        }
+    }
+
+    /// Sends, from `strategy`, the trade on the target of `quantity` of
+    /// `instrument_id`, rounded to its sizes, on `side`: on a barrier a
+    /// Nautilus bracket (`OrderFactory::bracket`: a market entry, a
+    /// take-profit limit and a stop-market, one-updates-the-other), on a
+    /// horizon a market entry; and its time alert, `after` now, which
+    /// closes it (`on_trade_time`). Its orders have the factory's ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instrument is not in the cache, the size
+    /// cannot be made in it, or Nautilus refuses an order or the alert.
+    pub fn send<S>(
+        self,
+        strategy: &mut S,
+        instrument_id: InstrumentId,
+        side: OrderSide,
+        quantity: Quantity,
+    ) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        self.send_as(strategy, instrument_id, side, quantity, None)
+    }
+
+    /// Sends the trade as `send`, its orders named after `named`'s legs if
+    /// given.
+    fn send_as<S>(
+        self,
+        strategy: &mut S,
+        instrument_id: InstrumentId,
+        side: OrderSide,
+        quantity: Quantity,
+        named: Option<Target>,
+    ) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let instrument = strategy
+            .cache()
+            .instrument(&instrument_id)
+            .with_context(|| format!("instrument {instrument_id} not in cache"))?;
+        let size = quantity.as_decimal();
+        let quantity = instrument
+            .try_make_qty_from_decimal(size, None)
+            // In the message, not as context: Nautilus logs only the top
+            // error of the chain.
+            .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
+        let id = |leg| named.map(|target| target.order_id(leg));
+        let entry = match self {
+            Self::Barrier {
+                take_profit, stop, ..
+            } => {
+                let orders = strategy
+                    .order()
+                    .bracket()
+                    .instrument_id(instrument_id)
+                    .order_side(side)
+                    .quantity(quantity)
+                    .maybe_entry_client_order_id(id(Leg::Entry))
+                    .maybe_tp_client_order_id(id(Leg::TakeProfit))
+                    .maybe_sl_client_order_id(id(Leg::Stop))
+                    .tp_price(take_profit)
+                    .sl_trigger_price(stop)
+                    .call();
+                // Nautilus' bracket is the entry, then its legs.
+                let entry = orders[0].client_order_id();
+                strategy.submit_order_list(orders, None, None, None)?;
+                entry
+            }
+            Self::Horizon(_) => {
+                let order = strategy.order().market(
+                    instrument_id,
+                    side,
+                    quantity,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    id(Leg::Entry),
+                );
+                let entry = order.client_order_id();
+                strategy.submit_order(order, None, None, None)?;
+                entry
+            }
+        };
+        let at = Timestamp::from(strategy.clock().timestamp_ns()) + self.after();
+        strategy
+            .clock()
+            .set_time_alert(&format!("{TIME_ALERT}{entry}"), at, None, None)
+    }
 }
 
-/// The decision and kind of target of the time alert `name`, if one.
-fn parse_time_alert(name: &str) -> Option<(u64, Kind)> {
-    let (decision, kind) = name
-        .strip_prefix(TIME_ALERT)?
-        .strip_prefix('D')?
-        .split_once('-')?;
-    let mut letters = kind.chars();
-    let kind = Kind::of(letters.next()?)?;
-    letters.next().is_none().then_some(())?;
-    Some((decision.parse().ok()?, kind))
+/// At the time alert of a trade (`TradeTarget::send`), closes it
+/// (`close_trade`); another event is not a trade's.
+///
+/// # Errors
+///
+/// Returns an error if Nautilus refuses the cancel or the close.
+pub fn on_trade_time<S>(strategy: &mut S, event: &TimeEvent) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActor + DataActorNative,
+{
+    match trade_alert_entry(&event.name) {
+        Some(entry) => close_trade(strategy, entry),
+        None => Ok(()),
+    }
+}
+
+/// The entry of the trade whose time alert is `name`, if a trade's.
+fn trade_alert_entry(name: &str) -> Option<ClientOrderId> {
+    ClientOrderId::new_checked(name.strip_prefix(TIME_ALERT)?).ok()
+}
+
+/// Closes the trade of `entry` at its time: cancels its orders still open,
+/// the entry and its legs, and closes the position it opened if still
+/// open, tagged `TIME_TAG`. Both are found among those open in the cache,
+/// which Nautilus never purges, by the entry: the legs' parent, the
+/// position's opening order.
+fn close_trade<S>(strategy: &mut S, entry: ClientOrderId) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActor + DataActorNative,
+{
+    let strategy_id = strategy.strategy_id();
+    let orders: Vec<ClientOrderId> = strategy
+        .cache()
+        .orders_open(None, None, strategy_id.as_ref(), None, None)
+        .iter()
+        .filter(|order| order.client_order_id() == entry || order.parent_order_id() == Some(entry))
+        .map(Order::client_order_id)
+        .collect();
+    if !orders.is_empty() {
+        strategy.cancel_orders(orders, None, None)?;
+    }
+    if let Some(position) = trade_position(strategy, entry) {
+        let tags = Some(vec![Ustr::from(TIME_TAG)]);
+        strategy.close_position(&position, None, tags, None, None, None, None)?;
+    }
+    Ok(())
+}
+
+/// The open position the trade of `entry` opened, if any.
+fn trade_position<S>(strategy: &S, entry: ClientOrderId) -> Option<Position>
+where
+    S: Strategy + StrategyNative + DataActor + DataActorNative,
+{
+    let strategy_id = strategy.strategy_id();
+    strategy
+        .cache()
+        .positions_open(None, None, strategy_id.as_ref(), None, None)
+        .into_iter()
+        .find(|position| position.opening_order_id == entry)
 }
 
 /// The exit of `target` that `closing` is, from its id or, closing at the

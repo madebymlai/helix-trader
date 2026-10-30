@@ -18,10 +18,13 @@
 //!   decision sets (`targets::Stops`, from the decision's price and the
 //!   barrier's ATR, which the handle runs), on a horizon in money. It
 //!   returns the trade of the side clearing its margin, the larger of two
-//!   (`payoff::pick`), of the targets' size. A side with no model valid
-//!   yet never trades; a stale decision, cold features, a barrier ATR not
-//!   yet initialized, no side clearing its margin or two tied are no
-//!   trade, never an error.
+//!   (`payoff::pick`), of the targets' size, on the target of its label
+//!   as the decision sets it on that side (`targets::TradeTarget`): the
+//!   strategy sends it (`Trade::send`) as a dataset run sends its targets,
+//!   and hands the handle its time events, which close it at its limit or
+//!   horizon. A side with no model valid yet never trades; a stale
+//!   decision, cold features, a barrier ATR not yet initialized, no side
+//!   clearing its margin or two tied are no trade, never an error.
 //! - in a dataset run (`Mode::Dataset`): opens the decision's targets
 //!   (`targets::Targets`) and returns no trade, so the strategy places
 //!   none of its own; the strategy hands it its order, position and time
@@ -73,7 +76,7 @@ use nautilus_common::{
 use nautilus_model::{
     data::{BarType, CustomData},
     enums::OrderSide,
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    events::{OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Quantity, fixed::FIXED_PRECISION},
 };
@@ -88,7 +91,7 @@ use super::{
     meta::{Meta, meta_row},
     payoff,
     store::{LoadedModel, ModelStore, Swap},
-    targets::{Label, Side, Stops, TargetRow, Targets, TargetsConfig},
+    targets::{self, Label, Side, Stops, TargetRow, Targets, TargetsConfig, TradeTarget},
 };
 use crate::strategy::{DataRequirements, warmup};
 
@@ -122,16 +125,41 @@ pub enum Mode {
 /// The rows a dataset run settled, shared with its caller.
 pub type SettledRows = Rc<RefCell<Vec<TargetRow>>>;
 
-/// A trade a decision makes.
+/// A trade a decision makes: the target its model was labelled on, as a
+/// dataset run sets it at the decision on the side traded. A strategy
+/// sends it (`send`) and hands the handle its time events, which close it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trade {
+    /// The targets' instrument.
+    pub instrument_id: InstrumentId,
     pub side: OrderSide,
     /// The targets' size, or, with a meta model sizing, its multiple of it.
     pub quantity: Quantity,
+    /// The label's target: on a barrier its exits and its limit, else the
+    /// horizon; a rule primary's, the barrier.
+    pub target: TradeTarget,
     /// The calibrated probability that the label is true of the model
     /// deciding: the meta model's, if any, else that of the primary's
     /// model of the side.
     pub probability: f64,
+}
+
+impl Trade {
+    /// Sends the trade from `strategy` (`TradeTarget::send`), as a dataset
+    /// run sends its target: a bracket or a market entry, and the time
+    /// alert closing it, which the strategy hands the handle
+    /// (`ModelHandle::on_time_event`).
+    ///
+    /// # Errors
+    ///
+    /// As `TradeTarget::send`.
+    pub fn send<S>(&self, strategy: &mut S) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        self.target
+            .send(strategy, self.instrument_id, self.side, self.quantity)
+    }
 }
 
 /// A strategy's model handle, shared with it as an `Rc`.
@@ -160,6 +188,8 @@ struct Trading {
     /// Live, the retrains; none in a backtest.
     retraining: Option<Retraining>,
     primary: Primary,
+    /// The targets' instrument.
+    instrument_id: InstrumentId,
     /// The targets' size.
     quantity: Quantity,
 }
@@ -167,17 +197,26 @@ struct Trading {
 /// What picks the side of a trade.
 #[derive(Debug)]
 enum Primary {
-    /// A model of each side traded, and the meta model taking its trades,
-    /// if any.
+    /// A model of each side traded, the target of its label, and the meta
+    /// model taking its trades, if any.
     Model {
         sides: Vec<SideModels>,
-        /// On a barrier label, the stops of the barrier, which weigh the
-        /// expected R; none on a horizon, expected in money.
-        stops: Option<Stops>,
+        labelled: Labelled,
         meta: Option<MetaModels>,
     },
-    /// The strategy's rule, and the meta model taking its trades.
-    Rule { meta: MetaModels },
+    /// The strategy's rule, the barrier its meta model learns, which its
+    /// trades are on, and the meta model taking them.
+    Rule { stops: Stops, meta: MetaModels },
+}
+
+/// The target a model primary's trades are on, its label's.
+#[derive(Debug)]
+enum Labelled {
+    /// The barrier's exits as the decision sets them; the worth of its
+    /// stop weighs the expected R.
+    Barrier(Stops),
+    /// The horizon, expected in money.
+    Horizon(SignedDuration),
 }
 
 /// The models of a side, and its margin.
@@ -255,14 +294,23 @@ impl ModelHandle {
                     })
                 })
                 .collect::<anyhow::Result<_>>()?;
-            let stops = match config.label {
-                Label::Barrier => Some(
+            let labelled = match config.label {
+                Label::Barrier => Labelled::Barrier(
                     Stops::new(&config.targets, config.decision, requirements)?
                         .context("the label is the barrier, and the targets have none")?,
                 ),
-                Label::Horizon => None,
+                Label::Horizon => Labelled::Horizon(
+                    config
+                        .targets
+                        .horizon
+                        .context("the label is the horizon, and the targets have none")?,
+                ),
             };
-            Ok(Primary::Model { sides, stops, meta })
+            Ok(Primary::Model {
+                sides,
+                labelled,
+                meta,
+            })
         };
         Self::built(
             strategy_id,
@@ -314,6 +362,9 @@ impl ModelHandle {
             )?
             .to_string();
             Ok(Primary::Rule {
+                stops: Stops::new(&config.targets, config.decision, requirements)?.context(
+                    "a rule primary's meta model learns the barrier, and the targets have none",
+                )?,
                 meta: MetaModels::of(&meta, &fingerprint),
             })
         };
@@ -351,6 +402,7 @@ impl ModelHandle {
             Mode::Backtest { models, commission } => Serving::Trading(Box::new(Trading {
                 retraining: None,
                 primary: primary(&models, &commission)?,
+                instrument_id: traded,
                 quantity: targets.quantity,
             })),
             Mode::Live {
@@ -367,6 +419,7 @@ impl ModelHandle {
                     launcher,
                 )),
                 primary: primary(&models, &commission)?,
+                instrument_id: traded,
                 quantity: targets.quantity,
             })),
             Mode::Dataset { rows } => Serving::Dataset {
@@ -384,11 +437,12 @@ impl ModelHandle {
     }
 
     /// Starts the handle on `strategy`, reading `bar_types`, from
-    /// `on_start`: registers the features (and starts the barrier's ATR: a
-    /// model primary's stops', trading on a barrier label, or, in a dataset
-    /// run, the targets', and collects the rows they settle), then starts the
-    /// decision cadence, live `warmup::live_bar_build_delay(bar_types)`
-    /// late, and live the retrain timer.
+    /// `on_start`: registers the features (and starts the barrier's ATR:
+    /// the stops', trading on a barrier, a rule's or a model's labelled on
+    /// it, or, in a dataset run, the targets', and collects the rows they
+    /// settle), then starts the decision cadence, live
+    /// `warmup::live_bar_build_delay(bar_types)` late, and live the
+    /// retrain timer.
     ///
     /// # Errors
     ///
@@ -401,11 +455,13 @@ impl ModelHandle {
         self.features.register(strategy);
         let delay = match &self.serving {
             Serving::Trading(trading) => {
-                if let Primary::Model {
-                    stops: Some(stops), ..
-                } = &trading.primary
-                {
-                    stops.start(strategy);
+                match &trading.primary {
+                    Primary::Model {
+                        labelled: Labelled::Barrier(stops),
+                        ..
+                    }
+                    | Primary::Rule { stops, .. } => stops.start(strategy),
+                    Primary::Model { .. } => {}
                 }
                 match &trading.retraining {
                     Some(retraining) => {
@@ -495,12 +551,14 @@ impl ModelHandle {
         }
     }
 
-    /// Hands `event` to the targets of a dataset run, or live to the
-    /// retrains, which launch one on their timer's; a no-op in a backtest.
+    /// Hands `event` to the targets of a dataset run; trading, closes the
+    /// trade whose time alert it is (`targets::on_trade_time`), and live
+    /// hands it to the retrains, which launch one on their timer's.
     ///
     /// # Errors
     ///
-    /// Returns an error as `Targets::on_time_event` does.
+    /// Returns an error as `Targets::on_time_event` or
+    /// `targets::on_trade_time` does.
     pub fn on_time_event<S>(&self, strategy: &mut S, event: &TimeEvent) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
@@ -510,16 +568,9 @@ impl ModelHandle {
                 if let Some(retraining) = &trading.retraining {
                     retraining.on_time_event(event);
                 }
-                Ok(())
+                targets::on_trade_time(strategy, event)
             }
             Serving::Dataset { targets, .. } => targets.on_time_event(strategy, event),
-        }
-    }
-
-    /// Hands `event` to the targets of a dataset run; a no-op trading.
-    pub fn on_order_filled(&self, event: &OrderFilled) {
-        if let Serving::Dataset { targets, .. } = &self.serving {
-            targets.on_order_filled(event);
         }
     }
 
@@ -561,7 +612,8 @@ impl Trading {
     /// rule's `side` if the primary is a rule: a model primary's trade, of
     /// the side whose latest model valid then expects a net P&L clearing
     /// its margin, the larger of two, taken if its meta model takes it; a
-    /// rule's taken if its meta model takes it.
+    /// rule's taken if its meta model takes it. Either on the target of
+    /// its label as the decision sets it on the side.
     fn trade<S>(
         &self,
         strategy: &S,
@@ -573,7 +625,14 @@ impl Trading {
         S: DataActor + DataActorNative,
     {
         match (&self.primary, side) {
-            (Primary::Model { sides, stops, meta }, None) => {
+            (
+                Primary::Model {
+                    sides,
+                    labelled,
+                    meta,
+                },
+                None,
+            ) => {
                 let mut decided = vec![];
                 for SideModels {
                     side,
@@ -587,38 +646,69 @@ impl Trading {
                         continue;
                     };
                     let payoff = payoff.context("a primary's model has its payoff")?;
-                    let unit = match stops {
-                        None => 1.0,
-                        Some(stops) => match stops.at(strategy, *side)? {
-                            Some(unit) => unit,
-                            None => return Ok(None),
-                        },
+                    let Some((target, unit)) = labelled.at(strategy, *side)? else {
+                        return Ok(None);
                     };
                     decided.push((
-                        (*side, probability),
+                        (*side, probability, target),
                         payoff.expected(probability) * unit,
                         *margin,
                     ));
                 }
-                let Some((side, probability)) = payoff::pick(decided) else {
+                let Some((side, probability, target)) = payoff::pick(decided) else {
                     return Ok(None);
                 };
-                let side = side.order_side();
+                let trade = self.trade_of(side.order_side(), target, probability);
                 match meta {
-                    None => Ok(Some(Trade {
-                        side,
-                        quantity: self.quantity,
-                        probability,
-                    })),
-                    Some(meta) => {
-                        meta.take(now, &meta_row(row, side, probability), side, self.quantity)
-                    }
+                    None => Ok(Some(trade)),
+                    Some(meta) => meta.take(now, &meta_row(row, trade.side, probability), trade),
                 }
             }
-            (Primary::Rule { meta }, Some(side)) => meta.take(now, row, side, self.quantity),
+            (Primary::Rule { stops, meta }, Some(side)) => {
+                let of = match side {
+                    OrderSide::Sell => Side::Short,
+                    _ => Side::Long,
+                };
+                let Some((target, _)) = stops.at(strategy, of)? else {
+                    return Ok(None);
+                };
+                meta.take(now, row, self.trade_of(side, target, f64::NAN))
+            }
             (Primary::Model { .. }, Some(_)) | (Primary::Rule { .. }, None) => {
                 unreachable!("a rule primary decides on a side, a model primary on none")
             }
+        }
+    }
+
+    /// The trade on `side` of the targets' size and instrument, on
+    /// `target`, at `probability`.
+    const fn trade_of(&self, side: OrderSide, target: TradeTarget, probability: f64) -> Trade {
+        Trade {
+            instrument_id: self.instrument_id,
+            side,
+            quantity: self.quantity,
+            target,
+            probability,
+        }
+    }
+}
+
+impl Labelled {
+    /// The target of a trade on `side` at a decision of `strategy` now,
+    /// and what the unit of its side's payoff is worth: on a barrier its
+    /// exits there and the worth of its stop, none as `Stops::at`; on a
+    /// horizon the horizon and 1, the payoff being in money.
+    ///
+    /// # Errors
+    ///
+    /// As `Stops::at`.
+    fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<(TradeTarget, f64)>>
+    where
+        S: DataActor + DataActorNative,
+    {
+        match self {
+            Self::Barrier(stops) => stops.at(strategy, side),
+            Self::Horizon(horizon) => Ok(Some((TradeTarget::Horizon(*horizon), 1.0))),
         }
     }
 }
@@ -662,21 +752,15 @@ impl MetaModels {
         }
     }
 
-    /// The trade on `side` of `quantity`, the targets' size, if the meta
-    /// model in use at `now` predicts at least its threshold on `row`,
-    /// sized from its probability; no trade without a meta model.
+    /// The primary's `trade`, of the targets' size, if the meta model in
+    /// use at `now` predicts at least its threshold on `row`, at its
+    /// probability and sized from it; no trade without a meta model.
     ///
     /// # Errors
     ///
     /// Returns an error if the model fails to predict, or the size is no
     /// quantity.
-    fn take(
-        &self,
-        now: Timestamp,
-        row: &[f64],
-        side: OrderSide,
-        quantity: Quantity,
-    ) -> anyhow::Result<Option<Trade>> {
+    fn take(&self, now: Timestamp, row: &[f64], trade: Trade) -> anyhow::Result<Option<Trade>> {
         let Some(probability) = self.models.at(now, |model| model.predict(row))? else {
             return Ok(None);
         };
@@ -684,17 +768,17 @@ impl MetaModels {
             return Ok(None);
         }
         let quantity = match self.config.size {
-            None => quantity,
+            None => trade.quantity,
             Some(_) => {
-                let size = quantity.as_decimal() * self.config.size(probability);
+                let size = trade.quantity.as_decimal() * self.config.size(probability);
                 Quantity::from_decimal_dp(size, FIXED_PRECISION)
                     .map_err(|e| anyhow::anyhow!("sizing {size}: {e}"))?
             }
         };
         Ok(Some(Trade {
-            side,
             quantity,
             probability,
+            ..trade
         }))
     }
 }
@@ -1142,8 +1226,10 @@ mod tests {
         assert_eq!(
             handle.decide(&mut probe).unwrap(),
             Some(Trade {
+                instrument_id: InstrumentId::from(AUD),
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
+                target: TradeTarget::Horizon(SignedDuration::from_hours(1)),
                 probability: c(0.6),
             })
         );
@@ -1251,6 +1337,31 @@ mod tests {
 
         assert_eq!(decide(10).map(|trade| trade.side), Some(OrderSide::Buy));
         assert_eq!(decide(2), None);
+    }
+
+    /// Worked by hand. From the mid of 0.70000, the long's take profit 20
+    /// bps above, 0.00140, and its stop 10 bps below, 0.00070: the
+    /// prices a dataset run's long sets there, closed 2 hours later.
+    #[test]
+    fn a_barrier_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &barrier_config(10), (Some(8), None));
+        handle.start(&mut probe, &[]).unwrap();
+
+        let trade = handle.decide(&mut probe).unwrap().unwrap();
+
+        assert_eq!(
+            (trade.side, trade.target),
+            (
+                OrderSide::Buy,
+                TradeTarget::Barrier {
+                    take_profit: Price::from("0.70140"),
+                    stop: Price::from("0.69930"),
+                    limit: SignedDuration::from_hours(2),
+                }
+            )
+        );
     }
 
     #[test]
@@ -1714,8 +1825,10 @@ mod tests {
         assert_eq!(
             handle.decide(&mut probe).unwrap(),
             Some(Trade {
+                instrument_id: InstrumentId::from(AUD),
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
+                target: TradeTarget::Horizon(SignedDuration::from_hours(1)),
                 probability: c(0.7),
             })
         );
@@ -1824,8 +1937,15 @@ mod tests {
         assert_eq!(
             sold,
             Some(Trade {
+                instrument_id: InstrumentId::from(AUD),
                 side: OrderSide::Sell,
                 quantity: Quantity::from(1000),
+                // 10 bps of the mid of 0.70000 below and above it.
+                target: TradeTarget::Barrier {
+                    take_profit: Price::from("0.69930"),
+                    stop: Price::from("0.70070"),
+                    limit: SignedDuration::from_hours(2),
+                },
                 probability: c(0.7),
             })
         );

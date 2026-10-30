@@ -10,7 +10,7 @@
 //! hold no third: a meta section has no meta section of its own, and
 //! writing one is refused at load as an unknown field.
 
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use jiff::SignedDuration;
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
@@ -26,8 +26,8 @@ use crate::strategy::DataRequirements;
 ///
 /// ```toml
 /// [model]
-/// decision = { every = "15m" }
-/// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }
+/// decision = { every = "1h" }
+/// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "45m" }
 /// label = "horizon"
 /// retrain = "168h"
 /// window = "720h"
@@ -178,8 +178,9 @@ impl ModelConfig {
     /// (the barrier's limit or the horizon) is not shorter than the
     /// window, the holdout is not positive or leaves no fitted row (see
     /// `validate_window`), the margins name no side or one is not finite,
-    /// the minimum score is not an AUC, or the meta model is invalid (see
-    /// `MetaConfig::validate`).
+    /// the minimum score is not an AUC, the meta model is invalid (see
+    /// `MetaConfig::validate`), or the decisions are on events or a target
+    /// is not shorter than their cadence (see `validate_cadence`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
         self.learner.validate()?;
@@ -204,8 +205,37 @@ impl ModelConfig {
         if let Some(meta) = &self.meta {
             meta.validate(&self.targets)?;
         }
-        Ok(())
+        validate_cadence(self.decision, &self.targets)
     }
+}
+
+/// Checks that each of `targets` closes before the next decision of
+/// `rule`: a model primary trades the target of its label, and a live
+/// account nets a new trade into one still open, where a dataset run's
+/// hedging venue keeps them apart.
+fn validate_cadence(rule: DecisionRule, targets: &TargetsConfig) -> anyhow::Result<()> {
+    let DecisionRule::Every(cadence) = rule else {
+        bail!(
+            "a model primary trades its target, and decisions on events have no cadence for \
+             it to close within"
+        );
+    };
+    if let Some(barrier) = targets.barrier {
+        ensure!(
+            barrier.limit < cadence,
+            "the barrier's limit {:#} is not shorter than the decision cadence {cadence:#}: \
+             a trade would still be open at the next decision",
+            barrier.limit
+        );
+    }
+    if let Some(horizon) = targets.horizon {
+        ensure!(
+            horizon < cadence,
+            "the horizon {horizon:#} is not shorter than the decision cadence {cadence:#}: a \
+             trade would still be open at the next decision"
+        );
+    }
+    Ok(())
 }
 
 impl RuleConfig {
@@ -356,11 +386,12 @@ mod tests {
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
-    /// A model section with a barrier closed after 2 hours and a horizon
-    /// of 1 hour, on a window of 48 hours, 12 of them held out.
+    /// A model section deciding every hour, with a barrier closed after 45
+    /// minutes and a horizon of 30, on a window of 48 hours, 12 of them
+    /// held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
-        targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
+        targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "30m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" } }
         label = "barrier"
         retrain = "24h"
         window = "48h"
@@ -469,16 +500,52 @@ mod tests {
         );
     }
 
+    /// Deciding every hour, a barrier closed after an hour, or a horizon of
+    /// one, would still be open at the next decision.
+    #[test]
+    fn a_target_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
+        for (targets, named) in [
+            (
+                r#"horizon = "30m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "1h" }"#,
+                "limit 1h",
+            ),
+            (
+                r#"horizon = "90m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
+                "horizon 1h 30m",
+            ),
+        ] {
+            let toml = section(&format!(
+                r#"targets = {{ instrument_id = "XAUUSD.ICMARKETS", quantity = "1", {targets} }}"#
+            ));
+
+            let err = refused(&toml);
+
+            assert!(
+                err.contains(named) && err.contains("cadence 1h"),
+                "{named}: {err}"
+            );
+        }
+    }
+
+    /// Decisions on events have no cadence their trades would close
+    /// within.
+    #[test]
+    fn a_model_primary_deciding_on_events_is_refused() {
+        let toml = section(r#"decision = "event""#);
+
+        assert!(refused(&toml).contains("event"), "{}", refused(&toml));
+    }
+
     /// The window of 48 hours holds the holdout, the calibration as long
-    /// before it, and before them a fitted row settled 2 hours later: 22
-    /// hours of holdout leave one, 23 none.
+    /// before it, and before them a fitted row settled 45 minutes later: 23
+    /// hours of holdout leave one, 24 none.
     #[test]
     fn a_holdout_leaving_no_fitted_row_before_it_and_its_calibration_is_refused() {
-        for holdout in ["23h", "0h"] {
+        for holdout in ["24h", "0h"] {
             let toml = section(&format!(r#"holdout = "{holdout}""#));
             assert!(refused(&toml).contains("holdout"), "{holdout}");
         }
-        assert!(load(&section(r#"holdout = "22h""#)).is_ok());
+        assert!(load(&section(r#"holdout = "23h""#)).is_ok());
     }
 
     #[test]
@@ -556,7 +623,7 @@ mod tests {
     fn atr_section(atr: Option<&str>) -> String {
         let atr = atr.map(|atr| format!(", atr = {atr}")).unwrap_or_default();
         section(&format!(
-            r#"targets = {{ instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "2h"{atr} }} }}"#
+            r#"targets = {{ instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }} }}"#
         ))
     }
 
@@ -738,7 +805,7 @@ mod tests {
     #[test]
     fn a_meta_window_holdout_threshold_or_score_out_of_range_is_refused() {
         for (line, why) in [
-            (r#"window = "2h""#, "not shorter than the window"),
+            (r#"window = "45m""#, "not shorter than the window"),
             (r#"holdout = "35h""#, "holdout"),
             ("threshold = 1.5", "threshold"),
             ("min_score = -0.1", "minimum score"),

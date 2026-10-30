@@ -44,8 +44,10 @@ are a type, `model::features::FeatureSet`, built once and shared with
 Nautilus as an indicator, and its features implement a trait,
 `model::features::Feature`; it holds a type, `model::handle::ModelHandle`,
 the one place it decides, which serves its models or, in a dataset run,
-opens its targets (see "Features and decisions"). Its orders stay its
-own. `model_ema/` is the example.
+opens its targets (see "Features and decisions"). Its orders are the
+trade the handle gives it, the target its model was labelled on, sent
+through the one function a dataset run sends its targets with
+(`Trade::send`, "Model handle"). `model_ema/` is the example.
 
 ## Config
 
@@ -688,7 +690,7 @@ of its choosing (`model::features`, `model::decide`).
   [barrier]
   take_profit = { atr = 2.0 }
   stop = { atr = 1.5 }
-  limit = "2h"
+  limit = "10m"
   ```
 
   An `atr` table sets another period, `atr = { period = 20 }`, and is
@@ -718,17 +720,22 @@ of its choosing (`model::features`, `model::decide`).
   &requirements)`, an `Rc`),
   calls `open(self, row)`
   with each row `decide` returns, and hands it
-  `on_time_event`, `on_order_filled`, `on_order_denied`,
+  `on_time_event`, `on_order_denied`,
   `on_order_rejected`, `on_position_closed` and `on_stop`; it sends no
   orders of its own then. For each target and side, a long and a short,
-  `open` sends a bracket (market entry, take-profit limit, stop, the exits
-  one-updates-the-other) or a market entry, client order ids
-  `D{n}-{B|H}{L|S}-{E|TP|SL}`, and sets a time alert at the limit or
-  horizon that closes the decision's positions still open
-  (`close_position`, tagged) and cancels its legs by their ids. A closed
-  position's opening order names its decision and side, its closing order
-  the exit: take profit, stop or time; the only state kept is each open
-  target's position id, from its entry's fill. Once all its targets are
+  `open` sends the trade a strategy trading on a model of that target
+  would (`TradeTarget::send`, the one sending of both): a Nautilus
+  bracket (`OrderFactory::bracket`: market entry, take-profit limit,
+  stop-market, the exits one-updates-the-other) or a market entry, here
+  with client order ids `D{n}-{B|H}{L|S}-{E|TP|SL}`, and a time alert at
+  the limit or horizon, named after the entry, that cancels the entry
+  and its legs still open and closes the position it opened, if still
+  open (`close_position`, tagged). Both are found among the cache's open
+  orders and positions, which Nautilus never purges, by the entry (the
+  legs' parent, the position's opening order), so a dataset run's purge
+  of closed orders loses nothing. A closed position's opening order
+  names its decision and side, its closing order the exit: take profit,
+  stop or time; no state is kept but the rows being assembled. Once all its targets are
   closed, the decision's `TargetRow` (its `FeatureRow`, per target and
   side the realised P&L net of commission as Nautilus reports it and the
   exit, and a barrier's `Distances`, its take profit's and its stop's
@@ -815,7 +822,14 @@ of its choosing (`model::features`, `model::decide`).
   the window, a holdout leaving no fitted row before it and the
   calibration as long before it (the window must be longer than twice
   the holdout and the longest target), margins naming no side or not
-  numbers, and a minimum score outside [0, 1]. An optional
+  numbers, a minimum score outside [0, 1], and a barrier limit or
+  horizon not shorter than the decision cadence, the error naming both:
+  the strategy trades its label's target (see "Model handle"), and each
+  trade must close before the next decision, since a dataset run keeps
+  each decision's trades apart on a hedging venue where a live account
+  nets a new trade into one still open. Decisions on events, with no
+  cadence to compare, are refused for a model primary until a rule for
+  them is settled. An optional
   `[model.meta]` table (`MetaConfig`) adds a meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
   config, &requirements, &commission)` and `train_at(t, replay)`
@@ -893,8 +907,23 @@ of its choosing (`model::features`, `model::decide`).
   the decision's price and the ATR at it, on the ticks, as a dataset run
   sets it), on a horizon in money. A side trades if that is at or above
   its margin; of two, the one expected the more, none at a tie
-  (`payoff::pick`); it returns the `Trade` (side, the targets' size, the
-  side's calibrated probability). With a fixed cost, a tight ATR stop
+  (`payoff::pick`); it returns the `Trade`: the targets' instrument, the
+  side, the targets' size, the side's calibrated probability, and the
+  target its model was labelled on as the decision sets it on that side
+  (`TradeTarget`): on a barrier the take-profit and stop prices a dataset
+  run's would set there and its limit, on a horizon the horizon; a rule
+  primary's trade is on the barrier its meta model learns. The strategy
+  sends it, `trade.send(self)`, through the function a dataset run
+  sends its targets with (above, "Targets"), a bracket or a market
+  entry and a time alert, and hands the handle its `on_time_event`,
+  which closes the trade at the alert, so that what the model's
+  probability, expected P&L, scores and gate describe is the trade
+  placed (`backtest_model.rs` realises per trade the P&L of the dataset
+  row of its decision and side). Nautilus' IB execution client denies
+  reduce-only orders, which a bracket's legs and `close_position` are
+  (`live/ib/README.md`, nautilus#5464, the repo's issue #9): a model
+  strategy cannot trade live on IB; its backtests and other venues are
+  unaffected. With a fixed cost, a tight ATR stop
   needs a higher probability than a wide one to clear a margin, which a
   fixed probability threshold cannot express (Elkan 2001; Bahnsen et al.
   2015). A side with no model valid yet never trades; a stale decision,
@@ -910,10 +939,9 @@ of its choosing (`model::features`, `model::decide`).
   `Mode::Dataset { rows }` (the replay of a train) `decide` opens the
   decision's targets instead and returns no trade, and the rows they
   settle are collected in `rows`; the strategy hands the handle its
-  `on_time_event`, `on_order_filled`, `on_order_denied`,
-  `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
-  trading. The trades are the strategy's own orders: `model_ema/` sends a
-  market order and closes it `hold` later.
+  `on_time_event`, `on_order_denied`, `on_order_rejected`,
+  `on_position_closed` and `on_stop`, all but the time events no-ops
+  trading. `model_ema/` sends each trade it is given.
 - **Meta-labeling.** A primary picks the side, a meta model decides
   whether to take the trade (`model::meta`). The primary is a model, to
   which a `[model.meta]` table alone adds a meta model, or the
