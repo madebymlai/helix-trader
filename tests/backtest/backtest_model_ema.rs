@@ -1,4 +1,4 @@
-//! The learned strategy (`strategy::learned`) end to end on a fixture
+//! The `model_ema` strategy (`strategy::model_ema`) end to end on a fixture
 //! catalog of IC's gold: the binary's `train` subcommand trains its model
 //! at a time, replaying the strategy's dataset run, and a backtest of the
 //! strategy then trades on the store. Its features are averages of 1-minute
@@ -26,7 +26,7 @@ use helix_trader::{
         handle::Mode,
         launcher::{Launcher, Retrained},
     },
-    strategy::learned::{Learned, LearnedConfig},
+    strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::Money;
@@ -64,7 +64,7 @@ fn t() -> Timestamp {
 fn train(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("train")
-        .arg("learned")
+        .arg("model_ema")
         .arg("--config")
         .arg(config)
         .arg("--catalog")
@@ -91,7 +91,7 @@ fn a_model_trained_by_the_train_subcommand_trades_from_its_valid_from() {
         t() + SignedDuration::from_hours(4),
     );
     let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
 
     let stdout = train(&config_path, catalog.path(), &models, t());
@@ -116,7 +116,7 @@ fn a_backtest_from_the_valid_from_first_decides_once_its_features_are_initialize
         t() + SignedDuration::from_hours(4),
     );
     let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
     train(&config_path, catalog.path(), &models, t());
 
@@ -132,7 +132,7 @@ fn traded(catalog: &TempDir, models: PathBuf) -> (usize, usize) {
 /// The orders and positions of a backtest of the strategy on the models
 /// under `models`, from `start` to 03:00 of the 23rd.
 fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, usize) {
-    let config: LearnedConfig = toml::from_str(CONFIG).unwrap();
+    let config: ModelEmaConfig = toml::from_str(CONFIG).unwrap();
     let requirements = config.bars.data_requirements();
     let backtest = Backtest {
         bar_types: requirements.bar_types,
@@ -142,7 +142,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
         balance: Money::from("100000 USD"),
         ..ic::backtest(catalog)
     };
-    let strategy = Learned::new(
+    let strategy = ModelEma::new(
         config,
         Mode::Backtest {
             models,
@@ -161,12 +161,12 @@ fn a_model_a_live_retrain_publishes_through_the_train_subcommand_is_traded() {
         t() + SignedDuration::from_hours(4),
     );
     let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
     // As a live node starts it (`retrain_args`), with the fixture's costs.
     let args = [
         "train".as_ref(),
-        "learned".as_ref(),
+        "model_ema".as_ref(),
         "--config".as_ref(),
         config_path.as_os_str(),
         "--catalog".as_ref(),
@@ -199,7 +199,7 @@ fn backtest(
 ) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("backtest")
-        .arg("learned")
+        .arg("model_ema")
         .arg("--config")
         .arg(config)
         .arg("--catalog")
@@ -230,7 +230,7 @@ fn the_binarys_backtest_retrains_in_child_processes_once() {
         t() + SignedDuration::from_hours(51),
     );
     let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
     let (start, end) = (t(), t() + SignedDuration::from_hours(36));
     let next = t() + SignedDuration::from_hours(24);
@@ -272,7 +272,7 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
         t() + SignedDuration::from_hours(51),
     );
     let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("learned.toml"), dir.path().join("models"));
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(
         &config_path,
         CONFIG.replace("min_score = 0.5", "min_score = 0.6"),

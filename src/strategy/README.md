@@ -45,7 +45,7 @@ Nautilus as an indicator, and its features implement a trait,
 `model::features::Feature`; it holds a type, `model::handle::ModelHandle`,
 the one place it decides, which serves its models or, in a dataset run,
 opens its targets (see "Features and decisions"). Its orders stay its
-own. `learned/` is the example.
+own. `model_ema/` is the example.
 
 ## Config
 
@@ -374,7 +374,7 @@ impl DataActor for Trend {
   registered, so a strategy registers at least one. The end of a warmup
   request opens nothing: live, the warmup hydrates the indicators; in a
   backtest they warm on the replay (see "Warmup and training"). The EMA
-  checks it in `on_bar`, `learned` before each decision.
+  checks it in `on_bar`, `model_ema` before each decision.
 - The warmup is shared as function calls, not as a hook implementation:
   a strategy built for live (`Trend::live`) hands `warmup::start` the bar
   types and warmup of `bars`, the continuous bars of those on a futures
@@ -577,7 +577,7 @@ of its choosing (`model::features`, `model::decide`).
   `features/tests.rs`, so editing one changes no fingerprint);
   `.warmup(span)` declares how much data the features read before a
   decision, which a dataset build replays before its first day (see
-  "Dataset"): a strategy passes its own warmup, `learned/` its `warmup`;
+  "Dataset"): a strategy passes its own warmup, `model_ema/` its `warmup`;
   none unless given. For a recursive indicator, an exponential average or
   Wilder's ATR, give several times its period, 5 to 10: its first value
   keeps a weight that decays only exponentially, e^-1 to e^-2 a period
@@ -872,7 +872,7 @@ of its choosing (`model::features`, `model::decide`).
   settle are collected in `rows`; the strategy hands the handle its
   `on_time_event`, `on_order_filled`, `on_order_denied`,
   `on_order_rejected`, `on_position_closed` and `on_stop`, no-ops
-  trading. The trades are the strategy's own orders: `learned/` sends a
+  trading. The trades are the strategy's own orders: `model_ema/` sends a
   market order and closes it `hold` later.
 - **Meta-labeling.** A primary picks the side, a meta model decides
   whether to take the trade (`model::meta`). The primary is a model, to

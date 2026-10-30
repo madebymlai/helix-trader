@@ -6,11 +6,11 @@ use serde::Deserialize;
 
 use crate::{model::config::ModelConfig, strategy::BarsConfig};
 
-/// Config of the learned strategy, loaded from TOML: the bars, at the top,
-/// how long a trade is held, and the model, in a `[model]` table.
+/// Config of the `model_ema` strategy, loaded from TOML: the bars, at the
+/// top, how long a trade is held, and the model, in a `[model]` table.
 #[derive(Debug, Clone, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
-pub struct LearnedConfig {
+pub struct ModelEmaConfig {
     #[serde(default = "default_base")]
     #[builder(default = default_base())]
     pub base: StrategyConfig,
@@ -25,7 +25,7 @@ pub struct LearnedConfig {
     pub model: ModelConfig,
 }
 
-impl LearnedConfig {
+impl ModelEmaConfig {
     /// # Errors
     ///
     /// Returns an error if the bars are inconsistent (see
@@ -49,7 +49,7 @@ impl LearnedConfig {
 /// does, netting or hedging, in a backtest as live.
 fn default_base() -> StrategyConfig {
     StrategyConfig {
-        strategy_id: Some(StrategyId::from("LEARNED-001")),
+        strategy_id: Some(StrategyId::from("MODEL_EMA-001")),
         order_id_tag: Some("001".to_string()),
         ..Default::default()
     }
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn loads_the_bars_the_hold_and_the_model_from_toml() {
-        let config: LearnedConfig = toml::from_str(TOML).unwrap();
+        let config: ModelEmaConfig = toml::from_str(TOML).unwrap();
         config.validate().unwrap();
         assert_eq!(
             config.bars.data_requirements().bar_types,
@@ -96,14 +96,14 @@ mod tests {
         assert_eq!(config.model.learner, LearnerConfig::Baseline {});
         assert_eq!(
             config.base.strategy_id,
-            Some(StrategyId::from("LEARNED-001"))
+            Some(StrategyId::from("MODEL_EMA-001"))
         );
     }
 
     #[test]
     fn rejects_a_misspelt_field_of_the_model_at_load() {
         let toml = TOML.replace("min_score", "min_scor");
-        let err = toml::from_str::<LearnedConfig>(&toml).unwrap_err();
+        let err = toml::from_str::<ModelEmaConfig>(&toml).unwrap_err();
         assert!(err.to_string().contains("min_scor"), "{err}");
     }
 
@@ -113,7 +113,7 @@ mod tests {
             r#"targets = { instrument_id = "XAUUSD.ICMARKETS""#,
             r#"targets = { instrument_id = "EURUSD.ICMARKETS""#,
         );
-        let config: LearnedConfig = toml::from_str(&toml).unwrap();
+        let config: ModelEmaConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("EURUSD.ICMARKETS"), "{err}");
     }
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn rejects_a_non_positive_hold() {
         let toml = TOML.replace(r#"hold = "30m""#, r#"hold = "0s""#);
-        let config: LearnedConfig = toml::from_str(&toml).unwrap();
+        let config: ModelEmaConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("hold"), "{err}");
     }
@@ -132,7 +132,7 @@ mod tests {
             r#"instrument_ids = ["XAUUSD.ICMARKETS"]"#,
             r#"instrument_ids = ["XAUUSD.ICMARKETS", "ESM4.CME"]"#,
         );
-        let config: LearnedConfig = toml::from_str(&toml).unwrap();
+        let config: ModelEmaConfig = toml::from_str(&toml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("venue"), "{err}");
     }
@@ -159,12 +159,12 @@ mod tests {
             )
         );
 
-        let config: LearnedConfig = toml::from_str(&toml).unwrap();
+        let config: ModelEmaConfig = toml::from_str(&toml).unwrap();
         config.validate().unwrap();
         assert_eq!(config.model.meta.unwrap().threshold, 0.55);
 
         let nested = format!("{toml}\n[model.meta.meta]\nthreshold = 0.5\n");
-        let err = toml::from_str::<LearnedConfig>(&nested).unwrap_err();
+        let err = toml::from_str::<ModelEmaConfig>(&nested).unwrap_err();
         assert!(err.to_string().contains("unknown field `meta`"), "{err}");
     }
 }

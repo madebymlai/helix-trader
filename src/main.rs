@@ -29,7 +29,7 @@ use helix_trader::{
     strategy::{
         DataRequirements, SeriesSlice,
         ema::{EmaCross, EmaCrossConfig},
-        learned::{self, Learned, LearnedConfig},
+        model_ema::{self, ModelEma, ModelEmaConfig},
     },
 };
 use jiff::Timestamp;
@@ -335,7 +335,8 @@ impl RetrainCosts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Strategy {
     Ema,
-    Learned,
+    #[value(name = "model_ema")]
+    ModelEma,
 }
 
 /// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
@@ -404,21 +405,21 @@ fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
     read().with_context(|| format!("loading the EMA config {}", path.display()))
 }
 
-/// Reads the learned strategy's config from `path` and validates it.
-fn load_learned_config(path: &Path) -> anyhow::Result<LearnedConfig> {
-    let read = || -> anyhow::Result<LearnedConfig> {
-        let config: LearnedConfig = toml::from_str(&fs::read_to_string(path)?)?;
+/// Reads the `model_ema` strategy's config from `path` and validates it.
+fn load_model_ema_config(path: &Path) -> anyhow::Result<ModelEmaConfig> {
+    let read = || -> anyhow::Result<ModelEmaConfig> {
+        let config: ModelEmaConfig = toml::from_str(&fs::read_to_string(path)?)?;
         config.validate()?;
         Ok(config)
     };
-    read().with_context(|| format!("loading the learned config {}", path.display()))
+    read().with_context(|| format!("loading the model_ema config {}", path.display()))
 }
 
 /// The data requirements of `strategy`'s config at `path`.
 fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequirements> {
     Ok(match strategy {
         Strategy::Ema => load_ema_config(path)?.bars.data_requirements(),
-        Strategy::Learned => load_learned_config(path)?.bars.data_requirements(),
+        Strategy::ModelEma => load_model_ema_config(path)?.bars.data_requirements(),
     })
 }
 
@@ -580,11 +581,11 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
             let outcome = backtest(config.bars.data_requirements()).run(EmaCross::new(config)?)?;
             print!("{}", backtest::report(&outcome));
         }
-        Strategy::Learned => {
-            let config = load_learned_config(&args.run.config)?;
+        Strategy::ModelEma => {
+            let config = load_model_ema_config(&args.run.config)?;
             let commission = args.commission.normalized();
             let walk =
-                learned::walk_forward(&config, &args.run.catalog, &args.models, &commission)?;
+                model_ema::walk_forward(&config, &args.run.catalog, &args.models, &commission)?;
             let children = Children::of(&args)?;
             walk.prepare(
                 start,
@@ -597,7 +598,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
                 commission,
             };
             let outcome =
-                backtest(config.bars.data_requirements()).run(Learned::new(config, mode)?)?;
+                backtest(config.bars.data_requirements()).run(ModelEma::new(config, mode)?)?;
             print!("{}", backtest::report(&outcome));
             print!("{}", walk.scores(start, end)?);
         }
@@ -737,8 +738,8 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             live.run(&config.bars.data_requirements(), EmaCross::live(config)?)
                 .await
         }
-        Strategy::Learned => {
-            let config = load_learned_config(&args.config)?;
+        Strategy::ModelEma => {
+            let config = load_model_ema_config(&args.config)?;
             let program = std::env::current_exe().context("finding this binary to retrain")?;
             let mode = Mode::Live {
                 models: args.models.clone(),
@@ -748,7 +749,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             };
             live.run(
                 &config.bars.data_requirements(),
-                Learned::new(config, mode)?,
+                ModelEma::new(config, mode)?,
             )
             .await
         }
@@ -767,11 +768,11 @@ struct DatasetRun {
 }
 
 impl DatasetRun {
-    /// The rows the learned strategy of `config` settles over `[start,
+    /// The rows the `model_ema` strategy of `config` settles over `[start,
     /// end]`.
     fn replay(
         &self,
-        config: &LearnedConfig,
+        config: &ModelEmaConfig,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<TargetRow>> {
@@ -792,7 +793,7 @@ impl DatasetRun {
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
-        backtest.run_dataset(Learned::new(config.clone(), mode)?)?;
+        backtest.run_dataset(ModelEma::new(config.clone(), mode)?)?;
         Ok(rows.take())
     }
 }
@@ -865,9 +866,9 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     };
     let outcome = match args.strategy {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
-        Strategy::Learned => {
-            let config = load_learned_config(&args.config)?;
-            let training = learned::training(
+        Strategy::ModelEma => {
+            let config = load_model_ema_config(&args.config)?;
+            let training = model_ema::training(
                 &config,
                 &args.catalog,
                 &args.models,
@@ -893,17 +894,15 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     let (first, last) = dataset::days(start, end);
-    let built = match args.run.strategy {
-        Strategy::Ema => bail!("the EMA strategy trades on no model"),
-        Strategy::Learned => {
-            let config = load_learned_config(&args.run.config)?;
-            learned::dataset(&config, &args.run.catalog, &args.commission.normalized())?.build(
-                first,
-                last,
-                |from, to| run.replay(&config, from, to),
-            )?
-        }
-    };
+    let built =
+        match args.run.strategy {
+            Strategy::Ema => bail!("the EMA strategy trades on no model"),
+            Strategy::ModelEma => {
+                let config = load_model_ema_config(&args.run.config)?;
+                model_ema::dataset(&config, &args.run.catalog, &args.commission.normalized())?
+                    .build(first, last, |from, to| run.replay(&config, from, to))?
+            }
+        };
     match (built.first(), built.last()) {
         (Some(from), Some(to)) => {
             println!("built {} days of the dataset, {from} to {to}", built.len())
@@ -1182,9 +1181,9 @@ mod tests {
 
     /// The arguments a train requires.
     const TRAIN: [&str; 9] = [
-        "learned",
+        "model_ema",
         "--config",
-        "learned.toml",
+        "model_ema.toml",
         "--at",
         "2026-10-23",
         "--commission-rate",
@@ -1196,8 +1195,8 @@ mod tests {
     #[test]
     fn parses_a_train_at_a_time_with_its_costs_into_the_models_store() {
         let args = parse_train(&TRAIN).unwrap();
-        assert_eq!(args.strategy, Strategy::Learned);
-        assert_eq!(args.config, PathBuf::from("learned.toml"));
+        assert_eq!(args.strategy, Strategy::ModelEma);
+        assert_eq!(args.config, PathBuf::from("model_ema.toml"));
         assert_eq!(
             args.at,
             "2026-10-23T00:00:00Z".parse::<Timestamp>().unwrap()
@@ -1233,7 +1232,7 @@ mod tests {
             parse_backtest(&argv).unwrap().models,
             PathBuf::from("/data/models")
         );
-        let args = parse_live(&["learned", "--config", "learned.toml"]).unwrap();
+        let args = parse_live(&["model_ema", "--config", "model_ema.toml"]).unwrap();
         assert_eq!(args.models, PathBuf::from("models"));
     }
 
@@ -1260,12 +1259,12 @@ mod tests {
         assert!(err.contains("meta") && err.contains("0.48"), "{err}");
     }
 
-    /// The arguments of a learned live node retraining at a commission
+    /// The arguments of a `model_ema` live node retraining at a commission
     /// rate.
     const LIVE_RETRAINING: [&str; 7] = [
-        "learned",
+        "model_ema",
         "--config",
-        "learned.toml",
+        "model_ema.toml",
         "--retrain-commission-rate",
         "0.00003",
         "--retrain-balance",
@@ -1284,9 +1283,9 @@ mod tests {
             train,
             [
                 "train",
-                "learned",
+                "model_ema",
                 "--config",
-                "learned.toml",
+                "model_ema.toml",
                 "--catalog",
                 "/data/catalog",
                 "--models",
@@ -1335,7 +1334,7 @@ mod tests {
             ("--retrain-commission", "3"),
             ("--retrain-balance", "lots"),
         ] {
-            let argv = ["learned", "--config", "learned.toml", flag, value];
+            let argv = ["model_ema", "--config", "model_ema.toml", flag, value];
             assert!(parse_live(&argv).is_err(), "{flag} {value}");
         }
         let mut both = LIVE_RETRAINING.to_vec();
@@ -1374,9 +1373,9 @@ mod tests {
 
     /// The arguments a dataset build requires.
     const DATASET: [&str; 11] = [
-        "learned",
+        "model_ema",
         "--config",
-        "learned.toml",
+        "model_ema.toml",
         "--start",
         "2026-10-20",
         "--end",
@@ -1390,7 +1389,7 @@ mod tests {
     #[test]
     fn parses_a_dataset_build_over_a_span_with_its_costs() {
         let args = parse_dataset(&DATASET).unwrap();
-        assert_eq!(args.run.strategy, Strategy::Learned);
+        assert_eq!(args.run.strategy, Strategy::ModelEma);
         assert_eq!(
             args.run.window().unwrap(),
             (
@@ -1454,9 +1453,9 @@ mod tests {
     fn two_spellings_of_a_retrain_commission_are_one_key() {
         let retrain = |rate: &str| {
             parse_live(&[
-                "learned",
+                "model_ema",
                 "--config",
-                "learned.toml",
+                "model_ema.toml",
                 "--retrain-commission-rate",
                 rate,
             ])
