@@ -57,7 +57,7 @@ use nautilus_model::identifiers::StrategyId;
 use super::{
     calibration::Calibration,
     config::{ModelConfig, RuleConfig},
-    dataset::{Commission, Dataset, DatasetRow, SchemaMismatch},
+    dataset::{Dataset, DatasetRow, DatasetVenue, SchemaMismatch},
     features::FeatureSet,
     holdout::{Earnings, Holdout, Minimums, Refusal, Rule, Trade},
     learner::{LearnerConfig, Model, TrainingSet},
@@ -168,8 +168,8 @@ pub enum Kept {
 impl Training {
     /// The training of `strategy_id`'s models, one for each side of its
     /// margins, and of its meta model if `config` has one, deciding with
-    /// `features`, on its dataset, for a strategy of `requirements`, net of
-    /// `commission`, in the catalog at `catalog` and its models in the
+    /// `features`, on its dataset, for a strategy of `requirements`,
+    /// run on `venue`, in the catalog at `catalog` and its models in the
     /// store under `models`, as `config` says.
     ///
     /// # Errors
@@ -184,7 +184,7 @@ impl Training {
         features: &FeatureSet,
         config: ModelConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         let realised = Realised::new(catalog, &config.targets, config.label)?;
         let sides = config
@@ -206,24 +206,17 @@ impl Training {
                         features,
                         &config,
                         requirements,
-                        commission,
+                        venue,
                         side,
                     )?,
                 })
             })
             .collect::<anyhow::Result<_>>()?;
-        let meta = Meta::of_model(
-            models,
-            strategy_id,
-            features,
-            &config,
-            requirements,
-            commission,
-        )?
-        .map(|meta| {
-            let level = Level::of_meta(&meta);
-            (level, meta)
-        });
+        let meta = Meta::of_model(models, strategy_id, features, &config, requirements, venue)?
+            .map(|meta| {
+                let level = Level::of_meta(&meta);
+                (level, meta)
+            });
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -233,7 +226,7 @@ impl Training {
                 config.decision,
                 config.targets.clone(),
                 requirements,
-                commission,
+                venue,
             )?,
             targets: config.targets,
             realised: Some(realised),
@@ -245,7 +238,7 @@ impl Training {
     /// The training of the meta model of `strategy_id`, whose primary is
     /// its rule, deciding with `features` (which declare the rule's side
     /// and probability), on its dataset, for a strategy of `requirements`,
-    /// net of `commission`, in the catalog at `catalog` and its models in
+    /// run on `venue`, in the catalog at `catalog` and its models in
     /// the store under `models`, as `config` says.
     ///
     /// # Errors
@@ -259,16 +252,9 @@ impl Training {
         features: &FeatureSet,
         config: RuleConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
-        let meta = Meta::of_rule(
-            models,
-            strategy_id,
-            features,
-            &config,
-            requirements,
-            commission,
-        )?;
+        let meta = Meta::of_rule(models, strategy_id, features, &config, requirements, venue)?;
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -278,7 +264,7 @@ impl Training {
                 config.decision,
                 config.targets.clone(),
                 requirements,
-                commission,
+                venue,
             )?,
             targets: config.targets,
             realised: None,
@@ -670,6 +656,7 @@ mod tests {
     use super::*;
     use crate::model::{
         config::{Margins, MetaConfig},
+        dataset::Commission,
         decide::{DecisionRule, FeatureRow},
         holdout::Trades,
         learner::LearnerConfig,
@@ -742,9 +729,14 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million.
-    fn commission() -> Commission {
-        Commission::Rate("0.00003".to_string())
+    /// The venue of the dataset runs: a commission rate of 30 per million,
+    /// 10 million USD, no leverage.
+    fn venue() -> DatasetVenue {
+        DatasetVenue {
+            commission: Commission::Rate("0.00003".to_string()),
+            balance: Money::from("10000000 USD"),
+            leverage: Decimal::ONE,
+        }
     }
 
     /// The catalog in `dir`, holding AUD/USD, whose stops' worth a train
@@ -767,7 +759,7 @@ mod tests {
             &features(1),
             config,
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
     }
@@ -1164,7 +1156,7 @@ mod tests {
                 config().decision,
                 &config().targets,
                 &requirements(),
-                &commission(),
+                &venue(),
             )
             .unwrap()
             .to_string()
@@ -1434,7 +1426,7 @@ mod tests {
                         config.decision,
                         &config.targets,
                         &requirements(),
-                        &commission(),
+                        &venue(),
                     )
                     .unwrap()
                     .to_string(),
@@ -1641,7 +1633,7 @@ mod tests {
                 meta: meta(24),
             },
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap();
         let (buy, sell) = (1.0, -1.0);

@@ -17,8 +17,8 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            CALIBRATION, STRATEGY, baseline_of, commission, config, features, replay, replay_of,
-            requirements, targets, trade, walk,
+            CALIBRATION, STRATEGY, baseline_of, config, features, replay, replay_of, requirements,
+            targets, trade, venue, walk,
         },
         ic,
     },
@@ -41,7 +41,7 @@ fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
         &features(),
         config,
         &requirements(),
-        &commission(),
+        &venue(),
         side,
     )
     .unwrap()

@@ -15,7 +15,7 @@ use helix_trader::{
     model::{
         calibration::Calibration,
         config::{Margins, ModelConfig},
-        dataset::{self, Commission},
+        dataset::{self, Commission, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, PRIMARY_FEATURES},
         handle::{Mode, ModelHandle, SettledRows, Trade},
@@ -248,13 +248,18 @@ pub fn requirements() -> DataRequirements {
     }
 }
 
-/// The commission of `backtest`, as given: 30 USD per million traded.
-pub fn commission() -> Commission {
-    Commission::Rate("0.00003".to_string())
+/// The venue of `backtest`, as given: 30 USD per million traded, 10M USD,
+/// no leverage.
+pub fn venue() -> DatasetVenue {
+    DatasetVenue {
+        commission: Commission::Rate("0.00003".to_string()),
+        balance: Money::from("10000000 USD"),
+        leverage: Decimal::ONE,
+    }
 }
 
 /// The run of the probe over `[from, to]` on IC's hedging venue, 30 USD
-/// per million traded, 10M USD.
+/// per million traded, 10M USD (`venue`).
 pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
@@ -263,8 +268,8 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         start: from,
         end: to,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
-        balance: Money::from("10000000 USD"),
-        leverage: Decimal::ONE,
+        balance: venue().balance,
+        leverage: venue().leverage,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }
@@ -337,7 +342,7 @@ pub fn trade_on(
         config,
         Mode::Backtest {
             models: models.to_path_buf(),
-            commission: commission(),
+            venue: venue(),
         },
     );
     backtest(catalog.path(), from, to).run(probe).unwrap();
@@ -443,7 +448,7 @@ fn stored_baseline(
         config.decision,
         &config.targets,
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap();
     baseline_stored(

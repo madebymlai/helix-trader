@@ -232,6 +232,16 @@ impl CommissionArgs {
             (None, None) => unreachable!("clap requires one commission flag"),
         }
     }
+
+    /// The venue of a dataset run at this commission, `balance` and
+    /// `leverage`.
+    fn venue(&self, balance: Money, leverage: Decimal) -> dataset::DatasetVenue {
+        dataset::DatasetVenue {
+            commission: self.normalized(),
+            balance,
+            leverage,
+        }
+    }
 }
 
 /// The flag of `commission` and its value, as `dataset` and `train` take
@@ -328,6 +338,31 @@ impl RetrainCosts {
                  dataset runs (--retrain-commission or --retrain-commission-rate)"
             ),
         }
+    }
+
+    /// The starting balance of the retrains' dataset runs, as given.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if it was not given.
+    fn balance(&self) -> anyhow::Result<&str> {
+        self.retrain_balance.as_deref().context(
+            "a strategy trading on a model retrains: give the starting balance of its \
+             dataset runs (--retrain-balance)",
+        )
+    }
+
+    /// The venue of the retrains' dataset runs, at the node's `leverage`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commission or the balance was not given.
+    fn venue(&self, leverage: Decimal) -> anyhow::Result<dataset::DatasetVenue> {
+        Ok(dataset::DatasetVenue {
+            commission: self.commission()?,
+            balance: parse_money(self.balance()?).map_err(anyhow::Error::msg)?,
+            leverage,
+        })
     }
 }
 
@@ -583,10 +618,9 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         }
         Strategy::ModelEma => {
             let config = load_model_ema_config(&args.run.config)?;
-            let commission = args.commission.normalized();
-            let walk =
-                model_ema::walk_forward(&config, &args.run.catalog, &args.models, &commission)?;
             let children = Children::of(&args)?;
+            let walk =
+                model_ema::walk_forward(&config, &args.run.catalog, &args.models, &children.venue)?;
             walk.prepare(
                 start,
                 end,
@@ -595,7 +629,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
             )?;
             let mode = Mode::Backtest {
                 models: args.models.clone(),
-                commission,
+                venue: children.venue.clone(),
             };
             let outcome =
                 backtest(config.bars.data_requirements()).run(ModelEma::new(config, mode)?)?;
@@ -618,9 +652,9 @@ struct Children {
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
-    commission: dataset::Commission,
-    balance: Money,
-    leverage: Decimal,
+    /// The venue of the dataset runs: the backtest's commission and
+    /// leverage, and its dataset balance.
+    venue: dataset::DatasetVenue,
 }
 
 impl Children {
@@ -638,9 +672,7 @@ impl Children {
             config: args.run.config.clone(),
             catalog: args.run.catalog.clone(),
             models: args.models.clone(),
-            commission: args.commission.normalized(),
-            balance,
-            leverage: args.leverage,
+            venue: args.commission.venue(balance, args.leverage),
         })
     }
 
@@ -705,13 +737,13 @@ impl Children {
             "--catalog".into(),
             self.catalog.clone().into_os_string(),
         ]);
-        args.extend(commission_args(&self.commission).map(OsString::from));
+        args.extend(commission_args(&self.venue.commission).map(OsString::from));
         args.extend(
             [
                 "--balance".to_string(),
-                self.balance.to_string(),
+                self.venue.balance.to_string(),
                 "--leverage".to_string(),
-                self.leverage.to_string(),
+                self.venue.leverage.to_string(),
             ]
             .map(OsString::from),
         );
@@ -743,7 +775,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             let program = std::env::current_exe().context("finding this binary to retrain")?;
             let mode = Mode::Live {
                 models: args.models.clone(),
-                commission: args.retrain.commission()?,
+                venue: args.retrain.venue(args.leverage)?,
                 launcher: Launcher::process(program, retrain_args(&args)?),
                 catalog: args.catalog.clone(),
             };
@@ -810,10 +842,7 @@ fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
     let costs = &args.retrain;
     let commission = costs.commission()?;
     let commission = commission_args(&commission);
-    let balance = costs.retrain_balance.as_deref().context(
-        "a strategy trading on a model retrains: give the starting balance of its \
-         dataset runs (--retrain-balance)",
-    )?;
+    let balance = costs.balance()?;
     let strategy = args
         .strategy
         .to_possible_value()
@@ -872,7 +901,7 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
                 &config,
                 &args.catalog,
                 &args.models,
-                &args.commission.normalized(),
+                &args.commission.venue(args.balance, args.leverage),
             )?;
             training.train_at(args.at, |start, end| run.replay(&config, start, end))
         }
@@ -894,15 +923,18 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     let (first, last) = dataset::days(start, end);
-    let built =
-        match args.run.strategy {
-            Strategy::Ema => bail!("the EMA strategy trades on no model"),
-            Strategy::ModelEma => {
-                let config = load_model_ema_config(&args.run.config)?;
-                model_ema::dataset(&config, &args.run.catalog, &args.commission.normalized())?
-                    .build(first, last, |from, to| run.replay(&config, from, to))?
-            }
-        };
+    let built = match args.run.strategy {
+        Strategy::Ema => bail!("the EMA strategy trades on no model"),
+        Strategy::ModelEma => {
+            let config = load_model_ema_config(&args.run.config)?;
+            model_ema::dataset(
+                &config,
+                &args.run.catalog,
+                &args.commission.venue(args.balance, args.leverage),
+            )?
+            .build(first, last, |from, to| run.replay(&config, from, to))?
+        }
+    };
     match (built.first(), built.last()) {
         (Some(from), Some(to)) => {
             println!("built {} days of the dataset, {from} to {to}", built.len())
@@ -1491,6 +1523,6 @@ mod tests {
         let mut argv = backtest_required();
         argv.extend(["--dataset-balance", "10000000 EUR"]);
         let children = Children::of(&parse_backtest(&argv).unwrap()).unwrap();
-        assert_eq!(children.balance, Money::from("10000000 EUR"));
+        assert_eq!(children.venue.balance, Money::from("10000000 EUR"));
     }
 }

@@ -16,8 +16,8 @@ use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, baseline_of, commission, config, replay_on, requirements, rule, targets,
-        trade_on, walk,
+        Missing, STRATEGY, baseline_of, config, replay_on, requirements, rule, targets, trade_on,
+        venue, walk,
     },
     ic,
 };
@@ -82,7 +82,7 @@ fn long_store(models: &Path) -> ModelStore {
         &features(),
         &config_daily(),
         &requirements(),
-        &commission(),
+        &venue(),
         Side::Long,
     )
     .unwrap()
@@ -96,7 +96,7 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
         &features(),
         config_daily(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
 }
@@ -124,7 +124,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                                 rule(),
                                 targets(),
                                 &requirements(),
-                                &commission(),
+                                &venue(),
                             )?;
                             let (first, last) = dataset::days(from, to);
                             dataset.build(first, last, |from, to| {
@@ -211,15 +211,10 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
 /// The calibrated probability of the long model of `store` valid from
 /// `at` on the missing feature: the same on every row.
 fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
-    let fingerprint = dataset::fingerprint(
-        &features(),
-        rule(),
-        &targets(),
-        &requirements(),
-        &commission(),
-    )
-    .unwrap()
-    .to_string();
+    let fingerprint =
+        dataset::fingerprint(&features(), rule(), &targets(), &requirements(), &venue())
+            .unwrap()
+            .to_string();
     store
         .read(at)
         .unwrap()
@@ -253,7 +248,7 @@ fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
         rule(),
         targets(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
     .read(start, end)

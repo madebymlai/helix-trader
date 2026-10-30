@@ -18,7 +18,7 @@
 use std::{fmt::Write as _, fs, path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{backtest, commission, walk},
+    dataset::{backtest, venue, walk},
     ic,
 };
 use helix_trader::{
@@ -73,7 +73,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
         from - SignedDuration::from_hours(5),
         to + SignedDuration::from_hours(1),
     );
-    let dataset = model_ema::dataset(&config, catalog.path(), &commission()).unwrap();
+    let dataset = model_ema::dataset(&config, catalog.path(), &venue()).unwrap();
     let (first, last) = dataset::days(from, to - SignedDuration::from_nanos(1));
     dataset
         .build(first, last, |start, end| {

@@ -96,7 +96,8 @@ impl Realised {
     /// # Errors
     ///
     /// Returns an error if the targets have no `label` target, or the
-    /// catalog holds no instrument of the barrier's targets.
+    /// catalog holds no instrument of the barrier's targets or an inverse
+    /// one (see `targets::ensure_linear`).
     pub fn new(catalog: &Path, targets: &TargetsConfig, label: Label) -> anyhow::Result<Self> {
         let sides = Side::BOTH.map(|side| {
             (
@@ -121,6 +122,7 @@ impl Realised {
                     .with_context(|| format!("reading the instrument {id}"))?
                     .pop()
                     .with_context(|| format!("the catalog holds no instrument {id}"))?;
+                targets::ensure_linear(&instrument)?;
                 Some((instrument, targets.quantity))
             }
         };
@@ -200,7 +202,12 @@ pub fn pick<T>(sides: impl IntoIterator<Item = (T, f64, f64)>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
+    use nautilus_model::instruments::{Instrument, stubs::btcusd_bybit};
+    use rust_decimal::Decimal;
+
     use super::*;
+    use crate::model::targets::{Barrier, Distance};
 
     fn close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
@@ -285,5 +292,40 @@ mod tests {
     #[test]
     fn no_side_trades_nothing() {
         assert_eq!(pick::<Side>([]), None);
+    }
+
+    /// Bybit's inverse BTCUSD, settled in BTC, in a catalog, and targets on
+    /// it with a barrier and a horizon.
+    fn inverse() -> (tempfile::TempDir, TargetsConfig) {
+        let instrument = InstrumentAny::CryptoPerpetual(btcusd_bybit());
+        let dir = tempfile::tempdir().unwrap();
+        ParquetDataCatalog::new(dir.path(), None, None, None, None)
+            .write_instruments(vec![instrument.clone()])
+            .unwrap();
+        let targets = TargetsConfig::builder()
+            .instrument_id(instrument.id())
+            .quantity(Quantity::from(1))
+            .barrier(Barrier {
+                take_profit: Distance::BasisPoints(Decimal::from(20)),
+                stop: Distance::BasisPoints(Decimal::from(10)),
+                limit: SignedDuration::from_mins(30),
+                atr: None,
+            })
+            .horizon(SignedDuration::from_mins(30))
+            .build();
+        (dir, targets)
+    }
+
+    /// Nautilus' notional value of an inverse instrument divides by the
+    /// price, so a stop's distance has no worth in R on it: a barrier
+    /// label is refused; a horizon, in money, has no stop to weigh.
+    #[test]
+    fn a_barrier_on_an_inverse_instrument_is_refused() {
+        let (catalog, targets) = inverse();
+
+        let err = Realised::new(catalog.path(), &targets, Label::Barrier).unwrap_err();
+
+        assert!(format!("{err:#}").contains("inverse"), "{err:#}");
+        assert!(Realised::new(catalog.path(), &targets, Label::Horizon).is_ok());
     }
 }

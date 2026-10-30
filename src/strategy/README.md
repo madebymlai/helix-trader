@@ -651,12 +651,15 @@ of its choosing (`model::features`, `model::decide`).
   adds the targets, their barrier's ATR as it runs (its period and its
   bars, whose source is what the strategy reads), and
   `dataset::fingerprint(&features, rule, &targets, &requirements,
-  &commission)` all of it, the commission of the dataset runs, as given,
-  normalized (`Commission::PerOrder` or `Commission::Rate`, `3 USD` for
-  `3.00 USD`, `0.00003` for `0.000030`), and the dataset version,
-  `dataset::VERSION`. The targets are net of the commission, so rows and
-  models of other costs are never read. The runs' balance and leverage
-  are not in it: large enough, they deny no target.
+  &venue)` all of it, the venue settings of the dataset runs
+  (`DatasetVenue`), each as given, normalized, and the dataset version,
+  `dataset::VERSION`. The settings are the commission
+  (`Commission::PerOrder` or `Commission::Rate`, `3 USD` for `3.00 USD`,
+  `0.00003` for `0.000030`), which the targets are net of, and the
+  starting balance and the leverage (`10000000 USD` for
+  `10000000.00 USD`, `1` for `1.00`), under which Nautilus' risk engine
+  denies an order the account cannot margin: rows and models of other
+  settings are never read.
 - **Versions.** A change of the fingerprint rebuilds the dataset and its
   models; a change of the code does not, until a version is bumped by
   hand. A strategy author bumps their feature version (`.version(n)`,
@@ -731,7 +734,9 @@ of its choosing (`model::features`, `model::decide`).
   subscription. Bars a warmup request builds reach only the cache, so they
   do not warm it: a dataset run's replay of the warmup before its first
   day does. A decision at which the ATR is not yet initialized opens no
-  target, logged at debug, as cold features give no decision. The
+  target, logged at debug, as cold features give no decision, and so
+  does one whose exit rounds onto the decision's price (no distance,
+  a P&L in R of no stop). The
   strategy shares a `Targets` (`Targets::new(config, rule,
   &requirements)`, an `Rc`),
   calls `open(self, row)`
@@ -776,10 +781,10 @@ of its choosing (`model::features`, `model::decide`).
   and its stop; `TargetRow::values`, `pnl_index`, `commission_index`,
   `stop_index`), the settling and
   decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
-  &features, rule, targets, &requirements, &commission)`) stores them
+  &features, rule, targets, &requirements, &venue)`) stores them
   under the strategy id and the fingerprint, so another strategy, of
   another width, has its own, and a change to the features, the rule,
-  the targets, what the strategy reads under an ATR or the commission
+  the targets, what the strategy reads under an ATR or the venue settings
   finds none; the
   feature names go in the data type's metadata, not in each row. The
   catalog's coverage is the day cache: `missing(first, last)` gives the
@@ -854,7 +859,7 @@ of its choosing (`model::features`, `model::decide`).
   them is settled. An optional
   `[model.meta]` table (`MetaConfig`) adds a meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
-  config, &requirements, &commission)` and `train_at(t, replay)`
+  config, &requirements, &venue)` and `train_at(t, replay)`
   (`model::train`) train at `t` a model for each side of the margins, the
   long's learning whether the long of the label's target gains, the
   short's whether its short does, on the same rows: those of the window
@@ -874,7 +879,10 @@ of its choosing (`model::features`, `model::decide`).
   distance on the targets' quantity by the instrument's
   `calculate_notional_value`, the instrument as the catalog last holds
   it), so a stop-out with slippage can be below -1R; on a horizon in
-  money. On the holdout its decision rule takes a side's trade where its
+  money. An inverse instrument is refused for a barrier label, at
+  training and at a decision (`targets::ensure_linear`): its notional
+  value divides by the price, which is not what a stop risks. On the
+  holdout its decision rule takes a side's trade where its
   expected net P&L clears the side's margin, as the handle trades it
   (below), each row's own stop's worth, the other side aside; what those
   trades earned is Nautilus' `Expectancy` (the net P&L per trade) and
@@ -908,7 +916,8 @@ of its choosing (`model::features`, `model::decide`).
   primary's, and its minimums are its own.
 - **Model store.** `ModelStore` (`model::store`) holds the published
   models under `<models>/<strategy id>/<fingerprint>/<settings>/<side>/`
-  (the dataset's fingerprint, the commission in it; `long` or `short`),
+  (the dataset's fingerprint, the dataset runs' venue in it; `long` or
+  `short`),
   the settings a hash of the learner and its settings, the label, the
   window, the holdout, `min_pnl` and `min_trades`, and the side's
   directory keyed by its margin, which decides the trades its holdout is
@@ -966,7 +975,13 @@ of its choosing (`model::features`, `model::decide`).
   probability, expected P&L, scores and holdout figures describe is the
   trade
   placed (`backtest_model.rs` realises per trade the P&L of the dataset
-  row of its decision and side). Nautilus' IB execution client denies
+  row of its decision and side). At start (a restart) the handle sets
+  the time alert of each trade of the strategy on the targets'
+  instrument still open again (`targets::arm_open_trades`), as the EMA
+  does: each open position whose opening order is a trade's entry (no
+  bracket leg nor other reduce-only order) is closed the barrier's limit
+  or the horizon after the entry's fill, or at once if that has passed.
+  Nautilus' IB execution client denies
   reduce-only orders, which a bracket's legs and `close_position` are
   (`live/ib/README.md`, nautilus#5464, the repo's issue #9): a model
   strategy cannot trade live on IB; its backtests and other venues are
@@ -974,7 +989,8 @@ of its choosing (`model::features`, `model::decide`).
   needs a higher probability than a wide one to clear a margin, which a
   fixed probability threshold cannot express (Elkan 2001; Bahnsen et al.
   2015). A side with no model valid yet never trades; a stale decision,
-  cold features, a barrier ATR not yet initialized, no side clearing its
+  cold features, a barrier ATR not yet initialized, an exit on the
+  decision's price, no side clearing its
   margin or two tied give no trade, never an error. The stores are
   listed again at each decision, so a model published meanwhile is used
   from the first decision at or after its valid-from, and a model is swapped in only
@@ -1006,7 +1022,9 @@ of its choosing (`model::features`, `model::decide`).
   (1 a buy, -1 a sell) and that side's calibrated probability (missing
   for a rule) after them,
   and learns whether the triple-barrier trade on the primary's side won:
-  the targets need a barrier, and a dataset row, which opens a long and a
+  the targets need a barrier, and a model primary its label on it, so
+  that its trades are the barrier's (a meta model on a horizon-labelled
+  primary is refused at load); a dataset row, which opens a long and a
   short at every decision, has either side's, so the meta's rows need no
   replay of their own. A rule primary's rows are its decisions on a side.
   A model primary's are its dataset's rows, each with the side its
@@ -1033,7 +1051,7 @@ of its choosing (`model::features`, `model::decide`).
   its time came from, so the interval does not key the store.
 - **Retraining backtest.** `WalkForward` (`model::walk`,
   `WalkForward::new(catalog, models, strategy_id, &features, config,
-  &requirements, &commission)`)
+  &requirements, &venue)`)
   holds a backtest's retrains and scores: `prepare(start, end, build,
   train)` has `build` build the dataset from the first retrain's window
   to `end` if it lacks a day, then `train` train at each retrain time a

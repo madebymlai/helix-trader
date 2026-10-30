@@ -42,7 +42,7 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::ModelConfig,
-    dataset::{self, Commission, Dataset, DatasetRow},
+    dataset::{self, Dataset, DatasetRow, DatasetVenue},
     features::FeatureSet,
     holdout::{Earnings, Rule, STRESS},
     learner::Model,
@@ -124,8 +124,8 @@ pub struct Score {
 
 impl WalkForward {
     /// The backtests of `strategy_id`'s models, deciding with `features`,
-    /// on its dataset, for a strategy of `requirements`, net of
-    /// `commission`, in the catalog at `catalog` and its models in the
+    /// on its dataset, for a strategy of `requirements`,
+    /// run on `venue`, in the catalog at `catalog` and its models in the
     /// store under `models`, as `config` says.
     ///
     /// # Errors
@@ -140,7 +140,7 @@ impl WalkForward {
         features: &FeatureSet,
         config: ModelConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         let stores = config
             .margins
@@ -152,7 +152,7 @@ impl WalkForward {
                     features,
                     &config,
                     requirements,
-                    commission,
+                    venue,
                     side,
                 )?;
                 Ok((side, margin, store))
@@ -168,17 +168,10 @@ impl WalkForward {
                 config.decision,
                 config.targets.clone(),
                 requirements,
-                commission,
+                venue,
             )?,
             stores,
-            meta: Meta::of_model(
-                models,
-                strategy_id,
-                features,
-                &config,
-                requirements,
-                commission,
-            )?,
+            meta: Meta::of_model(models, strategy_id, features, &config, requirements, venue)?,
             config,
         })
     }
@@ -540,6 +533,7 @@ mod tests {
     use crate::model::{
         calibration::Calibration,
         config::{Margins, MetaConfig},
+        dataset::Commission,
         decide::{DecisionRule, FeatureRow},
         holdout::{Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
@@ -601,9 +595,14 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million.
-    fn commission() -> Commission {
-        Commission::Rate("0.00003".to_string())
+    /// The venue of the dataset runs: a commission rate of 30 per million,
+    /// 10 million USD, no leverage.
+    fn venue() -> DatasetVenue {
+        DatasetVenue {
+            commission: Commission::Rate("0.00003".to_string()),
+            balance: Money::from("10000000 USD"),
+            leverage: Decimal::ONE,
+        }
     }
 
     fn walk(dir: &Path) -> WalkForward {
@@ -615,7 +614,7 @@ mod tests {
             &features(),
             config(),
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
     }
@@ -1054,7 +1053,7 @@ Short model scores, out of sample, over the span
             &features(),
             with_meta(),
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap();
         for at in [
@@ -1100,7 +1099,7 @@ Short model scores, out of sample, over the span
             &features(),
             with_meta(),
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
     }

@@ -144,7 +144,8 @@ mod tests {
     }
 
     /// A meta model is a `[model.meta]` table, and no more: a meta of the
-    /// meta is an unknown field.
+    /// meta is an unknown field. It learns the barrier trades of a primary
+    /// labelled on the barrier.
     #[test]
     fn loads_a_meta_model_from_its_table_alone_and_no_deeper() {
         let barrier =
@@ -164,6 +165,7 @@ mod tests {
                 r#"horizon = "30m" }"#,
                 &format!(r#"horizon = "30m", {barrier}"#)
             )
+            .replace(r#"label = "horizon""#, r#"label = "barrier""#)
         );
 
         let config: ModelEmaConfig = toml::from_str(&toml).unwrap();

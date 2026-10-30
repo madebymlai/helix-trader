@@ -84,7 +84,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
     config::{MetaConfig, ModelConfig, RuleConfig},
-    dataset::{self, Commission},
+    dataset::{self, DatasetVenue},
     decide::{self, DecisionRule},
     features::FeatureSet,
     launcher::{Launcher, Retraining},
@@ -99,13 +99,13 @@ use crate::strategy::{DataRequirements, warmup};
 #[derive(Debug, Clone)]
 pub enum Mode {
     /// Trades in a backtest on the models of the store under `models`
-    /// whose targets are net of `commission`, that of its dataset runs.
+    /// whose targets are those of its dataset runs, on `venue`.
     Backtest {
         models: PathBuf,
-        commission: Commission,
+        venue: DatasetVenue,
     },
     /// Trades live on the models of the store under `models` whose targets
-    /// are net of `commission`, that of its retrains' dataset runs, deciding
+    /// are those of its retrains' dataset runs, on `venue`, deciding
     /// the live node's bar build delay late, and retrains on the
     /// config's interval through `launcher`, each retrain launched at its
     /// time, trained at the last time the catalog at `catalog` holds for
@@ -113,7 +113,7 @@ pub enum Mode {
     /// (`launcher::Retraining`).
     Live {
         models: PathBuf,
-        commission: Commission,
+        venue: DatasetVenue,
         launcher: Launcher,
         catalog: PathBuf,
     },
@@ -256,24 +256,17 @@ impl ModelHandle {
         requirements: &DataRequirements,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
-        let primary = |models: &Path, commission: &Commission| -> anyhow::Result<Primary> {
+        let primary = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Primary> {
             let fingerprint = dataset::fingerprint(
                 &features,
                 config.decision,
                 &config.targets,
                 requirements,
-                commission,
+                venue,
             )?
             .to_string();
-            let meta = Meta::of_model(
-                models,
-                strategy_id,
-                &features,
-                config,
-                requirements,
-                commission,
-            )?
-            .map(|meta| MetaModels::of(&meta, &fingerprint));
+            let meta = Meta::of_model(models, strategy_id, &features, config, requirements, venue)?
+                .map(|meta| MetaModels::of(&meta, &fingerprint));
             let sides = config
                 .margins
                 .sides()
@@ -284,7 +277,7 @@ impl ModelHandle {
                         &features,
                         config,
                         requirements,
-                        commission,
+                        venue,
                         side,
                     )?;
                     Ok(SideModels {
@@ -344,21 +337,14 @@ impl ModelHandle {
             "the features of a rule primary declare its side and probability \
              (`FeatureSetBuilder::primary`)"
         );
-        let primary = |models: &Path, commission: &Commission| -> anyhow::Result<Primary> {
-            let meta = Meta::of_rule(
-                models,
-                strategy_id,
-                &features,
-                config,
-                requirements,
-                commission,
-            )?;
+        let primary = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Primary> {
+            let meta = Meta::of_rule(models, strategy_id, &features, config, requirements, venue)?;
             let fingerprint = dataset::fingerprint(
                 &features,
                 config.decision,
                 &config.targets,
                 requirements,
-                commission,
+                venue,
             )?
             .to_string();
             Ok(Primary::Rule {
@@ -381,15 +367,15 @@ impl ModelHandle {
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
     /// `targets`, retrained every `retrain`, for a strategy of
     /// `requirements`, in `mode`: trading on the models `primary` reads
-    /// under the store's root, of the targets net of the mode's
-    /// commission, or opening the targets.
+    /// under the store's root, of the targets of the dataset runs on the
+    /// mode's venue, or opening the targets.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
         (rule, targets, retrain): (DecisionRule, &TargetsConfig, SignedDuration),
         requirements: &DataRequirements,
         mode: Mode,
-        primary: impl FnOnce(&Path, &Commission) -> anyhow::Result<Primary>,
+        primary: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Primary>,
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
         let traded = targets.instrument_id;
@@ -399,15 +385,15 @@ impl ModelHandle {
              no decision of the cadence would be fresh"
         );
         let serving = match mode {
-            Mode::Backtest { models, commission } => Serving::Trading(Box::new(Trading {
+            Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
-                primary: primary(&models, &commission)?,
+                primary: primary(&models, &venue)?,
                 instrument_id: traded,
                 quantity: targets.quantity,
             })),
             Mode::Live {
                 models,
-                commission,
+                venue,
                 launcher,
                 catalog,
             } => Serving::Trading(Box::new(Trading {
@@ -418,7 +404,7 @@ impl ModelHandle {
                     requirements.clone(),
                     launcher,
                 )),
-                primary: primary(&models, &commission)?,
+                primary: primary(&models, &venue)?,
                 instrument_id: traded,
                 quantity: targets.quantity,
             })),
@@ -440,29 +426,38 @@ impl ModelHandle {
     /// `on_start`: registers the features (and starts the barrier's ATR:
     /// the stops', trading on a barrier, a rule's or a model's labelled on
     /// it, or, in a dataset run, the targets', and collects the rows they
-    /// settle), then starts the decision cadence, live
+    /// settle); trading, sets again the time close of each of its trades
+    /// still open, as after a restart (`targets::arm_open_trades`); then
+    /// starts the decision cadence, live
     /// `warmup::live_bar_build_delay(bar_types)` late, and live the
     /// retrain timer.
     ///
     /// # Errors
     ///
-    /// Returns an error if Nautilus refuses the cadence's timer or the
-    /// retrain timer.
+    /// Returns an error if Nautilus refuses a trade's time alert, the
+    /// cadence's timer or the retrain timer.
     pub fn start<S>(&self, strategy: &mut S, bar_types: &[BarType]) -> anyhow::Result<()>
     where
-        S: DataActor + DataActorNative + Debug + 'static,
+        S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
         self.features.register(strategy);
         let delay = match &self.serving {
             Serving::Trading(trading) => {
-                match &trading.primary {
+                let after = match &trading.primary {
                     Primary::Model {
                         labelled: Labelled::Barrier(stops),
                         ..
                     }
-                    | Primary::Rule { stops, .. } => stops.start(strategy),
-                    Primary::Model { .. } => {}
-                }
+                    | Primary::Rule { stops, .. } => {
+                        stops.start(strategy);
+                        stops.limit()
+                    }
+                    Primary::Model {
+                        labelled: Labelled::Horizon(horizon),
+                        ..
+                    } => *horizon,
+                };
+                targets::arm_open_trades(strategy, trading.instrument_id, after)?;
                 match &trading.retraining {
                     Some(retraining) => {
                         retraining.start(strategy)?;
@@ -797,10 +792,15 @@ mod tests {
     use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
         data::QuoteTick,
-        enums::PriceType,
-        identifiers::{InstrumentId, TraderId},
-        instruments::{InstrumentAny, stubs::audusd_sim},
-        types::Price,
+        enums::{ContingencyType, OmsType, OrderType, PriceType},
+        events::OrderEventAny,
+        identifiers::{
+            AccountId, ClientOrderId, InstrumentId, PositionId, TradeId, TraderId, VenueOrderId,
+        },
+        instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
+        orders::{Order, OrderTestBuilder, stubs::TestOrderEventStubs},
+        position::Position,
+        types::{Money, Price},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use nautilus_portfolio::portfolio::Portfolio;
@@ -813,6 +813,7 @@ mod tests {
     use crate::model::{
         calibration::Calibration,
         config::{Margins, Sizing},
+        dataset::Commission,
         holdout::{Earnings, Holdout, Refusal, Trades},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
@@ -976,7 +977,7 @@ mod tests {
             &features(),
             config,
             &requirements(),
-            &commission(),
+            &venue(),
             side,
         )
         .unwrap()
@@ -1004,9 +1005,14 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million.
-    fn commission() -> Commission {
-        Commission::Rate("0.00003".to_string())
+    /// The venue of the dataset runs: a commission rate of 30 per million,
+    /// 10 million USD, no leverage.
+    fn venue() -> DatasetVenue {
+        DatasetVenue {
+            commission: Commission::Rate("0.00003".to_string()),
+            balance: Money::from("10000000 USD"),
+            leverage: Decimal::ONE,
+        }
     }
 
     /// A baseline long model of `config` valid from `valid_from` predicting
@@ -1037,7 +1043,7 @@ mod tests {
                     config.decision,
                     &config.targets,
                     &requirements(),
-                    &commission(),
+                    &venue(),
                 )
                 .unwrap()
                 .to_string(),
@@ -1073,7 +1079,7 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap()
@@ -1112,7 +1118,10 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                commission: Commission::PerOrder("3 USD".to_string()),
+                venue: DatasetVenue {
+                    commission: Commission::PerOrder("3 USD".to_string()),
+                    ..venue()
+                },
             },
         )
         .unwrap();
@@ -1152,7 +1161,7 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap();
@@ -1196,7 +1205,7 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap_err()
@@ -1230,7 +1239,7 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap()
@@ -1510,7 +1519,7 @@ mod tests {
         assert_eq!(
             next(Mode::Backtest {
                 models: models.clone(),
-                commission: commission(),
+                venue: venue(),
             }),
             at("2026-10-22T12:00:00.010Z")
         );
@@ -1530,7 +1539,7 @@ mod tests {
     fn live(models: PathBuf, catalog: &Path, launcher: Launcher) -> Mode {
         Mode::Live {
             models,
-            commission: commission(),
+            venue: venue(),
             launcher,
             catalog: catalog.to_path_buf(),
         }
@@ -1728,7 +1737,7 @@ mod tests {
                     decision,
                     targets,
                     &requirements(),
-                    &commission(),
+                    &venue(),
                 )
                 .unwrap()
                 .to_string(),
@@ -1795,7 +1804,7 @@ mod tests {
             &features,
             config,
             &requirements(),
-            &commission(),
+            &venue(),
             Side::Long,
         )
         .unwrap()
@@ -1815,7 +1824,7 @@ mod tests {
                 config,
                 config.meta.as_ref().unwrap(),
                 &requirements(),
-                &commission(),
+                &venue(),
             )
             .unwrap()
             .publish(&baseline_of(
@@ -1835,7 +1844,7 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap()
@@ -1930,7 +1939,7 @@ mod tests {
             &features,
             &config,
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
         .publish(&baseline_of(
@@ -1949,7 +1958,7 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap();
@@ -1987,11 +1996,181 @@ mod tests {
             &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                commission: commission(),
+                venue: venue(),
             },
         )
         .unwrap_err();
 
         assert!(err.to_string().contains("side"), "{err}");
+    }
+
+    /// 2026-10-22T12:00:00Z, the time of the restart.
+    const RESTART: &str = "2026-10-22T12:00:00Z";
+
+    /// Adds to the cache of `probe` a trade of `strategy` buying 1000
+    /// AUD/USD as a restart finds it, its entry `entry` filled at `filled`
+    /// into an open position of its own: a market entry, a bracket's if
+    /// `legs`, with its take profit and stop.
+    fn open_trade(probe: &Decider, strategy: &str, entry: &str, legs: bool, filled: &str) {
+        let aud = InstrumentAny::CurrencyPair(audusd_sim());
+        let account = AccountId::from("SIM-001");
+        let entry_id = ClientOrderId::from(entry);
+        let (tp, sl) = (
+            ClientOrderId::from(format!("{entry}-TP").as_str()),
+            ClientOrderId::from(format!("{entry}-SL").as_str()),
+        );
+        let order = |id: ClientOrderId, side| {
+            let mut builder = OrderTestBuilder::new(OrderType::Market);
+            builder
+                .instrument_id(aud.id())
+                .strategy_id(StrategyId::from(strategy))
+                .client_order_id(id)
+                .side(side)
+                .quantity(Quantity::from(1000));
+            builder
+        };
+        let mut entry_builder = order(entry_id, OrderSide::Buy);
+        if legs {
+            entry_builder
+                .contingency_type(ContingencyType::Oto)
+                .linked_order_ids(vec![tp, sl]);
+        }
+        let entry_order = entry_builder.build();
+        let cache = probe.cache_rc();
+        let mut cache = cache.borrow_mut();
+        cache
+            .add_order(entry_order.clone(), None, None, false)
+            .unwrap();
+        if legs {
+            for (leg, other) in [(tp, sl), (sl, tp)] {
+                let leg = order(leg, OrderSide::Sell)
+                    .parent_order_id(entry_id)
+                    .contingency_type(ContingencyType::Oco)
+                    .linked_order_ids(vec![other])
+                    .reduce_only(true)
+                    .build();
+                cache.add_order(leg, None, None, false).unwrap();
+            }
+        }
+        let position_id = PositionId::from(format!("P-{entry}").as_str());
+        let filled = TestOrderEventStubs::filled(
+            &entry_order,
+            &aud,
+            Some(TradeId::from(entry)),
+            Some(position_id),
+            Some(Price::from("0.70000")),
+            None,
+            None,
+            None,
+            Some(UnixNanos::from(at(filled))),
+            Some(account),
+        );
+        for event in [
+            TestOrderEventStubs::submitted(&entry_order, account),
+            TestOrderEventStubs::accepted(&entry_order, account, VenueOrderId::from(entry)),
+            filled.clone(),
+        ] {
+            cache.update_order(&event).unwrap();
+        }
+        let OrderEventAny::Filled(fill) = filled else {
+            panic!("not a fill");
+        };
+        cache
+            .add_position_id(&position_id, &aud.id().venue, &entry_id, &fill.strategy_id)
+            .unwrap();
+        cache
+            .add_position(&Position::new(&aud, fill), OmsType::Hedging)
+            .unwrap();
+    }
+
+    /// The time close of the trade of `entry`, as the clock holds it.
+    fn time_close(clock: &Rc<RefCell<VirtualClock>>, entry: &str) -> Option<UnixNanos> {
+        clock.borrow().next_time_ns(&format!("TARGET-TIME:{entry}"))
+    }
+
+    /// A barrier closed 2 hours after its entry: the bracket filled 30
+    /// minutes before the restart is closed 90 minutes after it, the one
+    /// filled 3 hours before at once.
+    #[test]
+    fn a_restart_sets_the_time_close_of_each_open_barrier_trade_again() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at(RESTART));
+        open_trade(&probe, STRATEGY, "O-1", true, "2026-10-22T11:30:00Z");
+        open_trade(&probe, STRATEGY, "O-2", true, "2026-10-22T09:00:00Z");
+        let handle = sides_handle(&probe, models.path(), &barrier_config(10), (None, None));
+
+        handle.start(&mut probe, &[]).unwrap();
+
+        assert_eq!(
+            time_close(&clock, "O-1"),
+            Some(UnixNanos::from(at("2026-10-22T13:30:00Z")))
+        );
+        assert_eq!(
+            time_close(&clock, "O-2"),
+            Some(UnixNanos::from(at(RESTART)))
+        );
+    }
+
+    /// A horizon of an hour: the market entry filled 20 minutes before the
+    /// restart is closed 40 minutes after it. Another strategy's trade is
+    /// not the handle's.
+    #[test]
+    fn a_restart_sets_the_time_close_of_its_own_open_horizon_trades_again() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at(RESTART));
+        open_trade(&probe, STRATEGY, "O-1", false, "2026-10-22T11:40:00Z");
+        open_trade(&probe, "OTHER-001", "O-2", false, "2026-10-22T11:40:00Z");
+        let handle = handle(&probe, models.path());
+
+        handle.start(&mut probe, &[]).unwrap();
+
+        assert_eq!(
+            time_close(&clock, "O-1"),
+            Some(UnixNanos::from(at("2026-10-22T12:40:00Z")))
+        );
+        assert_eq!(time_close(&clock, "O-2"), None);
+    }
+
+    /// The market entry filled 90 minutes before the restart, its hour
+    /// over: its alert fires at once, and the handle closes its position
+    /// with a market sell of its 1000, tagged as a time close.
+    #[test]
+    fn a_trade_open_at_a_restart_is_closed_at_its_time() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at(RESTART));
+        open_trade(&probe, STRATEGY, "O-1", false, "2026-10-22T10:30:00Z");
+        let handle = handle(&probe, models.path());
+        handle.start(&mut probe, &[]).unwrap();
+
+        let events = clock
+            .borrow_mut()
+            .advance_time(UnixNanos::from(at(RESTART)), true);
+        for event in events {
+            handle.on_time_event(&mut probe, &event).unwrap();
+        }
+
+        let cache = probe.cache();
+        let closes: Vec<_> = cache
+            .orders(None, None, None, None, None)
+            .into_iter()
+            .filter(|order| order.client_order_id() != ClientOrderId::from("O-1"))
+            .map(|order| {
+                (
+                    order.order_side(),
+                    order.quantity(),
+                    order.is_reduce_only(),
+                    order.tags().unwrap_or_default().to_vec(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            closes,
+            [(
+                OrderSide::Sell,
+                Quantity::from(1000),
+                true,
+                vec![ustr::Ustr::from("TARGET-TIME")]
+            )]
+        );
     }
 }

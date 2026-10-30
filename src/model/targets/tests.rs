@@ -551,6 +551,7 @@ fn exits(barrier: Barrier, reference: &str, atr: Option<f64>) -> Vec<(String, St
     barrier
         .exits(&half_point(), reference, atr)
         .unwrap()
+        .expect("exits off the reference")
         .into_iter()
         .map(|(_, take_profit, stop)| (take_profit.to_string(), stop.to_string()))
         .collect()
@@ -610,6 +611,28 @@ fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
             ("997.0".into(), "1004.0".into())
         ]
     );
+}
+
+/// A tiny ATR of 0.1 on half-point ticks from 1000.0: a stop of 1 ATR,
+/// 0.1, is nearer 1000.0 than 999.5, and a take profit of 1.5 ATRs,
+/// 0.15, nearer 1000.0 than 1000.5. An exit on the decision's price is no
+/// distance, a P&L in R of no stop, so neither barrier is a target, as
+/// with a cold ATR; 10 ATRs, 1.0, are.
+#[test]
+fn an_exit_rounding_onto_the_reference_gives_no_exits() {
+    let exits_of = |take_profit: Decimal, stop: Decimal| {
+        Barrier {
+            take_profit: Distance::Atr(take_profit),
+            stop: Distance::Atr(stop),
+            ..config().barrier.unwrap()
+        }
+        .exits(&half_point(), Decimal::from(1000), Some(0.1))
+        .unwrap()
+    };
+
+    assert_eq!(exits_of(Decimal::from(10), Decimal::ONE), None);
+    assert_eq!(exits_of(Decimal::new(15, 1), Decimal::from(10)), None);
+    assert!(exits_of(Decimal::from(10), Decimal::from(10)).is_some());
 }
 
 #[test]
@@ -915,4 +938,16 @@ fn a_stop_is_worth_its_distance_on_the_targets_quantity() {
     let worth = stop_worth(&instrument, Quantity::from(1000), 0.001).unwrap();
 
     assert!((worth - 1.0).abs() < 1e-9, "{worth}");
+}
+
+/// Bybit's inverse BTCUSD: Nautilus' notional value of a distance on it
+/// divides by the price, which is not what the stop risks.
+#[test]
+fn a_stop_on_an_inverse_instrument_is_refused() {
+    let instrument =
+        InstrumentAny::CryptoPerpetual(nautilus_model::instruments::stubs::btcusd_bybit());
+
+    let err = stop_worth(&instrument, Quantity::from(1), 10.0).unwrap_err();
+
+    assert!(err.to_string().contains("inverse"), "{err}");
 }

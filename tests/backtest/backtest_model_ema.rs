@@ -20,7 +20,7 @@ use std::{
 };
 
 use crate::common::{
-    dataset::{baseline_stored, commission, walk},
+    dataset::{baseline_stored, venue, walk},
     ic,
 };
 use helix_trader::{
@@ -113,7 +113,7 @@ fn kept_with_its_figures(text: &str) -> bool {
 /// `train` subcommand built in `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     let config: ModelEmaConfig = toml::from_str(CONFIG).unwrap();
-    let dataset = model_ema::dataset(&config, catalog.path(), &commission())
+    let dataset = model_ema::dataset(&config, catalog.path(), &venue())
         .unwrap()
         .manifest()
         .unwrap();
@@ -126,7 +126,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         at,
         6,
     );
-    model_ema::training(&config, catalog.path(), models, &commission())
+    model_ema::training(&config, catalog.path(), models, &venue())
         .unwrap()
         .store(Side::Long)
         .unwrap()
@@ -199,7 +199,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
         config,
         Mode::Backtest {
             models,
-            commission: commission(),
+            venue: venue(),
         },
     )
     .unwrap();

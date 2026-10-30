@@ -697,6 +697,40 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     );
 }
 
+/// The ATR of `targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand`,
+/// 0.40 at 10:00, with a stop of a hundredth of it, 0.004 from 4000.10:
+/// on gold's cent ticks the stop rounds onto the decision's price, no
+/// distance, so the decision opens no target, as one on a cold ATR: no
+/// row and no order.
+#[test]
+fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_of(ranging_quotes(), from, to);
+    let backtest = Backtest {
+        end: ic::at("10:50:00"),
+        ..gold_backtest(catalog.path().to_path_buf())
+    };
+    let config = TargetsConfig::builder()
+        .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
+        .quantity(Quantity::from(1))
+        .barrier(Barrier {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(1, 2)),
+            limit: SignedDuration::from_mins(45),
+            atr: Some(AtrConfig { period: 2 }),
+        })
+        .horizon(SignedDuration::from_mins(30))
+        .build();
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let (probe, record) = TargetProbe::new(source, config);
+
+    backtest.run_dataset(probe).unwrap();
+
+    let record = record.borrow();
+    assert_eq!(record.rows, []);
+    assert!(record.fills.is_empty(), "{:?}", record.fills);
+}
+
 /// The barrier of the ATR tests on BTC: a take profit 2 and a stop 1.5
 /// average true ranges of 2 hourly bars away, closed 45 minutes after its
 /// decision, beside a horizon of 30 minutes, of one contract.

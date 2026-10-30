@@ -116,7 +116,7 @@ fn a_dataset_build_replays_through_a_sliver_between_promoted_files() {
         dataset::rule(),
         dataset::targets(),
         &dataset::requirements(),
-        &dataset::commission(),
+        &dataset::venue(),
     )
     .unwrap();
 

@@ -191,8 +191,10 @@ impl ModelConfig {
     /// (the barrier's limit or the horizon) is not shorter than the
     /// window, the holdout is not positive or leaves no fitted row (see
     /// `validate_window`), the margins name no side or one is not finite,
-    /// the minimums are invalid (see `validate_minimums`), the meta model is
-    /// invalid (see `MetaConfig::validate`), or the decisions are on events
+    /// the minimums are invalid (see `validate_minimums`), a meta model
+    /// gates a primary not labelled on the barrier, whose trades it learns,
+    /// the meta model is invalid (see `MetaConfig::validate`), or the
+    /// decisions are on events
     /// or a target is not shorter than their cadence (see
     /// `validate_cadence`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
@@ -217,6 +219,11 @@ impl ModelConfig {
         }
         validate_minimums(self.minimums())?;
         if let Some(meta) = &self.meta {
+            ensure!(
+                self.label == Label::Barrier,
+                "the meta model learns whether the primary's barrier trade wins, and the \
+                 primary is labelled \"horizon\": it places horizon trades, not barrier ones"
+            );
             meta.validate(&self.targets)?;
         }
         validate_cadence(self.decision, &self.targets)
@@ -863,6 +870,19 @@ mod tests {
 
         let err = refused(&format!("{toml}\n{META}"));
 
+        assert!(err.contains("barrier"), "{err}");
+    }
+
+    /// A horizon-labelled primary trades its horizon, and the meta model
+    /// would gate it on barrier trades never placed.
+    #[test]
+    fn a_meta_model_on_a_horizon_labelled_primary_is_refused_naming_both() {
+        let toml = SECTION.replace(r#"label = "barrier""#, r#"label = "horizon""#);
+
+        let err = refused(&format!("{toml}\n{META}"));
+
+        assert!(err.contains("meta"), "{err}");
+        assert!(err.contains("horizon"), "{err}");
         assert!(err.contains("barrier"), "{err}");
     }
 

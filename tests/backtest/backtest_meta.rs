@@ -24,8 +24,8 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, backtest, baseline_of, commission, config, meta_baseline_of, replay_on,
-        requirements, rule, targets, trade_on, walk,
+        Missing, STRATEGY, backtest, baseline_of, config, meta_baseline_of, replay_on,
+        requirements, rule, targets, trade_on, venue, walk,
     },
     ic,
 };
@@ -143,10 +143,9 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
 /// `row`, as a strategy of `features` loads it.
 fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
-    let fingerprint =
-        dataset::fingerprint(features, rule(), &targets(), &requirements(), &commission())
-            .unwrap()
-            .to_string();
+    let fingerprint = dataset::fingerprint(features, rule(), &targets(), &requirements(), &venue())
+        .unwrap()
+        .to_string();
     stored
         .load(&stored.manifest.feature_names, &fingerprint)
         .unwrap()
@@ -169,7 +168,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
         &features(false),
         model_primary(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
     .prepare(
@@ -184,7 +183,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     rule(),
                     targets(),
                     &requirements(),
-                    &commission(),
+                    &venue(),
                 )?;
                 let (first, last) = dataset::days(from, to);
                 dataset.build(first, last, |from, to| {
@@ -210,7 +209,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     &features(false),
                     model_primary(),
                     &requirements(),
-                    &commission(),
+                    &venue(),
                 )
                 .unwrap()
                 .train_at(at, |from, to| replay_on(catalog, features(false), from, to))
@@ -231,7 +230,7 @@ fn primary_store(models: &Path) -> ModelStore {
         &features(false),
         &model_primary(),
         &requirements(),
-        &commission(),
+        &venue(),
         Side::Long,
     )
     .unwrap()
@@ -246,7 +245,7 @@ fn meta_store(models: &Path) -> ModelStore {
         &model_primary(),
         &meta(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
 }
@@ -452,7 +451,7 @@ fn rule_dataset(catalog: &TempDir) -> Dataset {
         rule(),
         targets(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
 }
@@ -479,7 +478,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
             &features(true),
             rule_primary(),
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
         .train_at(start, |from, to| replay_rule(&catalog, from, to))
@@ -511,7 +510,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
         &features(true),
         &rule_primary(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap();
     assert!(store.valid_froms().unwrap().is_empty());
@@ -524,7 +523,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
     let trades = on_thread(|| {
         let (probe, trades) = rule_probe(Mode::Backtest {
             models: models.path().to_path_buf(),
-            commission: commission(),
+            venue: venue(),
         });
         backtest(catalog.path(), start, end).run(probe).unwrap();
         trades.take()

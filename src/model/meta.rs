@@ -35,7 +35,7 @@ use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
 
 use super::{
     config::{MetaConfig, ModelConfig, RuleConfig},
-    dataset::{self, Commission, DatasetRow},
+    dataset::{self, DatasetRow, DatasetVenue},
     features::{FeatureSet, PRIMARY_FEATURES, primary_values},
     holdout::Trade,
     payoff::{self, Realised},
@@ -76,8 +76,8 @@ enum Primary {
 
 impl Meta {
     /// The meta model of `config`, the model of `strategy_id` deciding
-    /// with `features` on targets for a strategy of `requirements`, net of
-    /// `commission`, its models in the store under `models`; none if
+    /// with `features` on targets for a strategy of `requirements`,
+    /// run on `venue`, its models in the store under `models`; none if
     /// `config` has no meta section.
     ///
     /// # Errors
@@ -90,7 +90,7 @@ impl Meta {
         features: &FeatureSet,
         config: &ModelConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Option<Self>> {
         let Some(meta) = &config.meta else {
             return Ok(None);
@@ -105,7 +105,7 @@ impl Meta {
                     features,
                     config,
                     requirements,
-                    commission,
+                    venue,
                     side,
                 )?;
                 Ok((side, margin, store))
@@ -123,7 +123,7 @@ impl Meta {
                     config.decision,
                     &config.targets,
                     requirements,
-                    commission,
+                    venue,
                 )?
                 .to_string(),
             },
@@ -134,14 +134,14 @@ impl Meta {
                 config,
                 meta,
                 requirements,
-                commission,
+                venue,
             )?,
         }))
     }
 
     /// The meta model of `config`, of `strategy_id`, whose primary is its
     /// rule, deciding with `features` on targets for a strategy of
-    /// `requirements`, net of `commission`, its models in the store under
+    /// `requirements`, run on `venue`, its models in the store under
     /// `models`.
     ///
     /// # Errors
@@ -155,7 +155,7 @@ impl Meta {
         features: &FeatureSet,
         config: &RuleConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         ensure!(
             features.has_primary(),
@@ -167,14 +167,7 @@ impl Meta {
             primary: Primary::Rule,
             feature_names: features.names().to_vec(),
             trades: trades(&config.targets)?,
-            store: ModelStore::of_rule(
-                models,
-                strategy_id,
-                features,
-                config,
-                requirements,
-                commission,
-            )?,
+            store: ModelStore::of_rule(models, strategy_id, features, config, requirements, venue)?,
         })
     }
 

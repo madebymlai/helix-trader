@@ -43,7 +43,7 @@ use std::{path::Path, rc::Rc};
 
 use crate::{
     model::{
-        dataset::{Commission, Dataset},
+        dataset::{Dataset, DatasetVenue},
         decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle},
@@ -98,7 +98,7 @@ impl ModelEma {
 }
 
 /// The training of the model of the strategy `config` describes, on its
-/// dataset, net of `commission`, in the catalog at `catalog` and its models
+/// dataset, run on `venue`, in the catalog at `catalog` and its models
 /// in the store under `models`; its replay runs the strategy in
 /// `Mode::Dataset`.
 ///
@@ -109,7 +109,7 @@ pub fn training(
     config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<Training> {
     config.validate()?;
     let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
@@ -120,12 +120,12 @@ pub fn training(
         &features,
         config.model.clone(),
         &config.bars.data_requirements(),
-        commission,
+        venue,
     )
 }
 
 /// The backtests of the model of the strategy `config` describes, on its
-/// dataset, net of `commission`, in the catalog at `catalog` and its models
+/// dataset, run on `venue`, in the catalog at `catalog` and its models
 /// in the store under `models`: their retrains and their scores.
 ///
 /// # Errors
@@ -136,7 +136,7 @@ pub fn walk_forward(
     config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<WalkForward> {
     config.validate()?;
     let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
@@ -147,11 +147,11 @@ pub fn walk_forward(
         &features,
         config.model.clone(),
         &config.bars.data_requirements(),
-        commission,
+        venue,
     )
 }
 
-/// The dataset of the strategy `config` describes, net of `commission`, in
+/// The dataset of the strategy `config` describes, run on `venue`, in
 /// the catalog at `catalog`; its replay runs the strategy in
 /// `Mode::Dataset`.
 ///
@@ -161,7 +161,7 @@ pub fn walk_forward(
 pub fn dataset(
     config: &ModelEmaConfig,
     catalog: &Path,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<Dataset> {
     config.validate()?;
     let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
@@ -172,7 +172,7 @@ pub fn dataset(
         config.model.decision,
         config.model.targets.clone(),
         &config.bars.data_requirements(),
-        commission,
+        venue,
     )
 }
 

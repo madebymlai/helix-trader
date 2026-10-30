@@ -13,7 +13,7 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{STRATEGY, commission, replay_on, requirements, rule, targets},
+    dataset::{STRATEGY, replay_on, requirements, rule, targets, venue},
     ic,
 };
 use helix_trader::model::{
@@ -141,7 +141,7 @@ fn training(catalog: &TempDir, models: &Path, min_pnl: f64) -> Training {
         &features(),
         config(min_pnl),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
 }
@@ -227,15 +227,10 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
         assert_eq!(holdout.auc, Some(1.0));
         assert!(holdout.log_loss < holdout.baseline_log_loss, "{holdout:?}");
     }
-    let fingerprint = dataset::fingerprint(
-        &features(),
-        rule(),
-        &targets(),
-        &requirements(),
-        &commission(),
-    )
-    .unwrap()
-    .to_string();
+    let fingerprint =
+        dataset::fingerprint(&features(), rule(), &targets(), &requirements(), &venue())
+            .unwrap()
+            .to_string();
     for side in Side::BOTH {
         let stored = training.store(side).unwrap().read(t()).unwrap();
         let model = stored

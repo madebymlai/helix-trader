@@ -3,7 +3,7 @@
 //!
 //! A store is a directory per strategy id, fingerprint (that of its
 //! dataset: the features, the decision rule, the targets and the
-//! commission they are net of, see `dataset::fingerprint`) and training
+//! venue settings of its dataset runs, see `dataset::fingerprint`) and training
 //! settings (the learner and its settings, the label, the window, the
 //! holdout and the minimums its holdout must meet to be published,
 //! `holdout::Minimums`), and side, the long or the short, keyed by its
@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     calibration::Calibration,
     config::{Margins, MetaConfig, ModelConfig, RuleConfig},
-    dataset::{self, Commission},
+    dataset::{self, DatasetVenue},
     decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
     holdout::Holdout,
@@ -91,7 +91,7 @@ pub struct ModelManifest {
     /// The time the model was trained at, from which it is valid.
     pub valid_from: Timestamp,
     /// The fingerprint of the features, the decision rule, the targets and
-    /// the commission.
+    /// the venue of its dataset runs.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
@@ -208,7 +208,7 @@ impl LoadedModel {
 impl ModelStore {
     /// The store, under `root`, of the `side` models of `strategy_id`
     /// deciding with `features` as `config` says, on targets for a strategy
-    /// of `requirements`, net of `commission`, and trained as `config`
+    /// of `requirements`, run on `venue`, and trained as `config`
     /// says: `long/` or `short/` in the directory of its training settings,
     /// keyed by the side's margin, which decides the trades its holdout
     /// is judged on.
@@ -223,7 +223,7 @@ impl ModelStore {
         features: &FeatureSet,
         config: &ModelConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
         side: Side,
     ) -> anyhow::Result<Self> {
         let margin = config
@@ -231,26 +231,19 @@ impl ModelStore {
             .of(side)
             .with_context(|| format!("the margins trade no {}", side.name()))?;
         Ok(Self {
-            directory: primary_directory(
-                root,
-                strategy_id,
-                features,
-                config,
-                requirements,
-                commission,
-            )?
-            .join(side.name())
-            .join(
-                Fingerprint::default()
-                    .with(&margin.to_le_bytes())
-                    .to_string(),
-            ),
+            directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
+                .join(side.name())
+                .join(
+                    Fingerprint::default()
+                        .with(&margin.to_le_bytes())
+                        .to_string(),
+                ),
         })
     }
 
     /// The store, under `root`, of the meta model `meta` of the model
     /// primary of `strategy_id` deciding with `features` as `config` says,
-    /// on targets for a strategy of `requirements`, net of `commission`:
+    /// on targets for a strategy of `requirements`, run on `venue`:
     /// beside the primary's sides, under `meta/` and the meta's training
     /// settings, the primary's margins among them (they make the meta's
     /// rows).
@@ -266,28 +259,21 @@ impl ModelStore {
         config: &ModelConfig,
         meta: &MetaConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         let Margins { long, short } = config.margins;
         let settings =
             meta_settings(meta)?.with(format!("long {long:?} short {short:?}").as_bytes());
         Ok(Self {
-            directory: primary_directory(
-                root,
-                strategy_id,
-                features,
-                config,
-                requirements,
-                commission,
-            )?
-            .join(META)
-            .join(settings.to_string()),
+            directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
+                .join(META)
+                .join(settings.to_string()),
         })
     }
 
     /// The store, under `root`, of the meta models of `strategy_id`, whose
     /// primary is its rule, deciding with `features` as `config` says, on
-    /// targets for a strategy of `requirements`, net of `commission`.
+    /// targets for a strategy of `requirements`, run on `venue`.
     ///
     /// # Errors
     ///
@@ -299,7 +285,7 @@ impl ModelStore {
         features: &FeatureSet,
         config: &RuleConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             directory: dataset_directory(
@@ -309,7 +295,7 @@ impl ModelStore {
                 config.decision,
                 &config.targets,
                 requirements,
-                commission,
+                venue,
             )?
             .join(META)
             .join(meta_settings(&config.meta)?.to_string()),
@@ -386,7 +372,7 @@ impl ModelStore {
 
 /// The directory, under `root`, of the stores of `strategy_id` deciding
 /// with `features` on `rule`, of `targets` for a strategy of `requirements`,
-/// net of `commission`: its id and its dataset's fingerprint.
+/// run on `venue`: its id and its dataset's fingerprint.
 fn dataset_directory(
     root: &Path,
     strategy_id: StrategyId,
@@ -394,9 +380,9 @@ fn dataset_directory(
     rule: DecisionRule,
     targets: &TargetsConfig,
     requirements: &DataRequirements,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<PathBuf> {
-    let fingerprint = dataset::fingerprint(features, rule, targets, requirements, commission)?;
+    let fingerprint = dataset::fingerprint(features, rule, targets, requirements, venue)?;
     Ok(root
         .join(strategy_id.as_str())
         .join(fingerprint.to_string()))
@@ -404,7 +390,7 @@ fn dataset_directory(
 
 /// The directory, under `root`, of the models of the model primary of
 /// `strategy_id` deciding with `features` as `config` says, on targets for
-/// a strategy of `requirements`, net of `commission`: its dataset's, then
+/// a strategy of `requirements`, run on `venue`: its dataset's, then
 /// its training settings, the learner and its settings, the label, the
 /// window, the holdout and the minimums of its holdout.
 fn primary_directory(
@@ -413,7 +399,7 @@ fn primary_directory(
     features: &FeatureSet,
     config: &ModelConfig,
     requirements: &DataRequirements,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<PathBuf> {
     let settings = Fingerprint::default()
         .with(serde_json::to_string(&config.learner)?.as_bytes())
@@ -429,7 +415,7 @@ fn primary_directory(
         config.decision,
         &config.targets,
         requirements,
-        commission,
+        venue,
     )?
     .join(settings.to_string()))
 }
@@ -559,10 +545,16 @@ mod values {
 mod tests {
     use jiff::SignedDuration;
     use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::{enums::PriceType, identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::{
+        enums::PriceType,
+        identifiers::InstrumentId,
+        types::{Money, Quantity},
+    };
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::model::{
+        dataset::Commission,
         decide::DecisionRule,
         holdout::Earnings,
         learner::{LearnerConfig, TrainingSet},
@@ -607,18 +599,18 @@ mod tests {
     }
 
     fn store(root: &Path, config: &ModelConfig) -> ModelStore {
-        store_net_of(root, config, &commission())
+        store_net_of(root, config, &venue())
     }
 
-    fn store_net_of(root: &Path, config: &ModelConfig, commission: &Commission) -> ModelStore {
-        side_store(root, config, commission, Side::Long)
+    fn store_net_of(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelStore {
+        side_store(root, config, venue, Side::Long)
     }
 
-    /// The store of the `side` models of `config`, net of `commission`.
+    /// The store of the `side` models of `config`, run on `venue`.
     fn side_store(
         root: &Path,
         config: &ModelConfig,
-        commission: &Commission,
+        venue: &DatasetVenue,
         side: Side,
     ) -> ModelStore {
         ModelStore::new(
@@ -627,7 +619,7 @@ mod tests {
             &features(),
             config,
             &requirements(),
-            commission,
+            venue,
             side,
         )
         .unwrap()
@@ -645,9 +637,14 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million.
-    fn commission() -> Commission {
-        Commission::Rate("0.00003".to_string())
+    /// The venue of the dataset runs: a commission rate of 30 per million,
+    /// 10 million USD, no leverage.
+    fn venue() -> DatasetVenue {
+        DatasetVenue {
+            commission: Commission::Rate("0.00003".to_string()),
+            balance: Money::from("10000000 USD"),
+            leverage: Decimal::ONE,
+        }
     }
 
     fn at(time: &str) -> Timestamp {
@@ -876,7 +873,7 @@ mod tests {
             config,
             meta,
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
     }
@@ -926,11 +923,11 @@ mod tests {
     #[test]
     fn the_long_and_the_short_models_are_listed_apart() {
         let dir = tempfile::tempdir().unwrap();
-        side_store(dir.path(), &config(), &commission(), Side::Long)
+        side_store(dir.path(), &config(), &venue(), Side::Long)
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
 
-        let short = side_store(dir.path(), &config(), &commission(), Side::Short);
+        let short = side_store(dir.path(), &config(), &venue(), Side::Short);
 
         assert!(short.valid_froms().unwrap().is_empty());
     }
@@ -978,10 +975,17 @@ mod tests {
             Commission::PerOrder("3 USD".to_string()),
         ] {
             assert!(
-                store_net_of(dir.path(), &config(), &other)
-                    .valid_froms()
-                    .unwrap()
-                    .is_empty(),
+                store_net_of(
+                    dir.path(),
+                    &config(),
+                    &DatasetVenue {
+                        commission: other.clone(),
+                        ..venue()
+                    }
+                )
+                .valid_froms()
+                .unwrap()
+                .is_empty(),
                 "{other:?}"
             );
         }

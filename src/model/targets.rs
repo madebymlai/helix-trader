@@ -39,7 +39,8 @@
 //! decision at which that ATR is not yet initialized opens no target, as a
 //! decision on cold features is none. Each exit is on the instrument's
 //! nearest tick (Nautilus' tick grid), a tie away from the decision's
-//! price.
+//! price; an exit on the decision's price, no distance (a stop worth
+//! nothing, a P&L in R of none), opens no target either.
 //!
 //! Each order's client order id names its decision, target, side and leg,
 //! `D{n}-{B|H}{L|S}-{E|TP|SL}`: the decision's number in the run, `B` a
@@ -595,7 +596,10 @@ impl Barrier {
 
     /// The take profit and stop of each side, the long then the short,
     /// from `reference` and, if a distance is in ATRs, the ATR's value
-    /// `atr`, each on the nearest tick of `instrument`.
+    /// `atr`, each on the nearest tick of `instrument`; none if an exit
+    /// rounds onto `reference`, no distance (a stop's worth nothing, a P&L
+    /// in R of none), so that the decision is no target, as one on a cold
+    /// ATR.
     ///
     /// # Errors
     ///
@@ -609,13 +613,13 @@ impl Barrier {
         instrument: &InstrumentAny,
         reference: Decimal,
         atr: Option<f64>,
-    ) -> anyhow::Result<Vec<(Side, Price, Price)>> {
+    ) -> anyhow::Result<Option<Vec<(Side, Price, Price)>>> {
         let atr = atr
             .map(|atr| Decimal::try_from(atr).with_context(|| format!("the ATR {atr}")))
             .transpose()?;
         let take_profit = self.take_profit.length(reference, atr);
         let stop = self.stop.length(reference, atr);
-        Side::BOTH
+        let exits = Side::BOTH
             .into_iter()
             .map(|side| {
                 let favour = side.sign();
@@ -625,7 +629,11 @@ impl Barrier {
                     nearest_tick(instrument, reference - favour * stop, -favour)?,
                 ))
             })
-            .collect()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let off_reference = exits.iter().all(|(_, take_profit, stop)| {
+            take_profit.as_decimal() != reference && stop.as_decimal() != reference
+        });
+        Ok(off_reference.then_some(exits))
     }
 }
 
@@ -787,15 +795,23 @@ impl Stops {
         }
     }
 
+    /// How long after its entry a barrier trade is closed: its limit.
+    #[must_use]
+    pub const fn limit(&self) -> SignedDuration {
+        self.barrier.limit
+    }
+
     /// The barrier of `side` at a decision of `strategy` now, as a trade's
     /// target, and the worth of its stop; none with no price of the
-    /// instrument yet or the ATR not yet initialized, as a dataset run
+    /// instrument yet, the ATR not yet initialized or an exit on the
+    /// decision's price (`Barrier::exits`), as a dataset run
     /// opens no target then.
     ///
     /// # Errors
     ///
     /// Returns an error if the instrument is not in the cache, or an exit
-    /// is outside its prices or the stop has no worth.
+    /// is outside its prices or the stop has no worth (on an inverse
+    /// instrument, see `ensure_linear`).
     pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<(TradeTarget, f64)>>
     where
         S: DataActor + DataActorNative,
@@ -816,7 +832,9 @@ impl Stops {
             return Ok(None);
         };
         let reference = reference.as_decimal();
-        let exits = self.barrier.exits(&instrument, reference, atr)?;
+        let Some(exits) = self.barrier.exits(&instrument, reference, atr)? else {
+            return Ok(None);
+        };
         let (_, take_profit, stop) = exits
             .into_iter()
             .find(|(of, _, _)| *of == side)
@@ -850,13 +868,15 @@ impl Debug for Stops {
 ///
 /// # Errors
 ///
-/// Returns an error if `quantity` or `distance` cannot be made in the
-/// instrument's sizes and prices.
+/// Returns an error if `instrument` is inverse (see `ensure_linear`), or
+/// `quantity` or `distance` cannot be made in the instrument's sizes and
+/// prices.
 pub fn stop_worth(
     instrument: &InstrumentAny,
     quantity: Quantity,
     distance: f64,
 ) -> anyhow::Result<f64> {
+    ensure_linear(instrument)?;
     let size = quantity.as_decimal();
     let quantity = instrument
         .try_make_qty_from_decimal(size, None)
@@ -865,6 +885,22 @@ pub fn stop_worth(
     Ok(instrument
         .try_calculate_notional_value(quantity, distance, None)?
         .as_f64())
+}
+
+/// Checks that a barrier's stops on `instrument` have a worth
+/// (`stop_worth`): Nautilus' notional value of an inverse instrument's
+/// distance divides by it as a price, which is not what the stop risks.
+///
+/// # Errors
+///
+/// Returns an error if `instrument` is inverse.
+pub fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
+    ensure!(
+        !instrument.is_inverse(),
+        "{} is inverse: a barrier's stop on it has no worth in R",
+        instrument.id()
+    );
+    Ok(())
 }
 
 /// Nautilus' side of the ATR: it reads the bars of its bar type alone.
@@ -983,8 +1019,9 @@ impl Targets {
     /// Opens the targets of the decision of `row`: for each target and
     /// side, its orders, from `strategy`, and each target's time alert.
     /// With no price of the instrument yet, the decision is unsettled;
-    /// with the barrier's ATR not yet initialized, it opens nothing, as a
-    /// decision on cold features is none.
+    /// with the barrier's ATR not yet initialized, or an exit of the
+    /// barrier on the decision's price (`Barrier::exits`), it opens
+    /// nothing, as a decision on cold features is none.
     ///
     /// # Errors
     ///
@@ -1010,7 +1047,7 @@ impl Targets {
                 Some(value)
             }
         };
-        let decision = {
+        let next_decision = || {
             let mut state = self.state.borrow_mut();
             state.next += 1;
             state.next - 1
@@ -1025,16 +1062,27 @@ impl Targets {
         };
         let Some(reference) = reference else {
             log::error!(
-                "decision {decision} at {time}: no price of {instrument_id} to set its targets \
-                 from; unsettled"
+                "decision {} at {time}: no price of {instrument_id} to set its targets from; \
+                 unsettled",
+                next_decision()
             );
             return Ok(());
         };
         let reference = reference.as_decimal();
         let exits = match self.config.barrier {
-            Some(barrier) => barrier.exits(&instrument, reference, atr)?,
+            Some(barrier) => match barrier.exits(&instrument, reference, atr)? {
+                Some(exits) => exits,
+                None => {
+                    log::debug!(
+                        "decision at {time}: an exit of the barrier is on the price {reference} \
+                         of {instrument_id}; no targets"
+                    );
+                    return Ok(());
+                }
+            },
             None => vec![],
         };
+        let decision = next_decision();
         self.state
             .borrow_mut()
             .open
@@ -1510,8 +1558,61 @@ impl TradeTarget {
         let at = Timestamp::from(strategy.clock().timestamp_ns()) + self.after();
         strategy
             .clock()
-            .set_time_alert(&format!("{TIME_ALERT}{entry}"), at, None, None)
+            .set_time_alert(&trade_alert(entry), at, None, None)
     }
+}
+
+/// Sets again, from `strategy`'s start (a restart), the time alert of
+/// each of its trades on `instrument_id` still open, closed `after` its
+/// entry (the target's limit or horizon): `after` the entry's fill, when
+/// its position opened, or now if that has passed (the clock's
+/// `allow_past`). A trade still open is an open position of the strategy
+/// whose opening order is a trade's entry: no bracket's leg, nor any
+/// other reduce-only order.
+///
+/// # Errors
+///
+/// Returns an error if Nautilus refuses an alert.
+pub fn arm_open_trades<S>(
+    strategy: &mut S,
+    instrument_id: InstrumentId,
+    after: SignedDuration,
+) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActor + DataActorNative,
+{
+    let strategy_id = strategy.strategy_id();
+    let open: Vec<(ClientOrderId, Timestamp)> = {
+        let cache = strategy.cache();
+        cache
+            .positions_open(None, Some(&instrument_id), strategy_id.as_ref(), None, None)
+            .into_iter()
+            .filter(|position| {
+                cache
+                    .order(&position.opening_order_id)
+                    .is_some_and(|entry| {
+                        entry.parent_order_id().is_none() && !entry.is_reduce_only()
+                    })
+            })
+            .map(|position| {
+                (
+                    position.opening_order_id,
+                    Timestamp::from(position.ts_opened),
+                )
+            })
+            .collect()
+    };
+    for (entry, opened) in open {
+        strategy
+            .clock()
+            .set_time_alert(&trade_alert(entry), opened + after, None, None)?;
+    }
+    Ok(())
+}
+
+/// The name of the time alert of the trade of `entry`.
+fn trade_alert(entry: ClientOrderId) -> String {
+    format!("{TIME_ALERT}{entry}")
 }
 
 /// At the time alert of a trade (`TradeTarget::send`), closes it
