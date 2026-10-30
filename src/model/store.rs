@@ -49,6 +49,7 @@ use super::{
     learner::{LearnerConfig, Model, SavedModel},
     targets::{Label, TargetsConfig},
 };
+use crate::strategy::DataRequirements;
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
@@ -150,17 +151,19 @@ impl StoredModel {
 
 impl ModelStore {
     /// The store, under `root`, of the models of `strategy_id` deciding with
-    /// `features` as `config` says, on targets net of `commission`, and
-    /// trained as `config` says.
+    /// `features` as `config` says, on targets for a strategy of
+    /// `requirements`, net of `commission`, and trained as `config` says.
     ///
     /// # Errors
     ///
-    /// Returns an error if the learner cannot be written as JSON.
+    /// Returns an error if the learner cannot be written as JSON, or as
+    /// `dataset::fingerprint` does.
     pub fn new(
         root: &Path,
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &ModelConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
         let settings = Fingerprint::default()
@@ -176,8 +179,9 @@ impl ModelStore {
                 features,
                 config.decision,
                 &config.targets,
+                requirements,
                 commission,
-            )
+            )?
             .join(settings.to_string()),
         })
     }
@@ -201,16 +205,18 @@ impl ModelStore {
 
     /// The store, under `root`, of the meta models of `strategy_id`, whose
     /// primary is its rule, deciding with `features` as `config` says, on
-    /// targets net of `commission`.
+    /// targets for a strategy of `requirements`, net of `commission`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the learner cannot be written as JSON.
+    /// Returns an error if the learner cannot be written as JSON, or as
+    /// `dataset::fingerprint` does.
     pub fn of_rule(
         root: &Path,
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &RuleConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -220,8 +226,9 @@ impl ModelStore {
                 features,
                 config.decision,
                 &config.targets,
+                requirements,
                 commission,
-            )
+            )?
             .join(META)
             .join(meta_settings(&config.meta)?.to_string()),
         })
@@ -296,18 +303,21 @@ impl ModelStore {
 }
 
 /// The directory, under `root`, of the stores of `strategy_id` deciding
-/// with `features` on `rule`, of `targets` net of `commission`: its id and
-/// its dataset's fingerprint.
+/// with `features` on `rule`, of `targets` for a strategy of `requirements`,
+/// net of `commission`: its id and its dataset's fingerprint.
 fn dataset_directory(
     root: &Path,
     strategy_id: StrategyId,
     features: &FeatureSet,
     rule: DecisionRule,
     targets: &TargetsConfig,
+    requirements: &DataRequirements,
     commission: &Commission,
-) -> PathBuf {
-    root.join(strategy_id.as_str())
-        .join(dataset::fingerprint(features, rule, targets, commission).to_string())
+) -> anyhow::Result<PathBuf> {
+    let fingerprint = dataset::fingerprint(features, rule, targets, requirements, commission)?;
+    Ok(root
+        .join(strategy_id.as_str())
+        .join(fingerprint.to_string()))
 }
 
 /// The training settings of `meta`: its learner, window, holdout and
@@ -484,9 +494,22 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features(),
             config,
+            &requirements(),
             commission,
         )
         .unwrap()
+    }
+
+    /// What the strategy reads: the quotes of gold.
+    fn requirements() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![crate::strategy::TickSeries {
+                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(GOLD),
+            }],
+            warmup: SignedDuration::ZERO,
+        }
     }
 
     /// A commission rate of 30 per million.

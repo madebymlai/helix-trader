@@ -610,14 +610,16 @@ of its choosing (`model::features`, `model::decide`).
   warmup, the shared indicator
   code (`model::features` itself and Nautilus' indicators, named by the
   git source `Cargo.lock` pins, through `build.rs`), the rule and
-  `model::decide`'s own code; `targets::fingerprint(fingerprint, &config)`
-  adds the targets and `model::targets`' code, and
-  `dataset::fingerprint(&features, rule, &targets, &commission)` all of
-  it and the commission of the dataset runs, as given, normalized
-  (`Commission::PerOrder` or `Commission::Rate`, `3 USD` for `3.00 USD`,
-  `0.00003` for `0.000030`): the targets are net of
-  it, so rows and models of other costs are never read. The runs' balance
-  and leverage are not in it: large enough, they deny no target.
+  `model::decide`'s own code; `targets::fingerprint(fingerprint, &config,
+  rule, &requirements)` adds the targets, their barrier's ATR as it runs
+  (its period and its bars, whose source is what the strategy reads), and
+  `model::targets`' code, and `dataset::fingerprint(&features, rule,
+  &targets, &requirements, &commission)` all of it and the commission of
+  the dataset runs, as given, normalized (`Commission::PerOrder` or
+  `Commission::Rate`, `3 USD` for `3.00 USD`, `0.00003` for `0.000030`):
+  the targets are net of it, so rows and models of other costs are
+  never read. The runs' balance and leverage are not in it: large
+  enough, they deny no target.
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
   venue with a large balance) each decision's targets come from real
   orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
@@ -628,11 +630,22 @@ of its choosing (`model::features`, `model::decide`).
   quote's mid, else the last trade, else the last bar's close), each in
   one unit (`Distance`): basis points of that price, `{ bps = 20 }`, or
   multiples of an average true range, `{ atr = 2.0 }`. The ATR is
-  Nautilus' `AverageTrueRange` (Wilder's average) of 14 bars, the mids
-  of the targets' instrument built from its quotes at the decision
-  cadence (`TargetsConfig::atr_bars`): deciding every 15 minutes,
-  `EURUSD.ICMARKETS-15-MINUTE-MID-INTERNAL`. The bars are not declared
-  anywhere:
+  Nautilus' `AverageTrueRange` (Wilder's average) of 14 bars of the
+  targets' instrument at the decision cadence, built by Nautilus from
+  what the strategy reads of that instrument (its `DataRequirements`,
+  the bars' sources among them), the first that applies
+  (`TargetsConfig::atr_bars`), deciding every 15 minutes:
+
+  | The strategy reads | The ATR's bars | Such as |
+  |---|---|---|
+  | its quotes | their mids | `EURUSD.ICMARKETS-15-MINUTE-MID-INTERNAL` |
+  | its trades, no quotes | their last prices | `ESZ6.CME-15-MINUTE-LAST-INTERNAL` |
+  | its source bars alone | composite bars of them, priced as they are | `BTC-USDT-SWAP.OKX-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL` |
+
+  Quotes or trades read through bars built from them count. Of several
+  source bars, the ATR's are built from the longest whose length the
+  cadence is a whole multiple of, the first in `catalog_series` order at
+  a tie. The bars are not declared anywhere:
 
   ```toml
   [barrier]
@@ -643,8 +656,15 @@ of its choosing (`model::features`, `model::decide`).
 
   An `atr` table sets another period, `atr = { period = 20 }`, and is
   refused without an `atr` distance; decisions on events, with no
-  cadence, are refused with an ATR, and so is a cadence Nautilus builds
-  no bars of (a step must divide the next unit: 15 minutes, not 90).
+  cadence, are refused with an ATR, and so are a cadence Nautilus builds
+  no bars of (a step must divide the next unit: 15 minutes, not 90), a
+  strategy reading neither quotes, trades nor bars of the instrument,
+  and, on source bars alone, a cadence that is a whole multiple of none
+  of them (hourly decisions on 2-hour bars), the error naming both. In a
+  backtest, a source bar stamped at the close of a bar of the cadence is
+  replayed before the timer closing that bar, so the bar holds it and the
+  decision 10 ms later reads it. The targets run only in dataset runs,
+  backtests: live, no ATR bars are built.
   Each exit is on the instrument's nearest tick (Nautilus' tick grid,
   `next_bid_price` and `next_ask_price`), a tie away from the decision's
   price. The targets own the ATR: `start(self)` in `on_start` registers
@@ -655,7 +675,8 @@ of its choosing (`model::features`, `model::decide`).
   do not warm it: a dataset run's replay of the warmup before its first
   day does. A decision at which the ATR is not yet initialized opens no
   target, logged at debug, as cold features give no decision. The
-  strategy shares a `Targets` (`Targets::new(config, rule)`, an `Rc`),
+  strategy shares a `Targets` (`Targets::new(config, rule,
+  &requirements)`, an `Rc`),
   calls `open(self, row)`
   with each row `decide` returns, and hands it
   `on_time_event`, `on_order_filled`, `on_order_denied`,
@@ -688,10 +709,11 @@ of its choosing (`model::features`, `model::decide`).
   horizon, the long then the short, its P&L and its exit, 1 a take
   profit, -1 a stop, 0 the time; `TargetRow::values`), the settling and
   decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
-  &features, rule, targets, &commission)`) stores them under the strategy
-  id and the fingerprint, so another strategy, of another width, has its
-  own, and a change to the features, the rule, the targets or the
-  commission finds none; the
+  &features, rule, targets, &requirements, &commission)`) stores them
+  under the strategy id and the fingerprint, so another strategy, of
+  another width, has its own, and a change to the features, the rule,
+  the targets, what the strategy reads under an ATR or the commission
+  finds none; the
   feature names go in the data type's metadata, not in each row. The
   catalog's coverage is the day cache: `missing(first, last)` gives the
   days it lacks, from the catalog's missing intervals, and `build(first,
@@ -736,8 +758,8 @@ of its choosing (`model::features`, `model::decide`).
   `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
   and `learner`. `validate(&requirements)` refuses a retrain interval not
   positive, a traded instrument the strategy does not read, a barrier ATR
-  on an instrument whose quotes it does not read (they build the ATR's
-  bars) or whose period of bars, the given or the default, at the
+  without bars built from what it reads of that instrument (above) or
+  whose period of bars, the given or the default, at the
   decision cadence is longer than the strategy's warmup (a dataset run
   replays only the warmup before its first day, so the ATR would be cold
   at its first decisions; as long is enough), a label of a
@@ -747,9 +769,9 @@ of its choosing (`model::features`, `model::decide`).
   outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
   meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
-  config, &commission)` and `train_at(t, replay)` (`model::train`) train
-  at `t`: the rows of the window ending at `t` settled by `t`
-  (`Dataset::settled`),
+  config, &requirements, &commission)` and `train_at(t, replay)`
+  (`model::train`) train at `t`: the rows of the window ending at `t`
+  settled by `t` (`Dataset::settled`),
   so the purge between them and the model's first use is the longest
   target; the model fitted on those before the holdout, the window's
   last part, settled by its start, the same gap; scored by the AUC of its
@@ -785,9 +807,10 @@ of its choosing (`model::features`, `model::decide`).
   the backtest's scores and the meta's rows all use it.
 - **Model handle.** A strategy trading on its model holds a `ModelHandle`
   (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
-  mode)`, an `Rc`), the one place it decides: `start(self, &bar_types)`
-  in `on_start` registers the features and starts the cadence, live
-  `warmup::live_bar_build_delay(&bar_types)` late; `decide(self)` at each
+  &requirements, mode)`, an `Rc`), the one place it decides:
+  `start(self, &bar_types)` in `on_start` registers the features and
+  starts the cadence, live `warmup::live_bar_build_delay(&bar_types)`
+  late; `decide(self)` at each
   fresh decision, on data of the targets' instrument (`new` refuses a
   cadence on features reading none of it), snapshots the features and
   publishes their row, then, in
@@ -853,7 +876,7 @@ of its choosing (`model::features`, `model::decide`).
   its time came from, so the interval does not key the store.
 - **Retraining backtest.** `WalkForward` (`model::walk`,
   `WalkForward::new(catalog, models, strategy_id, &features, config,
-  &commission)`)
+  &requirements, &commission)`)
   holds a backtest's retrains and scores: `prepare(start, end, build,
   train)` has `build` build the dataset from the first retrain's window
   to `end` if it lacks a day, then `train` train at each missing retrain

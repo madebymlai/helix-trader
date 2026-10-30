@@ -12,7 +12,7 @@
 
 use anyhow::ensure;
 use jiff::SignedDuration;
-use nautilus_model::{data::NautilusDataType, enums::OrderSide};
+use nautilus_model::enums::OrderSide;
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
 
@@ -166,14 +166,15 @@ impl ModelConfig {
     /// are invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
     /// `LearnerConfig::validate`), the retrain interval is not positive,
     /// the targets trade an instrument the strategy does not read, the
-    /// barrier's ATR is on an instrument whose quotes it does not read
-    /// (they build the ATR's bars) or warms over longer than its warmup,
-    /// the label names a target the config lacks, a target (the barrier's
-    /// limit or the horizon) is not shorter than the window, the holdout
-    /// is not positive or leaves no fitted row (it and the longest target
-    /// not shorter than the window), the thresholds are not probabilities
-    /// with the short below the long, the minimum score is not an AUC, or
-    /// the meta model is invalid (see `MetaConfig::validate`).
+    /// barrier's ATR has no bars built from what it reads of that
+    /// instrument (see `TargetsConfig::atr_bars`) or warms over longer than
+    /// its warmup, the label names a target the config lacks, a target
+    /// (the barrier's limit or the horizon) is not shorter than the
+    /// window, the holdout is not positive or leaves no fitted row (it and
+    /// the longest target not shorter than the window), the thresholds are
+    /// not probabilities with the short below the long, the minimum score
+    /// is not an AUC, or the meta model is invalid (see
+    /// `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
         self.learner.validate()?;
@@ -205,9 +206,9 @@ impl RuleConfig {
     ///
     /// Returns an error if the decision rule or the targets are invalid,
     /// the retrain interval is not positive, the targets trade an
-    /// instrument the strategy does not read, the barrier's ATR is on
-    /// quotes it does not read or warms over longer than its warmup (as
-    /// `ModelConfig::validate`), or the meta model is invalid (see
+    /// instrument the strategy does not read, the barrier's ATR has no
+    /// bars built from what it reads or warms over longer than its warmup
+    /// (as `ModelConfig::validate`), or the meta model is invalid (see
     /// `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
@@ -278,7 +279,7 @@ fn validate_decisions(
     requirements: &DataRequirements,
 ) -> anyhow::Result<()> {
     rule.validate()?;
-    targets.validate(rule)?;
+    targets.validate(rule, requirements)?;
     ensure!(
         retrain.is_positive(),
         "the retrain interval {retrain:#} is not positive"
@@ -288,15 +289,7 @@ fn validate_decisions(
         requirements.instrument_ids().contains(&traded),
         "the targets trade {traded}, which the strategy does not read"
     );
-    if let Some(atr) = targets.atr_bars(rule)? {
-        ensure!(
-            requirements
-                .catalog_series()
-                .contains(&(NautilusDataType::QuoteTick, traded.to_string())),
-            "the barrier's ATR is on {}, built from the quotes of {traded}, which the \
-             strategy does not read",
-            atr.bar_type
-        );
+    if let Some(atr) = targets.atr_bars(rule, requirements)? {
         // A dataset run replays the warmup before its first day, and no
         // more: an ATR still cold then opens no target at the day's first
         // decisions, which a longer build would.
@@ -344,7 +337,7 @@ fn validate_min_score(min_score: f64) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::identifiers::InstrumentId;
+    use nautilus_model::{data::BarType, identifiers::InstrumentId};
 
     use super::*;
     use crate::strategy::TickSeries;
@@ -577,25 +570,77 @@ mod tests {
         }
     }
 
-    /// The ATR's bars are built from the quotes of the targets' instrument:
-    /// a strategy replaying only its trades would leave it cold.
+    /// The requirements of a strategy reading `ticks` of gold, each by the
+    /// name Nautilus parses, and `bar_types`, warming for 14 hours, as the
+    /// default ATR of hourly bars does.
+    fn reading_gold(ticks: &[&str], bar_types: &[&str]) -> DataRequirements {
+        DataRequirements {
+            bar_types: bar_types
+                .iter()
+                .map(|&bar_type| BarType::from(bar_type))
+                .collect(),
+            ticks: ticks
+                .iter()
+                .map(|data| {
+                    toml::from_str::<TickSeries>(&format!(
+                        r#"data = "{data}"
+                           instrument_id = "{GOLD}""#
+                    ))
+                    .unwrap()
+                })
+                .collect(),
+            warmup: SignedDuration::from_hours(14),
+        }
+    }
+
+    /// Without quotes, the ATR's bars are built from the trades, or from
+    /// the source bars the strategy reads.
     #[test]
-    fn a_barrier_atr_without_the_quotes_of_its_instrument_is_refused() {
+    fn a_barrier_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes() {
         let config: ModelConfig = toml::from_str(&atr_section(None)).unwrap();
-        let requirements = DataRequirements {
-            ticks: vec![
-                toml::from_str::<TickSeries>(&format!(
-                    r#"data = "trades"
-                       instrument_id = "{GOLD}""#
-                ))
-                .unwrap(),
-            ],
-            ..reading_gold_for(SignedDuration::from_hours(14))
-        };
+
+        for requirements in [
+            reading_gold(&["trades"], &[]),
+            reading_gold(
+                &[],
+                &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
+            ),
+        ] {
+            assert!(config.validate(&requirements).is_ok(), "{requirements:?}");
+        }
+    }
+
+    /// Neither quotes, trades nor bars of the targets' instrument: the
+    /// ATR's bars have nothing to be built from.
+    #[test]
+    fn a_barrier_atr_on_an_instrument_whose_prices_the_strategy_does_not_read_is_refused() {
+        let config: ModelConfig = toml::from_str(&atr_section(None)).unwrap();
+
+        let err = format!(
+            "{:#}",
+            config
+                .validate(&reading_gold(&["order_book_depths"], &[]))
+                .unwrap_err()
+        );
+
+        assert!(err.contains("ATR") && err.contains(GOLD), "{err}");
+    }
+
+    /// Hourly decisions cannot have bars of 2-hour source bars.
+    #[test]
+    fn a_barrier_atr_on_source_bars_longer_than_the_cadence_is_refused() {
+        let config: ModelConfig = toml::from_str(&atr_section(None)).unwrap();
+        let requirements = reading_gold(
+            &[],
+            &["XAUUSD.ICMARKETS-4-HOUR-LAST-INTERNAL@2-HOUR-EXTERNAL"],
+        );
 
         let err = format!("{:#}", config.validate(&requirements).unwrap_err());
 
-        assert!(err.contains("quotes"), "{err}");
+        assert!(
+            err.contains("1h") && err.contains("XAUUSD.ICMARKETS-2-HOUR-LAST-EXTERNAL"),
+            "{err}"
+        );
     }
 
     #[test]

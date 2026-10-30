@@ -12,8 +12,8 @@ use std::{collections::VecDeque, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Lcg, STRATEGY, commission, config, features, replay, replay_of, replay_on, rule, targets,
-        walk,
+        Lcg, STRATEGY, commission, config, features, replay, replay_of, replay_on, requirements,
+        rule, targets, walk,
     },
     ic,
 };
@@ -52,6 +52,7 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
         &features(),
         rule(),
         targets(),
+        &requirements(),
         &commission(),
     )
     .unwrap();
@@ -172,6 +173,7 @@ fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
             &two_hour_mean(),
             rule(),
             targets(),
+            &requirements(),
             &commission(),
         )
         .unwrap();
@@ -245,6 +247,7 @@ fn stored_by_a_build_to(last: Date, from: Timestamp, to: Timestamp) -> Vec<Datas
             &features(),
             rule(),
             targets(),
+            &requirements(),
             &commission(),
         )
         .unwrap();
@@ -361,6 +364,7 @@ fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> 
             &mid_warming_for(warmup),
             config.decision,
             config.targets.clone(),
+            &requirements(),
             &commission(),
         )
         .unwrap();

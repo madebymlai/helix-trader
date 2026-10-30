@@ -23,7 +23,8 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, backtest, commission, config, replay_on, rule, targets, trade_on, walk,
+        Missing, STRATEGY, backtest, commission, config, replay_on, requirements, rule, targets,
+        trade_on, walk,
     },
     ic,
 };
@@ -154,6 +155,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
         StrategyId::from(STRATEGY),
         &features(false),
         model_primary(),
+        &requirements(),
         &commission(),
     )
     .unwrap()
@@ -168,6 +170,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     &features(false),
                     rule(),
                     targets(),
+                    &requirements(),
                     &commission(),
                 )?;
                 let (first, last) = dataset::days(from, to);
@@ -185,6 +188,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     StrategyId::from(STRATEGY),
                     &features(false),
                     model_primary(),
+                    &requirements(),
                     &commission(),
                 )
                 .unwrap()
@@ -229,6 +233,7 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
         StrategyId::from(STRATEGY),
         &features(false),
         &model_primary(),
+        &requirements(),
         &commission(),
     )
     .unwrap();
@@ -369,6 +374,7 @@ fn rule_probe(mode: Mode) -> (RuleProbe, Trades) {
             StrategyId::from(STRATEGY),
             features(true),
             &rule_primary(),
+            &requirements(),
             mode,
         )
         .unwrap(),
@@ -398,6 +404,7 @@ fn rule_dataset(catalog: &TempDir) -> Dataset {
         &features(true),
         rule(),
         targets(),
+        &requirements(),
         &commission(),
     )
     .unwrap()
@@ -427,6 +434,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
                     StrategyId::from(STRATEGY),
                     &features(true),
                     rule_primary(),
+                    &requirements(),
                     &commission(),
                 )
                 .unwrap()
@@ -467,6 +475,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
         StrategyId::from(STRATEGY),
         &features(true),
         &rule_primary(),
+        &requirements(),
         &commission(),
     )
     .unwrap();

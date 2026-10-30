@@ -47,6 +47,7 @@ use super::{
     store::{ModelManifest, ModelStore, Probe, StoredModel},
     targets::{Label, TargetRow, TargetsConfig},
 };
+use crate::strategy::DataRequirements;
 
 /// The most rows of the holdout a published model is probed on.
 const PROBES: usize = 16;
@@ -130,9 +131,10 @@ pub enum Kept {
 
 impl Training {
     /// The training of `strategy_id`'s model, and of its meta model if
-    /// `config` has one, deciding with `features`, on its dataset, net of
-    /// `commission`, in the catalog at `catalog` and its models in the
-    /// store under `models`, as `config` says.
+    /// `config` has one, deciding with `features`, on its dataset, for a
+    /// strategy of `requirements`, net of `commission`, in the catalog at
+    /// `catalog` and its models in the store under `models`, as `config`
+    /// says.
     ///
     /// # Errors
     ///
@@ -145,6 +147,7 @@ impl Training {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: ModelConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
         let label = config
@@ -159,15 +162,29 @@ impl Training {
                 holdout: config.holdout,
                 min_score: config.min_score,
                 learner: config.learner.clone(),
-                store: ModelStore::new(models, strategy_id, features, &config, commission)?,
+                store: ModelStore::new(
+                    models,
+                    strategy_id,
+                    features,
+                    &config,
+                    requirements,
+                    commission,
+                )?,
             },
             label,
         };
-        let meta =
-            Meta::of_model(models, strategy_id, features, &config, commission)?.map(|meta| {
-                let level = Level::of_meta(&meta);
-                (level, meta)
-            });
+        let meta = Meta::of_model(
+            models,
+            strategy_id,
+            features,
+            &config,
+            requirements,
+            commission,
+        )?
+        .map(|meta| {
+            let level = Level::of_meta(&meta);
+            (level, meta)
+        });
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -176,6 +193,7 @@ impl Training {
                 features,
                 config.decision,
                 config.targets.clone(),
+                requirements,
                 commission,
             )?,
             targets: config.targets,
@@ -186,9 +204,9 @@ impl Training {
 
     /// The training of the meta model of `strategy_id`, whose primary is
     /// its rule, deciding with `features` (which declare the rule's side
-    /// and probability), on its dataset, net of `commission`, in the catalog
-    /// at `catalog` and its models in the store under `models`, as `config`
-    /// says.
+    /// and probability), on its dataset, for a strategy of `requirements`,
+    /// net of `commission`, in the catalog at `catalog` and its models in
+    /// the store under `models`, as `config` says.
     ///
     /// # Errors
     ///
@@ -200,9 +218,17 @@ impl Training {
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: RuleConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
-        let meta = Meta::of_rule(models, strategy_id, features, &config, commission)?;
+        let meta = Meta::of_rule(
+            models,
+            strategy_id,
+            features,
+            &config,
+            requirements,
+            commission,
+        )?;
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -211,6 +237,7 @@ impl Training {
                 features,
                 config.decision,
                 config.targets.clone(),
+                requirements,
                 commission,
             )?,
             targets: config.targets,
@@ -542,6 +569,18 @@ mod tests {
             .build()
     }
 
+    /// What the strategy reads: the quotes of gold.
+    fn requirements() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![crate::strategy::TickSeries {
+                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(GOLD),
+            }],
+            warmup: SignedDuration::ZERO,
+        }
+    }
+
     /// A commission rate of 30 per million.
     fn commission() -> Commission {
         Commission::Rate("0.00003".to_string())
@@ -556,6 +595,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features(1),
             config,
+            &requirements(),
             &commission(),
         )
         .unwrap()
@@ -692,8 +732,10 @@ mod tests {
                 &features(1),
                 config().decision,
                 &config().targets,
-                &commission()
+                &requirements(),
+                &commission(),
             )
+            .unwrap()
             .to_string()
         );
         assert_eq!(manifest.targets, config().targets);
@@ -841,8 +883,10 @@ mod tests {
                         &features(1),
                         config.decision,
                         &config.targets,
+                        &requirements(),
                         &commission(),
                     )
+                    .unwrap()
                     .to_string(),
                     feature_names: vec!["mid_0".to_string()],
                     targets: config.targets,
@@ -990,6 +1034,7 @@ mod tests {
                 retrain: config.retrain,
                 meta: meta(24),
             },
+            &requirements(),
             &commission(),
         )
         .unwrap();

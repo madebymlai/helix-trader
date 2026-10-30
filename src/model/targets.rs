@@ -19,14 +19,19 @@
 //! trade, else the close of its last bar. Each distance is relative
 //! (`Distance`): basis points of that price, or multiples of an average
 //! true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR_PERIOD` bars
-//! unless the barrier gives another period. Its bars are the mids of the
-//! instrument built from its quotes at the decision cadence
-//! (`TargetsConfig::atr_bars`), so a decision reads the bar closing at its
-//! time; the targets own the ATR, and `Targets::start` registers it and
-//! subscribes to its bars, which no strategy declares. A decision at which
-//! that ATR is not yet initialized opens no target, as a decision on cold
-//! features is none. Each exit is on the instrument's nearest tick
-//! (Nautilus' tick grid), a tie away from the decision's price.
+//! unless the barrier gives another period. Its bars are Nautilus' bars of
+//! the instrument at the decision cadence, so a decision reads the bar
+//! closing at its time, built from what the strategy reads of it
+//! (`TargetsConfig::atr_bars`): the mids of its quotes, else the last
+//! prices of its trades, else, of its source bars alone, a composite bar
+//! type built from them. A backtest replays a source bar stamped at its
+//! close before the timer closing the bar of the cadence at that instant,
+//! so that bar holds it. The targets own the ATR, and `Targets::start`
+//! registers it and subscribes to its bars, which no strategy declares. A
+//! decision at which that ATR is not yet initialized opens no target, as a
+//! decision on cold features is none. Each exit is on the instrument's
+//! nearest tick (Nautilus' tick grid), a tie away from the decision's
+//! price.
 //!
 //! Each order's client order id names its decision, target, side and leg,
 //! `D{n}-{B|H}{L|S}-{E|TP|SL}`: the decision's number in the run, `B` a
@@ -77,7 +82,7 @@ use nautilus_indicators::{indicator::Indicator, volatility::atr::AverageTrueRang
 use nautilus_model::{
     data::{
         Bar, BarSpecification, BarType, CustomData, CustomDataTrait, DataType, HasTsInit,
-        QuoteTick, TradeTick,
+        NautilusDataType, QuoteTick, TradeTick,
     },
     enums::{AggregationSource, BarAggregation, OrderSide, PriceType},
     events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
@@ -96,6 +101,7 @@ use super::{
     decide::{DecisionRule, FeatureRow},
     features::Fingerprint,
 };
+use crate::strategy::DataRequirements;
 
 /// The prefix of a target's time alert, followed by its decision and
 /// target, such as `TARGET-TIME:D12-B`.
@@ -163,10 +169,21 @@ pub struct AtrConfig {
 /// The period of a barrier's ATR without an `atr` table: Wilder's 14 bars.
 pub const DEFAULT_ATR_PERIOD: usize = 14;
 
+/// The units of the ATR's bars, longest first, each its length: those of
+/// a fixed length, which a cadence, or the source bars of a composite bar
+/// type, is a whole number of.
+const ATR_UNITS: [(BarAggregation, SignedDuration); 5] = [
+    (BarAggregation::Day, SignedDuration::from_hours(24)),
+    (BarAggregation::Hour, SignedDuration::from_hours(1)),
+    (BarAggregation::Minute, SignedDuration::from_mins(1)),
+    (BarAggregation::Second, SignedDuration::from_secs(1)),
+    (BarAggregation::Millisecond, SignedDuration::from_millis(1)),
+];
+
 /// The average true range a barrier runs: over `period` bars of
-/// `bar_type`, the mids of the targets' instrument built from its quotes
-/// at the decision cadence, so that a decision reads the bar closing at
-/// its time.
+/// `bar_type`, bars of the targets' instrument at the decision cadence,
+/// so that a decision reads the bar closing at its time
+/// (`TargetsConfig::atr_bars`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtrBars {
     pub bar_type: BarType,
@@ -284,8 +301,13 @@ impl TargetsConfig {
     /// Returns an error if there is no target, or the size, a barrier's
     /// distance, its limit, its ATR's period or the horizon is not
     /// positive, or the barrier has an `atr` table no distance uses, or
-    /// an ATR without bars at the cadence of `rule` (see `atr_bars`).
-    pub fn validate(&self, rule: DecisionRule) -> anyhow::Result<()> {
+    /// an ATR without bars at the cadence of `rule` built from what a
+    /// strategy of `requirements` reads (see `atr_bars`).
+    pub fn validate(
+        &self,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+    ) -> anyhow::Result<()> {
         ensure!(
             self.barrier.is_some() || self.horizon.is_some(),
             "no target: neither a barrier nor a horizon"
@@ -312,7 +334,7 @@ impl TargetsConfig {
                 barrier.atr_period() != Some(0),
                 "the barrier's ATR period must be positive"
             );
-            self.atr_bars(rule)?;
+            self.atr_bars(rule, requirements)?;
         }
         if let Some(horizon) = self.horizon {
             ensure!(
@@ -323,20 +345,38 @@ impl TargetsConfig {
         Ok(())
     }
 
-    /// The barrier's average true range deciding on `rule`, if a distance
-    /// is in ATRs: its period, and its bars, the mids of the targets'
-    /// instrument built from its quotes (internal) at the decision cadence,
-    /// such as `EURUSD.ICMARKETS-15-MINUTE-MID-INTERNAL` every 15 minutes.
-    /// The step is the cadence in its largest whole unit, from days to
+    /// The barrier's average true range deciding on `rule`, for a strategy
+    /// of `requirements`, if a distance is in ATRs: its period, and its
+    /// bars, Nautilus' internal bars of the targets' instrument at the
+    /// decision cadence, built from what the strategy reads of it, the
+    /// first of:
+    ///
+    /// - its quotes: their mids, `XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL`
+    ///   every 15 minutes;
+    /// - its trades: their last prices, `..-15-MINUTE-LAST-INTERNAL`;
+    /// - its source bars (`DataRequirements::source_bars`): a composite bar
+    ///   type built from them, priced as they are,
+    ///   `..-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL`; of several, the
+    ///   longest whose length the cadence is a whole multiple of, the first
+    ///   in their order at a tie.
+    ///
+    /// Quotes and trades read through bars built from them count. The step
+    /// is the cadence in its largest whole unit, from days to
     /// milliseconds.
     ///
     /// # Errors
     ///
     /// Returns an error if the decisions are on events, with no cadence to
-    /// build bars at, or Nautilus builds no bars of the cadence: a step
-    /// must divide the next unit (`BarSpecification::new_checked`), so
-    /// that bars close on the decisions' grid.
-    pub fn atr_bars(&self, rule: DecisionRule) -> anyhow::Result<Option<AtrBars>> {
+    /// build bars at, Nautilus builds no bars of the cadence (a step must
+    /// divide the next unit, `BarSpecification::new_checked`, so that bars
+    /// close on the decisions' grid), the strategy reads neither quotes,
+    /// trades nor bars of the instrument, or, on bars alone, the cadence is
+    /// a whole multiple of none of them.
+    pub fn atr_bars(
+        &self,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+    ) -> anyhow::Result<Option<AtrBars>> {
         let Some(period) = self.barrier.and_then(|barrier| barrier.atr_period()) else {
             return Ok(None);
         };
@@ -346,15 +386,8 @@ impl TargetsConfig {
                  have none"
             );
         };
-        let units = [
-            (BarAggregation::Day, SignedDuration::from_hours(24)),
-            (BarAggregation::Hour, SignedDuration::from_hours(1)),
-            (BarAggregation::Minute, SignedDuration::from_mins(1)),
-            (BarAggregation::Second, SignedDuration::from_secs(1)),
-            (BarAggregation::Millisecond, SignedDuration::from_millis(1)),
-        ];
         let nanos = cadence.as_nanos();
-        let Some((aggregation, step)) = units
+        let Some((aggregation, step)) = ATR_UNITS
             .into_iter()
             .find(|(_, unit)| nanos % unit.as_nanos() == 0)
             .map(|(aggregation, unit)| (aggregation, nanos / unit.as_nanos()))
@@ -364,24 +397,59 @@ impl TargetsConfig {
                  milliseconds"
             );
         };
-        let spec = usize::try_from(step)
-            .map_err(anyhow::Error::from)
-            .and_then(|step| BarSpecification::new_checked(step, aggregation, PriceType::Mid))
-            .with_context(|| {
-                format!("the barrier's ATR has no bars of the decision cadence {cadence:#}")
-            })?;
-        Ok(Some(AtrBars {
-            bar_type: BarType::new(self.instrument_id, spec, AggregationSource::Internal),
-            period,
-        }))
+        let spec = |price_type| {
+            usize::try_from(step)
+                .map_err(anyhow::Error::from)
+                .and_then(|step| BarSpecification::new_checked(step, aggregation, price_type))
+                .with_context(|| {
+                    format!("the barrier's ATR has no bars of the decision cadence {cadence:#}")
+                })
+        };
+        let traded = self.instrument_id;
+        let series = requirements.catalog_series();
+        let reads = |data| series.contains(&(data, traded.to_string()));
+        let bar_type = if reads(NautilusDataType::QuoteTick) {
+            BarType::new(traded, spec(PriceType::Mid)?, AggregationSource::Internal)
+        } else if reads(NautilusDataType::TradeTick) {
+            BarType::new(traded, spec(PriceType::Last)?, AggregationSource::Internal)
+        } else {
+            let sources: Vec<BarType> = requirements
+                .source_bars()
+                .into_iter()
+                .filter(|source| source.instrument_id() == traded)
+                .collect();
+            ensure!(
+                !sources.is_empty(),
+                "the barrier's ATR has no bars of {traded} to be built from: the strategy reads \
+                 neither its quotes, its trades nor its bars"
+            );
+            let Some(source) = longest_dividing(&sources, cadence) else {
+                let sources: Vec<String> = sources.iter().map(ToString::to_string).collect();
+                bail!(
+                    "the barrier's ATR has no bars of the decision cadence {cadence:#}: it is \
+                     not a whole multiple of the bars of {traded} the strategy reads, {}",
+                    sources.join(", ")
+                );
+            };
+            let of = source.spec();
+            BarType::new_composite_checked(
+                traded,
+                spec(of.price_type)?,
+                AggregationSource::Internal,
+                of.step.get(),
+                of.aggregation,
+                source.aggregation_source(),
+            )?
+        };
+        Ok(Some(AtrBars { bar_type, period }))
     }
 
-    /// The config as the fingerprint reads it: the ATR's period as it
-    /// runs, given or the default. Its bars are the cadence's, which the
-    /// decisions' fingerprint holds.
-    fn fingerprint_part(&self) -> String {
+    /// The config as the fingerprint reads it, its barrier's ATR `atr` as
+    /// it runs: the period, given or the default, and the bars, whose
+    /// source changes the rows.
+    fn fingerprint_part(&self, atr: Option<AtrBars>) -> String {
+        let atr = atr.map(|atr| format!("{} bars of {}", atr.period, atr.bar_type));
         let barrier = self.barrier.map(|b| {
-            let atr = b.atr_period();
             format!(
                 "take profit {} stop {} limit {} ns atr {atr:?}",
                 b.take_profit,
@@ -533,6 +601,28 @@ impl Display for Distance {
     }
 }
 
+/// Of `sources`, the longest bars whose length `cadence` is a whole
+/// multiple of, the first at a tie; none if it is of none. Bars of no
+/// fixed length (ticks, volumes, months) divide no cadence.
+fn longest_dividing(sources: &[BarType], cadence: SignedDuration) -> Option<BarType> {
+    let length = |source: &BarType| {
+        let spec = source.spec();
+        ATR_UNITS
+            .iter()
+            .any(|(aggregation, _)| *aggregation == spec.aggregation)
+            .then(|| spec.timedelta())
+    };
+    sources
+        .iter()
+        .filter_map(|source| length(source).map(|length| (*source, length)))
+        .filter(|(_, length)| cadence.as_nanos() % length.as_nanos() == 0)
+        .fold(None, |longest, (source, length)| match longest {
+            Some((_, kept)) if kept >= length => longest,
+            _ => Some((source, length)),
+        })
+        .map(|(source, _)| source)
+}
+
 /// `price` on the nearer of `instrument`'s ticks around it, Nautilus' tick
 /// grid; at a tie, the one `away` (1 up, -1 down) from the decision's
 /// price, so that an exit is not nearer than its distance.
@@ -615,13 +705,24 @@ impl ActorIndicator for BarrierAtr {
     }
 }
 
-/// `fingerprint` extended with the targets of `config` and this module's
-/// code, which places and reads them.
-#[must_use]
-pub fn fingerprint(fingerprint: Fingerprint, config: &TargetsConfig) -> Fingerprint {
-    fingerprint
-        .with(config.fingerprint_part().as_bytes())
-        .with(include_str!("targets.rs").as_bytes())
+/// `fingerprint` extended with the targets of `config` deciding on `rule`
+/// for a strategy of `requirements`, and this module's code, which places
+/// and reads them.
+///
+/// # Errors
+///
+/// Returns an error if the barrier's ATR has no bars (see
+/// `TargetsConfig::atr_bars`).
+pub fn fingerprint(
+    fingerprint: Fingerprint,
+    config: &TargetsConfig,
+    rule: DecisionRule,
+    requirements: &DataRequirements,
+) -> anyhow::Result<Fingerprint> {
+    let atr = config.atr_bars(rule, requirements)?;
+    Ok(fingerprint
+        .with(config.fingerprint_part(atr).as_bytes())
+        .with(include_str!("targets.rs").as_bytes()))
 }
 
 impl Exit {
@@ -649,14 +750,20 @@ impl Outcome {
 }
 
 impl Targets {
-    /// The targets of `config`, for decisions on `rule`.
+    /// The targets of `config`, for decisions on `rule` of a strategy of
+    /// `requirements`.
     ///
     /// # Errors
     ///
-    /// Returns an error if `config` is invalid for `rule`.
-    pub fn new(config: TargetsConfig, rule: DecisionRule) -> anyhow::Result<Rc<Self>> {
-        config.validate(rule)?;
-        let atr = config.atr_bars(rule)?;
+    /// Returns an error if `config` is invalid for `rule` and
+    /// `requirements`.
+    pub fn new(
+        config: TargetsConfig,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+    ) -> anyhow::Result<Rc<Self>> {
+        config.validate(rule, requirements)?;
+        let atr = config.atr_bars(rule, requirements)?;
         Ok(Rc::new(Self {
             config,
             atr: atr.map(|atr| Rc::new(BarrierAtr::new(atr))),
@@ -667,11 +774,11 @@ impl Targets {
     /// Starts the barrier's average true range, if any, on `actor`, from
     /// its `on_start`: registers it with the actor's Nautilus indicators
     /// for its bars and subscribes the actor to them, so the data engine
-    /// builds them from the quotes and hands it each before the actor's
-    /// own handler. Nautilus registers an indicator once per bar type and
-    /// keeps one subscription per bar type and actor, so starting again,
-    /// on a restart, or a strategy subscribing to the same bars, feeds it
-    /// each bar once.
+    /// builds them, from the quotes, the trades or the source bars, and
+    /// hands it each before the actor's own handler. Nautilus registers
+    /// an indicator once per bar type and keeps one subscription per bar
+    /// type and actor, so starting again, on a restart, or a strategy
+    /// subscribing to the same bars, feeds it each bar once.
     pub fn start<A>(&self, actor: &mut A)
     where
         A: DataActor + DataActorNative + Debug + 'static,

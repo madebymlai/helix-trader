@@ -9,8 +9,8 @@
 //! of its id and its fingerprint (`decide::fingerprint` extended by
 //! `targets::fingerprint` and the commission of its dataset runs,
 //! `Commission`): a change to the feature code, names or warmup, the
-//! decision rule, a target or the commission finds no row, and the dataset
-//! is rebuilt.
+//! decision rule, a target, what the strategy reads that a barrier's ATR is
+//! built from, or the commission finds no row, and the dataset is rebuilt.
 //! The feature names are in the metadata of the rows' data type, which
 //! the catalog stores with each file and gives back with each row, so the
 //! rows do not repeat them; `read` checks them.
@@ -88,6 +88,7 @@ use super::{
     features::{FeatureSet, Fingerprint},
     targets::{self, TargetRow, TargetsConfig},
 };
+use crate::strategy::DataRequirements;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -188,26 +189,29 @@ pub struct Dataset {
 
 impl Dataset {
     /// The dataset of `strategy_id`, deciding with `features` on `rule`,
-    /// of `targets` net of `commission`, in the catalog at `catalog`. Registers `DatasetRow`
-    /// with Nautilus, as any reader of the catalog must.
+    /// of `targets` for a strategy of `requirements`, net of `commission`,
+    /// in the catalog at `catalog`. Registers `DatasetRow` with Nautilus,
+    /// as any reader of the catalog must.
     ///
     /// # Errors
     ///
-    /// Returns an error if `targets` is invalid.
+    /// Returns an error if `targets` is invalid for `rule` and
+    /// `requirements`.
     pub fn new(
         catalog: &Path,
         strategy_id: StrategyId,
         features: &FeatureSet,
         rule: DecisionRule,
         targets: TargetsConfig,
+        requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
-        targets.validate(rule)?;
+        targets.validate(rule, requirements)?;
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
         Ok(Self {
             catalog: catalog.to_path_buf(),
             strategy_id,
-            fingerprint: fingerprint(features, rule, &targets, commission),
+            fingerprint: fingerprint(features, rule, &targets, requirements, commission)?,
             warmup: features.warmup(),
             feature_names: features.names().to_vec(),
             targets,
@@ -536,17 +540,27 @@ impl DatasetRow {
 }
 
 /// The fingerprint of a dataset of `features` deciding on `rule`, of
-/// `targets` net of `commission`: the decisions' (`decide::fingerprint`)
-/// extended by the targets' (`targets::fingerprint`) and the commission.
-#[must_use]
+/// `targets` for a strategy of `requirements`, net of `commission`: the
+/// decisions' (`decide::fingerprint`) extended by the targets'
+/// (`targets::fingerprint`) and the commission.
+///
+/// # Errors
+///
+/// Returns an error as `targets::fingerprint` does.
 pub fn fingerprint(
     features: &FeatureSet,
     rule: DecisionRule,
     targets: &TargetsConfig,
+    requirements: &DataRequirements,
     commission: &Commission,
-) -> Fingerprint {
-    targets::fingerprint(decide::fingerprint(features, rule), targets)
-        .with(commission.fingerprint_part().as_bytes())
+) -> anyhow::Result<Fingerprint> {
+    Ok(targets::fingerprint(
+        decide::fingerprint(features, rule),
+        targets,
+        rule,
+        requirements,
+    )?
+    .with(commission.fingerprint_part().as_bytes()))
 }
 
 /// The catalog type of the rows.
@@ -631,6 +645,18 @@ mod tests {
             .build()
     }
 
+    /// What the strategy reads: the quotes of gold.
+    fn requirements() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![crate::strategy::TickSeries {
+                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(GOLD),
+            }],
+            warmup: SignedDuration::ZERO,
+        }
+    }
+
     /// A commission rate of 30 per million.
     fn commission() -> Commission {
         Commission::Rate("0.00003".to_string())
@@ -643,6 +669,7 @@ mod tests {
             &features(width),
             DecisionRule::Every(SignedDuration::from_hours(1)),
             targets(),
+            &requirements(),
             &commission(),
         )
         .unwrap()
@@ -908,6 +935,7 @@ mod tests {
                 &features(1),
                 rule,
                 targets,
+                &requirements(),
                 &commission,
             )
             .unwrap()
@@ -1073,6 +1101,7 @@ mod tests {
             &features,
             DecisionRule::Every(SignedDuration::from_hours(1)),
             targets(),
+            &requirements(),
             &commission(),
         )
         .unwrap()

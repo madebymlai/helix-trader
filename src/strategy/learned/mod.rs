@@ -82,6 +82,7 @@ impl Learned {
             strategy_id(&config)?,
             Rc::clone(&features),
             &config.model,
+            &config.bars.data_requirements(),
             mode,
         )?;
         Ok(Self {
@@ -160,6 +161,7 @@ pub fn training(
         strategy_id(config)?,
         &features,
         config.model.clone(),
+        &config.bars.data_requirements(),
         commission,
     )
 }
@@ -186,6 +188,7 @@ pub fn walk_forward(
         strategy_id(config)?,
         &features,
         config.model.clone(),
+        &config.bars.data_requirements(),
         commission,
     )
 }
@@ -210,6 +213,7 @@ pub fn dataset(
         &features,
         config.model.decision,
         config.model.targets.clone(),
+        &config.bars.data_requirements(),
         commission,
     )
 }

@@ -154,6 +154,20 @@ impl DataRequirements {
             .collect()
     }
 
+    /// The external bars read, stored as they are: the source bars of the
+    /// composite bar types (see `catalog_series`), each once, sorted as
+    /// `catalog_series` sorts.
+    #[must_use]
+    pub fn source_bars(&self) -> Vec<BarType> {
+        self.sources()
+            .into_iter()
+            .filter_map(|source| match source {
+                Source::Bars(bar_type) => Some(bar_type),
+                Source::Ticks(_) => None,
+            })
+            .collect()
+    }
+
     /// The catalog series read over `[start, end]`, contract by contract:
     /// each of `catalog_series`, in its order, split into the slices of its
     /// instrument's transition table (see `rolls::TransitionTable`), in
