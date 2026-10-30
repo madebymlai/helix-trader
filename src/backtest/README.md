@@ -1334,14 +1334,11 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     with no bar; a dataset build of a day replays through a sliver and
     stores its 24 rows.
   - Streamed data, in the live test binary (`tests/live/streaming.rs`, a
-    stub node in a child process): the binary's backtest over what the
-    node streamed across several promotions runs through the gaps
-    between them, which stay in the catalog, and over a crash and a
-    restart through the crash's gap. The joining rule, which fill-catalog
-    and a live start still apply, is unit-tested in
-    `data::live_runs` (gaps between a run's files and after the warmup it
-    wrote back joined; those of a crash, before a run's first row, before
-    a file not promoted, or with no run recorded kept).
+    stub node in a child process, promoting every second rather than
+    daily): the binary's backtest and dataset build over what the node
+    streamed across several promotions run through the slivers between
+    them, which stay in the catalog, and a backtest over a crash and a
+    restart through the crash's gap.
   - `backtest_inputs.rs`: a start on or after the end is refused before
     the node is built.
 

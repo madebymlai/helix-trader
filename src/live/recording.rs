@@ -4,13 +4,14 @@
 //! definitions its clients load, through Nautilus' streaming writer
 //! (`StreamingConfig`): Feather files appended under a staging directory
 //! outside the catalog, in `live/<instance id>/`, promoted into the catalog
-//! the node registers every promotion interval and on a clean stop, each
-//! staging file deleted once promoted. A retrain the node starts then
-//! replays up to the last promotion: it waits `Recording::catalog_delay`
-//! after its time for the data up to it. Each promotion names its files by
-//! their rows, so a run's files of a series leave gaps between them, which
-//! the readers join (`data::live_runs`, from the run starts `Live`
-//! records).
+//! the node registers daily and on a clean stop, each staging file deleted
+//! once promoted. A retrain the node starts then replays up to the last
+//! promotion: it waits `Recording::catalog_delay` after its time for the
+//! data up to it. Each promotion names its files by their rows, so a run's
+//! files of a series leave a sliver between them, one a day, which the
+//! catalog counts as missing: a backtest replays the rows through it, and
+//! the live warmup and fill-catalog ask the venue for it once, its answer
+//! written back over it.
 //!
 //! The node keeps one instance id per trader across restarts, in a file in
 //! the staging directory: a run after a crash writes to the same
@@ -26,7 +27,6 @@
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, anyhow, ensure};
@@ -38,29 +38,24 @@ use nautilus_persistence::config::{DataCatalogConfig, RotationConfig, StreamingC
 
 use crate::data::catalog_path;
 
-/// Where the live node stages the data it streams, and how often it
-/// promotes it into the catalog.
+/// Where the live node stages the data it streams; it promotes it into the
+/// catalog daily (`PROMOTION_INTERVAL`).
 #[derive(Debug, Clone)]
 pub struct Recording {
     /// The staging directory, outside the catalog; created if missing. It
     /// also keeps each trader's instance id.
     pub staging: PathBuf,
-    /// How often the staged data is promoted into the catalog: the delay
-    /// before a retrain sees it.
-    pub promotion_interval: Duration,
 }
 
 impl Recording {
     /// The streaming config of the node registering `catalog`, an absolute
-    /// path: staged under `staging`, promoted into `catalog` every
-    /// `promotion_interval` and on a clean stop, staging files deleted once
-    /// promoted.
+    /// path: staged under `staging`, promoted into `catalog` daily and on a
+    /// clean stop, staging files deleted once promoted.
     ///
     /// # Errors
     ///
     /// Returns an error if the staging directory is inside the catalog or
-    /// its path is not UTF-8, or if Nautilus refuses the config (a
-    /// promotion interval under a millisecond).
+    /// its path is not UTF-8.
     pub fn streaming(&self, catalog: &DataCatalogConfig) -> anyhow::Result<StreamingConfig> {
         let staging = catalog_path(&self.staging)?;
         // Apart, so that readers and maintenance of the catalog never meet
@@ -78,8 +73,8 @@ impl Recording {
             RotationConfig::NoRotation,
         );
         streaming.promotion_interval_ms = Some(
-            u64::try_from(self.promotion_interval.as_millis())
-                .context("the promotion interval overflows u64 milliseconds")?,
+            u64::try_from(PROMOTION_INTERVAL.as_millis())
+                .expect("a day of milliseconds fits in u64"),
         );
         streaming.promote_on_close = true;
         streaming.delete_feather_after_promotion = true;
@@ -91,13 +86,12 @@ impl Recording {
     }
 
     /// How long after a time the data the node received up to it is in
-    /// the catalog: a promotion interval, the promotions not being on a
+    /// the catalog: `PROMOTION_INTERVAL`, the promotions not being on a
     /// grid, and `PROMOTION_MARGIN` past it. A retrain the node starts at a
     /// time waits that long, so that its replay finds the data up to it.
     #[must_use]
     pub fn catalog_delay(&self) -> SignedDuration {
-        SignedDuration::try_from(self.promotion_interval)
-            .map_or(SignedDuration::MAX, |interval| interval + PROMOTION_MARGIN)
+        PROMOTION_INTERVAL + PROMOTION_MARGIN
     }
 
     /// The instance id of `trader_id`'s node: the one its last run kept in
@@ -173,7 +167,12 @@ pub fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
 /// a crash loses at most.
 const FLUSH_INTERVAL_MS: u64 = 1_000;
 
-/// How long past a promotion interval the data received up to a time is
+/// How often the staged data is promoted into the catalog: daily, so that
+/// a series gains a file, and a sliver between files, a day, and staging
+/// holds at most a day.
+const PROMOTION_INTERVAL: SignedDuration = SignedDuration::from_hours(24);
+
+/// How long past `PROMOTION_INTERVAL` the data received up to a time is
 /// surely in the catalog: past its flush (`FLUSH_INTERVAL_MS`), the live
 /// node's bar build delay for the bars it builds, and the promotion's own
 /// writing.
@@ -199,10 +198,7 @@ mod tests {
     use super::*;
 
     fn recording(staging: PathBuf) -> Recording {
-        Recording {
-            staging,
-            promotion_interval: Duration::from_secs(5 * 60),
-        }
+        Recording { staging }
     }
 
     fn catalog(dir: &std::path::Path) -> DataCatalogConfig {
@@ -210,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn the_staged_data_is_promoted_into_the_catalog_every_interval_and_on_stop() {
+    fn the_staged_data_is_promoted_into_the_catalog_daily_and_on_stop() {
         let dir = tempfile::tempdir().unwrap();
         let streaming = recording(dir.path().join("staging"))
             .streaming(&catalog(&dir.path().join("catalog")))
@@ -223,17 +219,17 @@ mod tests {
             streaming.catalog.unwrap().path(),
             dir.path().join("catalog").to_str().unwrap()
         );
-        assert_eq!(streaming.promotion_interval_ms, Some(300_000));
+        assert_eq!(streaming.promotion_interval_ms, Some(24 * 60 * 60 * 1_000));
         assert!(streaming.promote_on_close);
         assert!(streaming.delete_feather_after_promotion);
     }
 
     #[test]
-    fn data_is_in_the_catalog_a_promotion_interval_and_a_minute_after_it_arrives() {
+    fn data_is_in_the_catalog_a_day_and_a_minute_after_it_arrives() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             recording(dir.path().join("staging")).catalog_delay(),
-            SignedDuration::from_mins(6)
+            SignedDuration::from_hours(24) + SignedDuration::from_mins(1)
         );
     }
 

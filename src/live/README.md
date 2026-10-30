@@ -52,7 +52,7 @@ DataClientFactory>` and friends and never names a broker.
 ```sh
 helix-trader live ema --config ema.toml [--account DU1234567] \
   [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog] \
-  [--staging staging] [--promotion-minutes 5] [--models models] \
+  [--staging staging] [--models models] \
   [--retrain-commission-rate 0.00003 --retrain-balance "10000000 USD"]
 ```
 
@@ -79,10 +79,9 @@ node's cache (see "Cache in Redis").
   at the same time; a multiple of 1000 is refused before any gateway starts.
 - `--staging` (default `staging`) is the directory the node stages the
   data it streams, outside the catalog (a staging directory inside it is
-  refused); it also keeps each trader's instance id. `--promotion-minutes`
-  (default 5, at least 1, at most as many as fit in u64 milliseconds) is
-  how often the staged data is promoted into the catalog (see "Recording
-  into the catalog").
+  refused); it also keeps each trader's instance id. The staged data is
+  promoted into the catalog daily, a fixed interval with no setting (see
+  "Recording into the catalog").
 - `--models` (default `models`) is the model store a strategy trading on a
   model reads, its newest model valid at each decision (strategy README,
   "Features and decisions", "Model handle"); the EMA reads none.
@@ -124,10 +123,7 @@ node's cache (see "Cache in Redis").
    delay, and the streaming of its data into the catalog; then promote
    what the last run of its instance left staged (`promote_staged`, see
    "Instance id").
-6. Join the gaps the last runs streamed across in the series of the
-   warmup, and record the run's start in the catalog (see "Recording
-   into the catalog").
-7. Add the strategy, claim the external orders of its instruments that its
+6. Add the strategy, claim the external orders of its instruments that its
    config does not claim already (`register_external_order_claims`), then
    `run()`.
 
@@ -321,10 +317,11 @@ registers, so that a retrain the node starts replays up to the present
 (`LiveNodeConfig::streaming`, a `StreamingConfig`) appends what the
 message bus carries to Feather files under the staging directory
 (`--staging`), in `live/<instance id>/`, flushed every second, and
-promotes them into the catalog every `--promotion-minutes` and when the
-node is disposed after a clean stop (`promote_on_close`), each staging
-file deleted once promoted (`delete_feather_after_promotion`). Promotion
-writes parquet files beside fill-catalog's, named by their interval.
+promotes them into the catalog daily, a fixed interval with no setting,
+and when the node is disposed after a clean stop (`promote_on_close`),
+each staging file deleted once promoted
+(`delete_feather_after_promotion`). Promotion writes parquet files beside
+fill-catalog's, named by their interval.
 
 **What.** Quotes, trades, book deltas and depth, bars, mark and index
 prices, funding rates, and instrument definitions (`data_types`); not
@@ -347,25 +344,30 @@ sees each series up to the last promotion, a clean prefix of what the
 node received: no gap, no duplicate (`tests/live/streaming.rs`).
 
 **Coverage.** Promotion names each file by the `ts_init` of its first
-and last row, so the files of a series leave a gap between them, from
+and last row, so the files of a series leave a sliver between them, from
 one's last row to the next one's first, which Nautilus counts as missing
-(a 1 ns gap is a gap): a warmup over it asks the venue for every gap,
-and fill-catalog would fetch each again. A backtest, or a retrain's
-replay, reads the rows and not the intervals, and runs through the gaps
-(backtest README, "No check before the run"). The node records the start of each run in the catalog before it is
-built (`data::record_run_start`, `live-runs/<ns>` beside `data/`), and a
-reader joins the gaps a run streamed across before it reads
-(`data::live_runs::join`, with Nautilus' `extend_file_name`):
-fill-catalog's node fill, and the node's own start over the series of
-its warmup. A gap is joined when the file after it was promoted, the file
-before it ends after the run's start (the run's own, or the warmup it
-wrote back), and no run started inside it. A join covers the whole
-series at once, every gap judged by the file names before it: the file
-before a joined gap is renamed by its interval alone, no longer named as
-promoted, so a later join of a narrower window would leave the gap
-before that file. A crash or a stop stays a
-gap, as does the time before a run's first row. The node itself renames
-nothing while it streams: a reader never loses a file under it.
+(a 1 ns gap is a gap): one a day, promotion being daily, besides the gap
+of a crash or a stop and the time before a run's first row. Nothing
+joins slivers, and the node records nothing beside Nautilus' own
+streamed files: each reader takes the catalog as Nautilus does. A
+backtest, a dataset build or a retrain's replay reads the rows and not
+the intervals, and runs through the slivers (backtest README, "No check
+before the run"). The live warmup, Nautilus' catalog-first request, reads
+the stored rows and asks the venue for what the catalog lacks: the few
+slivers in its window, and the downtime; the answers certifying clients
+return (IC's) are written back over them. fill-catalog asks each sliver
+of its window once, and its write-back closes it (`data/README.md`, "What
+is missing"). A venue's answer for a sliver may store a tick beside one
+the node recorded. Run-start directories (`live-runs/`) that older nodes
+left in the catalog are ignored.
+
+**Interval promotion on OKX.** Nautilus documents that promoting at an
+interval can split rows sharing a `ts_init` across two files
+(`docs/how_to/stream_parquet_catalog.md`), and OKX
+stamps a whole message's rows once: the later file then overlaps the
+earlier, Nautilus refuses to promote it, keeps it staged, and the next
+start fails promoting it (`promote_staged`). Accepted as Nautilus'
+documented behaviour, at one promotion a day; no guard.
 
 **Instance id.** Nautilus names the staging run directory after the
 node's instance id and, at start, recovers and promotes only the files
@@ -376,11 +378,11 @@ seals the files the crashed run left (`.feather.partial`, up to their
 last complete batch), and the start promotes them as soon as the node is
 built (`promote_staged`: the writer closed, which promotes what it
 holds, `promote_on_close`, and reopened, empty, in the same directory),
-before the gaps are joined and the warmup reads the catalog and writes
-IC's answer back after them. Left to the first promotion, a promotion
-interval later, they would lie under that answer, which Nautilus would
-refuse to promote them over (non-disjoint intervals), losing them, and
-every start after would fail the same way. A crash loses at most the last
+before the warmup reads the catalog and writes IC's answer back after
+them. Left to the first promotion, a day later, they would lie under
+that answer, which Nautilus would refuse to promote them over
+(non-disjoint intervals), losing them, and every start after would fail
+the same way. A crash loses at most the last
 second, unflushed. A staged file the catalog already holds rows over
 fails the start, naming it. The same id is the logger's. A file
 that holds no instance id fails the start rather than being replaced:
@@ -388,10 +390,10 @@ with a new id, what the old one left unpromoted would stay in staging.
 Two live processes at once each need their own trader (see "Cache in
 Redis"), so their staging runs differ.
 
-**Disk.** Staging holds at most a promotion interval of data. The tick
-directories of the catalog gain a file per promotion: consolidate them
-from time to time (`ParquetDataCatalog::consolidate_catalog` and its
-kin).
+**Disk.** Staging holds at most a day of data, which each promotion
+loads per series. The tick directories of the catalog gain a file a day
+per series: consolidate them from time to time
+(`ParquetDataCatalog::consolidate_catalog` and its kin).
 
 ## Retraining
 
@@ -403,9 +405,9 @@ the grid time as a child process (`model::launcher`), with the node's
 `--config`, `--catalog`, `--models` and `--leverage` and the retrain
 costs: the replay runs a Nautilus node of its own, which this process,
 holding the live one, cannot. The timer fires
-`Recording::catalog_delay` after the grid time, a promotion interval and
-a minute: by then the data the node received up to that time is in the
-catalog for the replay. One retrain per strategy runs at a time: one due
+`Recording::catalog_delay` after the grid time, a day and a minute: by
+then the data the node received up to that time is in the catalog for
+the replay. One retrain per strategy runs at a time: one due
 while another runs is skipped, with a warning. The strategy polls the
 child at each decision: a finished child is logged, as info when it
 published (exit status success), as an error with the error it printed
@@ -648,17 +650,19 @@ tests: see [`okx/README.md`](okx/README.md).
 - `tests/live/streaming.rs` runs a node without a broker, hermetic and
   ungated: a stub data client on `SIM` sends numbered quotes, trades and
   depth, an actor subscribes to them and to 1-second bars built from the
-  trades, and the node streams as `Recording` configures it. The node
-  runs in a child process (the test binary, filtered to `streamed_node`),
+  trades, and the node streams as `Recording` configures it, but
+  promoting every second rather than daily, the interval set on the
+  `StreamingConfig` it returns. The node runs in a child process (the
+  test binary, filtered to `streamed_node`),
   stopping itself through `handle().stop()` or killed, and the test reads
   the catalog from its own process: a clean prefix of each series while
   the node runs, everything after a clean stop with no staging file left,
   the built bars under `EXTERNAL`, the instrument definition, and after a
   crash and a restart the crashed run's staged data promoted, before an
   answer written back over what the catalog lacks up to the start, as
-  IC's warmup writes it back, lands after it. The
-  binary's backtest over data streamed across several promotions runs
-  through the gaps between them, which it leaves in the catalog, and
+  IC's warmup writes it back, lands after it. The binary's backtest and
+  dataset build over data streamed across several promotions run through
+  the slivers between them, which stay in the catalog, and a backtest
   across a crash and a restart through the crash's gap.
 - Retraining needs no node: the launcher and the handle's retrains are
   unit tests (`model::launcher`, `model::handle`) on an in-process
@@ -672,15 +676,11 @@ tests: see [`okx/README.md`](okx/README.md).
 ## Unverified
 
 - A live retrain against a real venue: none has run. A backtest over
-  streamed data running through the gaps between promoted files is shown
-  on the stub client only.
-- A disconnect inside a run reads as covered once joined, as it does
-  inside one promoted file: Nautilus names a file by its rows, and no
-  client tells the node it lost data. A crash or a stop reads as a gap.
-- Joining renames files (Nautilus' `extend_file_name`): a reader that
-  listed a series just before another process joined it (a backtest
-  and a start, two fills) can fail to open a file and must read again. Promotion and the node's retrains, one at a time, do not race
-  it.
+  streamed data running through the slivers between promoted files is
+  shown on the stub client only.
+- A disconnect inside one promoted file reads as covered: Nautilus names
+  a file by its rows, and no client tells the node it lost data. A crash
+  or a stop reads as a gap.
 - Streaming on IB and OKX: only IC's demo has streamed so far
   (`ic/README.md`, "IC tests", `ic_live_demo.rs`), and a crash and
   restart only on the stub client.

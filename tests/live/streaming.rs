@@ -6,9 +6,10 @@
 //! bid size less one, the trade's id, the depth's sequence); an actor
 //! subscribes to them and to 1-second bars Nautilus builds from the
 //! trades. The node streams as `Recording` configures it, into a temp-dir
-//! catalog, its start recorded there as `Live` records it. The test,
-//! another process, reads the catalog while the node runs and after it
-//! stops, and backtests over it with the binary, a third.
+//! catalog, but promoting every `PROMOTION_MS` rather than daily, so that a
+//! test sees several promotions in seconds. The test, another process,
+//! reads the catalog while the node runs and after it stops, and backtests
+//! and builds a dataset over it with the binary, a third.
 //!
 //! Hermetic and ungated: no node runs in the test's own process, so it
 //! claims none (`main.rs`). Run it with:
@@ -30,10 +31,7 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use helix_trader::{
-    data::record_run_start,
-    live::{Recording, promote_staged},
-};
+use helix_trader::live::{Recording, promote_staged};
 use jiff::Timestamp;
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
@@ -73,7 +71,8 @@ const TICK: Duration = Duration::from_millis(20);
 /// The directory of the child's catalog and staging directory; set only
 /// in the child.
 const ROOT: &str = "HELIX_STREAMING_ROOT";
-/// The child's promotion interval, in milliseconds.
+/// The child's promotion interval, in milliseconds, set on the streaming
+/// config `Recording` gives in place of its daily one.
 const PROMOTION_MS: &str = "HELIX_STREAMING_PROMOTION_MS";
 /// When the child's node stops itself, in milliseconds after it starts;
 /// unset, it runs until killed.
@@ -276,6 +275,26 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
     assert!(!missing.is_empty(), "no gap between promotions");
 }
 
+/// A dataset build, a retrain's replay, over the streamed data runs through
+/// the gaps between the files Nautilus promoted, as a backtest does.
+#[test]
+fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(5_000), 0);
+    assert!(node.wait().unwrap().success());
+    let promoted = catalog(dir.path())
+        .get_intervals(&NautilusDataType::QuoteTick.into(), Some(INSTRUMENT_ID))
+        .unwrap();
+    assert!(promoted.len() >= 2, "one promotion: {promoted:?}");
+    let (first, last) = streamed_span(dir.path());
+
+    let dataset = dataset(dir.path(), first, last);
+
+    assert!(dataset.status.success(), "{}", backtest_output(&dataset));
+    let stdout = String::from_utf8_lossy(&dataset.stdout);
+    assert!(stdout.contains("built "), "{stdout}");
+}
+
 /// Not a test: the node the tests above run in a child process. Passes at
 /// once outside one.
 #[test]
@@ -296,8 +315,9 @@ fn streamed_node() {
         .unwrap();
 }
 
-/// Runs the node of `root` streaming as `Recording` configures it, until
-/// `stop_after`, or until killed.
+/// Runs the node of `root` streaming as `Recording` configures it, but
+/// promoting every `promotion_interval`, until `stop_after`, or until
+/// killed.
 async fn run_node(
     root: &Path,
     promotion_interval: Duration,
@@ -314,13 +334,14 @@ async fn run_node(
     );
     let recording = Recording {
         staging: root.join("staging"),
-        promotion_interval,
     };
+    let mut streaming = recording.streaming(&catalog)?;
+    streaming.promotion_interval_ms = Some(u64::try_from(promotion_interval.as_millis())?);
     let config = LiveNodeConfig {
         environment: Environment::Live,
         trader_id,
         instance_id: Some(recording.instance_id(trader_id)?),
-        streaming: Some(recording.streaming(&catalog)?),
+        streaming: Some(streaming),
         catalogs: vec![catalog],
         ..Default::default()
     };
@@ -333,10 +354,9 @@ async fn run_node(
             Box::new(StubConfig { first_seq }),
         )?
         .build()?;
-    // As `Live` starts it: what the last run staged promoted, then the run's
-    // start recorded, before the node runs.
+    // As `Live` starts it: what the last run staged promoted before the
+    // node runs.
     promote_staged(&mut node)?;
-    record_run_start(&root.join("catalog"))?;
     if std::env::var(WRITE_BACK).is_ok() {
         write_back(root)?;
     }
@@ -522,6 +542,43 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
     std::fs::write(&config, EMA_CONFIG).unwrap();
     Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .args(["backtest", "ema", "--config"])
+        .arg(&config)
+        .arg("--catalog")
+        .arg(root.join("catalog"))
+        .args(["--start", &start.to_string(), "--end", &end.to_string()])
+        .args(["--commission", "1 USD", "--balance", "1000000 USD"])
+        .output()
+        .unwrap()
+}
+
+/// The learned strategy on the stub's AUD/USD: a decision every second on
+/// its 1-second bars, each target held a second.
+const LEARNED_CONFIG: &str = r#"
+    instrument_ids = ["AUD/USD.SIM"]
+    bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" }
+    warmup = "1s"
+    hold = "1s"
+
+    [model]
+    decision = { every = "1s" }
+    targets = { instrument_id = "AUD/USD.SIM", quantity = "1", horizon = "1s" }
+    label = "horizon"
+    retrain = "24h"
+    window = "46h"
+    holdout = "12h"
+    thresholds = { long = 0.6, short = 0.4 }
+    min_score = 0.5
+    learner = { kind = "fake" }
+"#;
+
+/// The binary's dataset build of the learned strategy (`LEARNED_CONFIG`)
+/// over the days of `[start, end]` of the catalog of `root`, in a process of
+/// its own.
+fn dataset(root: &Path, start: Timestamp, end: Timestamp) -> Output {
+    let config = root.join("learned.toml");
+    std::fs::write(&config, LEARNED_CONFIG).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_helix-trader"))
+        .args(["dataset", "learned", "--config"])
         .arg(&config)
         .arg("--catalog")
         .arg(root.join("catalog"))

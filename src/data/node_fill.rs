@@ -4,11 +4,11 @@
 //!
 //! `missing` turns series slices (`strategy::SeriesSlice`) into what the
 //! catalog lacks of them, by Nautilus' own count
-//! (`get_missing_intervals_for_request`) once the gaps a live run streamed
-//! across are joined (`live_runs`): per contract its definitions, then
-//! each series' missing windows. A `NodeFill` gathers each source's
-//! data client with its requests, cut into windows of the source's period,
-//! and `run` builds a live node with those clients and the catalog, and an
+//! (`get_missing_intervals_for_request`): per contract its definitions, then
+//! each series' missing windows, the slivers between a live node's promoted
+//! files among them, each asked once and closed by its write-back. A
+//! `NodeFill` gathers each source's data client with its requests, cut into
+//! windows of the source's period, and `run` builds a live node with those clients and the catalog, and an
 //! actor asking for one window at a time with `update_catalog`. The data
 //! engine serves what the catalog holds, asks the client for the rest and
 //! writes the answer back over the window asked for. The actor records the
@@ -49,7 +49,7 @@ use nautilus_persistence::{
 };
 use serde_json::json;
 
-use super::{catalog_path, live_runs};
+use super::catalog_path;
 use crate::strategy::SeriesSlice;
 
 /// How long `run` waits for the answer to one request at most, by the wall
@@ -163,16 +163,14 @@ impl FillRequest {
 /// What `catalog` lacks of `slices`, contract by contract in the order they
 /// first come: the contract's definition over the span of what it lacks,
 /// then each of its series' missing windows (Nautilus'
-/// `get_missing_intervals_for_request`, once the gaps a live run streamed
-/// across are joined: `live_runs::join`), in time order. The slices are
+/// `get_missing_intervals_for_request`), in time order. The slices are
 /// `DataRequirements::slices`, which reads no window of a series twice. A
 /// contract lacking nothing is left out.
 ///
 /// # Errors
 ///
 /// Returns an error if a series is not the quotes, trades, book depths or
-/// book deltas of its slice's contract, if the catalog cannot be read, or
-/// if a gap a live run streamed across cannot be joined.
+/// book deltas of its slice's contract, or if the catalog cannot be read.
 pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -191,8 +189,6 @@ pub fn missing(
             "the {data} of {identifier} on a slice of {id}"
         );
         let (from, to) = (nanos(slice.from), nanos(slice.to));
-        live_runs::join(catalog, data_type, identifier)
-            .with_context(|| format!("joining the live runs of the {data} of {id}"))?;
         let gaps = catalog
             .get_missing_intervals_for_request(
                 from,
@@ -555,6 +551,10 @@ mod tests {
         types::{Price, Quantity},
     };
 
+    use nautilus_persistence::{
+        backend::parquet::paths::timestamps_to_filename, catalog::traits::CatalogWriter,
+    };
+
     use super::*;
     use crate::rolls::Slice;
 
@@ -777,6 +777,74 @@ mod tests {
             "2026-10-21T06:00:00Z",
             "2026-10-21T18:00:00Z",
         )];
+
+        assert_eq!(missing(&catalog, &slices).unwrap(), []);
+    }
+
+    /// Quote files of `id` in the catalog in `dir` over the intervals of
+    /// `files`, each named as a live node's promotion names it: its
+    /// interval and a replay identity. The files are empty: coverage reads
+    /// their names.
+    fn promoted_quotes(dir: &Path, id: &str, files: &[(&str, &str)]) {
+        let quotes = dir.join("data/quotes").join(id.replace('/', ""));
+        std::fs::create_dir_all(&quotes).unwrap();
+        for &(first, last) in files {
+            let name = timestamps_to_filename(ts(first).into(), ts(last).into())
+                .replace(".parquet", "_0123456789abcdef.parquet");
+            std::fs::write(quotes.join(name), b"").unwrap();
+        }
+    }
+
+    /// The slivers a live node's daily promotions leave between their files
+    /// are what the catalog lacks, each asked of the venue once: its
+    /// write-back (`update_catalog`) closes it, so the next fill asks
+    /// nothing. A run-start directory an older node left is ignored.
+    #[test]
+    fn a_sliver_between_promoted_files_is_asked_once_and_its_write_back_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("live-runs/1792540800000000000")).unwrap();
+        promoted_quotes(
+            dir.path(),
+            "XAUUSD.ICMARKETS",
+            &[
+                ("2026-10-21T00:00:00Z", "2026-10-21T23:59:59.5Z"),
+                ("2026-10-21T23:59:59.7Z", "2026-10-22T23:59:59Z"),
+            ],
+        );
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let slices = [slice(
+            NautilusDataType::QuoteTick,
+            "XAUUSD.ICMARKETS",
+            "2026-10-21T00:00:00Z",
+            "2026-10-22T23:59:59Z",
+        )];
+
+        let first = missing(&catalog, &slices).unwrap();
+        let sliver = request(
+            FillData::Quotes,
+            "XAUUSD.ICMARKETS",
+            "2026-10-21T23:59:59.500000001Z",
+            "2026-10-21T23:59:59.699999999Z",
+        );
+        assert_eq!(
+            first,
+            [
+                FillRequest {
+                    data: FillData::Instrument,
+                    ..sliver
+                },
+                sliver
+            ]
+        );
+        // The venue's empty answer, recorded as the data engine records it.
+        catalog
+            .record_empty_coverage(
+                NautilusDataType::QuoteTick,
+                Some("XAUUSD.ICMARKETS"),
+                sliver.from.into(),
+                sliver.to.into(),
+            )
+            .unwrap();
 
         assert_eq!(missing(&catalog, &slices).unwrap(), []);
     }
