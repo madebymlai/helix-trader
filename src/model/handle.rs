@@ -1453,7 +1453,7 @@ mod tests {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::ONE),
             limit: SignedDuration::from_hours(2),
-            atr: Some(AtrConfig { period: 2 }),
+            atr: Some(AtrConfig::over(2)),
         });
         config
     }

@@ -438,11 +438,7 @@ fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
 
 /// Reads the `model_ema` strategy's config from `path` and validates it.
 fn load_model_ema_config(path: &Path) -> anyhow::Result<ModelEmaConfig> {
-    let read = || -> anyhow::Result<ModelEmaConfig> {
-        let config: ModelEmaConfig = toml::from_str(&fs::read_to_string(path)?)?;
-        config.validate()?;
-        Ok(config)
-    };
+    let read = || ModelEmaConfig::load(&fs::read_to_string(path)?);
     read().with_context(|| format!("loading the model_ema config {}", path.display()))
 }
 
@@ -450,7 +446,7 @@ fn load_model_ema_config(path: &Path) -> anyhow::Result<ModelEmaConfig> {
 fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequirements> {
     Ok(match strategy {
         Strategy::Ema => load_ema_config(path)?.data_requirements(),
-        Strategy::ModelEma => load_model_ema_config(path)?.bars.data_requirements(),
+        Strategy::ModelEma => load_model_ema_config(path)?.data_requirements(),
     })
 }
 
@@ -627,8 +623,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
                 models: args.models.clone(),
                 venue: children.venue.clone(),
             };
-            let outcome =
-                backtest(config.bars.data_requirements()).run(ModelEma::new(config, mode)?)?;
+            let outcome = backtest(config.data_requirements()).run(ModelEma::new(config, mode)?)?;
             print!("{}", backtest::report(&outcome));
             print!("{}", walk.scores(start, end)?);
         }
@@ -776,7 +771,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
                 launcher: Launcher::process(program, retrain_args(&args)?),
                 catalog: args.catalog.clone(),
             };
-            let requirements = config.bars.data_requirements();
+            let requirements = config.data_requirements();
             let strategy = ModelEma::new(config, mode)?;
             live.run(&requirements, &strategy.warmup(), strategy).await
         }
@@ -803,7 +798,7 @@ impl DatasetRun {
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<TargetRow>> {
-        let requirements = config.bars.data_requirements();
+        let requirements = config.data_requirements();
         let rows = SettledRows::default();
         let mode = Mode::Dataset {
             rows: Rc::clone(&rows),

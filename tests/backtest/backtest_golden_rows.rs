@@ -35,13 +35,18 @@ use jiff::{SignedDuration, Timestamp};
 /// bracket 1.5 ATRs of 3 hourly bars in its favour, 7.5 bps against,
 /// closed after 45 minutes, and a horizon of 30 minutes, of one ounce.
 const CONFIG: &str = r#"
-    instrument_ids = ["XAUUSD.ICMARKETS"]
-    bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" }
+    [data]
+    series = [
+        { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
+    ]
     warmup = "4h"
+
+    [trade]
+    instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
 
     [model]
     decision = { every = "1h" }
-    targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "30m", barrier = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, limit = "45m", atr = { period = 3 } } }
+    targets = { horizon = "30m", barrier = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, limit = "45m", atr = { period = 3 } } }
     label = "barrier"
     retrain = "24h"
     window = "46h"
@@ -64,7 +69,7 @@ const WRITE: &str = "GOLDEN_ROWS";
 /// The rows of the 21st to the 23rd of October 2026 are the snapshot's.
 #[test]
 fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
-    let config: ModelEmaConfig = toml::from_str(CONFIG).unwrap();
+    let config = ModelEmaConfig::load(CONFIG).unwrap();
     let (from, to) = (
         ic::at("00:00:00"),
         ic::at("00:00:00") + SignedDuration::from_hours(72),
@@ -77,7 +82,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     let (first, last) = dataset::days(from, to - SignedDuration::from_nanos(1));
     dataset
         .build(first, last, |start, end| {
-            let requirements = config.bars.data_requirements();
+            let requirements = config.data_requirements();
             let rows = SettledRows::default();
             let mode = Mode::Dataset {
                 rows: Rc::clone(&rows),

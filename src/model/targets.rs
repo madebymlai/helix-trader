@@ -27,7 +27,9 @@
 //! trade, else the close of its last bar. Each distance is relative
 //! (`Distance`): basis points of that price, or multiples of an average
 //! true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR_PERIOD` bars
-//! unless the barrier gives another period. Its bars are Nautilus' bars of
+//! and Nautilus' defaults unless the barrier gives its arguments, built by
+//! Nautilus' `AverageTrueRange::new` as the config is validated, so that
+//! an argument Nautilus refuses panics at load. Its bars are Nautilus' bars of
 //! the instrument at the decision cadence, so a decision reads the bar
 //! closing at its time, built from what the strategy reads of it
 //! (`TargetsConfig::atr_bars`): the mids of its quotes, else the last
@@ -91,7 +93,9 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
-use nautilus_indicators::{indicator::Indicator, volatility::atr::AverageTrueRange};
+use nautilus_indicators::{
+    average::MovingAverageType, indicator::Indicator, volatility::atr::AverageTrueRange,
+};
 use nautilus_model::{
     data::{
         Bar, BarSpecification, BarType, CustomData, CustomDataTrait, DataType, HasTsInit,
@@ -114,7 +118,7 @@ use super::{
     decide::{DecisionRule, FeatureRow},
     features::Fingerprint,
 };
-use crate::strategy::{DataRequirements, warmup::Warmup};
+use crate::strategy::{DataRequirements, TradedInstrument, warmup::Warmup};
 
 /// The prefix of a trade's time alert, followed by its entry's client
 /// order id, such as `TARGET-TIME:D12-BL-E`.
@@ -124,8 +128,10 @@ const TIME_ALERT: &str = "TARGET-TIME:";
 const TIME_TAG: &str = "TARGET-TIME";
 
 /// The targets of each decision, from the strategy's config: on one
-/// instrument, of one size, a triple barrier, a horizon or both.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
+/// instrument, of one size, a triple barrier, a horizon or both. The
+/// strategy's TOML has the targets alone (`TargetsTable`), on the
+/// instrument and of the size of its `[trade]` table (`TargetsTable::trading`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct TargetsConfig {
     /// The instrument the targets trade.
@@ -138,11 +144,36 @@ pub struct TargetsConfig {
     pub horizon: Option<SignedDuration>,
 }
 
+/// The targets as a model table of a strategy's TOML has them, `targets = {
+/// horizon = "1h", barrier = { .. } }`: what they trade is the strategy's
+/// `[trade]`, named once.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetsTable {
+    /// The triple barrier, if any.
+    pub barrier: Option<Barrier>,
+    /// The horizon of the horizon target, if any, such as `"1h"`.
+    pub horizon: Option<SignedDuration>,
+}
+
+impl TargetsTable {
+    /// The targets trading `traded`: its instrument, its size.
+    #[must_use]
+    pub fn trading(self, traded: &TradedInstrument) -> TargetsConfig {
+        TargetsConfig {
+            instrument_id: traded.instrument_id,
+            quantity: traded.trade_size,
+            barrier: self.barrier,
+            horizon: self.horizon,
+        }
+    }
+}
+
 /// A triple barrier: the exits of a bracket, each a distance from the
 /// decision's price, and its time limit, such as `{ take_profit = { atr =
-/// 2.0 }, stop = { bps = 20 }, limit = "2h" }`, or with the ATR's period
-/// given, `{ .., atr = { period = 20 } }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 2.0 }, stop = { bps = 20 }, limit = "2h" }`, or with the ATR's
+/// arguments given, `{ .., atr = { period = 20, ma_type = "WILDER" } }`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Barrier {
     /// How far the take profit is, in the side's favour.
@@ -152,7 +183,8 @@ pub struct Barrier {
     /// How long after the decision what is still open is closed.
     pub limit: SignedDuration,
     /// The average true range the `atr` distances are multiples of, if
-    /// not of `DEFAULT_ATR_PERIOD` bars: only with a distance in ATRs.
+    /// not of `DEFAULT_ATR_PERIOD` bars and Nautilus' defaults: only with
+    /// a distance in ATRs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atr: Option<AtrConfig>,
 }
@@ -170,13 +202,80 @@ pub enum Distance {
     Atr(Decimal),
 }
 
-/// The average true range of a barrier: Nautilus' `AverageTrueRange`, of
-/// its default moving average (Wilder's), over `period` bars, `{ period =
-/// 20 }`. Its bars are the decision cadence's (`AtrBars`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The average true range of a barrier: Nautilus' `AverageTrueRange`, its
+/// arguments by their Nautilus names, `{ period = 20, ma_type = "WILDER",
+/// use_previous = true, value_floor = 0.0 }`, `ma_type` a Nautilus
+/// `MovingAverageType` by its name; those left out are Nautilus' defaults.
+/// Its bars are the decision cadence's (`AtrBars`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtrConfig {
     pub period: usize,
+    #[serde(
+        default,
+        with = "moving_average_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ma_type: Option<MovingAverageType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_previous: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_floor: Option<f64>,
+}
+
+impl AtrConfig {
+    /// The ATR over `period` bars, of Nautilus' defaults.
+    #[must_use]
+    pub const fn over(period: usize) -> Self {
+        Self {
+            period,
+            ma_type: None,
+            use_previous: None,
+            value_floor: None,
+        }
+    }
+
+    /// Nautilus' ATR of these arguments.
+    ///
+    /// # Panics
+    ///
+    /// Panics if Nautilus refuses an argument (`AverageTrueRange::new`): a
+    /// period outside `1..=2^24`, a floor negative or not finite.
+    fn indicator(&self) -> AverageTrueRange {
+        AverageTrueRange::new(
+            self.period,
+            self.ma_type,
+            self.use_previous,
+            self.value_floor,
+        )
+    }
+}
+
+/// Nautilus' `MovingAverageType` by its name, which its `FromStr` reads,
+/// case aside, and its `Display` writes: Nautilus gives it no serde.
+mod moving_average_type {
+    use std::str::FromStr;
+
+    use nautilus_indicators::average::MovingAverageType;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+    pub fn serialize<S: Serializer>(
+        ma_type: &Option<MovingAverageType>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        ma_type
+            .map(|ma_type| ma_type.to_string())
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<MovingAverageType>, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        MovingAverageType::from_str(&name)
+            .map(Some)
+            .map_err(|_| de::Error::custom(format!("{name} is no Nautilus moving average type")))
+    }
 }
 
 /// The period of a barrier's ATR without an `atr` table: Wilder's 14 bars.
@@ -193,14 +292,14 @@ const ATR_UNITS: [(BarAggregation, SignedDuration); 5] = [
     (BarAggregation::Millisecond, SignedDuration::from_millis(1)),
 ];
 
-/// The average true range a barrier runs: over `period` bars of
+/// The average true range a barrier runs: `config`, on bars of
 /// `bar_type`, bars of the targets' instrument at the decision cadence,
 /// so that a decision reads the bar closing at its time
 /// (`TargetsConfig::atr_bars`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtrBars {
     pub bar_type: BarType,
-    pub period: usize,
+    pub config: AtrConfig,
 }
 
 /// The target a model learns: whether its side of the barrier, or of the
@@ -342,10 +441,15 @@ impl TargetsConfig {
     /// # Errors
     ///
     /// Returns an error if there is no target, or the size, a barrier's
-    /// distance, its limit, its ATR's period or the horizon is not
-    /// positive, or the barrier has an `atr` table no distance uses, or
-    /// an ATR without bars at the cadence of `rule` built from what a
-    /// strategy of `requirements` reads (see `atr_bars`).
+    /// distance, its limit or the horizon is not positive, or the barrier
+    /// has an `atr` table no distance uses, or an ATR without bars at the
+    /// cadence of `rule` built from what a strategy of `requirements` reads
+    /// (see `atr_bars`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if Nautilus refuses an argument of the barrier's ATR as it
+    /// builds it (`AverageTrueRange::new`).
     pub fn validate(
         &self,
         rule: DecisionRule,
@@ -373,10 +477,10 @@ impl TargetsConfig {
                 barrier.uses_atr() || barrier.atr.is_none(),
                 "the barrier has an ATR no distance uses"
             );
-            ensure!(
-                barrier.atr_period() != Some(0),
-                "the barrier's ATR period must be positive"
-            );
+            if let Some(atr) = barrier.atr_config() {
+                // Nautilus checks the arguments as it builds the ATR.
+                atr.indicator();
+            }
             self.atr_bars(rule, requirements)?;
         }
         if let Some(horizon) = self.horizon {
@@ -420,7 +524,7 @@ impl TargetsConfig {
         rule: DecisionRule,
         requirements: &DataRequirements,
     ) -> anyhow::Result<Option<AtrBars>> {
-        let Some(period) = self.barrier.and_then(|barrier| barrier.atr_period()) else {
+        let Some(config) = self.barrier.and_then(|barrier| barrier.atr_config()) else {
             return Ok(None);
         };
         let DecisionRule::Every(cadence) = rule else {
@@ -484,14 +588,14 @@ impl TargetsConfig {
                 source.aggregation_source(),
             )?
         };
-        Ok(Some(AtrBars { bar_type, period }))
+        Ok(Some(AtrBars { bar_type, config }))
     }
 
     /// The config as the fingerprint reads it, its barrier's ATR `atr` as
-    /// it runs: the period, given or the default, and the bars, whose
-    /// source changes the rows.
+    /// it runs: Nautilus' ATR as built, its arguments given or Nautilus'
+    /// defaults, and its bars, whose source changes the rows.
     fn fingerprint_part(&self, atr: Option<AtrBars>) -> String {
-        let atr = atr.map(|atr| format!("{} bars of {}", atr.period, atr.bar_type));
+        let atr = atr.map(|atr| format!("{} on bars of {}", atr.config.indicator(), atr.bar_type));
         let barrier = self.barrier.map(|b| {
             format!(
                 "take profit {} stop {} limit {} ns atr {atr:?}",
@@ -587,11 +691,11 @@ impl Barrier {
             .any(|distance| matches!(distance, Distance::Atr(_)))
     }
 
-    /// The period of its ATR, if a distance is in ATRs: its `atr` table's,
-    /// else `DEFAULT_ATR_PERIOD`.
-    fn atr_period(&self) -> Option<usize> {
+    /// Its ATR, if a distance is in ATRs: its `atr` table's, else of
+    /// `DEFAULT_ATR_PERIOD` bars and Nautilus' defaults.
+    fn atr_config(&self) -> Option<AtrConfig> {
         self.uses_atr()
-            .then(|| self.atr.map_or(DEFAULT_ATR_PERIOD, |atr| atr.period))
+            .then(|| self.atr.unwrap_or(AtrConfig::over(DEFAULT_ATR_PERIOD)))
     }
 
     /// The take profit and stop of each side, the long then the short,
@@ -723,7 +827,7 @@ impl BarrierAtr {
     fn new(bars: AtrBars) -> Self {
         Self {
             bar_type: bars.bar_type,
-            indicator: RefCell::new(AverageTrueRange::new(bars.period, None, None, None)),
+            indicator: RefCell::new(bars.config.indicator()),
         }
     }
 

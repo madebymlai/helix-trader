@@ -14,10 +14,10 @@
 //! What most strategies share is a config struct and functions, never a
 //! base type: `StandardConfig`, the tables every strategy's TOML has, holds
 //! the series read, their warmup and their `Session`, and the instruments
-//! traded, beside the strategy's own table (its `Part`). `model_ema` still
-//! embeds the earlier `BarsConfig` with `#[serde(flatten)]`. The exception is a strategy trading on a learned model,
-//! which holds the harness' types (`model::features::FeatureSet`,
-//! `model::handle::ModelHandle`); `model_ema` is the example.
+//! traded, beside the strategy's own table (its `Part`). The exception is
+//! a strategy trading on a learned model, which holds the harness' types
+//! (`model::features::FeatureSet`, `model::handle::ModelHandle`);
+//! `model_ema` is the example, its `[model]` table its own part.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from quotes; a `warmup::Warmup`, which
@@ -26,7 +26,6 @@
 //! requests none. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
-mod config;
 pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
@@ -35,7 +34,6 @@ mod session;
 mod standard;
 pub mod warmup;
 
-pub use config::{BarsConfig, CompositeSource};
 pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 pub use session::Session;
 

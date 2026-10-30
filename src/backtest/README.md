@@ -871,11 +871,15 @@ the composite hour bars warmed up over 48 hours, no session, 0.01 BTC a
 trade. Funding not included (filled before funding was stored).
 
 ```toml
-instrument_ids = ["BTC-USDT-SWAP.OKX"]     # or BTC-USD_UM_XPERP-310404.OKX
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
-trade_size = "1"                           # "100" on the X-Perp
+# or BTC-USD_UM_XPERP-310404.OKX, trade_size "100"
+[data]
+series = [
+    { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+]
 warmup = "48h"
+
+[trade]
+instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "1" }]
 ```
 
 ```
@@ -1212,11 +1216,15 @@ over the warmup and the window (194,609 quotes, 973 crossed pairs and 8
 one-sided bars dropped, 21 minutes):
 
 ```toml
-instrument_ids = ["SXR8.IBIS"]
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-trade_size = "5"
+[data]
+series = [
+    { data = "bars", instrument_id = "SXR8.IBIS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+]
 warmup = "720h"
 session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
+
+[trade]
+instruments = [{ instrument_id = "SXR8.IBIS", trade_size = "5" }]
 ```
 
 ```

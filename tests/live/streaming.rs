@@ -555,13 +555,18 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
 /// seconds on its 1-second bars, each target held a second, closed before
 /// the next.
 const MODEL_EMA_CONFIG: &str = r#"
-    instrument_ids = ["AUD/USD.SIM"]
-    bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" }
+    [data]
+    series = [
+        { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
+    ]
     warmup = "1s"
+
+    [trade]
+    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
 
     [model]
     decision = { every = "2s" }
-    targets = { instrument_id = "AUD/USD.SIM", quantity = "1", horizon = "1s" }
+    targets = { horizon = "1s" }
     label = "horizon"
     retrain = "24h"
     window = "46h"

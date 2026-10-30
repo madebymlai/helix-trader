@@ -42,13 +42,18 @@ use tempfile::TempDir;
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
 const CONFIG: &str = r#"
-    instrument_ids = ["XAUUSD.ICMARKETS"]
-    bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" }
+    [data]
+    series = [
+        { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
+    ]
     warmup = "1h"
+
+    [trade]
+    instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
 
     [model]
     decision = { every = "1h" }
-    targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "30m" }
+    targets = { horizon = "30m" }
     label = "horizon"
     retrain = "24h"
     window = "46h"
@@ -112,7 +117,7 @@ fn kept_with_its_figures(text: &str) -> bool {
 /// `at`, a baseline of 0.6 on the strategy's features, as the dataset the
 /// `train` subcommand built in `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
-    let config: ModelEmaConfig = toml::from_str(CONFIG).unwrap();
+    let config = ModelEmaConfig::load(CONFIG).unwrap();
     let dataset = model_ema::dataset(&config, catalog.path(), &venue())
         .unwrap()
         .manifest()
@@ -121,7 +126,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         dataset.strategy_id,
         dataset.fingerprint,
         dataset.feature_names,
-        &config.model,
+        &config.model(),
         Some(Side::Long),
         at,
         6,
@@ -185,8 +190,8 @@ fn traded(catalog: &TempDir, models: PathBuf) -> (usize, usize) {
 /// The orders and positions of a backtest of the strategy on the models
 /// under `models`, from `start` to 03:00 of the 23rd.
 fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, usize) {
-    let config: ModelEmaConfig = toml::from_str(CONFIG).unwrap();
-    let requirements = config.bars.data_requirements();
+    let config = ModelEmaConfig::load(CONFIG).unwrap();
+    let requirements = config.data_requirements();
     let backtest = Backtest {
         bar_types: requirements.bar_types,
         ticks: requirements.ticks,

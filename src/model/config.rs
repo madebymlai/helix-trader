@@ -19,16 +19,16 @@ use super::{
     decide::DecisionRule,
     holdout::Minimums,
     learner::LearnerConfig,
-    targets::{Label, Side, TargetsConfig},
+    targets::{Label, Side, TargetsConfig, TargetsTable},
 };
-use crate::strategy::DataRequirements;
+use crate::strategy::{DataRequirements, TradedInstrument};
 
 /// A strategy's model, loaded from TOML, such as
 ///
 /// ```toml
 /// [model]
 /// decision = { every = "1h" }
-/// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "45m" }
+/// targets = { horizon = "45m" }
 /// label = "horizon"
 /// retrain = "168h"
 /// window = "720h"
@@ -38,13 +38,17 @@ use crate::strategy::DataRequirements;
 /// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
+///
+/// Its targets `T` are as the TOML has them, a `TargetsTable` (a
+/// `ModelSection`), until the section trades the instrument of the
+/// strategy's `[trade]` (`ModelSection::trading`).
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
-pub struct ModelConfig {
+pub struct ModelConfig<T = TargetsConfig> {
     /// When the strategy decides.
     pub decision: DecisionRule,
     /// The targets of each decision, read from orders in a dataset run.
-    pub targets: TargetsConfig,
+    pub targets: T,
     /// The target the models learn: whether each side of it gains.
     pub label: Label,
     /// How often the model is retrained, such as `"168h"`: at every multiple
@@ -80,7 +84,7 @@ pub struct ModelConfig {
 /// ```toml
 /// [model]
 /// decision = "event"
-/// targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { .. } }
+/// targets = { barrier = { .. } }
 /// retrain = "168h"
 ///
 /// [model.meta]
@@ -91,14 +95,16 @@ pub struct ModelConfig {
 /// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
+///
+/// Its targets `T` are as `ModelConfig`'s.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
-pub struct RuleConfig {
+pub struct RuleConfig<T = TargetsConfig> {
     /// When the strategy decides: its rule is asked then, and a decision is
     /// made only on the side it signals.
     pub decision: DecisionRule,
     /// The targets of each decision; a barrier, which the meta model learns.
-    pub targets: TargetsConfig,
+    pub targets: T,
     /// How often the meta model is retrained, as `ModelConfig::retrain`.
     pub retrain: SignedDuration,
     /// The meta model.
@@ -172,6 +178,62 @@ impl Margins {
         Side::BOTH
             .into_iter()
             .filter_map(|side| self.of(side).map(|margin| (side, margin)))
+    }
+}
+
+/// A model section as a strategy's TOML has it: its targets trade nothing
+/// yet.
+pub type ModelSection = ModelConfig<TargetsTable>;
+
+impl ModelSection {
+    /// The section, its targets trading `traded` (`TargetsTable::trading`).
+    #[must_use]
+    pub fn trading(self, traded: &TradedInstrument) -> ModelConfig {
+        let Self {
+            decision,
+            targets,
+            label,
+            retrain,
+            window,
+            holdout,
+            margins,
+            min_pnl,
+            min_trades,
+            learner,
+            meta,
+        } = self;
+        ModelConfig {
+            decision,
+            targets: targets.trading(traded),
+            label,
+            retrain,
+            window,
+            holdout,
+            margins,
+            min_pnl,
+            min_trades,
+            learner,
+            meta,
+        }
+    }
+}
+
+impl RuleConfig<TargetsTable> {
+    /// The section, its targets trading `traded` (`TargetsTable::trading`).
+    #[must_use]
+    pub fn trading(self, traded: &TradedInstrument) -> RuleConfig {
+        let Self {
+            decision,
+            targets,
+            retrain,
+            meta,
+        } = self;
+        RuleConfig {
+            decision,
+            targets: targets.trading(traded),
+            retrain,
+            meta,
+        }
     }
 }
 
@@ -373,13 +435,13 @@ fn validate_decisions(
         // A dataset run replays the warmup before its first day, and no
         // more: an ATR still cold then opens no target at the day's first
         // decisions, which a longer build would.
-        let warms = i32::try_from(atr.period)
+        let warms = i32::try_from(atr.config.period)
             .ok()
             .and_then(|period| atr.bar_type.spec().timedelta().checked_mul(period));
         ensure!(
             warms.is_some_and(|warms| warms <= requirements.warmup),
             "the barrier's ATR of {} bars of {} warms over longer than the warmup {:#}",
-            atr.period,
+            atr.config.period,
             atr.bar_type,
             requirements.warmup
         );
@@ -427,7 +489,7 @@ fn validate_minimums(minimums: Minimums) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{data::BarType, identifiers::InstrumentId};
+    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Quantity};
 
     use super::*;
     use crate::strategy::TickSeries;
@@ -439,7 +501,7 @@ mod tests {
     /// held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
-        targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "30m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" } }
+        targets = { horizon = "30m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" } }
         label = "barrier"
         retrain = "24h"
         window = "48h"
@@ -474,9 +536,22 @@ mod tests {
         }
     }
 
+    /// What every test's strategy trades: an ounce of gold.
+    fn gold() -> TradedInstrument {
+        TradedInstrument {
+            instrument_id: InstrumentId::from(GOLD),
+            trade_size: Quantity::from(1),
+        }
+    }
+
+    /// The section of `toml`, trading gold.
+    fn parse(toml: &str) -> anyhow::Result<ModelConfig> {
+        Ok(toml::from_str::<ModelSection>(toml)?.trading(&gold()))
+    }
+
     /// The error of loading `toml` for a strategy reading gold, if any.
     fn load(toml: &str) -> anyhow::Result<ModelConfig> {
-        let config: ModelConfig = toml::from_str(toml)?;
+        let config = parse(toml)?;
         config.validate(&reading(GOLD))?;
         Ok(config)
     }
@@ -530,10 +605,8 @@ mod tests {
 
     #[test]
     fn a_horizon_not_shorter_than_the_window_is_refused() {
-        let toml = section(
-            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "48h" }"#,
-        )
-        .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+        let toml = section(r#"targets = { horizon = "48h" }"#)
+            .replace(r#"label = "barrier""#, r#"label = "horizon""#);
 
         assert!(
             refused(&toml).contains("not shorter than the window"),
@@ -545,7 +618,7 @@ mod tests {
     #[test]
     fn a_limit_not_shorter_than_the_window_is_refused() {
         let toml = section(
-            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "49h" } }"#,
+            r#"targets = { barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "49h" } }"#,
         );
 
         assert!(
@@ -569,9 +642,7 @@ mod tests {
                 "horizon 1h 30m",
             ),
         ] {
-            let toml = section(&format!(
-                r#"targets = {{ instrument_id = "XAUUSD.ICMARKETS", quantity = "1", {targets} }}"#
-            ));
+            let toml = section(&format!(r#"targets = {{ {targets} }}"#));
 
             let err = refused(&toml);
 
@@ -663,7 +734,7 @@ mod tests {
 
     #[test]
     fn a_traded_instrument_the_strategy_does_not_read_is_refused() {
-        let config: ModelConfig = toml::from_str(SECTION).unwrap();
+        let config = parse(SECTION).unwrap();
 
         let err = format!(
             "{:#}",
@@ -675,9 +746,7 @@ mod tests {
 
     #[test]
     fn a_label_of_a_target_the_config_lacks_is_refused() {
-        let toml = section(
-            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }"#,
-        );
+        let toml = section(r#"targets = { horizon = "1h" }"#);
 
         assert!(refused(&toml).contains("label"), "{}", refused(&toml));
     }
@@ -687,7 +756,7 @@ mod tests {
     fn atr_section(atr: Option<&str>) -> String {
         let atr = atr.map(|atr| format!(", atr = {atr}")).unwrap_or_default();
         section(&format!(
-            r#"targets = {{ instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }} }}"#
+            r#"targets = {{ barrier = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }} }}"#
         ))
     }
 
@@ -707,7 +776,7 @@ mod tests {
     #[test]
     fn a_barrier_atr_warming_longer_than_the_warmup_is_refused() {
         for (atr, hours) in [(None, 14), (Some("{ period = 3 }"), 3)] {
-            let config: ModelConfig = toml::from_str(&atr_section(atr)).unwrap();
+            let config = parse(&atr_section(atr)).unwrap();
 
             let shorter = SignedDuration::from_hours(hours - 1);
             let err = format!(
@@ -751,7 +820,7 @@ mod tests {
     /// the source bars the strategy reads.
     #[test]
     fn a_barrier_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes() {
-        let config: ModelConfig = toml::from_str(&atr_section(None)).unwrap();
+        let config = parse(&atr_section(None)).unwrap();
 
         for requirements in [
             reading_gold(&["trades"], &[]),
@@ -768,7 +837,7 @@ mod tests {
     /// ATR's bars have nothing to be built from.
     #[test]
     fn a_barrier_atr_on_an_instrument_whose_prices_the_strategy_does_not_read_is_refused() {
-        let config: ModelConfig = toml::from_str(&atr_section(None)).unwrap();
+        let config = parse(&atr_section(None)).unwrap();
 
         let err = format!(
             "{:#}",
@@ -783,7 +852,7 @@ mod tests {
     /// Hourly decisions cannot have bars of 2-hour source bars.
     #[test]
     fn a_barrier_atr_on_source_bars_longer_than_the_cadence_is_refused() {
-        let config: ModelConfig = toml::from_str(&atr_section(None)).unwrap();
+        let config = parse(&atr_section(None)).unwrap();
         let requirements = reading_gold(
             &[],
             &["XAUUSD.ICMARKETS-4-HOUR-LAST-INTERNAL@2-HOUR-EXTERNAL"],
@@ -801,7 +870,7 @@ mod tests {
     fn a_barrier_atr_deciding_on_events_is_refused() {
         let toml =
             atr_section(None).replace(r#"decision = { every = "1h" }"#, r#"decision = "event""#);
-        let config: ModelConfig = toml::from_str(&toml).unwrap();
+        let config = parse(&toml).unwrap();
 
         let err = format!(
             "{:#}",
@@ -863,10 +932,8 @@ mod tests {
 
     #[test]
     fn a_meta_model_without_a_barrier_is_refused() {
-        let toml = section(
-            r#"targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", horizon = "1h" }"#,
-        )
-        .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+        let toml = section(r#"targets = { horizon = "1h" }"#)
+            .replace(r#"label = "barrier""#, r#"label = "horizon""#);
 
         let err = refused(&format!("{toml}\n{META}"));
 
@@ -913,7 +980,7 @@ mod tests {
     fn a_rule_primarys_section_reads_its_meta_from_toml() {
         let toml = r#"
             decision = "event"
-            targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
+            targets = { barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
             retrain = "24h"
 
             [meta]
@@ -926,7 +993,9 @@ mod tests {
             size = { min = 0.5, max = 2 }
         "#;
 
-        let config: RuleConfig = toml::from_str(toml).unwrap();
+        let config = toml::from_str::<RuleConfig<TargetsTable>>(toml)
+            .unwrap()
+            .trading(&gold());
         config.validate(&reading(GOLD)).unwrap();
 
         assert_eq!(config.decision, DecisionRule::Event);
@@ -944,11 +1013,13 @@ mod tests {
     fn a_rule_primarys_section_needs_its_meta() {
         let toml = r#"
             decision = "event"
-            targets = { instrument_id = "XAUUSD.ICMARKETS", quantity = "1", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
+            targets = { barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
             retrain = "24h"
         "#;
 
-        let err = toml::from_str::<RuleConfig>(toml).unwrap_err().to_string();
+        let err = toml::from_str::<RuleConfig<TargetsTable>>(toml)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("meta"), "{err}");
     }

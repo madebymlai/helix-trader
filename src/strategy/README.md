@@ -32,7 +32,6 @@ type or trait:
 ```
 strategy/
   standard.rs   StandardConfig: the standard tables, the strategy's Part
-  config.rs     BarsConfig: model_ema's flat bars config
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
 ```
@@ -128,11 +127,11 @@ config or every violation out.
 `main` loads the config before anything else, so a bad config never
 starts a node, a backtest, a dataset or a training run.
 
-`model_ema` still reads the earlier flat config, the shared
-`strategy::BarsConfig` flattened into `ModelEmaConfig` (`instrument_ids`,
-`bar_spec`, `composite`, `warmup`, `ticks`, `session` at the top of its
-TOML, checked by `BarsConfig::validate`, which stops at the first error);
-its TOML examples below are in that shape.
+`model_ema` loads the same way, its own part a `[model]` table (see
+"Features and decisions"): it trades one instrument, `[trade]`'s, which its
+model's targets trade, of its `trade_size`; its rules are a strategy id
+in `[base]`, which keys its models, and the model valid for the data it
+reads (`ModelConfig::validate`, its first error reported under `model`).
 
 ### Bar types
 
@@ -160,9 +159,7 @@ series = [
 ]
 ```
 
-gives `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. (`model_ema`'s
-flat config says the same with `instrument_ids`, one `bar_spec` for all,
-and `composite` for `from`.) Nautilus' risk
+gives `SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`. Nautilus' risk
 engine prices a market order from the cached external LAST bar, so the
 strategy needs no quotes to trade. A bar type carries one price type, so
 LAST bars carry no spread: a strategy that needs it subscribes to the
@@ -174,9 +171,8 @@ The config states what the strategy needs from data as one
 `strategy::DataRequirements`: its bar types, its tick series and its
 warmup, its instruments derived from the bar types and the ticks
 (`DataRequirements::instrument_ids`). `fill_catalog`, backtest and live
-read them from it (`main` calls `config.data_requirements()`, or
-`config.bars.data_requirements()` for `model_ema`), never from the
-config's fields:
+read them from it (`main` calls `config.data_requirements()`), never
+from the config's fields:
 
 ```rust
 pub fn data_requirements(&self) -> DataRequirements {
@@ -189,7 +185,7 @@ pub fn data_requirements(&self) -> DataRequirements {
 ```
 
 A strategy reading ticks as they are, beside or instead of bars, lists
-them in `[data] series` too (`ticks` in `model_ema`'s flat config), each
+them in `[data] series` too, each
 a `TickSeries`, a Nautilus data type (`NautilusDataType`) of one
 instrument:
 
@@ -256,7 +252,8 @@ Warmup and training, "Bars on a root").
 
 ### Session
 
-`Session` (`strategy/session.rs`, `[data] session`, the `session` field of `BarsConfig` in `model_ema`) holds a `jiff::tz::TimeZone`, read from its IANA name with
+`Session` (`strategy/session.rs`, `[data] session`) holds a
+`jiff::tz::TimeZone`, read from its IANA name with
 `#[serde(with = "jiff::fmt::serde::tz::required")]` because `TimeZone` has
 no plain `Deserialize` (an unknown name fails at load), and `open` and
 `close` as `jiff::civil::Time` (`"08:30"`).
@@ -337,7 +334,7 @@ nautilus_strategy!(Trend);
 
 impl DataActor for Trend {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        for bar_type in self.config.bars.bar_types() {
+        for bar_type in self.config.data.bar_types() {
             let book = Rc::clone(&self.book) as SharedActorIndicator;
             self.core_mut().register_indicator_for_bars(bar_type, book);
         }
@@ -703,10 +700,12 @@ of its choosing (`model::features`, `model::decide`).
 - **Targets.** In a dataset run (`Backtest::run_dataset`, on a hedging
   venue with a large balance) each decision's targets come from real
   orders on Nautilus' simulated venue (`model::targets`), so fees, spread,
-  slippage and funding are in them. The config (`TargetsConfig`, from
-  TOML) names the instrument, the size of every order, and a triple
-  barrier, a horizon, `horizon = "1h"`, or both. The barrier's take
-  profit and stop are distances from the decision's price (the last
+  slippage and funding are in them. The config (`TargetsConfig`) has the
+  instrument, the size of every order, and a triple barrier, a horizon,
+  `horizon = "1h"`, or both; the TOML's `[model] targets`
+  (`TargetsTable`) names only the targets, which trade the instrument of
+  the strategy's `[trade]`, of its `trade_size`
+  (`TargetsTable::trading`). The barrier's take profit and stop are distances from the decision's price (the last
   quote's mid, else the last trade, else the last bar's close), each in
   one unit (`Distance`): basis points of that price, `{ bps = 20 }`, or
   multiples of an average true range, `{ atr = 2.0 }`. The ATR is
@@ -728,15 +727,20 @@ of its choosing (`model::features`, `model::decide`).
   a tie. The bars are not declared anywhere:
 
   ```toml
-  [barrier]
-  take_profit = { atr = 2.0 }
-  stop = { atr = 1.5 }
-  limit = "10m"
+  targets = { barrier = { take_profit = { atr = 2.0 }, stop = { atr = 1.5 }, limit = "10m" } }
   ```
 
-  An `atr` table sets another period, `atr = { period = 20 }`, and is
-  refused without an `atr` distance; decisions on events, with no
-  cadence, are refused with an ATR, and so are a cadence Nautilus builds
+  An `atr` table in the barrier sets Nautilus' `AverageTrueRange`
+  arguments by their names, `atr = { period = 20, ma_type = "SIMPLE",
+  use_previous = true, value_floor = 0.0 }` (`AtrConfig`), `period`
+  required, the others Nautilus' defaults when left out, `ma_type` a
+  Nautilus `MovingAverageType` by its name (its `FromStr`, case aside).
+  The load builds the ATR with Nautilus' `AverageTrueRange::new`, whose
+  checked constructor is not public: an argument it refuses (a period of
+  0, a negative floor) panics at load. The fingerprint reads the ATR as
+  Nautilus builds it, so its defaults written out key the same dataset.
+  The table is refused without an `atr` distance; decisions on events,
+  with no cadence, are refused with an ATR, and so are a cadence Nautilus builds
   no bars of (a step must divide the next unit: 15 minutes, not 90), a
   strategy reading neither quotes, trades nor bars of the instrument,
   and, on source bars alone, a cadence that is a whole multiple of none
@@ -1309,7 +1313,7 @@ ATR" above).
 
 - Pure modules: unit tests in a `#[cfg(test)] mod tests` at the bottom of
   each file, or in `<module>/tests.rs` (`docs/ARCHITECTURE.md`).
-  `StandardConfig`, `BarsConfig` and `Session` are unit tested where they
+  `StandardConfig` and `Session` are unit tested where they
   live, at the config load (TOML text in, the config or every
   `ConfigError` out), `warmup::cache_config` too; a strategy's config
   tests cover only its own fields and rules.

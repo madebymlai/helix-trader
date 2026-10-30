@@ -26,7 +26,6 @@ mod features;
 
 pub use config::ModelEmaConfig;
 
-use anyhow::Context;
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     messages::data::DataResponseEnvelope,
@@ -43,6 +42,7 @@ use crate::{
     model::{
         dataset::{Dataset, DatasetVenue},
         decide,
+        features::FeatureSet,
         handle::{Mode, ModelHandle},
         train::Training,
         walk::WalkForward,
@@ -59,20 +59,20 @@ pub struct ModelEma {
 
 impl ModelEma {
     /// The strategy, its model handle in `mode`: live, its warmup
-    /// (`BarsConfig::warmup`) is requested at start, which hydrates its
+    /// (`DataConfig::warmup`) is requested at start, which hydrates its
     /// indicators; otherwise they warm on the data replayed.
     ///
     /// # Errors
     ///
-    /// Returns an error if the config is invalid.
+    /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
+    /// the base (`StrategyCore::new_checked`).
     pub fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
-        config.validate()?;
-        let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+        let features = feature_set(&config)?;
         let model = ModelHandle::new(
-            strategy_id(&config)?,
+            config.strategy_id(),
             features,
-            &config.model,
-            &config.bars.data_requirements(),
+            &config.model(),
+            &config.data_requirements(),
             mode,
         )?;
         Ok(Self {
@@ -96,22 +96,21 @@ impl ModelEma {
 ///
 /// # Errors
 ///
-/// Returns an error if the config is invalid, or as `Training::new` does.
+/// Returns an error as `Training::new` does.
 pub fn training(
     config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
     venue: &DatasetVenue,
 ) -> anyhow::Result<Training> {
-    config.validate()?;
-    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    let features = feature_set(config)?;
     Training::new(
         catalog,
         models,
-        strategy_id(config)?,
+        config.strategy_id(),
         &features,
-        config.model.clone(),
-        &config.bars.data_requirements(),
+        config.model(),
+        &config.data_requirements(),
         venue,
     )
 }
@@ -122,23 +121,21 @@ pub fn training(
 ///
 /// # Errors
 ///
-/// Returns an error if the config is invalid, or as `WalkForward::new`
-/// does.
+/// Returns an error as `WalkForward::new` does.
 pub fn walk_forward(
     config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
     venue: &DatasetVenue,
 ) -> anyhow::Result<WalkForward> {
-    config.validate()?;
-    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    let features = feature_set(config)?;
     WalkForward::new(
         catalog,
         models,
-        strategy_id(config)?,
+        config.strategy_id(),
         &features,
-        config.model.clone(),
-        &config.bars.data_requirements(),
+        config.model(),
+        &config.data_requirements(),
         venue,
     )
 }
@@ -149,31 +146,30 @@ pub fn walk_forward(
 ///
 /// # Errors
 ///
-/// Returns an error if the config is invalid, or as `Dataset::new` does.
+/// Returns an error as `Dataset::new` does.
 pub fn dataset(
     config: &ModelEmaConfig,
     catalog: &Path,
     venue: &DatasetVenue,
 ) -> anyhow::Result<Dataset> {
-    config.validate()?;
-    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    let features = feature_set(config)?;
+    let model = config.model();
     Dataset::new(
         catalog,
-        strategy_id(config)?,
+        config.strategy_id(),
         &features,
-        config.model.decision,
-        config.model.targets.clone(),
-        &config.bars.data_requirements(),
+        model.decision,
+        model.targets,
+        &config.data_requirements(),
         venue,
     )
 }
 
-/// The strategy's id, from its base.
-fn strategy_id(config: &ModelEmaConfig) -> anyhow::Result<nautilus_model::identifiers::StrategyId> {
-    config
-        .base
-        .strategy_id
-        .context("the strategy has no id to key its models")
+/// The features of the strategy `config` describes: the averages of each
+/// of its bars series, warmed over its warmup.
+fn feature_set(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
+    let bar_types: Vec<_> = config.data.bar_types().collect();
+    features::features(&bar_types, config.data.warmup)
 }
 
 nautilus_strategy!(ModelEma, {

@@ -4,7 +4,7 @@ use jiff::SignedDuration;
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use nautilus_model::{
     data::{BarSpecification, BarType, NautilusDataType},
-    enums::{AggregationSource, PriceType},
+    enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::InstrumentId,
     types::Quantity,
 };
@@ -14,7 +14,7 @@ use serde::{
     de::{self, DeserializeOwned, MapAccess, Visitor},
 };
 
-use super::{CompositeSource, DataRequirements, TickSeries, session::Session, tick_data};
+use super::{DataRequirements, TickSeries, session::Session, tick_data};
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
 /// names and types, and the strategy's own part `P` (see `Part`).
@@ -262,6 +262,16 @@ impl TryFrom<SeriesFields> for Series {
         };
         Ok(Self::Bars(bar_type))
     }
+}
+
+/// The source bars of a composite bar type, a bars series' `from`: the
+/// `composite_*` arguments of Nautilus' `BarType::new_composite`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositeSource {
+    pub step: usize,
+    pub aggregation: BarAggregation,
+    pub aggregation_source: AggregationSource,
 }
 
 /// `[trade]`: what the strategy trades.
