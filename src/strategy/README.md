@@ -701,7 +701,9 @@ of its choosing (`model::features`, `model::decide`).
   backtest, a source bar stamped at the close of a bar of the cadence is
   replayed before the timer closing that bar, so the bar holds it and the
   decision 10 ms later reads it. The targets run only in dataset runs,
-  backtests: live, no ATR bars are built.
+  backtests; a model trading on the barrier runs the same ATR for its
+  stops (`Stops`, "Model handle"), in a backtest and live, where it warms
+  on live bars alone: its warmup request does not build them.
   Each exit is on the instrument's nearest tick (Nautilus' tick grid,
   `next_bid_price` and `next_ask_price`), a tie away from the decision's
   price. The targets own the ATR: `start(self)` in `on_start` registers
@@ -729,7 +731,9 @@ of its choosing (`model::features`, `model::decide`).
   target's position id, from its entry's fill. Once all its targets are
   closed, the decision's `TargetRow` (its `FeatureRow`, per target and
   side the realised P&L net of commission as Nautilus reports it and the
-  exit, the settling time) is published on the message bus, keyed by the
+  exit, and a barrier's `Distances`, its take profit's and its stop's
+  distance in price from the decision's price, as set on the ticks, the
+  basis points or ATRs resolved there; the settling time) is published on the message bus, keyed by the
   strategy id (`TargetRow::data_type`); `Outcome::sign` is the P&L's
   sign. A denied or rejected order, or an entry not filled by its time,
   leaves the decision unsettled, logged, and so do positions still open
@@ -744,7 +748,8 @@ of its choosing (`model::features`, `model::decide`).
   values, the target values in the order of
   `TargetsConfig::target_names` (per target, the barrier then the
   horizon, the long then the short, its P&L and its exit, 1 a take
-  profit, -1 a stop, 0 the time; `TargetRow::values`), the settling and
+  profit, -1 a stop, 0 the time, and a barrier's distances of its take
+  profit and its stop; `TargetRow::values`, `pnl_index`, `stop_index`), the settling and
   decision times. A `Dataset` (`Dataset::new(catalog, strategy_id,
   &features, rule, targets, &requirements, &commission)`) stores them
   under the strategy id and the fingerprint, so another strategy, of
@@ -791,10 +796,15 @@ of its choosing (`model::features`, `model::decide`).
   `SchemaMismatch`.
 - **Model config.** The model section of a strategy's TOML is a
   `ModelConfig` (`model::config`): `decision`, `targets`, `label`
-  (`"barrier"` or `"horizon"`: the model learns whether that target's long
-  gains, net of costs), `retrain`, `window` and `holdout` (durations),
-  `thresholds = { long = 0.6, short = 0.4 }`, `min_score` (a holdout AUC)
-  and `learner`. `validate(&requirements)` refuses a retrain interval not
+  (`"barrier"` or `"horizon"`: each side's model learns whether that
+  side of that target gains, net of costs), `retrain`, `window` and
+  `holdout` (durations), `margins`, `min_score` (a holdout AUC) and
+  `learner`. `margins = { long = 0.5, short = 0.5 }` names the sides
+  traded, each with the expected net P&L of a trade, in the targets' P&L
+  currency per trade of their quantity, from which it is traded (see
+  "Model handle"); each is optional, a side without one has no model,
+  trained, stored, scored nor traded, so `{ long = 0.5 }` is a long-only
+  model. `validate(&requirements)` refuses a retrain interval not
   positive, a traded instrument the strategy does not read, a barrier ATR
   without bars built from what it reads of that instrument (above) or
   whose period of bars, the given or the default, at the
@@ -802,66 +812,96 @@ of its choosing (`model::features`, `model::decide`).
   replays only the warmup before its first day, so the ATR would be cold
   at its first decisions; as long is enough), a label of a
   target the config lacks, a barrier limit or horizon not shorter than
-  the window, a holdout leaving no fitted row, thresholds that are not
-  probabilities with the short below the long, and a minimum score
-  outside [0, 1]. An optional `[model.meta]` table (`MetaConfig`) adds a
-  meta model, below.
+  the window, a holdout leaving no fitted row before it and the
+  calibration as long before it (the window must be longer than twice
+  the holdout and the longest target), margins naming no side or not
+  numbers, and a minimum score outside [0, 1]. An optional
+  `[model.meta]` table (`MetaConfig`) adds a meta model, below.
 - **Training.** `Training::new(catalog, models, strategy_id, &features,
   config, &requirements, &commission)` and `train_at(t, replay)`
-  (`model::train`) train at `t`: the rows of the window ending at `t`
-  settled by `t` (`Dataset::settled`),
-  so the purge between them and the model's first use is the longest
-  target; the model fitted on those before the holdout, the window's
-  last part, settled by its start, the same gap; scored by the AUC of its
-  predictions on the holdout (`score::auc`). At or above `min_score` the
-  model is published, valid from `t`; else, and on any error, the current
-  model is kept with the reason (`Kept`: below the minimum score, failed,
-  or schema mismatch). A train returns what it did, `Trained`: the
-  `Outcome` of each model, never an error. With a meta model the primary
-  trains first, then the meta, on the rows of the one replay (see
+  (`model::train`) train at `t` a model for each side of the margins, the
+  long's learning whether the long of the label's target gains, the
+  short's whether its short does, on the same rows: those of the window
+  ending at `t` settled by `t` (`Dataset::settled`), so the purge
+  between them and the models' first use is the longest target. The
+  window ends in the holdout and, before it, the calibration, as long:
+  a model is fitted on the rows before the calibration settled by its
+  start; calibrated by Platt scaling (`model::calibration`, a logistic
+  curve of its prediction fitted to Platt's smoothed targets, Newton's
+  method as Lin, Lin and Weng give it; Nautilus has none) on its
+  predictions on the calibration's rows settled by the holdout's start;
+  scored by the AUC of its calibrated predictions on the holdout
+  (`score::auc`). Its payoff (`model::payoff`) is the mean realised win
+  and loss of its side's trades on the rows before the holdout, Nautilus'
+  `AvgWinner` and `AvgLoser` (`nautilus_analysis`,
+  `calculate_from_realized_pnls`): on a barrier in R, each row's net P&L
+  over the worth of its own stop (`targets::stop_worth`, the stop's
+  distance on the targets' quantity by the instrument's
+  `calculate_notional_value`, the instrument as the catalog last holds
+  it), so a stop-out with slippage can be below -1R; on a horizon in
+  money. At or above `min_score` a side's model is published in its
+  side's store, valid from `t`, with its calibration and its payoff;
+  else, and on any error, its current model is kept with the reason
+  (`Kept`: below the minimum score, failed, schema mismatch, or no row
+  to calibrate on or no win or no loss to expect), the other side
+  publishing or keeping on its own. A train returns what it did,
+  `Trained`: the `Outcome` of each model, the long's, the short's and the
+  meta's, never an error. With a meta model the primary's sides train
+  first, then the meta, on the rows of the one replay (see
   "Meta-labeling"); `Training::of_rule` trains a rule primary's meta
-  alone.
+  alone. The meta is calibrated as a side is, with no payoff.
 - **Model store.** `ModelStore` (`model::store`) holds the published
-  models under `<models>/<strategy id>/<fingerprint>/<settings>/` (the
-  dataset's fingerprint, the commission in it), the settings a hash of the
-  learner and its settings, the label, the window, the holdout and the
-  minimum score: a model published at a lower minimum may score below a
-  higher one, so a stricter gate lists none of it. Each model is one
-  file, `<valid from>.json`, written beside its name and renamed onto
-  it: its manifest (strategy, valid
-  from, fingerprint, feature names, target spec, label, learner, holdout
-  AUC, and up to 16 holdout rows with the model's predictions on them, a
-  missing value written `"NaN"`) and the model as its adapter saved it.
-  A reloaded model is checked by predicting the probes, not by its bytes.
-  `valid_froms()` lists the models in time order, `read(valid_from)` gives
-  one back. `StoredModel::load(feature_names, fingerprint)` loads it with
-  the checks a handle makes before use (below). A meta model's store is
-  `meta/<settings>` under its primary's directory (`ModelStore::meta`),
-  its settings its learner, window, holdout and minimum score and the
-  primary's thresholds; a rule primary's under the strategy id and
-  fingerprint (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
+  models under `<models>/<strategy id>/<fingerprint>/<settings>/<side>/`
+  (the dataset's fingerprint, the commission in it; `long` or `short`),
+  the settings a hash of the learner and its settings, the label, the
+  window, the holdout and the minimum score: a model published at a
+  lower minimum may score below a higher one, so a stricter gate lists
+  none of it. Each model is one file, `<valid from>.json`, written beside
+  its name and renamed onto it: its manifest (strategy, valid from,
+  fingerprint, feature names, target spec, label, side, learner,
+  calibration, payoff, holdout AUC, and up to 16 holdout rows with the
+  model's calibrated predictions on them, a missing value written
+  `"NaN"`) and the model as its adapter saved it. A reloaded model is
+  checked by predicting the probes, not by its bytes. `valid_froms()`
+  lists the models in time order, `read(valid_from)` gives one back.
+  `StoredModel::load(feature_names, fingerprint)` loads it with the
+  checks a handle makes before use (below), a `LoadedModel` whose every
+  prediction is calibrated. A meta model's store is `meta/<settings>`
+  beside its primary's sides (`ModelStore::meta`), its settings its
+  learner, window, holdout and minimum score and the primary's margins;
+  a rule primary's under the strategy id and fingerprint
+  (`ModelStore::of_rule`). `Swap` swaps a store's models in as a
   strategy does, decision by decision: the latest valid, checked, a
   model failing a check refused and the current one kept; the handle,
   the backtest's scores and the meta's rows all use it.
 - **Model handle.** A strategy trading on its model holds a `ModelHandle`
   (`model::handle`, `ModelHandle::new(strategy_id, features, &config,
   &requirements, mode)`, an `Rc`), the one place it decides:
-  `start(self, &bar_types)` in `on_start` registers the features and
+  `start(self, &bar_types)` in `on_start` registers the features (and,
+  trading on a barrier, the barrier's ATR, as the targets do) and
   starts the cadence, live `warmup::live_bar_build_delay(&bar_types)`
   late; `decide(self)` at each
   fresh decision, on data of the targets' instrument (`new` refuses a
   cadence on features reading none of it), snapshots the features and
   publishes their row, then, in
   `Mode::Backtest { models, commission }` or `Mode::Live { models,
-  commission, .. }`, takes the
-  latest model of
-  the store valid at the decision, predicts, and returns the `Trade`
-  (side, the targets' size, the probability) that `Thresholds::side`
-  makes of the probability: a buy at or above `long`, a sell at or below
-  `short`. No model valid yet, a stale decision, cold features or a
-  probability between the thresholds give no trade, never an error. The store is listed again
-  at each decision, so a model published meanwhile is used from the first
-  decision at or after its valid-from, and a model is swapped in only
+  commission, .. }`, takes for each side of the margins the latest model
+  of its store valid at the decision, its calibrated probability `p`,
+  and the side's expected net P&L (`model::payoff`): `p` times the
+  expected win less `1 - p` times the expected loss, on a barrier in R
+  times the worth of the stop the decision sets (`targets::Stops`, from
+  the decision's price and the ATR at it, on the ticks, as a dataset run
+  sets it), on a horizon in money. A side trades if that is at or above
+  its margin; of two, the one expected the more, none at a tie
+  (`payoff::pick`); it returns the `Trade` (side, the targets' size, the
+  side's calibrated probability). With a fixed cost, a tight ATR stop
+  needs a higher probability than a wide one to clear a margin, which a
+  fixed probability threshold cannot express (Elkan 2001; Bahnsen et al.
+  2015). A side with no model valid yet never trades; a stale decision,
+  cold features, a barrier ATR not yet initialized, no side clearing its
+  margin or two tied give no trade, never an error. The stores are
+  listed again at each decision, so a model published meanwhile is used
+  from the first decision at or after its valid-from, and a model is swapped in only
   there, before predicting: no decision mixes two models. Before use a
   model is checked: its feature names in order and its fingerprint are
   the strategy's, its width theirs, and it predicts each probe to the bit
@@ -887,20 +927,23 @@ of its choosing (`model::features`, `model::decide`).
   the trade a multiple of the targets' size, `min` at the threshold to
   `max` at a probability of 1, linear between. The meta model decides
   only when the primary signals, on the primary's features with its side
-  (1 a buy, -1 a sell) and probability (missing for a rule) after them,
+  (1 a buy, -1 a sell) and that side's calibrated probability (missing
+  for a rule) after them,
   and learns whether the triple-barrier trade on the primary's side won:
   the targets need a barrier, and a dataset row, which opens a long and a
   short at every decision, has either side's, so the meta's rows need no
   replay of their own. A rule primary's rows are its decisions on a side.
-  A model primary's are its dataset's rows, each with the prediction of
-  the primary model the strategy used then (`Swap`), out of sample by
-  construction, none before the primary's first model, which the meta's
-  window never starts before; a row the primary makes no trade of is
-  none. Trading, the handle takes the primary's trade if the meta model
-  in use predicts at least `threshold`, sized if it sizes; no meta model
-  valid yet is no trade. Two levels at most, by the types: `MetaConfig`
-  has no meta, so `[model.meta.meta]` is refused at load as an unknown
-  field.
+  A model primary's are its dataset's rows, each with the side its
+  decision rule picks from the models of each side the strategy used
+  then (`Swap`), each stop worth the row's own (`payoff::Realised`), out
+  of sample by construction, none before the primary's first model of
+  any side, which the meta's window never starts before; a row the
+  primary makes no trade of is none, so a long-only primary gives the
+  meta buys alone. Trading, the handle takes the primary's trade if the
+  meta model in use predicts, calibrated, at least `threshold`, sized if
+  it sizes; no meta model valid yet is no trade. Two levels at most, by
+  the types: `MetaConfig` has no meta, so `[model.meta.meta]` is refused
+  at load as an unknown field.
 - **Schedule.** A model is retrained every `retrain` (`model::schedule`),
   at its multiples since the Unix epoch, whatever the run start, in a
   backtest as live: the times of a Nautilus timer named after the
@@ -917,16 +960,17 @@ of its choosing (`model::features`, `model::decide`).
   &requirements, &commission)`)
   holds a backtest's retrains and scores: `prepare(start, end, build,
   train)` has `build` build the dataset from the first retrain's window
-  to `end` if it lacks a day, then `train` train at each missing retrain
-  time; `scores(start, end)` scores each decision of the dataset in the
-  span with the model the handle used at it, beside the baseline fitted
-  at each retrain time, per retrain period and over the span (backtest
-  README, "Retraining on the schedule"). With a meta model, `prepare`
-  builds from the longer of the two windows and trains at each time
-  either store lacks, the meta's only after the primary's first model as
+  to `end` if it lacks a day, then `train` train at each retrain time a
+  side's store lacks; `scores(start, end)` scores, for each side, each
+  decision of the dataset in the span against the side's label with the
+  side's model the handle used at it, calibrated, beside the side's
+  baseline fitted at each retrain time, per retrain period and over the
+  span, AUC and log loss (backtest README, "Retraining on the
+  schedule"). With a meta model, `prepare` builds from the longer of the
+  two windows and trains at each time a store lacks, the meta's only after the primary's first model as
   the earlier trains of the span leave it (before, its window has no
   row, so it never publishes there), and the
-  meta's scores follow the primary's.
+  meta's scores follow the sides'.
 - **Live retraining.** In `Mode::Live { models, commission, launcher,
   catalog }` the handle retrains too (`model::launcher`): `start`
   sets the strategy's retrain timer (`schedule::start`) on the grid of

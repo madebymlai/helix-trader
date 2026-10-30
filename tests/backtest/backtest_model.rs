@@ -1,11 +1,11 @@
 //! A strategy trading on its models (`model::handle`): the probe of
 //! `common::dataset` decides every hour on the last mid of IC's gold,
 //! trading in a backtest on the models of a store. On a fixed list of
-//! baseline models, each predicting its own probability whatever the row,
-//! each decision's probability names the model it used: the latest valid
-//! at or before it. A model LightGBM fitted by a train at t, reloaded in
-//! the node, predicts on the decisions of its probe rows exactly as at
-//! training.
+//! baseline long models, each predicting its own probability whatever the
+//! row, calibrated alike, each decision's probability names the model it
+//! used: the latest valid at or before it. A model LightGBM fitted by a
+//! train at t, reloaded in the node, predicts on the decisions of its
+//! probe rows exactly as at training, calibrated.
 
 use std::path::Path;
 
@@ -16,10 +16,13 @@ use crate::common::{
     ic,
 };
 use helix_trader::model::{
-    config::{ModelConfig, Thresholds},
+    calibration::Calibration,
+    config::{Margins, ModelConfig},
     dataset,
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
+    payoff::Payoff,
     store::{ModelManifest, ModelStore, Probe, StoredModel},
+    targets::Side,
     train::Training,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -34,12 +37,18 @@ fn store(models: &Path, config: &ModelConfig) -> ModelStore {
         config,
         &requirements(),
         &commission(),
+        Side::Long,
     )
     .unwrap()
 }
 
-/// A baseline model of the probe valid from `valid_from`, predicting
-/// `trues` tenths whatever the row.
+/// The calibration of the baselines, `c(p) = 1 / (1 + e^(2 - 4p))`,
+/// increasing: c(0.5) = 0.5.
+const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+
+/// A baseline long model of the probe valid from `valid_from`, predicting
+/// `trues` tenths whatever the row, calibrated by `CALIBRATION`, expecting
+/// a win and a loss of 1R: above 0.5 a long expected to gain.
 fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
     let labels = (0..10).map(|i| i < trues).collect();
     let set = TrainingSet::new(1, vec![4000.0; 10], labels).unwrap();
@@ -60,11 +69,17 @@ fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
             feature_names: vec!["mid".to_string()],
             targets: targets(),
             label: config().label,
+            side: Some(Side::Long),
             learner: LearnerConfig::Baseline {},
+            calibration: CALIBRATION,
+            payoff: Some(Payoff {
+                win: 1.0,
+                loss: 1.0,
+            }),
             score: 0.6,
             probes: vec![Probe {
                 row: vec![4000.0],
-                prediction: model.predict(&[4000.0]).unwrap(),
+                prediction: CALIBRATION.apply(model.predict(&[4000.0]).unwrap()),
             }],
         },
         model: model.save().unwrap(),
@@ -73,8 +88,8 @@ fn baseline(valid_from: Timestamp, trues: usize) -> StoredModel {
 
 /// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late;
 /// models valid from 02:00 (0.7), 04:00 (0.8), 04:30
-/// (0.9) and 09:00 (after the run). Before 02:00 no model is valid:
-/// no trade.
+/// (0.9) and 09:00 (after the run), each probability calibrated. Before
+/// 02:00 no model is valid: no trade.
 #[test]
 fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let catalog = walk(
@@ -118,17 +133,18 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     assert_eq!(
         probabilities,
         [
-            (hour("02"), 0.7),
-            (hour("03"), 0.7),
-            (hour("04"), 0.8),
-            (hour("05"), 0.9),
-            (hour("06"), 0.9),
+            (hour("02"), CALIBRATION.apply(0.7)),
+            (hour("03"), CALIBRATION.apply(0.7)),
+            (hour("04"), CALIBRATION.apply(0.8)),
+            (hour("05"), CALIBRATION.apply(0.9)),
+            (hour("06"), CALIBRATION.apply(0.9)),
         ]
     );
 }
 
-/// A train at t (16:00 of the 25th) with LightGBM on a window of 60
-/// hours, enough rows for its leaves of 20 rows to split, published
+/// A train at t (16:00 of the 25th) with LightGBM on a window of 72
+/// hours, 48 before the calibration and the holdout, enough rows for its
+/// leaves of 20 rows to split, published
 /// whatever its score; the same model, valid from the holdout's start,
 /// then trades over the holdout, whose decisions are the probe rows'. The
 /// walk puts the holdout's mids on both sides of the fitted ones' split,
@@ -145,12 +161,12 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let t = ic::at("00:00:00") + SignedDuration::from_hours(112);
     let config = ModelConfig {
         learner: LearnerConfig::LightGbm(LightGbmConfig::builder().num_iterations(20).build()),
-        window: SignedDuration::from_hours(60),
+        window: SignedDuration::from_hours(72),
         min_score: 0.0,
-        // Every probability a trade, to record it.
-        thresholds: Thresholds {
-            long: f64::MIN_POSITIVE,
-            short: 0.0,
+        // Every decision a long, to record its probability.
+        margins: Margins {
+            long: Some(f64::MIN),
+            short: None,
         },
         ..config()
     };
@@ -169,7 +185,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
                 .unwrap();
                 let outcome = training.train_at(t, |from, to| replay(&catalog, from, to));
                 assert!(outcome.published(), "{outcome:?}");
-                training.store().read(t).unwrap()
+                training.store(Side::Long).unwrap().read(t).unwrap()
             })
             .join()
             .unwrap()

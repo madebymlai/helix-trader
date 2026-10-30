@@ -12,7 +12,7 @@ use crate::common::ic;
 use helix_trader::{
     backtest::{Backtest, commission_rate},
     model::{
-        config::{ModelConfig, Thresholds},
+        config::{Margins, ModelConfig},
         dataset::Commission,
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet},
@@ -145,9 +145,10 @@ pub fn targets() -> TargetsConfig {
         .build()
 }
 
-/// The probe's decisions and targets, learning whether the bracket's long
-/// gains, on a window of 46 hours, the last 12 held out, by the fake
-/// learner from an AUC of 0.5; a long from 0.6, a short to 0.4.
+/// The probe's decisions and targets, learning whether each side of the
+/// bracket gains, on a window of 46 hours, the last 12 held out and the
+/// 12 before them calibrated on, by the fake learner from an AUC of 0.5;
+/// each side traded from an expected net P&L of nought.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -156,9 +157,9 @@ pub fn config() -> ModelConfig {
         .retrain(SignedDuration::from_hours(24))
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
-        .thresholds(Thresholds {
-            long: 0.6,
-            short: 0.4,
+        .margins(Margins {
+            long: Some(0.0),
+            short: Some(0.0),
         })
         .min_score(0.5)
         .learner(LearnerConfig::Fake {})

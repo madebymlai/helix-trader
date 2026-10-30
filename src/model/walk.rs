@@ -1,30 +1,31 @@
-//! A backtest of a strategy trading on its model, retrained on its
+//! A backtest of a strategy trading on its models, retrained on its
 //! schedule as live would be: what the backtest does before its run, and
 //! the out-of-sample scores it reports after.
 //!
 //! Before the run (`WalkForward::prepare`), the dataset is built over the
 //! span, from the window of the first retrain to the end of the span's
 //! last day (`Dataset::build`), so that the last retrain period has
-//! targets to score; then the model is trained at every retrain time of
-//! the span (`schedule::times`) the store has no model valid from
+//! targets to score; then the models are trained at every retrain time of
+//! the span (`schedule::times`) a side's store has no model valid from
 //! (`schedule::missing`). Each build and train is a child process in a
 //! backtest (one Nautilus node per process), handed in by the caller; a
 //! train then finds the days of its window built and replays none. A
 //! model in the store is reused, so a second backtest of the same span
-//! builds and trains nothing. A train that kept the current model
+//! builds and trains nothing. A train that kept a side's current model
 //! published none, so the next backtest trains at that time again. The
-//! run then trades on the store as it is: at each decision, the latest
-//! model valid then (`handle`).
+//! run then trades on the stores as they are: at each decision, the
+//! latest model of each side valid then (`handle`).
 //!
-//! After the run (`WalkForward::scores`), each decision's row of the
-//! dataset in the span is scored against its label with the model the
-//! strategy used at it: the latest valid then, a model failing its checks
-//! refused and the current one kept, as the handle does. Every model is
-//! out of sample on its rows: trained at its valid-from on rows settled
-//! by then. Beside it, the baseline: the training mean, fitted at the
+//! After the run (`WalkForward::scores`), each side's model is scored on
+//! each decision's row of the dataset in the span against its side's
+//! label, with the model the strategy used at it: the latest valid then,
+//! a model failing its checks refused and the current one kept, as the
+//! handle does, its probabilities calibrated. Every model is out of
+//! sample on its rows: trained at its valid-from on rows settled by then.
+//! Beside each, its side's baseline: the training mean, fitted at the
 //! start of each retrain period on the rows a model trained then is
-//! fitted on. The AUC and log loss (`score`) of both are given per
-//! retrain period and over the span.
+//! fitted and calibrated on, those before its holdout. The AUC and log loss (`score`) of both are given per side,
+//! per retrain period and over the span.
 
 use std::{collections::BTreeSet, fmt, path::Path};
 
@@ -39,8 +40,10 @@ use super::{
     features::FeatureSet,
     learner::{LearnerConfig, Model, TrainingSet},
     meta::Meta,
+    payoff::Realised,
     schedule, score,
     store::{ModelStore, Swap},
+    targets::Side,
     train::{self, Example},
 };
 use crate::strategy::DataRequirements;
@@ -50,26 +53,36 @@ use crate::strategy::DataRequirements;
 pub struct WalkForward {
     feature_names: Vec<String>,
     config: ModelConfig,
-    /// Where the label is among a row's target values.
-    label: usize,
+    /// How the rows' trades read: their labels and payoffs.
+    realised: Realised,
     dataset: Dataset,
-    store: ModelStore,
+    /// The store of each side traded.
+    stores: Vec<(Side, ModelStore)>,
     /// The meta model, if any: trained with the primary.
     meta: Option<Meta>,
 }
 
-/// The out-of-sample scores of a backtest.
+/// The out-of-sample scores of a backtest: of each model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scores {
+    /// The long model's, if the primary trades the long.
+    pub long: Option<ModelScores>,
+    /// The short model's, if the primary trades the short.
+    pub short: Option<ModelScores>,
+    /// The meta model's, on the rows the primary in use made a trade of,
+    /// if there is one.
+    pub meta: Option<ModelScores>,
+}
+
+/// The out-of-sample scores of one model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelScores {
     /// Each retrain period of the span, in order.
     pub periods: Vec<Period>,
     /// The model's over the span, its rows with a model.
     pub model: Score,
     /// The baseline's over the span.
     pub baseline: Score,
-    /// The meta model's, on the rows the primary in use made a trade of,
-    /// if there is one.
-    pub meta: Option<Box<Scores>>,
 }
 
 /// The scores of one retrain period.
@@ -99,7 +112,7 @@ pub struct Score {
 }
 
 impl WalkForward {
-    /// The backtests of `strategy_id`'s model, deciding with `features`,
+    /// The backtests of `strategy_id`'s models, deciding with `features`,
     /// on its dataset, for a strategy of `requirements`, net of
     /// `commission`, in the catalog at `catalog` and its models in the
     /// store under `models`, as `config` says.
@@ -107,7 +120,8 @@ impl WalkForward {
     /// # Errors
     ///
     /// Returns an error if the targets are invalid, the label names a
-    /// target they lack, or the store cannot be keyed.
+    /// target they lack, a barrier's instrument is not in the catalog, or
+    /// a store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -117,12 +131,25 @@ impl WalkForward {
         requirements: &DataRequirements,
         commission: &Commission,
     ) -> anyhow::Result<Self> {
-        let Some(label) = config.targets.label_index(config.label) else {
-            bail!("the label {:?} has no target", config.label);
-        };
+        let stores = config
+            .margins
+            .sides()
+            .map(|(side, _)| {
+                let store = ModelStore::new(
+                    models,
+                    strategy_id,
+                    features,
+                    &config,
+                    requirements,
+                    commission,
+                    side,
+                )?;
+                Ok((side, store))
+            })
+            .collect::<anyhow::Result<_>>()?;
         Ok(Self {
             feature_names: features.names().to_vec(),
-            label,
+            realised: Realised::new(catalog, &config.targets, config.label)?,
             dataset: Dataset::new(
                 catalog,
                 strategy_id,
@@ -132,14 +159,7 @@ impl WalkForward {
                 requirements,
                 commission,
             )?,
-            store: ModelStore::new(
-                models,
-                strategy_id,
-                features,
-                &config,
-                requirements,
-                commission,
-            )?,
+            stores,
             meta: Meta::of_model(
                 models,
                 strategy_id,
@@ -155,16 +175,16 @@ impl WalkForward {
     /// Prepares a backtest over `[start, end)`: if the dataset lacks a day
     /// from the window of the span's first retrain time to the span's end,
     /// `build` builds it over that span (`Dataset::build` of its days);
-    /// then `train` trains at each retrain time of the span the store has
-    /// no model valid from, or the meta model's store, if any, after the
-    /// primary's first model (`Meta::window_start`: before, the meta has
-    /// no row), in time order (`Training::train_at`, which trains both),
-    /// each time judged after the trains before it: a primary model they
-    /// publish gives the meta its rows from then on.
+    /// then `train` trains at each retrain time of the span a side's store
+    /// has no model valid from, or the meta model's store, if any, after
+    /// the primary's first model (`Meta::window_start`: before, the meta
+    /// has no row), in time order (`Training::train_at`, which trains them
+    /// all), each time judged after the trains before it: a primary model
+    /// they publish gives the meta its rows from then on.
     ///
     /// # Errors
     ///
-    /// Returns an error if the span is empty, the dataset or the store
+    /// Returns an error if the span is empty, the dataset or a store
     /// cannot be read, or as `build` and `train` do.
     pub fn prepare(
         &self,
@@ -182,7 +202,10 @@ impl WalkForward {
         if !self.dataset.missing(first, last)?.is_empty() {
             build(from, end)?;
         }
-        let primary_missing = schedule::missing(&times, &self.store.valid_froms()?);
+        let mut primary_missing = BTreeSet::new();
+        for (_, store) in &self.stores {
+            primary_missing.extend(schedule::missing(&times, &store.valid_froms()?));
+        }
         let meta_missing = match &self.meta {
             Some(meta) => schedule::missing(&times, &meta.store().valid_froms()?),
             None => vec![],
@@ -206,13 +229,13 @@ impl WalkForward {
     }
 
     /// The scores of a backtest over `[start, end)`, prepared (`prepare`):
-    /// the model's, and the meta model's, if any.
+    /// each side's model's, and the meta model's, if any.
     ///
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset lacks a day of
-    /// it or of a retrain window, a model fails to predict, or the
-    /// dataset or a store cannot be read.
+    /// it or of a retrain window, a model fails to predict, a row's stop
+    /// has no worth, or the dataset or a store cannot be read.
     pub fn scores(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Scores> {
         let times = schedule::times(self.config.retrain, start, end)?;
         let (first, last) = dataset::days(start, end);
@@ -224,54 +247,72 @@ impl WalkForward {
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
         let fingerprint = self.dataset.fingerprint().to_string();
-        let examples: Vec<Example> = rows
-            .iter()
-            .map(|row| Example::of(row, train::gained(row, self.label)))
-            .collect();
-        let models = Swap::new(
-            self.store.clone(),
-            self.feature_names.clone(),
-            fingerprint.clone(),
-        );
-        let mut scores = score(&times, start, end, &examples, models, |at| {
-            self.baseline(at)
-        })?;
+        let mut scores = Scores {
+            long: None,
+            short: None,
+            meta: None,
+        };
+        for (side, store) in &self.stores {
+            let examples: Vec<Example> = rows
+                .iter()
+                .map(|row| Example::of(row, self.realised.gained(row, *side)))
+                .collect();
+            let models = Swap::new(
+                store.clone(),
+                self.feature_names.clone(),
+                fingerprint.clone(),
+            );
+            let side_scores = score(&times, start, end, &examples, models, |at| {
+                self.baseline(*side, at)
+            })?;
+            match side {
+                Side::Long => scores.long = Some(side_scores),
+                Side::Short => scores.short = Some(side_scores),
+            }
+        }
         if let Some(meta) = &self.meta {
-            let examples = meta.examples(&rows.iter().collect::<Vec<_>>())?;
+            let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), Some(&self.realised))?;
             let models = Swap::new(
                 meta.store().clone(),
                 meta.feature_names().to_vec(),
                 fingerprint,
             );
-            let meta_scores = score(&times, start, end, &examples, models, |at| {
+            scores.meta = Some(score(&times, start, end, &examples, models, |at| {
                 self.meta_baseline(meta, at)
-            })?;
-            scores.meta = Some(Box::new(meta_scores));
+            })?);
         }
         Ok(scores)
     }
 
-    /// The baseline a retrain at `at` fits: the training mean of the rows
-    /// a model trained then is fitted on (`train::split`); none without
-    /// such a row.
-    fn baseline(&self, at: Timestamp) -> anyhow::Result<Option<Model>> {
+    /// The baseline of `side` a retrain at `at` fits: the training mean of
+    /// the rows a model trained then is fitted and calibrated on
+    /// (`train::split`); none without such a row.
+    fn baseline(&self, side: Side, at: Timestamp) -> anyhow::Result<Option<Model>> {
         let rows = self.settled(at - self.config.window, at)?;
         let examples = rows
             .iter()
-            .map(|row| Example::of(row, train::gained(row, self.label)))
+            .map(|row| Example::of(row, self.realised.gained(row, side)))
             .collect();
-        fit_baseline(self.feature_names.len(), examples, at - self.config.holdout)
+        let holdout = at - self.config.holdout;
+        fit_baseline(
+            self.feature_names.len(),
+            examples,
+            holdout - self.config.holdout,
+            holdout,
+        )
     }
 
     /// The baseline of `meta` a retrain at `at` fits, as `baseline`: on the
-    /// rows a meta model trained then is fitted on.
+    /// rows a meta model trained then is fitted and calibrated on.
     fn meta_baseline(&self, meta: &Meta, at: Timestamp) -> anyhow::Result<Option<Model>> {
         let rows = self.settled(meta.window_start(at)?, at)?;
-        let examples = meta.examples(&rows.iter().collect::<Vec<_>>())?;
+        let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), Some(&self.realised))?;
+        let holdout = at - meta.config().holdout;
         fit_baseline(
             meta.feature_names().len(),
             examples,
-            at - meta.config().holdout,
+            holdout - meta.config().holdout,
+            holdout,
         )
     }
 
@@ -293,7 +334,7 @@ fn score(
     examples: &[Example],
     mut models: Swap,
     baseline: impl Fn(Timestamp) -> anyhow::Result<Option<Model>>,
-) -> anyhow::Result<Scores> {
+) -> anyhow::Result<ModelScores> {
     let valid_froms = models.store().valid_froms()?;
     let (mut model_rows, mut baseline_rows) = (vec![], vec![]);
     let mut periods = vec![];
@@ -326,29 +367,34 @@ fn score(
         model_rows.extend(by_model);
         baseline_rows.extend(by_baseline);
     }
-    Ok(Scores {
+    Ok(ModelScores {
         periods,
         model: Score::of(&model_rows),
         baseline: Score::of(&baseline_rows),
-        meta: None,
     })
 }
 
-/// The training mean of `examples` of `width` features fitted on before
-/// the holdout from `holdout` (`train::split`); none without such a row.
+/// The training mean of `examples` of `width` features fitted and
+/// calibrated on before the holdout from `holdout`, the calibration from
+/// `calibration` (`train::split`); none without such a row.
 fn fit_baseline(
     width: usize,
     examples: Vec<Example>,
+    calibration: Timestamp,
     holdout: Timestamp,
 ) -> anyhow::Result<Option<Model>> {
-    let (fitted, _) = train::split(examples, holdout);
-    if fitted.is_empty() {
+    let (fitted, calibrating, _) = train::split(examples, calibration, holdout);
+    let trained: Vec<Example> = fitted.into_iter().chain(calibrating).collect();
+    if trained.is_empty() {
         return Ok(None);
     }
     let set = TrainingSet::new(
         width,
-        fitted.iter().flat_map(|row| row.features.clone()).collect(),
-        fitted.iter().map(|row| row.label).collect(),
+        trained
+            .iter()
+            .flat_map(|row| row.features.clone())
+            .collect(),
+        trained.iter().map(|row| row.label).collect(),
     )?;
     Ok(Some(LearnerConfig::Baseline {}.fit(&set)?))
 }
@@ -364,20 +410,26 @@ impl Score {
     }
 }
 
-/// The scores as text, in the sections of the backtest's report: one per
-/// period, then the span; then the meta model's, if any, the same way.
+/// The scores as text, in the sections of the backtest's report: of each
+/// model, the long's, the short's, then the meta's, one per period, then
+/// the span.
 impl fmt::Display for Scores {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        sections(f, "Model", self)?;
-        match &self.meta {
-            Some(meta) => sections(f, "Meta model", meta),
-            None => Ok(()),
+        for (model, scores) in [
+            ("Long model", &self.long),
+            ("Short model", &self.short),
+            ("Meta model", &self.meta),
+        ] {
+            if let Some(scores) = scores {
+                sections(f, model, scores)?;
+            }
         }
+        Ok(())
     }
 }
 
 /// The sections of `scores`, each headed by `model`, the model's name.
-fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &Scores) -> fmt::Result {
+fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &ModelScores) -> fmt::Result {
     for period in &scores.periods {
         writeln!(
             f,
@@ -427,8 +479,10 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        config::{MetaConfig, Thresholds},
+        calibration::Calibration,
+        config::{Margins, MetaConfig},
         decide::{DecisionRule, FeatureRow},
+        payoff::Payoff,
         store::{ModelManifest, StoredModel},
         targets::{Barrier, Distance, Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
     };
@@ -464,9 +518,9 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
-            .thresholds(Thresholds {
-                long: 0.6,
-                short: 0.4,
+            .margins(Margins {
+                long: Some(0.0),
+                short: Some(0.0),
             })
             .min_score(0.5)
             .learner(LearnerConfig::Fake {})
@@ -515,6 +569,7 @@ mod tests {
         let outcome = |pnl: &str| Outcome {
             pnl: Money::from(pnl),
             exit: Exit::Time,
+            distances: None,
         };
         let (long, short) = if wins {
             ("1 USD", "-1 USD")
@@ -567,7 +622,11 @@ mod tests {
             .unwrap();
     }
 
-    /// A fake model valid from `valid_from`, of `fingerprint`.
+    /// The calibration of the models of the tests: 1 / (1 + e^(2 - 4p)).
+    const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+
+    /// A fake model valid from `valid_from`, of `fingerprint`, calibrated
+    /// by `CALIBRATION`.
     fn model(walk: &WalkForward, valid_from: Timestamp, fingerprint: String) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.5], vec![true]).unwrap();
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
@@ -579,7 +638,13 @@ mod tests {
                 feature_names: walk.feature_names.clone(),
                 targets: config().targets,
                 label: Label::Horizon,
+                side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
+                calibration: CALIBRATION,
+                payoff: Some(Payoff {
+                    win: 1.0,
+                    loss: 1.0,
+                }),
                 score: 0.5,
                 probes: vec![],
             },
@@ -587,11 +652,19 @@ mod tests {
         }
     }
 
+    /// Publishes a fake model valid from `valid_from` for each side.
     fn publish(walk: &WalkForward, valid_from: Timestamp) {
         let fingerprint = walk.dataset.fingerprint().to_string();
-        walk.store
-            .publish(&model(walk, valid_from, fingerprint))
-            .unwrap();
+        for (_, store) in &walk.stores {
+            store
+                .publish(&model(walk, valid_from, fingerprint.clone()))
+                .unwrap();
+        }
+    }
+
+    /// The store of the long models of `walk`.
+    fn long(walk: &WalkForward) -> &ModelStore {
+        &walk.stores[0].1
     }
 
     /// What `prepare` over the 7th and the 8th asked for: the spans built
@@ -658,14 +731,16 @@ mod tests {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
     }
 
-    /// Worked by hand. The 7th, the fake's probabilities its feature: the
-    /// win 0.8 above the losses 0.3 and 0.6 (AUC 1), log loss `-(ln 0.8 +
-    /// ln 0.7 + ln 0.4) / 3`; the baseline 2/3 throughout (AUC 0.5),
-    /// `-(ln 2/3 + 2 ln 1/3) / 3`. The 8th, two wins (no AUC), `-(ln 0.9 +
-    /// ln 0.2) / 2`; the baseline 1/3, `-ln 1/3`. The span: of the six pairs
-    /// of a win and a loss, the win above in four; the baseline's wins
-    /// 2/3, 1/3 and 1/3 against its losses at 2/3, a tie each for the
-    /// first: one of six.
+    /// Worked by hand, the long's. The 7th, the fake's probabilities its
+    /// feature `p` calibrated, `c(p) = 1 / (1 + e^(2 - 4p))`: the win 0.8
+    /// above the losses 0.3 and 0.6 (AUC 1), log loss `-(ln c(0.8) + ln (1 -
+    /// c(0.3)) + ln (1 - c(0.6))) / 3`; the baseline 2/3 throughout (AUC 0.5),
+    /// `-(ln 2/3 + 2 ln 1/3) / 3`. The 8th, two wins (no AUC), `-(ln c(0.9) +
+    /// ln c(0.2)) / 2`; the baseline 1/3, `-ln 1/3`. The span: of the six
+    /// pairs of a win and a loss, the win above in four; the baseline's
+    /// wins 2/3, 1/3 and 1/3 against its losses at 2/3, a tie each for the
+    /// first: one of six. The short wins where the long loses: on the 7th
+    /// its model ranks every pair the wrong way round, its baseline 1/3.
     #[test]
     fn each_period_scores_the_model_in_use_and_the_baseline_fitted_at_its_start() {
         let dir = tempfile::tempdir().unwrap();
@@ -676,7 +751,8 @@ mod tests {
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
-        let [first, second] = &scores.periods[..] else {
+        let long = scores.long.as_ref().unwrap();
+        let [first, second] = &long.periods[..] else {
             panic!("{scores:?}");
         };
         assert_eq!(
@@ -689,18 +765,21 @@ mod tests {
         );
         assert_eq!((first.model.rows, first.baseline.rows), (3, 3));
         close(first.model.auc, 1.0);
-        close(first.model.log_loss, 0.498_703);
+        close(first.model.log_loss, 0.515_799);
         close(first.baseline.auc, 0.5);
         close(first.baseline.log_loss, 0.867_563);
         assert_eq!(second.models, [at("2026-01-08T00:00:00Z")]);
         assert_eq!((second.model.rows, second.model.auc), (2, None));
-        close(second.model.log_loss, 0.857_399);
+        close(second.model.log_loss, 0.823_592);
         close(second.baseline.log_loss, 1.098_612);
-        assert_eq!((scores.model.rows, scores.baseline.rows), (5, 5));
-        close(scores.model.auc, 4.0 / 6.0);
-        close(scores.model.log_loss, 0.642_181);
-        close(scores.baseline.auc, 1.0 / 6.0);
-        close(scores.baseline.log_loss, 0.959_983);
+        assert_eq!((long.model.rows, long.baseline.rows), (5, 5));
+        close(long.model.auc, 4.0 / 6.0);
+        close(long.model.log_loss, 0.638_916);
+        close(long.baseline.auc, 1.0 / 6.0);
+        close(long.baseline.log_loss, 0.959_983);
+        let short = &scores.short.as_ref().unwrap().periods[0];
+        close(short.model.auc, 0.0);
+        close(short.baseline.log_loss, 0.867_563);
     }
 
     #[test]
@@ -709,7 +788,7 @@ mod tests {
         let walk = walk(dir.path());
         build(&walk);
         publish(&walk, at("2026-01-07T00:00:00Z"));
-        walk.store
+        long(&walk)
             .publish(&model(&walk, at("2026-01-08T00:00:00Z"), "f".repeat(64)))
             .unwrap();
 
@@ -717,8 +796,9 @@ mod tests {
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
-        assert_eq!(scores.periods[1].models, [at("2026-01-07T00:00:00Z")]);
-        assert_eq!(scores.periods[1].model.rows, 2);
+        let periods = &scores.long.unwrap().periods;
+        assert_eq!(periods[1].models, [at("2026-01-07T00:00:00Z")]);
+        assert_eq!(periods[1].model.rows, 2);
     }
 
     #[test]
@@ -732,11 +812,12 @@ mod tests {
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
-        let first = &scores.periods[0];
+        let long = scores.long.unwrap();
+        let first = &long.periods[0];
         assert!(first.models.is_empty(), "{first:?}");
         assert_eq!((first.model.rows, first.model.log_loss), (0, None));
         assert_eq!(first.baseline.rows, 3);
-        assert_eq!(scores.model.rows, 2);
+        assert_eq!(long.model.rows, 2);
     }
 
     #[test]
@@ -758,22 +839,25 @@ mod tests {
             log_loss: None,
         };
         let scores = Scores {
-            periods: vec![Period {
-                from: at("2026-01-07T00:00:00Z"),
-                to: at("2026-01-08T00:00:00Z"),
-                models: vec![at("2026-01-07T00:00:00Z")],
+            long: None,
+            short: Some(ModelScores {
+                periods: vec![Period {
+                    from: at("2026-01-07T00:00:00Z"),
+                    to: at("2026-01-08T00:00:00Z"),
+                    models: vec![at("2026-01-07T00:00:00Z")],
+                    model: score,
+                    baseline: score,
+                }],
                 model: score,
-                baseline: score,
-            }],
-            model: score,
-            baseline: Score::default(),
+                baseline: Score::default(),
+            }),
             meta: None,
         };
 
         assert_eq!(
             scores.to_string(),
             "
-Model scores, out of sample, from 2026-01-07T00:00:00Z to 2026-01-08T00:00:00Z
+Short model scores, out of sample, from 2026-01-07T00:00:00Z to 2026-01-08T00:00:00Z
   Model valid from: 2026-01-07T00:00:00Z
   AUC: 0.750000
   Log loss: n/a
@@ -782,7 +866,7 @@ Model scores, out of sample, from 2026-01-07T00:00:00Z to 2026-01-08T00:00:00Z
   Baseline log loss: n/a
   Baseline rows: 3
 
-Model scores, out of sample, over the span
+Short model scores, out of sample, over the span
   AUC: 0.750000
   Log loss: n/a
   Rows: 3
@@ -884,7 +968,7 @@ Model scores, out of sample, over the span
     /// A train of `walk` at `at`, as `Training::train_at` publishes: the
     /// primary, and the meta if the primary had a model before `at`.
     fn train_both(walk: &WalkForward, at: Timestamp) -> anyhow::Result<()> {
-        let earlier = walk.store.valid_froms()?.first().is_some_and(|&t| t < at);
+        let earlier = long(walk).valid_froms()?.first().is_some_and(|&t| t < at);
         publish(walk, at);
         if earlier {
             let fingerprint = walk.dataset.fingerprint().to_string();
@@ -956,44 +1040,36 @@ Model scores, out of sample, over the span
     }
 
     #[test]
-    fn the_meta_models_scores_follow_the_models_in_the_report() {
+    fn the_long_the_short_then_the_meta_models_scores_follow_in_the_report() {
         let score = Score {
             rows: 2,
             auc: None,
             log_loss: Some(0.5),
         };
-        let period = Period {
-            from: at("2026-01-07T00:00:00Z"),
-            to: at("2026-01-08T00:00:00Z"),
-            models: vec![],
+        let scores = ModelScores {
+            periods: vec![Period {
+                from: at("2026-01-07T00:00:00Z"),
+                to: at("2026-01-08T00:00:00Z"),
+                models: vec![],
+                model: score,
+                baseline: score,
+            }],
             model: score,
             baseline: score,
-        };
-        let meta = Scores {
-            periods: vec![period.clone()],
-            model: score,
-            baseline: score,
-            meta: None,
         };
         let scores = Scores {
-            periods: vec![period],
-            model: score,
-            baseline: score,
-            meta: Some(Box::new(meta)),
+            long: Some(scores.clone()),
+            short: Some(scores.clone()),
+            meta: Some(scores),
         };
 
         let text = scores.to_string();
 
-        let primary = text
-            .find("\nModel scores, out of sample, over the span")
-            .unwrap();
-        let meta = text
-            .find("\nMeta model scores, out of sample, from 2026-01-07T00:00:00Z")
-            .unwrap();
-        assert!(primary < meta, "{text}");
-        assert!(
-            text.contains("\nMeta model scores, out of sample, over the span"),
-            "{text}"
-        );
+        let at = |heading: &str| {
+            text.find(&format!("\n{heading} scores, out of sample, over the span"))
+                .unwrap_or_else(|| panic!("no {heading}: {text}"))
+        };
+        assert!(at("Long model") < at("Short model"), "{text}");
+        assert!(at("Short model") < at("Meta model"), "{text}");
     }
 }

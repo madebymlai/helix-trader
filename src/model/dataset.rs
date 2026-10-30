@@ -610,7 +610,7 @@ mod tests {
     use super::*;
     use crate::model::{
         decide::FeatureRow,
-        targets::{Barrier, Distance, Exit, Outcome, Outcomes},
+        targets::{Barrier, Distance, Distances, Exit, Outcome, Outcomes},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -681,14 +681,20 @@ mod tests {
 
     /// The row of the decision at `time`, settled an hour later: its
     /// features, a long winning `pnl` at its take profit and a short losing
-    /// as much at its stop on the barrier, the reverse at the horizon.
+    /// as much at its stop on the barrier, each 3 from its take profit and
+    /// 2 from its stop, the reverse at the horizon.
     fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let loss = format!("-{pnl}");
-        let outcome = |pnl: &str, exit| Outcome {
+        let outcome = |pnl: &str, exit, distances| Outcome {
             pnl: Money::from(&*format!("{pnl} USD")),
             exit,
+            distances,
         };
+        let barrier = Some(Distances {
+            take_profit: Decimal::from(3),
+            stop: Decimal::from(2),
+        });
         TargetRow {
             decision: FeatureRow {
                 strategy_id: StrategyId::from(STRATEGY),
@@ -697,12 +703,12 @@ mod tests {
                 ts_init: ns,
             },
             barrier: Some(Outcomes {
-                long: outcome(pnl, Exit::TakeProfit),
-                short: outcome(&loss, Exit::Stop),
+                long: outcome(pnl, Exit::TakeProfit, barrier),
+                short: outcome(&loss, Exit::Stop, barrier),
             }),
             horizon: Some(Outcomes {
-                long: outcome(&loss, Exit::Time),
-                short: outcome(pnl, Exit::Time),
+                long: outcome(&loss, Exit::Time, None),
+                short: outcome(pnl, Exit::Time, None),
             }),
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
         }
@@ -713,7 +719,9 @@ mod tests {
         let ns = UnixNanos::from(at(time));
         DatasetRow {
             features,
-            targets: vec![pnl, 1.0, -pnl, -1.0, -pnl, 0.0, pnl, 0.0],
+            targets: vec![
+                pnl, 1.0, 3.0, 2.0, -pnl, -1.0, 3.0, 2.0, -pnl, 0.0, pnl, 0.0,
+            ],
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
             ts_event: ns,
             ts_init: ns,
@@ -1017,8 +1025,12 @@ mod tests {
             [
                 "barrier_long_pnl",
                 "barrier_long_exit",
+                "barrier_long_take_profit",
+                "barrier_long_stop",
                 "barrier_short_pnl",
                 "barrier_short_exit",
+                "barrier_short_take_profit",
+                "barrier_short_stop",
                 "horizon_long_pnl",
                 "horizon_long_exit",
                 "horizon_short_pnl",

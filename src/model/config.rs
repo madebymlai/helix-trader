@@ -1,7 +1,7 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
 //! targets of its decisions and the one its model learns, how often a
 //! model is retrained and the window it is trained on, the gate it must
-//! pass, the thresholds that turn its probability into a trade, and its
+//! pass, the margins its expected P&L must clear to trade a side, and its
 //! learner; and, optionally, the meta model filtering its trades.
 //!
 //! A strategy has at most two levels of models: a primary, its rule
@@ -12,14 +12,13 @@
 
 use anyhow::ensure;
 use jiff::SignedDuration;
-use nautilus_model::enums::OrderSide;
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
 
 use super::{
     decide::DecisionRule,
     learner::LearnerConfig,
-    targets::{Label, TargetsConfig},
+    targets::{Label, Side, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
 
@@ -33,7 +32,7 @@ use crate::strategy::DataRequirements;
 /// retrain = "168h"
 /// window = "720h"
 /// holdout = "120h"
-/// thresholds = { long = 0.6, short = 0.4 }
+/// margins = { long = 0.5, short = 0.5 }
 /// min_score = 0.55
 /// learner = { kind = "lightgbm" }
 /// ```
@@ -44,7 +43,7 @@ pub struct ModelConfig {
     pub decision: DecisionRule,
     /// The targets of each decision, read from orders in a dataset run.
     pub targets: TargetsConfig,
-    /// The target the model learns: whether its long gains.
+    /// The target the models learn: whether each side of it gains.
     pub label: Label,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
@@ -55,8 +54,8 @@ pub struct ModelConfig {
     /// The last part of the window the model is scored on and not fitted
     /// on, such as `"120h"`.
     pub holdout: SignedDuration,
-    /// The probabilities from which a prediction is a trade.
-    pub thresholds: Thresholds,
+    /// The sides traded, each with the expected net P&L it trades from.
+    pub margins: Margins,
     /// The lowest holdout AUC a model is published with.
     pub min_score: f64,
     /// The learner and its settings.
@@ -132,27 +131,34 @@ pub struct Sizing {
     pub max: Decimal,
 }
 
-/// A prediction at or above `long` is a long, at or below `short` a short,
-/// between them no trade.
+/// The sides a model primary trades, each with its margin: the expected
+/// net P&L of a trade, in the targets' P&L currency per trade of their
+/// quantity, from which the side is traded (`payoff`), such as
+/// `margins = { long = 0.5, short = 0.5 }`. A side without one has no
+/// model, trained, stored, scored nor traded: `{ long = 0.5 }` is a
+/// long-only model.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Thresholds {
-    pub long: f64,
-    pub short: f64,
+pub struct Margins {
+    pub long: Option<f64>,
+    pub short: Option<f64>,
 }
 
-impl Thresholds {
-    /// The side of the trade a prediction of `probability` makes: a buy at
-    /// or above `long`, a sell at or below `short`, none between them.
+impl Margins {
+    /// The margin of `side`, if it is traded.
     #[must_use]
-    pub fn side(&self, probability: f64) -> Option<OrderSide> {
-        if probability >= self.long {
-            Some(OrderSide::Buy)
-        } else if probability <= self.short {
-            Some(OrderSide::Sell)
-        } else {
-            None
+    pub const fn of(&self, side: Side) -> Option<f64> {
+        match side {
+            Side::Long => self.long,
+            Side::Short => self.short,
         }
+    }
+
+    /// The sides traded, the long first, each with its margin.
+    pub fn sides(&self) -> impl Iterator<Item = (Side, f64)> {
+        Side::BOTH
+            .into_iter()
+            .filter_map(|side| self.of(side).map(|margin| (side, margin)))
     }
 }
 
@@ -170,26 +176,30 @@ impl ModelConfig {
     /// instrument (see `TargetsConfig::atr_bars`) or warms over longer than
     /// its warmup, the label names a target the config lacks, a target
     /// (the barrier's limit or the horizon) is not shorter than the
-    /// window, the holdout is not positive or leaves no fitted row (it and
-    /// the longest target not shorter than the window), the thresholds are
-    /// not probabilities with the short below the long, the minimum score
-    /// is not an AUC, or the meta model is invalid (see
+    /// window, the holdout is not positive or leaves no fitted row (see
+    /// `validate_window`), the margins name no side or one is not finite,
+    /// the minimum score is not an AUC, or the meta model is invalid (see
     /// `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
         validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
         self.learner.validate()?;
         ensure!(
-            self.targets.label_index(self.label).is_some(),
+            self.targets.pnl_index(self.label, Side::Long).is_some(),
             "the label {:?} names a target the targets do not have",
             self.label
         );
         validate_window(self.window, self.holdout, &self.targets)?;
-        let Thresholds { long, short } = self.thresholds;
         ensure!(
-            (0.0..=1.0).contains(&short) && (0.0..=1.0).contains(&long) && short < long,
-            "the thresholds short {short} and long {long} are not probabilities \
-             with the short below the long"
+            self.margins.sides().next().is_some(),
+            "the margins name no side to trade"
         );
+        for (side, margin) in self.margins.sides() {
+            ensure!(
+                margin.is_finite(),
+                "the {} margin {margin} is not a number",
+                side.name()
+            );
+        }
         validate_min_score(self.min_score)?;
         if let Some(meta) = &self.meta {
             meta.validate(&self.targets)?;
@@ -308,7 +318,9 @@ fn validate_decisions(
 }
 
 /// Checks that the longest of `targets` is shorter than `window`, and
-/// `holdout` positive and short enough to leave a fitted row after it.
+/// `holdout` positive and short enough to leave a fitted row before it
+/// and the calibration, as long as it, before it (`train`): the window
+/// longer than twice the holdout and the longest target.
 fn validate_window(
     window: SignedDuration,
     holdout: SignedDuration,
@@ -320,9 +332,9 @@ fn validate_window(
         "the longest target {longest:#} is not shorter than the window {window:#}"
     );
     ensure!(
-        holdout.is_positive() && holdout + longest < window,
-        "the holdout {holdout:#} leaves no fitted row in the window {window:#} \
-         after the longest target {longest:#}"
+        holdout.is_positive() && holdout * 2 + longest < window,
+        "the holdout {holdout:#} and the calibration as long before it leave no fitted \
+         row in the window {window:#} after the longest target {longest:#}"
     );
     Ok(())
 }
@@ -353,7 +365,7 @@ mod tests {
         retrain = "24h"
         window = "48h"
         holdout = "12h"
-        thresholds = { long = 0.6, short = 0.4 }
+        margins = { long = 0.5, short = 0.5 }
         min_score = 0.55
         learner = { kind = "fake" }
     "#;
@@ -407,10 +419,10 @@ mod tests {
         assert_eq!(config.window, SignedDuration::from_hours(48));
         assert_eq!(config.holdout, SignedDuration::from_hours(12));
         assert_eq!(
-            config.thresholds,
-            Thresholds {
-                long: 0.6,
-                short: 0.4
+            config.margins,
+            Margins {
+                long: Some(0.5),
+                short: Some(0.5)
             }
         );
         assert_eq!(config.min_score, 0.55);
@@ -457,26 +469,37 @@ mod tests {
         );
     }
 
+    /// The window of 48 hours holds the holdout, the calibration as long
+    /// before it, and before them a fitted row settled 2 hours later: 22
+    /// hours of holdout leave one, 23 none.
     #[test]
-    fn a_holdout_leaving_no_fitted_row_is_refused() {
-        for holdout in ["46h", "0h"] {
+    fn a_holdout_leaving_no_fitted_row_before_it_and_its_calibration_is_refused() {
+        for holdout in ["23h", "0h"] {
             let toml = section(&format!(r#"holdout = "{holdout}""#));
             assert!(refused(&toml).contains("holdout"), "{holdout}");
         }
-        assert!(load(&section(r#"holdout = "45h""#)).is_ok());
+        assert!(load(&section(r#"holdout = "22h""#)).is_ok());
     }
 
     #[test]
-    fn thresholds_out_of_order_are_refused() {
-        for thresholds in [
-            "{ long = 0.4, short = 0.6 }",
-            "{ long = 0.5, short = 0.5 }",
-            "{ long = 1.2, short = 0.4 }",
-            "{ long = 0.6, short = -0.1 }",
-        ] {
-            let toml = section(&format!("thresholds = {thresholds}"));
-            assert!(refused(&toml).contains("thresholds"), "{thresholds}");
+    fn margins_naming_no_side_or_not_a_number_are_refused() {
+        for margins in ["{}", "{ long = nan }", "{ long = 0.5, short = inf }"] {
+            let toml = section(&format!("margins = {margins}"));
+            assert!(refused(&toml).contains("margin"), "{margins}");
         }
+        assert!(refused(&section("margins = { both = 0.5 }")).contains("both"));
+    }
+
+    /// `{ long = 0.5 }` is a long-only model: the short is not traded.
+    #[test]
+    fn margins_of_one_side_trade_that_side_alone() {
+        let config = load(&section("margins = { long = 0.5 }")).unwrap();
+
+        assert_eq!(
+            config.margins.sides().collect::<Vec<_>>(),
+            [(Side::Long, 0.5)]
+        );
+        assert_eq!(config.margins.of(Side::Short), None);
     }
 
     #[test]
@@ -657,22 +680,6 @@ mod tests {
         );
 
         assert!(err.contains("ATR"), "{err}");
-    }
-
-    #[test]
-    fn the_thresholds_make_a_probability_a_long_a_short_or_no_trade() {
-        let thresholds = Thresholds {
-            long: 0.6,
-            short: 0.4,
-        };
-
-        assert_eq!(thresholds.side(0.6), Some(OrderSide::Buy));
-        assert_eq!(thresholds.side(0.9), Some(OrderSide::Buy));
-        assert_eq!(thresholds.side(0.4), Some(OrderSide::Sell));
-        assert_eq!(thresholds.side(0.1), Some(OrderSide::Sell));
-        assert_eq!(thresholds.side(0.5), None);
-        assert_eq!(thresholds.side(0.59), None);
-        assert_eq!(thresholds.side(f64::NAN), None);
     }
 
     /// A meta model on the section's barrier, held out its last 12 hours.

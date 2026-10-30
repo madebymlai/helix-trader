@@ -46,7 +46,12 @@
 //!
 //! Once every target of a decision has an outcome, the decision is settled
 //! and its row, a `TargetRow`, published on the message bus, custom data
-//! keyed by the strategy's id (`TargetRow::data_type`). A decision whose
+//! keyed by the strategy's id (`TargetRow::data_type`). A barrier's
+//! outcomes carry the distances its decision set on each side
+//! (`Distances`), in price from the decision's price: what makes a
+//! trade's P&L a multiple of its stop. A strategy trading on a model of
+//! the barrier sets the same stops at its decisions (`Stops`), and
+//! `stop_worth` makes a stop's distance money. A decision whose
 //! order the risk engine denies or the venue rejects, or whose entry has
 //! not filled by its time limit, is unsettled: logged, and no row. So is a
 //! decision whose positions are still open when the run stops.
@@ -90,7 +95,7 @@ use nautilus_model::{
     instruments::{Instrument, InstrumentAny},
     orders::Order,
     position::Position,
-    types::{Money, Price, Quantity},
+    types::{Money, Price, Quantity, fixed::FIXED_PRECISION},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -190,7 +195,7 @@ pub struct AtrBars {
     pub period: usize,
 }
 
-/// The target a model learns: whether the long of the barrier, or of the
+/// The target a model learns: whether its side of the barrier, or of the
 /// horizon, gains after its costs, `"barrier"` or `"horizon"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -215,6 +220,17 @@ pub struct Outcome {
     /// reports it.
     pub pnl: Money,
     pub exit: Exit,
+    /// The barrier the decision set on the side; none for a horizon.
+    pub distances: Option<Distances>,
+}
+
+/// How far a barrier's exits on one side are from the decision's price,
+/// in price, as the decision set them: on the instrument's ticks, the
+/// basis points or ATRs resolved at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Distances {
+    pub take_profit: Decimal,
+    pub stop: Decimal,
 }
 
 /// The outcomes of a target on each side.
@@ -264,6 +280,8 @@ struct State {
 /// An open decision.
 struct Decision {
     row: FeatureRow,
+    /// The barrier set on each side, if the config has one.
+    distances: BTreeMap<Side, Distances>,
     outcomes: BTreeMap<(Kind, Side), Outcome>,
 }
 
@@ -281,8 +299,11 @@ enum Kind {
     Horizon,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Side {
+/// A side of a target, and of a model: the long or the short, `"long"` or
+/// `"short"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
     Long,
     Short,
 }
@@ -477,43 +498,47 @@ impl TargetsConfig {
 
     /// The names of the values of a row (`TargetRow::values`), in their
     /// order: for the barrier, then the horizon, the long then the short,
-    /// each its P&L and its exit, such as `barrier_long_pnl` and
-    /// `barrier_long_exit`.
+    /// each its P&L and its exit, and a barrier's the distances of its
+    /// take profit and its stop, such as `barrier_long_pnl`,
+    /// `barrier_long_exit`, `barrier_long_take_profit` and
+    /// `barrier_long_stop`.
     #[must_use]
     pub fn target_names(&self) -> Vec<String> {
         self.kinds()
             .flat_map(|(kind, _)| {
-                [Side::Long, Side::Short].into_iter().flat_map(move |side| {
-                    ["pnl", "exit"].map(|value| format!("{}_{}_{value}", kind.name(), side.name()))
+                Side::BOTH.into_iter().flat_map(move |side| {
+                    kind.values()
+                        .iter()
+                        .map(move |value| format!("{}_{}_{value}", kind.name(), side.name()))
                 })
             })
             .collect()
     }
 
-    /// Where the long's P&L of `label`'s target is among the values of a
-    /// row (`TargetRow::values`); none if the config has no such target.
+    /// Where the P&L of `label`'s target on `side` is among the values of
+    /// a row (`TargetRow::values`); none if the config has no such target.
     #[must_use]
-    pub fn label_index(&self, label: Label) -> Option<usize> {
+    pub fn pnl_index(&self, label: Label, side: Side) -> Option<usize> {
+        self.index(label, side, "pnl")
+    }
+
+    /// Where the stop's distance of `label`'s target on `side` is among the
+    /// values of a row (`TargetRow::values`); none if the config has no
+    /// such target, or it is a horizon, which has no stop.
+    #[must_use]
+    pub fn stop_index(&self, label: Label, side: Side) -> Option<usize> {
+        self.index(label, side, "stop")
+    }
+
+    /// Where `value` of `label`'s target on `side` is among the values of a
+    /// row, if it has one.
+    fn index(&self, label: Label, side: Side, value: &str) -> Option<usize> {
         let kind = match label {
             Label::Barrier => Kind::Barrier,
             Label::Horizon => Kind::Horizon,
         };
-        // Each target has the long's P&L and exit, then the short's.
-        self.kinds()
-            .position(|(of, _)| of == kind)
-            .map(|position| position * 4)
-    }
-
-    /// Where the P&L of `label`'s target on `side` is among the values of
-    /// a row (`TargetRow::values`); none if the config has no such target.
-    #[must_use]
-    pub fn pnl_index(&self, label: Label, side: OrderSide) -> Option<usize> {
-        let long = self.label_index(label)?;
-        Some(if side == OrderSide::Buy {
-            long
-        } else {
-            long + 2
-        })
+        let name = format!("{}_{}_{value}", kind.name(), side.name());
+        self.target_names().iter().position(|of| *of == name)
     }
 
     /// The kinds of target of the config.
@@ -561,7 +586,7 @@ impl Barrier {
             .transpose()?;
         let take_profit = self.take_profit.length(reference, atr);
         let stop = self.stop.length(reference, atr);
-        [Side::Long, Side::Short]
+        Side::BOTH
             .into_iter()
             .map(|side| {
                 let favour = side.sign();
@@ -670,6 +695,140 @@ impl BarrierAtr {
         let indicator = self.indicator.borrow();
         indicator.initialized.then_some(indicator.value)
     }
+
+    /// Registers it with `actor`'s Nautilus indicators for its bars and
+    /// subscribes the actor to them (see `Targets::start`).
+    fn start<A>(self: &Rc<Self>, actor: &mut A)
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        let shared = Rc::clone(self) as SharedActorIndicator;
+        actor
+            .core_mut()
+            .register_indicator_for_bars(self.bar_type, shared);
+        actor.subscribe_bars(self.bar_type, None, None);
+    }
+}
+
+/// The stop a decision of a trading strategy sets on each side of the
+/// barrier, as a dataset run's would: from the decision's price
+/// (`reference`) and the barrier's ATR, on the instrument's ticks, and
+/// worth in money (`stop_worth`). What an expected P&L in R is weighed by.
+pub struct Stops {
+    instrument_id: InstrumentId,
+    quantity: Quantity,
+    barrier: Barrier,
+    atr: Option<Rc<BarrierAtr>>,
+}
+
+impl Stops {
+    /// The stops of the barrier of `config`, for decisions on `rule` of a
+    /// strategy of `requirements`; none if `config` has no barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the barrier's ATR has no bars (see
+    /// `TargetsConfig::atr_bars`).
+    pub fn new(
+        config: &TargetsConfig,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(barrier) = config.barrier else {
+            return Ok(None);
+        };
+        let atr = config.atr_bars(rule, requirements)?;
+        Ok(Some(Self {
+            instrument_id: config.instrument_id,
+            quantity: config.quantity,
+            barrier,
+            atr: atr.map(|atr| Rc::new(BarrierAtr::new(atr))),
+        }))
+    }
+
+    /// Starts the barrier's ATR, if any, on `actor`, from its `on_start`,
+    /// as `Targets::start` does.
+    pub fn start<A>(&self, actor: &mut A)
+    where
+        A: DataActor + DataActorNative + Debug + 'static,
+    {
+        if let Some(atr) = &self.atr {
+            atr.start(actor);
+        }
+    }
+
+    /// The worth of the stop of `side` at a decision of `strategy` now;
+    /// none with no price of the instrument yet or the ATR not yet
+    /// initialized, as a dataset run opens no target then.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instrument is not in the cache, or the stop
+    /// is outside its prices or has no worth.
+    pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<f64>>
+    where
+        S: DataActor + DataActorNative,
+    {
+        let atr = match &self.atr {
+            None => None,
+            Some(atr) => match atr.value() {
+                Some(value) => Some(value),
+                None => return Ok(None),
+            },
+        };
+        let instrument_id = self.instrument_id;
+        let cache = strategy.cache();
+        let instrument = cache
+            .instrument(&instrument_id)
+            .with_context(|| format!("instrument {instrument_id} not in cache"))?;
+        let Some(reference) = reference(&cache, &instrument_id) else {
+            return Ok(None);
+        };
+        let reference = reference.as_decimal();
+        let exits = self.barrier.exits(&instrument, reference, atr)?;
+        let (_, _, stop) = exits
+            .into_iter()
+            .find(|(of, _, _)| *of == side)
+            .expect("a barrier has exits on both sides");
+        let distance = (stop.as_decimal() - reference).abs();
+        stop_worth(
+            &instrument,
+            self.quantity,
+            distance.to_f64().unwrap_or(f64::NAN),
+        )
+        .map(Some)
+    }
+}
+
+impl Debug for Stops {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stops")
+            .field("barrier", &self.barrier)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a stop `distance` in price away is worth on `quantity` of
+/// `instrument`, rounded to its sizes, in its P&L currency: Nautilus'
+/// `calculate_notional_value` of the distance.
+///
+/// # Errors
+///
+/// Returns an error if `quantity` or `distance` cannot be made in the
+/// instrument's sizes and prices.
+pub fn stop_worth(
+    instrument: &InstrumentAny,
+    quantity: Quantity,
+    distance: f64,
+) -> anyhow::Result<f64> {
+    let size = quantity.as_decimal();
+    let quantity = instrument
+        .try_make_qty_from_decimal(size, None)
+        .map_err(|e| anyhow::anyhow!("ordering {size} of {}: {e}", instrument.id()))?;
+    let distance = Price::new_checked(distance, FIXED_PRECISION)?;
+    Ok(instrument
+        .try_calculate_notional_value(quantity, distance, None)?
+        .as_f64())
 }
 
 /// Nautilus' side of the ATR: it reads the bars of its bar type alone.
@@ -784,11 +943,7 @@ impl Targets {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         if let Some(atr) = &self.atr {
-            let shared = Rc::clone(atr) as SharedActorIndicator;
-            actor
-                .core_mut()
-                .register_indicator_for_bars(atr.bar_type, shared);
-            actor.subscribe_bars(atr.bar_type, None, None);
+            atr.start(actor);
         }
     }
 
@@ -853,7 +1008,7 @@ impl Targets {
         self.state
             .borrow_mut()
             .open
-            .insert(decision, Decision::new(row));
+            .insert(decision, Decision::new(row, &exits, reference));
         let sent = self.send(strategy, decision, quantity, &exits);
         if let Err(e) = &sent {
             self.unsettle(decision, format_args!("sending its orders: {e}"));
@@ -891,7 +1046,7 @@ impl Targets {
             strategy.submit_order_list(orders, None, None, None)?;
         }
         if self.config.horizon.is_some() {
-            for side in [Side::Long, Side::Short] {
+            for side in Side::BOTH {
                 let target = Target::new(decision, Kind::Horizon, side);
                 let order = strategy.order().market(
                     instrument_id,
@@ -935,7 +1090,7 @@ impl Targets {
         let Some((decision, kind)) = parse_time_alert(&event.name) else {
             return Ok(());
         };
-        for side in [Side::Long, Side::Short] {
+        for side in Side::BOTH {
             let target = Target::new(decision, kind, side);
             let position_id = self.state.borrow_mut().positions.remove(&target);
             let (legs, position) = {
@@ -1024,9 +1179,10 @@ impl Targets {
             let Some(decision) = state.open.get_mut(&target.decision) else {
                 return;
             };
-            decision
-                .outcomes
-                .insert((target.kind, target.side), Outcome { pnl, exit });
+            decision.outcomes.insert(
+                (target.kind, target.side),
+                decision.outcome(target, pnl, exit),
+            );
             let barrier = decision.outcomes(Kind::Barrier);
             let horizon = decision.outcomes(Kind::Horizon);
             if barrier.is_some() != self.config.barrier.is_some()
@@ -1108,10 +1264,39 @@ impl Debug for Targets {
 }
 
 impl Decision {
-    fn new(row: FeatureRow) -> Self {
+    /// The decision of `row`, its barrier `exits` set from `reference`.
+    fn new(row: FeatureRow, exits: &[(Side, Price, Price)], reference: Decimal) -> Self {
+        let distances = exits
+            .iter()
+            .map(|&(side, take_profit, stop)| {
+                let distance = |exit: Price| (exit.as_decimal() - reference).abs();
+                (
+                    side,
+                    Distances {
+                        take_profit: distance(take_profit),
+                        stop: distance(stop),
+                    },
+                )
+            })
+            .collect();
         Self {
             row,
+            distances,
             outcomes: BTreeMap::new(),
+        }
+    }
+
+    /// The outcome of its `target`, its position closed with `pnl` by
+    /// `exit`, a barrier's with the distances it set.
+    fn outcome(&self, target: Target, pnl: Money, exit: Exit) -> Outcome {
+        let distances = match target.kind {
+            Kind::Barrier => self.distances.get(&target.side).copied(),
+            Kind::Horizon => None,
+        };
+        Outcome {
+            pnl,
+            exit,
+            distances,
         }
     }
 
@@ -1194,6 +1379,15 @@ impl Kind {
         }
     }
 
+    /// The names of the values a row has of a target of this kind, on each
+    /// side.
+    const fn values(self) -> &'static [&'static str] {
+        match self {
+            Self::Barrier => &["pnl", "exit", "take_profit", "stop"],
+            Self::Horizon => &["pnl", "exit"],
+        }
+    }
+
     /// The legs of a target of this kind.
     fn legs(self) -> &'static [Leg] {
         match self {
@@ -1204,15 +1398,21 @@ impl Kind {
 }
 
 impl Side {
-    /// The name of the side in the names of a row's values.
-    fn name(self) -> &'static str {
+    /// The long, then the short.
+    pub const BOTH: [Self; 2] = [Self::Long, Self::Short];
+
+    /// The name of the side, as in the names of a row's values.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Long => "long",
             Self::Short => "short",
         }
     }
 
-    fn order_side(self) -> OrderSide {
+    /// The side of the order opening it: a buy the long, a sell the short.
+    #[must_use]
+    pub const fn order_side(self) -> OrderSide {
         match self {
             Self::Long => OrderSide::Buy,
             Self::Short => OrderSide::Sell,
@@ -1287,14 +1487,22 @@ fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Price> {
 impl TargetRow {
     /// The values of the row, in the order of `TargetsConfig::target_names`
     /// of the config that made it: each P&L in its currency, each exit as
-    /// `Exit::value`.
+    /// `Exit::value`, each distance in price.
     #[must_use]
     pub fn values(&self) -> Vec<f64> {
         [self.barrier, self.horizon]
             .into_iter()
             .flatten()
             .flat_map(|outcomes| [outcomes.long, outcomes.short])
-            .flat_map(|outcome| [outcome.pnl.as_f64(), outcome.exit.value()])
+            .flat_map(|outcome| {
+                let distances = outcome.distances.into_iter().flat_map(|distances| {
+                    [distances.take_profit, distances.stop]
+                        .map(|distance| distance.to_f64().unwrap_or(f64::NAN))
+                });
+                [outcome.pnl.as_f64(), outcome.exit.value()]
+                    .into_iter()
+                    .chain(distances)
+            })
             .collect()
     }
 

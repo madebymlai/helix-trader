@@ -982,12 +982,12 @@ the run.
 
 ### Retraining on the schedule
 
-A backtest of a strategy trading on a model retrains it as live would,
-at every multiple of the model section's `retrain` since the Unix epoch,
-whatever the run start: the times Nautilus fires the retrain timer
-started on an epoch-aligned time (`model::schedule`), on a virtual clock
-over the span, each model valid from the time it was trained at; `main`
-runs the steps of `model::walk`:
+A backtest of a strategy trading on a model retrains it, each side of
+its margins, as live would, at every multiple of the model section's
+`retrain` since the Unix epoch, whatever the run start: the times
+Nautilus fires the retrain timer started on an epoch-aligned time
+(`model::schedule`), on a virtual clock over the span, each model valid
+from the time it was trained at; `main` runs the steps of `model::walk`:
 
 1. If the dataset lacks a day from the window of the first retrain time
    (the last grid time not after `--start`, less `window`, or the meta
@@ -996,34 +996,39 @@ runs the steps of `model::walk`:
    retrain period then has its targets to score. The build replays the
    features' warmup before its first day, so the catalog should hold the
    data from there: what it lacks is not replayed, nothing refuses it.
-2. For each retrain time before `--end` the store has no model valid
-   from (the primary's, or its meta model's after the primary's first
-   model: before it the meta has no row), in time order, a child
-   process, `train <strategy> --at t`, trains at it (the primary, then
-   its meta model); its window's days already built, it replays none. A
-   model in the store is reused, so a second backtest of the span starts
-   no child. A train that kept the current model (below the minimum
-   score, failed) published none and is no failure of the backtest: its
-   reason goes to standard error, `the retrain at t: ..`, and the next
+2. For each retrain time before `--end` a store has no model valid
+   from (a side's of the primary, or its meta model's after the
+   primary's first model: before it the meta has no row), in time order,
+   a child process, `train <strategy> --at t`, trains at it (each side of
+   the primary, then its meta model); its window's days already built,
+   it replays none. A model in the store is reused, so a second backtest
+   of the span starts no child. A train that kept the current model
+   (below the minimum score, failed), of a side or the meta, published
+   none and is no failure of the backtest: its reason goes to standard
+   error, `the retrain at t: ..`, and the next
    backtest trains at that time again.
-3. The run, on the store: at each decision the latest model valid then.
-4. The scores (`WalkForward::scores`), after the report: per retrain
-   period (`from` its retrain time or `--start`, `to` the next or
-   `--end`) and over the span, the AUC and log loss (`model::score`) of
-   the model in use at each decision of the dataset in the span, against
-   its label, the model chosen as the handle chooses it (the latest
-   valid, one failing its checks refused); beside it the baseline, the
-   training mean fitted at each retrain time on the rows a model trained
-   then is fitted on. Every model is out of sample on its period: trained
-   on rows settled by its valid-from. Live, a model is valid only once
-   its train finishes; a backtest takes it valid from its retrain time, a
-   small optimism.
+3. The run, on the stores: at each decision the latest model of each
+   side valid then, the side traded the one whose expected net P&L
+   clears its margin (strategy README, "Model handle").
+4. The scores (`WalkForward::scores`), after the report, of each side
+   traded, the long's headed `Long model scores`, the short's `Short
+   model scores`: per retrain period (`from` its retrain time or
+   `--start`, `to` the next or `--end`) and over the span, the AUC and
+   log loss (`model::score`) of the calibrated probabilities of the
+   side's model in use at each decision of the dataset in the span,
+   against the side's label, the model chosen as the handle chooses it
+   (the latest valid, one failing its checks refused); beside it the
+   side's baseline, the training mean fitted at each retrain time on the
+   rows a model trained then is fitted and calibrated on. Every model is
+   out of sample on its period: trained on rows settled by its
+   valid-from. Live, a model is valid only once its train finishes; a
+   backtest takes it valid from its retrain time, a small optimism.
 
    With a meta model, the meta's scores follow, the same sections
    headed `Meta model scores`: on the rows the primary in use made a
    trade of (`model::meta`), the meta model in use at each, against
    whether the barrier on the primary's side won, beside the baseline
-   fitted on the rows a meta trained then is fitted on.
+   fitted on the rows a meta trained then is fitted and calibrated on.
 
 Each child is this binary (`std::env::current_exe`), on the backtest's
 strategy, config, catalog, store, commission flag (normalized) and leverage,
@@ -1039,7 +1044,7 @@ another.
 A period of the scores prints as, for example:
 
 ```
-Model scores, out of sample, from 2026-10-23T00:00:00Z to 2026-10-24T00:00:00Z
+Long model scores, out of sample, from 2026-10-23T00:00:00Z to 2026-10-24T00:00:00Z
   Model valid from: 2026-10-23T00:00:00Z
   AUC: 0.512346
   Log loss: 0.701234
@@ -1494,25 +1499,29 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_train.rs`: training at a time (strategy README, "Features
     and decisions"), with the probe of `backtest_dataset.rs`, shared from
     `common::dataset`, and the fake learner, whose prediction, the mid
-    clamped to 1, ties every row: the holdout AUC is 0.5 exactly. A train
-    at midnight on a 46-hour window replays the days it lacks through
-    `run_dataset` and publishes a model whose reload predicts its
-    manifest's probes to the bit; with a minimum score of 0.6, a train an
-    hour later keeps the current model, that model published in the
-    gated store (the minimum score keys it), the store unchanged.
+    clamped to 1 and calibrated alike, ties every row: each side's
+    holdout AUC is 0.5 exactly. A train at midnight on a 46-hour window
+    replays the days it lacks through `run_dataset` and publishes a long
+    and a short model, each with its payoff, whose reload predicts its
+    manifest's probes, calibrated, to the bit; with a minimum score of
+    0.6, a train an hour later keeps each current model, those models
+    published in the gated stores (the minimum score keys them), the
+    stores unchanged.
   - `backtest_model.rs`: a strategy trading on its models (strategy
     README, "Features and decisions", "Model handle"), the probe of
-    `common::dataset`, its model handle in a backtest. On baseline models
-    valid from 02:00, 04:00, 04:30 and 09:00, each predicting its own
-    probability, the hourly decisions of 00:00 to 06:00 trade none before
-    02:00, then each on the latest model valid at or before it (0.7, 0.7,
-    0.8, 0.9, 0.9); the one after the run is never used. Parity: a model
-    LightGBM fitted by a train at midnight on a 94-hour window, published
-    again valid from its holdout's start, predicts in the node, on the
-    holdout's decisions, each probe row's prediction to the bit.
+    `common::dataset`, its model handle in a backtest. On baseline long
+    models valid from 02:00, 04:00, 04:30 and 09:00, each predicting its
+    own probability, calibrated alike, the hourly decisions of 00:00 to
+    06:00 trade none before 02:00, then each on the latest model valid at
+    or before it (0.7, 0.7, 0.8, 0.9, 0.9, calibrated); the one after the
+    run is never used. Parity: a long model LightGBM fitted by a train at
+    16:00 of the 25th on a 72-hour window, published again valid from its
+    holdout's start, predicts in the node, on the holdout's decisions,
+    each probe row's calibrated prediction to the bit.
   - `backtest_model_ema.rs`: the `model_ema` strategy end to end: the
-    binary's `train model_ema --at` on a fixture config publishes a model (fake
-    learner, AUC 0.5 at a minimum of 0.5) after its dataset run, and a
+    binary's `train model_ema --at` on a fixture config of the long alone
+    publishes a model (fake learner, AUC 0.5 at a minimum of 0.5) after
+    its dataset run, and a
     backtest of the strategy on that store from two hours before the
     model's valid-from trades only from it, a long at each of its three
     decisions, closed 30 minutes later: 6 orders, 3 positions; from the
@@ -1528,16 +1537,18 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     the backtest runs on, no order, no model scored.
   - `backtest_retrain.rs`: retraining on the schedule (`model::walk`):
     the probe of `common::dataset` on one feature missing from the first
-    quote, so the fake learner predicts its training mean, each model's
-    own. Over three days retrained at each midnight, the build and the
-    trains run on threads of their own, then every decision of a day
-    trades on the model trained at its midnight, and a second
-    preparation builds and trains nothing; each period scores its model
-    as the baseline fitted at its start, the same mean.
+    quote, so the fake learner predicts its training mean, calibrated to a
+    constant, each long model's own. Over three days retrained at each
+    midnight, the build and the trains run on threads of their own, then
+    every decision of a day trades on the model trained at its midnight,
+    and a second preparation builds and trains nothing; neither a
+    period's model nor its baseline ranks a row above another (AUC 0.5),
+    and the model's log loss is that of its constant against the
+    period's outcomes.
   - `backtest_meta.rs`: meta-labeling (`model::meta`) on the fixture of
     `backtest_retrain.rs`, every model the fake learner on the missing
-    feature, three days retrained at each midnight. A model primary,
-    long at every decision, with a meta model: the first retrain has no
+    feature, three days retrained at each midnight. A model primary of
+    the long alone, long at every decision, with a meta model: the first retrain has no
     primary model before it and publishes no meta model, the others do;
     each meta model's holdout carries the probability of the primary
     model trained a day before it, never of the one trained with it, and

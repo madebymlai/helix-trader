@@ -566,7 +566,7 @@ const MODEL_EMA_CONFIG: &str = r#"
     retrain = "24h"
     window = "46h"
     holdout = "12h"
-    thresholds = { long = 0.6, short = 0.4 }
+    margins = { long = 0.0, short = 0.0 }
     min_score = 0.5
     learner = { kind = "fake" }
 "#;

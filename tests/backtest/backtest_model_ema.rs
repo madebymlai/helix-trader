@@ -34,7 +34,9 @@ use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, warmed up an hour,
 /// trades held 30 minutes; learning whether the horizon's long gains, on
-/// a window of 46 hours, the last 12 held out.
+/// a window of 46 hours, the last 12 held out and the 12 before them
+/// calibrated on; trading the long alone, at every decision, its margin
+/// below any expected P&L.
 const CONFIG: &str = r#"
     instrument_ids = ["XAUUSD.ICMARKETS"]
     bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" }
@@ -48,7 +50,7 @@ const CONFIG: &str = r#"
     retrain = "24h"
     window = "46h"
     holdout = "12h"
-    thresholds = { long = 0.6, short = 0.4 }
+    margins = { long = -1e9 }
     min_score = 0.5
     learner = { kind = "fake" }
 "#;
@@ -244,11 +246,13 @@ fn the_binarys_backtest_retrains_in_child_processes_once() {
             "{stdout}"
         );
     }
-    let scores = stdout.find("Model scores").expect(&stdout);
+    let scores = stdout.find("Long model scores").expect(&stdout);
     assert!(stdout.find("Final balances").unwrap() < scores, "{stdout}");
     for (from, to) in [(t(), next), (next, end)] {
         assert!(
-            stdout.contains(&format!("Model scores, out of sample, from {from} to {to}")),
+            stdout.contains(&format!(
+                "Long model scores, out of sample, from {from} to {to}"
+            )),
             "{stdout}"
         );
     }

@@ -1,14 +1,15 @@
 //! Model EMA, an example strategy trading on a learned model: at each
 //! decision of its model section, its model handle (`model::handle`)
-//! predicts on its features, the averages of its bars (`features.rs`),
-//! and a probability past a threshold is a trade, a market order of the
-//! targets' instrument and size on its side, closed `hold` after it is
-//! sent (`close_position`, on a time alert). It decides only once its
-//! indicators are initialized: warm from the replay in a backtest or a
-//! dataset run, from its warmup request live. Trades may overlap: on a
-//! hedging venue each is a position of its own, on a netting venue they
-//! add into one, which the first close then closes. A restart does not set
-//! again the alerts of the trades still open.
+//! predicts each side on its features, the averages of its bars
+//! (`features.rs`), and a side expected to clear its margin is a trade,
+//! a market order of the targets' instrument and size on its side,
+//! closed `hold` after it is sent (`close_position`, on a time alert).
+//! It decides only once its indicators are initialized: warm from the
+//! replay in a backtest or a dataset run, from its warmup request live.
+//! Trades may overlap: on a hedging venue each is a position of its own,
+//! on a netting venue they add into one, which the first close then
+//! closes. A restart does not set again the alerts of the trades still
+//! open.
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
 //! or leaves each trade of the model (`model::meta`), and may size it.

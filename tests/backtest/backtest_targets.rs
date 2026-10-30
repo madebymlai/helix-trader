@@ -27,7 +27,7 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
         targets::{
-            AtrConfig, Barrier, Distance, Exit, Outcome, Outcomes, TargetRow, Targets,
+            AtrConfig, Barrier, Distance, Distances, Exit, Outcome, Outcomes, TargetRow, Targets,
             TargetsConfig,
         },
     },
@@ -268,11 +268,25 @@ fn outcome(pnl: &str, exit: Exit) -> Outcome {
     Outcome {
         pnl: Money::from(pnl),
         exit,
+        distances: None,
     }
 }
 
 fn outcomes(long: Outcome, short: Outcome) -> Outcomes {
     Outcomes { long, short }
+}
+
+/// The barrier's outcomes `long` and `short`, each side's take profit
+/// `take_profit` and its stop `stop` from the decision's price.
+fn barrier(long: Outcome, short: Outcome, take_profit: &str, stop: &str) -> Outcomes {
+    let distances = Some(Distances {
+        take_profit: take_profit.parse().unwrap(),
+        stop: stop.parse().unwrap(),
+    });
+    Outcomes {
+        long: Outcome { distances, ..long },
+        short: Outcome { distances, ..short },
+    }
 }
 
 /// The row of `decision`, settled `settled` after its time.
@@ -377,9 +391,11 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 3997.10 (+2.90 - 0.24). The horizon closes on the flat quote.
         row(
             decision(at("09:00"), 4000.10),
-            outcomes(
+            barrier(
                 outcome("-3.64 USD", Exit::Stop),
                 outcome("2.66 USD", Exit::TakeProfit),
+                "3.00",
+                "3.00",
             ),
             flat(),
             SignedDuration::from_mins(30),
@@ -389,9 +405,11 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 4003.10, the short's stop at the ask, 4003.40.
         row(
             decision(at("10:00"), 4000.10),
-            outcomes(
+            barrier(
                 outcome("2.66 USD", Exit::TakeProfit),
                 outcome("-3.64 USD", Exit::Stop),
+                "3.00",
+                "3.00",
             ),
             flat(),
             SignedDuration::from_mins(45),
@@ -400,9 +418,11 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // long +0.80, the short -1.20, less the fees.
         row(
             decision(at("11:00"), 4000.10),
-            outcomes(
+            barrier(
                 outcome("0.56 USD", Exit::Time),
                 outcome("-1.44 USD", Exit::Time),
+                "3.00",
+                "3.00",
             ),
             outcomes(
                 outcome("0.56 USD", Exit::Time),
@@ -555,9 +575,11 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // loss) and the short's stop at its trigger, 100,100 (-1 - 1.0005).
         row(
             decision(at("09:00"), 100_000.0),
-            outcomes(
+            barrier(
                 outcome("-0.0005 USDT", Exit::TakeProfit),
                 outcome("-2.0005 USDT", Exit::Stop),
+                "100",
+                "100",
             ),
             flat(),
             SignedDuration::from_mins(30),
@@ -566,16 +588,18 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // the short's take profit at its limit (+1 - 0.9995).
         row(
             decision(at("10:00"), 100_000.0),
-            outcomes(
+            barrier(
                 outcome("-1.9995 USDT", Exit::Stop),
                 outcome("0.0005 USDT", Exit::TakeProfit),
+                "100",
+                "100",
             ),
             flat(),
             SignedDuration::from_mins(30),
         ),
         row(
             decision(at("11:00"), 100_000.0),
-            flat(),
+            barrier(flat().long, flat().short, "100", "100"),
             flat(),
             SignedDuration::from_mins(45),
         ),
@@ -649,9 +673,11 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         // horizon closes both on the flat quote at 10:30.
         row(
             decision(ic::at("10:00:00"), 4000.10),
-            outcomes(
+            barrier(
                 outcome("0.46 USD", Exit::TakeProfit),
                 outcome("-1.34 USD", Exit::Stop),
+                "0.80",
+                "0.60",
             ),
             outcomes(
                 outcome("-0.44 USD", Exit::Time),
@@ -765,9 +791,11 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
         // flat trade at 10:30, its two fees lost.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            outcomes(
+            barrier(
                 outcome("0.09945 USDT", Exit::TakeProfit),
                 outcome("-2.2006 USDT", Exit::Stop),
+                "110",
+                "82.5",
             ),
             outcomes(
                 outcome("-1 USDT", Exit::Time),
@@ -836,9 +864,11 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         // 10:30, its two fees lost.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            outcomes(
+            barrier(
                 outcome("0.09945 USDT", Exit::TakeProfit),
                 outcome("-1.8254125 USDT", Exit::Stop),
+                "110",
+                "82.5",
             ),
             outcomes(
                 outcome("-1 USDT", Exit::Time),

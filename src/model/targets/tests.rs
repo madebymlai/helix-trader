@@ -782,10 +782,17 @@ fn a_decision_settles_within_its_longest_target() {
 }
 
 #[test]
-fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
-    let outcome = |pnl: &str, exit| Outcome {
+fn a_row_has_a_value_per_target_name_the_pnl_the_exit_and_a_barriers_distances_of_each_side() {
+    let outcome = |pnl: &str, exit, distances| Outcome {
         pnl: Money::from(pnl),
         exit,
+        distances,
+    };
+    let barrier = |take_profit, stop| {
+        Some(Distances {
+            take_profit: Decimal::new(take_profit, 2),
+            stop: Decimal::new(stop, 2),
+        })
     };
     let row = TargetRow {
         decision: FeatureRow {
@@ -795,12 +802,12 @@ fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
             ts_init: UnixNanos::from(1),
         },
         barrier: Some(Outcomes {
-            long: outcome("2.5 USD", Exit::TakeProfit),
-            short: outcome("-3.5 USD", Exit::Stop),
+            long: outcome("2.5 USD", Exit::TakeProfit, barrier(300, 150)),
+            short: outcome("-3.5 USD", Exit::Stop, barrier(325, 175)),
         }),
         horizon: Some(Outcomes {
-            long: outcome("-0.25 USD", Exit::Time),
-            short: outcome("0.25 USD", Exit::Time),
+            long: outcome("-0.25 USD", Exit::Time, None),
+            short: outcome("0.25 USD", Exit::Time, None),
         }),
         settled_at: UnixNanos::from(2),
     };
@@ -814,15 +821,24 @@ fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
         [
             "barrier_long_pnl",
             "barrier_long_exit",
+            "barrier_long_take_profit",
+            "barrier_long_stop",
             "barrier_short_pnl",
             "barrier_short_exit",
+            "barrier_short_take_profit",
+            "barrier_short_stop",
             "horizon_long_pnl",
             "horizon_long_exit",
             "horizon_short_pnl",
             "horizon_short_exit",
         ]
     );
-    assert_eq!(row.values(), [2.5, 1.0, -3.5, -1.0, -0.25, 0.0, 0.25, 0.0]);
+    assert_eq!(
+        row.values(),
+        [
+            2.5, 1.0, 3.0, 1.5, -3.5, -1.0, 3.25, 1.75, -0.25, 0.0, 0.25, 0.0
+        ]
+    );
     assert_eq!(horizon.target_names().len(), 4);
 }
 
@@ -832,6 +848,7 @@ fn an_outcome_has_the_sign_of_its_pnl() {
         Outcome {
             pnl: Money::from(pnl),
             exit: Exit::Time,
+            distances: None,
         }
         .sign()
     };
@@ -842,26 +859,22 @@ fn an_outcome_has_the_sign_of_its_pnl() {
 }
 
 #[test]
-fn a_label_is_the_long_pnl_of_its_target_among_a_rows_values() {
+fn a_sides_pnl_and_stop_are_its_target_names_among_a_rows_values() {
+    let names = config().target_names();
+    let pnl = |label, side| names[config().pnl_index(label, side).unwrap()].clone();
+    let stop = |label, side| names[config().stop_index(label, side).unwrap()].clone();
     let horizon = TargetsConfig {
         barrier: None,
         ..config()
     };
 
-    assert_eq!(config().label_index(Label::Barrier), Some(0));
-    assert_eq!(config().label_index(Label::Horizon), Some(4));
-    assert_eq!(horizon.label_index(Label::Horizon), Some(0));
-    assert_eq!(horizon.label_index(Label::Barrier), None);
-}
-
-#[test]
-fn a_sides_pnl_is_its_target_names_pnl_among_a_rows_values() {
-    let names = config().target_names();
-    let name = |label, side| names[config().pnl_index(label, side).unwrap()].clone();
-
-    assert_eq!(name(Label::Barrier, OrderSide::Buy), "barrier_long_pnl");
-    assert_eq!(name(Label::Barrier, OrderSide::Sell), "barrier_short_pnl");
-    assert_eq!(name(Label::Horizon, OrderSide::Sell), "horizon_short_pnl");
+    assert_eq!(pnl(Label::Barrier, Side::Long), "barrier_long_pnl");
+    assert_eq!(pnl(Label::Barrier, Side::Short), "barrier_short_pnl");
+    assert_eq!(pnl(Label::Horizon, Side::Short), "horizon_short_pnl");
+    assert_eq!(stop(Label::Barrier, Side::Short), "barrier_short_stop");
+    assert_eq!(config().stop_index(Label::Horizon, Side::Long), None);
+    assert_eq!(horizon.pnl_index(Label::Horizon, Side::Long), Some(0));
+    assert_eq!(horizon.pnl_index(Label::Barrier, Side::Long), None);
 }
 
 #[test]
@@ -882,4 +895,14 @@ fn a_label_reads_from_toml() {
 #[test]
 fn the_fingerprinted_code_holds_no_test() {
     assert!(!include_str!("../targets.rs").contains("#[test]"));
+}
+
+/// 1000 AUD/USD with a stop 10 pips away: 1 USD at risk.
+#[test]
+fn a_stop_is_worth_its_distance_on_the_targets_quantity() {
+    let instrument = InstrumentAny::CurrencyPair(nautilus_model::instruments::stubs::audusd_sim());
+
+    let worth = stop_worth(&instrument, Quantity::from(1000), 0.001).unwrap();
+
+    assert!((worth - 1.0).abs() < 1e-9, "{worth}");
 }

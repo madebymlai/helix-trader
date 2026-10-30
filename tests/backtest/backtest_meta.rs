@@ -1,12 +1,12 @@
 //! Meta-labeling on a fixture catalog (`model::meta`), its primary a model
 //! or a rule, every model the fake learner on a missing feature, so that
-//! each model's probability is the mean of its training labels and names
-//! it (`common::dataset::Missing`). Over a span of three days retrained
+//! each model's probability is the mean of its training labels, calibrated
+//! to a constant, and names it (`common::dataset::Missing`). Over a span of three days retrained
 //! every midnight, the dataset is built, then each retrain trains the
 //! primary and its meta model; in the run, a decision trades only if the
 //! meta model in use takes the primary's trade.
 //!
-//! A model primary trades long at every decision. Its meta model's rows
+//! A model primary of the long alone trades long at every decision. Its meta model's rows
 //! carry the probability of the primary model in use at each, never of
 //! the one trained at the meta's own retrain: out of sample. Its first
 //! retrain has no primary model before it, so no meta model, and the
@@ -29,14 +29,14 @@ use crate::common::{
     ic,
 };
 use helix_trader::model::{
-    config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
+    config::{Margins, MetaConfig, ModelConfig, RuleConfig},
     dataset::{self, Dataset},
     decide,
     features::FeatureSet,
     handle::{Mode, ModelHandle, SettledRows, Trade},
     learner::LearnerConfig,
     store::ModelStore,
-    targets::TargetRow,
+    targets::{Side, TargetRow},
     train::{Kept, Outcome, Trained, Training},
     walk::WalkForward,
 };
@@ -67,44 +67,45 @@ fn features(rule: bool) -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// A meta model on 46 hours, the last 12 held out, the fake learner,
-/// published from an AUC of 0.5 (its probability the same on every row,
-/// its AUC 0.5), taking every trade, to record its probability.
+/// A meta model on 46 hours, the last 6 held out and the 6 before them
+/// calibrated on, the fake learner, published from an AUC of 0.5 (its
+/// probability the same on every row, its AUC 0.5), taking every trade, to
+/// record its probability.
 fn meta() -> MetaConfig {
     MetaConfig::builder()
         .window(SignedDuration::from_hours(46))
-        .holdout(SignedDuration::from_hours(12))
+        .holdout(SignedDuration::from_hours(6))
         .threshold(0.0)
         .min_score(0.5)
         .learner(LearnerConfig::Fake {})
         .build()
 }
 
-/// The probe's model, retrained every day, a long at every decision, its
-/// trades taken by `meta`.
+/// The probe's model of the long alone, retrained every day, a long at
+/// every decision, its trades taken by `meta`.
 fn model_primary() -> ModelConfig {
     ModelConfig {
         retrain: SignedDuration::from_hours(24),
-        thresholds: Thresholds {
-            long: f64::MIN_POSITIVE,
-            short: 0.0,
+        margins: Margins {
+            long: Some(f64::MIN),
+            short: None,
         },
         meta: Some(meta()),
         ..config()
     }
 }
 
-/// The rule probe's section, retrained every day, its meta model on 36
-/// hours, the last 18 held out: with two signals in three, of either
-/// side, a holdout of 12 hours of the fixture has one label, and the
-/// models of a window of 46 hours do not all differ.
+/// The rule probe's section, retrained every day, its meta model on 46
+/// hours, the last 18 held out and the 18 before them calibrated on: with
+/// two signals in three, of either side, a holdout of 12 hours of the
+/// fixture has one label.
 fn rule_primary() -> RuleConfig {
     RuleConfig {
         decision: rule(),
         targets: targets(),
         retrain: SignedDuration::from_hours(24),
         meta: MetaConfig {
-            window: SignedDuration::from_hours(36),
+            window: SignedDuration::from_hours(46),
             holdout: SignedDuration::from_hours(18),
             ..meta()
         },
@@ -136,11 +137,19 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
 }
 
-/// The prediction of the model of `store` valid from `at` on `row`.
-fn predicts(store: &ModelStore, at: Timestamp, row: &[f64]) -> f64 {
+/// The calibrated prediction of the model of `store` valid from `at` on
+/// `row`, as a strategy of `features` loads it.
+fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
-    let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
-    model.predict(row).unwrap()
+    let fingerprint =
+        dataset::fingerprint(features, rule(), &targets(), &requirements(), &commission())
+            .unwrap()
+            .to_string();
+    stored
+        .load(&stored.manifest.feature_names, &fingerprint)
+        .unwrap()
+        .predict(row)
+        .unwrap()
 }
 
 /// Prepares the backtest of the span of the model primary: the dataset
@@ -216,7 +225,7 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
     assert!(
         trained
             .iter()
-            .all(|(_, trained)| matches!(trained.primary, Some(Outcome::Published { .. }))),
+            .all(|(_, trained)| matches!(trained.long, Some(Outcome::Published { .. }))),
         "{trained:?}"
     );
     assert!(
@@ -235,18 +244,28 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
         &model_primary(),
         &requirements(),
         &commission(),
+        Side::Long,
     )
     .unwrap();
-    let meta = primary.meta(&meta(), model_primary().thresholds).unwrap();
+    let meta = ModelStore::meta(
+        models.path(),
+        StrategyId::from(STRATEGY),
+        &features(false),
+        &model_primary(),
+        &meta(),
+        &requirements(),
+        &commission(),
+    )
+    .unwrap();
     let means: Vec<f64> = retrains
         .iter()
-        .map(|&at| predicts(&primary, at, &[f64::NAN]))
+        .map(|&at| predicts(&primary, &features(false), at, &[f64::NAN]))
         .collect();
     assert!(
         means[0] != means[1] && means[1] != means[2],
         "the primary's models must differ to be told apart: {means:?}"
     );
-    // Each meta model's holdout, the last 12 hours before its retrain, is
+    // Each meta model's holdout, the last 6 hours before its retrain, is
     // of the decisions of the primary model trained a day before: its
     // probability, never the one of the primary trained with the meta.
     for (i, &at) in retrains.iter().enumerate().skip(1) {
@@ -284,7 +303,12 @@ fn a_model_primarys_meta_model_learns_from_its_out_of_sample_predictions_and_tak
             );
             continue;
         }
-        let taken = predicts(&meta, from, &[f64::NAN, 1.0, means[period]]);
+        let taken = predicts(
+            &meta,
+            &features(false),
+            from,
+            &[f64::NAN, 1.0, means[period]],
+        );
         assert_eq!(trades.len(), 24, "period {period}");
         assert!(
             trades
@@ -455,9 +479,9 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
         );
     }
     assert!(
-        trained
-            .iter()
-            .all(|trained| trained.primary.is_none() && trained.published()),
+        trained.iter().all(|trained| trained.long.is_none()
+            && trained.short.is_none()
+            && trained.published()),
         "{trained:?}"
     );
 
@@ -481,7 +505,7 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
     .unwrap();
     let longs: Vec<f64> = retrains
         .iter()
-        .map(|&at| predicts(&store, at, &[f64::NAN, 1.0, f64::NAN]))
+        .map(|&at| predicts(&store, &features(true), at, &[f64::NAN, 1.0, f64::NAN]))
         .collect();
     assert!(
         longs[0] != longs[1] && longs[1] != longs[2],
@@ -495,7 +519,12 @@ fn a_rule_primarys_signals_alone_are_rows_and_trades_on_its_side_taken_by_its_me
             .iter()
             .rfind(|&&at| UnixNanos::from(at) <= *time)
             .unwrap();
-        let taken = predicts(&store, *retrain, &[f64::NAN, value, f64::NAN]);
+        let taken = predicts(
+            &store,
+            &features(true),
+            *retrain,
+            &[f64::NAN, value, f64::NAN],
+        );
         assert_eq!((trade.side, trade.probability), (side, taken), "at {time}");
     }
 }

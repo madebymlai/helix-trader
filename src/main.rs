@@ -1249,7 +1249,8 @@ mod tests {
 
         let err = reported(&kept.clone().into()).unwrap_err().to_string();
         let meta_kept = Trained {
-            primary: Some(published.clone()),
+            long: Some(published.clone()),
+            short: Some(published.clone()),
             meta: Some(kept),
         };
 

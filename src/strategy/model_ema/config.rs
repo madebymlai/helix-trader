@@ -20,7 +20,7 @@ pub struct ModelEmaConfig {
     pub bars: BarsConfig,
     /// How long a trade is held after it is sent, such as `"1h"`.
     pub hold: SignedDuration,
-    /// The model: its decisions, targets, training, thresholds and
+    /// The model: its decisions, targets, training, margins and
     /// learner. The trades are of the targets' instrument and size.
     pub model: ModelConfig,
 }
@@ -75,7 +75,7 @@ mod tests {
         retrain = "24h"
         window = "48h"
         holdout = "12h"
-        thresholds = { long = 0.6, short = 0.4 }
+        margins = { long = 0.5, short = 0.5 }
         min_score = 0.5
         learner = { kind = "baseline" }
     "#;

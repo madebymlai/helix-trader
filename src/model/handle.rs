@@ -10,12 +10,18 @@
 //! fresh (data of the targets' instrument since the previous) and every
 //! one is initialized, and publishes their row (`decide::decide`), then:
 //!
-//! - trading (`Mode::Backtest`, `Mode::Live`): takes the latest model of
-//!   the store (`store::ModelStore`) valid at the decision, predicts on the
-//!   row and returns the trade the config's thresholds make of the
-//!   probability (`Thresholds::side`), of the targets' size. No model
-//!   valid yet, a stale decision, cold features, or a probability between
-//!   the thresholds are no trade, never an error.
+//! - trading (`Mode::Backtest`, `Mode::Live`): takes, for each side of
+//!   the config's margins, the latest model of its store
+//!   (`store::ModelStore`) valid at the decision, its calibrated
+//!   probability on the row, and its expected net P&L (`payoff`): on a
+//!   barrier label, the expected R times the worth of the stop the
+//!   decision sets (`targets::Stops`, from the decision's price and the
+//!   barrier's ATR, which the handle runs), on a horizon in money. It
+//!   returns the trade of the side clearing its margin, the larger of two
+//!   (`payoff::pick`), of the targets' size. A side with no model valid
+//!   yet never trades; a stale decision, cold features, a barrier ATR not
+//!   yet initialized, no side clearing its margin or two tied are no
+//!   trade, never an error.
 //! - in a dataset run (`Mode::Dataset`): opens the decision's targets
 //!   (`targets::Targets`) and returns no trade, so the strategy places
 //!   none of its own; the strategy hands it its order, position and time
@@ -23,8 +29,8 @@
 //!   of the run.
 //!
 //! With a meta model (`model::meta`), a trade of the primary is taken only
-//! if the meta model in use, on the row with the primary's side and
-//! probability, predicts at least its threshold, sized from that
+//! if the meta model in use, on the row with the primary's side and that
+//! side's probability, predicts at least its threshold, sized from that
 //! probability if the meta sizes (`MetaConfig::size`); no meta model valid
 //! yet is no trade. A strategy whose primary is its rule (`of_rule`)
 //! decides through `decide_on` with the rule's side, only when the rule
@@ -33,7 +39,8 @@
 //! A model is swapped in only inside `decide`, before it predicts: no
 //! decision mixes two models. A backtest and a live node read the same
 //! store, listed again at each decision, so a model published meanwhile
-//! is used from the first decision at or after its valid-from. Before use
+//! is used from the first decision at or after its valid-from. Every
+//! probability is calibrated (`store::LoadedModel`). Before use
 //! a model is checked against the strategy: its feature names and their
 //! order, its fingerprint (`dataset::fingerprint`), its width, and its
 //! probes, each of which the reloaded model must predict to the bit as it
@@ -56,7 +63,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -73,14 +80,15 @@ use nautilus_model::{
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
-    config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
+    config::{MetaConfig, ModelConfig, RuleConfig},
     dataset::{self, Commission},
     decide::{self, DecisionRule},
     features::FeatureSet,
     launcher::{Launcher, Retraining},
     meta::{Meta, meta_row},
-    store::{ModelStore, Swap},
-    targets::{TargetRow, Targets, TargetsConfig},
+    payoff,
+    store::{LoadedModel, ModelStore, Swap},
+    targets::{Label, Side, Stops, TargetRow, Targets, TargetsConfig},
 };
 use crate::strategy::{DataRequirements, warmup};
 
@@ -120,8 +128,9 @@ pub struct Trade {
     pub side: OrderSide,
     /// The targets' size, or, with a meta model sizing, its multiple of it.
     pub quantity: Quantity,
-    /// The probability that the label is true of the model deciding: the
-    /// meta model's, if any, else the primary's.
+    /// The calibrated probability that the label is true of the model
+    /// deciding: the meta model's, if any, else that of the primary's
+    /// model of the side.
     pub probability: f64,
 }
 
@@ -158,14 +167,25 @@ struct Trading {
 /// What picks the side of a trade.
 #[derive(Debug)]
 enum Primary {
-    /// A model, and the meta model taking its trades, if any.
+    /// A model of each side traded, and the meta model taking its trades,
+    /// if any.
     Model {
-        models: Models,
-        thresholds: Thresholds,
+        sides: Vec<SideModels>,
+        /// On a barrier label, the stops of the barrier, which weigh the
+        /// expected R; none on a horizon, expected in money.
+        stops: Option<Stops>,
         meta: Option<MetaModels>,
     },
     /// The strategy's rule, and the meta model taking its trades.
     Rule { meta: MetaModels },
+}
+
+/// The models of a side, and its margin.
+#[derive(Debug)]
+struct SideModels {
+    side: Side,
+    margin: f64,
+    models: Models,
 }
 
 /// The models of one level of the store, swapped in decision by decision.
@@ -215,22 +235,34 @@ impl ModelHandle {
                 commission,
             )?
             .map(|meta| MetaModels::of(&meta, &fingerprint));
-            Ok(Primary::Model {
-                models: Models::new(
-                    ModelStore::new(
+            let sides = config
+                .margins
+                .sides()
+                .map(|(side, margin)| {
+                    let store = ModelStore::new(
                         models,
                         strategy_id,
                         &features,
                         config,
                         requirements,
                         commission,
-                    )?,
-                    features.names().to_vec(),
-                    fingerprint,
+                        side,
+                    )?;
+                    Ok(SideModels {
+                        side,
+                        margin,
+                        models: Models::new(store, features.names().to_vec(), fingerprint.clone()),
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            let stops = match config.label {
+                Label::Barrier => Some(
+                    Stops::new(&config.targets, config.decision, requirements)?
+                        .context("the label is the barrier, and the targets have none")?,
                 ),
-                thresholds: config.thresholds,
-                meta,
-            })
+                Label::Horizon => None,
+            };
+            Ok(Primary::Model { sides, stops, meta })
         };
         Self::built(
             strategy_id,
@@ -352,8 +384,9 @@ impl ModelHandle {
     }
 
     /// Starts the handle on `strategy`, reading `bar_types`, from
-    /// `on_start`: registers the features (and, in a dataset run, starts the
-    /// targets' ATR, and collects the rows they settle), then starts the
+    /// `on_start`: registers the features (and starts the barrier's ATR: a
+    /// model primary's stops', trading on a barrier label, or, in a dataset
+    /// run, the targets', and collects the rows they settle), then starts the
     /// decision cadence, live `warmup::live_bar_build_delay(bar_types)`
     /// late, and live the retrain timer.
     ///
@@ -367,13 +400,21 @@ impl ModelHandle {
     {
         self.features.register(strategy);
         let delay = match &self.serving {
-            Serving::Trading(trading) => match &trading.retraining {
-                Some(retraining) => {
-                    retraining.start(strategy)?;
-                    warmup::live_bar_build_delay(bar_types)
+            Serving::Trading(trading) => {
+                if let Primary::Model {
+                    stops: Some(stops), ..
+                } = &trading.primary
+                {
+                    stops.start(strategy);
                 }
-                None => SignedDuration::ZERO,
-            },
+                match &trading.retraining {
+                    Some(retraining) => {
+                        retraining.start(strategy)?;
+                        warmup::live_bar_build_delay(bar_types)
+                    }
+                    None => SignedDuration::ZERO,
+                }
+            }
             Serving::Dataset { targets, rows } => {
                 targets.start(strategy);
                 let rows = Rc::clone(rows);
@@ -445,7 +486,7 @@ impl ModelHandle {
         };
         match &self.serving {
             Serving::Trading(trading) => {
-                trading.trade(Timestamp::from(row.ts_event), &row.features, side)
+                trading.trade(strategy, Timestamp::from(row.ts_event), &row.features, side)
             }
             Serving::Dataset { targets, .. } => {
                 targets.open(strategy, row)?;
@@ -516,31 +557,53 @@ impl ModelHandle {
 }
 
 impl Trading {
-    /// The trade of the decision at `now` on `row`, on the rule's `side` if
-    /// the primary is a rule: a model primary's trade, of the latest model
-    /// valid then through the thresholds, taken if its meta model takes
-    /// it; a rule's taken if its meta model takes it.
-    fn trade(
+    /// The trade of the decision of `strategy` at `now` on `row`, on the
+    /// rule's `side` if the primary is a rule: a model primary's trade, of
+    /// the side whose latest model valid then expects a net P&L clearing
+    /// its margin, the larger of two, taken if its meta model takes it; a
+    /// rule's taken if its meta model takes it.
+    fn trade<S>(
         &self,
+        strategy: &S,
         now: Timestamp,
         row: &[f64],
         side: Option<OrderSide>,
-    ) -> anyhow::Result<Option<Trade>> {
+    ) -> anyhow::Result<Option<Trade>>
+    where
+        S: DataActor + DataActorNative,
+    {
         match (&self.primary, side) {
-            (
-                Primary::Model {
+            (Primary::Model { sides, stops, meta }, None) => {
+                let mut decided = vec![];
+                for SideModels {
+                    side,
+                    margin,
                     models,
-                    thresholds,
-                    meta,
-                },
-                None,
-            ) => {
-                let Some(probability) = models.predict(now, row)? else {
+                } in sides
+                {
+                    let Some((probability, payoff)) =
+                        models.at(now, |model| Ok((model.predict(row)?, model.payoff())))?
+                    else {
+                        continue;
+                    };
+                    let payoff = payoff.context("a primary's model has its payoff")?;
+                    let unit = match stops {
+                        None => 1.0,
+                        Some(stops) => match stops.at(strategy, *side)? {
+                            Some(unit) => unit,
+                            None => return Ok(None),
+                        },
+                    };
+                    decided.push((
+                        (*side, probability),
+                        payoff.expected(probability) * unit,
+                        *margin,
+                    ));
+                }
+                let Some((side, probability)) = payoff::pick(decided) else {
                     return Ok(None);
                 };
-                let Some(side) = thresholds.side(probability) else {
-                    return Ok(None);
-                };
+                let side = side.order_side();
                 match meta {
                     None => Ok(Some(Trade {
                         side,
@@ -567,17 +630,21 @@ impl Models {
         Self(RefCell::new(Swap::new(store, feature_names, fingerprint)))
     }
 
-    /// The prediction on `row` of the latest model valid at `now`, swapped
-    /// in; none without a model. A store that cannot be listed keeps the
+    /// What `read` reads of the latest model valid at `now`, swapped in;
+    /// none without a model. A store that cannot be listed keeps the
     /// current model.
-    fn predict(&self, now: Timestamp, row: &[f64]) -> anyhow::Result<Option<f64>> {
+    fn at<T>(
+        &self,
+        now: Timestamp,
+        read: impl FnOnce(&LoadedModel) -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
         let mut swap = self.0.borrow_mut();
         let valid_froms = swap.store().valid_froms().unwrap_or_else(|e| {
             log::error!("listing the models at {now}: {e:#}; the current model kept");
             vec![]
         });
         swap.at(now, &valid_froms)
-            .map(|(_, model)| model.predict(row))
+            .map(|(_, model)| read(model))
             .transpose()
     }
 }
@@ -610,7 +677,7 @@ impl MetaModels {
         side: OrderSide,
         quantity: Quantity,
     ) -> anyhow::Result<Option<Trade>> {
-        let Some(probability) = self.models.predict(now, row)? else {
+        let Some(probability) = self.models.at(now, |model| model.predict(row))? else {
             return Ok(None);
         };
         if probability < self.config.threshold {
@@ -648,6 +715,7 @@ mod tests {
         data::QuoteTick,
         enums::PriceType,
         identifiers::{InstrumentId, TraderId},
+        instruments::{InstrumentAny, stubs::audusd_sim},
         types::Price,
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -659,8 +727,10 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        config::Sizing,
+        calibration::Calibration,
+        config::{Margins, Sizing},
         learner::{LearnerConfig, TrainingSet},
+        payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, Distance, Label, TargetsConfig},
     };
@@ -694,6 +764,24 @@ mod tests {
             .borrow_mut()
             .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
         let cache = Rc::new(RefCell::new(Cache::default()));
+        // AUD/USD in the cache, quoted at 0.69990/0.70010: a barrier's
+        // stops are set from its mid.
+        cache
+            .borrow_mut()
+            .add_instrument(InstrumentAny::CurrencyPair(audusd_sim()))
+            .unwrap();
+        cache
+            .borrow_mut()
+            .add_quote(QuoteTick::new(
+                InstrumentId::from(AUD),
+                Price::from("0.69990"),
+                Price::from("0.70010"),
+                Quantity::from(1),
+                Quantity::from(1),
+                UnixNanos::from(now),
+                UnixNanos::from(now),
+            ))
+            .unwrap();
         let portfolio = Rc::new(RefCell::new(Portfolio::new(
             clock.clone(),
             cache.clone(),
@@ -745,8 +833,8 @@ mod tests {
         features.handle_quote(&quote).unwrap();
     }
 
-    /// Hourly decisions on a horizon of 1 hour of 1000 AUD/USD, a long from
-    /// 0.6 and a short to 0.4, the baseline learner.
+    /// Hourly decisions on a horizon of 1 hour of 1000 AUD/USD, each side
+    /// traded from an expected net P&L of nought, the baseline learner.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -761,25 +849,42 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
-            .thresholds(Thresholds {
-                long: 0.6,
-                short: 0.4,
+            .margins(Margins {
+                long: Some(0.0),
+                short: Some(0.0),
             })
             .min_score(0.5)
             .learner(LearnerConfig::Baseline {})
             .build()
     }
 
+    /// The store of the long models under `models`.
     fn store(models: &Path) -> ModelStore {
+        side_store(models, &config(), Side::Long)
+    }
+
+    /// The store of the `side` models of `config` under `models`.
+    fn side_store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
         ModelStore::new(
             models,
             StrategyId::from(STRATEGY),
             &features(),
-            &config(),
+            config,
             &requirements(),
             &commission(),
+            side,
         )
         .unwrap()
+    }
+
+    /// The calibration of every model of the tests, `c(p) = 1 / (1 +
+    /// e^(2 - 4p))`: c(0.5) = 0.5, c(0.6) = 0.598688, c(0.7) = 0.689974,
+    /// c(0.8) = 0.768525, c(0.9) = 0.832018.
+    const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+
+    /// The calibrated probability of a prediction of `p`.
+    fn c(p: f64) -> f64 {
+        CALIBRATION.apply(p)
     }
 
     /// What the strategy reads: the quotes of AUD/USD.
@@ -799,14 +904,25 @@ mod tests {
         Commission::Rate("0.00003".to_string())
     }
 
-    /// A baseline model valid from `valid_from` predicting `trues` tenths
-    /// whatever the row, as the store keeps it for the probe's features,
-    /// probed on one row.
+    /// A baseline long model of `config` valid from `valid_from` predicting
+    /// `trues` tenths whatever the row, calibrated by `CALIBRATION`,
+    /// expecting a win and a loss of 1, as the store keeps it for the
+    /// probe's features, probed on one row.
     fn baseline(valid_from: &str, trues: usize) -> StoredModel {
+        baseline_for(&config(), Side::Long, valid_from, trues)
+    }
+
+    /// The baseline of `baseline`, of `config`'s `side`.
+    fn baseline_for(
+        config: &ModelConfig,
+        side: Side,
+        valid_from: &str,
+        trues: usize,
+    ) -> StoredModel {
         let labels = (0..10).map(|i| i < trues).collect();
         let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
         let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
-        let config = config();
+        let config = config.clone();
         StoredModel {
             manifest: ModelManifest {
                 strategy_id: StrategyId::from(STRATEGY),
@@ -823,11 +939,17 @@ mod tests {
                 feature_names: vec!["mid".to_string()],
                 targets: config.targets,
                 label: config.label,
+                side: Some(side),
                 learner: config.learner,
+                calibration: CALIBRATION,
+                payoff: Some(Payoff {
+                    win: 1.0,
+                    loss: 1.0,
+                }),
                 score: 0.6,
                 probes: vec![Probe {
                     row: vec![0.7],
-                    prediction: model.predict(&[0.7]).unwrap(),
+                    prediction: CALIBRATION.apply(model.predict(&[0.7]).unwrap()),
                 }],
             },
             model: model.save().unwrap(),
@@ -893,7 +1015,7 @@ mod tests {
         assert_eq!(other.decide(&mut probe).unwrap(), None);
         assert_eq!(
             probability(handle(&probe, models.path()).decide(&mut probe).unwrap()),
-            Some(0.8)
+            Some(c(0.8))
         );
     }
 
@@ -978,52 +1100,157 @@ mod tests {
         assert!(err.contains(AUD), "{err}");
     }
 
+    /// The probe's handle of `config`, trading in a backtest on the models
+    /// under `models` with the long's of `long` tenths and the short's of
+    /// `short` tenths, if any, valid from midnight, its features warm.
+    fn sides_handle(
+        probe: &Decider,
+        models: &Path,
+        config: &ModelConfig,
+        (long, short): (Option<usize>, Option<usize>),
+    ) -> Rc<ModelHandle> {
+        for (side, trues) in [(Side::Long, long), (Side::Short, short)] {
+            if let Some(trues) = trues {
+                side_store(models, config, side)
+                    .publish(&baseline_for(config, side, "2026-10-22T00:00:00Z", trues))
+                    .unwrap();
+            }
+        }
+        let features = features();
+        warm(&features, probe.clock().timestamp_ns());
+        ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            config,
+            &requirements(),
+            Mode::Backtest {
+                models: models.to_path_buf(),
+                commission: commission(),
+            },
+        )
+        .unwrap()
+    }
+
+    /// A long expecting `2 c(0.6) - 1`, 0.197 USD, clearing its margin of
+    /// nought; the short has no model yet, and never trades.
     #[test]
-    fn a_probability_from_the_long_threshold_buys_the_targets_size() {
+    fn a_side_expected_to_clear_its_margin_trades_the_targets_size() {
         let models = tempfile::tempdir().unwrap();
-        store(models.path())
-            .publish(&baseline("2026-10-22T00:00:00Z", 6))
-            .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &config(), (Some(6), None));
 
         assert_eq!(
-            handle(&probe, models.path()).decide(&mut probe).unwrap(),
+            handle.decide(&mut probe).unwrap(),
             Some(Trade {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
-                probability: 0.6,
+                probability: c(0.6),
             })
         );
     }
 
+    /// The long expects 0.380 USD, the short 0.537: both clear nought, the
+    /// short the more.
     #[test]
-    fn a_probability_to_the_short_threshold_sells() {
+    fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
         let models = tempfile::tempdir().unwrap();
-        store(models.path())
-            .publish(&baseline("2026-10-22T00:00:00Z", 4))
-            .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &config(), (Some(7), Some(8)));
 
-        let trade = handle(&probe, models.path())
-            .decide(&mut probe)
-            .unwrap()
-            .unwrap();
+        let trade = handle.decide(&mut probe).unwrap().unwrap();
 
-        assert_eq!((trade.side, trade.probability), (OrderSide::Sell, 0.4));
+        assert_eq!((trade.side, trade.probability), (OrderSide::Sell, c(0.8)));
     }
 
     #[test]
-    fn a_probability_inside_the_thresholds_gives_no_trade() {
+    fn two_sides_expected_alike_trade_neither() {
         let models = tempfile::tempdir().unwrap();
-        store(models.path())
-            .publish(&baseline("2026-10-22T00:00:00Z", 5))
-            .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &config(), (Some(7), Some(7)));
+
+        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+    }
+
+    /// The long expects 0.380 USD, short of its margin of 0.5 USD; the
+    /// short expects to lose.
+    #[test]
+    fn no_side_clearing_its_margin_gives_no_trade() {
+        let models = tempfile::tempdir().unwrap();
+        let config = ModelConfig {
+            margins: Margins {
+                long: Some(0.5),
+                short: Some(0.5),
+            },
+            ..config()
+        };
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &config, (Some(7), Some(3)));
+
+        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+    }
+
+    /// A short model in the store expecting 0.664 USD, which a model of
+    /// both sides would sell on: a long-only model never reads it.
+    #[test]
+    fn a_long_only_model_never_sells() {
+        let models = tempfile::tempdir().unwrap();
+        let long_only = ModelConfig {
+            margins: Margins {
+                long: Some(0.0),
+                short: None,
+            },
+            ..config()
+        };
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let both = sides_handle(&probe, models.path(), &config(), (Some(3), Some(9)));
+        let long = sides_handle(&probe, models.path(), &long_only, (None, None));
 
         assert_eq!(
-            handle(&probe, models.path()).decide(&mut probe).unwrap(),
-            None
+            both.decide(&mut probe).unwrap().map(|trade| trade.side),
+            Some(OrderSide::Sell)
         );
+        assert_eq!(long.decide(&mut probe).unwrap(), None);
+    }
+
+    /// `config` learning a barrier a take profit 20 bps and a stop `stop`
+    /// bps from the decision's price, trading the long from 0.30 USD.
+    fn barrier_config(stop: i64) -> ModelConfig {
+        let mut config = config();
+        config.targets.barrier = Some(Barrier {
+            take_profit: Distance::BasisPoints(Decimal::from(20)),
+            stop: Distance::BasisPoints(Decimal::from(stop)),
+            limit: SignedDuration::from_hours(2),
+            atr: None,
+        });
+        config.label = Label::Barrier;
+        config.margins = Margins {
+            long: Some(0.3),
+            short: None,
+        };
+        config
+    }
+
+    /// Worked by hand. The long expects `2 c(0.8) - 1`, 0.537R, at either
+    /// stop. From the mid of 0.70000, a stop 10 bps away is 0.00070, worth
+    /// 0.70 USD on 1000 AUD/USD: 0.376 USD expected, above the margin of
+    /// 0.30; 2 bps away, 0.00014, worth 0.14 USD: 0.075 USD, below it.
+    #[test]
+    fn a_barriers_expected_r_is_weighed_by_the_worth_of_the_decisions_stop() {
+        let decide = |stop| {
+            let models = tempfile::tempdir().unwrap();
+            let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+            let handle = sides_handle(
+                &probe,
+                models.path(),
+                &barrier_config(stop),
+                (Some(8), None),
+            );
+            handle.start(&mut probe, &[]).unwrap();
+            handle.decide(&mut probe).unwrap()
+        };
+
+        assert_eq!(decide(10).map(|trade| trade.side), Some(OrderSide::Buy));
+        assert_eq!(decide(2), None);
     }
 
     #[test]
@@ -1046,7 +1273,7 @@ mod tests {
             probabilities.push(probability(handle.decide(&mut probe).unwrap()));
         }
 
-        assert_eq!(probabilities, [Some(0.7), Some(0.8), Some(0.8)]);
+        assert_eq!(probabilities, [Some(c(0.7)), Some(c(0.8)), Some(c(0.8))]);
     }
 
     #[test]
@@ -1062,8 +1289,11 @@ mod tests {
         store.publish(&baseline("2026-10-22T12:00:00Z", 9)).unwrap();
         advance(&handle, &clock, "2026-10-22T13:00:00Z");
 
-        assert_eq!(before, Some(0.7));
-        assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.9));
+        assert_eq!(before, Some(c(0.7)));
+        assert_eq!(
+            probability(handle.decide(&mut probe).unwrap()),
+            Some(c(0.9))
+        );
     }
 
     /// The model valid from 10:00 is used at 11:00; `refused`, valid from
@@ -1082,7 +1312,7 @@ mod tests {
             probabilities.push(probability(handle.decide(&mut probe).unwrap()));
         }
 
-        assert_eq!(probabilities, [Some(0.7), Some(0.7), Some(0.7)]);
+        assert_eq!(probabilities, [Some(c(0.7)), Some(c(0.7)), Some(c(0.7))]);
     }
 
     #[test]
@@ -1118,7 +1348,7 @@ mod tests {
     #[test]
     fn a_model_not_predicting_its_probes_is_refused_and_the_current_kept() {
         let mut refused = baseline("2026-10-22T12:00:00Z", 9);
-        refused.manifest.probes[0].prediction = 0.9 + f64::EPSILON;
+        refused.manifest.probes[0].prediction = c(0.9) + f64::EPSILON;
 
         kept_over(refused);
     }
@@ -1248,7 +1478,10 @@ mod tests {
             Launcher::in_process(|_| unreachable!()),
         );
 
-        assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.8));
+        assert_eq!(
+            probability(handle.decide(&mut probe).unwrap()),
+            Some(c(0.8))
+        );
     }
 
     #[test]
@@ -1296,8 +1529,11 @@ mod tests {
 
         // The catalog ends before the retrain's time: trained at its end.
         assert_eq!(trained_at, at("2026-10-22T23:00:00Z"));
-        assert_eq!(before, Some(0.7));
-        assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.9));
+        assert_eq!(before, Some(c(0.7)));
+        assert_eq!(
+            probability(handle.decide(&mut probe).unwrap()),
+            Some(c(0.9))
+        );
     }
 
     #[test]
@@ -1323,7 +1559,10 @@ mod tests {
         keeping.recv().unwrap();
         advance(&handle, &clock, "2026-10-23T01:00:00Z");
 
-        assert_eq!(probability(handle.decide(&mut probe).unwrap()), Some(0.7));
+        assert_eq!(
+            probability(handle.decide(&mut probe).unwrap()),
+            Some(c(0.7))
+        );
         assert_eq!(
             store(models.path()).valid_froms().unwrap(),
             [at("2026-10-22T10:00:00Z")]
@@ -1332,8 +1571,8 @@ mod tests {
 
     /// A baseline valid from `valid_from` on rows of `feature_names`, of a
     /// strategy deciding with `features` as `config` says (its decisions
-    /// and targets), predicting
-    /// `trues` tenths whatever the row.
+    /// and targets), predicting `trues` tenths whatever the row, calibrated
+    /// by `CALIBRATION`, expecting a win and a loss of 1.
     fn baseline_of(
         features: &FeatureSet,
         (decision, targets): (DecisionRule, &TargetsConfig),
@@ -1361,7 +1600,13 @@ mod tests {
                 feature_names: feature_names.iter().map(ToString::to_string).collect(),
                 targets: targets.clone(),
                 label: Label::Barrier,
+                side: None,
                 learner: LearnerConfig::Baseline {},
+                calibration: CALIBRATION,
+                payoff: Some(Payoff {
+                    win: 1.0,
+                    loss: 1.0,
+                }),
                 score: 0.6,
                 probes: vec![],
             },
@@ -1398,7 +1643,8 @@ mod tests {
     }
 
     /// The probe's handle trading in a backtest on the models under
-    /// `models` as `config` says, its primary a long of 0.6 from midnight,
+    /// `models` as `config` says, its primary a long of 0.6 from midnight
+    /// (expecting 0.197 USD, above its margin of nought),
     /// its meta model predicting `meta_trues` tenths, if any, its features
     /// warm by a quote at noon of the 22nd.
     fn meta_handle(
@@ -1414,6 +1660,7 @@ mod tests {
             config,
             &requirements(),
             &commission(),
+            Side::Long,
         )
         .unwrap()
         .publish(&baseline_of(
@@ -1425,16 +1672,15 @@ mod tests {
         ))
         .unwrap();
         if let Some(trues) = meta_trues {
-            ModelStore::new(
+            ModelStore::meta(
                 models,
                 StrategyId::from(STRATEGY),
                 &features,
                 config,
+                config.meta.as_ref().unwrap(),
                 &requirements(),
                 &commission(),
             )
-            .unwrap()
-            .meta(config.meta.as_ref().unwrap(), config.thresholds)
             .unwrap()
             .publish(&baseline_of(
                 &features,
@@ -1470,7 +1716,7 @@ mod tests {
             Some(Trade {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
-                probability: 0.7,
+                probability: c(0.7),
             })
         );
     }
@@ -1493,8 +1739,8 @@ mod tests {
         assert_eq!(handle.decide(&mut probe).unwrap(), None);
     }
 
-    /// From the threshold 0.6 to 1, 0.5 to 2 times the size: 0.8 is 1.25
-    /// times 1000.
+    /// From the threshold 0.6 to 1, 0.5 to 2 times the size: the meta's
+    /// c(0.8), 0.768525, is 1.131968 times 1000.
     #[test]
     fn a_sizing_meta_model_sizes_the_trade_from_its_probability() {
         let models = tempfile::tempdir().unwrap();
@@ -1507,8 +1753,9 @@ mod tests {
 
         let trade = handle.decide(&mut probe).unwrap().unwrap();
 
-        assert_eq!(trade.quantity.as_decimal(), Decimal::from(1250));
-        assert_eq!(trade.probability, 0.8);
+        let quantity = trade.quantity.as_f64();
+        assert!((quantity - 1_131.967_938).abs() < 1e-6, "{quantity}");
+        assert_eq!(trade.probability, c(0.8));
     }
 
     /// The rule primary of `config`: its features declare the side.
@@ -1579,7 +1826,7 @@ mod tests {
             Some(Trade {
                 side: OrderSide::Sell,
                 quantity: Quantity::from(1000),
-                probability: 0.7,
+                probability: c(0.7),
             })
         );
     }
