@@ -326,10 +326,12 @@ pub fn is_time_close(order: &OrderAny) -> bool {
 /// Read from the position's fills and the legs' own link, not from the
 /// entry's order or `Cache::position_for_order`: Nautilus purges a closed
 /// order with its index (`purge_closed_orders`, a dataset run's a minute
-/// after it closes), the filled entry with it, while the open position
-/// and the open legs stay. A leg filled whole and purged ended a trade on
-/// a hedging venue by closing its position; live keeps closed orders a
-/// week (`live::node`).
+/// after it closes) unless an order linked to it is still open, so a
+/// bracket's filled entry stays while a leg is open, but a market entry
+/// with a time limit, linked to none, goes while its position stays open.
+/// Once a trade has ended its legs, closed too, are purged with its entry:
+/// a leg filled whole ended the trade on a hedging venue by closing its
+/// position. Live keeps closed orders a week (`live::node`).
 fn holds_open(cache: &CacheApi<'_>, position: &Position, entry: ClientOrderId) -> bool {
     let filled = position.client_order_ids();
     filled.contains(&entry)

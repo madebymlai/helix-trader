@@ -535,10 +535,13 @@ trade.send(self)?;
   later trades add into, so a trade's time closes the others' share too,
   and theirs then find it closed. A position closed and opened again is a
   new one, holding none of the earlier fills. Open orders and positions
-  are never purged from the cache; a closed order is, with its index, so
-  the trade is read from the position's fills and the legs' own link to
-  their entry, not from the entry's order nor
-  `Cache::position_for_order`.
+  are never purged from the cache; a closed order is, with its index,
+  unless an order linked to it is still open: a bracket's filled entry
+  stays while a leg is open, but a market entry with a time limit, linked
+  to none, goes while its position stays open, so the trade is read from
+  the position's fills and the legs' own link to their entry, not from
+  the entry's order nor `Cache::position_for_order`. Once a trade has
+  ended, its legs are purged with its entry.
 - At start, `orders::arm_open_trades(self)?` sets the time alert of each
   trade of the strategy again, from the cache, whose entry is still an
   open order (walked as Nautilus' `reactivate_gtd_timers` walks them) or
