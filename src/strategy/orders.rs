@@ -21,13 +21,16 @@
 //! still open, the entry and its legs, and, if the trade is still open,
 //! closes its position (`close_position`, tagged `TIME_CLOSE_TAG`, see
 //! `is_time_close`). A trade is open while an open position holds its
-//! entry's fill and no fill of its legs: on a hedging venue the position
-//! its entry opened; on a netting venue the venue's one position, which a
-//! later entry adds into, so closing a trade there closes the trades it
-//! holds with it, a later trade's alert finding it closed. A position
-//! closed and opened again is a new one, holding none of the earlier fills.
-//! The open orders and positions are never purged from the cache, so a
-//! dataset run's purge of closed ones loses nothing of an open trade.
+//! entry's fill and no leg of the entry (an order Nautilus names it the
+//! parent of) is filled whole (`OrderStatus::Filled`): a leg partly filled
+//! leaves the rest of the trade open, which its time closes. On a hedging
+//! venue the position is the one its entry opened; on a netting venue the
+//! venue's one position, which a later entry adds into, so closing a
+//! trade there closes the trades it holds with it, a later trade's alert
+//! finding it closed. A position closed and opened again is a new one,
+//! holding none of the earlier fills. The open orders and positions are
+//! never purged from the cache, so a dataset run's purge of closed ones
+//! loses nothing of an open trade.
 //!
 //! Nautilus has no time limit on a position, so the alert and its close
 //! are ours; at a restart `arm_open_trades`, from `on_start`, sets the
@@ -44,10 +47,11 @@ use anyhow::{Context, bail};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
+    cache::CacheApi,
     timer::TimeEvent,
 };
 use nautilus_model::{
-    enums::OrderSide,
+    enums::{OrderSide, OrderStatus},
     identifiers::{ClientOrderId, InstrumentId},
     instruments::Instrument,
     orders::{Order, OrderAny},
@@ -240,11 +244,7 @@ where
         let position = cache
             .positions_open(None, None, strategy_id.as_ref(), None, None)
             .into_iter()
-            .find(|position| {
-                holds_open(position, entry, |id| {
-                    cache.order(id).and_then(|o| o.parent_order_id())
-                })
-            });
+            .find(|position| holds_open(&cache, position, entry));
         (orders, position)
     };
     if !orders.is_empty() {
@@ -260,8 +260,9 @@ where
 /// Sets again, from `strategy`'s start (a restart), the time alert of each
 /// of its trades still open, at its entry's creation plus the time limit
 /// it is tagged with, or now if that has passed (the clock's
-/// `allow_past`): each entry tagged with a time limit whose fill an open
-/// position of the strategy holds, with no fill of its legs.
+/// `allow_past`): each entry tagged with a time limit whose trade is open,
+/// its fill held by an open position of the strategy and no leg of it
+/// filled whole.
 ///
 /// # Errors
 ///
@@ -273,7 +274,6 @@ where
     let strategy_id = strategy.strategy_id();
     let open: Vec<(ClientOrderId, Timestamp)> = {
         let cache = strategy.cache();
-        let parent = |id: &ClientOrderId| cache.order(id).and_then(|o| o.parent_order_id());
         cache
             .positions_open(None, None, strategy_id.as_ref(), None, None)
             .into_iter()
@@ -281,13 +281,13 @@ where
                 position
                     .client_order_ids()
                     .into_iter()
-                    .filter(|&entry| holds_open(&position, entry, parent))
-                    .filter_map(|entry| {
-                        let order = cache.order(&entry)?;
-                        let limit = time_limit(&order)?;
-                        Some((entry, Timestamp::from(order.ts_init()) + limit))
-                    })
+                    .filter(|&entry| holds_open(&cache, &position, entry))
                     .collect::<Vec<_>>()
+            })
+            .filter_map(|entry| {
+                let order = cache.order(&entry)?;
+                let limit = time_limit(&order)?;
+                Some((entry, Timestamp::from(order.ts_init()) + limit))
             })
             .collect()
     };
@@ -309,14 +309,25 @@ pub fn is_time_close(order: &OrderAny) -> bool {
 }
 
 /// Whether `position` holds the trade of `entry` open: its entry's fill
-/// and no fill of an order `parent` names it the parent of, a leg.
-fn holds_open(
-    position: &Position,
-    entry: ClientOrderId,
-    parent: impl Fn(&ClientOrderId) -> Option<ClientOrderId>,
-) -> bool {
+/// and no leg of it filled whole, an order of `cache` Nautilus names the
+/// entry the parent of (`parent_order_id`) in `OrderStatus::Filled`. A leg
+/// partly filled leaves the rest of the trade open in the position.
+///
+/// Read from the position's fills and the legs' own link, not from the
+/// entry's order or `Cache::position_for_order`: Nautilus purges a closed
+/// order with its index (`purge_closed_orders`, a dataset run's a minute
+/// after it closes), the filled entry with it, while the open position
+/// and the open legs stay. A leg filled whole and purged ended a trade on
+/// a hedging venue by closing its position; live keeps closed orders a
+/// week (`live::node`).
+fn holds_open(cache: &CacheApi<'_>, position: &Position, entry: ClientOrderId) -> bool {
     let filled = position.client_order_ids();
-    filled.contains(&entry) && !filled.iter().any(|id| parent(id) == Some(entry))
+    filled.contains(&entry)
+        && !filled.iter().any(|id| {
+            cache.order(id).is_some_and(|leg| {
+                leg.parent_order_id() == Some(entry) && leg.status() == OrderStatus::Filled
+            })
+        })
 }
 
 /// The time limit `entry` is tagged with, if any.

@@ -151,11 +151,24 @@ fn accept(probe: &Probe, order: &str) {
     }
 }
 
-/// Fills the cached order `order`, accepted, into `position` at `ts`, as
-/// the execution engine does: the order, the order's position, the
-/// position, kept as `oms`; a closed position opened again as a new one
-/// under its id.
+/// Fills the cached order `order`, accepted, whole into `position` at
+/// `ts`, as `fill_of`.
 fn fill(probe: &Probe, order: &str, position: &str, ts: u64, oms: OmsType) {
+    fill_of(probe, order, None, position, ts, oms);
+}
+
+/// Fills `quantity` of the cached order `order`, accepted, its whole
+/// quantity if none, into `position` at `ts`, as the execution engine
+/// does: the order, the order's position, the position, kept as `oms`; a
+/// closed position opened again as a new one under its id.
+fn fill_of(
+    probe: &Probe,
+    order: &str,
+    quantity: Option<Quantity>,
+    position: &str,
+    ts: u64,
+    oms: OmsType,
+) {
     let cache = probe.cache_rc();
     let order = cache.borrow().order_owned(&id(order)).unwrap();
     let filled = TestOrderEventStubs::filled(
@@ -164,7 +177,7 @@ fn fill(probe: &Probe, order: &str, position: &str, ts: u64, oms: OmsType) {
         Some(TradeId::from(order.client_order_id().as_str())),
         Some(PositionId::from(position)),
         Some(Price::from("0.70000")),
-        None,
+        quantity,
         None,
         None,
         Some(UnixNanos::from(ts)),
@@ -438,6 +451,23 @@ fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled() {
     assert_eq!(closes(&probe), [close()]);
 }
 
+/// A dataset run purges closed orders a minute after they close (Nautilus'
+/// `purge_closed_orders`), the filled entry with them: its open legs and
+/// its open position still end the trade at its time.
+#[test]
+fn at_its_time_a_trade_its_filled_entry_purged_is_closed_and_its_legs_cancelled() {
+    let (mut probe, clock) = registered();
+    sent(&mut probe, "T-1", buy(bracket(4)));
+    fill(&probe, "T-1", "P-1", NOW, OmsType::Hedging);
+    probe.cache_rc().borrow_mut().purge_order(id("T-1"));
+
+    advance(&mut probe, &clock, NOW + 240 * MINUTE);
+
+    assert_eq!(status(&probe, "T-1-TP"), OrderStatus::PendingCancel);
+    assert_eq!(status(&probe, "T-1-SL"), OrderStatus::PendingCancel);
+    assert_eq!(closes(&probe), [close()]);
+}
+
 #[test]
 fn at_its_time_an_unfilled_entry_is_cancelled_and_nothing_closed() {
     let (mut probe, clock) = registered();
@@ -529,6 +559,33 @@ fn a_trade_its_leg_ended_is_not_closed_at_its_time() {
     assert_eq!(closes(&probe), []);
     advance(&mut probe, &clock, NOW + 90 * MINUTE);
     assert_eq!(closes(&probe), [close()]);
+}
+
+/// Its take profit filled 40,000 of its 100,000 on a hedging venue: the
+/// trade is not ended, a leg closed alone ends it, so at its time the legs
+/// are cancelled and its position, the 60,000 left, closed.
+#[test]
+fn a_trade_its_leg_partly_filled_is_closed_at_its_time() {
+    let (mut probe, clock) = registered();
+    sent(&mut probe, "T-1", buy(bracket(4)));
+    fill(&probe, "T-1", "P-1", NOW, OmsType::Hedging);
+    fill_of(
+        &probe,
+        "T-1-TP",
+        Some(Quantity::from(40_000)),
+        "P-1",
+        NOW + 60 * MINUTE,
+        OmsType::Hedging,
+    );
+
+    advance(&mut probe, &clock, NOW + 240 * MINUTE);
+
+    assert_eq!(status(&probe, "T-1-TP"), OrderStatus::PendingCancel);
+    assert_eq!(status(&probe, "T-1-SL"), OrderStatus::PendingCancel);
+    assert_eq!(
+        closes(&probe),
+        [(OrderSide::Sell, Quantity::from(60_000), true, true)]
+    );
 }
 
 /// On a netting venue the first trade's position closed at 10:20 by
@@ -686,6 +743,32 @@ fn a_restart_sets_no_time_for_a_trade_its_leg_ended() {
     assert_eq!(alert(&clock, "T-1"), None);
     assert_eq!(
         alert(&clock, "T-2"),
+        Some(UnixNanos::from(NOW + 220 * MINUTE))
+    );
+}
+
+/// A trade sent 20 minutes before the restart, its take profit since
+/// filled 40,000 of its 100,000: still open, its time is set again.
+#[test]
+fn a_restart_sets_the_time_of_a_trade_its_leg_partly_filled_again() {
+    let cache = cache();
+    let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
+    sent(&mut before, "T-1", buy(bracket(4)));
+    fill(&before, "T-1", "P-1", NOW - 20 * MINUTE, OmsType::Hedging);
+    fill_of(
+        &before,
+        "T-1-TP",
+        Some(Quantity::from(40_000)),
+        "P-1",
+        NOW - 10 * MINUTE,
+        OmsType::Hedging,
+    );
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+
+    arm_open_trades(&mut probe).unwrap();
+
+    assert_eq!(
+        alert(&clock, "T-1"),
         Some(UnixNanos::from(NOW + 220 * MINUTE))
     );
 }

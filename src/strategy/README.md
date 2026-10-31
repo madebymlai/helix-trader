@@ -527,12 +527,17 @@ trade.send(self)?;
   open, the entry and its legs, and closes its position if the trade is
   still open (`close_position`, tagged as a time close,
   `orders::is_time_close`). A trade is open while an open position holds
-  its entry's fill and no fill of its legs: on a hedging venue the
-  position its entry opened, on a netting venue the one position later
-  trades add into, so a trade's time closes the others' share too, and
-  theirs then find it closed. A position closed and opened again is a new
-  one, holding none of the earlier fills. Open orders and positions are
-  never purged from the cache.
+  its entry's fill and no leg of the entry (an order Nautilus names it
+  the parent of) is filled whole (`OrderStatus::Filled`): a leg partly
+  filled leaves the rest open, which its time closes. On a hedging venue
+  the position its entry opened, on a netting venue the one position
+  later trades add into, so a trade's time closes the others' share too,
+  and theirs then find it closed. A position closed and opened again is a
+  new one, holding none of the earlier fills. Open orders and positions
+  are never purged from the cache; a closed order is, with its index, so
+  the trade is read from the position's fills and the legs' own link to
+  their entry, not from the entry's order nor
+  `Cache::position_for_order`.
 - At start, `orders::arm_open_trades(self)?` sets the time alert of each
   open trade of the strategy again, from the cache: its entry's creation
   plus the limit it is tagged with, at once if that has passed.
