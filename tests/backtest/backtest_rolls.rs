@@ -237,7 +237,7 @@ fn the_roller_switches_the_subscriptions_at_the_roll_and_tells_the_strategy() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, ticks(ROOT));
 
-    let got = run(&backtest, Subscribe::Roller(Roller::new(ticks(ROOT))));
+    let got = run(&backtest, Subscribe::Roller(Roller::replayed(ticks(ROOT))));
 
     // The roll is told after August's last tick, at its slice's last
     // nanosecond, and before December's first, at the roll.
@@ -270,7 +270,7 @@ fn the_roller_alone_keeps_the_strategy_on_the_contract_standing_for_the_root() {
     // run, so what reaches the probe is what the roller subscribes to.
     let backtest = backtest(&catalog, [ticks(PRE), ticks(POST)].concat());
 
-    let got = run(&backtest, Subscribe::Roller(Roller::new(ticks(ROOT))));
+    let got = run(&backtest, Subscribe::Roller(Roller::replayed(ticks(ROOT))));
 
     // Not August's trade at the roll nor its ticks after it, not
     // December's trade at 23:15 nor its snapshot at 23:50.
@@ -301,7 +301,7 @@ fn the_roller_of_a_plain_instrument_subscribes_once_and_sets_no_alert() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, ticks(POST));
 
-    let got = run(&backtest, Subscribe::Roller(Roller::new(ticks(POST))));
+    let got = run(&backtest, Subscribe::Roller(Roller::replayed(ticks(POST))));
 
     // December's contract named as itself: all its ticks of the run, no
     // roll.
@@ -359,7 +359,7 @@ fn the_roller_keeps_a_contract_declared_beside_its_root_after_the_root_rolls_off
     let declared = [ticks(ROOT), ticks(PRE)].concat();
     let backtest = backtest(&catalog, declared.clone());
 
-    let got = run(&backtest, Subscribe::Roller(Roller::new(declared)));
+    let got = run(&backtest, Subscribe::Roller(Roller::replayed(declared)));
 
     // The root rolls from August's contract to December's; August's,
     // declared as itself, keeps arriving after the roll.
@@ -471,7 +471,7 @@ fn the_roller_rolls_book_deltas_and_custom_data_keyed_by_the_contract() {
 
     let got = run(
         &backtest,
-        Subscribe::Roller(Roller::new(deltas_and_imbalances(ROOT))),
+        Subscribe::Roller(Roller::replayed(deltas_and_imbalances(ROOT))),
     );
 
     // August's before the roll, December's after.

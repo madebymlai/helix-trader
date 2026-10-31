@@ -67,7 +67,8 @@
 //! (`FeatureSet::roll`), so decisions wait on the strategy's initialized
 //! gate until they refill. The same code runs in a backtest and a dataset
 //! run, on the catalog's contract slices (`DataRequirements::slices`), and
-//! live.
+//! live, where the roller loads each post contract before its roll
+//! (`Roller::live`).
 //!
 //! A live node builds composite bars `Warmup::live_bar_build_delay` after
 //! their close, so a live handle starts the cadence with that delay, a
@@ -486,6 +487,10 @@ impl ModelHandle {
         if requirements.ticks.contains(&quotes) && !ticks.contains(&quotes) {
             ticks.push(quotes);
         }
+        let roller = match mode {
+            Mode::Live { .. } => Roller::live(ticks),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(ticks),
+        };
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -526,7 +531,7 @@ impl ModelHandle {
             traded,
             serving,
             warmup: Rc::new(warmup),
-            roller: Roller::new(ticks),
+            roller,
         }))
     }
 
