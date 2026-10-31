@@ -43,9 +43,6 @@ use tempfile::TempDir;
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
 const CONFIG: &str = r#"
-    [base]
-    strategy_id = "MODEL_EMA-001"
-
     [data]
     series = [
         { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
@@ -80,6 +77,7 @@ fn t() -> Timestamp {
 fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("train")
+        .arg("model_ema")
         .arg("--config")
         .arg(config)
         .arg("--catalog")
@@ -227,6 +225,7 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     // As a live node starts it (`retrain_args`), with the fixture's costs.
     let args = [
         "train".as_ref(),
+        "model_ema".as_ref(),
         "--config".as_ref(),
         config_path.as_os_str(),
         "--catalog".as_ref(),
@@ -262,6 +261,7 @@ fn backtest(
 ) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("backtest")
+        .arg("model_ema")
         .arg("--config")
         .arg(config)
         .arg("--catalog")

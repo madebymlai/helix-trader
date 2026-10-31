@@ -222,9 +222,6 @@ mod tests {
 
     /// Trades AUD/USD on a horizon of 30 minutes, deciding hourly.
     const CONFIG: &str = r#"
-        [base]
-        strategy_id = "MODEL_EMA-001"
-
         [data]
         series = [
             { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },

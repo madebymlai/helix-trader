@@ -152,9 +152,6 @@ mod tests {
     fn config() -> EmaCrossConfig {
         EmaCrossConfig::load(
             r#"
-            [base]
-            strategy_id = "EMA_CROSS-001"
-
             [data]
             series = [
                 { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
