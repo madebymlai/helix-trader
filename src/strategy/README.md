@@ -776,8 +776,8 @@ of its choosing (`model::features`, `model::decide`).
   fees. The market data is the quotes, trades, bars, depth and deltas of
   the traded instrument a feature reads (`FeatureSet::last_update`), and
   its last quote in the cache, which a model strategy's harness reads
-  whatever the features read (see "Root ticks and the traded
-  instrument"), whatever their kind or venue, with no calendar of
+  when no series reads the traded instrument (see "Root ticks and the
+  traded instrument"), whatever their kind or venue, with no calendar of
   sessions; not another
   instrument's, which may trade while the traded one is closed, nor
   custom data, which may come on a weekend. The data engine builds no bar
@@ -808,12 +808,16 @@ of its choosing (`model::features`, `model::decide`).
   slices (`DataRequirements::slices`) through the same roller. Live,
   ticks have no warmup of their own, a root's neither: no history is
   requested of its contracts, the front or the next, and its features
-  warm on the live stream. The harness reads the traded instrument's
+  warm on the live stream. When no series of the strategy reads the
+  traded instrument, as beside features on a root, the harness reads its
   quotes itself, for the decision's reference price, the venue's fills,
   the barrier's ATR and freshness: a model strategy's data requirements
   add them (`Part::harness_ticks`, `handle::traded_quotes`), so
   fill-catalog fetches, a backtest or dataset run replays and the handle
-  subscribes them, and the features need not read the traded instrument.
+  subscribes them. When a series reads it, the strategy's own series of
+  it serve and no quotes are added: an OKX strategy reads its candles
+  alone, which OKX's archive serves, and the barrier's ATR is built from
+  what the strategy reads of it (`TargetsConfig::atr_bars`).
   A futures root traded is refused at load: orders go to a contract.
   Bars on a root are Nautilus' continuous bars and do not roll this way.
 - **Rows.** `decide` snapshots the features if the decision is fresh and

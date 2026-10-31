@@ -738,7 +738,8 @@ mod tests {
         }
     }
 
-    /// Its harness reads the quotes of what it trades, not its features.
+    /// Its harness reads the quotes of what it trades when no series reads
+    /// it.
     #[test]
     fn a_traded_instrument_the_strategy_does_not_read_is_no_error() {
         let config = parse(SECTION).unwrap();

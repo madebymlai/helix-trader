@@ -150,6 +150,15 @@ impl DataConfig {
         })
     }
 
+    /// Whether a series reads `instrument_id`, its bars or its ticks.
+    #[must_use]
+    pub fn reads(&self, instrument_id: InstrumentId) -> bool {
+        self.series.iter().any(|series| match series {
+            Series::Bars(bar_type) => bar_type.instrument_id() == instrument_id,
+            Series::Ticks(ticks) => ticks.instrument_id == instrument_id,
+        })
+    }
+
     /// Pushes the violations of `[data]`: no series; a bars series not
     /// aggregated on time (the session needs the bar's span), built from
     /// ticks but priced MARK (Nautilus builds bars from quotes or trades

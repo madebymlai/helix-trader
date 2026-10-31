@@ -57,13 +57,15 @@ impl Part for ModelEmaParams {
         }
     }
 
-    /// The quotes of the instrument traded, which the model's harness
-    /// reads (`handle::traded_quotes`).
+    /// The quotes of the instrument traded if no series reads it, which
+    /// the model's harness then reads (`handle::traded_quotes`); otherwise
+    /// the series of it serve.
     fn harness_ticks(config: &ModelEmaConfig) -> Vec<TickSeries> {
         config
             .trade
             .instruments
             .iter()
+            .filter(|traded| !config.data.reads(traded.instrument_id))
             .map(|traded| traded_quotes(traded.instrument_id))
             .collect()
     }
@@ -255,8 +257,8 @@ mod tests {
         assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
-    /// The harness reads the quotes of the instrument traded, whatever the
-    /// features read: the requirements hold them after the series' ticks.
+    /// The harness reads the quotes of the instrument traded when no series
+    /// reads it: the requirements hold them after the series' ticks.
     #[test]
     fn a_traded_instrument_not_read_loads_its_quotes_into_the_requirements() {
         let toml = TOML.replace(
@@ -272,6 +274,91 @@ mod tests {
                 data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
             }]
+        );
+    }
+
+    /// The traded instrument's 1-minute bars are its own series of it: the
+    /// harness reads them and adds no quotes.
+    #[test]
+    fn a_traded_instrument_a_series_reads_adds_no_quotes() {
+        let requirements = ModelEmaConfig::load(TOML).unwrap().data_requirements();
+
+        assert_eq!(requirements.ticks, []);
+    }
+
+    /// The features read the trades of the GC root and nothing of the gold
+    /// traded: the harness reads its quotes.
+    #[test]
+    fn a_traded_instrument_beside_features_on_a_root_loads_its_quotes() {
+        let toml = TOML.replace(
+            r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#,
+            r#"{ data = "trades", instrument_id = "GC.GLBX" },"#,
+        );
+
+        let requirements = ModelEmaConfig::load(&toml).unwrap().data_requirements();
+
+        assert_eq!(
+            requirements.ticks,
+            [
+                TickSeries {
+                    data: NautilusDataType::TradeTick,
+                    instrument_id: InstrumentId::from("GC.GLBX"),
+                },
+                TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: InstrumentId::from("XAUUSD.ICMARKETS"),
+                },
+            ]
+        );
+    }
+
+    /// Trading OKX on hourly bars built from its 1-minute candles, the one
+    /// series its archive serves (`data::okx`): fill-catalog fetches those
+    /// candles alone, no quotes.
+    #[test]
+    fn an_okx_strategy_on_composite_bars_requires_its_candles_alone() {
+        let toml = TOML
+            .replace(
+                r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#,
+                r#"{ data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },"#,
+            )
+            .replace(
+                r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "2" }]"#,
+                r#"instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]"#,
+            );
+
+        let requirements = ModelEmaConfig::load(&toml).unwrap().data_requirements();
+
+        assert_eq!(
+            requirements.catalog_series(),
+            [(
+                NautilusDataType::Bar,
+                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
+            )]
+        );
+    }
+
+    /// Gold's 1-minute LAST bars are built from its trades, and the
+    /// strategy reads no quote of it: the barrier's ATR of 3 bars, decided
+    /// hourly, runs on hourly bars of its trades.
+    #[test]
+    fn the_barrier_atr_of_a_strategy_reading_trades_runs_on_their_bars() {
+        let config = ModelEmaConfig::load(
+            &with_atr(", atr = { period = 3 }")
+                .replace(r#"price_type = "MID""#, r#"price_type = "LAST""#),
+        )
+        .unwrap();
+        let model = config.model();
+
+        let atr = model
+            .targets
+            .atr_bars(model.decision, &config.data_requirements())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            atr.bar_type,
+            BarType::from("XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL")
         );
     }
 

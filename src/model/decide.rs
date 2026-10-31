@@ -34,8 +34,9 @@
 //! The market data is the quotes, trades, bars, depth and deltas of the
 //! traded instrument a feature reads (`FeatureSet::last_update`), whatever
 //! their kind or venue, and its last quote in the cache, which a model
-//! strategy's harness reads whatever the features read
-//! (`handle::traded_quotes`), with no calendar of sessions. Not the data of
+//! strategy's harness reads when no series of the strategy reads the
+//! traded instrument (`handle::traded_quotes`), with no calendar of
+//! sessions. Not the data of
 //! another instrument, which may trade while the traded one is closed, nor
 //! custom data, which may come on a weekend. The node builds no time bar
 //! for a period without data (`warmup::data_engine_config`), so a bar is

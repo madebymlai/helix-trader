@@ -56,9 +56,11 @@
 //!
 //! The handle owns a `rolls::Roller` of the features' tick series
 //! (`FeatureSet::ticks`) and of the traded instrument's quotes
-//! (`traded_quotes`), which the harness reads whatever the features read:
-//! `start` subscribes each on the contract standing for it, a plain
-//! instrument once, a root on its front contract with its roll alert, and
+//! (`traded_quotes`) when its data requirements hold them, which the
+//! harness reads when no series of the strategy reads the traded
+//! instrument: `start` subscribes each on the contract standing for it, a
+//! plain instrument once, a root on its front contract with its roll
+//! alert, and
 //! the strategy hands the handle its time events (after
 //! `strategy::orders::on_time_event`), the roller first. At a roll the
 //! root's features move to the post contract and restart
@@ -244,7 +246,8 @@ pub struct ModelHandle {
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
     /// Subscribes the features' ticks, on the contract standing for each
-    /// root, and the traded instrument's quotes (`traded_quotes`).
+    /// root, and the traded instrument's quotes (`traded_quotes`) if the
+    /// requirements hold them.
     roller: Roller,
 }
 
@@ -479,8 +482,9 @@ impl ModelHandle {
         }
         .feeding(Rc::clone(features) as SharedActorIndicator);
         let mut ticks = features.ticks();
-        if !ticks.contains(&traded_quotes(traded)) {
-            ticks.push(traded_quotes(traded));
+        let quotes = traded_quotes(traded);
+        if requirements.ticks.contains(&quotes) && !ticks.contains(&quotes) {
+            ticks.push(quotes);
         }
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
@@ -723,11 +727,11 @@ impl ModelHandle {
 }
 
 /// The quotes of `instrument_id`, the instrument a model strategy trades,
-/// which its harness reads whatever the features read: the decision's
-/// reference price, the venue's fills, the barrier's ATR and the
-/// decisions' freshness (`decide::decide`) come from them. The strategy's
-/// data requirements hold them (`strategy::Part::harness_ticks`), and the
-/// handle subscribes to them.
+/// which its harness reads when no series of the strategy reads it: the
+/// decision's reference price, the venue's fills, the barrier's ATR and
+/// the decisions' freshness (`decide::decide`) then come from them. The
+/// strategy's data requirements then hold them
+/// (`strategy::Part::harness_ticks`), and the handle subscribes to them.
 #[must_use]
 pub fn traded_quotes(instrument_id: InstrumentId) -> TickSeries {
     TickSeries {

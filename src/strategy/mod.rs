@@ -75,9 +75,10 @@ pub struct DataRequirements {
     /// whatever is declared; no source serves custom data) and replayed in
     /// a backtest as declared, with no warmup of their own, those of its
     /// harness among them (`Part::harness_ticks`: a model strategy's
-    /// traded quotes). Their instruments are read too: live sets up their
-    /// clients but subscribes to none of the ticks, which the strategy (a
-    /// model strategy's handle) subscribes to.
+    /// traded quotes when no series reads the traded instrument). Their
+    /// instruments are read too: live sets up their clients but
+    /// subscribes to none of the ticks, which the strategy (a model
+    /// strategy's handle) subscribes to.
     pub ticks: Vec<TickSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
