@@ -813,9 +813,10 @@ of its choosing (`model::features`, `model::decide`).
   windows refill on the post contract. Other instruments' features are
   untouched. Backtests and dataset runs replay the catalog's contract
   slices (`DataRequirements::slices`) through the same roller. Live,
-  the warmup requests the history of the roller's ticks over the
-  strategy's warmup, catalog first, a root's on its front contract alone
-  (`rolls::front`), ending at the start; the roller subscribes to them
+  the warmup requests the history of the features' ticks
+  (`FeatureSet::ticks`, not the traded instrument's series no feature
+  reads) over the strategy's warmup, catalog first, a root's on its
+  front contract alone (`rolls::front`), ending at the start; the roller subscribes to them
   from there (`start_ns`), so no tick is handed twice and the first
   decision after the warmup is warm. Nautilus hands the responses' quotes
   and trades to the features registered for the contract, and the

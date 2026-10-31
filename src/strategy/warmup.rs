@@ -71,7 +71,7 @@
 //! ended.
 //!
 //! Ticks a strategy's features read as they are (`Warmup::reading`, a
-//! model strategy's handle naming its roller's) are requested over the
+//! model strategy's handle naming its features') are requested over the
 //! same window in the same group, catalog first with `update_catalog`, a
 //! root's on the contract standing for it at the start (`rolls::front`)
 //! alone: `request_quotes`, `request_trades`, `request_book_depth` and
