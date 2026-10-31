@@ -35,6 +35,8 @@ use helix_trader::{
         model_ema::ModelEma,
     },
 };
+#[cfg(gold_scalp)]
+use helix_trader::strategy::gold_scalp::GoldScalp;
 use jiff::{Timestamp, civil::Date};
 use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
@@ -371,17 +373,26 @@ impl RetrainCosts {
 enum Strategy {
     Ema,
     ModelEma,
+    #[cfg(gold_scalp)]
+    GoldScalp,
 }
 
 impl Strategy {
     /// Every strategy.
-    const ALL: &[Self] = &[Self::Ema, Self::ModelEma];
+    const ALL: &[Self] = &[
+        Self::Ema,
+        Self::ModelEma,
+        #[cfg(gold_scalp)]
+        Self::GoldScalp,
+    ];
 
     /// The name of the strategy ids of its configs.
     const fn name(self) -> &'static str {
         match self {
             Self::Ema => "EMA_CROSS",
             Self::ModelEma => "MODEL_EMA",
+            #[cfg(gold_scalp)]
+            Self::GoldScalp => "GOLD_SCALP",
         }
     }
 
@@ -485,6 +496,8 @@ fn data_requirements(path: &Path) -> anyhow::Result<DataRequirements> {
     Ok(match Strategy::of_config(path)? {
         Strategy::Ema => load_config::<EmaParams>(path)?.data_requirements(),
         Strategy::ModelEma => model_requirements::<ModelEma>(path)?,
+        #[cfg(gold_scalp)]
+        Strategy::GoldScalp => model_requirements::<GoldScalp>(path)?,
     })
 }
 
@@ -653,6 +666,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
             print!("{}", backtest::report(&outcome));
         }
         Strategy::ModelEma => backtest_on_models::<ModelEma>(&args, backtest)?,
+        #[cfg(gold_scalp)]
+        Strategy::GoldScalp => backtest_on_models::<GoldScalp>(&args, backtest)?,
     }
     Ok(())
 }
@@ -812,6 +827,8 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             live.run(&requirements, &strategy.warmup(), strategy).await
         }
         Strategy::ModelEma => live_on_models::<ModelEma>(&args, &live).await,
+        #[cfg(gold_scalp)]
+        Strategy::GoldScalp => live_on_models::<GoldScalp>(&args, &live).await,
     }
 }
 
@@ -935,6 +952,8 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     let outcome = match Strategy::of_config(&args.config)? {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
         Strategy::ModelEma => train::<ModelEma>(&args, &run)?,
+        #[cfg(gold_scalp)]
+        Strategy::GoldScalp => train::<GoldScalp>(&args, &run)?,
     };
     reported(&outcome)
 }
@@ -965,6 +984,8 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
     let built = match Strategy::of_config(&args.run.config)? {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
         Strategy::ModelEma => build_dataset::<ModelEma>(&args, &run, first, last)?,
+        #[cfg(gold_scalp)]
+        Strategy::GoldScalp => build_dataset::<GoldScalp>(&args, &run, first, last)?,
     };
     match (built.first(), built.last()) {
         (Some(from), Some(to)) => {
@@ -1648,6 +1669,19 @@ mod tests {
         assert_eq!(
             Strategy::of_config(Path::new(model_ema)).unwrap(),
             Strategy::ModelEma
+        );
+    }
+
+    #[cfg(gold_scalp)]
+    #[test]
+    fn the_private_config_picks_its_strategy() {
+        let config = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/strategy/gold_scalp/gold_scalp.toml"
+        );
+        assert_eq!(
+            Strategy::of_config(Path::new(config)).unwrap(),
+            Strategy::GoldScalp
         );
     }
 
