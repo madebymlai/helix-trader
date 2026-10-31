@@ -34,14 +34,16 @@
 //!
 //! Nautilus has no time limit on a position, so the alert and its close
 //! are ours; at a restart `arm_open_trades`, from `on_start`, sets the
-//! alert of each open trade again from the cache, at its entry's creation
-//! plus the time limit it is tagged with, at once if that has passed.
+//! alert of each trade again from the cache whose entry is still an open
+//! order (as Nautilus' `reactivate_gtd_timers` walks the open orders) or
+//! which is still open, at its entry's creation plus the time limit it is
+//! tagged with, at once if that has passed.
 //! Nautilus' GTD expiry on the bracket's legs does not fit: an expired leg
 //! leaves the position open, IC sends no leg's time in force (its legs
 //! become the position's stop loss and take profit), and OKX takes GTC
 //! orders alone in an order list.
 
-use std::str::FromStr;
+use std::{collections::BTreeSet, str::FromStr};
 
 use anyhow::{Context, bail};
 use jiff::{SignedDuration, Timestamp};
@@ -261,8 +263,9 @@ where
 /// of its trades still open, at its entry's creation plus the time limit
 /// it is tagged with, or now if that has passed (the clock's
 /// `allow_past`): each entry tagged with a time limit whose trade is open,
-/// its fill held by an open position of the strategy and no leg of it
-/// filled whole.
+/// an open order of the strategy (as Nautilus' `reactivate_gtd_timers`
+/// walks them), or its fill held by an open position of the strategy and
+/// no leg of it filled whole.
 ///
 /// # Errors
 ///
@@ -274,7 +277,11 @@ where
     let strategy_id = strategy.strategy_id();
     let open: Vec<(ClientOrderId, Timestamp)> = {
         let cache = strategy.cache();
-        cache
+        let unfilled = cache
+            .orders_open(None, None, strategy_id.as_ref(), None, None)
+            .into_iter()
+            .map(|order| order.client_order_id());
+        let filled = cache
             .positions_open(None, None, strategy_id.as_ref(), None, None)
             .into_iter()
             .flat_map(|position| {
@@ -283,7 +290,10 @@ where
                     .into_iter()
                     .filter(|&entry| holds_open(&cache, &position, entry))
                     .collect::<Vec<_>>()
-            })
+            });
+        let entries: BTreeSet<ClientOrderId> = unfilled.chain(filled).collect();
+        entries
+            .into_iter()
             .filter_map(|entry| {
                 let order = cache.order(&entry)?;
                 let limit = time_limit(&order)?;

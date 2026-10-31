@@ -773,6 +773,49 @@ fn a_restart_sets_the_time_of_a_trade_its_leg_partly_filled_again() {
     );
 }
 
+/// A trade sent 20 minutes before the restart, its entry still unfilled:
+/// its time is set again, 4 hours after its send.
+#[test]
+fn a_restart_sets_the_time_of_an_unfilled_entry_again() {
+    let cache = cache();
+    let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
+    sent(&mut before, "T-1", buy(bracket(4)));
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+
+    arm_open_trades(&mut probe).unwrap();
+
+    assert_eq!(
+        alert(&clock, "T-1"),
+        Some(UnixNanos::from(NOW + 220 * MINUTE))
+    );
+}
+
+/// A trade sent 20 minutes before the restart, its entry filled 40,000 of
+/// its 100,000, open as an order and held by a position: its time is set
+/// again, once.
+#[test]
+fn a_restart_sets_the_time_of_a_partly_filled_entry_again_once() {
+    let cache = cache();
+    let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
+    sent(&mut before, "T-1", buy(bracket(4)));
+    fill_of(
+        &before,
+        "T-1",
+        Some(Quantity::from(40_000)),
+        "P-1",
+        NOW - 20 * MINUTE,
+        OmsType::Hedging,
+    );
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+
+    arm_open_trades(&mut probe).unwrap();
+
+    assert_eq!(
+        alert(&clock, "T-1"),
+        Some(UnixNanos::from(NOW + 220 * MINUTE))
+    );
+}
+
 /// The first trade's netting position closed 30 minutes before the
 /// restart, inside its 4 hours, and opened again by a later trade: the
 /// later trade's time alone is set again.

@@ -539,8 +539,10 @@ trade.send(self)?;
   their entry, not from the entry's order nor
   `Cache::position_for_order`.
 - At start, `orders::arm_open_trades(self)?` sets the time alert of each
-  open trade of the strategy again, from the cache: its entry's creation
-  plus the limit it is tagged with, at once if that has passed.
+  trade of the strategy again, from the cache, whose entry is still an
+  open order (walked as Nautilus' `reactivate_gtd_timers` walks them) or
+  which is still open: its entry's creation plus the limit it is tagged
+  with, at once if that has passed.
 - Nautilus has no time limit on a position, so the alert and its close
   are ours. Its GTD expiry on the bracket's legs (`manage_gtd_expiry`)
   does not fit: an expired leg leaves the position open, IC sends no
