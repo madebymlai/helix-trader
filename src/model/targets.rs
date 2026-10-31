@@ -89,6 +89,7 @@ use nautilus_common::{
         indicators::{ActorIndicator, SharedActorIndicator},
     },
     cache::CacheApi,
+    config::{ConfigError, ConfigErrorCollector, ConfigResult},
 };
 use nautilus_core::UnixNanos;
 use nautilus_indicators::{indicator::Indicator, volatility::atr::AverageTrueRange};
@@ -361,11 +362,13 @@ enum Leg {
 impl TargetsConfig {
     /// # Errors
     ///
-    /// Returns an error if there is no target, or the size, a barrier's
-    /// distance, its limit or the horizon is not positive, or the barrier
-    /// has an `atr` table no distance uses, or an ATR without bars at the
-    /// cadence of `rule` built from what a strategy of `requirements` reads
-    /// (see `atr_bars`).
+    /// Returns every violation, each Nautilus' `ConfigError` under its
+    /// field of `[model]` (`model.targets.…`), as one
+    /// `ConfigError::Multiple` if there are several: no target, the size, a
+    /// barrier's distance, its limit or the horizon not positive, an `atr`
+    /// table no distance uses, or an ATR without bars at the cadence of
+    /// `rule` built from what a strategy of `requirements` reads (see
+    /// `atr_bars`).
     ///
     /// # Panics
     ///
@@ -375,42 +378,62 @@ impl TargetsConfig {
         &self,
         rule: DecisionRule,
         requirements: &DataRequirements,
-    ) -> anyhow::Result<()> {
-        ensure!(
+    ) -> ConfigResult<()> {
+        let mut errors = ConfigErrorCollector::new();
+        errors.check(
             self.barrier.is_some() || self.horizon.is_some(),
-            "no target: neither a barrier nor a horizon"
+            ConfigError::invalid_value(
+                "model.targets",
+                "no target: neither a barrier nor a horizon",
+            ),
         );
-        ensure!(
+        errors.check(
             self.quantity.is_positive(),
-            "the target quantity must be positive"
+            ConfigError::invalid_value("model.targets", "the target quantity must be positive"),
         );
         if let Some(barrier) = self.barrier {
-            ensure!(
+            errors.check(
                 barrier.take_profit.value() > Decimal::ZERO && barrier.stop.value() > Decimal::ZERO,
-                "the barrier's take profit and stop must be positive"
+                ConfigError::invalid_value(
+                    "model.targets.barrier",
+                    "the barrier's take profit and stop must be positive",
+                ),
             );
-            ensure!(
+            errors.check(
                 barrier.limit.is_positive(),
-                "the barrier's limit {:#} is not positive",
-                barrier.limit
+                ConfigError::invalid_value(
+                    "model.targets.barrier.limit",
+                    format!("the barrier's limit {:#} is not positive", barrier.limit),
+                ),
             );
-            ensure!(
+            errors.check(
                 barrier.uses_atr() || barrier.atr.is_none(),
-                "the barrier has an ATR no distance uses"
+                ConfigError::invalid_value(
+                    "model.targets.barrier.atr",
+                    "the barrier has an ATR no distance uses",
+                ),
             );
-            if let Some(atr) = barrier.atr_args() {
+            let atr = |result: anyhow::Result<()>| {
+                result.map_err(|e| {
+                    ConfigError::invalid_value("model.targets.barrier.atr", format!("{e:#}"))
+                })
+            };
+            if let Some(args) = barrier.atr_args() {
                 // Nautilus checks the arguments as it builds the ATR.
-                atr.build()?;
+                errors.collect(atr(args.build().map(drop)));
             }
-            self.atr_bars(rule, requirements)?;
+            errors.collect(atr(self.atr_bars(rule, requirements).map(drop)));
         }
         if let Some(horizon) = self.horizon {
-            ensure!(
+            errors.check(
                 horizon.is_positive(),
-                "the horizon {horizon:#} is not positive"
+                ConfigError::invalid_value(
+                    "model.targets.horizon",
+                    format!("the horizon {horizon:#} is not positive"),
+                ),
             );
         }
-        Ok(())
+        errors.into_result()
     }
 
     /// The barrier's average true range deciding on `rule`, for a strategy

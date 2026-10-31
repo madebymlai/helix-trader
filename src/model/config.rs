@@ -10,8 +10,8 @@
 //! hold no third: a meta section has no meta section of its own, and
 //! writing one is refused at load as an unknown field.
 
-use anyhow::{bail, ensure};
 use jiff::{SignedDuration, Timestamp};
+use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
 
@@ -246,52 +246,76 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule, the targets or the learner
-    /// are invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
-    /// `LearnerConfig::validate`), the retrain interval is not positive,
-    /// the targets trade a futures root, the barrier's ATR has no bars
-    /// built from what it reads of that instrument (see
-    /// `TargetsConfig::atr_bars`) or warms over longer than
-    /// its warmup, the label names a target the config lacks, a target
-    /// (the barrier's limit or the horizon) is not shorter than the
-    /// window, the holdout is not positive or leaves no fitted row (see
-    /// `validate_window`), the margins name no side or one is not finite,
-    /// the minimums are invalid (see `validate_minimums`), a meta model
-    /// gates a primary not labelled on the barrier, whose trades it learns,
-    /// the meta model is invalid (see `MetaConfig::validate`), or the
-    /// decisions are on events
-    /// or a target is not shorter than their cadence (see
-    /// `validate_cadence`).
-    pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
-        validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
-        self.learner.validate()?;
-        ensure!(
-            self.targets.pnl_index(self.label, Side::Long).is_some(),
-            "the label {:?} names a target the targets do not have",
-            self.label
+    /// Returns every violation, each Nautilus' `ConfigError` under its
+    /// field of `[model]` (`model.…`), as one `ConfigError::Multiple` if
+    /// there are several: the decision rule, the targets or the learner
+    /// invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
+    /// `LearnerConfig::validate`), the retrain interval not positive, the
+    /// targets trading a futures root, the barrier's ATR without bars built
+    /// from what the strategy reads of that instrument (see
+    /// `TargetsConfig::atr_bars`) or warming over longer than its warmup,
+    /// the label naming a target the config lacks, a target (the barrier's
+    /// limit or the horizon) not shorter than the window, the holdout not
+    /// positive or leaving no fitted row (see `validate_window`), the
+    /// margins naming no side or one not finite, the minimums invalid (see
+    /// `validate_minimums`), a meta model gating a primary not labelled on
+    /// the barrier, whose trades it learns, the meta model invalid (see
+    /// `MetaConfig::validate`), or the decisions on events or a target not
+    /// shorter than their cadence (see `validate_cadence`).
+    pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
+        let mut errors = ConfigErrorCollector::new();
+        validate_decisions(
+            self.decision,
+            &self.targets,
+            self.retrain,
+            requirements,
+            &mut errors,
         );
-        validate_window(self.window, self.holdout, &self.targets)?;
-        ensure!(
+        errors.collect(learner(&self.learner, "model.learner"));
+        errors.check(
+            self.targets.pnl_index(self.label, Side::Long).is_some(),
+            ConfigError::invalid_value(
+                "model.label",
+                format!(
+                    "the label {:?} names a target the targets do not have",
+                    self.label
+                ),
+            ),
+        );
+        validate_window(
+            self.window,
+            self.holdout,
+            &self.targets,
+            "model",
+            &mut errors,
+        );
+        errors.check(
             self.margins.sides().next().is_some(),
-            "the margins name no side to trade"
+            ConfigError::invalid_value("model.margins", "the margins name no side to trade"),
         );
         for (side, margin) in self.margins.sides() {
-            ensure!(
+            errors.check(
                 margin.is_finite(),
-                "the {} margin {margin} is not a number",
-                side.name()
+                ConfigError::invalid_value(
+                    format!("model.margins.{}", side.name()),
+                    format!("the {} margin {margin} is not a number", side.name()),
+                ),
             );
         }
-        validate_minimums(self.minimums())?;
+        validate_minimums(self.minimums(), "model", &mut errors);
         if let Some(meta) = &self.meta {
-            ensure!(
+            errors.check(
                 self.label == Label::Barrier,
-                "the meta model learns whether the primary's barrier trade wins, and the \
-                 primary is labelled \"horizon\": it places horizon trades, not barrier ones"
+                ConfigError::invalid_value(
+                    "model.meta",
+                    "the meta model learns whether the primary's barrier trade wins, and the \
+                     primary is labelled \"horizon\": it places horizon trades, not barrier ones",
+                ),
             );
-            meta.validate(&self.targets)?;
+            meta.validate(&self.targets, &mut errors);
         }
-        validate_cadence(self.decision, &self.targets)
+        validate_cadence(self.decision, &self.targets, &mut errors);
+        errors.into_result()
     }
 
     /// The least a side's model is published with, on its holdout.
@@ -304,33 +328,49 @@ impl ModelConfig {
     }
 }
 
-/// Checks that each of `targets` closes before the next decision of
-/// `rule`: a model primary trades the target of its label, and a live
-/// account nets a new trade into one still open, where a dataset run's
-/// hedging venue keeps them apart.
-fn validate_cadence(rule: DecisionRule, targets: &TargetsConfig) -> anyhow::Result<()> {
+/// Pushes onto `errors` the violation of a target of `targets` not closing
+/// before the next decision of `rule`, or of no cadence: a model primary
+/// trades the target of its label, and a live account nets a new trade
+/// into one still open, where a dataset run's hedging venue keeps them
+/// apart.
+fn validate_cadence(
+    rule: DecisionRule,
+    targets: &TargetsConfig,
+    errors: &mut ConfigErrorCollector,
+) {
     let DecisionRule::Every(cadence) = rule else {
-        bail!(
+        errors.push(ConfigError::invalid_value(
+            "model.decision",
             "a model primary trades its target, and decisions on events have no cadence for \
-             it to close within"
-        );
+             it to close within",
+        ));
+        return;
     };
     if let Some(barrier) = targets.barrier {
-        ensure!(
+        errors.check(
             barrier.limit < cadence,
-            "the barrier's limit {:#} is not shorter than the decision cadence {cadence:#}: \
-             a trade would still be open at the next decision",
-            barrier.limit
+            ConfigError::invalid_value(
+                "model.targets.barrier.limit",
+                format!(
+                    "the barrier's limit {:#} is not shorter than the decision cadence \
+                     {cadence:#}: a trade would still be open at the next decision",
+                    barrier.limit
+                ),
+            ),
         );
     }
     if let Some(horizon) = targets.horizon {
-        ensure!(
+        errors.check(
             horizon < cadence,
-            "the horizon {horizon:#} is not shorter than the decision cadence {cadence:#}: a \
-             trade would still be open at the next decision"
+            ConfigError::invalid_value(
+                "model.targets.horizon",
+                format!(
+                    "the horizon {horizon:#} is not shorter than the decision cadence \
+                     {cadence:#}: a trade would still be open at the next decision"
+                ),
+            ),
         );
     }
-    Ok(())
 }
 
 impl RuleConfig {
@@ -339,52 +379,65 @@ impl RuleConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule or the targets are invalid,
-    /// the retrain interval is not positive, the targets trade a futures
-    /// root, the barrier's ATR has no bars built from what it reads or
-    /// warms over longer than its warmup
-    /// (as `ModelConfig::validate`), or the meta model is invalid (see
-    /// `MetaConfig::validate`).
-    pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
-        validate_decisions(self.decision, &self.targets, self.retrain, requirements)?;
-        self.meta.validate(&self.targets)
+    /// Returns every violation, as `ModelConfig::validate` does: the
+    /// decision rule or the targets invalid, the retrain interval not
+    /// positive, the targets trading a futures root, the barrier's ATR
+    /// without bars built from what it reads or warming over longer than
+    /// its warmup, or the meta model invalid (see `MetaConfig::validate`).
+    pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
+        let mut errors = ConfigErrorCollector::new();
+        validate_decisions(
+            self.decision,
+            &self.targets,
+            self.retrain,
+            requirements,
+            &mut errors,
+        );
+        self.meta.validate(&self.targets, &mut errors);
+        errors.into_result()
     }
 }
 
 impl MetaConfig {
-    /// Checks the meta model against the primary's `targets`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the targets have no barrier, the trade the meta
-    /// model learns, the learner is invalid (see `LearnerConfig::validate`),
-    /// a target is not shorter than the window, the holdout is not
-    /// positive or leaves no fitted row, the threshold is not a
-    /// probability, the minimums are invalid (see `validate_minimums`), or the
-    /// sizing's multiples are not positive with the minimum not above the
-    /// maximum.
-    pub fn validate(&self, targets: &TargetsConfig) -> anyhow::Result<()> {
-        ensure!(
+    /// Pushes onto `errors` every violation of the meta model against the
+    /// primary's `targets`, each under its field of `[model.meta]`
+    /// (`model.meta.…`): the targets without a barrier, the trade the meta
+    /// model learns, the learner invalid (see `LearnerConfig::validate`), a
+    /// target not shorter than the window, the holdout not positive or
+    /// leaving no fitted row, the threshold not a probability, the minimums
+    /// invalid (see `validate_minimums`), or the sizing's multiples not
+    /// positive with the minimum not above the maximum.
+    pub fn validate(&self, targets: &TargetsConfig, errors: &mut ConfigErrorCollector) {
+        errors.check(
             targets.barrier.is_some(),
-            "the meta model learns whether the primary's barrier trade wins, \
-             and the targets have no barrier"
+            ConfigError::invalid_value(
+                "model.meta",
+                "the meta model learns whether the primary's barrier trade wins, and the \
+                 targets have no barrier",
+            ),
         );
-        self.learner.validate()?;
-        validate_window(self.window, self.holdout, targets)?;
-        ensure!(
+        errors.collect(learner(&self.learner, "model.meta.learner"));
+        validate_window(self.window, self.holdout, targets, "model.meta", errors);
+        errors.check(
             (0.0..=1.0).contains(&self.threshold),
-            "the meta threshold {} is not a probability",
-            self.threshold
+            ConfigError::invalid_value(
+                "model.meta.threshold",
+                format!("the meta threshold {} is not a probability", self.threshold),
+            ),
         );
-        validate_minimums(self.minimums())?;
+        validate_minimums(self.minimums(), "model.meta", errors);
         if let Some(Sizing { min, max }) = self.size {
-            ensure!(
+            errors.check(
                 min.is_sign_positive() && !min.is_zero() && min <= max,
-                "the meta sizing's multiples min {min} and max {max} are not positive \
-                 with the min not above the max"
+                ConfigError::invalid_value(
+                    "model.meta.size",
+                    format!(
+                        "the meta sizing's multiples min {min} and max {max} are not positive \
+                         with the min not above the max"
+                    ),
+                ),
             );
         }
-        Ok(())
     }
 
     /// The least a meta model is published with, on its holdout.
@@ -414,83 +467,123 @@ impl MetaConfig {
     }
 }
 
-/// Checks what every model section has: the decision `rule`, the
-/// `targets`, the `retrain` interval, against the strategy's
-/// `requirements`.
+/// Pushes onto `errors` the violations of what every model section has:
+/// the decision `rule`, the `targets`, the `retrain` interval, against the
+/// strategy's `requirements`.
 fn validate_decisions(
     rule: DecisionRule,
     targets: &TargetsConfig,
     retrain: SignedDuration,
     requirements: &DataRequirements,
-) -> anyhow::Result<()> {
-    rule.validate()?;
-    targets.validate(rule, requirements)?;
-    ensure!(
+    errors: &mut ConfigErrorCollector,
+) {
+    errors.collect(
+        rule.validate()
+            .map_err(|e| ConfigError::invalid_value("model.decision", format!("{e:#}"))),
+    );
+    errors.collect(targets.validate(rule, requirements));
+    errors.check(
         retrain.is_positive(),
-        "the retrain interval {retrain:#} is not positive"
+        ConfigError::invalid_value(
+            "model.retrain",
+            format!("the retrain interval {retrain:#} is not positive"),
+        ),
     );
     let traded = targets.instrument_id;
     // A root rolls at any time: its first roll after the epoch tells it.
     if let Some(roll) = Transition::after(traded, Timestamp::UNIX_EPOCH) {
-        bail!(
-            "the targets trade {traded}, a futures root: orders go to a contract, such as {}",
-            roll.pre
-        );
+        errors.push(ConfigError::invalid_value(
+            "model.targets",
+            format!(
+                "the targets trade {traded}, a futures root: orders go to a contract, such as {}",
+                roll.pre
+            ),
+        ));
     }
-    if let Some(atr) = targets.atr_bars(rule, requirements)? {
+    // An ATR without bars is the targets' violation, pushed above.
+    if let Ok(Some(atr)) = targets.atr_bars(rule, requirements) {
         // A dataset run replays the warmup before its first day, and no
         // more: an ATR still cold then opens no target at the day's first
         // decisions, which a longer build would.
         let warms = i32::try_from(atr.args.period)
             .ok()
             .and_then(|period| atr.bar_type.spec().timedelta().checked_mul(period));
-        ensure!(
+        errors.check(
             warms.is_some_and(|warms| warms <= requirements.warmup),
-            "the barrier's ATR of {} bars of {} warms over longer than the warmup {:#}",
-            atr.args.period,
-            atr.bar_type,
-            requirements.warmup
+            ConfigError::invalid_value(
+                "model.targets.barrier.atr",
+                format!(
+                    "the barrier's ATR of {} bars of {} warms over longer than the warmup {:#}",
+                    atr.args.period, atr.bar_type, requirements.warmup
+                ),
+            ),
         );
     }
-    Ok(())
 }
 
-/// Checks that the longest of `targets` is shorter than `window`, and
-/// `holdout` positive and short enough to leave a fitted row before it
-/// and the calibration, as long as it, before it (`train`): the window
-/// longer than twice the holdout and the longest target.
+/// The violation of `learner`, under `field`.
+fn learner(learner: &LearnerConfig, field: &str) -> ConfigResult<()> {
+    learner
+        .validate()
+        .map_err(|e| ConfigError::invalid_value(field, format!("{e:#}")))
+}
+
+/// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
+/// violations of the longest of `targets` not shorter than `window`, or
+/// `holdout` not positive or too long to leave a fitted row before it and
+/// the calibration, as long as it, before it (`train`): the window longer
+/// than twice the holdout and the longest target.
 fn validate_window(
     window: SignedDuration,
     holdout: SignedDuration,
     targets: &TargetsConfig,
-) -> anyhow::Result<()> {
+    section: &str,
+    errors: &mut ConfigErrorCollector,
+) {
     let longest = targets.settles_within();
-    ensure!(
+    errors.check(
         longest < window,
-        "the longest target {longest:#} is not shorter than the window {window:#}"
+        ConfigError::invalid_value(
+            format!("{section}.window"),
+            format!("the longest target {longest:#} is not shorter than the window {window:#}"),
+        ),
     );
-    ensure!(
+    errors.check(
         holdout.is_positive() && holdout * 2 + longest < window,
-        "the holdout {holdout:#} and the calibration as long before it leave no fitted \
-         row in the window {window:#} after the longest target {longest:#}"
+        ConfigError::invalid_value(
+            format!("{section}.holdout"),
+            format!(
+                "the holdout {holdout:#} and the calibration as long before it leave no fitted \
+                 row in the window {window:#} after the longest target {longest:#}"
+            ),
+        ),
     );
-    Ok(())
 }
 
-/// Checks that the minimum net P&L of `minimums` is a number and their
-/// minimum count of trades at least one.
-fn validate_minimums(minimums: Minimums) -> anyhow::Result<()> {
-    ensure!(
+/// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
+/// violations of the minimum net P&L of `minimums` not a number and their
+/// minimum count of trades below one.
+fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigErrorCollector) {
+    errors.check(
         minimums.min_pnl.is_finite(),
-        "the minimum net P&L per trade {} is not a number",
-        minimums.min_pnl
+        ConfigError::invalid_value(
+            format!("{section}.min_pnl"),
+            format!(
+                "the minimum net P&L per trade {} is not a number",
+                minimums.min_pnl
+            ),
+        ),
     );
-    ensure!(
+    errors.check(
         minimums.min_trades >= 1,
-        "the minimum count of trades is {}, not at least one",
-        minimums.min_trades
+        ConfigError::invalid_value(
+            format!("{section}.min_trades"),
+            format!(
+                "the minimum count of trades is {}, not at least one",
+                minimums.min_trades
+            ),
+        ),
     );
-    Ok(())
 }
 
 #[cfg(test)]

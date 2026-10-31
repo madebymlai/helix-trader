@@ -41,7 +41,8 @@ impl Part for ModelEmaParams {
 
     /// The base without a strategy id, which keys the model's store, or
     /// the model invalid for the data read and the instrument traded (see
-    /// `ModelConfig::validate`), its first error under `model`.
+    /// `ModelConfig::validate`), each violation under its field of
+    /// `[model]`.
     fn validate(config: &ModelEmaConfig, errors: &mut ConfigErrorCollector) {
         errors.check(
             config.base.strategy_id.is_some(),
@@ -49,11 +50,7 @@ impl Part for ModelEmaParams {
         );
         if let [traded] = config.trade.instruments.as_slice() {
             let model = config.own.model.clone().trading(traded);
-            errors.collect(
-                model
-                    .validate(&config.data_requirements())
-                    .map_err(|e| ConfigError::invalid_value("model", format!("{e:#}"))),
-            );
+            errors.collect(model.validate(&config.data_requirements()));
         }
     }
 
@@ -174,11 +171,14 @@ mod tests {
             .collect()
     }
 
-    /// The reason of the one config error refusing `toml`, under `model`.
+    /// The reason of the one config error refusing `toml`, under a field of
+    /// `[model]`.
     fn model_refusal(toml: &str) -> String {
         let err = ModelEmaConfig::load(toml).unwrap_err();
         match err.downcast_ref::<ConfigError>() {
-            Some(ConfigError::InvalidValue { field, reason }) if field == "model" => reason.clone(),
+            Some(ConfigError::InvalidValue { field, reason }) if field.starts_with("model.") => {
+                reason.clone()
+            }
             _ => panic!("not refused under model: {err}"),
         }
     }
@@ -462,6 +462,8 @@ mod tests {
         let _ = ModelEmaConfig::load(&with_atr(r#", atr = { period = 0 }"#));
     }
 
+    /// The model's violation is its horizon of an hour, decided every hour,
+    /// reported under the horizon's field, `model.targets.horizon`.
     #[test]
     fn reports_its_own_violations_with_the_standard_ones() {
         let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
@@ -469,8 +471,56 @@ mod tests {
             .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
         assert_eq!(
             error_fields(&toml),
-            ["data.warmup", "base.strategy_id", "model"]
+            ["data.warmup", "base.strategy_id", "model.targets.horizon"]
         );
+    }
+
+    /// Three violations of the model, each reported under its field at
+    /// once: margins naming no side, no trade required on the holdout, and
+    /// a horizon of an hour decided every hour.
+    #[test]
+    fn reports_every_violation_of_the_model_under_its_field() {
+        let toml = TOML
+            .replace("margins = { long = 0.5, short = 0.5 }", "margins = {}")
+            .replace("min_trades = 30", "min_trades = 0")
+            .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+
+        let mut fields = error_fields(&toml);
+        fields.sort();
+
+        assert_eq!(
+            fields,
+            ["model.margins", "model.min_trades", "model.targets.horizon"]
+        );
+    }
+
+    /// The meta model's violations are reported under `[model.meta]`'s
+    /// fields: a threshold of 1.5 is no probability, and it requires no
+    /// trade on its holdout.
+    #[test]
+    fn reports_the_meta_models_violations_under_its_fields() {
+        let meta = r#"
+            [model.meta]
+            window = "48h"
+            holdout = "12h"
+            threshold = 1.5
+            min_pnl = 0.5
+            min_trades = 0
+            learner = { kind = "baseline" }
+        "#;
+        let toml = format!(
+            "{}\n{meta}",
+            TOML.replace(
+                r#"targets = { horizon = "30m" }"#,
+                r#"targets = { horizon = "30m", barrier = { take_profit = { bps = 10 }, stop = { bps = 10 }, limit = "45m" } }"#,
+            )
+            .replace(r#"label = "horizon""#, r#"label = "barrier""#)
+        );
+
+        let mut fields = error_fields(&toml);
+        fields.sort();
+
+        assert_eq!(fields, ["model.meta.min_trades", "model.meta.threshold"]);
     }
 
     /// A meta model is a `[model.meta]` table, and no more: a meta of the

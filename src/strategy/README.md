@@ -181,7 +181,8 @@ starts a node, a backtest, a dataset or a training run.
 "Features and decisions"): it trades one instrument, `[trade]`'s, which its
 model's targets trade, of its `trade_size`; its rules are a strategy id
 in `[base]`, which keys its models, and the model valid for the data it
-reads (`ModelConfig::validate`, its first error reported under `model`).
+reads (`ModelConfig::validate`, every violation reported at once, each
+under its field of `[model]`, such as `model.targets.horizon`).
 
 ### Bar types
 
