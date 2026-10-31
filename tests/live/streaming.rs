@@ -521,13 +521,12 @@ fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
     (first.into(), last.into())
 }
 
-/// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes,
-/// its trades and its stored depth replayed as they are. Too slow to trade in a few seconds.
+/// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes.
+/// Too slow to trade in a few seconds.
 const EMA_CONFIG: &str = r#"
     [data]
     series = [
         { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
-        { data = "trades", instrument_id = "AUD/USD.SIM" },
     ]
     warmup = "1s"
 
