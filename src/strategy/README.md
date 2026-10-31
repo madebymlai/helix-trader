@@ -73,11 +73,9 @@ strategy (`strategy::StandardConfig`, `strategy/standard.rs`):
 [base]      # Nautilus' StrategyConfig as is; optional, the strategy's default
 strategy_id = "EMA_CROSS-001"
 
-[data]      # what the strategy reads
+[data]      # what the strategy reads, and nothing else
 series = [
     { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
-    { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
-    { data = "trades", instrument_id = "ESM4.CME" },
 ]
 warmup = "720h"
 session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
@@ -141,7 +139,12 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   knows no indicator type. The barrier's ATR of a model strategy is not
   one of them: it is the harness', not the strategy's code's.
 - `[trade] instruments` pairs each traded instrument with its
-  `trade_size`, a Nautilus `Quantity` (a string, `"1"`).
+  `trade_size`, a Nautilus `Quantity` (a string, `"1"`). The traded
+  instrument's execution data comes from `[trade]` itself, whatever the
+  strategy: when no series of `[data]` reads it, its quotes are added to
+  the data requirements (`TradeConfig`, see below), not to `[data]`, so
+  fill-catalog fetches them and a backtest replays them for its orders'
+  fills.
 - `[model]` is the model of a strategy trading on one
   (`model::config::ModelSection`, see "Features and decisions"), whose
   targets trade `[trade]`'s one instrument, of its `trade_size`
@@ -184,10 +187,13 @@ config or every violation out.
   mistyped argument fails) and built (`ExponentialMovingAverage::new_checked`
   refuses `period = 0`), each reported under `indicators.<name>`, and
   none it does not declare; as many traded instruments as
-  the strategy trades, each `trade_size` positive; of a strategy trading
-  on a model, a strategy id and its model valid (see below); the series
-  read (see "Series read"); then the strategy's own rules
-  (`Part::validate`: for the EMA, the fast period below the slow one).
+  the strategy trades, none a futures root of the roll calendar (orders
+  go to a contract; the error names one, under
+  `trade.instruments[i].instrument_id`), each `trade_size` positive; of a
+  strategy trading on a model, a strategy id and its model valid (see
+  below); the series read (see "Series read"); then the strategy's own
+  rules (`Part::validate`: for the EMA, the fast period below the slow
+  one).
 
 ### Series read
 
@@ -206,7 +212,10 @@ invalid data.series: the strategy reads TradeTick of GC.GLBX, which is not liste
 
 A listed series nothing reads is refused under its own field,
 `data.series[i]`; a series read and not listed under `data.series`. The
-answer may be the strategy's own errors instead, each under its field:
+traded instrument's quotes `[trade]` adds to the data requirements (see
+"Root ticks and the traded instrument") are no series of `[data]`, and
+no part's answer. The answer may be the strategy's own errors instead,
+each under its field:
 the EMA's with no bars series of its traded instrument,
 
 ```text
@@ -226,9 +235,7 @@ invalid trade.instruments[0].instrument_id reference ESU4.CME: has no bars serie
   of the traded instrument, so it needs none listed. The harness gives
   that answer once (`model::reads`), from the features the part builds
   (`model::ModelPart::features`), which every run decides on too (see
-  "Features and decisions"). The traded instrument's quotes the harness
-  adds itself (see "Root ticks and the traded instrument") are not
-  listed.
+  "Features and decisions").
 
 `main` loads the config before anything else, so a bad config never
 starts a node, a backtest, a dataset or a training run.
@@ -240,9 +247,10 @@ rules of every such strategy, so its part repeats none: a strategy id in
 `[base]`, which keys its models, and the model valid for the data it
 reads and the instrument it trades (`ModelConfig::validate`, every
 violation reported at once with the others, each under its field of
-`[model]`, such as `model.targets.horizon`). Its data requirements add
-the quotes of the traded instrument when no series reads it (see "Root
-ticks and the traded instrument"). Its part with no fields of its own:
+`[model]`, such as `model.targets.horizon`). The quotes of the traded
+instrument its data requirements add when no series reads it, as every
+strategy's do, serve its harness too (see "Root ticks and the traded
+instrument"). Its part with no fields of its own:
 
 ```rust
 #[derive(Debug, Clone, Deserialize)]
@@ -321,7 +329,8 @@ from the config's fields:
 pub fn data_requirements(&self) -> DataRequirements {
     DataRequirements {
         bar_types: self.data.bar_types().collect(),
-        ticks: /* the series that are not bars */,
+        ticks: /* the series that are not bars, then the quotes of each
+                  traded instrument no series reads */,
         warmup: self.data.warmup,
     }
 }
@@ -845,7 +854,8 @@ of its choosing (`model::features`, `model::decide`).
   features checked are those run. Each series the features read, their
   bar types (`FeatureSet::bar_types`) and their tick series
   (`FeatureSet::ticks`, a root's as the root), is listed as it is, bars
-  by their bar type.
+  by their bar type. The traded instrument's quotes `[trade]` adds (see
+  "Root ticks and the traded instrument") are not listed.
 - **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
   indicator: `features.register(self)` in `on_start` registers it for the
   quotes and trades of each instrument, a root's contract standing for
@@ -936,9 +946,9 @@ of its choosing (`model::features`, `model::decide`).
   When no series of the strategy reads the
   traded instrument, as beside features on a root, the harness reads its
   quotes itself, for the decision's reference price, the venue's fills,
-  the barrier's ATR and freshness: a model strategy's data requirements
-  add them (`StandardConfig::data_requirements`,
-  `handle::traded_quotes`), so
+  the barrier's ATR and freshness: the data requirements add them, as
+  every strategy's do (`StandardConfig::data_requirements`, see
+  "Config"), so
   fill-catalog fetches, a backtest or dataset run replays and the handle
   subscribes them. When a series reads it, the strategy's own series of
   it serve and no quotes are added: an OKX strategy reads its candles
@@ -946,7 +956,8 @@ of its choosing (`model::features`, `model::decide`).
   what the strategy reads of it (`TargetsConfig::atr_bars`), and the
   handle subscribes the strategy's tick series of it, its trades read
   alone making the decisions fresh.
-  A futures root traded is refused at load: orders go to a contract.
+  A futures root traded is refused at load, by the shared `[trade]`
+  rules: orders go to a contract.
   Bars on a root are Nautilus' continuous bars and do not roll this way.
 - **Rows.** `decide` snapshots the features if the decision is fresh and
   every one is initialized, and publishes them on the message bus as a
@@ -1153,8 +1164,8 @@ of its choosing (`model::features`, `model::decide`).
   "Model handle"); each is optional, a side without one has no model,
   trained, stored, scored nor traded, so `{ long = 0.5 }` is a long-only
   model. `validate(&requirements)` refuses a retrain interval not
-  positive, a futures root as the traded instrument (orders go to a
-  contract; the error names one), a barrier ATR
+  positive (a futures root as the traded instrument is the shared
+  `[trade]` rules' to refuse, see "Config"), a barrier ATR
   without bars built from what it reads of that instrument (above) or
   whose period of bars, the given or the default, at the
   decision cadence is longer than the strategy's warmup (a dataset run

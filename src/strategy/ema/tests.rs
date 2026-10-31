@@ -261,6 +261,25 @@ fn reports_every_unread_series_with_the_other_violations() {
     );
 }
 
+/// The crossover reading the bars of the GC root, the one series of it,
+/// and trading the root: no order goes to a root, which the shared trade
+/// rules refuse under its field.
+#[test]
+fn rejects_a_futures_root_traded() {
+    let toml = TOML
+        .replace("ESM4.CME", "GC.GLBX")
+        .replace("price_type = \"MID\"", "price_type = \"LAST\"");
+    assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
+}
+
+/// Its bars of the instrument traded give execution its prices: no
+/// quotes of it are added.
+#[test]
+fn requires_no_quotes_of_the_instrument_its_bars_read() {
+    let config = EmaCrossConfig::load(TOML).unwrap();
+    assert_eq!(config.data_requirements().ticks, []);
+}
+
 #[test]
 fn reports_its_own_violations_with_the_standard_ones() {
     let toml = TOML
