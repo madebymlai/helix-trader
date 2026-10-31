@@ -10,6 +10,7 @@ use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{DataType, NautilusDataType},
     enums::BookType,
@@ -17,13 +18,17 @@ use nautilus_model::{
 };
 
 use super::Transition;
-use crate::strategy::TickSeries;
+use crate::strategy::{TickSeries, warmup::subscription_params};
 
 /// The prefix of an instrument's roll alert, followed by its id.
 const ROLL_ALERT: &str = "ROLL:";
 
 /// The levels a side of an `OrderBookDepth10` snapshot.
 const DEPTH: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+
+/// The book type of the book deltas a roller subscribes to, and a warmup
+/// requests.
+pub const DELTAS_BOOK_TYPE: BookType = BookType::L3_MBO;
 
 /// Subscribes a strategy to its tick series, each on the contract standing
 /// for its instrument (see `Transition::after`), and rolls them: owned by
@@ -128,28 +133,37 @@ impl Roller {
             .map(|tick| &tick.data)
     }
 
-    /// Subscribes `actor` to the series of `instrument_id` on `contract`.
+    /// Subscribes `actor` to the series of `instrument_id` on `contract`,
+    /// streaming from now: live, where the warmup, requested up to now,
+    /// ends (`strategy::warmup`).
     fn subscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
+        let now = UnixNanos::from(actor.clock().utc_now());
         for data in self.data_of(instrument_id) {
+            let params = Some(subscription_params(now, []));
             match data {
-                NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, None),
-                NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, None),
+                NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, params),
+                NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, params),
                 NautilusDataType::OrderBookDepth => actor.subscribe_book_depth(
                     contract,
                     BookType::L2_MBP,
                     Some(DEPTH),
                     None,
                     false,
-                    None,
+                    params,
                 ),
-                NautilusDataType::OrderBookDelta => {
-                    actor.subscribe_book_deltas(contract, BookType::L3_MBO, None, None, false, None)
-                }
+                NautilusDataType::OrderBookDelta => actor.subscribe_book_deltas(
+                    contract,
+                    DELTAS_BOOK_TYPE,
+                    None,
+                    None,
+                    false,
+                    params,
+                ),
                 NautilusDataType::Custom { type_name } => {
-                    actor.subscribe_data(custom(type_name, contract), None, None);
+                    actor.subscribe_data(custom(type_name, contract), None, params);
                 }
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }

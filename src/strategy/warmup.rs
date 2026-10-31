@@ -70,18 +70,42 @@
 //! answers it with no bars; `continuous_bars` reads them once the group
 //! ended.
 //!
+//! Ticks a strategy's features read as they are (`Warmup::reading`, a
+//! model strategy's handle naming its roller's) are requested over the
+//! same window in the same group, catalog first with `update_catalog`, a
+//! root's on the contract standing for it at the start (`rolls::front`)
+//! alone: `request_quotes`, `request_trades`, `request_book_depth` and
+//! `request_book_deltas` (with the book type the roller subscribes to,
+//! `rolls::DELTAS_BOOK_TYPE`, onto which Nautilus replays the deltas from
+//! the day's start into the snapshot the response opens with). A series
+//! some bars are built from is requested once, building them. Each
+//! response ends at `now`, trimmed to it, and the roller, started right
+//! after, subscribes to the series with `start_ns` its own `now`
+//! (`subscription_params`), so no tick is handed twice. Nautilus hands a
+//! response's quotes and trades to the indicators registered for their
+//! instrument, so a strategy's features registered for the contract
+//! before the requests read them with no further call; it routes depth
+//! and deltas to no indicator, so the
+//! warmup hands them to its book indicators (`BookIndicator`), the deltas
+//! in the batches the live stream carries (`batches`). Ticks arriving on
+//! the live stream while a venue's part of a response is pending reach the
+//! features before that part: Nautilus buffers no ticks for indicators as
+//! it aggregates bars across a request's end. Custom data is no tick
+//! feature's series: no warmup.
+//!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it. The
 //! functions are its parts: `start` from `on_start`, `bars` from
 //! `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
-//! and `finished` from `on_data_response`, then, on bars on a root,
-//! `continuous_bars`; in a backtest or a dataset run `subscribe` from
-//! `on_start` alone.
+//! `Warmup::on_historical_book_depth` and `on_historical_book_deltas` from
+//! the hooks of the same names, and `finished` from `on_data_response`,
+//! then, on bars on a root, `continuous_bars`; in a backtest or a dataset
+//! run `subscribe` from `on_start` alone.
 
-use std::{cell::Cell, collections::BTreeMap, fmt::Debug};
+use std::{cell::Cell, collections::BTreeMap, fmt::Debug, rc::Rc};
 
 use anyhow::{Context, bail, ensure};
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
     cache::CacheConfig,
@@ -91,31 +115,47 @@ use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
-    data::{Bar, BarType, Data, NautilusDataType},
-    enums::AggregationSource,
+    data::{Bar, BarType, Data, NautilusDataType, OrderBookDelta, OrderBookDeltas, OrderBookDepth},
+    enums::{AggregationSource, RecordFlag},
     identifiers::Venue,
 };
 use serde_json::{Value, json};
 
 use crate::{
-    rolls::ContinuousBars,
-    strategy::{DataRequirements, Source, bar_sources},
+    rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
+    strategy::{DataRequirements, Source, TickSeries, bar_sources},
 };
+
+/// What a warmup hands the book depth and deltas of its responses to,
+/// which Nautilus routes to no indicator (`ActorIndicator` reads quotes,
+/// trades and bars alone): a model strategy's features.
+pub trait BookIndicator {
+    /// Reads `depth`, a snapshot of the warmup, oldest first.
+    fn handle_depth(&self, depth: &OrderBookDepth);
+
+    /// Reads `deltas`, a batch of the warmup as the live stream carries
+    /// it, oldest first.
+    fn handle_deltas(&self, deltas: &OrderBookDeltas);
+}
 
 /// A strategy's warmup, built from its data requirements for a live node
 /// (`live`) or a replay (`replayed`, a backtest or a dataset run): the one
 /// owner of the protocol above, so that a strategy holds one and its hooks
 /// delegate to it. Nautilus delivers historical data only to the
 /// strategy's own hooks, so a strategy calls `start` from `on_start`,
-/// `on_data_response` from `on_data_response`, and `on_historical` from
-/// `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`.
+/// `on_data_response` from `on_data_response`, `on_historical` from
+/// `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
+/// and `on_historical_book_depth` and `on_historical_book_deltas` from
+/// theirs.
 ///
-/// Live, `start` requests the warmup of the bar types the strategy reads
-/// and of those the strategy's harness needs warm (`building`, the
-/// barrier's ATR's), and subscribes to them from the warmup's end; the
-/// bars of each response go to the indicators the warmup feeds
-/// (`feeding`, `building`), oldest first. On a replay `start` subscribes
-/// to the strategy's bar types alone: the harness subscribes to its own.
+/// Live, `start` requests the warmup of the bar types the strategy reads,
+/// of those the strategy's harness needs warm (`building`, the barrier's
+/// ATR's) and of the tick series its features read (`reading`), and
+/// subscribes to the bars from the warmup's end; the bars of each response
+/// go to the indicators the warmup feeds (`feeding`, `building`), oldest
+/// first, its depth and deltas to its book indicators (`feeding_books`).
+/// On a replay `start` subscribes to the strategy's bar types alone: the
+/// harness subscribes to its own.
 /// The strategies read no bars on a root, so a warmup has no continuous
 /// bars. A live node sizes its cache from `cache_config`, which holds the
 /// warmup of every bar type the warmup builds.
@@ -127,8 +167,12 @@ pub struct Warmup {
     bar_types: Vec<BarType>,
     /// The bar types the harness needs warm beyond those.
     harness: Vec<BarType>,
+    /// The tick series warmed as they are, of roots or plain instruments.
+    ticks: Vec<TickSeries>,
     /// What the warmup's bars are handed to.
     indicators: Vec<SharedActorIndicator>,
+    /// What the warmup's book depth and deltas are handed to.
+    books: Vec<Rc<dyn BookIndicator>>,
     /// The request group of the last live start.
     group: Cell<UUID4>,
 }
@@ -163,7 +207,9 @@ impl Warmup {
             length: requirements.warmup,
             bar_types: requirements.bar_types.clone(),
             harness: Vec::new(),
+            ticks: Vec::new(),
             indicators: Vec::new(),
+            books: Vec::new(),
             group: Cell::new(UUID4::new()),
         }
     }
@@ -188,6 +234,27 @@ impl Warmup {
         self.feeding(indicator)
     }
 
+    /// The warmup requesting the history of `ticks` too, quotes, trades,
+    /// book depth or deltas of roots or plain instruments, each on the
+    /// contract standing for its instrument at the start (`rolls::front`):
+    /// the series a strategy's features read, which its roller subscribes
+    /// to from the warmup's end. Quotes and trades reach the indicators
+    /// Nautilus has registered for them; depth and deltas reach those
+    /// `feeding_books` names.
+    #[must_use]
+    pub fn reading(mut self, ticks: Vec<TickSeries>) -> Self {
+        self.ticks = ticks;
+        self
+    }
+
+    /// The warmup handing the book depth and deltas of its responses to
+    /// `books` too.
+    #[must_use]
+    pub fn feeding_books(mut self, books: Rc<dyn BookIndicator>) -> Self {
+        self.books.push(books);
+        self
+    }
+
     /// Starts the warmup of `actor`, from its `on_start`: live, requests it
     /// as a new request group and subscribes to the bars it builds from
     /// its end (see `start`); on a replay, subscribes to the strategy's
@@ -207,6 +274,7 @@ impl Warmup {
                 start(
                     actor,
                     &self.built(),
+                    &self.ticks,
                     self.length,
                     &continuous,
                     self.group.get(),
@@ -254,6 +322,29 @@ impl Warmup {
         Ok(())
     }
 
+    /// Hands the book depth of `response`, a response to the warmup's
+    /// request, to the book indicators it feeds, oldest first, from the
+    /// actor's `on_historical_book_depth`.
+    pub fn on_historical_book_depth(&self, response: &[OrderBookDepth]) {
+        for depth in response {
+            for books in &self.books {
+                books.handle_depth(depth);
+            }
+        }
+    }
+
+    /// Hands the book deltas of `response`, a response to the warmup's
+    /// request, to the book indicators it feeds, in the batches the live
+    /// stream carries (see `batches`), oldest first, from the actor's
+    /// `on_historical_book_deltas`.
+    pub fn on_historical_book_deltas(&self, response: &[OrderBookDelta]) {
+        for deltas in batches(response) {
+            for books in &self.books {
+                books.handle_deltas(&deltas);
+            }
+        }
+    }
+
     /// The cache config of a live node running the warmup: sized for the
     /// warmup of every bar type it builds (see `cache_config`).
     ///
@@ -289,27 +380,32 @@ impl Debug for Warmup {
             .field("length", &self.length)
             .field("bar_types", &self.bar_types)
             .field("harness", &self.harness)
+            .field("ticks", &self.ticks)
             .field("indicators", &self.indicators.len())
+            .field("books", &self.books.len())
             .field("group", &self.group)
             .finish()
     }
 }
 
-/// Requests the warmup of `bar_types`, internal bar types, over
-/// `[now - warmup, now]` as the request group `group`, then subscribes
-/// `actor` to them from `now`. The bars on a root with continuous bars in
-/// `continuous` are its continuous future, requested per bar type with
+/// Requests the warmup of `bar_types`, internal bar types, and of `ticks`,
+/// over `[now - warmup, now]` as the request group `group`, then subscribes
+/// `actor` to the bars from `now`; the ticks' subscriptions are their
+/// roller's. The bars on a root with continuous bars in `continuous` are
+/// its continuous future, requested per bar type with
 /// their `continuous_future_*` params; the others are requested per series
 /// they are built from (see `requests`): the source bars of a composite bar
 /// type, the trades of the instrument of LAST bars, the quotes of the
-/// instrument of BID, ASK and MID bars. The warmup of each request arrives
-/// in `on_historical_bars`, `on_historical_trades` or
-/// `on_historical_quotes`, where `bars` returns it; the end of the group
-/// in `on_data_response`, where `finished` tells it. `group` is the
-/// caller's, stored before the call: a group whose requests are all
-/// answered at once ends before this returns. No bar types make no
-/// request and no group, which `DataActor::request_group` refuses empty: a
-/// strategy reading ticks alone has no warmup.
+/// instrument of BID, ASK and MID bars; each tick series is requested on
+/// the contract standing for its instrument now, once with the bars built
+/// from it if any. The warmup of each request arrives in
+/// `on_historical_bars`, `on_historical_trades`, `on_historical_quotes`,
+/// `on_historical_book_depth` or `on_historical_book_deltas`; the end of
+/// the group in `on_data_response`, where `finished` tells it. `group` is
+/// the caller's, stored before the call: a group whose requests are all
+/// answered at once ends before this returns. No bar types and no ticks
+/// make no request and no group, which `DataActor::request_group` refuses
+/// empty.
 ///
 /// # Errors
 ///
@@ -318,6 +414,7 @@ impl Debug for Warmup {
 pub fn start<A>(
     actor: &mut A,
     bar_types: &[BarType],
+    ticks: &[TickSeries],
     warmup: SignedDuration,
     continuous: &ContinuousBars,
     group: UUID4,
@@ -350,11 +447,14 @@ where
             Some(now),
             None,
             None,
-            Some(request_params([bar_type].into_iter(), params)),
+            Some(request_params(
+                [bar_type].into_iter(),
+                params.into_iter().flatten(),
+            )),
         )?);
     }
-    for (source, built) in requests(&others) {
-        let params = Some(request_params(built.iter(), None));
+    for (source, built) in requests(&others, ticks, now) {
+        let params = Some(request_params(built.iter(), []));
         requested.push(match source {
             Source::Bars(source) => {
                 actor.request_bars(source, Some(start), Some(now), None, None, params)?
@@ -376,7 +476,30 @@ where
                     None,
                     params,
                 )?,
-                data => unreachable!("bars are built from quotes or trades, not {data}"),
+                NautilusDataType::OrderBookDepth => actor.request_book_depth(
+                    tick.instrument_id,
+                    Some(start),
+                    Some(now),
+                    None,
+                    None,
+                    None,
+                    params,
+                )?,
+                // The book type the roller subscribes to: Nautilus replays
+                // the deltas before the start onto a book of it, into the
+                // snapshot the response starts with.
+                NautilusDataType::OrderBookDelta => actor.request_book_deltas(
+                    tick.instrument_id,
+                    Some(start),
+                    Some(now),
+                    None,
+                    None,
+                    Some(request_params(
+                        built.iter(),
+                        [("book_type".to_string(), json!(DELTAS_BOOK_TYPE.to_string()))],
+                    )),
+                )?,
+                data => unreachable!("{data} is not read by a tick feature"),
             },
         });
     }
@@ -417,7 +540,11 @@ fn subscribe_from<A>(
     // of a continuous future per bar type.
     for bar_type in continuous_bars {
         let params = continuous.params(bar_type.instrument_id());
-        actor.subscribe_bars(bar_type, None, Some(subscription_params(now, params)));
+        actor.subscribe_bars(
+            bar_type,
+            None,
+            Some(subscription_params(now, params.into_iter().flatten())),
+        );
     }
     // One subscription per venue for the others: Nautilus routes a list of
     // bar types to the client of their one venue.
@@ -429,15 +556,21 @@ fn subscribe_from<A>(
             .push(bar_type);
     }
     for venue_bar_types in by_venue.into_values() {
-        actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now, None)));
+        actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now, [])));
     }
 }
 
-/// The warmup requests of `bar_types`, internal bar types on no root: one
-/// per series they are built from, as Nautilus' data engine builds them
-/// (see `strategy::catalog_series`), with the bar types built from it, in
-/// the order the series first come.
-fn requests(bar_types: &[BarType]) -> Vec<(Source, Vec<BarType>)> {
+/// The warmup requests of `bar_types`, internal bar types on no root, and
+/// of `ticks` at `now`: one per series the bars are built from, as
+/// Nautilus' data engine builds them (see `strategy::catalog_series`), with
+/// the bar types built from it, in the order the series first come; then
+/// one per tick series on the contract standing for its instrument at
+/// `now` (`rolls::front`) that no bar is built from, building none.
+fn requests(
+    bar_types: &[BarType],
+    ticks: &[TickSeries],
+    now: Timestamp,
+) -> Vec<(Source, Vec<BarType>)> {
     let mut requests: Vec<(Source, Vec<BarType>)> = Vec::new();
     for (source, bar_type) in bar_sources(bar_types).zip(bar_types) {
         match requests.iter_mut().find(|(of, _)| *of == source) {
@@ -445,14 +578,44 @@ fn requests(bar_types: &[BarType]) -> Vec<(Source, Vec<BarType>)> {
             None => requests.push((source, vec![*bar_type])),
         }
     }
+    for tick in ticks {
+        let source = Source::Ticks(TickSeries {
+            data: tick.data.clone(),
+            instrument_id: front(tick.instrument_id, now),
+        });
+        if !requests.iter().any(|(of, _)| *of == source) {
+            requests.push((source, vec![]));
+        }
+    }
     requests
 }
 
-/// The params of a warmup request building `bar_types`, with the
-/// `continuous` params of their root, if on one.
+/// `deltas`, a response's, in the batches the live stream carries: each
+/// closed by its `F_LAST` delta, the trailing deltas without one a batch
+/// of their own, as Nautilus' data engine publishes a response's deltas.
+fn batches(deltas: &[OrderBookDelta]) -> Vec<OrderBookDeltas> {
+    let mut batches = Vec::new();
+    let mut batch: Vec<OrderBookDelta> = Vec::new();
+    for delta in deltas {
+        batch.push(*delta);
+        if RecordFlag::F_LAST.matches(delta.flags) {
+            batches.push(OrderBookDeltas::new(
+                delta.instrument_id,
+                std::mem::take(&mut batch),
+            ));
+        }
+    }
+    if let Some(last) = batch.last() {
+        batches.push(OrderBookDeltas::new(last.instrument_id, batch));
+    }
+    batches
+}
+
+/// The params of a warmup request building `bar_types`, with `others`:
+/// the `continuous` params of their root, if on one, or a book type.
 fn request_params<'a>(
     bar_types: impl Iterator<Item = &'a BarType>,
-    continuous: Option<[(String, Value); 2]>,
+    others: impl IntoIterator<Item = (String, Value)>,
 ) -> Params {
     let bar_types: Vec<String> = bar_types.map(ToString::to_string).collect();
     Params::new(
@@ -463,19 +626,24 @@ fn request_params<'a>(
             ("update_catalog".to_string(), json!(true)),
         ]
         .into_iter()
-        .chain(continuous.into_iter().flatten())
+        .chain(others)
         .collect(),
     )
 }
 
-/// The params of the subscription to the bars warmed up to `now`: the live
-/// stream starts there. With the `continuous` params of their root, if on
-/// one.
-fn subscription_params(now: UnixNanos, continuous: Option<[(String, Value); 2]>) -> Params {
+/// The params of the subscription to the data warmed up to `now`, bars or
+/// ticks: the live stream starts there (`start_ns`). Without it, the data
+/// engine of a node with a catalog starts a subscription to quotes, trades,
+/// external bars or custom data at the catalog's end. With `others`: the
+/// `continuous` params of their root, if bars on one.
+pub(crate) fn subscription_params(
+    now: UnixNanos,
+    others: impl IntoIterator<Item = (String, Value)>,
+) -> Params {
     Params::new(
         [("start_ns".to_string(), json!(now.as_u64()))]
             .into_iter()
-            .chain(continuous.into_iter().flatten())
+            .chain(others)
             .collect(),
     )
 }
@@ -663,12 +831,14 @@ fn warmup_bars(bar_type: &BarType, warmup: SignedDuration) -> anyhow::Result<usi
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
+    use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::actor::indicators::ActorIndicator;
     use nautilus_model::{
-        data::{QuoteTick, TradeTick},
+        data::{BookOrder, QuoteTick, TradeTick, stubs::stub_depth10},
+        enums::{BookAction, OrderSide, RecordFlag},
         identifiers::InstrumentId,
+        types::{Price, Quantity},
     };
 
     use super::*;
@@ -730,31 +900,132 @@ mod tests {
         assert_eq!(warmup.built(), vec![hours, minutes]);
     }
 
-    /// A root's ticks, as any ticks, have no warmup of their own: a live
-    /// start requests the history of the bars alone, none of the root nor
-    /// of its contracts, the one in front or the next.
-    #[test]
-    fn a_live_warmup_requests_no_history_of_a_roots_ticks() {
-        let requirements = DataRequirements {
-            ticks: vec![TickSeries {
-                data: NautilusDataType::TradeTick,
-                instrument_id: InstrumentId::from("GC.GLBX"),
-            }],
-            ..reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"])
-        };
+    fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
+        TickSeries {
+            data,
+            instrument_id: InstrumentId::from(instrument_id),
+        }
+    }
 
-        let warmup = Warmup::live(&requirements);
+    /// A live start requests the history of the ticks the strategy reads
+    /// too, a root's on the contract standing for it then: GC rolls into
+    /// GCZ6 on 2026-07-29 and out of it on 2026-11-26 (`rolls/README.md`),
+    /// so on 2026-08-10 the root's trades and depth are GCZ6's, requested
+    /// once beside GCZ6's own trades. IC's gold quotes, which build the
+    /// strategy's bars, are requested once, building them; the ticks no
+    /// bar is built from build none.
+    #[test]
+    fn a_live_warmup_requests_a_roots_ticks_on_its_front_contract() {
+        let bars = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
+        let warmup =
+            Warmup::live(&reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"])).reading(vec![
+                tick(NautilusDataType::TradeTick, "GC.GLBX"),
+                tick(NautilusDataType::OrderBookDepth, "GC.GLBX"),
+                tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
+                tick(NautilusDataType::TradeTick, "GCZ6.GLBX"),
+                tick(NautilusDataType::OrderBookDelta, "GC.GLBX"),
+            ]);
+        let now: Timestamp = "2026-08-10T14:30:00Z".parse().unwrap();
 
         assert_eq!(
-            requests(&warmup.built()),
-            [(
-                Source::Ticks(TickSeries {
-                    data: NautilusDataType::QuoteTick,
-                    instrument_id: InstrumentId::from("XAUUSD.ICMARKETS"),
-                }),
-                vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
-            )]
+            requests(&warmup.built(), &warmup.ticks, now),
+            [
+                (
+                    Source::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
+                    vec![bars],
+                ),
+                (
+                    Source::Ticks(tick(NautilusDataType::TradeTick, "GCZ6.GLBX")),
+                    vec![],
+                ),
+                (
+                    Source::Ticks(tick(NautilusDataType::OrderBookDepth, "GCZ6.GLBX")),
+                    vec![],
+                ),
+                (
+                    Source::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ6.GLBX")),
+                    vec![],
+                ),
+            ]
         );
+    }
+
+    /// What a warmup hands books to, recording them.
+    #[derive(Default)]
+    struct Books {
+        depths: RefCell<Vec<OrderBookDepth>>,
+        deltas: RefCell<Vec<OrderBookDeltas>>,
+    }
+
+    impl BookIndicator for Books {
+        fn handle_depth(&self, depth: &OrderBookDepth) {
+            self.depths.borrow_mut().push(depth.clone());
+        }
+
+        fn handle_deltas(&self, deltas: &OrderBookDeltas) {
+            self.deltas.borrow_mut().push(deltas.clone());
+        }
+    }
+
+    /// A delta of GCZ6 with `sequence` and `flags`.
+    fn delta(sequence: u64, flags: u8) -> OrderBookDelta {
+        OrderBookDelta::new(
+            InstrumentId::from("GCZ6.GLBX"),
+            BookAction::Add,
+            BookOrder::new(
+                OrderSide::Buy,
+                Price::from("4000.0"),
+                Quantity::from(1),
+                sequence,
+            ),
+            flags,
+            sequence,
+            UnixNanos::from(sequence),
+            UnixNanos::from(sequence),
+        )
+    }
+
+    /// Nautilus answers a deltas request with the deltas alone; the warmup
+    /// hands them over in the batches the live stream carries, each closed
+    /// by its `F_LAST` delta, the trailing ones without it a batch of
+    /// their own, as Nautilus' data engine publishes a response's deltas.
+    #[test]
+    fn the_warmup_hands_book_deltas_over_in_the_batches_the_live_stream_carries() {
+        let books = Rc::new(Books::default());
+        let warmup = Warmup::live(&reading(&[])).feeding_books(Rc::clone(&books) as _);
+        let last = RecordFlag::F_LAST as u8;
+
+        warmup.on_historical_book_deltas(&[
+            delta(1, 0),
+            delta(2, last),
+            delta(3, last),
+            delta(4, 0),
+        ]);
+
+        let batches: Vec<Vec<u64>> = books
+            .deltas
+            .borrow()
+            .iter()
+            .map(|batch| batch.deltas.iter().map(|d| d.sequence).collect())
+            .collect();
+        assert_eq!(batches, [vec![1, 2], vec![3], vec![4]]);
+    }
+
+    /// Nautilus routes no depth to indicators: the warmup hands each
+    /// snapshot of a response over, in order.
+    #[test]
+    fn the_warmup_hands_book_depth_over_in_order() {
+        let books = Rc::new(Books::default());
+        let warmup = Warmup::live(&reading(&[])).feeding_books(Rc::clone(&books) as _);
+        let depth = |sequence| OrderBookDepth {
+            sequence,
+            ..stub_depth10()
+        };
+
+        warmup.on_historical_book_depth(&[depth(7), depth(8)]);
+
+        let sequences: Vec<u64> = books.depths.borrow().iter().map(|d| d.sequence).collect();
+        assert_eq!(sequences, [7, 8]);
     }
 
     /// The cache holds the warmup of the harness's bars too: 1,440
@@ -786,7 +1057,11 @@ mod tests {
             })
         };
 
-        let requested = requests(&[hour_last, hour_mid, composite, minute_last]);
+        let requested = requests(
+            &[hour_last, hour_mid, composite, minute_last],
+            &[],
+            Timestamp::UNIX_EPOCH,
+        );
 
         assert_eq!(
             requested,

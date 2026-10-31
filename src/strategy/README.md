@@ -274,8 +274,10 @@ deltas grouped into an event per `F_LAST` (`OrderBookDeltas`, in
 `on_book_deltas`); custom data, which `BacktestDataConfig` refuses, read
 from the catalog by the backtest and added to the node's engine (see
 `src/backtest/README.md`, "Custom data"). The strategy subscribes to them
-itself. They have no warmup of their own: a strategy reading ticks alone
-gets the default cache. Live sets up the clients of their instruments, as
+itself, and live warms up on those its features read (a model
+strategy's, `Warmup::reading`); the cache keeps no more of them than
+Nautilus' default holds, the features reading them from the responses.
+Live sets up the clients of their instruments, as
 of every instrument of the requirements, but subscribes to none of them;
 live custom data reaches the strategy as it is published on the message
 bus.
@@ -807,9 +809,15 @@ of its choosing (`model::features`, `model::decide`).
   windows refill on the post contract. Other instruments' features are
   untouched. Backtests and dataset runs replay the catalog's contract
   slices (`DataRequirements::slices`) through the same roller. Live,
-  ticks have no warmup of their own, a root's neither: no history is
-  requested of its contracts, the front or the next, and its features
-  warm on the live stream. When no series of the strategy reads the
+  the warmup requests the history of the roller's ticks over the
+  strategy's warmup, catalog first, a root's on its front contract alone
+  (`rolls::front`), ending at the start; the roller subscribes to them
+  from there (`start_ns`), so no tick is handed twice and the first
+  decision after the warmup is warm. Nautilus hands the responses' quotes
+  and trades to the features registered for the contract, and the
+  warmup their depth and deltas (`Warmup::on_historical_book_depth`,
+  `on_historical_book_deltas`, in the live stream's `F_LAST` batches).
+  When no series of the strategy reads the
   traded instrument, as beside features on a root, the harness reads its
   quotes itself, for the decision's reference price, the venue's fills,
   the barrier's ATR and freshness: a model strategy's data requirements

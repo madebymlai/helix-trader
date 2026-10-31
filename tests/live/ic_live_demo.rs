@@ -106,6 +106,7 @@ impl DataActor for Recorder {
         warmup::start(
             self,
             &[self.bar_type],
+            &[],
             self.warmup,
             &ContinuousBars::default(),
             self.warmup_group,

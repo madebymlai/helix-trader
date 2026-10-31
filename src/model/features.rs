@@ -11,8 +11,11 @@
 //! requests (a warmup's quotes), with no strategy code. Nautilus routes no
 //! depth, book deltas or custom data to indicators, so the strategy
 //! forwards those from its handlers (`handle_depth`, `handle_deltas`,
-//! `handle_data`); no kind takes both paths. Bars built from a warmup's
-//! quotes or source bars reach only the cache, not the indicators: the
+//! `handle_data`); no kind takes both paths. A live warmup's quotes and
+//! trades reach the set as registered, its depth and deltas through the
+//! warmup (`BookIndicator`, `Warmup::on_historical_book_depth` and
+//! `on_historical_book_deltas`). Bars built from a warmup's quotes,
+//! trades or source bars reach only the cache, not the indicators: the
 //! strategy's warmup hands them to `handle_bar` (`Warmup::on_historical`,
 //! the warmup a model strategy's `ModelHandle` builds).
 //!
@@ -94,7 +97,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     rolls::{Transition, front},
-    strategy::TickSeries,
+    strategy::{TickSeries, warmup::BookIndicator},
 };
 
 /// The names of a primary's side and probability, the last values of a
@@ -343,9 +346,25 @@ impl FeatureSet {
         }
     }
 
+    /// Feeds `data` to the raw features declared on its data type.
+    pub fn handle_data(&self, data: &CustomData) {
+        for slot in self.slots.borrow_mut().iter_mut() {
+            if let Slot::Data(data_type, read, value) = slot
+                && *data_type == data.data_type
+            {
+                *value = Some(read(data));
+            }
+        }
+    }
+}
+
+/// The strategy's side of the set for books, which Nautilus routes to no
+/// indicator: the strategy forwards its live depth and deltas, and its
+/// warmup those of its responses (`Warmup::feeding_books`).
+impl BookIndicator for FeatureSet {
     /// Feeds `depth` to the features declared on its instrument's depth,
     /// or on the depth of the root it stands for.
-    pub fn handle_depth(&self, depth: &OrderBookDepth) {
+    fn handle_depth(&self, depth: &OrderBookDepth) {
         for slot in self.slots.borrow_mut().iter_mut() {
             if let Slot::Depth(reading, feature) = slot
                 && reading.contract == depth.instrument_id
@@ -358,24 +377,13 @@ impl FeatureSet {
 
     /// Feeds `deltas` to the features declared on its instrument's deltas,
     /// or on the deltas of the root it stands for.
-    pub fn handle_deltas(&self, deltas: &OrderBookDeltas) {
+    fn handle_deltas(&self, deltas: &OrderBookDeltas) {
         for slot in self.slots.borrow_mut().iter_mut() {
             if let Slot::Deltas(reading, feature) = slot
                 && reading.contract == deltas.instrument_id
             {
                 feature.handle_deltas(deltas);
                 self.updated(reading.instrument_id, deltas.ts_init);
-            }
-        }
-    }
-
-    /// Feeds `data` to the raw features declared on its data type.
-    pub fn handle_data(&self, data: &CustomData) {
-        for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Data(data_type, read, value) = slot
-                && *data_type == data.data_type
-            {
-                *value = Some(read(data));
             }
         }
     }

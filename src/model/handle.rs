@@ -74,8 +74,12 @@
 //! backtest's and a dataset run's with none (see `decide`).
 //!
 //! The handle builds the strategy's warmup (`strategy::warmup::Warmup`)
-//! from its requirements and mode, and `start` starts it; the strategy
-//! delegates its historical-data hooks to it (`warmup`). Live, it warms
+//! from its requirements and mode, reading the roller's ticks, and `start`
+//! starts it, the features registered first; the strategy delegates its
+//! historical-data hooks to it (`warmup`). Live, the warmup requests the
+//! history of the roller's ticks, a root's on the contract standing for it,
+//! which reaches the features before the roller's subscriptions continue
+//! from its end, so the first decision after a start is warm. It warms
 //! the barrier's ATR from the warmup request, as it does the features: the
 //! request builds the ATR's bars too (`Stops::warmed`), and the warmup
 //! hands the bars of the response to both, so the first decision after a
@@ -126,7 +130,7 @@ use crate::{
     strategy::{
         DataRequirements, TickSeries,
         orders::{Exits, Trade},
-        warmup::Warmup,
+        warmup::{BookIndicator, Warmup},
     },
 };
 
@@ -476,16 +480,18 @@ impl ModelHandle {
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
         let traded = targets.instrument_id;
-        let warmup = match mode {
-            Mode::Live { .. } => Warmup::live(requirements),
-            Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
-        }
-        .feeding(Rc::clone(features) as SharedActorIndicator);
         let mut ticks = features.ticks();
         let quotes = traded_quotes(traded);
         if requirements.ticks.contains(&quotes) && !ticks.contains(&quotes) {
             ticks.push(quotes);
         }
+        let warmup = match mode {
+            Mode::Live { .. } => Warmup::live(requirements),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
+        }
+        .reading(ticks.clone())
+        .feeding(Rc::clone(features) as SharedActorIndicator)
+        .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -530,14 +536,16 @@ impl ModelHandle {
         }))
     }
 
-    /// Starts the handle on `strategy`, from `on_start`: starts the
-    /// strategy's warmup (`Warmup::start`) and its roller, which subscribes
-    /// the features' ticks and the traded instrument's quotes, a root's on
-    /// the contract standing for it, registers the features (and
-    /// starts the barrier's ATR: the stops', trading on a barrier, a rule's
-    /// or a model's labelled on it, or, in a dataset run, the targets', and
-    /// collects the rows they settle); then starts the decision cadence, live
-    /// `Warmup::live_bar_build_delay` late, and live the retrain timer.
+    /// Starts the handle on `strategy`, from `on_start`: registers the
+    /// features, starts the strategy's warmup (`Warmup::start`), live
+    /// requesting the history of the bars and of the roller's ticks, then
+    /// the roller, which subscribes the features' ticks and the traded
+    /// instrument's quotes from now, where the warmup ends, a root's on the
+    /// contract standing for it; starts the barrier's ATR (the stops',
+    /// trading on a barrier, a rule's or a model's labelled on it, or, in a
+    /// dataset run, the targets', and collects the rows they settle); then
+    /// starts the decision cadence, live `Warmup::live_bar_build_delay`
+    /// late, and live the retrain timer.
     ///
     /// # Errors
     ///
@@ -547,9 +555,12 @@ impl ModelHandle {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
+        // Registered first: a warmup request the catalog answers alone is
+        // answered within `start`, its quotes and trades handed to the
+        // indicators registered by then.
+        self.features.register(strategy);
         self.warmup.start(strategy)?;
         self.roller.start(strategy)?;
-        self.features.register(strategy);
         let delay = match &self.serving {
             Serving::Trading(trading) => {
                 if let Some(stops) = self.serving.stops() {
@@ -962,14 +973,16 @@ mod tests {
         actor::indicators::ActorIndicator,
         cache::Cache,
         clock::{Clock, VirtualClock},
+        messages::data::{DataCommand, RequestCommand, SubscribeCommand, TradesResponse},
+        msgbus::{MessagingSwitchboard, TypedIntoHandler},
         timer::TimeEventCallback,
     };
-    use nautilus_core::UnixNanos;
+    use nautilus_core::{UUID4, UnixNanos};
     use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        data::{Bar, BarType, QuoteTick},
-        enums::PriceType,
-        identifiers::{InstrumentId, TraderId},
+        data::{Bar, BarType, QuoteTick, TradeTick},
+        enums::{AggressorSide, PriceType},
+        identifiers::{ClientId, InstrumentId, TradeId, TraderId},
         instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Price},
     };
@@ -2345,5 +2358,146 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("side"), "{err}");
+    }
+
+    /// The data commands `probe`'s actor sends to the data engine from
+    /// now, in order, each as what it asks for: requests with their
+    /// window, subscriptions with the time their stream starts.
+    fn sent_commands() -> Rc<RefCell<Vec<String>>> {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&sent);
+        msgbus::register_data_command_endpoint(
+            MessagingSwitchboard::data_engine_queue_execute(),
+            TypedIntoHandler::from(move |command: DataCommand| {
+                let start_ns = |params: Option<&nautilus_core::Params>| {
+                    params
+                        .and_then(|params| params.get_u64("start_ns"))
+                        .map(|ns| Timestamp::from(UnixNanos::from(ns)))
+                };
+                let ids = |ids: &[InstrumentId]| {
+                    ids.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let line = match command {
+                    DataCommand::Request(RequestCommand::Trades(r)) => format!(
+                        "request trades [{}] {:?}..{:?}",
+                        ids(&r.instrument_ids),
+                        r.start,
+                        r.end
+                    ),
+                    DataCommand::Request(RequestCommand::Quotes(r)) => format!(
+                        "request quotes [{}] {:?}..{:?}",
+                        ids(&r.instrument_ids),
+                        r.start,
+                        r.end
+                    ),
+                    DataCommand::Subscribe(SubscribeCommand::Trades(s)) => format!(
+                        "subscribe trades [{}] from {:?}",
+                        ids(&s.instrument_ids),
+                        start_ns(s.params.as_ref())
+                    ),
+                    DataCommand::Subscribe(SubscribeCommand::Quotes(s)) => format!(
+                        "subscribe quotes [{}] from {:?}",
+                        ids(&s.instrument_ids),
+                        start_ns(s.params.as_ref())
+                    ),
+                    other => format!("{other:?}"),
+                };
+                record.borrow_mut().push(line);
+            }),
+        );
+        sent
+    }
+
+    /// A trade of GC's December contract at `time`, at `price`.
+    fn gcz6_trade(time: &str, price: &str) -> TradeTick {
+        let ts = UnixNanos::from(at(time));
+        TradeTick::new(
+            InstrumentId::from("GCZ6.GLBX"),
+            Price::from(price),
+            Quantity::from(1),
+            AggressorSide::Buy,
+            TradeId::from(time),
+            ts,
+            ts,
+        )
+    }
+
+    /// Live on 2026-08-10 at 14:30, a feature on the trades of the root
+    /// GC, the mean of its last two, reads GCZ6, the contract standing for
+    /// it (GC rolls into GCZ6 on 2026-07-29, `rolls/README.md`): the start
+    /// requests GCZ6's trades over the hour of warmup, ending now, then
+    /// subscribes to them from now, so the live stream starts where the
+    /// warmup ends; the traded AUD/USD's quotes, which no series reads,
+    /// alike. The response's two trades, which Nautilus hands to the
+    /// indicators registered for GCZ6's trades, make the strategy's
+    /// indicators initialized: the first decision after the warmup is warm.
+    #[test]
+    fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
+        let features = FeatureSet::builder()
+            .trades(
+                InstrumentId::from("GC.GLBX"),
+                "gc_2_trades",
+                SimpleMovingAverage::new(2, None),
+            )
+            .build()
+            .unwrap();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                TickSeries {
+                    data: NautilusDataType::TradeTick,
+                    instrument_id: InstrumentId::from("GC.GLBX"),
+                },
+                traded_quotes(InstrumentId::from(AUD)),
+            ],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config(),
+            &requirements,
+            live(
+                models.path().to_path_buf(),
+                catalog.path(),
+                Launcher::in_process(|_| unreachable!()),
+            ),
+        )
+        .unwrap();
+        let sent = sent_commands();
+
+        handle.start(&mut probe).unwrap();
+        let cold = probe.core().indicators_initialized().unwrap();
+        probe.handle_trades_response(&TradesResponse::new(
+            UUID4::new(),
+            ClientId::from("GLBX"),
+            InstrumentId::from("GCZ6.GLBX"),
+            vec![
+                gcz6_trade("2026-08-10T14:00:00Z", "4000.0"),
+                gcz6_trade("2026-08-10T14:29:00Z", "4002.0"),
+            ],
+            None,
+            None,
+            UnixNanos::from(at("2026-08-10T14:30:00Z")),
+            None,
+        ));
+
+        assert_eq!(
+            *sent.borrow(),
+            [
+                "request trades [GCZ6.GLBX] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+                "request quotes [AUD/USD.SIM] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+                "subscribe trades [GCZ6.GLBX] from Some(2026-08-10T14:30:00Z)",
+                "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
+            ]
+        );
+        assert!(!cold);
+        assert!(probe.core().indicators_initialized().unwrap());
     }
 }

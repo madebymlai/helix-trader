@@ -35,7 +35,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{Bar, QuoteTick, TradeTick},
+    data::{Bar, OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick},
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
 };
 use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
@@ -220,6 +220,18 @@ impl DataActor for ModelEma {
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
         self.model.warmup().on_historical(self, bars)
+    }
+
+    /// Nautilus routes no book data to indicators: the warmup hands it to
+    /// the features.
+    fn on_historical_book_depth(&mut self, depths: &[OrderBookDepth]) -> anyhow::Result<()> {
+        self.model.warmup().on_historical_book_depth(depths);
+        Ok(())
+    }
+
+    fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
+        self.model.warmup().on_historical_book_deltas(deltas);
+        Ok(())
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

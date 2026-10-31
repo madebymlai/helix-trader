@@ -95,6 +95,7 @@ impl DataActor for Probe {
         warmup::start(
             self,
             &[composite],
+            &[],
             WARMUP,
             &ContinuousBars::default(),
             self.warmup,
