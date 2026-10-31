@@ -17,8 +17,9 @@ Each strategy is one folder, and everything about it lives there:
 strategy/<name>/
   mod.rs        Nautilus wiring, kept thin, and its part of the config
                 (the EMA's: its indicators, its count of instruments, its
-                rules) and its exits, constants or computed
-  config.rs     its config, when its part is large (model_ema's [model])
+                rules; model_ema's: its count of instruments, its model
+                taken) and its exits, constants or computed
+  config.rs     its part of the config, when it is large
   book.rs       the pure core: from bars to decisions (the EMA's signal.rs)
   ...           more pure modules as needed (features.rs, tree.rs, ...)
 ```
@@ -89,6 +90,8 @@ period = 30
 
 [trade]     # what it trades
 instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
+
+# [model]   # its model, of a strategy trading on one: the EMA does not
 ```
 
 - `[base]` is Nautilus' `StrategyConfig` unchanged; without it the
@@ -139,13 +142,20 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   one of them: it is the harness', not the strategy's code's.
 - `[trade] instruments` pairs each traded instrument with its
   `trade_size`, a Nautilus `Quantity` (a string, `"1"`).
+- `[model]` is the model of a strategy trading on one
+  (`model::config::ModelSection`, see "Features and decisions"), whose
+  targets trade `[trade]`'s one instrument, of its `trade_size`
+  (`StandardConfig::model`). A strategy trading on a model requires it,
+  and any other refuses it, a key no table of it takes.
 - The strategy's part (`strategy::Part`) is its own fields, at the top
   level, each with its default if it has one (`deny_unknown_fields`: any
   top-level key the standard tables and its fields do not take is
   refused); how many instruments it trades (`Part::INSTRUMENTS`, one for
-  the EMA); its default base; and its own rules. It cannot drop or rename
-  the standard tables: the config reads `base`, `data`, `indicators` and
-  `trade` as them, and every other key as its own.
+  the EMA); whether it trades on a model (`Part::TAKES_MODEL`, none
+  unless it says); its default base; and its own rules, none unless it
+  says. It cannot drop or rename the standard tables: the config reads
+  `base`, `data`, `indicators`, `trade` and, of a strategy trading on a
+  model, `model` as them, and every other key as its own.
 
 Loading is one step, `StandardConfig::load`: TOML text in, the validated
 config or every violation out.
@@ -173,19 +183,40 @@ config or every violation out.
   mistyped argument fails) and built (`ExponentialMovingAverage::new_checked`
   refuses `period = 0`), each reported under `indicators.<name>`, and
   none it does not declare; as many traded instruments as
-  the strategy trades, each `trade_size` positive; then the strategy's
-  own rules (`Part::validate`: for the EMA, the fast period below the
-  slow one).
+  the strategy trades, each `trade_size` positive; of a strategy trading
+  on a model, a strategy id and its model valid (see below); then the
+  strategy's own rules (`Part::validate`: for the EMA, the fast period
+  below the slow one).
 
 `main` loads the config before anything else, so a bad config never
 starts a node, a backtest, a dataset or a training run.
 
-`model_ema` loads the same way, its own part a `[model]` table (see
-"Features and decisions"): it trades one instrument, `[trade]`'s, which its
-model's targets trade, of its `trade_size`; its rules are a strategy id
-in `[base]`, which keys its models, and the model valid for the data it
-reads (`ModelConfig::validate`, every violation reported at once, each
-under its field of `[model]`, such as `model.targets.horizon`).
+A strategy trading on a model (`model_ema`) loads the same way, its
+part taking a model and trading one instrument, `[trade]`'s, which its
+model's targets trade, of its `trade_size`. The shared config holds the
+rules of every such strategy, so its part repeats none: a strategy id in
+`[base]`, which keys its models, and the model valid for the data it
+reads and the instrument it trades (`ModelConfig::validate`, every
+violation reported at once with the others, each under its field of
+`[model]`, such as `model.targets.horizon`). Its data requirements add
+the quotes of the traded instrument when no series reads it (see "Root
+ticks and the traded instrument"). Its part with no fields of its own:
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEmaParams {}
+
+impl Part for ModelEmaParams {
+    const INSTRUMENTS: usize = 1;
+    const TAKES_MODEL: bool = true;
+
+    fn default_base() -> StrategyConfig { /* MODEL_EMA-001 */ }
+}
+```
+
+Its features are checked against `[data]` before any run (see "Features
+and decisions", "Series read").
 
 ### Bar types
 
@@ -749,6 +780,22 @@ of its choosing (`model::features`, `model::decide`).
   probability, `primary_side` and `primary_probability`, given at each
   decision on a side (see "Meta-labeling"), the set having no values
   without one.
+- **Series read.** `[data] series` lists what the features read, and
+  nothing else: before any run, a backtest, a live node, a train or a
+  dataset build, the harness builds the features of the config and
+  checks them against it (`ModelStrategy::features`, on every path:
+  `new`, `dataset`, `training`, `walk_forward`). Each series the features
+  read, their bar types (`FeatureSet::bar_types`) and their tick series
+  (`FeatureSet::ticks`, a root's as the root), is listed as it is, bars
+  by their bar type; each series listed is read by the features or by
+  the barrier's ATR, its bars or the quotes or trades they are built
+  from (see "Targets"). The traded instrument's quotes the harness adds
+  itself (see "Root ticks and the traded instrument") are not listed. A
+  mismatch is one error naming every series missing and unread:
+
+  ```text
+  the series of [data] are not those the features read: the features read TradeTick of GC.GLBX, which [data] series does not list; [data] series lists QuoteTick of EURUSD.ICMARKETS, which neither the features nor the barrier's ATR read
+  ```
 - **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
   indicator: `features.register(self)` in `on_start` registers it for the
   quotes and trades of each instrument, a root's contract standing for
@@ -840,7 +887,8 @@ of its choosing (`model::features`, `model::decide`).
   traded instrument, as beside features on a root, the harness reads its
   quotes itself, for the decision's reference price, the venue's fills,
   the barrier's ATR and freshness: a model strategy's data requirements
-  add them (`Part::harness_ticks`, `handle::traded_quotes`), so
+  add them (`StandardConfig::data_requirements`,
+  `handle::traded_quotes`), so
   fill-catalog fetches, a backtest or dataset run replays and the handle
   subscribes them. When a series reads it, the strategy's own series of
   it serve and no quotes are added: an OKX strategy reads its candles
@@ -1513,11 +1561,15 @@ ATR" above).
 3. In `main.rs`, add a variant to `enum Strategy`, by its command-line
    name, and an arm to each `match` on it (fill-catalog's data
    requirements, backtest, live, train, dataset). A strategy trading on
-   a model implements `model::ModelStrategy` (its `Params`, `new` in a
-   `Mode`, `warmup`, `features` and `model`; its dataset, training and
-   walk forward follow), and each of its arms is one line calling main's
-   function generic over it, as `model_ema`'s; a strategy with no model
-   refuses `train` and `dataset`.
+   a model implements `model::ModelStrategy`: its `Params`, a part taking
+   a model (`Part::TAKES_MODEL`); `with_features`, the strategy of its
+   config deciding on the features given, its model handle in a `Mode`;
+   `warmup`; and `build_features`, its features of its config. `new`,
+   `features` (`build_features` checked against `[data]`, see "Series
+   read"), its dataset, training and walk forward follow, so every run
+   checks them. Each of its arms is one line calling main's function
+   generic over it, as `model_ema`'s; a strategy with no model refuses
+   `train` and `dataset`.
 
 ## Tests
 

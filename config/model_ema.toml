@@ -18,7 +18,8 @@
 [data]
 # The series read (all stored in the catalog): hourly bars of the mid,
 # built by Nautilus from the quotes, of each instrument; each gives the
-# model its two averages.
+# model its two averages. A model strategy lists the series its features
+# or its barrier's ATR read, and no other, or no run starts.
 series = [
     { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
     { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
@@ -33,6 +34,8 @@ warmup = "72h"
 # of each trade.
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
 
+# The model, of a strategy trading on one: its targets trade [trade]'s
+# instrument, of its trade_size.
 [model]
 # A decision every hour, on the hour's bars.
 decision = { every = "1h" }

@@ -755,7 +755,8 @@ impl ModelHandle {
 /// decision's reference price, the venue's fills, the barrier's ATR and
 /// the decisions' freshness (`decide::decide`) then come from them. The
 /// strategy's data requirements then hold them
-/// (`strategy::Part::harness_ticks`), and the handle subscribes to them.
+/// (`StandardConfig::data_requirements`), and the handle subscribes to
+/// them.
 #[must_use]
 pub fn traded_quotes(instrument_id: InstrumentId) -> TickSeries {
     TickSeries {

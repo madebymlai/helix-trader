@@ -281,6 +281,21 @@ impl FeatureSet {
         ticks
     }
 
+    /// The bar types the features read, each once, in order: the bars
+    /// beside `ticks`.
+    #[must_use]
+    pub fn bar_types(&self) -> Vec<BarType> {
+        let mut bar_types: Vec<BarType> = Vec::new();
+        for slot in self.slots.borrow().iter() {
+            if let Slot::Bars(bar_type, _) = slot
+                && !bar_types.contains(bar_type)
+            {
+                bar_types.push(*bar_type);
+            }
+        }
+        bar_types
+    }
+
     /// The time (`ts_init`) of the latest quote, trade, bar, depth or
     /// deltas of `instrument_id` a feature read, if any: an update no
     /// feature reads, or custom data, is none.

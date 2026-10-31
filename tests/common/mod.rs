@@ -249,6 +249,7 @@ pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCros
                 trade_size: Quantity::from(10),
             }],
         },
+        model: None,
         own: EmaParams {},
     }
 }
