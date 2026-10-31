@@ -55,19 +55,20 @@
 //! error, and the current one kept; it is not read again (`store::Swap`).
 //!
 //! The handle owns a `rolls::Roller` of the features' tick series
-//! (`FeatureSet::ticks`) and of the traded instrument's quotes
-//! (`traded_quotes`) when its data requirements hold them, which the
-//! harness reads when no series of the strategy reads the traded
-//! instrument: `start` subscribes each on the contract standing for it, a
-//! plain instrument once, a root on its front contract with its roll
-//! alert, and
+//! (`FeatureSet::ticks`) and of the tick series of the traded instrument
+//! its data requirements hold, which the harness reads for the decisions'
+//! freshness, its quotes (`traded_quotes`) among them when no series of
+//! the strategy reads it: `start` subscribes each on the contract standing
+//! for it, a plain instrument once, a root on its front contract with its
+//! roll alert, and
 //! the strategy hands the handle its time events (after
 //! `strategy::orders::on_time_event`), the roller first. At a roll the
 //! root's features move to the post contract and restart
 //! (`FeatureSet::roll`), so decisions wait on the strategy's initialized
 //! gate until they refill. The same code runs in a backtest and a dataset
 //! run, on the catalog's contract slices (`DataRequirements::slices`), and
-//! live.
+//! live, where the roller loads each post contract before its roll
+//! (`Roller::live`).
 //!
 //! A live node builds composite bars `Warmup::live_bar_build_delay` after
 //! their close, so a live handle starts the cadence with that delay, a
@@ -78,8 +79,8 @@
 //! starts it, the features registered first; the strategy delegates its
 //! historical-data hooks to it (`warmup`). Live, the warmup requests the
 //! history of the roller's ticks, a root's on the contract standing for it,
-//! which reaches the features before the roller's subscriptions continue
-//! from its end, so the first decision after a start is warm. It warms
+//! handed to the features, and the roller's subscriptions continue from
+//! its end, so the first decision after a start is warm. It warms
 //! the barrier's ATR from the warmup request, as it does the features: the
 //! request builds the ATR's bars too (`Stops::warmed`), and the warmup
 //! hands the bars of the response to both, so the first decision after a
@@ -250,8 +251,7 @@ pub struct ModelHandle {
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
     /// Subscribes the features' ticks, on the contract standing for each
-    /// root, and the traded instrument's quotes (`traded_quotes`) if the
-    /// requirements hold them.
+    /// root, and the requirements' tick series of the traded instrument.
     roller: Roller,
 }
 
@@ -481,9 +481,14 @@ impl ModelHandle {
         rule.validate()?;
         let traded = targets.instrument_id;
         let mut ticks = features.ticks();
-        let quotes = traded_quotes(traded);
-        if requirements.ticks.contains(&quotes) && !ticks.contains(&quotes) {
-            ticks.push(quotes);
+        for tick in requirements
+            .ticks
+            .iter()
+            .filter(|tick| tick.instrument_id == traded)
+        {
+            if !ticks.contains(tick) {
+                ticks.push(tick.clone());
+            }
         }
         let warmup = match mode {
             Mode::Live { .. } => Warmup::live(requirements),
@@ -492,6 +497,10 @@ impl ModelHandle {
         .reading(ticks.clone())
         .feeding(Rc::clone(features) as SharedActorIndicator)
         .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
+        let roller = match mode {
+            Mode::Live { .. } => Roller::live(ticks),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(ticks),
+        };
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -532,7 +541,7 @@ impl ModelHandle {
             traded,
             serving,
             warmup: Rc::new(warmup),
-            roller: Roller::new(ticks),
+            roller,
         }))
     }
 
@@ -540,7 +549,7 @@ impl ModelHandle {
     /// features, starts the strategy's warmup (`Warmup::start`), live
     /// requesting the history of the bars and of the roller's ticks, then
     /// the roller, which subscribes the features' ticks and the traded
-    /// instrument's quotes from now, where the warmup ends, a root's on the
+    /// instrument's from now, where the warmup ends, a root's on the
     /// contract standing for it; starts the barrier's ATR (the stops',
     /// trading on a barrier, a rule's or a model's labelled on it, or, in a
     /// dataset run, the targets', and collects the rows they settle); then
@@ -974,7 +983,10 @@ mod tests {
         cache::Cache,
         clock::{Clock, VirtualClock},
         messages::data::{DataCommand, RequestCommand, SubscribeCommand, TradesResponse},
-        msgbus::{MessagingSwitchboard, TypedIntoHandler},
+        msgbus::{
+            self, MessagingSwitchboard, TypedIntoHandler,
+            switchboard::{get_quotes_topic, get_trades_topic},
+        },
         timer::TimeEventCallback,
     };
     use nautilus_core::{UUID4, UnixNanos};
@@ -1414,6 +1426,63 @@ mod tests {
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
             Some(c(0.8))
+        );
+    }
+
+    /// A strategy reading AUD/USD, which it trades, as trades alone, its
+    /// features GBP/USD's quotes: the handle subscribes AUD/USD's trades,
+    /// and no quotes of it, beside the features' GBP/USD quotes.
+    #[test]
+    fn the_handle_subscribes_the_series_the_strategy_reads_of_the_traded_instrument() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let gbp = InstrumentId::from("GBP/USD.SIM");
+        let features = FeatureSet::builder()
+            .quotes(
+                gbp,
+                "mid",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .build()
+            .unwrap();
+        let tick = |data, instrument_id| TickSeries {
+            data,
+            instrument_id,
+        };
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(NautilusDataType::TradeTick, InstrumentId::from(AUD)),
+                tick(NautilusDataType::QuoteTick, gbp),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config(),
+            &requirements,
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap();
+
+        handle.start(&mut probe).unwrap();
+
+        let aud = InstrumentId::from(AUD);
+        assert_eq!(
+            msgbus::exact_subscriber_count_trades(get_trades_topic(aud)),
+            1
+        );
+        assert_eq!(
+            msgbus::exact_subscriber_count_quotes(get_quotes_topic(aud)),
+            0
+        );
+        assert_eq!(
+            msgbus::exact_subscriber_count_quotes(get_quotes_topic(gbp)),
+            1
         );
     }
 
@@ -2387,6 +2456,9 @@ mod tests {
                         r.start,
                         r.end
                     ),
+                    DataCommand::Request(RequestCommand::Instrument(r)) => {
+                        format!("request instrument [{}]", ids(&r.instrument_ids))
+                    }
                     DataCommand::Request(RequestCommand::Quotes(r)) => format!(
                         "request quotes [{}] {:?}..{:?}",
                         ids(&r.instrument_ids),
@@ -2430,8 +2502,8 @@ mod tests {
     /// it (GC rolls into GCZ6 on 2026-07-29, `rolls/README.md`): the start
     /// requests GCZ6's trades over the hour of warmup, ending now, then
     /// subscribes to them from now, so the live stream starts where the
-    /// warmup ends; the traded AUD/USD's quotes, which no series reads,
-    /// alike. The response's two trades, which Nautilus hands to the
+    /// warmup ends, and loads GCG7, the post contract of the next roll;
+    /// the traded AUD/USD's quotes, which no series reads, alike. The response's two trades, which Nautilus hands to the
     /// indicators registered for GCZ6's trades, make the strategy's
     /// indicators initialized: the first decision after the warmup is warm.
     #[test]
@@ -2494,6 +2566,7 @@ mod tests {
                 "request trades [GCZ6.GLBX] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
                 "request quotes [AUD/USD.SIM] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
                 "subscribe trades [GCZ6.GLBX] from Some(2026-08-10T14:30:00Z)",
+                "request instrument [GCG7.GLBX]",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
             ]
         );

@@ -54,9 +54,7 @@ its time is after `start` and no later than `end`. A roll exactly at
 `Transition::after(instrument_id, time)` is the next roll after `time`,
 `time` excluded, from the contract in front then (its `pre`), with no span:
 none for a plain instrument. The table is built from it, and the roller
-uses it to know the next roll in advance. `contracts_at(instrument_id,
-time)` is what an instrument needs from `time` up to that roll: the
-contract in front and the one it rolls into, or a plain instrument alone.
+uses it to know the next roll in advance.
 
 `Transition::before(instrument_id, time)` mirrors `after`: the last roll
 at or before `time`, `time` included, into the contract in front then
@@ -132,9 +130,13 @@ instrument").
 Bars do not use the roller: Nautilus' continuous bars roll themselves from
 the table.
 
-Live, the node loads a root's contract in front at its start and the next
-one, so the contracts the roller subscribes to are loaded; a run spans one
-roll (`live/README.md`, "Rolled roots").
+A live roller (`Roller::live`) loads each post contract before its roll:
+with each roll alert it sets, it requests that roll's post contract from
+the venue's data client, so a live node, which loads at its start only the
+contract in front, rolls any number of times without a restart
+(`live/README.md`, "Rolled roots"). A backtest's or a dataset run's
+(`Roller::replayed`) requests nothing: the run registers every contract of
+its slices up front.
 
 ## Continuous bars
 

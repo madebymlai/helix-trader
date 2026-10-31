@@ -537,10 +537,13 @@ trade.send(self)?;
   later trades add into, so a trade's time closes the others' share too,
   and theirs then find it closed. A position closed and opened again is a
   new one, holding none of the earlier fills. Open orders and positions
-  are never purged from the cache; a closed order is, with its index, so
-  the trade is read from the position's fills and the legs' own link to
-  their entry, not from the entry's order nor
-  `Cache::position_for_order`.
+  are never purged from the cache; a closed order is, with its index,
+  unless an order linked to it is still open: a bracket's filled entry
+  stays while a leg is open, but a market entry with a time limit, linked
+  to none, goes while its position stays open, so the trade is read from
+  the position's fills and the legs' own link to their entry, not from
+  the entry's order nor `Cache::position_for_order`. Once a trade has
+  ended, its legs are purged with its entry.
 - At start, `orders::arm_open_trades(self)?` sets the time alert of each
   trade of the strategy again, from the cache, whose entry is still an
   open order (walked as Nautilus' `reactivate_gtd_timers` walks them) or
@@ -778,9 +781,10 @@ of its choosing (`model::features`, `model::decide`).
   decide on its last quote, and its targets would be the spread and the
   fees. The market data is the quotes, trades, bars, depth and deltas of
   the traded instrument a feature reads (`FeatureSet::last_update`), and
-  its last quote in the cache, which a model strategy's harness reads
-  when no series reads the traded instrument (see "Root ticks and the
-  traded instrument"), whatever their kind or venue, with no calendar of
+  its last quote and trade in the cache, of the series of it the model
+  handle subscribes: those the strategy reads, or the quotes its harness
+  reads when no series reads the traded instrument (see "Root ticks and
+  the traded instrument"), whatever their kind or venue, with no calendar of
   sessions; not another
   instrument's, which may trade while the traded one is closed, nor
   custom data, which may come on a weekend. The data engine builds no bar
@@ -825,8 +829,10 @@ of its choosing (`model::features`, `model::decide`).
   fill-catalog fetches, a backtest or dataset run replays and the handle
   subscribes them. When a series reads it, the strategy's own series of
   it serve and no quotes are added: an OKX strategy reads its candles
-  alone, which OKX's archive serves, and the barrier's ATR is built from
-  what the strategy reads of it (`TargetsConfig::atr_bars`).
+  alone, which OKX's archive serves, the barrier's ATR is built from
+  what the strategy reads of it (`TargetsConfig::atr_bars`), and the
+  handle subscribes the strategy's tick series of it, its trades read
+  alone making the decisions fresh.
   A futures root traded is refused at load: orders go to a contract.
   Bars on a root are Nautilus' continuous bars and do not roll this way.
 - **Rows.** `decide` snapshots the features if the decision is fresh and
