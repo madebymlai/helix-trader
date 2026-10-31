@@ -44,7 +44,6 @@ fn x_perp_ema_cross() -> EmaCrossConfig {
         r#"
         [base]
         strategy_id = "EMA_CROSS-001"
-        order_id_tag = "001"
         use_hyphens_in_client_order_ids = false
 
         [data]

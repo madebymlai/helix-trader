@@ -26,11 +26,12 @@ use crate::common::{
 use helix_trader::{
     backtest::Backtest,
     model::{
+        ModelStrategy,
         handle::Mode,
         launcher::{Launcher, Retrained},
         targets::Side,
     },
-    strategy::model_ema::{self, ModelEma, ModelEmaConfig},
+    strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::Money;
@@ -42,6 +43,9 @@ use tempfile::TempDir;
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
 const CONFIG: &str = r#"
+    [base]
+    strategy_id = "MODEL_EMA-001"
+
     [data]
     series = [
         { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
@@ -76,7 +80,6 @@ fn t() -> Timestamp {
 fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("train")
-        .arg("model_ema")
         .arg("--config")
         .arg(config)
         .arg("--catalog")
@@ -118,7 +121,7 @@ fn kept_with_its_figures(text: &str) -> bool {
 /// `train` subcommand built in `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
-    let dataset = model_ema::dataset(&config, catalog.path(), &venue())
+    let dataset = ModelEma::dataset(&config, catalog.path(), &venue())
         .unwrap()
         .manifest()
         .unwrap();
@@ -131,7 +134,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         at,
         6,
     );
-    model_ema::training(&config, catalog.path(), models, &venue())
+    ModelEma::training(&config, catalog.path(), models, &venue())
         .unwrap()
         .store(Side::Long)
         .unwrap()
@@ -224,7 +227,6 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     // As a live node starts it (`retrain_args`), with the fixture's costs.
     let args = [
         "train".as_ref(),
-        "model_ema".as_ref(),
         "--config".as_ref(),
         config_path.as_os_str(),
         "--catalog".as_ref(),
@@ -260,7 +262,6 @@ fn backtest(
 ) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("backtest")
-        .arg("model_ema")
         .arg("--config")
         .arg(config)
         .arg("--catalog")

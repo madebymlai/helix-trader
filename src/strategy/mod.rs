@@ -2,7 +2,8 @@
 //!
 //! Build step 5. The port is the Nautilus `Strategy` trait
 //! (`nautilus_trading`): backtest and live are generic over it and never
-//! name a concrete strategy. `main` picks one by name and builds it.
+//! name a concrete strategy. `main` picks one by the name of its config's
+//! strategy id (`strategy_id_of`) and builds it.
 //!
 //! Each strategy is its own submodule and exposes only its constructor and
 //! config. Inside, `mod.rs` is the thin Nautilus wiring: a struct holding a
@@ -41,7 +42,9 @@ mod standard;
 pub mod warmup;
 
 pub use indicators::{AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig};
-pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
+pub use standard::{
+    DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument, strategy_id_of,
+};
 pub use session::Session;
 
 use std::str::FromStr;

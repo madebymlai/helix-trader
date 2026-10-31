@@ -24,10 +24,11 @@ use crate::common::{
 use helix_trader::{
     backtest::Backtest,
     model::{
+        ModelStrategy,
         dataset::{self, DatasetRow},
         handle::{Mode, SettledRows},
     },
-    strategy::model_ema::{self, ModelEma, ModelEmaConfig},
+    strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
 
@@ -35,6 +36,9 @@ use jiff::{SignedDuration, Timestamp};
 /// bracket 1.5 ATRs of 3 hourly bars in its favour, 7.5 bps against,
 /// closed after 45 minutes, and a horizon of 30 minutes, of one ounce.
 const CONFIG: &str = r#"
+    [base]
+    strategy_id = "MODEL_EMA-001"
+
     [data]
     series = [
         { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
@@ -78,7 +82,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
         from - SignedDuration::from_hours(5),
         to + SignedDuration::from_hours(1),
     );
-    let dataset = model_ema::dataset(&config, catalog.path(), &venue()).unwrap();
+    let dataset = ModelEma::dataset(&config, catalog.path(), &venue()).unwrap();
     let (first, last) = dataset::days(from, to - SignedDuration::from_nanos(1));
     dataset
         .build(first, last, |start, end| {

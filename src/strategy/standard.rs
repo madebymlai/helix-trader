@@ -5,7 +5,7 @@ use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use nautilus_model::{
     data::{BarSpecification, BarType, NautilusDataType},
     enums::{AggregationSource, BarAggregation, PriceType},
-    identifiers::InstrumentId,
+    identifiers::{InstrumentId, StrategyId},
     types::Quantity,
 };
 use nautilus_trading::strategy::StrategyConfig;
@@ -21,8 +21,10 @@ use super::{
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
 /// names and types, and the strategy's own part `P` (see `Part`).
 ///
-/// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
-///   one.
+/// - `[base]`: Nautilus' `StrategyConfig` as is, its `strategy_id`
+///   required: the name of that id, Nautilus' NAME-TAG, is the strategy
+///   the TOML configures (`strategy_id_of`), and its tag the order tag
+///   Nautilus derives when `order_id_tag` is unset.
 /// - `[data]`: what the strategy reads (see `DataConfig`).
 /// - `[indicators]`: the indicators its code reads, by name (see
 ///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
@@ -46,17 +48,14 @@ pub struct StandardConfig<P: Part> {
 
 /// A strategy's part of its config: its own fields, at the top level of
 /// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
-/// how many instruments it trades, the indicators it reads, its default
-/// `[base]` and its own rules. The standard tables are not its to drop or
-/// rename.
+/// how many instruments it trades, the indicators it reads and its own
+/// rules. The standard tables are not its to drop or rename.
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
     /// The indicators its code reads, each by name and arguments
     /// (`Declared`): `[indicators]` configures these and no other.
     const INDICATORS: &'static [&'static dyn Declaration] = &[];
-    /// Its `[base]` when the TOML has none.
-    fn default_base() -> StrategyConfig;
     /// Pushes onto `errors` every violation of its own rules in `config`,
     /// each under its field.
     fn validate(config: &StandardConfig<Self>, errors: &mut ConfigErrorCollector);
@@ -82,20 +81,36 @@ impl<P: Part> StandardConfig<P> {
 
     /// # Errors
     ///
-    /// Returns every violation of the rules of `[data]` (see
-    /// `DataConfig`), of `[indicators]` (those the strategy declares, each
-    /// table parsed and built by its declaration; see `IndicatorsConfig`),
-    /// of `[trade]` (as many instruments as the strategy trades, each
-    /// `trade_size` positive) and of the strategy's own (`Part::validate`):
-    /// Nautilus' `ConfigError` of each, with its field, as one
-    /// `ConfigError::Multiple` if there are several.
+    /// Returns every violation of the rules of `[base]` (a strategy id),
+    /// of `[data]` (see `DataConfig`), of `[indicators]` (those the
+    /// strategy declares, each table parsed and built by its declaration;
+    /// see `IndicatorsConfig`), of `[trade]` (as many instruments as the
+    /// strategy trades, each `trade_size` positive) and of the strategy's
+    /// own (`Part::validate`): Nautilus' `ConfigError` of each, with its
+    /// field, as one `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
+        errors.check(
+            self.base.strategy_id.is_some(),
+            ConfigError::missing_field("base.strategy_id"),
+        );
         self.data.validate(&mut errors);
         self.indicators.validate(P::INDICATORS, &mut errors);
         self.trade.validate(P::INSTRUMENTS, &mut errors);
         P::validate(self, &mut errors);
         errors.into_result()
+    }
+
+    /// The strategy's id, `[base] strategy_id`, which `validate` requires.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the base has none.
+    #[must_use]
+    pub fn strategy_id(&self) -> StrategyId {
+        self.base
+            .strategy_id
+            .expect("a validated config has a strategy id")
     }
 
     /// What the strategy needs from data: the bars and the ticks of its
@@ -123,6 +138,25 @@ impl<P: Part> StandardConfig<P> {
             warmup: self.data.warmup,
         }
     }
+}
+
+/// The strategy id of the config `toml`, its `[base] strategy_id`: read
+/// before the strategy is known, since the id's name picks it, the rest of
+/// the TOML left to that strategy's `StandardConfig::load`.
+///
+/// # Errors
+///
+/// Returns serde's error if the TOML has no `[base]` or one Nautilus'
+/// `StrategyConfig` refuses, or a `ConfigError` if it has no strategy id.
+pub fn strategy_id_of(toml: &str) -> anyhow::Result<StrategyId> {
+    /// A config's `[base]`, its other keys unread.
+    #[derive(Deserialize)]
+    struct Based {
+        base: StrategyConfig,
+    }
+    let Based { base } = toml::from_str(toml)?;
+    let id = base.strategy_id;
+    Ok(id.ok_or_else(|| ConfigError::missing_field("base.strategy_id"))?)
 }
 
 /// `[data]`: what the strategy reads, its warmup and its session.
@@ -387,7 +421,7 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
             .try_into()
             .map_err(de::Error::custom)?;
         Ok(StandardConfig {
-            base: base.unwrap_or_else(P::default_base),
+            base: base.ok_or_else(|| de::Error::missing_field("base"))?,
             data: data.ok_or_else(|| de::Error::missing_field("data"))?,
             indicators: indicators.unwrap_or_default(),
             trade: trade.ok_or_else(|| de::Error::missing_field("trade"))?,
@@ -398,8 +432,6 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::identifiers::StrategyId;
-
     use super::*;
 
     /// A pairs strategy: two instruments traded, its own field a `spread`
@@ -418,13 +450,6 @@ mod tests {
     impl Part for Pairs {
         const INSTRUMENTS: usize = 2;
 
-        fn default_base() -> StrategyConfig {
-            StrategyConfig {
-                strategy_id: Some(StrategyId::from("PAIRS-001")),
-                ..Default::default()
-            }
-        }
-
         fn validate(config: &StandardConfig<Self>, errors: &mut ConfigErrorCollector) {
             errors.check(
                 config.own.spread > 0,
@@ -435,6 +460,9 @@ mod tests {
 
     const TOML: &str = r#"
         spread = 3
+
+        [base]
+        strategy_id = "PAIRS-001"
 
         [data]
         series = [
@@ -472,6 +500,7 @@ mod tests {
                 ConfigError::InvalidValue { field, .. }
                 | ConfigError::Range { field, .. }
                 | ConfigError::EmptyField { field }
+                | ConfigError::MissingField { field }
                 | ConfigError::InvalidReference { field, .. } => vec![field.clone()],
                 ConfigError::MutuallyExclusiveFields { fields } => fields.clone(),
                 err => panic!("unexpected config error {err:?}"),
@@ -515,20 +544,68 @@ mod tests {
         assert_eq!(config.data.session.unwrap().open.to_string(), "08:30:00");
     }
 
+    /// The TOML of `TOML` without its `[base]` table.
+    fn without_base() -> String {
+        TOML.replace("[base]\n        strategy_id = \"PAIRS-001\"\n", "")
+    }
+
     #[test]
-    fn without_a_base_the_strategys_default_base_is_used() {
-        let config = load(TOML).unwrap();
-        assert_eq!(config.base.strategy_id, Some(StrategyId::from("PAIRS-001")));
+    fn a_config_without_a_base_is_refused_naming_it() {
+        let toml = without_base();
+        assert_ne!(toml, TOML);
+        let err = shape_error(&toml);
+        assert!(err.contains("`base`"), "{err}");
+    }
+
+    #[test]
+    fn a_base_without_a_strategy_id_is_refused() {
+        let toml = TOML.replace(
+            "strategy_id = \"PAIRS-001\"",
+            "use_hyphens_in_client_order_ids = false",
+        );
+        assert_eq!(error_fields(&toml), ["base.strategy_id"]);
+    }
+
+    /// Read before the strategy, which its name picks, is known: the
+    /// tables and fields of any strategy are left unread.
+    #[test]
+    fn the_strategy_id_is_read_before_the_strategy_is_known() {
+        let own = format!("{TOML}\n[model]\nlearner = 1\n");
+        assert_eq!(strategy_id_of(&own).unwrap(), StrategyId::from("PAIRS-001"));
+        let err = strategy_id_of(&without_base()).unwrap_err();
+        assert!(err.to_string().contains("`base`"), "{err}");
+        let toml = TOML.replace("strategy_id = \"PAIRS-001\"", "order_id_tag = \"001\"");
+        let err = strategy_id_of(&toml).unwrap_err();
+        assert!(err.to_string().contains("base.strategy_id"), "{err}");
+    }
+
+    #[test]
+    fn the_strategy_id_is_the_bases() {
+        assert_eq!(
+            load(TOML).unwrap().strategy_id(),
+            StrategyId::from("PAIRS-001")
+        );
     }
 
     #[test]
     fn the_base_is_nautilus_strategy_config() {
-        let toml = format!(
-            "{TOML}\n[base]\nstrategy_id = \"PAIRS-002\"\nuse_hyphens_in_client_order_ids = false\n"
+        let toml = TOML.replace(
+            "strategy_id = \"PAIRS-001\"",
+            "strategy_id = \"PAIRS-002\"\nuse_hyphens_in_client_order_ids = false",
         );
         let config = load(&toml).unwrap();
         assert_eq!(config.base.strategy_id, Some(StrategyId::from("PAIRS-002")));
         assert!(!config.base.use_hyphens_in_client_order_ids);
+    }
+
+    /// Nautilus derives the order id tag from the strategy id when the
+    /// base sets none: `PAIRS-001`'s is `001`.
+    #[test]
+    fn a_base_naming_the_strategy_id_alone_tags_its_orders_with_its_tag() {
+        let config = load(TOML).unwrap();
+        assert_eq!(config.base.order_id_tag, None);
+        let core = nautilus_trading::strategy::StrategyCore::new_checked(config.base).unwrap();
+        assert_eq!(core.order_id_tag(), Some("001"));
     }
 
     #[test]
@@ -560,7 +637,11 @@ mod tests {
 
     #[test]
     fn an_unknown_key_in_the_base_is_refused_naming_it() {
-        let err = shape_error(&format!("{TOML}\n[base]\nstrategy_idd = \"X-001\"\n"));
+        let toml = TOML.replace(
+            "strategy_id = \"PAIRS-001\"",
+            "strategy_id = \"PAIRS-001\"\nstrategy_idd = \"X-001\"",
+        );
+        let err = shape_error(&toml);
         assert!(err.contains("strategy_idd"), "{err}");
     }
 
@@ -646,6 +727,9 @@ mod tests {
     }
 
     const COMPOSITE_TOML: &str = r#"
+        [base]
+        strategy_id = "PAIRS-001"
+
         [data]
         series = [
             { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },

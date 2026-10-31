@@ -24,13 +24,14 @@ module.
 ## The command
 
 ```
-helix-trader backtest ema --config ema.toml --start 2026-01-01 --end 2026-10-01 \
+helix-trader backtest --config ema.toml --start 2026-01-01 --end 2026-10-01 \
   [--catalog catalog] (--commission "3 EUR" | --commission-rate 0.0005) \
   --balance "10000 EUR" [--leverage 10] [--models models] \
   [--dataset-balance "10000000 EUR"]
 ```
 
-`main` loads and validates the strategy's config, builds the `Backtest`
+`main` picks the strategy by the name of the config's `[base]
+strategy_id`, loads and validates the config, builds the `Backtest`
 from its data requirements (its bar types and ticks: a backtest requests
 no warmup), runs the strategy and prints `report`, in this order:
 
@@ -872,6 +873,9 @@ trade. Funding not included (filled before funding was stored).
 
 ```toml
 # or BTC-USD_UM_XPERP-310404.OKX, trade_size "100"
+[base]
+strategy_id = "EMA_CROSS-001"
+
 [data]
 series = [
     { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
@@ -883,7 +887,7 @@ instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "1" }]
 ```
 
 ```
-helix-trader backtest ema --config swap.toml --catalog okx-cat \
+helix-trader backtest --config swap.toml --catalog okx-cat \
   --start 2026-10-14 --end 2026-10-21 --commission-rate 0.0005 --balance "10000 USDT"
 ```
 
@@ -1003,7 +1007,7 @@ from the time it was trained at; `main` runs the steps of `model::walk`:
 2. For each retrain time before `--end` a store has no model valid
    from (a side's of the primary, or its meta model's after the
    primary's first model: before it the meta has no row), in time order,
-   a child process, `train <strategy> --at t`, trains at it (each side of
+   a child process, `train --config .. --at t`, trains at it (each side of
    the primary, then its meta model); its window's days already built,
    it replays none. A model in the store is reused, so a second backtest
    of the span starts no child. A train that kept the current model
@@ -1140,9 +1144,9 @@ outside Xetra's continuous trading), EMA 5/15 on
 09-12, 3 EUR an order:
 
 ```
-helix-trader fill-catalog ema --config sxr8.toml --catalog sxr8-cat \
+helix-trader fill-catalog --config sxr8.toml --catalog sxr8-cat \
   --start 2026-09-04 --end 2026-09-12
-helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
+helix-trader backtest --config sxr8.toml --catalog sxr8-cat \
   --start 2026-09-07 --end 2026-09-12 --commission "3 EUR" --balance "10000 EUR"
 ```
 
@@ -1163,9 +1167,9 @@ orders, all rejected `No market for SXR8.IBIS`, and ended at
 "720h"`, before fills on quotes (bar execution, one tick of slippage):
 
 ```
-helix-trader fill-catalog ema --config sxr8.toml --catalog sxr8-cat \
+helix-trader fill-catalog --config sxr8.toml --catalog sxr8-cat \
   --start 2025-10-01 --end 2026-10-03
-helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
+helix-trader backtest --config sxr8.toml --catalog sxr8-cat \
   --start 2026-01-01 --end 2026-10-01 --commission "3 EUR" --balance "10000 EUR"
 ```
 
@@ -1216,6 +1220,9 @@ over the warmup and the window (194,609 quotes, 973 crossed pairs and 8
 one-sided bars dropped, 21 minutes):
 
 ```toml
+[base]
+strategy_id = "EMA_CROSS-001"
+
 [data]
 series = [
     { data = "bars", instrument_id = "SXR8.IBIS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
@@ -1228,9 +1235,9 @@ instruments = [{ instrument_id = "SXR8.IBIS", trade_size = "5" }]
 ```
 
 ```
-helix-trader fill-catalog ema --config sxr8.toml --catalog sxr8-cat \
+helix-trader fill-catalog --config sxr8.toml --catalog sxr8-cat \
   --start 2025-12-01 --end 2026-10-01
-helix-trader backtest ema --config sxr8.toml --catalog sxr8-cat \
+helix-trader backtest --config sxr8.toml --catalog sxr8-cat \
   --start 2026-01-01 --end 2026-10-01 --commission-rate 0.0005 --balance "10000 EUR"
 ```
 
@@ -1319,7 +1326,10 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   dataset run purging them every minute, its run otherwise the same. The
   command line is tested in
   `main.rs`: required flags, exactly one commission flag, malformed
-  `Money`, the window check, `--leverage` 1 unless given.
+  `Money`, the window check, `--leverage` 1 unless given, no strategy
+  name on the command line, the strategy picked by the name of the
+  config's strategy id, an unknown one refused listing the known names,
+  and the children handed the config and no strategy name.
 - Integration tests in `tests/backtest/`, one node per test, run the real EMA
   strategy through `Backtest::run` on a fixture catalog (`tests/common`:
   SXR8.IBIS in EUR and its 1-minute quotes only, bid and ask at the mid
@@ -1557,7 +1567,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     recorded of its side, worked out by hand (the long -3.64, 2.66 and
     0.56 USD, the short 2.66, -3.64 and -1.44).
   - `backtest_model_ema.rs`: the `model_ema` strategy end to end: the
-    binary's `train model_ema --at` on a fixture config of the long alone
+    binary's `train --at` on a fixture config of the long alone
     refuses the fake learner's model, the same probability on every row,
     which earns no more than taking every trade, failing with the reason
     and the holdout's figures, and the store stays empty, no trade; with
@@ -1568,7 +1578,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     first decision and it trades the next two: 4 orders, 2 positions. The
     same `train`, started as a live node starts it, by
     `Launcher::process` on the test binary's `helix-trader`, is kept with
-    the same reason and figures. The binary's `backtest model_ema` from
+    the same reason and figures. The binary's `backtest` of it from
     midnight of the 23rd to noon of the 24th, retrained daily, builds the
     4 days from its first window and retrains at both midnights, in child
     processes; each keeps no model, its reason printed with its figures,

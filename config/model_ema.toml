@@ -1,19 +1,19 @@
 # Model EMA (`src/strategy/model_ema/`), read into `ModelEmaConfig`: an
 # example strategy trading on a learned model, whose features are a fast
 # and a slow EMA of each bars series it reads:
-#   cargo run --release -- train model_ema --config config/model_ema.toml ...
-#   cargo run --release -- backtest model_ema --config config/model_ema.toml ...
+#   cargo run --release -- train --config config/model_ema.toml ...
+#   cargo run --release -- backtest --config config/model_ema.toml ...
 # Every field is described in `src/strategy/README.md`.
 #
 # Its trades are its model's decisions, sent as given: the target its
 # model was labelled on, here the barrier of [model].targets, a bracket
 # closed at its limit.
 
-# Nautilus' StrategyConfig; defaults to MODEL_EMA-001, tag 001, when left
-# out. The strategy id keys the model's store.
-# [base]
-# strategy_id = "MODEL_EMA-001"
-# order_id_tag = "001"
+# Nautilus' StrategyConfig. The name of its strategy id, MODEL_EMA, picks
+# the strategy; Nautilus tags its orders with the id's tag, 001. The
+# strategy id keys the model's store.
+[base]
+strategy_id = "MODEL_EMA-001"
 
 [data]
 # The series read (all stored in the catalog): hourly bars of the mid,

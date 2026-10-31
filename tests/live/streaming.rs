@@ -524,6 +524,9 @@ fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
 /// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes,
 /// its trades and its stored depth replayed as they are. Too slow to trade in a few seconds.
 const EMA_CONFIG: &str = r#"
+    [base]
+    strategy_id = "EMA_CROSS-001"
+
     [data]
     series = [
         { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
@@ -545,7 +548,7 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
     let config = root.join("ema.toml");
     std::fs::write(&config, EMA_CONFIG).unwrap();
     Command::new(env!("CARGO_BIN_EXE_helix-trader"))
-        .args(["backtest", "ema", "--config"])
+        .args(["backtest", "--config"])
         .arg(&config)
         .arg("--catalog")
         .arg(root.join("catalog"))
@@ -559,6 +562,9 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
 /// seconds on its 1-second bars, each target held a second, closed before
 /// the next.
 const MODEL_EMA_CONFIG: &str = r#"
+    [base]
+    strategy_id = "MODEL_EMA-001"
+
     [data]
     series = [
         { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
@@ -588,7 +594,7 @@ fn dataset(root: &Path, start: Timestamp, end: Timestamp) -> Output {
     let config = root.join("model_ema.toml");
     std::fs::write(&config, MODEL_EMA_CONFIG).unwrap();
     Command::new(env!("CARGO_BIN_EXE_helix-trader"))
-        .args(["dataset", "model_ema", "--config"])
+        .args(["dataset", "--config"])
         .arg(&config)
         .arg("--catalog")
         .arg(root.join("catalog"))

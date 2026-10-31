@@ -11,7 +11,9 @@ adds only what Nautilus lacks.
 ## Commands
 
 One binary with one subcommand per process, since Nautilus allows one node
-per process. Each takes the strategy name and its TOML config.
+per process. Each takes a strategy's TOML config, whose `[base]
+strategy_id` names the strategy: `EMA_CROSS-001` is the EMA crossover,
+`MODEL_EMA-001` the model strategy, the name before the tag picking it.
 
 | Command | Does |
 |---|---|
@@ -33,6 +35,9 @@ cp .env.example .env    # IB paper login, OKX API key, IC cTrader app
 cargo build --release
 
 cat > ema.toml <<'EOF'
+[base]
+strategy_id = "EMA_CROSS-001"
+
 [data]
 series = [
     { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
@@ -47,11 +52,11 @@ slow = { period = 30 }
 instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]
 EOF
 
-target/release/helix-trader fill-catalog ema --config ema.toml \
+target/release/helix-trader fill-catalog --config ema.toml \
   --start 2026-01-01 --end 2026-10-01
-target/release/helix-trader backtest ema --config ema.toml \
+target/release/helix-trader backtest --config ema.toml \
   --start 2026-02-01 --end 2026-10-01 --commission-rate 0.0005 --balance "10000 USDT"
-target/release/helix-trader live ema --config ema.toml
+target/release/helix-trader live --config ema.toml
 ```
 
 The config is the universe: instruments, cadence, warmup and the
