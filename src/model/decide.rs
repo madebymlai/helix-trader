@@ -33,8 +33,9 @@
 //!
 //! The market data is the quotes, trades, bars, depth and deltas of the
 //! traded instrument a feature reads (`FeatureSet::last_update`), whatever
-//! their kind or venue, and its last quote in the cache, which a model
-//! strategy's harness reads when no series of the strategy reads the
+//! their kind or venue, and its last quote and trade in the cache, of the
+//! series of it the model handle subscribes: those the strategy reads, or
+//! the quotes its harness reads when no series of the strategy reads the
 //! traded instrument (`handle::traded_quotes`), with no calendar of
 //! sessions. Not the data of
 //! another instrument, which may trade while the traded one is closed, nor
@@ -163,8 +164,9 @@ pub fn is_decision(event: &TimeEvent) -> bool {
 /// if the decision is fresh and every feature is initialized, and
 /// publishes the row on the message bus, keyed by `strategy`'s id. A
 /// decision of a cadence is fresh if a feature read data of
-/// `instrument_id`, or its last quote in `strategy`'s cache was made, after
-/// the cadence's previous decision (see the module documentation); a stale one is skipped, logged at debug. A decision on
+/// `instrument_id`, or its last quote or trade in `strategy`'s cache was
+/// made, after the cadence's previous decision (see the module
+/// documentation); a stale one is skipped, logged at debug. A decision on
 /// an event is fresh.
 ///
 /// # Panics
@@ -182,13 +184,13 @@ where
     let now = strategy.clock().timestamp_ns();
     if let DecisionRule::Every(interval) = rule {
         let previous = UnixNanos::from(Timestamp::from(now) - interval);
-        let quoted = strategy
-            .cache()
-            .quote(&instrument_id)
-            .map(|quote| quote.ts_init);
+        let cache = strategy.cache();
+        let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
+        let traded = cache.trade(&instrument_id).map(|trade| trade.ts_init);
         if features
             .last_update(instrument_id)
             .max(quoted)
+            .max(traded)
             .is_none_or(|last| last <= previous)
         {
             log::debug!(

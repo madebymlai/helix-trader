@@ -55,12 +55,12 @@
 //! error, and the current one kept; it is not read again (`store::Swap`).
 //!
 //! The handle owns a `rolls::Roller` of the features' tick series
-//! (`FeatureSet::ticks`) and of the traded instrument's quotes
-//! (`traded_quotes`) when its data requirements hold them, which the
-//! harness reads when no series of the strategy reads the traded
-//! instrument: `start` subscribes each on the contract standing for it, a
-//! plain instrument once, a root on its front contract with its roll
-//! alert, and
+//! (`FeatureSet::ticks`) and of the tick series of the traded instrument
+//! its data requirements hold, which the harness reads for the decisions'
+//! freshness, its quotes (`traded_quotes`) among them when no series of
+//! the strategy reads it: `start` subscribes each on the contract standing
+//! for it, a plain instrument once, a root on its front contract with its
+//! roll alert, and
 //! the strategy hands the handle its time events (after
 //! `strategy::orders::on_time_event`), the roller first. At a roll the
 //! root's features move to the post contract and restart
@@ -247,8 +247,7 @@ pub struct ModelHandle {
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
     /// Subscribes the features' ticks, on the contract standing for each
-    /// root, and the traded instrument's quotes (`traded_quotes`) if the
-    /// requirements hold them.
+    /// root, and the requirements' tick series of the traded instrument.
     roller: Roller,
 }
 
@@ -483,9 +482,14 @@ impl ModelHandle {
         }
         .feeding(Rc::clone(features) as SharedActorIndicator);
         let mut ticks = features.ticks();
-        let quotes = traded_quotes(traded);
-        if requirements.ticks.contains(&quotes) && !ticks.contains(&quotes) {
-            ticks.push(quotes);
+        for tick in requirements
+            .ticks
+            .iter()
+            .filter(|tick| tick.instrument_id == traded)
+        {
+            if !ticks.contains(tick) {
+                ticks.push(tick.clone());
+            }
         }
         let roller = match mode {
             Mode::Live { .. } => Roller::live(ticks),
@@ -537,7 +541,7 @@ impl ModelHandle {
 
     /// Starts the handle on `strategy`, from `on_start`: starts the
     /// strategy's warmup (`Warmup::start`) and its roller, which subscribes
-    /// the features' ticks and the traded instrument's quotes, a root's on
+    /// the features' ticks and the traded instrument's, a root's on
     /// the contract standing for it, registers the features (and
     /// starts the barrier's ATR: the stops', trading on a barrier, a rule's
     /// or a model's labelled on it, or, in a dataset run, the targets', and
@@ -967,6 +971,10 @@ mod tests {
         actor::indicators::ActorIndicator,
         cache::Cache,
         clock::{Clock, VirtualClock},
+        msgbus::{
+            self,
+            switchboard::{get_quotes_topic, get_trades_topic},
+        },
         timer::TimeEventCallback,
     };
     use nautilus_core::UnixNanos;
@@ -1406,6 +1414,63 @@ mod tests {
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
             Some(c(0.8))
+        );
+    }
+
+    /// A strategy reading AUD/USD, which it trades, as trades alone, its
+    /// features GBP/USD's quotes: the handle subscribes AUD/USD's trades,
+    /// and no quotes of it, beside the features' GBP/USD quotes.
+    #[test]
+    fn the_handle_subscribes_the_series_the_strategy_reads_of_the_traded_instrument() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let gbp = InstrumentId::from("GBP/USD.SIM");
+        let features = FeatureSet::builder()
+            .quotes(
+                gbp,
+                "mid",
+                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+            )
+            .build()
+            .unwrap();
+        let tick = |data, instrument_id| TickSeries {
+            data,
+            instrument_id,
+        };
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(NautilusDataType::TradeTick, InstrumentId::from(AUD)),
+                tick(NautilusDataType::QuoteTick, gbp),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config(),
+            &requirements,
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap();
+
+        handle.start(&mut probe).unwrap();
+
+        let aud = InstrumentId::from(AUD);
+        assert_eq!(
+            msgbus::exact_subscriber_count_trades(get_trades_topic(aud)),
+            1
+        );
+        assert_eq!(
+            msgbus::exact_subscriber_count_quotes(get_quotes_topic(aud)),
+            0
+        );
+        assert_eq!(
+            msgbus::exact_subscriber_count_quotes(get_quotes_topic(gbp)),
+            1
         );
     }
 
