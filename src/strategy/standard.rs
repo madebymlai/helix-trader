@@ -27,7 +27,8 @@ use crate::model::{
 ///
 /// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
 ///   one.
-/// - `[data]`: what the strategy reads (see `DataConfig`).
+/// - `[data]`: what the strategy reads (see `DataConfig`), its series
+///   those its part answers it reads (`Part::reads`) and no other.
 /// - `[indicators]`: the indicators its code reads, by name (see
 ///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
 ///   without one.
@@ -57,8 +58,8 @@ pub struct StandardConfig<P: Part> {
 /// A strategy's part of its config: its own fields, at the top level of
 /// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
 /// how many instruments it trades, the indicators it reads, whether it
-/// trades on a model, its default `[base]` and its own rules. The standard
-/// tables are not its to drop or rename.
+/// trades on a model, its default `[base]`, the series it reads and its
+/// own rules. The standard tables are not its to drop or rename.
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
@@ -66,13 +67,24 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// (`Declared`): `[indicators]` configures these and no other.
     const INDICATORS: &'static [&'static dyn Declaration] = &[];
     /// Whether it trades on a model (`model::ModelStrategy`): if so its
-    /// TOML has a `[model]`, and it trades one instrument (`INSTRUMENTS`
-    /// 1). None unless it says.
+    /// TOML has a `[model]`, it trades one instrument (`INSTRUMENTS` 1),
+    /// and it builds its features (`model::ModelPart`). None unless it
+    /// says.
     const TAKES_MODEL: bool = false;
     /// Its `[base]` when the TOML has none: its strategy id alone, since
     /// Nautilus tags its orders with the id's tag when `order_id_tag` is
     /// unset (`StrategyCore::new_checked`).
     fn default_base() -> StrategyConfig;
+    /// The series the strategy reads of `config`, those its code
+    /// subscribes to and registers indicators for: `[data] series` lists
+    /// these and no other (see `StandardConfig::validate`). The load asks
+    /// only of a config whose `[trade]` lists `INSTRUMENTS` instruments.
+    ///
+    /// # Errors
+    ///
+    /// Returns the strategy's own errors reading `config`, each under its
+    /// field, as one `ConfigError::Multiple` if there are several.
+    fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>>;
     /// Pushes onto `errors` every violation of its own rules in `config`,
     /// each under its field: none unless it says.
     fn validate(_config: &StandardConfig<Self>, _errors: &mut ConfigErrorCollector) {}
@@ -98,17 +110,54 @@ impl<P: Part> StandardConfig<P> {
     /// table parsed and built by its declaration; see `IndicatorsConfig`),
     /// of `[trade]` (as many instruments as the strategy trades, each
     /// `trade_size` positive), of a strategy trading on a model (see
-    /// `validate_model`) and of the strategy's own (`Part::validate`):
-    /// Nautilus' `ConfigError` of each, with its field, as one
-    /// `ConfigError::Multiple` if there are several.
+    /// `validate_model`), of the series read (see `validate_series`) and
+    /// of the strategy's own (`Part::validate`): Nautilus' `ConfigError` of
+    /// each, with its field, as one `ConfigError::Multiple` if there are
+    /// several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);
         self.indicators.validate(P::INDICATORS, &mut errors);
         self.trade.validate(P::INSTRUMENTS, &mut errors);
         self.validate_model(&mut errors);
+        self.validate_series(&mut errors);
         P::validate(self, &mut errors);
         errors.into_result()
+    }
+
+    /// Pushes onto `errors` the strategy's own errors reading the config
+    /// (`Part::reads`), or else each series `[data]` lists that it does not
+    /// read, under `data.series[i]`, then each it reads that `[data]` does
+    /// not list, under `data.series`, each naming the series.
+    fn validate_series(&self, errors: &mut ConfigErrorCollector) {
+        // What a strategy reads may depend on what it trades: another
+        // count of instruments is `[trade]`'s violation.
+        if self.trade.instruments.len() != P::INSTRUMENTS {
+            return;
+        }
+        let read = match P::reads(self) {
+            Ok(read) => read,
+            Err(e) => {
+                errors.push(e);
+                return;
+            }
+        };
+        let listed = &self.data.series;
+        for (i, series) in listed.iter().enumerate() {
+            errors.check(
+                read.contains(series),
+                ConfigError::invalid_value(
+                    format!("data.series[{i}]"),
+                    format!("the strategy does not read {series}"),
+                ),
+            );
+        }
+        for series in read.iter().filter(|series| !listed.contains(series)) {
+            errors.push(ConfigError::invalid_value(
+                "data.series",
+                format!("the strategy reads {series}, which is not listed"),
+            ));
+        }
     }
 
     /// Pushes onto `errors`, if the config has a model, the violations of
@@ -200,7 +249,8 @@ impl<P: Part> StandardConfig<P> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataConfig {
-    /// The series read, bars and ticks (see `Series`).
+    /// The series read, bars and ticks (see `Series`): those the
+    /// strategy's part answers it reads (`Part::reads`), and no other.
     pub series: Vec<Series>,
     /// How far back the warmup history a live node requests at start
     /// starts; a backtest requests none, its strategy warming on the
@@ -515,6 +565,11 @@ mod tests {
                 strategy_id: Some(StrategyId::from("PAIRS-001")),
                 ..Default::default()
             }
+        }
+
+        /// Every series it lists.
+        fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
+            Ok(config.data.series.clone())
         }
 
         fn validate(config: &StandardConfig<Self>, errors: &mut ConfigErrorCollector) {
@@ -976,6 +1031,12 @@ mod tests {
                     strategy_id: Some(StrategyId::from("MODELLED-001")),
                     ..Default::default()
                 }
+            }
+
+            /// Every series it lists: the harness' answer is tested with
+            /// the harness (`model::reads`).
+            fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
+                Ok(config.data.series.clone())
             }
         }
 

@@ -100,9 +100,9 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   venue's"). Nautilus tags the strategy's orders with the id's tag when
   `order_id_tag` is unset (`StrategyCore::new_checked`), so
   `EMA_CROSS-001` tags them `001`.
-- `[data] series` lists every series read, each a Nautilus data type by
-  the name Nautilus parses (`NautilusDataType::from_str`) and its
-  instrument: `bars`, with `bar_spec` in Nautilus' `BarSpecification`
+- `[data] series` lists every series read and no other (see "Series
+  read" below), each a Nautilus data type by the name Nautilus parses
+  (`NautilusDataType::from_str`) and its instrument: `bars`, with `bar_spec` in Nautilus' `BarSpecification`
   fields and optionally `from` (see "Bar types"), or ticks read as they
   are (see `TickSeries` below). `warmup` is how far back a live start's
   history request goes (see "Warmup and training"), `session` the hours
@@ -152,8 +152,9 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   top-level key the standard tables and its fields do not take is
   refused); how many instruments it trades (`Part::INSTRUMENTS`, one for
   the EMA); whether it trades on a model (`Part::TAKES_MODEL`, none
-  unless it says); its default base; and its own rules, none unless it
-  says. It cannot drop or rename the standard tables: the config reads
+  unless it says); its default base; the series it reads
+  (`Part::reads`, which every part answers); and its own rules, none
+  unless it says. It cannot drop or rename the standard tables: the config reads
   `base`, `data`, `indicators`, `trade` and, of a strategy trading on a
   model, `model` as them, and every other key as its own.
 
@@ -184,9 +185,50 @@ config or every violation out.
   refuses `period = 0`), each reported under `indicators.<name>`, and
   none it does not declare; as many traded instruments as
   the strategy trades, each `trade_size` positive; of a strategy trading
-  on a model, a strategy id and its model valid (see below); then the
-  strategy's own rules (`Part::validate`: for the EMA, the fast period
-  below the slow one).
+  on a model, a strategy id and its model valid (see below); the series
+  read (see "Series read"); then the strategy's own rules
+  (`Part::validate`: for the EMA, the fast period below the slow one).
+
+### Series read
+
+`[data] series` lists exactly the series the strategy reads, those its
+code subscribes to and registers indicators for. Its part answers what
+they are (`Part::reads`, required, no default), and its code reads
+through that same answer, so the check and the run cannot disagree. The
+load compares the two, once `[trade]` lists as many instruments as the
+strategy trades (what it reads may depend on them), and reports each
+mismatch with every other violation, naming the series:
+
+```text
+invalid data.series[1]: the strategy does not read bars EURUSD.ICMARKETS-1-HOUR-MID-INTERNAL
+invalid data.series: the strategy reads TradeTick of GC.GLBX, which is not listed
+```
+
+A listed series nothing reads is refused under its own field,
+`data.series[i]`; a series read and not listed under `data.series`. The
+answer may be the strategy's own errors instead, each under its field:
+the EMA's with no bars series of its traded instrument,
+
+```text
+invalid trade.instruments[0].instrument_id reference ESU4.CME: has no bars series in data.series, the crossover reads one
+```
+
+- **The EMA** reads the first bars series of its traded instrument and
+  nothing else: its signal is registered for those bars
+  (`EmaCrossConfig::trade_bar_type`, its part's answer). A second bars
+  series of that instrument, ticks of it, or a series of another
+  instrument is unread.
+- **A strategy trading on a model** reads what its features read, their
+  bar types (`FeatureSet::bar_types`) and their tick series
+  (`FeatureSet::ticks`, a root's as the root), plus each listed series
+  the barrier's ATR reads, its bars or the quotes or trades they are
+  built from (see "Targets"): the ATR is built of what the strategy reads
+  of the traded instrument, so it needs none listed. The harness gives
+  that answer once (`model::reads`), from the features the part builds
+  (`model::ModelPart::features`), which every run decides on too (see
+  "Features and decisions"). The traded instrument's quotes the harness
+  adds itself (see "Root ticks and the traded instrument") are not
+  listed.
 
 `main` loads the config before anything else, so a bad config never
 starts a node, a backtest, a dataset or a training run.
@@ -215,8 +257,24 @@ impl Part for ModelEmaParams {
 }
 ```
 
-Its features are checked against `[data]` before any run (see "Features
-and decisions", "Series read").
+Its part builds its features (`model::ModelPart`), and answers what it
+reads from them through the harness (`model::reads`): `[data]` is checked
+against them at load, like every rule (see "Series read").
+
+```rust
+impl Part for ModelEmaParams {
+    ...
+    fn reads(config: &ModelEmaConfig) -> ConfigResult<Vec<Series>> {
+        model::reads(config)
+    }
+}
+
+impl ModelPart for ModelEmaParams {
+    fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
+        /* the averages of each bars series, a builder error under data.series */
+    }
+}
+```
 
 ### Bar types
 
@@ -612,10 +670,8 @@ way (backtest README, "Venue").
 #### The EMA crossover
 
 The example strategy (`ema/`) trades one instrument, the one of `[trade]
-instruments`, which must have exactly one bars series in `[data]`; the
-other series are read only: their bars are subscribed like the traded
-one's, and the EMA ignores them, as a strategy reading a signal instrument
-would read them.
+instruments`, on its bars series in `[data]`, the only series it reads
+and lists (see "Series read").
 
 A strategy reading an instrument's book lists it in `[data] series` too
 (CME gold, `GC.v.0.GLBX`, beside `XAUUSD.ICMARKETS`), no other config: a
@@ -780,22 +836,16 @@ of its choosing (`model::features`, `model::decide`).
   probability, `primary_side` and `primary_probability`, given at each
   decision on a side (see "Meta-labeling"), the set having no values
   without one.
-- **Series read.** `[data] series` lists what the features read, and
-  nothing else: before any run, a backtest, a live node, a train or a
-  dataset build, the harness builds the features of the config and
-  checks them against it (`ModelStrategy::features`, on every path:
-  `new`, `dataset`, `training`, `walk_forward`). Each series the features
-  read, their bar types (`FeatureSet::bar_types`) and their tick series
+- **Series read.** `[data] series` lists what the features read and what
+  the barrier's ATR reads of it, and nothing else, checked at load (see
+  "Config", "Series read"): the part builds the features
+  (`model::ModelPart::features`), for that check and for every run, a
+  backtest, a live node, a train or a dataset build
+  (`ModelStrategy::new`, `dataset`, `training`, `walk_forward`), so the
+  features checked are those run. Each series the features read, their
+  bar types (`FeatureSet::bar_types`) and their tick series
   (`FeatureSet::ticks`, a root's as the root), is listed as it is, bars
-  by their bar type; each series listed is read by the features or by
-  the barrier's ATR, its bars or the quotes or trades they are built
-  from (see "Targets"). The traded instrument's quotes the harness adds
-  itself (see "Root ticks and the traded instrument") are not listed. A
-  mismatch is one error naming every series missing and unread:
-
-  ```text
-  the series of [data] are not those the features read: the features read TradeTick of GC.GLBX, which [data] series does not list; [data] series lists QuoteTick of EURUSD.ICMARKETS, which neither the features nor the barrier's ATR read
-  ```
+  by their bar type.
 - **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
   indicator: `features.register(self)` in `on_start` registers it for the
   quotes and trades of each instrument, a root's contract standing for
@@ -1562,12 +1612,13 @@ ATR" above).
    name, and an arm to each `match` on it (fill-catalog's data
    requirements, backtest, live, train, dataset). A strategy trading on
    a model implements `model::ModelStrategy`: its `Params`, a part taking
-   a model (`Part::TAKES_MODEL`); `with_features`, the strategy of its
-   config deciding on the features given, its model handle in a `Mode`;
-   `warmup`; and `build_features`, its features of its config. `new`,
-   `features` (`build_features` checked against `[data]`, see "Series
-   read"), its dataset, training and walk forward follow, so every run
-   checks them. Each of its arms is one line calling main's function
+   a model (`Part::TAKES_MODEL`) that builds its features of its config
+   (`model::ModelPart::features`) and answers what it reads with the
+   harness' `model::reads`; `with_features`, the strategy of its config
+   deciding on the features given, its model handle in a `Mode`; and
+   `warmup`. `new`, its dataset, training and walk forward follow, each
+   deciding on the part's features. Every part answers what its strategy
+   reads (`Part::reads`, see "Series read"). Each of its arms is one line calling main's function
    generic over it, as `model_ema`'s; a strategy with no model refuses
    `train` and `dataset`.
 

@@ -22,7 +22,6 @@ use super::*;
 const TOML: &str = r#"
     [data]
     series = [
-        { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
         { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
     ]
     warmup = "720h"
@@ -161,6 +160,17 @@ fn rejects_two_traded_instruments() {
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
 }
 
+/// With no instrument traded, nothing is asked of the series: the count
+/// is the violation.
+#[test]
+fn rejects_no_traded_instrument_alone() {
+    let toml = TOML.replace(
+        "instruments = [{ instrument_id = \"ESM4.CME\", trade_size = \"1\" }]",
+        "instruments = []",
+    );
+    assert_eq!(error_fields(&toml), ["trade.instruments"]);
+}
+
 #[test]
 fn rejects_a_trade_instrument_without_bars() {
     let toml = TOML.replace(
@@ -170,19 +180,85 @@ fn rejects_a_trade_instrument_without_bars() {
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
 
+/// `TOML` with `series` listed after its bars series of the traded
+/// instrument.
+fn listing(series: &str) -> String {
+    TOML.replace(
+        "price_type = \"MID\" } },\n",
+        &format!("price_type = \"MID\" }} }},\n        {series},\n"),
+    )
+}
+
+/// The crossover reads the first bars series of the traded instrument: a
+/// second one is read by nothing.
 #[test]
-fn rejects_a_trade_instrument_with_two_bars_series() {
+fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
+    let toml = listing(
+        r#"{ data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
+    );
+    assert_eq!(error_fields(&toml), ["data.series[1]"]);
+    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
+    assert!(err.contains("ESM4.CME-2-HOUR-MID-INTERNAL"), "{err}");
+}
+
+#[test]
+fn rejects_bars_of_another_instrument_as_unread() {
+    let toml = listing(
+        r#"{ data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
+    );
+    assert_eq!(error_fields(&toml), ["data.series[1]"]);
+    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
+    assert!(err.contains("ESH4.CME-1-HOUR-MID-INTERNAL"), "{err}");
+}
+
+/// The crossover reads bars alone, even of the instrument it trades.
+#[test]
+fn rejects_ticks_of_the_trade_instrument_as_unread() {
+    let toml = listing(r#"{ data = "quotes", instrument_id = "ESM4.CME" }"#);
+    assert_eq!(error_fields(&toml), ["data.series[1]"]);
+    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
+    assert!(err.contains("QuoteTick of ESM4.CME"), "{err}");
+}
+
+/// The traded instrument without bars, its own error, is reported with
+/// the standard ones.
+#[test]
+fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
     let toml = TOML
         .replace(
-            "{ data = \"bars\", instrument_id = \"ESH4.CME\"",
-            "{ data = \"bars\", instrument_id = \"ESM4.CME\"",
+            "{ instrument_id = \"ESM4.CME\", trade_size",
+            "{ instrument_id = \"ESU4.CME\", trade_size",
         )
-        .replacen(
-            "step = 1, aggregation = \"HOUR\"",
-            "step = 2, aggregation = \"HOUR\"",
-            1,
-        );
-    assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
+        .replace("\"720h\"", "\"0s\"");
+    let mut fields = error_fields(&toml);
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["data.warmup", "trade.instruments[0].instrument_id"]
+    );
+}
+
+/// Each series read by nothing is reported under its field, with the
+/// standard violations and the crossover's own.
+#[test]
+fn reports_every_unread_series_with_the_other_violations() {
+    let toml = listing(
+        r#"{ data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+        { data = "trades", instrument_id = "ESM4.CME" }"#,
+    )
+    .replace("period = 10", "period = 30")
+    .replace("\"720h\"", "\"0s\"");
+    let mut fields = error_fields(&toml);
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "data.series[1]",
+            "data.series[2]",
+            "data.warmup",
+            "indicators.fast.period"
+        ]
+    );
 }
 
 #[test]

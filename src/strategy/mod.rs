@@ -17,11 +17,12 @@
 //! base type: `StandardConfig`, the tables every strategy's TOML has, holds
 //! the series read, their warmup and their `Session`, the indicators read
 //! (`IndicatorsConfig`), the instruments traded and the model of a strategy
-//! trading on one, beside the strategy's own table (its `Part`). The
-//! exception is a strategy trading on a learned model, which holds the
-//! harness' types (`model::features::FeatureSet`,
-//! `model::handle::ModelHandle`) and implements `model::ModelStrategy`;
-//! `model_ema` is the example.
+//! trading on one, beside the strategy's own table (its `Part`, which
+//! answers the series it reads, those its series list). The exception is
+//! a strategy trading on a learned model, which holds the harness' types
+//! (`model::features::FeatureSet`, `model::handle::ModelHandle`) and
+//! implements `model::ModelStrategy`, its part building its features
+//! (`model::ModelPart`); `model_ema` is the example.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
