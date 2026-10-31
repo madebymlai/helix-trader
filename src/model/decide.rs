@@ -33,7 +33,9 @@
 //!
 //! The market data is the quotes, trades, bars, depth and deltas of the
 //! traded instrument a feature reads (`FeatureSet::last_update`), whatever
-//! their kind or venue, with no calendar of sessions. Not the data of
+//! their kind or venue, and its last quote in the cache, which a model
+//! strategy's harness reads whatever the features read
+//! (`handle::traded_quotes`), with no calendar of sessions. Not the data of
 //! another instrument, which may trade while the traded one is closed, nor
 //! custom data, which may come on a weekend. The node builds no time bar
 //! for a period without data (`warmup::data_engine_config`), so a bar is
@@ -160,8 +162,8 @@ pub fn is_decision(event: &TimeEvent) -> bool {
 /// if the decision is fresh and every feature is initialized, and
 /// publishes the row on the message bus, keyed by `strategy`'s id. A
 /// decision of a cadence is fresh if a feature read data of
-/// `instrument_id` after the cadence's previous decision (see the module
-/// documentation); a stale one is skipped, logged at debug. A decision on
+/// `instrument_id`, or its last quote in `strategy`'s cache was made, after
+/// the cadence's previous decision (see the module documentation); a stale one is skipped, logged at debug. A decision on
 /// an event is fresh.
 ///
 /// # Panics
@@ -179,8 +181,13 @@ where
     let now = strategy.clock().timestamp_ns();
     if let DecisionRule::Every(interval) = rule {
         let previous = UnixNanos::from(Timestamp::from(now) - interval);
+        let quoted = strategy
+            .cache()
+            .quote(&instrument_id)
+            .map(|quote| quote.ts_init);
         if features
             .last_update(instrument_id)
+            .max(quoted)
             .is_none_or(|last| last <= previous)
         {
             log::debug!(

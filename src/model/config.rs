@@ -11,7 +11,7 @@
 //! writing one is refused at load as an unknown field.
 
 use anyhow::{bail, ensure};
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
 
@@ -21,7 +21,10 @@ use super::{
     learner::LearnerConfig,
     targets::{Label, Side, TargetsConfig, TargetsTable},
 };
-use crate::strategy::{DataRequirements, TradedInstrument};
+use crate::{
+    rolls::Transition,
+    strategy::{DataRequirements, TradedInstrument},
+};
 
 /// A strategy's model, loaded from TOML, such as
 ///
@@ -246,9 +249,9 @@ impl ModelConfig {
     /// Returns an error if the decision rule, the targets or the learner
     /// are invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
     /// `LearnerConfig::validate`), the retrain interval is not positive,
-    /// the targets trade an instrument the strategy does not read, the
-    /// barrier's ATR has no bars built from what it reads of that
-    /// instrument (see `TargetsConfig::atr_bars`) or warms over longer than
+    /// the targets trade a futures root, the barrier's ATR has no bars
+    /// built from what it reads of that instrument (see
+    /// `TargetsConfig::atr_bars`) or warms over longer than
     /// its warmup, the label names a target the config lacks, a target
     /// (the barrier's limit or the horizon) is not shorter than the
     /// window, the holdout is not positive or leaves no fitted row (see
@@ -337,9 +340,9 @@ impl RuleConfig {
     /// # Errors
     ///
     /// Returns an error if the decision rule or the targets are invalid,
-    /// the retrain interval is not positive, the targets trade an
-    /// instrument the strategy does not read, the barrier's ATR has no
-    /// bars built from what it reads or warms over longer than its warmup
+    /// the retrain interval is not positive, the targets trade a futures
+    /// root, the barrier's ATR has no bars built from what it reads or
+    /// warms over longer than its warmup
     /// (as `ModelConfig::validate`), or the meta model is invalid (see
     /// `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> anyhow::Result<()> {
@@ -427,10 +430,13 @@ fn validate_decisions(
         "the retrain interval {retrain:#} is not positive"
     );
     let traded = targets.instrument_id;
-    ensure!(
-        requirements.instrument_ids().contains(&traded),
-        "the targets trade {traded}, which the strategy does not read"
-    );
+    // A root rolls at any time: its first roll after the epoch tells it.
+    if let Some(roll) = Transition::after(traded, Timestamp::UNIX_EPOCH) {
+        bail!(
+            "the targets trade {traded}, a futures root: orders go to a contract, such as {}",
+            roll.pre
+        );
+    }
     if let Some(atr) = targets.atr_bars(rule, requirements)? {
         // A dataset run replays the warmup before its first day, and no
         // more: an ATR still cold then opens no target at the day's first
@@ -732,16 +738,29 @@ mod tests {
         }
     }
 
+    /// Its harness reads the quotes of what it trades, not its features.
     #[test]
-    fn a_traded_instrument_the_strategy_does_not_read_is_refused() {
+    fn a_traded_instrument_the_strategy_does_not_read_is_no_error() {
         let config = parse(SECTION).unwrap();
 
-        let err = format!(
-            "{:#}",
-            config.validate(&reading("EURUSD.ICMARKETS")).unwrap_err()
-        );
+        config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
+    }
 
-        assert!(err.contains(GOLD), "{err}");
+    /// GC.GLBX is a root of the roll calendar: its orders would go to no
+    /// contract. The error names the root and a contract of it.
+    #[test]
+    fn a_futures_root_traded_is_refused() {
+        let root = TradedInstrument {
+            instrument_id: InstrumentId::from("GC.GLBX"),
+            trade_size: Quantity::from(1),
+        };
+        let config = toml::from_str::<ModelSection>(SECTION)
+            .unwrap()
+            .trading(&root);
+
+        let err = format!("{:#}", config.validate(&reading("GC.GLBX")).unwrap_err());
+
+        assert!(err.contains("GC.GLBX") && err.contains("root"), "{err}");
     }
 
     #[test]

@@ -60,6 +60,11 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// Pushes onto `errors` every violation of its own rules in `config`,
     /// each under its field.
     fn validate(config: &StandardConfig<Self>, errors: &mut ConfigErrorCollector);
+    /// The tick series its harness reads beside `[data] series`, which its
+    /// data requirements hold too: none unless it says.
+    fn harness_ticks(_config: &StandardConfig<Self>) -> Vec<TickSeries> {
+        Vec::new()
+    }
 }
 
 impl<P: Part> StandardConfig<P> {
@@ -94,20 +99,27 @@ impl<P: Part> StandardConfig<P> {
     }
 
     /// What the strategy needs from data: the bars and the ticks of its
-    /// series, and the warmup.
+    /// series, then those of its harness not among them
+    /// (`Part::harness_ticks`), and the warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
+        let mut ticks: Vec<TickSeries> = self
+            .data
+            .series
+            .iter()
+            .filter_map(|series| match series {
+                Series::Bars(_) => None,
+                Series::Ticks(ticks) => Some(ticks.clone()),
+            })
+            .collect();
+        for tick in P::harness_ticks(self) {
+            if !ticks.contains(&tick) {
+                ticks.push(tick);
+            }
+        }
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
-            ticks: self
-                .data
-                .series
-                .iter()
-                .filter_map(|series| match series {
-                    Series::Bars(_) => None,
-                    Series::Ticks(ticks) => Some(ticks.clone()),
-                })
-                .collect(),
+            ticks,
             warmup: self.data.warmup,
         }
     }

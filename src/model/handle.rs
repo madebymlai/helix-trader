@@ -54,6 +54,19 @@
 //! did when fitted. A model failing a check is refused, logged as an
 //! error, and the current one kept; it is not read again (`store::Swap`).
 //!
+//! The handle owns a `rolls::Roller` of the features' tick series
+//! (`FeatureSet::ticks`) and of the traded instrument's quotes
+//! (`traded_quotes`), which the harness reads whatever the features read:
+//! `start` subscribes each on the contract standing for it, a plain
+//! instrument once, a root on its front contract with its roll alert, and
+//! the strategy hands the handle its time events (after
+//! `strategy::orders::on_time_event`), the roller first. At a roll the
+//! root's features move to the post contract and restart
+//! (`FeatureSet::roll`), so decisions wait on the strategy's initialized
+//! gate until they refill. The same code runs in a backtest and a dataset
+//! run, on the catalog's contract slices (`DataRequirements::slices`), and
+//! live.
+//!
 //! A live node builds composite bars `Warmup::live_bar_build_delay` after
 //! their close, so a live handle starts the cadence with that delay, a
 //! backtest's and a dataset run's with none (see `decide`).
@@ -87,7 +100,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::CustomData,
+    data::{CustomData, NautilusDataType},
     enums::OrderSide,
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
@@ -106,10 +119,13 @@ use super::{
     store::{LoadedModel, ModelStore, Swap},
     targets::{self, BarrierExits, Label, Side, Stops, TargetRow, Targets, TargetsConfig},
 };
-use crate::strategy::{
-    DataRequirements,
-    orders::{Exits, Trade},
-    warmup::Warmup,
+use crate::{
+    rolls::Roller,
+    strategy::{
+        DataRequirements, TickSeries,
+        orders::{Exits, Trade},
+        warmup::Warmup,
+    },
 };
 
 /// Where a handle runs, and so what it does at a decision.
@@ -227,6 +243,9 @@ pub struct ModelHandle {
     /// The strategy's warmup, which feeds the features and the barrier's
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
+    /// Subscribes the features' ticks, on the contract standing for each
+    /// root, and the traded instrument's quotes (`traded_quotes`).
+    roller: Roller,
 }
 
 #[derive(Debug)]
@@ -321,9 +340,7 @@ impl ModelHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule is invalid, a cadence's
-    /// features read no data of the targets' instrument (its decisions
-    /// would never be fresh, see `decide::decide`), a store cannot be
+    /// Returns an error if the decision rule is invalid, a store cannot be
     /// keyed, the meta model has no barrier to learn or, in a dataset run,
     /// the targets are invalid.
     pub fn new(
@@ -461,11 +478,10 @@ impl ModelHandle {
             Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
         }
         .feeding(Rc::clone(features) as SharedActorIndicator);
-        ensure!(
-            rule == DecisionRule::Event || features.reads(traded),
-            "the features read no data of {traded}, the targets' instrument: \
-             no decision of the cadence would be fresh"
-        );
+        let mut ticks = features.ticks();
+        if !ticks.contains(&traded_quotes(traded)) {
+            ticks.push(traded_quotes(traded));
+        }
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -506,11 +522,14 @@ impl ModelHandle {
             traded,
             serving,
             warmup: Rc::new(warmup),
+            roller: Roller::new(ticks),
         }))
     }
 
     /// Starts the handle on `strategy`, from `on_start`: starts the
-    /// strategy's warmup (`Warmup::start`), registers the features (and
+    /// strategy's warmup (`Warmup::start`) and its roller, which subscribes
+    /// the features' ticks and the traded instrument's quotes, a root's on
+    /// the contract standing for it, registers the features (and
     /// starts the barrier's ATR: the stops', trading on a barrier, a rule's
     /// or a model's labelled on it, or, in a dataset run, the targets', and
     /// collects the rows they settle); then starts the decision cadence, live
@@ -519,12 +538,13 @@ impl ModelHandle {
     /// # Errors
     ///
     /// Returns an error if the warmup fails to start, or Nautilus refuses
-    /// the cadence's timer or the retrain timer.
+    /// a roll alert, the cadence's timer or the retrain timer.
     pub fn start<S>(&self, strategy: &mut S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
         self.warmup.start(strategy)?;
+        self.roller.start(strategy)?;
         self.features.register(strategy);
         let delay = match &self.serving {
             Serving::Trading(trading) => {
@@ -632,15 +652,31 @@ impl ModelHandle {
         }
     }
 
-    /// Live, hands `event` to the retrains, which launch one on their
-    /// timer's; a no-op otherwise. A trade's time alert is the strategy's
+    /// Hands `event` of `strategy` to the roller first: at a roll alert
+    /// it switches the root's subscriptions to the post contract, and the
+    /// features reading the root move there and restart (`FeatureSet::roll`),
+    /// the decisions waiting until they are initialized again. Live, any
+    /// other event goes to the retrains, which launch one on their timer's.
+    /// A trade's time alert is the strategy's
     /// (`strategy::orders::on_time_event`).
-    pub fn on_time_event(&self, event: &TimeEvent) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clock refuses the next roll alert.
+    pub fn on_time_event<S>(&self, strategy: &mut S, event: &TimeEvent) -> anyhow::Result<()>
+    where
+        S: DataActor + DataActorNative + Debug + 'static,
+    {
+        if let Some(roll) = self.roller.on_time_event(strategy, event)? {
+            self.features.roll(strategy, &roll);
+            return Ok(());
+        }
         if let Serving::Trading(trading) = &self.serving
             && let Some(retraining) = &trading.retraining
         {
             retraining.on_time_event(event);
         }
+        Ok(())
     }
 
     /// Hands `event` to the targets of a dataset run; a no-op trading.
@@ -683,6 +719,20 @@ impl ModelHandle {
         if let Serving::Dataset { targets, .. } = &self.serving {
             targets.on_stop();
         }
+    }
+}
+
+/// The quotes of `instrument_id`, the instrument a model strategy trades,
+/// which its harness reads whatever the features read: the decision's
+/// reference price, the venue's fills, the barrier's ATR and the
+/// decisions' freshness (`decide::decide`) come from them. The strategy's
+/// data requirements hold them (`strategy::Part::harness_ticks`), and the
+/// handle subscribes to them.
+#[must_use]
+pub fn traded_quotes(instrument_id: InstrumentId) -> TickSeries {
+    TickSeries {
+        data: NautilusDataType::QuoteTick,
+        instrument_id,
     }
 }
 
@@ -1303,20 +1353,36 @@ mod tests {
         assert_eq!(handle.decide(&mut probe).unwrap(), None);
     }
 
-    /// Its decisions would never be fresh.
+    /// No feature reads AUD/USD, which it trades: its quote in the cache,
+    /// made at the decision, the harness's, makes the decision fresh, and
+    /// the long model, of the same feature name, trades at 0.8 calibrated.
     #[test]
-    fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_is_an_error() {
+    fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
+        store(models.path())
+            .publish(&baseline("2026-10-22T00:00:00Z", 8))
+            .unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let features = FeatureSet::builder()
             .quotes(
                 InstrumentId::from("GBP/USD.SIM"),
-                "gbp",
+                "mid",
                 SimpleMovingAverage::new(1, Some(PriceType::Mid)),
             )
             .build()
             .unwrap();
-
-        let err = ModelHandle::new(
+        features
+            .handle_quote(&QuoteTick::new(
+                InstrumentId::from("GBP/USD.SIM"),
+                Price::from("1.29990"),
+                Price::from("1.30010"),
+                Quantity::from(1),
+                Quantity::from(1),
+                UnixNanos::from(at("2026-10-22T10:00:00Z")),
+                UnixNanos::from(at("2026-10-22T10:00:00Z")),
+            ))
+            .unwrap();
+        let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
             features,
             &config(),
@@ -1326,10 +1392,12 @@ mod tests {
                 venue: venue(),
             },
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-        assert!(err.contains(AUD), "{err}");
+        assert_eq!(
+            probability(handle.decide(&mut probe).unwrap()),
+            Some(c(0.8))
+        );
     }
 
     /// The probe's handle of `config`, trading in a backtest on the models
@@ -1854,13 +1922,18 @@ mod tests {
     }
 
     /// Advances `clock` to `to`, handing `handle` the events of the timers
-    /// on the way.
-    fn run_to(handle: &ModelHandle, clock: &Rc<RefCell<VirtualClock>>, to: &str) {
+    /// on the way, of `probe`.
+    fn run_to(
+        handle: &ModelHandle,
+        probe: &mut Decider,
+        clock: &Rc<RefCell<VirtualClock>>,
+        to: &str,
+    ) {
         let events = clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at(to)), true);
         for event in events {
-            handle.on_time_event(&event);
+            handle.on_time_event(probe, &event).unwrap();
         }
     }
 
@@ -1924,7 +1997,7 @@ mod tests {
         let handle = live_handle(&mut probe, models.path(), catalog.path(), launcher);
         let before = probability(handle.decide(&mut probe).unwrap());
 
-        run_to(&handle, &clock, "2026-10-23T00:00:00Z");
+        run_to(&handle, &mut probe, &clock, "2026-10-23T00:00:00Z");
         let trained_at = publishing.recv().unwrap();
         advance(&handle, &clock, "2026-10-23T01:00:00Z");
 
@@ -1959,7 +2032,7 @@ mod tests {
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let handle = live_handle(&mut probe, models.path(), catalog.path(), launcher);
 
-        run_to(&handle, &clock, "2026-10-23T00:00:00Z");
+        run_to(&handle, &mut probe, &clock, "2026-10-23T00:00:00Z");
         keeping.recv().unwrap();
         advance(&handle, &clock, "2026-10-23T01:00:00Z");
 

@@ -731,8 +731,9 @@ of its choosing (`model::features`, `model::decide`).
   without one.
 - **Feeding.** The set is shared, an `Rc<FeatureSet>`, and is one Nautilus
   indicator: `features.register(self)` in `on_start` registers it for the
-  quotes and trades of each instrument and the bars of each bar type it
-  reads (Nautilus' `register_indicator_for_*`). The data engine then feeds
+  quotes and trades of each instrument, a root's contract standing for
+  it (see "Root ticks and the traded instrument"), and the bars of each
+  bar type it reads (Nautilus' `register_indicator_for_*`). The data engine then feeds
   it each of those before the strategy's handler, replayed, live and in a
   request's response (a warmup's quotes), with no strategy code. Nautilus
   routes no depth, deltas or custom data to indicators: the strategy
@@ -766,8 +767,11 @@ of its choosing (`model::features`, `model::decide`).
   before: a closed market, a weekend's or a night's, would otherwise
   decide on its last quote, and its targets would be the spread and the
   fees. The market data is the quotes, trades, bars, depth and deltas of
-  the traded instrument a feature reads (`FeatureSet::last_update`),
-  whatever their kind or venue, with no calendar of sessions; not another
+  the traded instrument a feature reads (`FeatureSet::last_update`), and
+  its last quote in the cache, which a model strategy's harness reads
+  whatever the features read (see "Root ticks and the traded
+  instrument"), whatever their kind or venue, with no calendar of
+  sessions; not another
   instrument's, which may trade while the traded one is closed, nor
   custom data, which may come on a weekend. The data engine builds no bar
   for a period without data (see "Hours without quotes"), so a bar is
@@ -776,6 +780,35 @@ of its choosing (`model::features`, `model::decide`).
   warmup's data makes it fresh only if made within that interval. A
   decision on an event is fresh. The rule holds in every mode: a stale
   decision gives no row, no targets and no trade.
+- **Root ticks and the traded instrument.** A feature may read the
+  quotes, trades, depth or deltas of a futures root (`GC.GLBX`, in the
+  roll calendar, see `rolls/README.md`) rather than a dated contract. The
+  model handle owns a `rolls::Roller` built from the set's tick series
+  (`FeatureSet::ticks`) and the traded instrument's quotes: its `start`
+  subscribes a plain instrument once and a root on its front contract,
+  with the roll alert, and `features.register` sets each root feature on
+  that contract (`rolls::front`), registered with Nautilus for its quotes
+  and trades. The strategy hands its time events to
+  `orders::on_time_event`, then to the handle, whose roller takes them
+  first: at a roll it switches the subscriptions, and the root's features
+  move to the post contract (`Transition::post`), registered there, and
+  are reset (Nautilus' `Indicator::reset`). Unadjusted ticks jump by the
+  contract gap at a roll, so no window mixes two contracts: the set is
+  not initialized, decisions wait on the strategy's
+  `indicators_initialized` gate, and no row is made, until the root's
+  windows refill on the post contract. Other instruments' features are
+  untouched. Backtests and dataset runs replay the catalog's contract
+  slices (`DataRequirements::slices`) through the same roller. Live,
+  ticks have no warmup of their own, a root's neither: no history is
+  requested of its contracts, the front or the next, and its features
+  warm on the live stream. The harness reads the traded instrument's
+  quotes itself, for the decision's reference price, the venue's fills,
+  the barrier's ATR and freshness: a model strategy's data requirements
+  add them (`Part::harness_ticks`, `handle::traded_quotes`), so
+  fill-catalog fetches, a backtest or dataset run replays and the handle
+  subscribes them, and the features need not read the traded instrument.
+  A futures root traded is refused at load: orders go to a contract.
+  Bars on a root are Nautilus' continuous bars and do not roll this way.
 - **Rows.** `decide` snapshots the features if the decision is fresh and
   every one is initialized, and publishes them on the message bus as a
   `FeatureRow` (the strategy id, the values, the decision time), custom
@@ -981,7 +1014,8 @@ of its choosing (`model::features`, `model::decide`).
   "Model handle"); each is optional, a side without one has no model,
   trained, stored, scored nor traded, so `{ long = 0.5 }` is a long-only
   model. `validate(&requirements)` refuses a retrain interval not
-  positive, a traded instrument the strategy does not read, a barrier ATR
+  positive, a futures root as the traded instrument (orders go to a
+  contract; the error names one), a barrier ATR
   without bars built from what it reads of that instrument (above) or
   whose period of bars, the given or the default, at the
   decision cadence is longer than the strategy's warmup (a dataset run
@@ -1149,7 +1183,8 @@ of its choosing (`model::features`, `model::decide`).
   `Mode::Dataset { rows }` (the replay of a train) `decide` opens the
   decision's targets instead and returns no trade, and the rows they
   settle are collected in `rows`; the strategy hands the handle its
-  `on_time_event` (the retrains', live), `on_order_canceled`,
+  `on_time_event` (its roller's roll alerts, then the retrains', live),
+  `on_order_canceled`,
   `on_order_denied`, `on_order_rejected`, `on_position_closed` and
   `on_stop`, the order events no-ops trading, and hands the order module
   its time events first, which close the targets' trades as they do its

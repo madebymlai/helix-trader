@@ -235,7 +235,7 @@ impl DataActor for ModelEma {
             };
         }
         if !orders::on_time_event(self, event)? {
-            self.model.on_time_event(event);
+            Rc::clone(&self.model).on_time_event(self, event)?;
         }
         Ok(())
     }

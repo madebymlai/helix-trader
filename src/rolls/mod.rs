@@ -17,7 +17,7 @@ mod continuous;
 mod roller;
 
 pub use continuous::ContinuousBars;
-pub use roller::Roller;
+pub use roller::{Roller, front};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::identifiers::InstrumentId;

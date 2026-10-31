@@ -49,6 +49,7 @@ mod backtest_okx_xperp_funding;
 mod backtest_quote_gap;
 mod backtest_retrain;
 mod backtest_rolls;
+mod backtest_root_ticks;
 mod backtest_session;
 mod backtest_stop;
 mod backtest_targets;

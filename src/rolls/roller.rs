@@ -195,8 +195,10 @@ impl Roller {
 }
 
 /// The contract standing for `instrument_id` at `time`: the pre contract
-/// of its next roll, or itself if it does not roll.
-fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
+/// of its next roll, or itself if it does not roll. What a roller
+/// subscribes to at its start.
+#[must_use]
+pub fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
 }
 

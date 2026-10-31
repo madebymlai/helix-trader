@@ -434,16 +434,34 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     assert_eq!(features.last_update(id(AUD)), None);
 }
 
+/// A roller subscribes these: each kind of tick of each instrument once,
+/// in the order declared, and neither bars nor custom data.
 #[test]
-fn a_set_reads_the_instruments_of_its_market_data_features() {
+fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), "bars", sma(1))
+        .trades(id(GBP), "gbp_trades", sma(1))
+        .quotes(id(AUD), "aud_quotes", sma(1))
         .data(level_type("SIM"), "level", read_level)
+        .quotes(id(AUD), "aud_quotes_2", sma(2))
+        .depth(id(AUD), "aud_depth", sma(1))
+        .deltas(id(GBP), "gbp_deltas", sma(1))
         .build()
         .unwrap();
+    let tick = |data, instrument: &str| TickSeries {
+        data,
+        instrument_id: id(instrument),
+    };
 
-    assert!(features.reads(id(AUD)));
-    assert!(!features.reads(id(GBP)));
+    assert_eq!(
+        features.ticks(),
+        [
+            tick(NautilusDataType::TradeTick, GBP),
+            tick(NautilusDataType::QuoteTick, AUD),
+            tick(NautilusDataType::OrderBookDepth, AUD),
+            tick(NautilusDataType::OrderBookDelta, GBP),
+        ]
+    );
 }
 
 #[test]

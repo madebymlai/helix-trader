@@ -102,7 +102,6 @@ impl DataActor for ModelProbe {
         });
         let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
         msgbus::subscribe_any(topic.into(), handler, None);
-        self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
         Rc::clone(&self.model).start(self)
     }
 
@@ -116,7 +115,7 @@ impl DataActor for ModelProbe {
             return Ok(());
         }
         if !orders::on_time_event(self, event)? {
-            self.model.on_time_event(event);
+            Rc::clone(&self.model).on_time_event(self, event)?;
         }
         Ok(())
     }
@@ -223,6 +222,17 @@ fn probe(
     config: &ModelConfig,
     mode: Mode,
 ) -> (ModelProbe, Rc<RefCell<Record>>) {
+    probe_reading(features, config, &requirements(), mode)
+}
+
+/// The probe deciding on `features` as `config` says, for a strategy of
+/// `requirements`, in `mode`, and what it records.
+pub fn probe_reading(
+    features: Rc<FeatureSet>,
+    config: &ModelConfig,
+    requirements: &DataRequirements,
+    mode: Mode,
+) -> (ModelProbe, Rc<RefCell<Record>>) {
     let record = Rc::new(RefCell::new(Record::default()));
     let probe = ModelProbe {
         core: StrategyCore::new(StrategyConfig {
@@ -234,7 +244,7 @@ fn probe(
             StrategyId::from(STRATEGY),
             features,
             config,
-            &requirements(),
+            requirements,
             mode,
         )
         .unwrap(),

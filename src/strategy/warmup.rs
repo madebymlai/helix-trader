@@ -730,6 +730,33 @@ mod tests {
         assert_eq!(warmup.built(), vec![hours, minutes]);
     }
 
+    /// A root's ticks, as any ticks, have no warmup of their own: a live
+    /// start requests the history of the bars alone, none of the root nor
+    /// of its contracts, the one in front or the next.
+    #[test]
+    fn a_live_warmup_requests_no_history_of_a_roots_ticks() {
+        let requirements = DataRequirements {
+            ticks: vec![TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from("GC.GLBX"),
+            }],
+            ..reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"])
+        };
+
+        let warmup = Warmup::live(&requirements);
+
+        assert_eq!(
+            requests(&warmup.built()),
+            [(
+                Source::Ticks(TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: InstrumentId::from("XAUUSD.ICMARKETS"),
+                }),
+                vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
+            )]
+        );
+    }
+
     /// The cache holds the warmup of the harness's bars too: 1,440
     /// 1-minute bars over a day, and one spanning the start.
     #[test]

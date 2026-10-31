@@ -389,14 +389,13 @@ nautilus_strategy!(RuleProbe, {
 
 impl DataActor for RuleProbe {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
         Rc::clone(&self.model).start(self)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if !decide::is_decision(event) {
             if !orders::on_time_event(self, event)? {
-                self.model.on_time_event(event);
+                Rc::clone(&self.model).on_time_event(self, event)?;
             }
             return Ok(());
         }

@@ -120,6 +120,15 @@ time are flushed after it), so an alert at the transition would miss the
 post contract's tick stamped there. The strategy is told after the pre
 contract's last tick and before the post contract's first.
 
+`front(instrument_id, time)` is the contract `start` subscribes to: the pre
+contract of the next roll, or the instrument itself if it does not roll.
+
+A model strategy's handle owns one, built from its features' tick series
+and the traded instrument's quotes: its features on a root read `front`'s
+contract from the start and each transition's `post` after a roll, and
+are reset there (`strategy/README.md`, "Root ticks and the traded
+instrument").
+
 Bars do not use the roller: Nautilus' continuous bars roll themselves from
 the table.
 

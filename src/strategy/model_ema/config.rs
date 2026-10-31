@@ -4,8 +4,11 @@ use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
 use crate::{
-    model::config::{ModelConfig, ModelSection},
-    strategy::{Part, StandardConfig},
+    model::{
+        config::{ModelConfig, ModelSection},
+        handle::traded_quotes,
+    },
+    strategy::{Part, StandardConfig, TickSeries},
 };
 
 /// Config of the `model_ema` strategy, loaded from TOML: the standard
@@ -53,6 +56,17 @@ impl Part for ModelEmaParams {
             );
         }
     }
+
+    /// The quotes of the instrument traded, which the model's harness
+    /// reads (`handle::traded_quotes`).
+    fn harness_ticks(config: &ModelEmaConfig) -> Vec<TickSeries> {
+        config
+            .trade
+            .instruments
+            .iter()
+            .map(|traded| traded_quotes(traded.instrument_id))
+            .collect()
+    }
 }
 
 impl ModelEmaConfig {
@@ -88,7 +102,11 @@ impl ModelEmaConfig {
 mod tests {
     use jiff::SignedDuration;
     use nautilus_indicators::average::MovingAverageType;
-    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::{
+        data::{BarType, NautilusDataType},
+        identifiers::InstrumentId,
+        types::Quantity,
+    };
 
     use super::*;
     use crate::model::{
@@ -237,14 +255,49 @@ mod tests {
         assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
+    /// The harness reads the quotes of the instrument traded, whatever the
+    /// features read: the requirements hold them after the series' ticks.
     #[test]
-    fn a_traded_instrument_not_read_is_refused() {
+    fn a_traded_instrument_not_read_loads_its_quotes_into_the_requirements() {
         let toml = TOML.replace(
             r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS""#,
             r#"instruments = [{ instrument_id = "EURUSD.ICMARKETS""#,
         );
+
+        let requirements = ModelEmaConfig::load(&toml).unwrap().data_requirements();
+
+        assert_eq!(
+            requirements.ticks,
+            [TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
+            }]
+        );
+    }
+
+    /// Quotes of the instrument traded the series list already are listed
+    /// once.
+    #[test]
+    fn traded_quotes_the_series_read_are_required_once() {
+        let toml = TOML.replace(
+            "series = [",
+            r#"series = [
+            { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },"#,
+        );
+
+        let requirements = ModelEmaConfig::load(&toml).unwrap().data_requirements();
+
+        assert_eq!(requirements.ticks.len(), 1, "{:?}", requirements.ticks);
+    }
+
+    #[test]
+    fn a_futures_root_traded_is_refused_at_load() {
+        let toml = TOML.replace(
+            r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS""#,
+            r#"instruments = [{ instrument_id = "GC.GLBX""#,
+        );
         let reason = model_refusal(&toml);
-        assert!(reason.contains("EURUSD.ICMARKETS"), "{reason}");
+        assert!(reason.contains("GC.GLBX"), "{reason}");
     }
 
     /// A trade on a horizon of an hour, decided every hour, would still be
