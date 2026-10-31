@@ -132,9 +132,9 @@ the table.
 
 A live roller (`Roller::live`) loads each post contract before its roll:
 with each roll alert it sets, it requests that roll's post contract from
-the venue's data client, so a live node, which loads at its start only the
-contract in front, rolls any number of times without a restart
-(`live/README.md`, "Rolled roots"). A backtest's or a dataset run's
+the venue's data client, so a live node, which loads at its start the
+contract in front and the next one, rolls any number of times without a
+restart (`live/README.md`, "Rolled roots"). A backtest's or a dataset run's
 (`Roller::replayed`) requests nothing: the run registers every contract of
 its slices up front.
 

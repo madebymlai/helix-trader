@@ -195,12 +195,16 @@ replayed as live.
 
 A strategy reading a futures root (`GC.GLBX`, see `rolls/README.md`)
 trades and reads its dated contracts, as in a backtest. At the start,
-`Live::run` takes for each instrument the strategy reads the contract
-standing for it now (`rolls::front`, from the same calendar the backtest's
-table is built from), a plain instrument itself. Those are the node's
+`Live::run` takes for each instrument the strategy reads the contracts of
+its next roll (`rolls::Transition::after`, from the same calendar the
+backtest's table is built from): the one standing for it now and the one
+it rolls into; a plain instrument itself. Those are the node's
 instruments at its start: each goes to the client of its venue like any
 instrument, loaded at connect, and the strategy claims its external
-orders. A config without a root loads what it did before.
+orders. Loading the next one too covers a start just before a roll: the
+roll may pass before the strategy starts, or the roller's request for its
+post contract may still be in flight at the roll, and IB subscribes only
+to what it loaded. A config without a root loads what it did before.
 
 The strategy's `Roller` (`Roller::live`) subscribes to the root's ticks on
 the contract in front and switches them to the next one at each roll
