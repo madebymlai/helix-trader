@@ -8,8 +8,10 @@
 //! config. Inside, `mod.rs` is the thin Nautilus wiring: a struct holding a
 //! `StrategyCore`, wired with `nautilus_strategy!`, implementing `DataActor`
 //! (`on_start`, `on_bar`) and placing orders with Nautilus' own API. Pure
-//! modules beside it (the EMA's `signal.rs` and `bracket.rs`) turn bars
-//! into decisions, tested without an engine.
+//! modules beside it (the EMA's `signal.rs`) turn bars into decisions,
+//! tested without an engine; their trades go through the shared order
+//! module (`orders`): a Nautilus bracket or a market entry, closed at its
+//! time limit, set again at a restart.
 //!
 //! What most strategies share is a config struct and functions, never a
 //! base type: `StandardConfig`, the tables every strategy's TOML has, holds
@@ -32,6 +34,7 @@ pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
 mod indicators;
+pub mod orders;
 pub mod model_ema;
 mod session;
 mod standard;

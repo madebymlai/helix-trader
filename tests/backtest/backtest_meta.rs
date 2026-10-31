@@ -34,7 +34,7 @@ use helix_trader::model::{
     dataset::{self, Dataset},
     decide,
     features::FeatureSet,
-    handle::{Mode, ModelHandle, SettledRows, Trade},
+    handle::{Decision, Mode, ModelHandle, SettledRows},
     holdout::Earnings,
     learner::LearnerConfig,
     store::ModelStore,
@@ -42,12 +42,13 @@ use helix_trader::model::{
     train::{Kept, Outcome, Trained, Training},
     walk::WalkForward,
 };
+use helix_trader::strategy::orders;
 use jiff::{SignedDuration, Timestamp, tz::TimeZone};
 use nautilus_common::{actor::DataActor, timer::TimeEvent};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::OrderSide,
-    events::{OrderDenied, OrderRejected, PositionClosed},
+    events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
@@ -316,7 +317,7 @@ fn a_model_primarys_meta_model_trains_on_its_trades_and_takes_them_in_the_run() 
 
     for (period, &from) in retrains.iter().enumerate() {
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(from + day()));
-        let trades: Vec<Trade> = record
+        let trades: Vec<Decision> = record
             .trades
             .iter()
             .filter(|(time, _)| from_ns <= *time && *time < to_ns)
@@ -366,9 +367,13 @@ struct RuleProbe {
 }
 
 /// The trades a rule probe recorded, and when.
-type Trades = Rc<RefCell<Vec<(UnixNanos, Trade)>>>;
+type Trades = Rc<RefCell<Vec<(UnixNanos, Decision)>>>;
 
 nautilus_strategy!(RuleProbe, {
+    fn on_order_canceled(&mut self, event: &OrderCanceled) {
+        self.model.on_order_canceled(self, event);
+    }
+
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.model.on_order_denied(&event);
     }
@@ -390,7 +395,10 @@ impl DataActor for RuleProbe {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if !decide::is_decision(event) {
-            return Rc::clone(&self.model).on_time_event(self, event);
+            if !orders::on_time_event(self, event)? {
+                self.model.on_time_event(event);
+            }
+            return Ok(());
         }
         let now = self.clock().timestamp_ns();
         if let Some(side) = signal(now)

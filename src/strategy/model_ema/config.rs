@@ -94,7 +94,7 @@ mod tests {
     use crate::model::{
         decide::DecisionRule,
         learner::LearnerConfig,
-        targets::{Barrier, Distance},
+        targets::{Barrier, Distance, Label},
     };
     use crate::strategy::AtrArgs;
 
@@ -184,6 +184,22 @@ mod tests {
             DecisionRule::Every(SignedDuration::from_hours(1))
         );
         assert_eq!(model.learner, LearnerConfig::Baseline {});
+        assert_eq!(config.strategy_id(), StrategyId::from("MODEL_EMA-001"));
+    }
+
+    #[test]
+    fn the_example_config_loads() {
+        let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
+        let model = config.model();
+        assert_eq!(
+            model.targets.instrument_id,
+            InstrumentId::from("XAUUSD.ICMARKETS")
+        );
+        assert_eq!(model.label, Label::Barrier);
+        assert_eq!(
+            model.targets.barrier.map(|barrier| barrier.limit),
+            Some(SignedDuration::from_mins(45))
+        );
         assert_eq!(config.strategy_id(), StrategyId::from("MODEL_EMA-001"));
     }
 

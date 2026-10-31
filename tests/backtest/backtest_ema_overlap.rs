@@ -1,6 +1,6 @@
 //! Two overlapping trades of the EMA crossover on a hedging venue, as
 //! IC's: the second cross opens a short beside the long still held, each
-//! its own position closed by its own time alert, 4 hours after its entry
+//! its own position closed by its own time alert, 4 hours after its send
 //! (`common::trades`). The moves are small, so that neither trade reaches
 //! its stop loss (50 bps) or take profit (100 bps). One node per thread,
 //! so one run per test.

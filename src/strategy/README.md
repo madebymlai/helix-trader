@@ -15,10 +15,11 @@ Each strategy is one folder, and everything about it lives there:
 
 ```
 strategy/<name>/
-  mod.rs        Nautilus wiring, kept thin
-  config.rs     the config: every parameter of the strategy
-  book.rs       the pure core: from bars to decisions (the EMA's signal.rs
-                and bracket.rs)
+  mod.rs        Nautilus wiring, kept thin, and its part of the config
+                (the EMA's: its indicators, its count of instruments, its
+                rules) and its exits, constants or computed
+  config.rs     its config, when its part is large (model_ema's [model])
+  book.rs       the pure core: from bars to decisions (the EMA's signal.rs)
   ...           more pure modules as needed (features.rs, tree.rs, ...)
 ```
 
@@ -35,20 +36,24 @@ strategy/
   indicators.rs [indicators]: indicators declared by name and arguments
   session.rs    Session: the hours traded
   warmup.rs     the warmup calls and the node configs it needs
+  orders.rs     Trade: the trades a strategy sends, closes at their time
+                limit and sets again at a restart
 ```
 
-Orders stay in each strategy, on Nautilus' own API (see "Orders and
-positions"): there are no shared trading helpers.
+A strategy's trades go through `strategy::orders` (see "Trades"), on
+Nautilus' own API underneath; a strategy placing other orders does so on
+Nautilus' API itself (see "Orders and positions").
 
 The one exception is a strategy trading on a learned model: its features
 are a type, `model::features::FeatureSet`, built once and shared with
 Nautilus as an indicator, and its features implement a trait,
 `model::features::Feature`; it holds a type, `model::handle::ModelHandle`,
 the one place it decides, which serves its models or, in a dataset run,
-opens its targets (see "Features and decisions"). Its orders are the
-trade the handle gives it, the target its model was labelled on, sent
-through the one function a dataset run sends its targets with
-(`Trade::send`, "Model handle"). `model_ema/` is the example.
+opens its targets (see "Features and decisions"). The handle sends no
+order: its decision is data (`handle::Decision`), whose trade, the
+target its model was labelled on, the strategy sends through the order
+module as a dataset run sends its targets (`decision.trade().send`,
+"Model handle"). `model_ema/` is the example.
 
 ## Config
 
@@ -485,6 +490,60 @@ self.submit_order(order, None, None, None)?;
   `on_position_opened(&mut self, event: PositionOpened)`, and so on. The
   fill hook takes a reference; most others take the event by value.
 
+#### Trades
+
+A strategy's trades go through one module, `strategy::orders`, which
+knows nothing of how the strategy decided. A `Trade` is an instrument, a
+side, a quantity and its exits:
+
+```rust
+let trade = Trade {
+    instrument_id,
+    side,
+    quantity,
+    exits: Exits {
+        take_profit: Some(take_profit),  // on the instrument's prices
+        stop_loss: Some(stop_loss),
+        time_limit: Some(SignedDuration::from_hours(4)),
+    },
+};
+trade.send(self)?;
+```
+
+- `send` rounds the quantity to the instrument's sizes (one rounding to
+  none is an error, no order) and sends, with both exits, a Nautilus
+  bracket (`OrderFactory::bracket`: market entry, take-profit limit,
+  stop-market, the legs one-updates-the-other and reduce-only), with
+  neither a market entry; one exit alone is refused, a bracket having
+  both. `send_as` names the orders (`OrderIds`), as a dataset run does.
+- **The time limit runs from the send**, the entry's creation, not its
+  fill: a dataset run labels a target from its decision, and on a market
+  entry the two differ by the venue's latency alone, none in a backtest.
+  The send sets a time alert named after the entry and tags the entry
+  with its limit, which the cache keeps (persisted live).
+- Nautilus delivers time events to the strategy alone: the strategy hands
+  each to `orders::on_time_event(self, event)?`, which says whether it
+  was a trade's. At a trade's time it cancels the trade's orders still
+  open, the entry and its legs, and closes its position if the trade is
+  still open (`close_position`, tagged as a time close,
+  `orders::is_time_close`). A trade is open while an open position holds
+  its entry's fill and no fill of its legs: on a hedging venue the
+  position its entry opened, on a netting venue the one position later
+  trades add into, so a trade's time closes the others' share too, and
+  theirs then find it closed. A position closed and opened again is a new
+  one, holding none of the earlier fills. Open orders and positions are
+  never purged from the cache.
+- At start, `orders::arm_open_trades(self)?` sets the time alert of each
+  open trade of the strategy again, from the cache: its entry's creation
+  plus the limit it is tagged with, at once if that has passed.
+- Nautilus has no time limit on a position, so the alert and its close
+  are ours. Its GTD expiry on the bracket's legs (`manage_gtd_expiry`)
+  does not fit: an expired leg leaves the position open, IC sends no
+  leg's time in force (its legs become the position's stop loss and take
+  profit), and OKX takes GTC orders alone in an order list. The
+  bracket's contingencies are left to the venue: Nautilus'
+  `manage_contingent_orders`, a `[base]` setting, is off by default.
+
 #### Position mode: the venue's
 
 A strategy leaves `oms_type` unset in its `StrategyConfig`. Nautilus then
@@ -527,21 +586,19 @@ subscription of the kind the data arrives as keeps the cache's book
   the first warm bar setting the side without one. The signal is the EMA's Nautilus indicator, registered for
   the traded instrument's bars and initialized once both EMAs are, by
   the bars inside the session; `on_bar` decides only once
-  `indicators_initialized()`. A cross sends one bracket in its direction: a market entry
-  of `trade_size`, its stop loss 50 bps and its take profit 100 bps from
-  the decision bar's close (`bracket::STOP_LOSS`, `TAKE_PROFIT`), rounded
-  to the instrument's prices. The exits are the code's, not the config's.
-- **Exit.** The stop loss or the take profit, the venue cancelling the
-  other leg; or the hold: the entry's first fill sets a time alert 4 hours
-  (`bracket::HOLD`) later, named after the entry, which cancels the trade's legs still open
-  and closes its position by id (`close_position`). A leg's fill cancels
-  the alert. At start (a restart) each trade of the strategy on the
-  traded instrument still open gets its alert again, named after its
-  entry, 4 hours after the entry's first fill, or at once if that has
-  passed: each filled bracket entry in the cache whose position is open,
-  not closed since the entry went in, and whose legs have not filled. On
-  a netting venue each trade in the one position gets its own alert; a
-  trade its stop loss or take profit ended gets none.
+  `indicators_initialized()`. A cross sends one trade in its direction
+  through the order module (see "Trades"): a bracket of `trade_size`, its
+  take profit 100 bps and its stop loss 50 bps from the decision bar's
+  close (`TAKE_PROFIT_BPS`, `STOP_LOSS_BPS`), rounded to the instrument's
+  prices, held 4 hours (`HOLD`). The exits are the code's constants, in
+  `ema/mod.rs`, not the config's.
+- **Exit.** The take profit or the stop loss, the venue cancelling the
+  other leg; or the hold, 4 hours after the send: the module cancels the
+  trade's legs still open and closes its position. The strategy hands
+  the module its time events, and at start (a restart) the module sets the hold of
+  each trade still open again (`orders::arm_open_trades`): on a netting
+  venue each trade in the one position gets its own; a trade its stop
+  loss or take profit ended, or whose position closed since, gets none.
 - **Overlap.** Each cross is a new trade, whatever is open. On a hedging
   venue (IC) each trade is a position of its own, closed by its own alert
   (`backtest_ema_overlap.rs`). On a netting venue (IB, OKX) trades add into
@@ -828,31 +885,29 @@ of its choosing (`model::features`, `model::decide`).
   strategy shares a `Targets` (`Targets::new(config, rule,
   &requirements)`, an `Rc`),
   calls `open(self, row)`
-  with each row `decide` returns, and hands it
-  `on_time_event`, `on_order_denied`,
-  `on_order_rejected`, `on_position_closed` and `on_stop`; it sends no
-  orders of its own then. For each target and side, a long and a short,
-  `open` sends the trade a strategy trading on a model of that target
-  would (`TradeTarget::send`, the one sending of both): a Nautilus
-  bracket (`OrderFactory::bracket`: market entry, take-profit limit,
-  stop-market, the exits one-updates-the-other) or a market entry, here
-  with client order ids `D{n}-{B|H}{L|S}-{E|TP|SL}`, and a time alert at
-  the limit or horizon, named after the entry, that cancels the entry
-  and its legs still open and closes the position it opened, if still
-  open (`close_position`, tagged). Both are found among the cache's open
-  orders and positions, which Nautilus never purges, by the entry (the
-  legs' parent, the position's opening order), so a dataset run's purge
-  of closed orders loses nothing. A closed position's opening order
+  with each row `decide` returns, hands it `on_order_canceled`,
+  `on_order_denied`, `on_order_rejected`, `on_position_closed` and
+  `on_stop`, and hands the order module its time events
+  (`orders::on_time_event`); it sends no orders of its own then. For each
+  target and side, a long and a short, `open` sends the trade a strategy
+  trading on a model of that target would, through the order module (see
+  "Trades", `Trade::send_as`, the one sending of both): a Nautilus
+  bracket or a market entry, here with client order ids
+  `D{n}-{B|H}{L|S}-{E|TP|SL}`, closed at the limit or horizon after
+  its send; the module finds the trade among the cache's open orders and
+  positions, which Nautilus never purges, so a dataset run's purge of
+  closed orders loses nothing. A closed position's opening order
   names its decision and side, its closing order the exit: take profit,
-  stop or time; no state is kept but the rows being assembled. Once all its targets are
+  stop or time (`orders::is_time_close`); no state is kept but the rows being assembled. Once all its targets are
   closed, the decision's `TargetRow` (its `FeatureRow`, per target and
   side the realised P&L net of commission as Nautilus reports it and the
   exit, and a barrier's `Distances`, its take profit's and its stop's
   distance in price from the decision's price, as set on the ticks, the
   basis points or ATRs resolved there; the settling time) is published on the message bus, keyed by the
   strategy id (`TargetRow::data_type`); `Outcome::sign` is the P&L's
-  sign. A denied or rejected order, or an entry not filled by its time,
-  leaves the decision unsettled, logged, and so do positions still open
+  sign. A denied or rejected order, or an entry not filled by its time
+  (cancelled then by the module, `on_order_canceled`), leaves the
+  decision unsettled, logged, and so do positions still open
   at the stop (`open_decisions()` counts the decisions still open). A
   barrier hit at the same nanosecond as the time limit
   counts: Nautilus hands the venue the quote before the alert. On bars
@@ -1051,25 +1106,28 @@ of its choosing (`model::features`, `model::decide`).
   the decision's price and the ATR at it, on the ticks, as a dataset run
   sets it), on a horizon in money. A side trades if that is at or above
   its margin; of two, the one expected the more, none at a tie
-  (`payoff::pick`); it returns the `Trade`: the targets' instrument, the
-  side, the targets' size, the side's calibrated probability, and the
-  target its model was labelled on as the decision sets it on that side
-  (`TradeTarget`): on a barrier the take-profit and stop prices a dataset
-  run's would set there and its limit, on a horizon the horizon; a rule
-  primary's trade is on the barrier its meta model learns. The strategy
-  sends it, `trade.send(self)`, through the function a dataset run
-  sends its targets with (above, "Targets"), a bracket or a market
-  entry and a time alert, and hands the handle its `on_time_event`,
-  which closes the trade at the alert, so that what the model's
-  probability, expected P&L, scores and holdout figures describe is the
-  trade
-  placed (`backtest_model.rs` realises per trade the P&L of the dataset
-  row of its decision and side). At start (a restart) the handle sets
-  the time alert of each trade of the strategy on the targets'
-  instrument still open again (`targets::arm_open_trades`), as the EMA
-  does: each open position whose opening order is a trade's entry (no
-  bracket leg nor other reduce-only order) is closed the barrier's limit
-  or the horizon after the entry's fill, or at once if that has passed.
+  (`payoff::pick`); it returns the `Decision`, plain data: the targets'
+  instrument, the side, the targets' size, the calibrated probability,
+  the expected net P&L (the primary's model's; none of a rule primary),
+  and the target its model was labelled on as the decision sets it on
+  that side: the reference price it is set from, on a barrier the
+  take-profit and stop prices a dataset run's would set there, and the
+  time limit, the barrier's limit or the horizon; a rule primary's is on
+  the barrier its meta model learns. The handle sends no order and
+  handles no trade's time. `decision.trade()` is the trade the model was
+  labelled on, which the strategy sends through the order module (see
+  "Trades"), the one a dataset run sends its targets through (above,
+  "Targets"), and hands the module its time events, which close it at
+  its time; so what the model's probability, expected P&L, scores and
+  holdout figures describe is the trade placed (`backtest_model.rs`
+  realises per trade the P&L of the dataset row of its decision and
+  side). **A strategy trading otherwise**, with exits, a size or a time
+  of its own from the decision's data, trades what the model was not
+  labelled on: its holdout figures and expected P&L describe the
+  labelled trade, not the strategy's, and its margins are no longer the
+  strategy's expected P&L. At start (a restart) the strategy has the
+  module set the time of each of its trades still open again
+  (`orders::arm_open_trades`), as the EMA does.
   Nautilus' IB execution client denies
   reduce-only orders, which a bracket's legs and `close_position` are
   (`live/ib/README.md`, nautilus#5464, the repo's issue #9): a model
@@ -1091,9 +1149,12 @@ of its choosing (`model::features`, `model::decide`).
   `Mode::Dataset { rows }` (the replay of a train) `decide` opens the
   decision's targets instead and returns no trade, and the rows they
   settle are collected in `rows`; the strategy hands the handle its
-  `on_time_event`, `on_order_denied`, `on_order_rejected`,
-  `on_position_closed` and `on_stop`, all but the time events no-ops
-  trading. `model_ema/` sends each trade it is given.
+  `on_time_event` (the retrains', live), `on_order_canceled`,
+  `on_order_denied`, `on_order_rejected`, `on_position_closed` and
+  `on_stop`, the order events no-ops trading, and hands the order module
+  its time events first, which close the targets' trades as they do its
+  own. `model_ema/` sends the trade of each decision it is given
+  (`config/model_ema.toml` is its example config).
 - **Meta-labeling.** A primary picks the side, a meta model decides
   whether to take the trade (`model::meta`). The primary is a model, to
   which a `[model.meta]` table alone adds a meta model, or the

@@ -428,9 +428,10 @@ pub mod trades {
     ///   EMA going to 624.44; 17:00 and 18:00 (18:00 and 19:00 Frankfurt
     ///   time) are out of the session and count for nothing. The bids
     ///   after the entry, 623.96 to 624.85 until 17:00, touch neither exit;
-    /// - 17:00, 4 hours after the entry filled: the time alert closes the
-    ///   long, a sell of 10 at the bid of the quote closing 17:00, 624.30 +
-    ///   0.60 − 0.05 = 624.85, and cancels its stop loss and take profit.
+    /// - 17:00, 4 hours after the entry's send and fill: the time alert
+    ///   closes the long, a sell of 10 at the bid of the quote closing
+    ///   17:00, 624.30 + 0.60 − 0.05 = 624.85, and cancels its stop loss
+    ///   and take profit.
     ///   An hour sooner it would have sold at 624.75, an hour later at
     ///   624.95.
     ///

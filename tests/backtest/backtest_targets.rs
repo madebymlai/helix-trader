@@ -32,7 +32,7 @@ use helix_trader::{
             TargetsConfig,
         },
     },
-    strategy::{AtrArgs, DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries, orders},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -46,7 +46,7 @@ use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{Bar, BarType, CustomData, NautilusDataType, QuoteTick, TradeTick},
     enums::{AggressorSide, OmsType, PriceType},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    events::{OrderCanceled, OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId, Symbol, TradeId},
     instruments::{CryptoPerpetual, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
@@ -178,6 +178,10 @@ nautilus_strategy!(TargetProbe, {
         self.record.borrow_mut().fills.push(event.ts_event);
     }
 
+    fn on_order_canceled(&mut self, event: &OrderCanceled) {
+        self.targets.on_order_canceled(self, event);
+    }
+
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.targets.on_order_denied(&event);
     }
@@ -221,7 +225,8 @@ impl DataActor for TargetProbe {
             }
             return Ok(());
         }
-        Rc::clone(&self.targets).on_time_event(self, event)
+        orders::on_time_event(self, event)?;
+        Ok(())
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {

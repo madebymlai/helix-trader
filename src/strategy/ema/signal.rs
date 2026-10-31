@@ -12,7 +12,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 
-use super::config::EmaCrossConfig;
+use super::EmaCrossConfig;
 use crate::strategy::Session;
 
 /// The crossings of the fast EMA over the slow one on the traded

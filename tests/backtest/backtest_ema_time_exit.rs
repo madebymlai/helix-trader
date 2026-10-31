@@ -1,12 +1,13 @@
 //! A trade of the EMA crossover that neither its stop loss nor its take
-//! profit ends is closed 4 hours, its hold, after its entry filled, on a
-//! time alert, at the market then (`common::trades`, `TIME_EXIT`). One
-//! node per thread, so one run per test.
+//! profit ends is closed 4 hours, its hold, after its send (its entry
+//! filling at once), on a time alert, at the market then
+//! (`common::trades`, `TIME_EXIT`). One node per thread, so one run per
+//! test.
 
 use crate::common::{self, trades};
 
 #[test]
-fn a_trade_is_closed_its_hold_after_the_entry_fill() {
+fn a_trade_is_closed_its_hold_after_its_send() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
 

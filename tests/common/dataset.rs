@@ -18,14 +18,14 @@ use helix_trader::{
         dataset::{self, Commission, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, PRIMARY_FEATURES},
-        handle::{Mode, ModelHandle, SettledRows, Trade},
+        handle::{Decision, Mode, ModelHandle, SettledRows},
         holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, Distance, Label, Side, TargetRow, TargetsConfig},
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{DataRequirements, TickSeries, orders},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -39,7 +39,7 @@ use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicato
 use nautilus_model::{
     data::{CustomData, NautilusDataType, QuoteTick},
     enums::{OmsType, PriceType},
-    events::{OrderDenied, OrderRejected, PositionClosed},
+    events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Money, Quantity},
 };
@@ -66,13 +66,17 @@ pub struct ModelProbe {
 pub struct Record {
     /// The row of each decision on warm features.
     pub rows: Vec<FeatureRow>,
-    /// The trade of each decision making one, and its time.
-    pub trades: Vec<(UnixNanos, Trade)>,
+    /// Each decision to trade, and its time.
+    pub trades: Vec<(UnixNanos, Decision)>,
     /// Each position closed, when it opened and its realised P&L.
     pub closed: Vec<(UnixNanos, Money)>,
 }
 
 nautilus_strategy!(ModelProbe, {
+    fn on_order_canceled(&mut self, event: &OrderCanceled) {
+        self.model.on_order_canceled(self, event);
+    }
+
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.model.on_order_denied(&event);
     }
@@ -104,14 +108,17 @@ impl DataActor for ModelProbe {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            if let Some(trade) = Rc::clone(&self.model).decide(self)? {
+            if let Some(decision) = Rc::clone(&self.model).decide(self)? {
                 let now = self.clock().timestamp_ns();
-                self.record.borrow_mut().trades.push((now, trade));
-                trade.send(self)?;
+                self.record.borrow_mut().trades.push((now, decision));
+                decision.trade().send(self)?;
             }
             return Ok(());
         }
-        Rc::clone(&self.model).on_time_event(self, event)
+        if !orders::on_time_event(self, event)? {
+            self.model.on_time_event(event);
+        }
+        Ok(())
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
