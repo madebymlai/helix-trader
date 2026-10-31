@@ -17,6 +17,10 @@ use serde::{
 use super::{
     DataRequirements, Declaration, IndicatorsConfig, TickSeries, session::Session, tick_data,
 };
+use crate::model::{
+    config::{ModelConfig, ModelSection},
+    handle::traded_quotes,
+};
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
 /// names and types, and the strategy's own part `P` (see `Part`).
@@ -28,6 +32,10 @@ use super::{
 ///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
 ///   without one.
 /// - `[trade]`: what it trades (see `TradeConfig`).
+/// - `[model]`: the model of a strategy trading on one
+///   (`Part::TAKES_MODEL`), whose targets trade `[trade]`'s instrument (see
+///   `ModelSection`, `model`); required of such a strategy, and a key no
+///   table takes of any other.
 /// - the strategy's own fields, `P` itself, at the top level beside them:
 ///   a TOML describes one strategy.
 ///
@@ -41,32 +49,33 @@ pub struct StandardConfig<P: Part> {
     pub data: DataConfig,
     pub indicators: IndicatorsConfig,
     pub trade: TradeConfig,
+    /// The model, if the strategy trades on one: then always.
+    pub model: Option<ModelSection>,
     pub own: P,
 }
 
 /// A strategy's part of its config: its own fields, at the top level of
 /// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
-/// how many instruments it trades, the indicators it reads, its default
-/// `[base]` and its own rules. The standard tables are not its to drop or
-/// rename.
+/// how many instruments it trades, the indicators it reads, whether it
+/// trades on a model, its default `[base]` and its own rules. The standard
+/// tables are not its to drop or rename.
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
     /// The indicators its code reads, each by name and arguments
     /// (`Declared`): `[indicators]` configures these and no other.
     const INDICATORS: &'static [&'static dyn Declaration] = &[];
+    /// Whether it trades on a model (`model::ModelStrategy`): if so its
+    /// TOML has a `[model]`, and it trades one instrument (`INSTRUMENTS`
+    /// 1). None unless it says.
+    const TAKES_MODEL: bool = false;
     /// Its `[base]` when the TOML has none: its strategy id alone, since
     /// Nautilus tags its orders with the id's tag when `order_id_tag` is
     /// unset (`StrategyCore::new_checked`).
     fn default_base() -> StrategyConfig;
     /// Pushes onto `errors` every violation of its own rules in `config`,
-    /// each under its field.
-    fn validate(config: &StandardConfig<Self>, errors: &mut ConfigErrorCollector);
-    /// The tick series its harness reads beside `[data] series`, which its
-    /// data requirements hold too: none unless it says.
-    fn harness_ticks(_config: &StandardConfig<Self>) -> Vec<TickSeries> {
-        Vec::new()
-    }
+    /// each under its field: none unless it says.
+    fn validate(_config: &StandardConfig<Self>, _errors: &mut ConfigErrorCollector) {}
 }
 
 impl<P: Part> StandardConfig<P> {
@@ -88,7 +97,8 @@ impl<P: Part> StandardConfig<P> {
     /// `DataConfig`), of `[indicators]` (those the strategy declares, each
     /// table parsed and built by its declaration; see `IndicatorsConfig`),
     /// of `[trade]` (as many instruments as the strategy trades, each
-    /// `trade_size` positive) and of the strategy's own (`Part::validate`):
+    /// `trade_size` positive), of a strategy trading on a model (see
+    /// `validate_model`) and of the strategy's own (`Part::validate`):
     /// Nautilus' `ConfigError` of each, with its field, as one
     /// `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
@@ -96,16 +106,41 @@ impl<P: Part> StandardConfig<P> {
         self.data.validate(&mut errors);
         self.indicators.validate(P::INDICATORS, &mut errors);
         self.trade.validate(P::INSTRUMENTS, &mut errors);
+        self.validate_model(&mut errors);
         P::validate(self, &mut errors);
         errors.into_result()
+    }
+
+    /// Pushes onto `errors`, if the config has a model, the violations of
+    /// a strategy trading on it: the base without a strategy id, which
+    /// keys the model's store, and the model invalid for the data read and
+    /// the one instrument traded (see `ModelConfig::validate`), each under
+    /// its field of `[model]`.
+    fn validate_model(&self, errors: &mut ConfigErrorCollector) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        errors.check(
+            self.base.strategy_id.is_some(),
+            ConfigError::missing_field("base.strategy_id"),
+        );
+        // Another count of instruments is `[trade]`'s violation.
+        if let [traded] = self.trade.instruments.as_slice() {
+            errors.collect(
+                model
+                    .clone()
+                    .trading(traded)
+                    .validate(&self.data_requirements()),
+            );
+        }
     }
 
     /// The strategy's id, `[base] strategy_id`.
     ///
     /// # Panics
     ///
-    /// Panics if the base has none, which the rules of a strategy whose id
-    /// keys its models refuse (`Part::validate`).
+    /// Panics if the base has none, which the rules of a strategy trading
+    /// on a model, whose id keys its models, refuse.
     #[must_use]
     pub fn strategy_id(&self) -> StrategyId {
         self.base
@@ -113,9 +148,27 @@ impl<P: Part> StandardConfig<P> {
             .expect("a validated config has a strategy id")
     }
 
+    /// The model, its targets trading the instrument of `[trade]`, of its
+    /// size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the config has no model, or `[trade]` does not list
+    /// exactly one instrument, which a validated config of a strategy
+    /// trading on a model has and lists.
+    #[must_use]
+    pub fn model(&self) -> ModelConfig {
+        let (Some(model), [traded]) = (&self.model, self.trade.instruments.as_slice()) else {
+            panic!("a validated config of a strategy trading on a model has it, of one instrument");
+        };
+        model.clone().trading(traded)
+    }
+
     /// What the strategy needs from data: the bars and the ticks of its
-    /// series, then those of its harness not among them
-    /// (`Part::harness_ticks`), and the warmup.
+    /// series, then, if it trades on a model, the quotes of each traded
+    /// instrument no series reads, which the model's harness then reads
+    /// (`handle::traded_quotes`; otherwise the series of it serve), and the
+    /// warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         let mut ticks: Vec<TickSeries> = self
@@ -127,10 +180,13 @@ impl<P: Part> StandardConfig<P> {
                 Series::Ticks(ticks) => Some(ticks.clone()),
             })
             .collect();
-        for tick in P::harness_ticks(self) {
-            if !ticks.contains(&tick) {
-                ticks.push(tick);
-            }
+        if self.model.is_some() {
+            let unread = self
+                .trade
+                .instruments
+                .iter()
+                .filter(|traded| !self.data.reads(traded.instrument_id));
+            ticks.extend(unread.map(|traded| traded_quotes(traded.instrument_id)));
         }
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
@@ -260,6 +316,17 @@ pub enum Series {
     Ticks(TickSeries),
 }
 
+/// A series by its bar type, `bars XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`,
+/// or as its ticks (see `TickSeries`).
+impl fmt::Display for Series {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bars(bar_type) => write!(f, "bars {bar_type}"),
+            Self::Ticks(ticks) => write!(f, "{ticks}"),
+        }
+    }
+}
+
 /// The keys of a series as the TOML has them.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -369,20 +436,25 @@ impl<'de, P: Part> Deserialize<'de> for StandardConfig<P> {
 }
 
 /// Reads the top-level keys of a `StandardConfig<P>`: the standard tables,
-/// then every other key into the strategy's part `P`, so its fields cannot
-/// stand for a standard table and its `deny_unknown_fields` refuses any key
-/// neither takes.
+/// `model` among them only of a strategy trading on a model
+/// (`Part::TAKES_MODEL`), then every other key into the strategy's part
+/// `P`, so its fields cannot stand for a standard table and its
+/// `deny_unknown_fields` refuses any key neither takes.
 struct Keys<P>(PhantomData<P>);
 
 impl<'de, P: Part> Visitor<'de> for Keys<P> {
     type Value = StandardConfig<P>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the tables base, data, indicators and trade, and the strategy's own fields")
+        f.write_str(
+            "the tables base, data, indicators, trade and, of a strategy trading on a model, \
+             model, and the strategy's own fields",
+        )
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let (mut base, mut data, mut indicators, mut trade) = (None, None, None, None);
+        let mut model = None;
         let mut own = toml::Table::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -390,6 +462,9 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
                 "data" => data = Some(map.next_value()?),
                 "indicators" => indicators = Some(map.next_value()?),
                 "trade" => trade = Some(map.next_value()?),
+                // Of any other strategy, `model` is a key of its own, which
+                // it refuses.
+                "model" if P::TAKES_MODEL => model = Some(map.next_value()?),
                 _ => {
                     let value = map.next_value::<toml::Value>()?;
                     own.insert(key, value);
@@ -406,6 +481,10 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
             data: data.ok_or_else(|| de::Error::missing_field("data"))?,
             indicators: indicators.unwrap_or_default(),
             trade: trade.ok_or_else(|| de::Error::missing_field("trade"))?,
+            model: match model {
+                None if P::TAKES_MODEL => return Err(de::Error::missing_field("model")),
+                model => model,
+            },
             own,
         })
     }
@@ -471,7 +550,11 @@ mod tests {
 
     /// The fields of the config errors of `toml`, in order.
     fn error_fields(toml: &str) -> Vec<String> {
-        let err = load(toml).unwrap_err();
+        fields_of(&load(toml).unwrap_err())
+    }
+
+    /// The fields of the config errors `err` holds, in order.
+    fn fields_of(err: &anyhow::Error) -> Vec<String> {
         let err = err
             .downcast_ref::<ConfigError>()
             .unwrap_or_else(|| panic!("not a config error: {err}"));
@@ -485,6 +568,7 @@ mod tests {
                 ConfigError::InvalidValue { field, .. }
                 | ConfigError::Range { field, .. }
                 | ConfigError::EmptyField { field }
+                | ConfigError::MissingField { field }
                 | ConfigError::InvalidReference { field, .. } => vec![field.clone()],
                 ConfigError::MutuallyExclusiveFields { fields } => fields.clone(),
                 err => panic!("unexpected config error {err:?}"),
@@ -495,7 +579,11 @@ mod tests {
     /// The message of the error refusing `toml`, which is not a config
     /// error: serde's, on the shape or the types.
     fn shape_error(toml: &str) -> String {
-        let err = load(toml).unwrap_err();
+        shape_of(&load(toml).unwrap_err())
+    }
+
+    /// The message of `err`, which is not a config error: serde's.
+    fn shape_of(err: &anyhow::Error) -> String {
         assert!(err.downcast_ref::<ConfigError>().is_none(), "{err}");
         err.to_string()
     }
@@ -799,6 +887,39 @@ mod tests {
         assert!(err.contains("America/Gotham"), "{err}");
     }
 
+    /// A strategy trading on no model has no `[model]`: it is a key no
+    /// table takes.
+    #[test]
+    fn a_strategy_taking_no_model_refuses_a_model_table() {
+        let toml = format!("{TOML}\n[model]\nretrain = \"24h\"\n");
+        let err = shape_error(&toml);
+        assert!(err.contains("`model`"), "{err}");
+    }
+
+    /// Its id keys no model store: a base without one loads.
+    #[test]
+    fn a_strategy_taking_no_model_needs_no_strategy_id() {
+        let config = load(&format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")).unwrap();
+        assert_eq!(config.base.strategy_id, None);
+    }
+
+    /// No harness reads what it trades: an instrument traded that no
+    /// series reads adds no quotes.
+    #[test]
+    fn a_strategy_taking_no_model_reads_no_quotes_of_what_it_trades() {
+        let toml = TOML.replace(
+            "{ instrument_id = \"ESM4.CME\", trade_size = \"2\" }",
+            "{ instrument_id = \"ESU4.CME\", trade_size = \"2\" }",
+        );
+        assert_eq!(
+            load(&toml).unwrap().data_requirements().ticks,
+            [TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from("ESH4.CME"),
+            }]
+        );
+    }
+
     #[test]
     fn the_strategys_own_rules_are_applied() {
         let toml = TOML.replace("spread = 3", "spread = 0");
@@ -823,5 +944,458 @@ mod tests {
                 "spread",
             ]
         );
+    }
+
+    /// The rules of a strategy trading on a model, the shared config's:
+    /// its `[model]`, the quotes its harness reads, its strategy id.
+    mod model {
+        use nautilus_indicators::average::MovingAverageType;
+
+        use super::*;
+        use crate::{
+            model::{
+                decide::DecisionRule,
+                learner::LearnerConfig,
+                targets::{Barrier, Distance, Label},
+            },
+            strategy::AtrArgs,
+        };
+
+        /// A strategy trading on a model: one instrument, no fields of its
+        /// own.
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Modelled {}
+
+        impl Part for Modelled {
+            const INSTRUMENTS: usize = 1;
+            const TAKES_MODEL: bool = true;
+
+            fn default_base() -> StrategyConfig {
+                StrategyConfig {
+                    strategy_id: Some(StrategyId::from("MODELLED-001")),
+                    ..Default::default()
+                }
+            }
+        }
+
+        const TOML: &str = r#"
+            [data]
+            series = [
+                { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
+            ]
+            warmup = "1h"
+
+            [trade]
+            instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "2" }]
+
+            [model]
+            decision = { every = "1h" }
+            targets = { horizon = "30m" }
+            label = "horizon"
+            retrain = "24h"
+            window = "48h"
+            holdout = "12h"
+            margins = { long = 0.5, short = 0.5 }
+            min_pnl = 0.5
+            min_trades = 30
+            learner = { kind = "baseline" }
+        "#;
+
+        fn load(toml: &str) -> anyhow::Result<StandardConfig<Modelled>> {
+            StandardConfig::load(toml)
+        }
+
+        /// The fields of the config errors refusing `toml`, in order.
+        fn error_fields(toml: &str) -> Vec<String> {
+            fields_of(&load(toml).unwrap_err())
+        }
+
+        /// The message of the error refusing `toml`, serde's on its shape.
+        fn shape_error(toml: &str) -> String {
+            shape_of(&load(toml).unwrap_err())
+        }
+
+        /// The reason of the one config error refusing `toml`, under a
+        /// field of `[model]`.
+        fn model_refusal(toml: &str) -> String {
+            let err = load(toml).unwrap_err();
+            match err.downcast_ref::<ConfigError>() {
+                Some(ConfigError::InvalidValue { field, reason })
+                    if field.starts_with("model.") =>
+                {
+                    reason.clone()
+                }
+                _ => panic!("not refused under model: {err}"),
+            }
+        }
+
+        /// `TOML` labelled on a barrier 2 ATRs out and 1.5 ATRs against,
+        /// closed after 45 minutes, its ATR `atr`, as the `targets` line
+        /// has it, warmed up over the 3 hourly bars an ATR of 3 bars needs.
+        fn with_atr(atr: &str) -> String {
+            TOML.replace(r#"warmup = "1h""#, r#"warmup = "3h""#).replace(
+                r#"targets = { horizon = "30m" }"#,
+                &format!(
+                    r#"targets = {{ barrier = {{ take_profit = {{ atr = 2 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }} }}"#
+                ),
+            )
+            .replace(r#"label = "horizon""#, r#"label = "barrier""#)
+        }
+
+        #[test]
+        fn loads_the_standard_tables_and_the_model() {
+            let config = load(TOML).unwrap();
+            assert_eq!(
+                config.data_requirements().bar_types,
+                [BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")]
+            );
+            let model = config.model();
+            assert_eq!(model.targets.horizon, Some(SignedDuration::from_mins(30)));
+            assert_eq!(
+                model.decision,
+                DecisionRule::Every(SignedDuration::from_hours(1))
+            );
+            assert_eq!(model.label, Label::Horizon);
+            assert_eq!(model.learner, LearnerConfig::Baseline {});
+        }
+
+        /// A strategy trading on a model has a `[model]`, as it has a
+        /// `[trade]`.
+        #[test]
+        fn a_strategy_taking_a_model_requires_its_table() {
+            let start = TOML.find("[model]").unwrap();
+            let err = shape_error(&TOML[..start]);
+            assert!(err.contains("`model`"), "{err}");
+        }
+
+        /// The targets trade what `[trade]` names: its one instrument, of
+        /// its size.
+        #[test]
+        fn the_targets_trade_the_instrument_and_size_of_the_trade_table() {
+            let targets = load(TOML).unwrap().model().targets;
+            assert_eq!(
+                targets.instrument_id,
+                InstrumentId::from("XAUUSD.ICMARKETS")
+            );
+            assert_eq!(targets.quantity, Quantity::from(2));
+        }
+
+        #[test]
+        fn targets_naming_an_instrument_or_a_quantity_are_refused_at_load() {
+            for key in [r#"instrument_id = "XAUUSD.ICMARKETS""#, r#"quantity = "1""#] {
+                let toml = TOML.replace(
+                    r#"targets = { horizon"#,
+                    &format!(r#"targets = {{ {key}, horizon"#),
+                );
+                let name = key.split(' ').next().unwrap();
+                let err = shape_error(&toml);
+                assert!(err.contains(&format!("`{name}`")), "{name}: {err}");
+            }
+        }
+
+        #[test]
+        fn a_second_traded_instrument_is_refused() {
+            let toml = TOML.replace(
+                r#"trade_size = "2" }]"#,
+                r#"trade_size = "2" }, { instrument_id = "EURUSD.ICMARKETS", trade_size = "1" }]"#,
+            );
+            assert_eq!(error_fields(&toml), ["trade.instruments"]);
+        }
+
+        /// The harness reads the quotes of the instrument traded when no
+        /// series reads it: the requirements hold them after the series'
+        /// ticks.
+        #[test]
+        fn a_traded_instrument_not_read_loads_its_quotes_into_the_requirements() {
+            let toml = TOML.replace(
+                r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS""#,
+                r#"instruments = [{ instrument_id = "EURUSD.ICMARKETS""#,
+            );
+
+            let requirements = load(&toml).unwrap().data_requirements();
+
+            assert_eq!(
+                requirements.ticks,
+                [TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
+                }]
+            );
+        }
+
+        /// The traded instrument's 1-minute bars are its own series of it:
+        /// the harness reads them and adds no quotes.
+        #[test]
+        fn a_traded_instrument_a_series_reads_adds_no_quotes() {
+            let requirements = load(TOML).unwrap().data_requirements();
+
+            assert_eq!(requirements.ticks, []);
+        }
+
+        /// The series read the trades of the GC root and nothing of the
+        /// gold traded: the harness reads its quotes.
+        #[test]
+        fn a_traded_instrument_beside_series_on_a_root_loads_its_quotes() {
+            let toml = TOML.replace(
+                r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#,
+                r#"{ data = "trades", instrument_id = "GC.GLBX" },"#,
+            );
+
+            let requirements = load(&toml).unwrap().data_requirements();
+
+            assert_eq!(
+                requirements.ticks,
+                [
+                    TickSeries {
+                        data: NautilusDataType::TradeTick,
+                        instrument_id: InstrumentId::from("GC.GLBX"),
+                    },
+                    TickSeries {
+                        data: NautilusDataType::QuoteTick,
+                        instrument_id: InstrumentId::from("XAUUSD.ICMARKETS"),
+                    },
+                ]
+            );
+        }
+
+        /// Trading OKX on hourly bars built from its 1-minute candles, the
+        /// one series its archive serves (`data::okx`): fill-catalog
+        /// fetches those candles alone, no quotes.
+        #[test]
+        fn an_okx_strategy_on_composite_bars_requires_its_candles_alone() {
+            let toml = TOML
+                .replace(
+                    r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#,
+                    r#"{ data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },"#,
+                )
+                .replace(
+                    r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "2" }]"#,
+                    r#"instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]"#,
+                );
+
+            let requirements = load(&toml).unwrap().data_requirements();
+
+            assert_eq!(
+                requirements.catalog_series(),
+                [(
+                    NautilusDataType::Bar,
+                    "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
+                )]
+            );
+        }
+
+        /// Gold's 1-minute LAST bars are built from its trades, and the
+        /// strategy reads no quote of it: the barrier's ATR of 3 bars,
+        /// decided hourly, runs on hourly bars of its trades.
+        #[test]
+        fn the_barrier_atr_of_a_strategy_reading_trades_runs_on_their_bars() {
+            let config = load(
+                &with_atr(", atr = { period = 3 }")
+                    .replace(r#"price_type = "MID""#, r#"price_type = "LAST""#),
+            )
+            .unwrap();
+            let model = config.model();
+
+            let atr = model
+                .targets
+                .atr_bars(model.decision, &config.data_requirements())
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                atr.bar_type,
+                BarType::from("XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL")
+            );
+        }
+
+        /// Quotes of the instrument traded the series list already are
+        /// listed once.
+        #[test]
+        fn traded_quotes_the_series_read_are_required_once() {
+            let toml = TOML.replace(
+                "series = [",
+                r#"series = [
+                { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },"#,
+            );
+
+            let requirements = load(&toml).unwrap().data_requirements();
+
+            assert_eq!(requirements.ticks.len(), 1, "{:?}", requirements.ticks);
+        }
+
+        #[test]
+        fn a_futures_root_traded_is_refused_at_load() {
+            let toml = TOML.replace(
+                r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS""#,
+                r#"instruments = [{ instrument_id = "GC.GLBX""#,
+            );
+            let reason = model_refusal(&toml);
+            assert!(reason.contains("GC.GLBX"), "{reason}");
+        }
+
+        /// A trade on a horizon of an hour, decided every hour, would still
+        /// be open at the next decision.
+        #[test]
+        fn a_target_not_shorter_than_the_decision_cadence_is_refused() {
+            let toml = TOML.replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+            let reason = model_refusal(&toml);
+            assert!(
+                reason.contains("horizon 1h") && reason.contains("cadence 1h"),
+                "{reason}"
+            );
+        }
+
+        /// The strategy id keys the model's store.
+        #[test]
+        fn a_base_without_a_strategy_id_is_refused() {
+            let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n");
+            assert_eq!(error_fields(&toml), ["base.strategy_id"]);
+        }
+
+        #[test]
+        fn a_misspelt_field_of_the_model_is_refused_at_load() {
+            let err = shape_error(&TOML.replace("min_pnl", "min_pn"));
+            assert!(err.contains("min_pn"), "{err}");
+        }
+
+        /// The barrier's ATR takes Nautilus' `AverageTrueRange` arguments
+        /// by their names, the moving average by Nautilus' name of it.
+        #[test]
+        fn the_barrier_atr_takes_nautilus_average_true_range_arguments() {
+            let toml = with_atr(
+                r#", atr = { period = 3, ma_type = "simple", use_previous = false, value_floor = 0.5 }"#,
+            );
+            let barrier = load(&toml).unwrap().model().targets.barrier.unwrap();
+            assert_eq!(
+                barrier,
+                Barrier {
+                    take_profit: Distance::Atr(2.into()),
+                    stop: Distance::Atr(rust_decimal::Decimal::new(15, 1)),
+                    limit: SignedDuration::from_mins(45),
+                    atr: Some(AtrArgs {
+                        period: 3,
+                        ma_type: Some(MovingAverageType::Simple),
+                        use_previous: Some(false),
+                        value_floor: Some(0.5),
+                    }),
+                }
+            );
+        }
+
+        #[test]
+        fn a_moving_average_nautilus_does_not_name_is_refused_at_load() {
+            let err = shape_error(&with_atr(
+                r#", atr = { period = 3, ma_type = "TRIANGULAR" }"#,
+            ));
+            assert!(err.contains("TRIANGULAR"), "{err}");
+        }
+
+        /// Nautilus' `AverageTrueRange::new` panics on an argument it
+        /// refuses, and the load builds the ATR.
+        #[test]
+        #[should_panic(expected = "value_floor")]
+        fn a_barrier_atr_argument_nautilus_refuses_panics_at_load() {
+            let _ = load(&with_atr(r#", atr = { period = 3, value_floor = -1.0 }"#));
+        }
+
+        #[test]
+        #[should_panic(expected = "period")]
+        fn a_barrier_atr_of_no_bars_panics_at_load() {
+            let _ = load(&with_atr(r#", atr = { period = 0 }"#));
+        }
+
+        /// The model's violation is its horizon of an hour, decided every
+        /// hour, reported under the horizon's field, `model.targets.horizon`,
+        /// after the standard ones and the strategy id's.
+        #[test]
+        fn reports_the_models_violations_with_the_standard_ones() {
+            let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
+                .replace("\"1h\"\n", "\"0s\"\n")
+                .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+            assert_eq!(
+                error_fields(&toml),
+                ["data.warmup", "base.strategy_id", "model.targets.horizon"]
+            );
+        }
+
+        /// Three violations of the model, each reported under its field at
+        /// once: margins naming no side, no trade required on the holdout,
+        /// and a horizon of an hour decided every hour.
+        #[test]
+        fn reports_every_violation_of_the_model_under_its_field() {
+            let toml = TOML
+                .replace("margins = { long = 0.5, short = 0.5 }", "margins = {}")
+                .replace("min_trades = 30", "min_trades = 0")
+                .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+
+            let mut fields = error_fields(&toml);
+            fields.sort();
+
+            assert_eq!(
+                fields,
+                ["model.margins", "model.min_trades", "model.targets.horizon"]
+            );
+        }
+
+        /// TOML with a barrier labelled on, and `meta` after it.
+        fn with_meta(meta: &str) -> String {
+            format!(
+                "{}\n{meta}",
+                TOML.replace(
+                    r#"targets = { horizon = "30m" }"#,
+                    r#"targets = { horizon = "30m", barrier = { take_profit = { bps = 10 }, stop = { bps = 10 }, limit = "45m" } }"#,
+                )
+                .replace(r#"label = "horizon""#, r#"label = "barrier""#)
+            )
+        }
+
+        /// The meta model's violations are reported under `[model.meta]`'s
+        /// fields: a threshold of 1.5 is no probability, and it requires no
+        /// trade on its holdout.
+        #[test]
+        fn reports_the_meta_models_violations_under_its_fields() {
+            let toml = with_meta(
+                r#"
+                [model.meta]
+                window = "48h"
+                holdout = "12h"
+                threshold = 1.5
+                min_pnl = 0.5
+                min_trades = 0
+                learner = { kind = "baseline" }
+                "#,
+            );
+
+            let mut fields = error_fields(&toml);
+            fields.sort();
+
+            assert_eq!(fields, ["model.meta.min_trades", "model.meta.threshold"]);
+        }
+
+        /// A meta model is a `[model.meta]` table, and no more: a meta of
+        /// the meta is an unknown field. It learns the barrier trades of a
+        /// primary labelled on the barrier.
+        #[test]
+        fn loads_a_meta_model_from_its_table_alone_and_no_deeper() {
+            let toml = with_meta(
+                r#"
+                [model.meta]
+                window = "48h"
+                holdout = "12h"
+                threshold = 0.55
+                min_pnl = 0.5
+                min_trades = 30
+                learner = { kind = "baseline" }
+                "#,
+            );
+
+            let config = load(&toml).unwrap();
+            assert_eq!(config.model().meta.unwrap().threshold, 0.55);
+
+            let nested = format!("{toml}\n[model.meta.meta]\nthreshold = 0.5\n");
+            let err = shape_error(&nested);
+            assert!(err.contains("unknown field `meta`"), "{err}");
+        }
     }
 }

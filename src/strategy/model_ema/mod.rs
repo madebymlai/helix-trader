@@ -25,10 +25,7 @@
 //! handed the order and position events; the module closes the targets
 //! at their time as it does the trades.
 
-mod config;
 mod features;
-
-pub use config::ModelEmaConfig;
 
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -38,21 +35,51 @@ use nautilus_common::{
 use nautilus_model::{
     data::{Bar, OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick},
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
+    identifiers::StrategyId,
 };
-use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
+use nautilus_trading::{
+    nautilus_strategy,
+    strategy::{StrategyConfig, StrategyCore},
+};
+use serde::Deserialize;
 use std::{any::Any, rc::Rc};
 
-use self::config::ModelEmaParams;
 use crate::{
     model::{
-        ModelStrategy,
-        config::ModelConfig,
-        decide,
+        ModelStrategy, decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle},
     },
-    strategy::{orders, warmup::Warmup},
+    strategy::{Part, StandardConfig, orders, warmup::Warmup},
 };
+
+/// Config of the `model_ema` strategy, loaded from TOML: the standard
+/// tables, its model in `[model]`, and no fields of its own
+/// (`ModelEmaParams`).
+pub type ModelEmaConfig = StandardConfig<ModelEmaParams>;
+
+/// The strategy's part: no fields of its own. It trades on a model, whose
+/// targets trade the one instrument of `[trade]`, of its size; its
+/// features are read from every bars series of `[data]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEmaParams {}
+
+impl Part for ModelEmaParams {
+    const INSTRUMENTS: usize = 1;
+    const TAKES_MODEL: bool = true;
+
+    /// The strategy's id alone, `MODEL_EMA-001`: Nautilus tags its orders
+    /// with the id's tag. `oms_type` is left unset: Nautilus keeps the
+    /// strategy's positions as the execution client of the venue does,
+    /// netting or hedging, in a backtest as live.
+    fn default_base() -> StrategyConfig {
+        StrategyConfig {
+            strategy_id: Some(StrategyId::from("MODEL_EMA-001")),
+            ..Default::default()
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ModelEma {
@@ -64,18 +91,22 @@ pub struct ModelEma {
 impl ModelStrategy for ModelEma {
     type Params = ModelEmaParams;
 
-    /// The strategy, its model handle in `mode`: live, its warmup
-    /// (`DataConfig::warmup`) is requested at start, which hydrates its
-    /// indicators; otherwise they warm on the data replayed.
+    /// The strategy, deciding on `features`, its model handle in `mode`:
+    /// live, its warmup (`DataConfig::warmup`) is requested at start, which
+    /// hydrates its indicators; otherwise they warm on the data replayed.
     ///
     /// # Errors
     ///
     /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
     /// the base (`StrategyCore::new_checked`).
-    fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
+    fn with_features(
+        config: ModelEmaConfig,
+        features: Rc<FeatureSet>,
+        mode: Mode,
+    ) -> anyhow::Result<Self> {
         let model = ModelHandle::new(
             config.strategy_id(),
-            Self::features(&config)?,
+            features,
             &config.model(),
             &config.data_requirements(),
             mode,
@@ -93,13 +124,9 @@ impl ModelStrategy for ModelEma {
     }
 
     /// The averages of each of its bars series, warmed over its warmup.
-    fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
+    fn build_features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
         let bar_types: Vec<_> = config.data.bar_types().collect();
         features::features(&bar_types, config.data.warmup)
-    }
-
-    fn model(config: &ModelEmaConfig) -> ModelConfig {
-        config.model()
     }
 }
 
@@ -216,7 +243,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::dataset::{Commission, DatasetVenue},
+        model::{
+            dataset::{Commission, DatasetVenue},
+            targets::Label,
+        },
         strategy::orders::{Exits, Trade},
     };
 
@@ -243,6 +273,57 @@ mod tests {
         min_trades = 30
         learner = { kind = "baseline" }
     "#;
+
+    #[test]
+    fn the_example_config_loads() {
+        let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
+        let model = config.model();
+        assert_eq!(
+            model.targets.instrument_id,
+            InstrumentId::from("XAUUSD.ICMARKETS")
+        );
+        assert_eq!(model.label, Label::Barrier);
+        assert_eq!(
+            model.targets.barrier.map(|barrier| barrier.limit),
+            Some(SignedDuration::from_mins(45))
+        );
+        assert_eq!(config.strategy_id(), StrategyId::from("MODEL_EMA-001"));
+    }
+
+    /// Its features read each bars series of its example: two averages of
+    /// each.
+    #[test]
+    fn the_features_of_the_example_config_read_its_series() {
+        let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
+
+        assert_eq!(ModelEma::features(&config).unwrap().names().len(), 4);
+    }
+
+    /// Its features read bars alone: the quotes of the gold traded, which
+    /// the barrier's ATR of a horizon does not run on, are read by none.
+    #[test]
+    fn a_tick_series_its_features_do_not_read_is_refused() {
+        let config = ModelEmaConfig::load(&CONFIG.replace(
+            "series = [",
+            r#"series = [
+            { data = "quotes", instrument_id = "AUD/USD.SIM" },"#,
+        ))
+        .unwrap();
+
+        let err = format!("{:#}", ModelEma::features(&config).unwrap_err());
+
+        assert!(err.contains("QuoteTick of AUD/USD.SIM"), "{err}");
+    }
+
+    /// Without `[base]`, its default: its strategy id alone, Nautilus
+    /// tagging its orders with the id's tag.
+    #[test]
+    fn defaults_its_base_to_its_strategy_id_alone() {
+        let base = ModelEmaConfig::load(CONFIG).unwrap().base;
+        assert_eq!(base.strategy_id, Some(StrategyId::from("MODEL_EMA-001")));
+        assert_eq!(base.order_id_tag, None);
+        assert_eq!(base.oms_type, None);
+    }
 
     /// 2026-10-26T10:00:00Z, the time of the restart.
     const NOW: u64 = 1_792_922_400_000_000_000;

@@ -16,11 +16,12 @@
 //! What most strategies share is a config struct and functions, never a
 //! base type: `StandardConfig`, the tables every strategy's TOML has, holds
 //! the series read, their warmup and their `Session`, the indicators read
-//! (`IndicatorsConfig`) and the instruments traded, beside the strategy's
-//! own table (its `Part`). The exception is a strategy trading on a learned
-//! model, which holds the harness' types (`model::features::FeatureSet`,
-//! `model::handle::ModelHandle`); `model_ema` is the example, its
-//! `[model]` table its own part.
+//! (`IndicatorsConfig`), the instruments traded and the model of a strategy
+//! trading on one, beside the strategy's own table (its `Part`). The
+//! exception is a strategy trading on a learned model, which holds the
+//! harness' types (`model::features::FeatureSet`,
+//! `model::handle::ModelHandle`) and implements `model::ModelStrategy`;
+//! `model_ema` is the example.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
@@ -34,17 +35,17 @@ pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
 mod indicators;
-pub mod orders;
 pub mod model_ema;
+pub mod orders;
 mod session;
 mod standard;
 pub mod warmup;
 
 pub use indicators::{AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig};
-pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 pub use session::Session;
+pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp};
@@ -73,12 +74,12 @@ pub struct DataRequirements {
     /// `TickSeries`): fetched by fill-catalog from their instrument's
     /// source (Databento fetches a GLBX instrument's book and trades
     /// whatever is declared; no source serves custom data) and replayed in
-    /// a backtest as declared, those of its harness among them
-    /// (`Part::harness_ticks`: a model strategy's traded quotes when no
-    /// series reads the traded instrument). Their instruments are read
-    /// too: live sets up their clients but subscribes to none of the
-    /// ticks, which the strategy (a model strategy's handle) subscribes to
-    /// and warms up on (`warmup::Warmup::reading`).
+    /// a backtest as declared, those of its harness among them (a model
+    /// strategy's traded quotes when no series reads the traded
+    /// instrument, `StandardConfig::data_requirements`). Their instruments
+    /// are read too: live sets up their clients but subscribes to none of
+    /// the ticks, which the strategy (a model strategy's handle) subscribes
+    /// to and warms up on (`warmup::Warmup::reading`).
     pub ticks: Vec<TickSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
@@ -304,6 +305,14 @@ impl SeriesSlice {
             .into_iter()
             .map(|(series, slice)| Self { series, slice })
             .collect()
+    }
+}
+
+/// The ticks by their Nautilus data type and instrument,
+/// `QuoteTick of XAUUSD.ICMARKETS`.
+impl fmt::Display for TickSeries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} of {}", self.data, self.instrument_id)
     }
 }
 

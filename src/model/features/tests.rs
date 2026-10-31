@@ -473,6 +473,24 @@ fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
     );
 }
 
+/// The bars of AUD's mids read by two features, its bids by one: each bar
+/// type once, in the order declared, and no ticks.
+#[test]
+fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
+    let features = FeatureSet::builder()
+        .bars(BarType::from(AUD_BARS), "mid_fast", sma(1))
+        .quotes(id(AUD), "aud_quotes", sma(1))
+        .bars(BarType::from(AUD_BID_BARS), "bid", sma(1))
+        .bars(BarType::from(AUD_BARS), "mid_slow", sma(2))
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        features.bar_types(),
+        [BarType::from(AUD_BARS), BarType::from(AUD_BID_BARS)]
+    );
+}
+
 #[test]
 fn a_set_declares_no_warmup_unless_given_one() {
     let features = |warmup: Option<SignedDuration>| {
