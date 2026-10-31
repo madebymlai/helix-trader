@@ -36,9 +36,6 @@ use jiff::{SignedDuration, Timestamp};
 /// bracket 1.5 ATRs of 3 hourly bars in its favour, 7.5 bps against,
 /// closed after 45 minutes, and a horizon of 30 minutes, of one ounce.
 const CONFIG: &str = r#"
-    [base]
-    strategy_id = "MODEL_EMA-001"
-
     [data]
     series = [
         { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },

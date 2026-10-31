@@ -23,7 +23,7 @@ use std::{collections::BTreeMap, path::Path};
 use helix_trader::{
     backtest::{Backtest, commission_per_order, venue_oms_type},
     strategy::{
-        DataConfig, IndicatorsConfig, Series, Session, TradeConfig, TradedInstrument,
+        DataConfig, IndicatorsConfig, Part, Series, Session, TradeConfig, TradedInstrument,
         ema::{EmaCross, EmaCrossConfig, EmaParams},
     },
 };
@@ -33,12 +33,11 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, QuoteTick},
     enums::{AggregationSource, BarAggregation, PriceType},
-    identifiers::{InstrumentId, StrategyId, Symbol, Venue},
+    identifiers::{InstrumentId, Symbol, Venue},
     instruments::{InstrumentAny, stubs::equity_aapl},
     types::{Currency, Money, Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
-use nautilus_trading::strategy::StrategyConfig;
 use rust_decimal::Decimal;
 use tempfile::TempDir;
 
@@ -227,10 +226,7 @@ pub const LIVE_WARMUP: SignedDuration = SignedDuration::from_hours(1);
 pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCrossConfig {
     let instrument_id = InstrumentId::from(INSTRUMENT_ID);
     EmaCrossConfig {
-        base: StrategyConfig {
-            strategy_id: Some(StrategyId::from("EMA_CROSS-001")),
-            ..Default::default()
-        },
+        base: EmaParams::default_base(),
         data: DataConfig {
             series: vec![Series::Bars(BarType::new(
                 instrument_id,

@@ -20,9 +20,6 @@ use nautilus_portfolio::portfolio::Portfolio;
 use super::*;
 
 const TOML: &str = r#"
-    [base]
-    strategy_id = "EMA_CROSS-001"
-
     [data]
     series = [
         { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
@@ -84,13 +81,6 @@ fn the_example_config_loads() {
         (config.fast_ema().period, config.slow_ema().period),
         (10, 30)
     );
-    assert_eq!(
-        config.strategy_id(),
-        nautilus_model::identifiers::StrategyId::from("EMA_CROSS-001")
-    );
-    // Nautilus keeps the strategy's positions as the venue's execution
-    // client does, netting or hedging, in a backtest as live.
-    assert_eq!(config.base.oms_type, None);
 }
 
 #[test]
@@ -103,6 +93,18 @@ fn reads_its_emas_from_the_indicators() {
         (config.fast_ema().period, config.slow_ema().period),
         (5, 15)
     );
+}
+
+#[test]
+fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
+    let config = EmaCrossConfig::load(TOML).unwrap();
+    assert_eq!(
+        config.base.strategy_id,
+        Some(StrategyId::from("EMA_CROSS-001"))
+    );
+    // Its id alone: Nautilus tags its orders with the id's tag.
+    assert_eq!(config.base.order_id_tag, None);
+    assert_eq!(config.base.oms_type, None);
 }
 
 #[test]
@@ -218,9 +220,6 @@ fn a_short_takes_profit_a_percent_below_the_close_and_stops_half_a_percent_above
 
 /// Trades AUD/USD.
 const CONFIG: &str = r#"
-    [base]
-    strategy_id = "EMA_CROSS-001"
-
     [data]
     series = [
         { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },

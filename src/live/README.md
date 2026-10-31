@@ -50,7 +50,7 @@ DataClientFactory>` and friends and never names a broker.
 ## The command
 
 ```sh
-helix-trader live --config ema.toml [--account DU1234567] \
+helix-trader live ema --config ema.toml [--account DU1234567] \
   [--client-id 1] [--leverage 1] [--trader-id HELIX-001] [--catalog catalog] \
   [--staging staging] [--models models] \
   [--retrain-commission-rate 0.00003 --retrain-balance "10000000 USD"]

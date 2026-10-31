@@ -144,9 +144,6 @@ async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
 fn never_trading_ema_cross() -> EmaCrossConfig {
     EmaCrossConfig::load(
         r#"
-        [base]
-        strategy_id = "EMA_CROSS-001"
-
         [data]
         series = [
             { data = "bars", instrument_id = "SXR8.IBIS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },

@@ -1,4 +1,6 @@
-use nautilus_common::config::ConfigErrorCollector;
+use nautilus_common::config::{ConfigError, ConfigErrorCollector};
+use nautilus_model::identifiers::StrategyId;
+use nautilus_trading::strategy::StrategyConfig;
 use serde::Deserialize;
 
 use crate::{
@@ -26,10 +28,26 @@ pub struct ModelEmaParams {
 impl Part for ModelEmaParams {
     const INSTRUMENTS: usize = 1;
 
-    /// The model invalid for the data read and the instrument traded (see
+    /// The strategy's id alone, `MODEL_EMA-001`: Nautilus tags its orders
+    /// with the id's tag. `oms_type` is left unset: Nautilus keeps the
+    /// strategy's positions as the execution client of the venue does,
+    /// netting or hedging, in a backtest as live.
+    fn default_base() -> StrategyConfig {
+        StrategyConfig {
+            strategy_id: Some(StrategyId::from("MODEL_EMA-001")),
+            ..Default::default()
+        }
+    }
+
+    /// The base without a strategy id, which keys the model's store, or
+    /// the model invalid for the data read and the instrument traded (see
     /// `ModelConfig::validate`), each violation under its field of
     /// `[model]`.
     fn validate(config: &ModelEmaConfig, errors: &mut ConfigErrorCollector) {
+        errors.check(
+            config.base.strategy_id.is_some(),
+            ConfigError::missing_field("base.strategy_id"),
+        );
         if let [traded] = config.trade.instruments.as_slice() {
             let model = config.own.model.clone().trading(traded);
             errors.collect(model.validate(&config.data_requirements()));
@@ -70,11 +88,10 @@ impl ModelEmaConfig {
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_common::config::ConfigError;
     use nautilus_indicators::average::MovingAverageType;
     use nautilus_model::{
         data::{BarType, NautilusDataType},
-        identifiers::{InstrumentId, StrategyId},
+        identifiers::InstrumentId,
         types::Quantity,
     };
 
@@ -87,9 +104,6 @@ mod tests {
     use crate::strategy::AtrArgs;
 
     const TOML: &str = r#"
-        [base]
-        strategy_id = "MODEL_EMA-001"
-
         [data]
         series = [
             { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
@@ -374,6 +388,22 @@ mod tests {
     }
 
     #[test]
+    fn a_base_without_a_strategy_id_is_refused() {
+        let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n");
+        assert_eq!(error_fields(&toml), ["base.strategy_id"]);
+    }
+
+    /// Without `[base]`, its default: its strategy id alone, Nautilus
+    /// tagging its orders with the id's tag.
+    #[test]
+    fn defaults_its_base_to_its_strategy_id_alone() {
+        let base = ModelEmaConfig::load(TOML).unwrap().base;
+        assert_eq!(base.strategy_id, Some(StrategyId::from("MODEL_EMA-001")));
+        assert_eq!(base.order_id_tag, None);
+        assert_eq!(base.oms_type, None);
+    }
+
+    #[test]
     fn a_misspelt_field_of_the_model_is_refused_at_load() {
         let err = shape_error(&TOML.replace("min_pnl", "min_pn"));
         assert!(err.contains("min_pn"), "{err}");
@@ -431,20 +461,15 @@ mod tests {
     }
 
     /// The model's violation is its horizon of an hour, decided every hour,
-    /// reported under the horizon's field, `model.targets.horizon`, after
-    /// the standard ones.
+    /// reported under the horizon's field, `model.targets.horizon`.
     #[test]
     fn reports_its_own_violations_with_the_standard_ones() {
-        let toml = TOML
-            .replace(
-                r#"strategy_id = "MODEL_EMA-001""#,
-                r#"order_id_tag = "001""#,
-            )
+        let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
             .replace("\"1h\"\n", "\"0s\"\n")
             .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
         assert_eq!(
             error_fields(&toml),
-            ["base.strategy_id", "data.warmup", "model.targets.horizon"]
+            ["data.warmup", "base.strategy_id", "model.targets.horizon"]
         );
     }
 

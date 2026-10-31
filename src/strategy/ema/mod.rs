@@ -33,11 +33,14 @@ use nautilus_indicators::average::ema::ExponentialMovingAverage;
 use nautilus_model::{
     data::{Bar, BarType, QuoteTick, TradeTick},
     enums::OrderSide,
-    identifiers::InstrumentId,
+    identifiers::{InstrumentId, StrategyId},
     instruments::Instrument,
     types::Quantity,
 };
-use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
+use nautilus_trading::{
+    nautilus_strategy,
+    strategy::{StrategyConfig, StrategyCore},
+};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -83,6 +86,17 @@ const SLOW: Declared<EmaArgs> = Declared::new("slow");
 impl Part for EmaParams {
     const INSTRUMENTS: usize = 1;
     const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &SLOW];
+
+    /// The strategy's id alone, `EMA_CROSS-001`: Nautilus tags its orders
+    /// with the id's tag. `oms_type` is left unset: Nautilus keeps the
+    /// strategy's positions as the execution client of the venue does,
+    /// netting or hedging, in a backtest as live.
+    fn default_base() -> StrategyConfig {
+        StrategyConfig {
+            strategy_id: Some(StrategyId::from("EMA_CROSS-001")),
+            ..Default::default()
+        }
+    }
 
     /// The fast period not below the slow one, or the traded instrument
     /// without exactly one bars series.
