@@ -185,6 +185,29 @@ fn rejects_a_trade_instrument_with_two_bars_series() {
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
 
+/// The crossover reading the bars of the GC root, the one series of it,
+/// and trading the root: no order goes to a root, which the shared trade
+/// rules refuse under its field.
+#[test]
+fn rejects_a_futures_root_traded() {
+    let toml = TOML
+        .replace(
+            "{ data = \"bars\", instrument_id = \"ESH4.CME\", bar_spec = { step = 1, aggregation = \"HOUR\", price_type = \"MID\" } },",
+            "",
+        )
+        .replace("ESM4.CME", "GC.GLBX")
+        .replace("price_type = \"MID\"", "price_type = \"LAST\"");
+    assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
+}
+
+/// Its bars of the instrument traded give execution its prices: no
+/// quotes of it are added.
+#[test]
+fn requires_no_quotes_of_the_instrument_its_bars_read() {
+    let config = EmaCrossConfig::load(TOML).unwrap();
+    assert_eq!(config.data_requirements().ticks, []);
+}
+
 #[test]
 fn reports_its_own_violations_with_the_standard_ones() {
     let toml = TOML

@@ -1,6 +1,6 @@
 use std::{fmt, marker::PhantomData, str::FromStr};
 
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use nautilus_model::{
     data::{BarSpecification, BarType, NautilusDataType},
@@ -17,9 +17,9 @@ use serde::{
 use super::{
     DataRequirements, Declaration, IndicatorsConfig, TickSeries, session::Session, tick_data,
 };
-use crate::model::{
-    config::{ModelConfig, ModelSection},
-    handle::traded_quotes,
+use crate::{
+    model::config::{ModelConfig, ModelSection},
+    rolls::Transition,
 };
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
@@ -96,11 +96,12 @@ impl<P: Part> StandardConfig<P> {
     /// Returns every violation of the rules of `[data]` (see
     /// `DataConfig`), of `[indicators]` (those the strategy declares, each
     /// table parsed and built by its declaration; see `IndicatorsConfig`),
-    /// of `[trade]` (as many instruments as the strategy trades, each
-    /// `trade_size` positive), of a strategy trading on a model (see
-    /// `validate_model`) and of the strategy's own (`Part::validate`):
-    /// Nautilus' `ConfigError` of each, with its field, as one
-    /// `ConfigError::Multiple` if there are several.
+    /// of `[trade]` (as many instruments as the strategy trades, none a
+    /// futures root, each `trade_size` positive; see `TradeConfig`), of a
+    /// strategy trading on a model (see `validate_model`) and of the
+    /// strategy's own (`Part::validate`): Nautilus' `ConfigError` of each,
+    /// with its field, as one `ConfigError::Multiple` if there are
+    /// several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);
@@ -165,13 +166,11 @@ impl<P: Part> StandardConfig<P> {
     }
 
     /// What the strategy needs from data: the bars and the ticks of its
-    /// series, then, if it trades on a model, the quotes of each traded
-    /// instrument no series reads, which the model's harness then reads
-    /// (`handle::traded_quotes`; otherwise the series of it serve), and the
-    /// warmup.
+    /// series, then the quotes of each instrument traded that no series
+    /// reads (`TradeConfig::quotes_unread_by`), and the warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
-        let mut ticks: Vec<TickSeries> = self
+        let ticks = self
             .data
             .series
             .iter()
@@ -179,15 +178,8 @@ impl<P: Part> StandardConfig<P> {
                 Series::Bars(_) => None,
                 Series::Ticks(ticks) => Some(ticks.clone()),
             })
+            .chain(self.trade.quotes_unread_by(&self.data))
             .collect();
-        if self.model.is_some() {
-            let unread = self
-                .trade
-                .instruments
-                .iter()
-                .filter(|traded| !self.data.reads(traded.instrument_id));
-            ticks.extend(unread.map(|traded| traded_quotes(traded.instrument_id)));
-        }
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
             ticks,
@@ -390,7 +382,9 @@ pub struct CompositeSource {
     pub aggregation_source: AggregationSource,
 }
 
-/// `[trade]`: what the strategy trades.
+/// `[trade]`: what the strategy trades, and the size of each trade. The
+/// execution data of an instrument traded comes from it: its quotes,
+/// when no series of `[data]` reads it (`quotes_unread_by`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
@@ -400,6 +394,10 @@ pub struct TradeConfig {
 }
 
 impl TradeConfig {
+    /// Pushes the violations of `[trade]`, whatever the strategy: not
+    /// `count` instruments listed; an instrument a futures root of the
+    /// roll calendar (`rolls::Transition`), since an order goes to a
+    /// contract; a `trade_size` not positive.
     fn validate(&self, count: usize, errors: &mut ConfigErrorCollector) {
         let listed = self.instruments.len();
         errors.check(
@@ -410,6 +408,18 @@ impl TradeConfig {
             ),
         );
         for (i, traded) in self.instruments.iter().enumerate() {
+            let instrument_id = traded.instrument_id;
+            // A root rolls at any time: its first roll after the epoch
+            // names a contract of it.
+            if let Some(roll) = Transition::after(instrument_id, Timestamp::UNIX_EPOCH) {
+                errors.push(ConfigError::invalid_value(
+                    format!("trade.instruments[{i}].instrument_id"),
+                    format!(
+                        "{instrument_id} is a futures root: orders go to a contract, such as {}",
+                        roll.pre
+                    ),
+                ));
+            }
             errors.check(
                 traded.trade_size.is_positive(),
                 ConfigError::range(
@@ -418,6 +428,25 @@ impl TradeConfig {
                 ),
             );
         }
+    }
+
+    /// The quotes of each instrument traded that no series of `data`
+    /// reads, in order: its prices for the strategy's orders and their
+    /// fills, and for a model harness' decisions, whatever the strategy; a
+    /// series reading it gives them otherwise. They are not series of
+    /// `[data]`: the strategy's data requirements add them
+    /// (`StandardConfig::data_requirements`).
+    fn quotes_unread_by<'a>(
+        &'a self,
+        data: &'a DataConfig,
+    ) -> impl Iterator<Item = TickSeries> + 'a {
+        self.instruments
+            .iter()
+            .filter(|traded| !data.reads(traded.instrument_id))
+            .map(|traded| TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: traded.instrument_id,
+            })
     }
 }
 
@@ -713,6 +742,38 @@ mod tests {
         assert_eq!(error_fields(&toml), ["trade.instruments[1].trade_size"]);
     }
 
+    /// GC.GLBX is a root of the roll calendar: an order to it would go to
+    /// no contract. Read by a series or not, it is refused as traded,
+    /// under its field, naming it.
+    #[test]
+    fn a_futures_root_traded_is_refused_naming_it() {
+        let toml = TOML.replace(
+            "{ instrument_id = \"ESM4.CME\", trade_size",
+            "{ instrument_id = \"GC.GLBX\", trade_size",
+        );
+        let err = load(&toml).unwrap_err();
+        assert_eq!(fields_of(&err), ["trade.instruments[1].instrument_id"]);
+        assert!(err.to_string().contains("GC.GLBX"), "{err}");
+    }
+
+    /// A root traded and a size not positive, of the same instrument, are
+    /// each reported, with the other violations.
+    #[test]
+    fn a_futures_root_traded_is_reported_with_the_other_violations() {
+        let toml = TOML.replace("\"720h\"", "\"0s\"").replace(
+            "{ instrument_id = \"ESM4.CME\", trade_size = \"2\" }",
+            "{ instrument_id = \"GC.GLBX\", trade_size = \"0\" }",
+        );
+        assert_eq!(
+            error_fields(&toml),
+            [
+                "data.warmup",
+                "trade.instruments[1].instrument_id",
+                "trade.instruments[1].trade_size",
+            ]
+        );
+    }
+
     #[test]
     fn a_bars_series_without_a_bar_spec_is_refused_naming_it() {
         let toml = TOML.replace(
@@ -903,16 +964,38 @@ mod tests {
         assert_eq!(config.base.strategy_id, None);
     }
 
-    /// No harness reads what it trades: an instrument traded that no
-    /// series reads adds no quotes.
+    /// Execution needs the prices of what is traded, model or not: an
+    /// instrument traded that no series reads adds its quotes, after the
+    /// series' ticks; the series stay as listed.
     #[test]
-    fn a_strategy_taking_no_model_reads_no_quotes_of_what_it_trades() {
+    fn a_traded_instrument_no_series_reads_loads_its_quotes_into_the_requirements() {
         let toml = TOML.replace(
             "{ instrument_id = \"ESM4.CME\", trade_size = \"2\" }",
             "{ instrument_id = \"ESU4.CME\", trade_size = \"2\" }",
         );
+        let config = load(&toml).unwrap();
         assert_eq!(
-            load(&toml).unwrap().data_requirements().ticks,
+            config.data_requirements().ticks,
+            [
+                TickSeries {
+                    data: NautilusDataType::TradeTick,
+                    instrument_id: InstrumentId::from("ESH4.CME"),
+                },
+                TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: InstrumentId::from("ESU4.CME"),
+                },
+            ]
+        );
+        assert_eq!(config.data.series.len(), 3);
+    }
+
+    /// Each instrument traded is read by a series, its bars or its
+    /// trades: no quotes are added.
+    #[test]
+    fn a_traded_instrument_a_series_reads_adds_no_quotes() {
+        assert_eq!(
+            load(TOML).unwrap().data_requirements().ticks,
             [TickSeries {
                 data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("ESH4.CME"),
@@ -947,7 +1030,8 @@ mod tests {
     }
 
     /// The rules of a strategy trading on a model, the shared config's:
-    /// its `[model]`, the quotes its harness reads, its strategy id.
+    /// its `[model]`, its strategy id; and the quotes of what it trades,
+    /// which its harness reads.
     mod model {
         use nautilus_indicators::average::MovingAverageType;
 
@@ -1224,14 +1308,18 @@ mod tests {
             assert_eq!(requirements.ticks.len(), 1, "{:?}", requirements.ticks);
         }
 
+        /// The shared trade rules refuse the root, under its field of
+        /// `[trade]`; the model, whose targets trade it, does not refuse it
+        /// again.
         #[test]
-        fn a_futures_root_traded_is_refused_at_load() {
+        fn a_futures_root_traded_is_refused_at_load_by_the_trade_rules() {
             let toml = TOML.replace(
                 r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS""#,
                 r#"instruments = [{ instrument_id = "GC.GLBX""#,
             );
-            let reason = model_refusal(&toml);
-            assert!(reason.contains("GC.GLBX"), "{reason}");
+            let err = load(&toml).unwrap_err();
+            assert_eq!(fields_of(&err), ["trade.instruments[0].instrument_id"]);
+            assert!(err.to_string().contains("GC.GLBX"), "{err}");
         }
 
         /// A trade on a horizon of an hour, decided every hour, would still
