@@ -1,6 +1,4 @@
-use nautilus_common::config::{ConfigError, ConfigErrorCollector};
-use nautilus_model::identifiers::StrategyId;
-use nautilus_trading::strategy::StrategyConfig;
+use nautilus_common::config::ConfigErrorCollector;
 use serde::Deserialize;
 
 use crate::{
@@ -28,26 +26,10 @@ pub struct ModelEmaParams {
 impl Part for ModelEmaParams {
     const INSTRUMENTS: usize = 1;
 
-    /// The strategy's id and order tag. `oms_type` is left unset: Nautilus
-    /// keeps the strategy's positions as the execution client of the venue
-    /// does, netting or hedging, in a backtest as live.
-    fn default_base() -> StrategyConfig {
-        StrategyConfig {
-            strategy_id: Some(StrategyId::from("MODEL_EMA-001")),
-            order_id_tag: Some("001".to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// The base without a strategy id, which keys the model's store, or
-    /// the model invalid for the data read and the instrument traded (see
+    /// The model invalid for the data read and the instrument traded (see
     /// `ModelConfig::validate`), each violation under its field of
     /// `[model]`.
     fn validate(config: &ModelEmaConfig, errors: &mut ConfigErrorCollector) {
-        errors.check(
-            config.base.strategy_id.is_some(),
-            ConfigError::missing_field("base.strategy_id"),
-        );
         if let [traded] = config.trade.instruments.as_slice() {
             let model = config.own.model.clone().trading(traded);
             errors.collect(model.validate(&config.data_requirements()));
@@ -83,27 +65,16 @@ impl ModelEmaConfig {
         };
         self.own.model.clone().trading(traded)
     }
-
-    /// The strategy's id, from its base, which `validate` requires.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the base has none.
-    #[must_use]
-    pub fn strategy_id(&self) -> StrategyId {
-        self.base
-            .strategy_id
-            .expect("a validated model_ema has a strategy id")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
+    use nautilus_common::config::ConfigError;
     use nautilus_indicators::average::MovingAverageType;
     use nautilus_model::{
         data::{BarType, NautilusDataType},
-        identifiers::InstrumentId,
+        identifiers::{InstrumentId, StrategyId},
         types::Quantity,
     };
 
@@ -116,6 +87,9 @@ mod tests {
     use crate::strategy::AtrArgs;
 
     const TOML: &str = r#"
+        [base]
+        strategy_id = "MODEL_EMA-001"
+
         [data]
         series = [
             { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
@@ -400,12 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn a_base_without_a_strategy_id_is_refused() {
-        let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n");
-        assert_eq!(error_fields(&toml), ["base.strategy_id"]);
-    }
-
-    #[test]
     fn a_misspelt_field_of_the_model_is_refused_at_load() {
         let err = shape_error(&TOML.replace("min_pnl", "min_pn"));
         assert!(err.contains("min_pn"), "{err}");
@@ -463,15 +431,20 @@ mod tests {
     }
 
     /// The model's violation is its horizon of an hour, decided every hour,
-    /// reported under the horizon's field, `model.targets.horizon`.
+    /// reported under the horizon's field, `model.targets.horizon`, after
+    /// the standard ones.
     #[test]
     fn reports_its_own_violations_with_the_standard_ones() {
-        let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
+        let toml = TOML
+            .replace(
+                r#"strategy_id = "MODEL_EMA-001""#,
+                r#"order_id_tag = "001""#,
+            )
             .replace("\"1h\"\n", "\"0s\"\n")
             .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
         assert_eq!(
             error_fields(&toml),
-            ["data.warmup", "base.strategy_id", "model.targets.horizon"]
+            ["base.strategy_id", "data.warmup", "model.targets.horizon"]
         );
     }
 

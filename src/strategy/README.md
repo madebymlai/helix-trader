@@ -3,7 +3,7 @@
 A strategy is a Nautilus strategy and nothing more. Backtest and live take
 any type that implements the Nautilus `Strategy` trait and never name a
 concrete strategy. A process runs one strategy at a time; `main` picks it by
-name.
+the name of its config's strategy id (see "Config").
 
 The Nautilus APIs below were checked against the sources of the pinned
 `develop` commit in `docs/ARCHITECTURE.md` (Version), which also holds the
@@ -69,7 +69,7 @@ strategy (`strategy::StandardConfig`, `strategy/standard.rs`):
 ```toml
 # the strategy's own fields, if any, before any table: the EMA has none
 
-[base]      # Nautilus' StrategyConfig as is; optional, the strategy's default
+[base]      # Nautilus' StrategyConfig as is; its strategy_id names the strategy
 strategy_id = "EMA_CROSS-001"
 
 [data]      # what the strategy reads
@@ -91,9 +91,15 @@ period = 30
 instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
 ```
 
-- `[base]` is Nautilus' `StrategyConfig` unchanged; without it the
-  strategy's default carries its own id and order tag (`EMA_CROSS-001`)
-  and leaves `oms_type` unset (see "Position mode: the venue's").
+- `[base]` is Nautilus' `StrategyConfig` unchanged, and required with
+  its `strategy_id`, Nautilus' NAME-TAG: the name, the text before the
+  tag (`StrategyId::get_tag`), picks the strategy every subcommand runs
+  (`EMA_CROSS` the EMA crossover, `MODEL_EMA` the model strategy;
+  `main.rs`, `Strategy::of_config`), so the command line names none; an
+  unknown name, or no strategy id, is refused listing the known ones.
+  Nautilus tags the strategy's orders with the id's tag when
+  `order_id_tag` is unset, so `EMA_CROSS-001` tags them `001`. Leave
+  `oms_type` unset (see "Position mode: the venue's").
 - `[data] series` lists every series read, each a Nautilus data type by
   the name Nautilus parses (`NautilusDataType::from_str`) and its
   instrument: `bars`, with `bar_spec` in Nautilus' `BarSpecification`
@@ -179,10 +185,10 @@ starts a node, a backtest, a dataset or a training run.
 
 `model_ema` loads the same way, its own part a `[model]` table (see
 "Features and decisions"): it trades one instrument, `[trade]`'s, which its
-model's targets trade, of its `trade_size`; its rules are a strategy id
-in `[base]`, which keys its models, and the model valid for the data it
-reads (`ModelConfig::validate`, every violation reported at once, each
-under its field of `[model]`, such as `model.targets.horizon`).
+model's targets trade, of its `trade_size`; its strategy id keys its
+models, and its rule is the model valid for the data it reads
+(`ModelConfig::validate`, every violation reported at once, each under
+its field of `[model]`, such as `model.targets.horizon`).
 
 ### Bar types
 
@@ -1319,8 +1325,9 @@ of its choosing (`model::features`, `model::decide`).
   catalog its live node retrains into at the same time: two processes
   building one strategy's dataset at once may both replay a day, and
   nothing orders their writes of its file and of the manifest.
-- **Commands.** `train <strategy> --config .. --at t` (`main.rs`) trains
-  at `t`: `Training::new` on the strategy's features and model section,
+- **Commands.** `train --config .. --at t` (`main.rs`) trains at `t`, of
+  the strategy the config names: `Training::new` on the strategy's
+  features and model section (`ModelStrategy::training`),
   `train_at` with a replay through `Backtest::run_dataset` of the strategy
   in `Mode::Dataset` on hedging venues, the costs and balance given as to
   a backtest (`--commission` or `--commission-rate`, `--balance`); it
@@ -1506,10 +1513,15 @@ ATR" above).
    its state registered as a Nautilus indicator, and the strategy's own
    decision and orders, made only once `indicators_initialized()`.
 2. Declare it in `strategy/mod.rs`.
-3. In `main.rs`, add a variant to `enum Strategy` and an arm to each `match`
-   on it (fill-catalog, backtest, live, train), reading the data
-   requirements from `config.data_requirements()`. A strategy with
-   no model refuses `train`.
+3. In `main.rs`, add a variant to `enum Strategy`, with the name of its
+   configs' strategy ids (`Strategy::name`, `Strategy::ALL`), and an arm
+   to each `match` on it (fill-catalog's data requirements, backtest,
+   live, train, dataset). A strategy trading on a model implements
+   `model::ModelStrategy` (its `Params`, `new` in a `Mode`, `warmup`,
+   `features` and `model`; its dataset, training and walk forward
+   follow), and each of its arms is one line calling main's function
+   generic over it, as `model_ema`'s; a strategy with no model refuses
+   `train` and `dataset`.
 
 ## Tests
 

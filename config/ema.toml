@@ -1,15 +1,15 @@
 # The EMA crossover (`src/strategy/ema/`), read into `EmaCrossConfig`:
-#   cargo run --release -- backtest ema --config config/ema.toml ...
+#   cargo run --release -- backtest --config config/ema.toml ...
 # Every field is described in `src/strategy/README.md`.
 #
 # The crossover has no fields of its own. Its exits are set in its code: a
 # stop loss 50 bps and a take profit 100 bps from the decision bar's
 # close, a trade held 4 hours at most.
 
-# Nautilus' StrategyConfig; defaults to EMA_CROSS-001, tag 001, when left out.
-# [base]
-# strategy_id = "EMA_CROSS-001"
-# order_id_tag = "001"
+# Nautilus' StrategyConfig. The name of its strategy id, EMA_CROSS, picks
+# the crossover; Nautilus tags its orders with the id's tag, 001.
+[base]
+strategy_id = "EMA_CROSS-001"
 
 [data]
 # The series read (all stored in the catalog): hourly bars of the mid,

@@ -19,10 +19,11 @@
 //! A `[model.meta]` table in its config adds a meta model, which takes
 //! or leaves each trade of the model (`model::meta`), and may size it.
 //!
-//! In a dataset run (`Mode::Dataset`, through `training`) it places no
-//! trade of its own: the handle opens each decision's targets, through
-//! the same module, and is handed the order and position events; the
-//! module closes the targets at their time as it does the trades.
+//! In a dataset run (`Mode::Dataset`, the replay of its dataset and its
+//! training, `model::ModelStrategy`) it places no trade of its own: the
+//! handle opens each decision's targets, through the same module, and is
+//! handed the order and position events; the module closes the targets
+//! at their time as it does the trades.
 
 mod config;
 mod features;
@@ -39,16 +40,16 @@ use nautilus_model::{
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
 };
 use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
-use std::{any::Any, path::Path, rc::Rc};
+use std::{any::Any, rc::Rc};
 
+use self::config::ModelEmaParams;
 use crate::{
     model::{
-        dataset::{Dataset, DatasetVenue},
+        ModelStrategy,
+        config::ModelConfig,
         decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle},
-        train::Training,
-        walk::WalkForward,
     },
     strategy::{orders, warmup::Warmup},
 };
@@ -60,7 +61,9 @@ pub struct ModelEma {
     model: Rc<ModelHandle>,
 }
 
-impl ModelEma {
+impl ModelStrategy for ModelEma {
+    type Params = ModelEmaParams;
+
     /// The strategy, its model handle in `mode`: live, its warmup
     /// (`DataConfig::warmup`) is requested at start, which hydrates its
     /// indicators; otherwise they warm on the data replayed.
@@ -69,11 +72,10 @@ impl ModelEma {
     ///
     /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
     /// the base (`StrategyCore::new_checked`).
-    pub fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
-        let features = feature_set(&config)?;
+    fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
         let model = ModelHandle::new(
             config.strategy_id(),
-            features,
+            Self::features(&config)?,
             &config.model(),
             &config.data_requirements(),
             mode,
@@ -86,93 +88,19 @@ impl ModelEma {
 
     /// Its warmup, its model handle's: a live node sizes its cache from
     /// it.
-    #[must_use]
-    pub fn warmup(&self) -> Rc<Warmup> {
+    fn warmup(&self) -> Rc<Warmup> {
         self.model.warmup()
     }
-}
 
-/// The training of the model of the strategy `config` describes, on its
-/// dataset, run on `venue`, in the catalog at `catalog` and its models
-/// in the store under `models`; its replay runs the strategy in
-/// `Mode::Dataset`.
-///
-/// # Errors
-///
-/// Returns an error as `Training::new` does.
-pub fn training(
-    config: &ModelEmaConfig,
-    catalog: &Path,
-    models: &Path,
-    venue: &DatasetVenue,
-) -> anyhow::Result<Training> {
-    let features = feature_set(config)?;
-    Training::new(
-        catalog,
-        models,
-        config.strategy_id(),
-        &features,
-        config.model(),
-        &config.data_requirements(),
-        venue,
-    )
-}
+    /// The averages of each of its bars series, warmed over its warmup.
+    fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
+        let bar_types: Vec<_> = config.data.bar_types().collect();
+        features::features(&bar_types, config.data.warmup)
+    }
 
-/// The backtests of the model of the strategy `config` describes, on its
-/// dataset, run on `venue`, in the catalog at `catalog` and its models
-/// in the store under `models`: their retrains and their scores.
-///
-/// # Errors
-///
-/// Returns an error as `WalkForward::new` does.
-pub fn walk_forward(
-    config: &ModelEmaConfig,
-    catalog: &Path,
-    models: &Path,
-    venue: &DatasetVenue,
-) -> anyhow::Result<WalkForward> {
-    let features = feature_set(config)?;
-    WalkForward::new(
-        catalog,
-        models,
-        config.strategy_id(),
-        &features,
-        config.model(),
-        &config.data_requirements(),
-        venue,
-    )
-}
-
-/// The dataset of the strategy `config` describes, run on `venue`, in
-/// the catalog at `catalog`; its replay runs the strategy in
-/// `Mode::Dataset`.
-///
-/// # Errors
-///
-/// Returns an error as `Dataset::new` does.
-pub fn dataset(
-    config: &ModelEmaConfig,
-    catalog: &Path,
-    venue: &DatasetVenue,
-) -> anyhow::Result<Dataset> {
-    let features = feature_set(config)?;
-    let model = config.model();
-    Dataset::new(
-        catalog,
-        config.strategy_id(),
-        &features,
-        model.decision,
-        model.targets,
-        &config.data_requirements(),
-        venue,
-    )
-}
-
-/// The features of the strategy `config` describes: the averages of each
-/// of its bars series, warmed over its warmup.
-fn feature_set(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
-    let bar_types: Vec<_> = config.data.bar_types().collect();
-    features::features(&bar_types, config.data.warmup)
+    fn model(config: &ModelEmaConfig) -> ModelConfig {
+        config.model()
+    }
 }
 
 nautilus_strategy!(ModelEma, {
@@ -265,7 +193,7 @@ impl DataActor for ModelEma {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, path::Path};
 
     use jiff::SignedDuration;
     use nautilus_common::{
@@ -288,12 +216,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::dataset::Commission,
+        model::dataset::{Commission, DatasetVenue},
         strategy::orders::{Exits, Trade},
     };
 
     /// Trades AUD/USD on a horizon of 30 minutes, deciding hourly.
     const CONFIG: &str = r#"
+        [base]
+        strategy_id = "MODEL_EMA-001"
+
         [data]
         series = [
             { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },

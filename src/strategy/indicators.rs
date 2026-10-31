@@ -220,7 +220,6 @@ mod tests {
 
     use nautilus_common::actor::indicators::SharedActorIndicator;
     use nautilus_model::data::{Bar, BarType};
-    use nautilus_trading::strategy::StrategyConfig;
 
     use super::*;
     use crate::strategy::{Part, StandardConfig};
@@ -288,14 +287,13 @@ mod tests {
         const INSTRUMENTS: usize = 1;
         const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &RANGE, &BREAKOUT];
 
-        fn default_base() -> StrategyConfig {
-            StrategyConfig::default()
-        }
-
         fn validate(_config: &StandardConfig<Self>, _errors: &mut ConfigErrorCollector) {}
     }
 
     const TOML: &str = r#"
+        [base]
+        strategy_id = "TREND-001"
+
         [data]
         series = [
             { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },

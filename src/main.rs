@@ -1,7 +1,10 @@
 //! Command line: one subcommand per process (fill-catalog, backtest, live,
 //! train, dataset), since Nautilus allows one node per process. Every
-//! subcommand takes the strategy name and its TOML config: the instruments
-//! and the warmup come from the config's data requirements.
+//! subcommand takes a strategy's TOML config, whose `[base] strategy_id`
+//! names the strategy run (`Strategy::of_config`): the instruments and the
+//! warmup come from the config's data requirements. A strategy trading on
+//! a model runs through `model::ModelStrategy`, each subcommand generic
+//! over it.
 
 use std::{
     ffi::OsString,
@@ -11,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, bail, ensure};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use helix_trader::{
     backtest::{self, Backtest},
     data::{
@@ -20,19 +23,19 @@ use helix_trader::{
     },
     live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live, Recording},
     model::{
-        dataset,
+        ModelStrategy, dataset,
         handle::{Mode, SettledRows},
         launcher::{Launcher, Retrained},
         targets::TargetRow,
         train::Trained,
     },
     strategy::{
-        DataRequirements, SeriesSlice,
-        ema::{EmaCross, EmaCrossConfig},
-        model_ema::{self, ModelEma, ModelEmaConfig},
+        self, DataRequirements, Part, SeriesSlice, StandardConfig,
+        ema::{EmaCross, EmaParams},
+        model_ema::ModelEma,
     },
 };
-use jiff::Timestamp;
+use jiff::{Timestamp, civil::Date};
 use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
@@ -82,9 +85,8 @@ enum Command {
 /// The arguments of a subcommand working on a window of the catalog.
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// The strategy whose instruments and warmup are used.
-    strategy: Strategy,
-    /// The strategy's TOML config.
+    /// The strategy's TOML config, whose instruments and warmup are used:
+    /// the name of its `[base] strategy_id` is the strategy's.
     #[arg(long)]
     config: PathBuf,
     /// Window start: a UTC date (2024-01-02) or an RFC 3339 timestamp.
@@ -147,7 +149,8 @@ struct BacktestArgs {
 
 #[derive(Debug, Args)]
 struct DatasetArgs {
-    /// The strategy, the catalog, and the span whose days are built.
+    /// The strategy's config, the catalog, and the span whose days are
+    /// built.
     #[command(flatten)]
     run: RunArgs,
     /// The costs of the dataset run, whose targets are net of them.
@@ -164,9 +167,7 @@ struct DatasetArgs {
 
 #[derive(Debug, Args)]
 struct TrainArgs {
-    /// The strategy whose model is trained.
-    strategy: Strategy,
-    /// The strategy's TOML config.
+    /// The TOML config of the strategy whose model is trained.
     #[arg(long)]
     config: PathBuf,
     /// The time trained at, the model's valid-from: same format as
@@ -255,9 +256,7 @@ fn commission_args(commission: &dataset::Commission) -> [&str; 2] {
 
 #[derive(Debug, Args)]
 struct LiveArgs {
-    /// The strategy to run.
-    strategy: Strategy,
-    /// The strategy's TOML config.
+    /// The TOML config of the strategy run.
     #[arg(long)]
     config: PathBuf,
     /// The IB account traded, for example DU1234567 (paper); needed only
@@ -366,12 +365,55 @@ impl RetrainCosts {
     }
 }
 
-/// The strategies), by command-line name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// The strategies, each named by the strategy id of its configs,
+/// `[base] strategy_id`: the id's name, Nautilus' NAME of NAME-TAG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Strategy {
     Ema,
-    #[value(name = "model_ema")]
     ModelEma,
+}
+
+impl Strategy {
+    /// Every strategy.
+    const ALL: &[Self] = &[Self::Ema, Self::ModelEma];
+
+    /// The name of the strategy ids of its configs.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ema => "EMA_CROSS",
+            Self::ModelEma => "MODEL_EMA",
+        }
+    }
+
+    /// The strategy the config at `path` configures: the one its strategy
+    /// id names, by the text before the id's tag (`StrategyId::get_tag`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the file and every strategy's name if it
+    /// cannot be read, has no `[base] strategy_id`, or its id names no
+    /// strategy.
+    fn of_config(path: &Path) -> anyhow::Result<Self> {
+        let picked = || -> anyhow::Result<Self> {
+            let id = strategy::strategy_id_of(&fs::read_to_string(path)?)?;
+            let name = id.as_str().strip_suffix(id.get_tag());
+            let name = name.and_then(|name| name.strip_suffix('-'));
+            Self::ALL
+                .iter()
+                .copied()
+                .find(|strategy| name == Some(strategy.name()))
+                .with_context(|| format!("its strategy id {id} names none"))
+        };
+        picked().with_context(|| {
+            let names: Vec<_> = Self::ALL.iter().map(|strategy| strategy.name()).collect();
+            format!(
+                "picking the strategy of the config {} by the name of its [base] \
+                 strategy_id, one of {}",
+                path.display(),
+                names.join(", ")
+            )
+        })
+    }
 }
 
 /// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
@@ -430,24 +472,26 @@ fn money_text(s: &str) -> Result<String, String> {
     parse_money(s).map(|_| s.to_string())
 }
 
-/// Reads the EMA crossover config from `path` and validates it.
-fn load_ema_config(path: &Path) -> anyhow::Result<EmaCrossConfig> {
-    let read = || EmaCrossConfig::load(&fs::read_to_string(path)?);
-    read().with_context(|| format!("loading the EMA config {}", path.display()))
+/// Reads the config of the strategy of part `P` from `path` and validates
+/// it.
+fn load_config<P: Part>(path: &Path) -> anyhow::Result<StandardConfig<P>> {
+    let read = || StandardConfig::load(&fs::read_to_string(path)?);
+    read().with_context(|| format!("loading the config {}", path.display()))
 }
 
-/// Reads the `model_ema` strategy's config from `path` and validates it.
-fn load_model_ema_config(path: &Path) -> anyhow::Result<ModelEmaConfig> {
-    let read = || ModelEmaConfig::load(&fs::read_to_string(path)?);
-    read().with_context(|| format!("loading the model_ema config {}", path.display()))
-}
-
-/// The data requirements of `strategy`'s config at `path`.
-fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequirements> {
-    Ok(match strategy {
-        Strategy::Ema => load_ema_config(path)?.data_requirements(),
-        Strategy::ModelEma => load_model_ema_config(path)?.data_requirements(),
+/// The data requirements of the config at `path`, of the strategy it
+/// names.
+fn data_requirements(path: &Path) -> anyhow::Result<DataRequirements> {
+    Ok(match Strategy::of_config(path)? {
+        Strategy::Ema => load_config::<EmaParams>(path)?.data_requirements(),
+        Strategy::ModelEma => model_requirements::<ModelEma>(path)?,
     })
+}
+
+/// The data requirements of the config at `path` of the model strategy
+/// `S`.
+fn model_requirements<S: ModelStrategy>(path: &Path) -> anyhow::Result<DataRequirements> {
+    Ok(load_config::<S::Params>(path)?.data_requirements())
 }
 
 /// The logger config from `NAUTILUS_LOG`: the default when it is unset, an
@@ -486,7 +530,7 @@ async fn main() -> anyhow::Result<()> {
 /// envelopes. OKX, IC and IB refuse a series they do not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
-    let requirements = data_requirements(args.run.strategy, &args.run.config)?;
+    let requirements = data_requirements(&args.run.config)?;
     // OKX's and IB's fills run no node, so no node installs Nautilus'
     // logger for them: install it here, as a node would (the fill's node
     // keeps it), so the `log` output of this crate and Nautilus, and the
@@ -602,44 +646,54 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         venue_oms: backtest::venue_oms_type,
         logging,
     };
-    match args.run.strategy {
+    match Strategy::of_config(&args.run.config)? {
         Strategy::Ema => {
-            let config = load_ema_config(&args.run.config)?;
+            let config = load_config::<EmaParams>(&args.run.config)?;
             let outcome = backtest(config.data_requirements()).run(EmaCross::new(config)?)?;
             print!("{}", backtest::report(&outcome));
         }
-        Strategy::ModelEma => {
-            let config = load_model_ema_config(&args.run.config)?;
-            let children = Children::of(&args)?;
-            let walk =
-                model_ema::walk_forward(&config, &args.run.catalog, &args.models, &children.venue)?;
-            walk.prepare(
-                start,
-                end,
-                |from, to| children.dataset(from, to),
-                |at| children.train(at),
-            )?;
-            let mode = Mode::Backtest {
-                models: args.models.clone(),
-                venue: children.venue.clone(),
-            };
-            let outcome = backtest(config.data_requirements()).run(ModelEma::new(config, mode)?)?;
-            print!("{}", backtest::report(&outcome));
-            print!("{}", walk.scores(start, end)?);
-        }
+        Strategy::ModelEma => backtest_on_models::<ModelEma>(&args, backtest)?,
     }
+    Ok(())
+}
+
+/// The backtest of `args` of the model strategy `S`, its `Backtest` of
+/// its data requirements `backtest`: retrained on its schedule by the
+/// backtest's children first (`Children`), then run, its results printed
+/// and the out-of-sample scores of its models after them.
+fn backtest_on_models<S: ModelStrategy>(
+    args: &BacktestArgs,
+    backtest: impl FnOnce(DataRequirements) -> Backtest,
+) -> anyhow::Result<()> {
+    let (start, end) = args.run.window()?;
+    let config = load_config::<S::Params>(&args.run.config)?;
+    let children = Children::of(args)?;
+    let walk = S::walk_forward(&config, &args.run.catalog, &args.models, &children.venue)?;
+    walk.prepare(
+        start,
+        end,
+        |from, to| children.dataset(from, to),
+        |at| children.train(at),
+    )?;
+    let mode = Mode::Backtest {
+        models: args.models.clone(),
+        venue: children.venue.clone(),
+    };
+    let outcome = backtest(config.data_requirements()).run(S::new(config, mode)?)?;
+    print!("{}", backtest::report(&outcome));
+    print!("{}", walk.scores(start, end)?);
     Ok(())
 }
 
 /// The child processes a backtest of a strategy trading on a model starts
 /// before its run, a Nautilus node each: this binary's `dataset` and
-/// `train`, on the backtest's strategy, config, catalog, store, commission
-/// and leverage, and its dataset balance. Each inherits the backtest's
-/// output and environment, so its logs and its outcome show as they come.
+/// `train`, on the backtest's config, which names the strategy, catalog,
+/// store, commission and leverage, and its dataset balance. Each inherits
+/// the backtest's output and environment, so its logs and its outcome show
+/// as they come.
 /// A train runs as live's do (`Launcher::process`): one that kept the
 /// current model, which `train` reports by failing, is a kept retrain.
 struct Children {
-    strategy: Strategy,
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
@@ -659,7 +713,6 @@ impl Children {
             .dataset_balance
             .context("a backtest of a strategy trading on a model needs --dataset-balance")?;
         Ok(Self {
-            strategy: args.run.strategy,
             config: args.run.config.clone(),
             catalog: args.run.catalog.clone(),
             models: args.models.clone(),
@@ -714,14 +767,10 @@ impl Children {
         Ok(())
     }
 
-    /// The arguments of `subcommand` on the backtest's strategy, config,
-    /// catalog, commission, dataset balance and leverage.
+    /// The arguments of `subcommand` on the backtest's config, catalog,
+    /// commission, dataset balance and leverage.
     fn args(&self, subcommand: &str) -> Vec<OsString> {
-        let strategy = self
-            .strategy
-            .to_possible_value()
-            .expect("every strategy has a name");
-        let mut args: Vec<OsString> = vec![subcommand.into(), strategy.get_name().into()];
+        let mut args: Vec<OsString> = vec![subcommand.into()];
         args.extend([
             "--config".into(),
             self.config.clone().into_os_string(),
@@ -755,27 +804,31 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         catalog: args.catalog.clone(),
         recording: args.recording(),
     };
-    match args.strategy {
+    match Strategy::of_config(&args.config)? {
         Strategy::Ema => {
-            let config = load_ema_config(&args.config)?;
+            let config = load_config::<EmaParams>(&args.config)?;
             let requirements = config.data_requirements();
             let strategy = EmaCross::live(config)?;
             live.run(&requirements, &strategy.warmup(), strategy).await
         }
-        Strategy::ModelEma => {
-            let config = load_model_ema_config(&args.config)?;
-            let program = std::env::current_exe().context("finding this binary to retrain")?;
-            let mode = Mode::Live {
-                models: args.models.clone(),
-                venue: args.retrain.venue(args.leverage)?,
-                launcher: Launcher::process(program, retrain_args(&args)?),
-                catalog: args.catalog.clone(),
-            };
-            let requirements = config.data_requirements();
-            let strategy = ModelEma::new(config, mode)?;
-            live.run(&requirements, &strategy.warmup(), strategy).await
-        }
+        Strategy::ModelEma => live_on_models::<ModelEma>(&args, &live).await,
     }
+}
+
+/// Runs the model strategy `S` of `args` on `live` until Ctrl-C, its
+/// retrains in child processes (`retrain_args`).
+async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
+    let config = load_config::<S::Params>(&args.config)?;
+    let program = std::env::current_exe().context("finding this binary to retrain")?;
+    let mode = Mode::Live {
+        models: args.models.clone(),
+        venue: args.retrain.venue(args.leverage)?,
+        launcher: Launcher::process(program, retrain_args(args)?),
+        catalog: args.catalog.clone(),
+    };
+    let requirements = config.data_requirements();
+    let strategy = S::new(config, mode)?;
+    live.run(&requirements, &strategy.warmup(), strategy).await
 }
 
 /// The dataset runs of a process: the strategy over the catalog in
@@ -790,11 +843,11 @@ struct DatasetRun {
 }
 
 impl DatasetRun {
-    /// The rows the `model_ema` strategy of `config` settles over `[start,
+    /// The rows the model strategy `S` of `config` settles over `[start,
     /// end]`.
-    fn replay(
+    fn replay<S: ModelStrategy>(
         &self,
-        config: &ModelEmaConfig,
+        config: &StandardConfig<S::Params>,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<TargetRow>> {
@@ -815,14 +868,14 @@ impl DatasetRun {
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
-        backtest.run_dataset(ModelEma::new(config.clone(), mode)?)?;
+        backtest.run_dataset(S::new(config.clone(), mode)?)?;
         Ok(rows.take())
     }
 }
 
 /// The arguments of the `train` a live node of `args` starts at each
-/// retrain, but its `--at`: the node's strategy, config, catalog, model
-/// store and leverage, and the retrains' costs.
+/// retrain, but its `--at`: the node's config, which names the strategy,
+/// catalog, model store and leverage, and the retrains' costs.
 ///
 /// # Errors
 ///
@@ -833,11 +886,7 @@ fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
     let commission = costs.commission()?;
     let commission = commission_args(&commission);
     let balance = costs.balance()?;
-    let strategy = args
-        .strategy
-        .to_possible_value()
-        .context("every strategy has a command-line name")?;
-    let mut train: Vec<OsString> = vec!["train".into(), strategy.get_name().into()];
+    let mut train: Vec<OsString> = vec!["train".into()];
     for (flag, value) in [
         ("--config", args.config.as_os_str()),
         ("--catalog", args.catalog.as_os_str()),
@@ -883,20 +932,20 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
-    let outcome = match args.strategy {
+    let outcome = match Strategy::of_config(&args.config)? {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
-        Strategy::ModelEma => {
-            let config = load_model_ema_config(&args.config)?;
-            let training = model_ema::training(
-                &config,
-                &args.catalog,
-                &args.models,
-                &args.commission.venue(args.balance, args.leverage),
-            )?;
-            training.train_at(args.at, |start, end| run.replay(&config, start, end))
-        }
+        Strategy::ModelEma => train::<ModelEma>(&args, &run)?,
     };
     reported(&outcome)
+}
+
+/// Trains the model of the model strategy `S` of `args` at `--at`, the
+/// days its dataset lacks replayed by `run`.
+fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
+    let config = load_config::<S::Params>(&args.config)?;
+    let venue = args.commission.venue(args.balance, args.leverage);
+    let training = S::training(&config, &args.catalog, &args.models, &venue)?;
+    Ok(training.train_at(args.at, |start, end| run.replay::<S>(&config, start, end)))
 }
 
 /// Builds the strategy's dataset over the days from `--start` to the day
@@ -913,17 +962,9 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     let (first, last) = dataset::days(start, end);
-    let built = match args.run.strategy {
+    let built = match Strategy::of_config(&args.run.config)? {
         Strategy::Ema => bail!("the EMA strategy trades on no model"),
-        Strategy::ModelEma => {
-            let config = load_model_ema_config(&args.run.config)?;
-            model_ema::dataset(
-                &config,
-                &args.run.catalog,
-                &args.commission.venue(args.balance, args.leverage),
-            )?
-            .build(first, last, |from, to| run.replay(&config, from, to))?
-        }
+        Strategy::ModelEma => build_dataset::<ModelEma>(&args, &run, first, last)?,
     };
     match (built.first(), built.last()) {
         (Some(from), Some(to)) => {
@@ -932,6 +973,20 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         _ => println!("the dataset holds every day from {first} to {last}"),
     }
     Ok(())
+}
+
+/// Builds the days `first` to `last` the dataset of the model strategy `S`
+/// of `args` lacks, by `run`; the days built.
+fn build_dataset<S: ModelStrategy>(
+    args: &DatasetArgs,
+    run: &DatasetRun,
+    first: Date,
+    last: Date,
+) -> anyhow::Result<Vec<Date>> {
+    let config = load_config::<S::Params>(&args.run.config)?;
+    let venue = args.commission.venue(args.balance, args.leverage);
+    S::dataset(&config, &args.run.catalog, &venue)?
+        .build(first, last, |from, to| run.replay::<S>(&config, from, to))
 }
 
 #[cfg(test)]
@@ -963,8 +1018,7 @@ mod tests {
         })
     }
 
-    const REQUIRED: [&str; 7] = [
-        "ema",
+    const REQUIRED: [&str; 6] = [
         "--config",
         "ema.toml",
         "--start",
@@ -983,7 +1037,6 @@ mod tests {
     #[test]
     fn parses_fill_catalog_with_its_client_id() {
         let args = parse(&REQUIRED).unwrap();
-        assert_eq!(args.run.strategy, Strategy::Ema);
         assert_eq!(args.run.config, PathBuf::from("ema.toml"));
         assert_eq!(
             args.run.start,
@@ -1000,7 +1053,6 @@ mod tests {
     #[test]
     fn parses_a_backtest_with_its_costs() {
         let args = parse_backtest(&backtest_required()).unwrap();
-        assert_eq!(args.run.strategy, Strategy::Ema);
         assert_eq!(args.run.config, PathBuf::from("ema.toml"));
         assert_eq!(
             args.run.end,
@@ -1077,23 +1129,21 @@ mod tests {
 
     #[test]
     fn live_runs_as_trader_helix_001_unless_given_another() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+        let args = parse_live(&["--config", "ema.toml"]).unwrap();
         assert_eq!(args.trader_id, TraderId::from("HELIX-001"));
-        let args =
-            parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX-002"]).unwrap();
+        let args = parse_live(&["--config", "ema.toml", "--trader-id", "HELIX-002"]).unwrap();
         assert_eq!(args.trader_id, TraderId::from("HELIX-002"));
     }
 
     #[test]
     fn rejects_a_trader_id_nautilus_refuses() {
         // Nautilus' trader id is a name and a tag joined by a hyphen.
-        assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
+        assert!(parse_live(&["--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
     }
 
     #[test]
     fn parses_live_with_the_adapter_client_id() {
-        let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
-        assert_eq!(args.strategy, Strategy::Ema);
+        let args = parse_live(&["--config", "ema.toml", "--account", "DU1234567"]).unwrap();
         assert_eq!(args.config, PathBuf::from("ema.toml"));
         assert_eq!(args.account, Some("DU1234567".parse().unwrap()));
         assert_eq!(args.client_id, 1);
@@ -1103,17 +1153,16 @@ mod tests {
 
     #[test]
     fn live_stages_in_staging_unless_told_otherwise() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+        let args = parse_live(&["--config", "ema.toml"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("staging"));
-        let args =
-            parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
+        let args = parse_live(&["--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("/data/staging"));
     }
 
     /// The node promotes daily: no setting.
     #[test]
     fn live_takes_no_promotion_interval() {
-        let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", "5"])
+        let err = parse_live(&["--config", "ema.toml", "--promotion-minutes", "5"])
             .unwrap_err()
             .to_string();
         assert!(err.contains("--promotion-minutes"), "{err}");
@@ -1121,9 +1170,9 @@ mod tests {
 
     #[test]
     fn live_takes_the_leverage_it_expects() {
-        let args = parse_live(&["ema", "--config", "okx.toml", "--leverage", "3"]).unwrap();
+        let args = parse_live(&["--config", "okx.toml", "--leverage", "3"]).unwrap();
         assert_eq!(args.leverage, Decimal::from(3));
-        let err = parse_live(&["ema", "--config", "okx.toml", "--leverage", "x"]).unwrap_err();
+        let err = parse_live(&["--config", "okx.toml", "--leverage", "x"]).unwrap_err();
         assert!(err.to_string().contains("--leverage"), "{err}");
     }
 
@@ -1149,12 +1198,12 @@ mod tests {
     #[test]
     fn rejects_a_start_not_before_the_end() {
         let mut argv = REQUIRED.to_vec();
-        argv[4] = "2024-03-01T12:30:00Z";
+        argv[3] = "2024-03-01T12:30:00Z";
         let err = parse(&argv).unwrap().run.window().unwrap_err().to_string();
         assert!(err.contains("before"), "{err}");
         assert!(parse(&REQUIRED).unwrap().run.window().is_ok());
         let mut argv = backtest_required();
-        argv[4] = "2024-03-01T12:30:00Z";
+        argv[3] = "2024-03-01T12:30:00Z";
         let err = parse_backtest(&argv).unwrap().run.window().unwrap_err();
         assert!(err.to_string().contains("before"), "{err}");
     }
@@ -1166,6 +1215,9 @@ mod tests {
         std::fs::write(
             &path,
             r#"
+            [base]
+            strategy_id = "EMA_CROSS-001"
+
             [data]
             series = []
             warmup = "720h"
@@ -1175,13 +1227,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        let err = format!("{:#}", load_ema_config(&path).unwrap_err());
+        let err = format!("{:#}", load_config::<EmaParams>(&path).unwrap_err());
         assert!(
             err.contains("ema.toml") && err.contains("data.series"),
             "{err}"
         );
         let missing = dir.path().join("missing.toml");
-        let err = format!("{:#}", load_ema_config(&missing).unwrap_err());
+        let err = format!("{:#}", load_config::<EmaParams>(&missing).unwrap_err());
         assert!(err.contains("missing.toml"), "{err}");
     }
 
@@ -1202,8 +1254,7 @@ mod tests {
     }
 
     /// The arguments a train requires.
-    const TRAIN: [&str; 9] = [
-        "model_ema",
+    const TRAIN: [&str; 8] = [
         "--config",
         "model_ema.toml",
         "--at",
@@ -1217,7 +1268,6 @@ mod tests {
     #[test]
     fn parses_a_train_at_a_time_with_its_costs_into_the_models_store() {
         let args = parse_train(&TRAIN).unwrap();
-        assert_eq!(args.strategy, Strategy::ModelEma);
         assert_eq!(args.config, PathBuf::from("model_ema.toml"));
         assert_eq!(
             args.at,
@@ -1254,7 +1304,7 @@ mod tests {
             parse_backtest(&argv).unwrap().models,
             PathBuf::from("/data/models")
         );
-        let args = parse_live(&["model_ema", "--config", "model_ema.toml"]).unwrap();
+        let args = parse_live(&["--config", "model_ema.toml"]).unwrap();
         assert_eq!(args.models, PathBuf::from("models"));
     }
 
@@ -1293,8 +1343,7 @@ mod tests {
 
     /// The arguments of a `model_ema` live node retraining at a commission
     /// rate.
-    const LIVE_RETRAINING: [&str; 7] = [
-        "model_ema",
+    const LIVE_RETRAINING: [&str; 6] = [
         "--config",
         "model_ema.toml",
         "--retrain-commission-rate",
@@ -1315,7 +1364,6 @@ mod tests {
             train,
             [
                 "train",
-                "model_ema",
                 "--config",
                 "model_ema.toml",
                 "--catalog",
@@ -1336,7 +1384,7 @@ mod tests {
     #[test]
     fn live_retrains_at_a_commission_per_order_too() {
         let mut argv = LIVE_RETRAINING.to_vec();
-        argv.splice(3..5, ["--retrain-commission", "3 USD"]);
+        argv.splice(2..4, ["--retrain-commission", "3 USD"]);
 
         let train = retrain_args(&parse_live(&argv).unwrap()).unwrap();
 
@@ -1350,7 +1398,7 @@ mod tests {
 
     #[test]
     fn live_retraining_without_its_costs_is_refused_naming_them() {
-        for missing in [3, 5] {
+        for missing in [2, 4] {
             let argv = [&LIVE_RETRAINING[..missing], &LIVE_RETRAINING[missing + 2..]].concat();
             let err = retrain_args(&parse_live(&argv).unwrap())
                 .unwrap_err()
@@ -1366,7 +1414,7 @@ mod tests {
             ("--retrain-commission", "3"),
             ("--retrain-balance", "lots"),
         ] {
-            let argv = ["model_ema", "--config", "model_ema.toml", flag, value];
+            let argv = ["--config", "model_ema.toml", flag, value];
             assert!(parse_live(&argv).is_err(), "{flag} {value}");
         }
         let mut both = LIVE_RETRAINING.to_vec();
@@ -1374,10 +1422,13 @@ mod tests {
         assert!(parse_live(&both).is_err());
     }
 
+    /// The example config of the EMA crossover.
+    const EMA_EXAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/config/ema.toml");
+
     #[test]
     fn the_ema_strategy_has_no_model_to_train() {
         let mut argv = TRAIN.to_vec();
-        argv[0] = "ema";
+        argv[1] = EMA_EXAMPLE;
         let err = run_train(parse_train(&argv).unwrap()).unwrap_err();
         assert!(err.to_string().contains("no model"), "{err}");
     }
@@ -1404,8 +1455,7 @@ mod tests {
     }
 
     /// The arguments a dataset build requires.
-    const DATASET: [&str; 11] = [
-        "model_ema",
+    const DATASET: [&str; 10] = [
         "--config",
         "model_ema.toml",
         "--start",
@@ -1421,7 +1471,7 @@ mod tests {
     #[test]
     fn parses_a_dataset_build_over_a_span_with_its_costs() {
         let args = parse_dataset(&DATASET).unwrap();
-        assert_eq!(args.run.strategy, Strategy::ModelEma);
+        assert_eq!(args.run.config, PathBuf::from("model_ema.toml"));
         assert_eq!(
             args.run.window().unwrap(),
             (
@@ -1437,7 +1487,7 @@ mod tests {
     #[test]
     fn the_ema_strategy_has_no_dataset_to_build() {
         let mut argv = DATASET.to_vec();
-        argv[0] = "ema";
+        argv[1] = EMA_EXAMPLE;
         let err = run_dataset(parse_dataset(&argv).unwrap()).unwrap_err();
         assert!(err.to_string().contains("no model"), "{err}");
     }
@@ -1485,7 +1535,6 @@ mod tests {
     fn two_spellings_of_a_retrain_commission_are_one_key() {
         let retrain = |rate: &str| {
             parse_live(&[
-                "model_ema",
                 "--config",
                 "model_ema.toml",
                 "--retrain-commission-rate",
@@ -1511,5 +1560,118 @@ mod tests {
         argv.extend(["--dataset-balance", "10000000 EUR"]);
         let children = Children::of(&parse_backtest(&argv).unwrap()).unwrap();
         assert_eq!(children.venue.balance, Money::from("10000000 EUR"));
+    }
+
+    #[test]
+    fn a_backtest_hands_its_children_the_config_and_no_strategy_name() {
+        let mut argv = backtest_required();
+        argv.extend(["--catalog", "/data/catalog"]);
+        argv.extend(["--dataset-balance", "10000000 EUR"]);
+        let children = Children::of(&parse_backtest(&argv).unwrap()).unwrap();
+
+        assert_eq!(
+            children.args("dataset"),
+            [
+                "dataset",
+                "--config",
+                "ema.toml",
+                "--catalog",
+                "/data/catalog",
+                "--commission",
+                "3 EUR",
+                "--balance",
+                "10000000.00 EUR",
+                "--leverage",
+                "1",
+            ]
+            .map(std::ffi::OsString::from)
+        );
+    }
+
+    /// No subcommand takes the strategy on the command line: its config
+    /// names it.
+    #[test]
+    fn no_subcommand_takes_a_strategy_name() {
+        let backtest = backtest_required();
+        let live = ["--config", "ema.toml"];
+        for (subcommand, argv) in [
+            ("fill-catalog", &REQUIRED[..]),
+            ("backtest", &backtest[..]),
+            ("live", &live[..]),
+            ("train", &TRAIN[..]),
+            ("dataset", &DATASET[..]),
+        ] {
+            assert!(parse_command(subcommand, argv).is_ok(), "{subcommand}");
+            for name in ["ema", "model_ema"] {
+                let named = [&[name][..], argv].concat();
+                let err = parse_command(subcommand, &named).unwrap_err();
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::UnknownArgument,
+                    "{subcommand} {name}: {err}"
+                );
+            }
+        }
+    }
+
+    /// A config at `name` in `dir` whose `[base]` is `base`.
+    fn config_with_base(dir: &Path, name: &str, base: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("{base}\n[data]\nwarmup = \"1h\"\n")).unwrap();
+        path
+    }
+
+    /// The name of the strategy id, the text before its tag, picks the
+    /// strategy, whatever the tag.
+    #[test]
+    fn the_strategy_is_the_one_its_configs_strategy_id_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for (id, strategy) in [
+            ("EMA_CROSS-001", Strategy::Ema),
+            ("EMA_CROSS-ESM4", Strategy::Ema),
+            ("MODEL_EMA-001", Strategy::ModelEma),
+            ("MODEL_EMA-002", Strategy::ModelEma),
+        ] {
+            let base = format!("[base]\nstrategy_id = \"{id}\"");
+            let path = config_with_base(dir.path(), "config.toml", &base);
+            assert_eq!(Strategy::of_config(&path).unwrap(), strategy, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_example_configs_pick_their_strategies() {
+        let model_ema = concat!(env!("CARGO_MANIFEST_DIR"), "/config/model_ema.toml");
+        assert_eq!(
+            Strategy::of_config(Path::new(EMA_EXAMPLE)).unwrap(),
+            Strategy::Ema
+        );
+        assert_eq!(
+            Strategy::of_config(Path::new(model_ema)).unwrap(),
+            Strategy::ModelEma
+        );
+    }
+
+    /// A config naming no strategy, or none known, is refused naming the
+    /// file and every known name.
+    #[test]
+    fn a_config_naming_no_known_strategy_is_refused_listing_the_known_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for base in [
+            "[base]\nstrategy_id = \"EMA-001\"",
+            "[base]\nstrategy_id = \"ema-001\"",
+            "[base]\nstrategy_id = \"EMA_CROSS-001-002\"",
+            "[base]\nstrategy_id = \"EXTERNAL\"",
+            "[base]\norder_id_tag = \"001\"",
+            "",
+        ] {
+            let path = config_with_base(dir.path(), "unknown.toml", base);
+            let err = format!("{:#}", Strategy::of_config(&path).unwrap_err());
+            assert!(
+                err.contains("unknown.toml")
+                    && err.contains("EMA_CROSS")
+                    && err.contains("MODEL_EMA"),
+                "{base}: {err}"
+            );
+        }
     }
 }
