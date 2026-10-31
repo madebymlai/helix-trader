@@ -776,9 +776,10 @@ of its choosing (`model::features`, `model::decide`).
   decide on its last quote, and its targets would be the spread and the
   fees. The market data is the quotes, trades, bars, depth and deltas of
   the traded instrument a feature reads (`FeatureSet::last_update`), and
-  its last quote in the cache, which a model strategy's harness reads
-  when no series reads the traded instrument (see "Root ticks and the
-  traded instrument"), whatever their kind or venue, with no calendar of
+  its last quote and trade in the cache, of the series of it the model
+  handle subscribes: those the strategy reads, or the quotes its harness
+  reads when no series reads the traded instrument (see "Root ticks and
+  the traded instrument"), whatever their kind or venue, with no calendar of
   sessions; not another
   instrument's, which may trade while the traded one is closed, nor
   custom data, which may come on a weekend. The data engine builds no bar
@@ -817,8 +818,10 @@ of its choosing (`model::features`, `model::decide`).
   fill-catalog fetches, a backtest or dataset run replays and the handle
   subscribes them. When a series reads it, the strategy's own series of
   it serve and no quotes are added: an OKX strategy reads its candles
-  alone, which OKX's archive serves, and the barrier's ATR is built from
-  what the strategy reads of it (`TargetsConfig::atr_bars`).
+  alone, which OKX's archive serves, the barrier's ATR is built from
+  what the strategy reads of it (`TargetsConfig::atr_bars`), and the
+  handle subscribes the strategy's tick series of it, its trades read
+  alone making the decisions fresh.
   A futures root traded is refused at load: orders go to a contract.
   Bars on a root are Nautilus' continuous bars and do not roll this way.
 - **Rows.** `decide` snapshots the features if the decision is fresh and
