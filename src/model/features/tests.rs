@@ -3,7 +3,7 @@ use std::{cell::Cell, sync::Arc};
 use nautilus_common::{actor::DataActor, cache::Cache, clock::VirtualClock};
 use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
-    data::{BookOrder, HasTsInit, OrderBookDelta, stubs::stub_depth10},
+    data::{BookOrder, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
     enums::{AggressorSide, BookAction, OrderSide, PriceType},
     identifiers::{TradeId, TraderId},
     types::{Price, Quantity},
@@ -161,17 +161,19 @@ impl nautilus_model::data::CustomDataTrait for Level {
     }
 }
 
-fn level_type(source: &str) -> DataType {
-    DataType::new("Level", None, Some(source.to_string()))
+/// The data type of the levels of `instrument`, keyed by its id.
+fn level_type(instrument: &str) -> DataType {
+    DataType::new("Level", None, Some(instrument.to_string()))
 }
 
-fn level(source: &str, level: f64) -> CustomData {
+/// A level of `instrument`.
+fn level(instrument: &str, level: f64) -> CustomData {
     CustomData::new(
         Arc::new(Level {
             level,
             ts: UnixNanos::default(),
         }),
-        level_type(source),
+        level_type(instrument),
     )
 }
 
@@ -282,7 +284,7 @@ fn an_update_of_a_kind_no_feature_reads_is_a_no_op() {
     features.handle_trade(&trade(AUD, 0.7)).unwrap();
     features.handle_depth(&stub_depth10());
     features.handle_deltas(&deltas(AUD));
-    features.handle_data(&level("SIM", 1.0));
+    features.handle_data(&level(AUD, 1.0));
 
     assert_eq!(features.values(), None);
 }
@@ -372,15 +374,15 @@ fn the_values_wait_for_every_feature() {
 #[test]
 fn a_raw_feature_holds_the_last_value_read_from_its_data_type() {
     let features = FeatureSet::builder()
-        .data(level_type("SIM"), "level", read_level)
+        .data("Level", id(AUD), "level", read_level)
         .build()
         .unwrap();
 
-    features.handle_data(&level("OTHER", 9.0));
+    features.handle_data(&level(GBP, 9.0));
     assert_eq!(features.values(), None);
 
-    features.handle_data(&level("SIM", 1.5));
-    features.handle_data(&level("SIM", 2.5));
+    features.handle_data(&level(AUD, 1.5));
+    features.handle_data(&level(AUD, 2.5));
     assert_eq!(features.values(), Some(vec![2.5]));
 }
 
@@ -422,28 +424,53 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
 fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     let features = FeatureSet::builder()
         .quotes(id(AUD), "quotes", sma(1))
-        .data(level_type("SIM"), "level", read_level)
+        .data("Level", id(AUD), "level", read_level)
         .build()
         .unwrap();
 
     features.handle_quote(&at!(quote(GBP, 1.3), 10)).unwrap();
     features.handle_trade(&at!(trade(AUD, 0.7), 20)).unwrap();
-    features.handle_data(&level("SIM", 1.0));
+    features.handle_data(&level(AUD, 1.0));
 
     assert_eq!(features.last_update(id(GBP)), None);
     assert_eq!(features.last_update(id(AUD)), None);
 }
 
+/// A roller subscribes these and a live warmup requests them: each kind of
+/// tick or custom data of each instrument once, in the order declared, and
+/// no bars.
 #[test]
-fn a_set_reads_the_instruments_of_its_market_data_features() {
+fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), "bars", sma(1))
-        .data(level_type("SIM"), "level", read_level)
+        .trades(id(GBP), "gbp_trades", sma(1))
+        .quotes(id(AUD), "aud_quotes", sma(1))
+        .data("Level", id(AUD), "level", read_level)
+        .quotes(id(AUD), "aud_quotes_2", sma(2))
+        .depth(id(AUD), "aud_depth", sma(1))
+        .deltas(id(GBP), "gbp_deltas", sma(1))
         .build()
         .unwrap();
+    let tick = |data, instrument: &str| TickSeries {
+        data,
+        instrument_id: id(instrument),
+    };
 
-    assert!(features.reads(id(AUD)));
-    assert!(!features.reads(id(GBP)));
+    assert_eq!(
+        features.ticks(),
+        [
+            tick(NautilusDataType::TradeTick, GBP),
+            tick(NautilusDataType::QuoteTick, AUD),
+            tick(
+                NautilusDataType::Custom {
+                    type_name: "Level".to_string()
+                },
+                AUD
+            ),
+            tick(NautilusDataType::OrderBookDepth, AUD),
+            tick(NautilusDataType::OrderBookDelta, GBP),
+        ]
+    );
 }
 
 #[test]
@@ -485,41 +512,48 @@ fn a_negative_warmup_is_an_error() {
     assert!(err.contains("warmup"), "{err}");
 }
 
-fn fingerprint(names: [&str; 2], code: &'static str) -> Fingerprint {
+fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
         .quotes(id(AUD), names[0], sma(1))
         .bars(BarType::from(AUD_BARS), names[1], sma(2))
-        .code(code)
+        .version(version)
         .build()
         .unwrap()
         .fingerprint()
 }
 
 #[test]
-fn the_fingerprint_is_the_same_for_the_same_names_and_code() {
-    assert_eq!(
-        fingerprint(["a", "b"], "code"),
-        fingerprint(["a", "b"], "code")
-    );
+fn the_fingerprint_is_the_same_for_the_same_names_and_version() {
+    assert_eq!(fingerprint(["a", "b"], 1), fingerprint(["a", "b"], 1));
 }
 
 #[test]
-fn the_fingerprint_changes_with_a_name_their_order_or_the_code() {
-    let base = fingerprint(["a", "b"], "code");
+fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
+    let base = fingerprint(["a", "b"], 1);
 
-    assert_ne!(base, fingerprint(["a", "c"], "code"));
-    assert_ne!(base, fingerprint(["b", "a"], "code"));
-    assert_ne!(base, fingerprint(["a", "b"], "code 2"));
+    assert_ne!(base, fingerprint(["a", "c"], 1));
+    assert_ne!(base, fingerprint(["b", "a"], 1));
+    assert_ne!(base, fingerprint(["a", "b"], 2));
     // Names are told apart from each other, not only concatenated.
-    assert_ne!(
-        fingerprint(["ab", "c"], "code"),
-        fingerprint(["a", "bc"], "code")
-    );
+    assert_ne!(fingerprint(["ab", "c"], 1), fingerprint(["a", "bc"], 1));
+}
+
+/// A set without a version is of version 0, as one given it.
+#[test]
+fn a_set_without_a_version_is_of_version_nought() {
+    let unversioned = FeatureSet::builder()
+        .quotes(id(AUD), "a", sma(1))
+        .bars(BarType::from(AUD_BARS), "b", sma(2))
+        .build()
+        .unwrap()
+        .fingerprint();
+
+    assert_eq!(unversioned, fingerprint(["a", "b"], 0));
 }
 
 #[test]
 fn a_fingerprint_extended_with_a_part_changes_with_the_part() {
-    let base = fingerprint(["a", "b"], "code");
+    let base = fingerprint(["a", "b"], 1);
 
     assert_ne!(base.with(b"rule"), base);
     assert_ne!(base.with(b"rule"), base.with(b"rule 2"));
@@ -647,11 +681,4 @@ fn declaring_a_rule_primary_changes_the_fingerprint() {
         .unwrap();
 
     assert_ne!(plain.fingerprint(), ruled.fingerprint());
-}
-
-/// The fingerprint hashes this module's code: its tests live in a
-/// file of their own, so editing one changes no fingerprint.
-#[test]
-fn the_fingerprinted_code_holds_no_test() {
-    assert!(!SHARED_CODE[0].contains("#[test]"));
 }

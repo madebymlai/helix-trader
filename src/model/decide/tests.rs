@@ -9,9 +9,9 @@ use nautilus_common::{
 use nautilus_core::UUID4;
 use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
-    data::QuoteTick,
-    enums::PriceType,
-    identifiers::{InstrumentId, TraderId},
+    data::{QuoteTick, TradeTick},
+    enums::{AggressorSide, PriceType},
+    identifiers::{InstrumentId, TradeId, TraderId},
     types::{Price, Quantity},
 };
 use nautilus_portfolio::portfolio::Portfolio;
@@ -329,6 +329,42 @@ fn data_of_another_instrument_makes_no_decision_fresh() {
     assert!(decide(&probe, &features, every(15), InstrumentId::from(GBP)).is_some());
 }
 
+/// No feature reads AUD/USD, which the strategy reads as trades alone:
+/// its last trade in the cache, made a second ago, makes the decision
+/// fresh.
+#[test]
+fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
+    let (probe, _clock) = registered(NOW);
+    let features = FeatureSet::builder()
+        .quotes(
+            InstrumentId::from(GBP),
+            "gbp",
+            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
+        )
+        .build()
+        .unwrap();
+    features
+        .handle_quote(&quote_of(GBP, 1.3, NOW - 16 * 60 * SECOND))
+        .unwrap();
+    assert_eq!(decide(&probe, &features, every(15), aud()), None);
+
+    probe
+        .cache_rc()
+        .borrow_mut()
+        .add_trade(TradeTick::new(
+            aud(),
+            Price::from("0.70000"),
+            Quantity::from(1),
+            AggressorSide::Buy,
+            TradeId::from("1"),
+            UnixNanos::from(NOW - SECOND),
+            UnixNanos::from(NOW - SECOND),
+        ))
+        .unwrap();
+
+    assert!(decide(&probe, &features, every(15), aud()).is_some());
+}
+
 #[test]
 fn an_event_decides_on_whatever_data_came_last() {
     let (probe, _clock) = registered(NOW);
@@ -354,11 +390,4 @@ fn the_fingerprint_changes_with_the_rule() {
         fingerprint(&features, DecisionRule::Event)
     );
     assert_ne!(fingerprint(&features, every(15)), features.fingerprint());
-}
-
-/// The fingerprint hashes this module's code: its tests live in a
-/// file of their own, so editing one changes no fingerprint.
-#[test]
-fn the_fingerprinted_code_holds_no_test() {
-    assert!(!include_str!("../decide.rs").contains("#[test]"));
 }

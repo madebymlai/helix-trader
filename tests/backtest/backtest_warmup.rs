@@ -14,7 +14,7 @@ fn a_run_started_before_the_trade_warms_the_crossover_on_its_own_bars() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     let result = trades::backtest(catalog.path(), trades::at("10:00"), &levels, "0 EUR")
-        .run(trades::ema_cross(trades::time_exit()))
+        .run(trades::ema_cross())
         .unwrap()
         .result;
 
@@ -23,15 +23,17 @@ fn a_run_started_before_the_trade_warms_the_crossover_on_its_own_bars() {
 }
 
 /// From 12:30 the run replays the bar closing 13:00 from 12:31 on, at
-/// 620.60, then 14:00 at 624.60 and 15:00 at 624.80: the slow EMA is
-/// initialized at 14:00, long (624.60 above 622.60), its first decision;
-/// 15:00 stays long (624.80 above 622.60). No cross, no order.
+/// 620.60, then 14:00 at 624.60, 15:00 and 16:00 at 624.80: the slow EMA
+/// is initialized at 14:00, long (624.60 above 622.60), its first
+/// decision; 15:00 stays long (624.80 above 622.60), the slow EMA going to
+/// 624.07, and 16:00 too (624.80 above 624.07); 17:00 and 18:00 are out of
+/// the session. No cross, no order.
 #[test]
 fn a_run_started_at_the_trade_is_cold_there_and_does_not_trade() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     let result = trades::backtest(catalog.path(), trades::at("12:30"), &levels, "0 EUR")
-        .run(trades::ema_cross(trades::time_exit()))
+        .run(trades::ema_cross())
         .unwrap()
         .result;
 

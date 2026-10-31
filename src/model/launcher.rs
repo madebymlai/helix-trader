@@ -372,7 +372,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::train::{Kept, Outcome},
+        model::{
+            holdout::{Earnings, Holdout, Refusal},
+            train::{Kept, Outcome},
+        },
         strategy::TickSeries,
     };
 
@@ -380,10 +383,20 @@ mod tests {
         time.parse().unwrap()
     }
 
+    /// A holdout of no trade.
+    fn holdout() -> Holdout {
+        Holdout {
+            earnings: Earnings::default(),
+            log_loss: 0.6,
+            baseline_log_loss: 0.69,
+            auc: Some(0.6),
+        }
+    }
+
     fn published(at: Timestamp) -> Trained {
         Outcome::Published {
             valid_from: at,
-            score: 0.6,
+            holdout: holdout(),
         }
         .into()
     }
@@ -410,9 +423,12 @@ mod tests {
     #[test]
     fn an_in_process_train_keeping_the_model_is_kept_with_its_reason() {
         let launcher = Launcher::in_process(|_| {
-            Outcome::Kept(Kept::BelowMinScore {
-                score: 0.48,
-                min_score: 0.55,
+            Outcome::Kept(Kept::Refused {
+                why: Refusal::MinPnl {
+                    pnl: 0.48,
+                    min_pnl: 0.55,
+                },
+                holdout: holdout(),
             })
             .into()
         });
@@ -462,14 +478,14 @@ mod tests {
     fn a_failing_child_is_kept_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
-             echo 'Error: kept the current model: holdout AUC 0.48 below the minimum 0.55' >&2; \
+             echo 'Error: kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55' >&2; \
              exit 1",
         );
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
             Retrained::Kept(
-                "kept the current model: holdout AUC 0.48 below the minimum 0.55".to_string()
+                "kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55".to_string()
             )
         );
     }

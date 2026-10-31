@@ -3,8 +3,9 @@
 //! either opening the targets of each decision in a dataset run
 //! (`Backtest::run_dataset`), the targets subscribing to the bars of
 //! their ATR, if any, the rows they settle collected, or trading on the
-//! models of a store, its decisions' rows and trades recorded; on IC's
-//! hedging venue both. And the random walk of quotes they replay.
+//! models of a store, sending its trades, its decisions' rows, trades and
+//! closed positions recorded; on IC's hedging venue both. And the
+//! random walk of quotes they replay.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -12,15 +13,19 @@ use crate::common::ic;
 use helix_trader::{
     backtest::{Backtest, commission_rate},
     model::{
-        config::{ModelConfig, Thresholds},
-        dataset::Commission,
+        calibration::Calibration,
+        config::{Margins, ModelConfig},
+        dataset::{self, Commission, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
-        features::{Feature, FeatureSet},
-        handle::{Mode, ModelHandle, SettledRows, Trade},
-        learner::LearnerConfig,
-        targets::{Barrier, Distance, Label, TargetRow, TargetsConfig},
+        features::{Feature, FeatureSet, PRIMARY_FEATURES},
+        handle::{Decision, Mode, ModelHandle, SettledRows},
+        holdout::{Earnings, Holdout},
+        learner::{LearnerConfig, TrainingSet},
+        payoff::Payoff,
+        store::{ModelManifest, Probe, StoredModel},
+        targets::{Barrier, Distance, Label, Side, TargetRow, TargetsConfig},
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{DataRequirements, TickSeries, orders},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -34,7 +39,7 @@ use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicato
 use nautilus_model::{
     data::{CustomData, NautilusDataType, QuoteTick},
     enums::{OmsType, PriceType},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Money, Quantity},
 };
@@ -48,7 +53,7 @@ pub const STRATEGY: &str = "DATASET-001";
 
 /// Decides every hour on the last mid of IC's gold through its model
 /// handle; records the rows published for its decisions and the trades
-/// they make, which it does not send.
+/// they make, which it sends, and the positions they closed.
 #[derive(Debug)]
 pub struct ModelProbe {
     core: StrategyCore,
@@ -61,13 +66,15 @@ pub struct ModelProbe {
 pub struct Record {
     /// The row of each decision on warm features.
     pub rows: Vec<FeatureRow>,
-    /// The trade of each decision making one, and its time.
-    pub trades: Vec<(UnixNanos, Trade)>,
+    /// Each decision to trade, and its time.
+    pub trades: Vec<(UnixNanos, Decision)>,
+    /// Each position closed, when it opened and its realised P&L.
+    pub closed: Vec<(UnixNanos, Money)>,
 }
 
 nautilus_strategy!(ModelProbe, {
-    fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.model.on_order_filled(event);
+    fn on_order_canceled(&mut self, event: &OrderCanceled) {
+        self.model.on_order_canceled(self, event);
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
@@ -79,6 +86,9 @@ nautilus_strategy!(ModelProbe, {
     }
 
     fn on_position_closed(&mut self, event: PositionClosed) {
+        if let Some(pnl) = event.realized_pnl {
+            self.record.borrow_mut().closed.push((event.ts_opened, pnl));
+        }
         Rc::clone(&self.model).on_position_closed(self, &event);
     }
 });
@@ -92,19 +102,22 @@ impl DataActor for ModelProbe {
         });
         let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
         msgbus::subscribe_any(topic.into(), handler, None);
-        self.subscribe_quotes(InstrumentId::from(ic::INSTRUMENT_ID), None, None);
-        Rc::clone(&self.model).start(self, &[])
+        Rc::clone(&self.model).start(self)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            if let Some(trade) = Rc::clone(&self.model).decide(self)? {
+            if let Some(decision) = Rc::clone(&self.model).decide(self)? {
                 let now = self.clock().timestamp_ns();
-                self.record.borrow_mut().trades.push((now, trade));
+                self.record.borrow_mut().trades.push((now, decision));
+                decision.trade().send(self)?;
             }
             return Ok(());
         }
-        Rc::clone(&self.model).on_time_event(self, event)
+        if !orders::on_time_event(self, event)? {
+            Rc::clone(&self.model).on_time_event(self, event)?;
+        }
+        Ok(())
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
@@ -145,9 +158,11 @@ pub fn targets() -> TargetsConfig {
         .build()
 }
 
-/// The probe's decisions and targets, learning whether the bracket's long
-/// gains, on a window of 46 hours, the last 12 held out, by the fake
-/// learner from an AUC of 0.5; a long from 0.6, a short to 0.4.
+/// The probe's decisions and targets, learning whether each side of the
+/// bracket gains, on a window of 46 hours, the last 12 held out and the
+/// 12 before them calibrated on, by the fake learner, published from
+/// nought per trade over a trade; each side traded from an expected net
+/// P&L of nought.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -156,11 +171,12 @@ pub fn config() -> ModelConfig {
         .retrain(SignedDuration::from_hours(24))
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
-        .thresholds(Thresholds {
-            long: 0.6,
-            short: 0.4,
+        .margins(Margins {
+            long: Some(0.0),
+            short: Some(0.0),
         })
-        .min_score(0.5)
+        .min_pnl(0.0)
+        .min_trades(1)
         .learner(LearnerConfig::Fake {})
         .build()
 }
@@ -206,6 +222,17 @@ fn probe(
     config: &ModelConfig,
     mode: Mode,
 ) -> (ModelProbe, Rc<RefCell<Record>>) {
+    probe_reading(features, config, &requirements(), mode)
+}
+
+/// The probe deciding on `features` as `config` says, for a strategy of
+/// `requirements`, in `mode`, and what it records.
+pub fn probe_reading(
+    features: Rc<FeatureSet>,
+    config: &ModelConfig,
+    requirements: &DataRequirements,
+    mode: Mode,
+) -> (ModelProbe, Rc<RefCell<Record>>) {
     let record = Rc::new(RefCell::new(Record::default()));
     let probe = ModelProbe {
         core: StrategyCore::new(StrategyConfig {
@@ -217,7 +244,7 @@ fn probe(
             StrategyId::from(STRATEGY),
             features,
             config,
-            &requirements(),
+            requirements,
             mode,
         )
         .unwrap(),
@@ -238,13 +265,18 @@ pub fn requirements() -> DataRequirements {
     }
 }
 
-/// The commission of `backtest`, as given: 30 USD per million traded.
-pub fn commission() -> Commission {
-    Commission::Rate("0.00003".to_string())
+/// The venue of `backtest`, as given: 30 USD per million traded, 10M USD,
+/// no leverage.
+pub fn venue() -> DatasetVenue {
+    DatasetVenue {
+        commission: Commission::Rate("0.00003".to_string()),
+        balance: Money::from("10000000 USD"),
+        leverage: Decimal::ONE,
+    }
 }
 
 /// The run of the probe over `[from, to]` on IC's hedging venue, 30 USD
-/// per million traded, 10M USD.
+/// per million traded, 10M USD (`venue`).
 pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
@@ -253,8 +285,8 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         start: from,
         end: to,
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
-        balance: Money::from("10000000 USD"),
-        leverage: Decimal::ONE,
+        balance: venue().balance,
+        leverage: venue().leverage,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }
@@ -327,7 +359,7 @@ pub fn trade_on(
         config,
         Mode::Backtest {
             models: models.to_path_buf(),
-            commission: commission(),
+            venue: venue(),
         },
     );
     backtest(catalog.path(), from, to).run(probe).unwrap();
@@ -368,5 +400,133 @@ impl Indicator for Missing {
 impl Feature for Missing {
     fn value(&self) -> f64 {
         f64::NAN
+    }
+}
+
+/// The calibration of the baselines, `c(p) = 1 / (1 + e^(2 - 4p))`,
+/// increasing: c(0.5) = 0.5.
+pub const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+
+/// A baseline long or short model of the probe deciding on `features` as
+/// `config` says, valid from `valid_from`, predicting `trues` tenths
+/// whatever the row, calibrated by `CALIBRATION`, expecting a win and a
+/// loss of 1R, as a train publishes one: above 0.5 a trade expected to
+/// gain. For a test whose models come from no train: the fixture's walk
+/// has no edge for a train to publish on (`backtest_train` trains on one).
+pub fn baseline_of(
+    features: &FeatureSet,
+    config: &ModelConfig,
+    side: Side,
+    valid_from: Timestamp,
+    trues: usize,
+) -> StoredModel {
+    stored_baseline(
+        features,
+        config,
+        features.names().to_vec(),
+        Some(side),
+        valid_from,
+        trues,
+    )
+}
+
+/// A baseline meta model of the primary deciding on `features` as `config`
+/// says (its rule's, or its model's: the primary's side and probability
+/// after its features), valid from `valid_from`, predicting `trues`
+/// tenths whatever the row, as `baseline_of`.
+pub fn meta_baseline_of(
+    features: &FeatureSet,
+    config: &ModelConfig,
+    valid_from: Timestamp,
+    trues: usize,
+) -> StoredModel {
+    let primary = (!features.has_primary()).then_some(PRIMARY_FEATURES.map(String::from));
+    let names = features
+        .names()
+        .iter()
+        .cloned()
+        .chain(primary.into_iter().flatten())
+        .collect();
+    stored_baseline(features, config, names, None, valid_from, trues)
+}
+
+/// A baseline of `feature_names`, of `side` for a primary and none for a
+/// meta, of the probe deciding on `features`, as `baseline_of` says.
+fn stored_baseline(
+    features: &FeatureSet,
+    config: &ModelConfig,
+    feature_names: Vec<String>,
+    side: Option<Side>,
+    valid_from: Timestamp,
+    trues: usize,
+) -> StoredModel {
+    let fingerprint = dataset::fingerprint(
+        features,
+        config.decision,
+        &config.targets,
+        &requirements(),
+        &venue(),
+    )
+    .unwrap();
+    baseline_stored(
+        StrategyId::from(STRATEGY),
+        fingerprint.to_string(),
+        feature_names,
+        config,
+        side,
+        valid_from,
+        trues,
+    )
+}
+
+/// A baseline of `strategy_id`, of its features `feature_names` under
+/// `fingerprint`, decided as `config` says, of `side` for a primary and
+/// none for a meta, valid from `valid_from`, predicting `trues` tenths
+/// whatever the row, as `baseline_of` says.
+pub fn baseline_stored(
+    strategy_id: StrategyId,
+    fingerprint: String,
+    feature_names: Vec<String>,
+    config: &ModelConfig,
+    side: Option<Side>,
+    valid_from: Timestamp,
+    trues: usize,
+) -> StoredModel {
+    let width = feature_names.len();
+    let labels = (0..10).map(|i| i < trues).collect();
+    let set = TrainingSet::new(width, vec![0.5; 10 * width], labels).unwrap();
+    let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
+    let probe = vec![0.5; width];
+    StoredModel {
+        manifest: ModelManifest {
+            strategy_id,
+            valid_from,
+            fingerprint,
+            feature_names,
+            targets: config.targets.clone(),
+            label: if side.is_some() {
+                config.label
+            } else {
+                Label::Barrier
+            },
+            side,
+            learner: LearnerConfig::Baseline {},
+            calibration: CALIBRATION,
+            payoff: side.map(|_| Payoff {
+                win: 1.0,
+                loss: 1.0,
+            }),
+            holdout: Holdout {
+                earnings: Earnings::default(),
+                log_loss: 0.6,
+                baseline_log_loss: 0.69,
+                auc: Some(0.5),
+            },
+            probes: vec![Probe {
+                prediction: CALIBRATION.apply(model.predict(&probe).unwrap()),
+                row: probe,
+            }],
+        },
+        model: model.save().unwrap(),
     }
 }

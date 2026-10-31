@@ -8,10 +8,14 @@
 //! `dataset` is the settled rows of a strategy stored by day in the
 //! catalog, its coverage the cache of the days built;
 //! `learner` is the model port, its learners fitting and loading the
-//! models that predict;
+//! models that predict; `calibration` turns their predictions into win
+//! rates; `payoff` is what a side's trade is expected to make and the
+//! side a decision trades;
 //! `config` is the model section of a strategy's config; `train` trains
-//! at a time, fitting on a window of the dataset and publishing in the
-//! `store` the model whose holdout `score` passes the gate; `handle` is
+//! at a time, fitting a model of each side traded on a window of the
+//! dataset and publishing in the `store` each whose `holdout`, what its
+//! decisions would have earned there and its `score`, meets the minimums;
+//! `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! targets in a dataset run; `schedule` is when a model is retrained, on
@@ -22,14 +26,17 @@
 //! trade of the primary, the strategy's rule or its model, trained on
 //! the primary's out-of-sample predictions.
 
+pub mod calibration;
 pub mod config;
 pub mod dataset;
 pub mod decide;
 pub mod features;
 pub mod handle;
+pub mod holdout;
 pub mod launcher;
 pub mod learner;
 pub mod meta;
+pub mod payoff;
 pub mod schedule;
 pub mod score;
 pub mod store;

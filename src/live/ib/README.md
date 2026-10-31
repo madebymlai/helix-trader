@@ -136,8 +136,12 @@ above, `account_id: Option<String>` (see "The account"), timeouts,
 Nautilus' `bracket()` makes its exits reduce-only and the IB execution
 client denies reduce-only orders (`UNSUPPORTED_REDUCE_ONLY`), so a bracket
 is denied on IB (`adapters/interactive_brokers/src/execution/core.rs`): the
-EMA crossover, which trades in brackets, cannot trade live on IB. Its
-backtests on IB data are unaffected.
+EMA crossover, which trades in brackets, cannot trade live on IB. Nor can
+a strategy trading on a model: its trades are its label's target, a
+bracket or a market entry closed by `close_position`, whose order is
+reduce-only too (`trading/src/strategy/mod.rs`, `close_position`). This is
+nautilus#5464, tracked by the repo's issue #9; nothing here works around
+it. Backtests on IB data, and other venues, are unaffected.
 The exec `client_id` must not be a multiple of 1000: the adapter partitions
 order ids by `client_id % 1000` and rejects one. Since data and exec share the
 client id, `mod.rs` refuses it before any gateway starts.

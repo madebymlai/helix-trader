@@ -11,12 +11,13 @@
 //! barriers in basis points and exits in average true ranges of hourly
 //! bars, the cadence's, which the targets subscribe to themselves, built
 //! from the quotes, from the trades alone and from minute bars alone, no
-//! order before the ATR is initialized. Orders the risk engine denies
-//! drop their decisions, unsettled, before any time alert could. Over two
-//! days of a random walk the targets are the same with the execution
-//! engine purging closed orders and positions as without, while the purge
-//! keeps the cache to the last minutes' orders. One node per thread, so
-//! one run per test, or per thread of a test.
+//! order before the ATR is initialized; deciding on LAST bars the run
+//! builds from the trades alone is deciding on the trades. Orders the
+//! risk engine denies drop their decisions, unsettled, before any time
+//! alert could. Over two days of a random walk the targets are the same
+//! with the execution engine purging closed orders and positions as
+//! without, while the purge keeps the cache to the last minutes' orders.
+//! One node per thread, so one run per test, or per thread of a test.
 
 use std::{cell::RefCell, collections::BTreeSet, path::PathBuf, rc::Rc, thread};
 
@@ -27,11 +28,11 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
         targets::{
-            AtrConfig, Barrier, Distance, Exit, Outcome, Outcomes, TargetRow, Targets,
+            Barrier, DEFAULT_ATR, Distance, Distances, Exit, Outcome, Outcomes, TargetRow, Targets,
             TargetsConfig,
         },
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries, orders},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -45,7 +46,7 @@ use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{Bar, BarType, CustomData, NautilusDataType, QuoteTick, TradeTick},
     enums::{AggressorSide, OmsType, PriceType},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
+    events::{OrderCanceled, OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId, Symbol, TradeId},
     instruments::{CryptoPerpetual, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
@@ -175,7 +176,10 @@ impl TargetProbe {
 nautilus_strategy!(TargetProbe, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
         self.record.borrow_mut().fills.push(event.ts_event);
-        self.targets.on_order_filled(event);
+    }
+
+    fn on_order_canceled(&mut self, event: &OrderCanceled) {
+        self.targets.on_order_canceled(self, event);
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
@@ -221,7 +225,8 @@ impl DataActor for TargetProbe {
             }
             return Ok(());
         }
-        Rc::clone(&self.targets).on_time_event(self, event)
+        orders::on_time_event(self, event)?;
+        Ok(())
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
@@ -264,15 +269,32 @@ fn decision(at: Timestamp, features: f64) -> FeatureRow {
     }
 }
 
-fn outcome(pnl: &str, exit: Exit) -> Outcome {
+/// The outcome of a position closed by `exit` with `pnl`, net of
+/// `commission`.
+fn outcome(pnl: &str, commission: &str, exit: Exit) -> Outcome {
     Outcome {
         pnl: Money::from(pnl),
+        commission: Money::from(commission),
         exit,
+        distances: None,
     }
 }
 
 fn outcomes(long: Outcome, short: Outcome) -> Outcomes {
     Outcomes { long, short }
+}
+
+/// The barrier's outcomes `long` and `short`, each side's take profit
+/// `take_profit` and its stop `stop` from the decision's price.
+fn barrier(long: Outcome, short: Outcome, take_profit: &str, stop: &str) -> Outcomes {
+    let distances = Some(Distances {
+        take_profit: take_profit.parse().unwrap(),
+        stop: stop.parse().unwrap(),
+    });
+    Outcomes {
+        long: Outcome { distances, ..long },
+        short: Outcome { distances, ..short },
+    }
 }
 
 /// The row of `decision`, settled `settled` after its time.
@@ -334,7 +356,7 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
 /// The quotes of the hand-worked targets: a dip at 09:20, a spike at
 /// 10:45:00.010, the time limit of the 10:00 decision, and a rise of 0.90
 /// from 11:20 on.
-fn hand_worked_quotes() -> Vec<QuoteTick> {
+pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
     gold_quotes(
         |t| match t {
             t if t == ic::at("09:20:00") => Some(("3996.80", "3997.00")),
@@ -367,8 +389,8 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let flat = || {
         // 4000.20 to 4000.00 and back: 0.20 lost and two fees.
         outcomes(
-            outcome("-0.44 USD", Exit::Time),
-            outcome("-0.44 USD", Exit::Time),
+            outcome("-0.44 USD", "0.24 USD", Exit::Time),
+            outcome("-0.44 USD", "0.24 USD", Exit::Time),
         )
     };
     let expected = [
@@ -377,9 +399,11 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 3997.10 (+2.90 - 0.24). The horizon closes on the flat quote.
         row(
             decision(at("09:00"), 4000.10),
-            outcomes(
-                outcome("-3.64 USD", Exit::Stop),
-                outcome("2.66 USD", Exit::TakeProfit),
+            barrier(
+                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
+                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
+                "3.00",
+                "3.00",
             ),
             flat(),
             SignedDuration::from_mins(30),
@@ -389,9 +413,11 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 4003.10, the short's stop at the ask, 4003.40.
         row(
             decision(at("10:00"), 4000.10),
-            outcomes(
-                outcome("2.66 USD", Exit::TakeProfit),
-                outcome("-3.64 USD", Exit::Stop),
+            barrier(
+                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
+                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
+                "3.00",
+                "3.00",
             ),
             flat(),
             SignedDuration::from_mins(45),
@@ -400,13 +426,15 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // long +0.80, the short -1.20, less the fees.
         row(
             decision(at("11:00"), 4000.10),
-            outcomes(
-                outcome("0.56 USD", Exit::Time),
-                outcome("-1.44 USD", Exit::Time),
+            barrier(
+                outcome("0.56 USD", "0.24 USD", Exit::Time),
+                outcome("-1.44 USD", "0.24 USD", Exit::Time),
+                "3.00",
+                "3.00",
             ),
             outcomes(
-                outcome("0.56 USD", Exit::Time),
-                outcome("-1.44 USD", Exit::Time),
+                outcome("0.56 USD", "0.24 USD", Exit::Time),
+                outcome("-1.44 USD", "0.24 USD", Exit::Time),
             ),
             SignedDuration::from_mins(45),
         ),
@@ -545,8 +573,8 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let flat = || {
         outcomes(
-            outcome("-1 USDT", Exit::Time),
-            outcome("-1 USDT", Exit::Time),
+            outcome("-1 USDT", "1 USDT", Exit::Time),
+            outcome("-1 USDT", "1 USDT", Exit::Time),
         )
     };
     let expected = [
@@ -555,9 +583,11 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // loss) and the short's stop at its trigger, 100,100 (-1 - 1.0005).
         row(
             decision(at("09:00"), 100_000.0),
-            outcomes(
-                outcome("-0.0005 USDT", Exit::TakeProfit),
-                outcome("-2.0005 USDT", Exit::Stop),
+            barrier(
+                outcome("-0.0005 USDT", "1.0005 USDT", Exit::TakeProfit),
+                outcome("-2.0005 USDT", "1.0005 USDT", Exit::Stop),
+                "100",
+                "100",
             ),
             flat(),
             SignedDuration::from_mins(30),
@@ -566,16 +596,18 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // the short's take profit at its limit (+1 - 0.9995).
         row(
             decision(at("10:00"), 100_000.0),
-            outcomes(
-                outcome("-1.9995 USDT", Exit::Stop),
-                outcome("0.0005 USDT", Exit::TakeProfit),
+            barrier(
+                outcome("-1.9995 USDT", "0.9995 USDT", Exit::Stop),
+                outcome("0.0005 USDT", "0.9995 USDT", Exit::TakeProfit),
+                "100",
+                "100",
             ),
             flat(),
             SignedDuration::from_mins(30),
         ),
         row(
             decision(at("11:00"), 100_000.0),
-            flat(),
+            barrier(flat().long, flat().short, "100", "100"),
             flat(),
             SignedDuration::from_mins(45),
         ),
@@ -631,7 +663,10 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_mins(45),
-            atr: Some(AtrConfig { period: 2 }),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_mins(30))
         .build();
@@ -649,13 +684,15 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         // horizon closes both on the flat quote at 10:30.
         row(
             decision(ic::at("10:00:00"), 4000.10),
-            outcomes(
-                outcome("0.46 USD", Exit::TakeProfit),
-                outcome("-1.34 USD", Exit::Stop),
+            barrier(
+                outcome("0.46 USD", "0.24 USD", Exit::TakeProfit),
+                outcome("-1.34 USD", "0.24 USD", Exit::Stop),
+                "0.80",
+                "0.60",
             ),
             outcomes(
-                outcome("-0.44 USD", Exit::Time),
-                outcome("-0.44 USD", Exit::Time),
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
             ),
             SignedDuration::from_mins(30),
         ),
@@ -669,6 +706,43 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     );
 }
 
+/// The ATR of `targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand`,
+/// 0.40 at 10:00, with a stop of a hundredth of it, 0.004 from 4000.10:
+/// on gold's cent ticks the stop rounds onto the decision's price, no
+/// distance, so the decision opens no target, as one on a cold ATR: no
+/// row and no order.
+#[test]
+fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_of(ranging_quotes(), from, to);
+    let backtest = Backtest {
+        end: ic::at("10:50:00"),
+        ..gold_backtest(catalog.path().to_path_buf())
+    };
+    let config = TargetsConfig::builder()
+        .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
+        .quantity(Quantity::from(1))
+        .barrier(Barrier {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(1, 2)),
+            limit: SignedDuration::from_mins(45),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
+        })
+        .horizon(SignedDuration::from_mins(30))
+        .build();
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let (probe, record) = TargetProbe::new(source, config);
+
+    backtest.run_dataset(probe).unwrap();
+
+    let record = record.borrow();
+    assert_eq!(record.rows, []);
+    assert!(record.fills.is_empty(), "{:?}", record.fills);
+}
+
 /// The barrier of the ATR tests on BTC: a take profit 2 and a stop 1.5
 /// average true ranges of 2 hourly bars away, closed 45 minutes after its
 /// decision, beside a horizon of 30 minutes, of one contract.
@@ -680,7 +754,10 @@ fn btc_atr_targets() -> TargetsConfig {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_mins(45),
-            atr: Some(AtrConfig { period: 2 }),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_mins(30))
         .build()
@@ -755,7 +832,40 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
 
     backtest.run_dataset(probe).unwrap();
 
-    let expected = [
+    let record = record.borrow();
+    assert_eq!(record.rows, btc_trades_atr_rows());
+    // The 09:00 decision sent no order: the first fill is the 10:00 one's.
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
+}
+
+/// The probe deciding on the close of BTC's hourly LAST bars, which the
+/// run builds from its trades alone (the strategy reads no trade): each
+/// bar closes on the hour's last trade, 100,000 at 09:59:55, so the
+/// decisions, their ATR and their targets are those of the probe deciding
+/// on the trades themselves.
+#[test]
+fn targets_on_last_bars_of_trades_are_those_on_the_trades() {
+    let catalog = btc_trades_catalog();
+    let hour_last = BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL");
+    let backtest = Backtest {
+        bar_types: vec![hour_last],
+        ticks: vec![],
+        end: ic::at("10:50:00"),
+        ..btc_backtest(&catalog)
+    };
+    let (probe, record) = TargetProbe::new(Source::Bars(hour_last), btc_atr_targets());
+
+    backtest.run_dataset(probe).unwrap();
+
+    assert_eq!(record.borrow().rows, btc_trades_atr_rows());
+}
+
+/// The rows of the probe on BTC's trades, an ATR of 55 at 10:00.
+fn btc_trades_atr_rows() -> [TargetRow; 1] {
+    [
         // Both enter at the last trade, 100,000: the long's take profit a
         // sell limit at 100,110, its stop at 99,917.5; the short's take
         // profit at 99,890, its stop a buy stop at 100,082.5. The trade at
@@ -765,24 +875,19 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
         // flat trade at 10:30, its two fees lost.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            outcomes(
-                outcome("0.09945 USDT", Exit::TakeProfit),
-                outcome("-2.2006 USDT", Exit::Stop),
+            barrier(
+                outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
+                outcome("-2.2006 USDT", "1.0006 USDT", Exit::Stop),
+                "110",
+                "82.5",
             ),
             outcomes(
-                outcome("-1 USDT", Exit::Time),
-                outcome("-1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
             ),
             SignedDuration::from_mins(30),
         ),
-    ];
-    let record = record.borrow();
-    assert_eq!(record.rows, expected);
-    // The 09:00 decision sent no order: the first fill is the 10:00 one's.
-    assert_eq!(
-        record.fills.first(),
-        Some(&UnixNanos::from(ic::at("10:00:00.010")))
-    );
+    ]
 }
 
 /// BTC's minute bars as `btc_bar`, flat at 100,000, but for the minutes
@@ -836,13 +941,15 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         // 10:30, its two fees lost.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            outcomes(
-                outcome("0.09945 USDT", Exit::TakeProfit),
-                outcome("-1.8254125 USDT", Exit::Stop),
+            barrier(
+                outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
+                outcome("-1.8254125 USDT", "1.0004125 USDT", Exit::Stop),
+                "110",
+                "82.5",
             ),
             outcomes(
-                outcome("-1 USDT", Exit::Time),
-                outcome("-1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
+                outcome("-1 USDT", "1 USDT", Exit::Time),
             ),
             SignedDuration::from_mins(30),
         ),

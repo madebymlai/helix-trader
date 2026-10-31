@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use nautilus_indicators::average::sma::SimpleMovingAverage;
+use nautilus_indicators::average::{MovingAverageType, sma::SimpleMovingAverage};
 use nautilus_model::{
     data::NautilusDataType,
     enums::PriceType,
@@ -27,6 +27,14 @@ fn rule() -> DecisionRule {
     every(15)
 }
 
+/// What `config` trades: an ounce of gold.
+fn gold() -> TradedInstrument {
+    TradedInstrument {
+        instrument_id: InstrumentId::from(GOLD),
+        trade_size: Quantity::from(1),
+    }
+}
+
 /// A take profit 20 bps away, a stop 1.5 ATRs of 14 bars.
 fn config() -> TargetsConfig {
     TargetsConfig::builder()
@@ -36,7 +44,10 @@ fn config() -> TargetsConfig {
             take_profit: Distance::BasisPoints(Decimal::from(20)),
             stop: Distance::Atr(Decimal::new(15, 1)),
             limit: SignedDuration::from_hours(2),
-            atr: Some(AtrConfig { period: 14 }),
+            atr: Some(AtrArgs {
+                period: 14,
+                ..DEFAULT_ATR
+            }),
         })
         .horizon(SignedDuration::from_hours(1))
         .build()
@@ -56,8 +67,6 @@ fn in_bps(take_profit: i64, stop: i64) -> Barrier {
 #[test]
 fn a_config_reads_from_toml() {
     let toml = r#"
-        instrument_id = "XAUUSD.ICMARKETS"
-        quantity = "1"
         horizon = "1h"
 
         [barrier]
@@ -67,19 +76,22 @@ fn a_config_reads_from_toml() {
         atr = { period = 14 }
     "#;
 
-    assert_eq!(toml::from_str::<TargetsConfig>(toml).unwrap(), config());
+    assert_eq!(
+        toml::from_str::<TargetsTable>(toml)
+            .unwrap()
+            .trading(&gold()),
+        config()
+    );
 }
 
 /// The ATR's bars are the decision cadence's: naming them is refused.
 #[test]
 fn a_barrier_atr_naming_its_bar_type_is_refused_at_load() {
     let toml = r#"
-        instrument_id = "XAUUSD.ICMARKETS"
-        quantity = "1"
         barrier = { take_profit = { atr = 2 }, stop = { atr = 1.5 }, limit = "2h", atr = { bar_type = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 } }
     "#;
 
-    let err = toml::from_str::<TargetsConfig>(toml).unwrap_err();
+    let err = toml::from_str::<TargetsTable>(toml).unwrap_err();
 
     assert!(err.to_string().contains("bar_type"), "{err}");
 }
@@ -125,7 +137,7 @@ fn atr_bars_reading(
     config
         .atr_bars(rule, requirements)
         .unwrap()
-        .map(|atr| (atr.bar_type.to_string(), atr.period))
+        .map(|atr| (atr.bar_type.to_string(), atr.args.period))
 }
 
 /// The bar type of the ATR of `config()` deciding on `rule`, for a
@@ -314,7 +326,10 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     };
     let overridden = TargetsConfig {
         barrier: Some(Barrier {
-            atr: Some(AtrConfig { period: 20 }),
+            atr: Some(AtrArgs {
+                period: 20,
+                ..DEFAULT_ATR
+            }),
             ..barrier
         }),
         ..config()
@@ -338,11 +353,11 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
 #[test]
 fn an_atr_distance_without_an_atr_table_reads_from_toml() {
     let toml = r#"
-        instrument_id = "XAUUSD.ICMARKETS"
-        quantity = "1"
         barrier = { take_profit = { atr = 2.0 }, stop = { atr = 1.5 }, limit = "2h" }
     "#;
-    let config = toml::from_str::<TargetsConfig>(toml).unwrap();
+    let config = toml::from_str::<TargetsTable>(toml)
+        .unwrap()
+        .trading(&gold());
 
     assert!(config.validate(rule(), &quotes()).is_ok());
     assert_eq!(atr_bars(&config, rule()).unwrap().1, 14);
@@ -385,12 +400,10 @@ fn a_distance_has_one_known_unit() {
     let barrier = |take_profit: &str| {
         let toml = format!(
             r#"
-            instrument_id = "XAUUSD.ICMARKETS"
-            quantity = "1"
             barrier = {{ take_profit = {take_profit}, stop = {{ bps = 10 }}, limit = "2h" }}
             "#
         );
-        toml::from_str::<TargetsConfig>(&toml).map(|config| config.barrier.unwrap())
+        toml::from_str::<TargetsTable>(&toml).map(|table| table.barrier.unwrap())
     };
 
     assert_eq!(barrier("{ bps = 7.5 }").unwrap().take_profit, {
@@ -404,13 +417,11 @@ fn a_distance_has_one_known_unit() {
 #[test]
 fn a_config_refuses_an_unknown_field() {
     let toml = r#"
-        instrument_id = "XAUUSD.ICMARKETS"
-        quantity = "1"
         horizon = "1h"
         horizn = "2h"
     "#;
 
-    assert!(toml::from_str::<TargetsConfig>(toml).is_err());
+    assert!(toml::from_str::<TargetsTable>(toml).is_err());
 }
 
 #[test]
@@ -465,13 +476,6 @@ fn sizes_distances_and_times_must_be_positive() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig { period: 0 }),
-                ..barrier
-            }),
-            ..config()
-        },
-        TargetsConfig {
-            barrier: Some(Barrier {
                 limit: SignedDuration::ZERO,
                 ..barrier
             }),
@@ -487,6 +491,100 @@ fn sizes_distances_and_times_must_be_positive() {
         assert!(config.validate(rule(), &quotes()).is_err(), "{config:?}");
         assert!(Targets::new(config, rule(), &quotes()).is_err());
     }
+}
+
+/// The ATR of no bars, which this test refused as an error before the
+/// barrier's ATR took Nautilus' arguments: Nautilus' `AverageTrueRange::new`
+/// checks them as it builds the ATR, panicking on one it refuses, and
+/// validating builds it, so the load stops there.
+#[test]
+#[should_panic(expected = "period")]
+fn an_atr_of_no_bars_panics_as_validated() {
+    let barrier = Barrier {
+        atr: Some(AtrArgs {
+            period: 0,
+            ..DEFAULT_ATR
+        }),
+        ..config().barrier.unwrap()
+    };
+    let config = TargetsConfig {
+        barrier: Some(barrier),
+        ..config()
+    };
+    let _ = config.validate(rule(), &quotes());
+}
+
+#[test]
+#[should_panic(expected = "value_floor")]
+fn an_atr_floor_nautilus_refuses_panics_as_validated() {
+    let barrier = Barrier {
+        atr: Some(AtrArgs {
+            value_floor: Some(f64::NAN),
+            ..AtrArgs {
+                period: 14,
+                ..DEFAULT_ATR
+            }
+        }),
+        ..config().barrier.unwrap()
+    };
+    let config = TargetsConfig {
+        barrier: Some(barrier),
+        ..config()
+    };
+    let _ = config.validate(rule(), &quotes());
+}
+
+/// The ATR's arguments are Nautilus' `AverageTrueRange`'s, by their names,
+/// the moving average by Nautilus' name of it, case aside.
+#[test]
+fn an_atr_reads_nautilus_arguments_from_toml() {
+    let toml = r#"
+        barrier = { take_profit = { atr = 2 }, stop = { atr = 1.5 }, limit = "2h", atr = { period = 20, ma_type = "Exponential", use_previous = false, value_floor = 0.25 } }
+    "#;
+
+    let atr = toml::from_str::<TargetsTable>(toml)
+        .unwrap()
+        .barrier
+        .unwrap()
+        .atr;
+
+    assert_eq!(
+        atr,
+        Some(AtrArgs {
+            period: 20,
+            ma_type: Some(MovingAverageType::Exponential),
+            use_previous: Some(false),
+            value_floor: Some(0.25),
+        })
+    );
+}
+
+/// What the targets trade is the strategy's `[trade]`: the table naming
+/// it is refused.
+#[test]
+fn a_table_naming_an_instrument_or_a_quantity_is_refused() {
+    for key in [r#"instrument_id = "XAUUSD.ICMARKETS""#, r#"quantity = "1""#] {
+        let toml = format!("{key}\nhorizon = \"1h\"");
+        let err = toml::from_str::<TargetsTable>(&toml).unwrap_err();
+        let name = key.split(' ').next().unwrap();
+        assert!(err.to_string().contains(name), "{err}");
+    }
+}
+
+/// The table trades the instrument and size it is given.
+#[test]
+fn a_table_trades_the_instrument_and_size_it_is_given() {
+    let table = toml::from_str::<TargetsTable>("horizon = \"1h\"").unwrap();
+    let traded = TradedInstrument {
+        instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
+        trade_size: Quantity::from(3),
+    };
+
+    let targets = table.trading(&traded);
+
+    assert_eq!(targets.instrument_id, traded.instrument_id);
+    assert_eq!(targets.quantity, traded.trade_size);
+    assert_eq!(targets.horizon, Some(SignedDuration::from_hours(1)));
 }
 
 #[test]
@@ -551,6 +649,7 @@ fn exits(barrier: Barrier, reference: &str, atr: Option<f64>) -> Vec<(String, St
     barrier
         .exits(&half_point(), reference, atr)
         .unwrap()
+        .expect("exits off the reference")
         .into_iter()
         .map(|(_, take_profit, stop)| (take_profit.to_string(), stop.to_string()))
         .collect()
@@ -612,6 +711,28 @@ fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
     );
 }
 
+/// A tiny ATR of 0.1 on half-point ticks from 1000.0: a stop of 1 ATR,
+/// 0.1, is nearer 1000.0 than 999.5, and a take profit of 1.5 ATRs,
+/// 0.15, nearer 1000.0 than 1000.5. An exit on the decision's price is no
+/// distance, a P&L in R of no stop, so neither barrier is a target, as
+/// with a cold ATR; 10 ATRs, 1.0, are.
+#[test]
+fn an_exit_rounding_onto_the_reference_gives_no_exits() {
+    let exits_of = |take_profit: Decimal, stop: Decimal| {
+        Barrier {
+            take_profit: Distance::Atr(take_profit),
+            stop: Distance::Atr(stop),
+            ..config().barrier.unwrap()
+        }
+        .exits(&half_point(), Decimal::from(1000), Some(0.1))
+        .unwrap()
+    };
+
+    assert_eq!(exits_of(Decimal::from(10), Decimal::ONE), None);
+    assert_eq!(exits_of(Decimal::new(15, 1), Decimal::from(10)), None);
+    assert!(exits_of(Decimal::from(10), Decimal::from(10)).is_some());
+}
+
 #[test]
 fn the_fingerprint_changes_with_every_target_spec() {
     let base = FeatureSet::builder()
@@ -652,7 +773,49 @@ fn the_fingerprint_changes_with_every_target_spec() {
         },
         TargetsConfig {
             barrier: Some(Barrier {
-                atr: Some(AtrConfig { period: 15 }),
+                atr: Some(AtrArgs {
+                    period: 15,
+                    ..DEFAULT_ATR
+                }),
+                ..barrier
+            }),
+            ..config()
+        },
+        TargetsConfig {
+            barrier: Some(Barrier {
+                atr: Some(AtrArgs {
+                    ma_type: Some(MovingAverageType::Simple),
+                    ..AtrArgs {
+                        period: 14,
+                        ..DEFAULT_ATR
+                    }
+                }),
+                ..barrier
+            }),
+            ..config()
+        },
+        TargetsConfig {
+            barrier: Some(Barrier {
+                atr: Some(AtrArgs {
+                    use_previous: Some(false),
+                    ..AtrArgs {
+                        period: 14,
+                        ..DEFAULT_ATR
+                    }
+                }),
+                ..barrier
+            }),
+            ..config()
+        },
+        TargetsConfig {
+            barrier: Some(Barrier {
+                atr: Some(AtrArgs {
+                    value_floor: Some(0.5),
+                    ..AtrArgs {
+                        period: 14,
+                        ..DEFAULT_ATR
+                    }
+                }),
                 ..barrier
             }),
             ..config()
@@ -691,8 +854,8 @@ fn the_fingerprint_changes_with_every_target_spec() {
     }
 }
 
-/// The ATR's period is fingerprinted as it runs: left to its default it
-/// keys the same targets as 14 written out.
+/// The ATR is fingerprinted as it runs: left to its defaults, its period
+/// and Nautilus' arguments, it keys the same targets as those written out.
 #[test]
 fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
     let base = FeatureSet::builder()
@@ -712,9 +875,25 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
         }),
         ..config()
     };
+    let written_out = TargetsConfig {
+        barrier: Some(Barrier {
+            atr: Some(AtrArgs {
+                period: 14,
+                ma_type: Some(MovingAverageType::Wilder),
+                use_previous: Some(true),
+                value_floor: Some(0.0),
+            }),
+            ..barrier
+        }),
+        ..config()
+    };
 
     assert_eq!(
         fingerprint(base, &default, rule(), &quotes()).unwrap(),
+        fingerprint(base, &config(), rule(), &quotes()).unwrap()
+    );
+    assert_eq!(
+        fingerprint(base, &written_out, rule(), &quotes()).unwrap(),
         fingerprint(base, &config(), rule(), &quotes()).unwrap()
     );
 }
@@ -782,10 +961,19 @@ fn a_decision_settles_within_its_longest_target() {
 }
 
 #[test]
-fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
-    let outcome = |pnl: &str, exit| Outcome {
+fn a_row_has_a_value_per_target_name_the_pnl_the_commission_the_exit_and_a_barriers_distances_of_each_side()
+ {
+    let outcome = |pnl: &str, exit, distances| Outcome {
         pnl: Money::from(pnl),
+        commission: Money::from("0.12 USD"),
         exit,
+        distances,
+    };
+    let barrier = |take_profit, stop| {
+        Some(Distances {
+            take_profit: Decimal::new(take_profit, 2),
+            stop: Decimal::new(stop, 2),
+        })
     };
     let row = TargetRow {
         decision: FeatureRow {
@@ -795,12 +983,12 @@ fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
             ts_init: UnixNanos::from(1),
         },
         barrier: Some(Outcomes {
-            long: outcome("2.5 USD", Exit::TakeProfit),
-            short: outcome("-3.5 USD", Exit::Stop),
+            long: outcome("2.5 USD", Exit::TakeProfit, barrier(300, 150)),
+            short: outcome("-3.5 USD", Exit::Stop, barrier(325, 175)),
         }),
         horizon: Some(Outcomes {
-            long: outcome("-0.25 USD", Exit::Time),
-            short: outcome("0.25 USD", Exit::Time),
+            long: outcome("-0.25 USD", Exit::Time, None),
+            short: outcome("0.25 USD", Exit::Time, None),
         }),
         settled_at: UnixNanos::from(2),
     };
@@ -813,17 +1001,31 @@ fn a_row_has_a_value_per_target_name_the_pnl_and_the_exit_of_each_side() {
         config().target_names(),
         [
             "barrier_long_pnl",
+            "barrier_long_commission",
             "barrier_long_exit",
+            "barrier_long_take_profit",
+            "barrier_long_stop",
             "barrier_short_pnl",
+            "barrier_short_commission",
             "barrier_short_exit",
+            "barrier_short_take_profit",
+            "barrier_short_stop",
             "horizon_long_pnl",
+            "horizon_long_commission",
             "horizon_long_exit",
             "horizon_short_pnl",
+            "horizon_short_commission",
             "horizon_short_exit",
         ]
     );
-    assert_eq!(row.values(), [2.5, 1.0, -3.5, -1.0, -0.25, 0.0, 0.25, 0.0]);
-    assert_eq!(horizon.target_names().len(), 4);
+    assert_eq!(
+        row.values(),
+        [
+            2.5, 0.12, 1.0, 3.0, 1.5, -3.5, 0.12, -1.0, 3.25, 1.75, -0.25, 0.12, 0.0, 0.25, 0.12,
+            0.0
+        ]
+    );
+    assert_eq!(horizon.target_names().len(), 6);
 }
 
 #[test]
@@ -831,7 +1033,9 @@ fn an_outcome_has_the_sign_of_its_pnl() {
     let sign = |pnl: &str| {
         Outcome {
             pnl: Money::from(pnl),
+            commission: Money::from("0.1 USD"),
             exit: Exit::Time,
+            distances: None,
         }
         .sign()
     };
@@ -842,26 +1046,31 @@ fn an_outcome_has_the_sign_of_its_pnl() {
 }
 
 #[test]
-fn a_label_is_the_long_pnl_of_its_target_among_a_rows_values() {
+fn a_sides_pnl_commission_and_stop_are_its_target_names_among_a_rows_values() {
+    let names = config().target_names();
+    let pnl = |label, side| names[config().pnl_index(label, side).unwrap()].clone();
+    let commission = |label, side| names[config().commission_index(label, side).unwrap()].clone();
+    let stop = |label, side| names[config().stop_index(label, side).unwrap()].clone();
     let horizon = TargetsConfig {
         barrier: None,
         ..config()
     };
 
-    assert_eq!(config().label_index(Label::Barrier), Some(0));
-    assert_eq!(config().label_index(Label::Horizon), Some(4));
-    assert_eq!(horizon.label_index(Label::Horizon), Some(0));
-    assert_eq!(horizon.label_index(Label::Barrier), None);
-}
-
-#[test]
-fn a_sides_pnl_is_its_target_names_pnl_among_a_rows_values() {
-    let names = config().target_names();
-    let name = |label, side| names[config().pnl_index(label, side).unwrap()].clone();
-
-    assert_eq!(name(Label::Barrier, OrderSide::Buy), "barrier_long_pnl");
-    assert_eq!(name(Label::Barrier, OrderSide::Sell), "barrier_short_pnl");
-    assert_eq!(name(Label::Horizon, OrderSide::Sell), "horizon_short_pnl");
+    assert_eq!(pnl(Label::Barrier, Side::Long), "barrier_long_pnl");
+    assert_eq!(pnl(Label::Barrier, Side::Short), "barrier_short_pnl");
+    assert_eq!(pnl(Label::Horizon, Side::Short), "horizon_short_pnl");
+    assert_eq!(
+        commission(Label::Barrier, Side::Short),
+        "barrier_short_commission"
+    );
+    assert_eq!(
+        commission(Label::Horizon, Side::Long),
+        "horizon_long_commission"
+    );
+    assert_eq!(stop(Label::Barrier, Side::Short), "barrier_short_stop");
+    assert_eq!(config().stop_index(Label::Horizon, Side::Long), None);
+    assert_eq!(horizon.pnl_index(Label::Horizon, Side::Long), Some(0));
+    assert_eq!(horizon.pnl_index(Label::Barrier, Side::Long), None);
 }
 
 #[test]
@@ -877,9 +1086,24 @@ fn a_label_reads_from_toml() {
     assert!(label(r#"label = "direction""#).is_err());
 }
 
-/// The fingerprint hashes this module's code: its tests live in a
-/// file of their own, so editing one changes no fingerprint.
+/// 1000 AUD/USD with a stop 10 pips away: 1 USD at risk.
 #[test]
-fn the_fingerprinted_code_holds_no_test() {
-    assert!(!include_str!("../targets.rs").contains("#[test]"));
+fn a_stop_is_worth_its_distance_on_the_targets_quantity() {
+    let instrument = InstrumentAny::CurrencyPair(nautilus_model::instruments::stubs::audusd_sim());
+
+    let worth = stop_worth(&instrument, Quantity::from(1000), 0.001).unwrap();
+
+    assert!((worth - 1.0).abs() < 1e-9, "{worth}");
+}
+
+/// Bybit's inverse BTCUSD: Nautilus' notional value of a distance on it
+/// divides by the price, which is not what the stop risks.
+#[test]
+fn a_stop_on_an_inverse_instrument_is_refused() {
+    let instrument =
+        InstrumentAny::CryptoPerpetual(nautilus_model::instruments::stubs::btcusd_bybit());
+
+    let err = stop_worth(&instrument, Quantity::from(1), 10.0).unwrap_err();
+
+    assert!(err.to_string().contains("inverse"), "{err}");
 }

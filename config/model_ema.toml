@@ -1,0 +1,57 @@
+# Model EMA (`src/strategy/model_ema/`), read into `ModelEmaConfig`: an
+# example strategy trading on a learned model, whose features are a fast
+# and a slow EMA of each bars series it reads:
+#   cargo run --release -- train model_ema --config config/model_ema.toml ...
+#   cargo run --release -- backtest model_ema --config config/model_ema.toml ...
+# Every field is described in `src/strategy/README.md`.
+#
+# Its trades are its model's decisions, sent as given: the target its
+# model was labelled on, here the barrier of [model].targets, a bracket
+# closed at its limit.
+
+# Nautilus' StrategyConfig; defaults to MODEL_EMA-001, tag 001, when left
+# out. The strategy id keys the model's store.
+# [base]
+# strategy_id = "MODEL_EMA-001"
+# order_id_tag = "001"
+
+[data]
+# The series read (all stored in the catalog): hourly bars of the mid,
+# built by Nautilus from the quotes, of each instrument; each gives the
+# model its two averages.
+series = [
+    { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+    { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+]
+# How far back a live node's warmup request goes at start, and a dataset
+# build's lead-in: enough for the slow average's 30 bars and the barrier's
+# ATR.
+warmup = "72h"
+
+[trade]
+# The one instrument traded, whose targets the model learns, and the size
+# of each trade.
+instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+
+[model]
+# A decision every hour, on the hour's bars.
+decision = { every = "1h" }
+# The targets each decision is labelled on: a triple barrier, its take
+# profit 2 and its stop 1 average true ranges from the decision's price
+# (Nautilus' AverageTrueRange of the hourly bars, by its arguments), closed
+# 45 minutes after its send if neither is reached, and a horizon of 45
+# minutes. Each closes before the next decision.
+targets = { barrier = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, limit = "45m", atr = { period = 14, ma_type = "WILDER" } }, horizon = "45m" }
+# The target the models learn, and the trade the strategy sends.
+label = "barrier"
+# Retrained weekly on the last 30 days, the last 5 held out to score it.
+retrain = "168h"
+window = "720h"
+holdout = "120h"
+# Both sides traded, each from an expected net P&L of 0.5 USD a trade.
+margins = { long = 0.5, short = 0.5 }
+# A side's model is published if its decisions earn at least 1 USD a trade
+# over at least 30 trades of the holdout.
+min_pnl = 1.0
+min_trades = 30
+learner = { kind = "lightgbm" }

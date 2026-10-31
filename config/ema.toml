@@ -1,0 +1,38 @@
+# The EMA crossover (`src/strategy/ema/`), read into `EmaCrossConfig`:
+#   cargo run --release -- backtest ema --config config/ema.toml ...
+# Every field is described in `src/strategy/README.md`.
+#
+# The crossover has no fields of its own. Its exits are set in its code: a
+# stop loss 50 bps and a take profit 100 bps from the decision bar's
+# close, a trade held 4 hours at most.
+
+# Nautilus' StrategyConfig; defaults to EMA_CROSS-001, tag 001, when left out.
+# [base]
+# strategy_id = "EMA_CROSS-001"
+# order_id_tag = "001"
+
+[data]
+# The series read (all stored in the catalog): hourly bars of the mid,
+# built by Nautilus from the quotes, of each instrument.
+series = [
+    { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+    { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+]
+# How far back a live node's warmup request goes at start.
+warmup = "72h"
+
+# The crossover's two averages of the traded instrument's bar closes, each
+# a Nautilus ExponentialMovingAverage by its constructor's arguments:
+# `period` in bars, the fast one shorter than the slow one, and optionally
+# `price_type`, the price it reads of quotes (LAST by default; bars give
+# their close).
+[indicators.fast]
+period = 10
+
+[indicators.slow]
+period = 30
+
+[trade]
+# The one instrument traded, read on its bars above, and the size of each
+# trade.
+instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]

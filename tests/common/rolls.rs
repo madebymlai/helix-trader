@@ -58,7 +58,7 @@ fn contract(id: &str, raw: &str, expiration: &str) -> InstrumentAny {
 }
 
 /// A trade of `id` at `time` and `price`, bought.
-fn trade(id: &str, time: Timestamp, price: &str) -> TradeTick {
+pub fn trade(id: &str, time: Timestamp, price: &str) -> TradeTick {
     TradeTick::new(
         InstrumentId::from(id),
         Price::from(price),
@@ -152,4 +152,30 @@ pub fn catalog_storing(post_trades_stored: bool) -> TempDir {
 /// A catalog of both contracts, their trades and their book depth.
 pub fn catalog() -> TempDir {
     catalog_storing(true)
+}
+
+/// A catalog of both contracts and `trades`, of either, stored over 22:00
+/// Tuesday to 02:00 Wednesday.
+pub fn catalog_of_trades(trades: Vec<TradeTick>) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    catalog
+        .write_instruments(vec![
+            contract(PRE, "GCQ6", "2026-08-27T17:30:00Z"),
+            contract(POST, "GCZ6", "2026-12-29T18:30:00Z"),
+        ])
+        .unwrap();
+    let (from, to) = (
+        Some(tuesday("22:00:00").into()),
+        Some(wednesday("02:00:00").into()),
+    );
+    for contract in [PRE, POST] {
+        let of: Vec<TradeTick> = trades
+            .iter()
+            .filter(|trade| trade.instrument_id == InstrumentId::from(contract))
+            .copied()
+            .collect();
+        catalog.write_to_parquet(&of, from, to, None).unwrap();
+    }
+    dir
 }

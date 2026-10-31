@@ -524,15 +524,19 @@ fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
 /// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes,
 /// its trades and its stored depth replayed as they are. Too slow to trade in a few seconds.
 const EMA_CONFIG: &str = r#"
-    instrument_ids = ["AUD/USD.SIM"]
-    trade_instrument_id = "AUD/USD.SIM"
-    bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" }
+    [data]
+    series = [
+        { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
+        { data = "trades", instrument_id = "AUD/USD.SIM" },
+    ]
     warmup = "1s"
-    ticks = [{ data = "trades", instrument_id = "AUD/USD.SIM" }]
-    trade_size = "1"
-    stop_loss_bps = 100
-    take_profit_bps = 100
-    hold = "1h"
+
+    [indicators]
+    fast = { period = 10 }
+    slow = { period = 30 }
+
+    [trade]
+    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
 "#;
 
 /// The binary's backtest of the EMA crossover (`EMA_CONFIG`) over
@@ -551,23 +555,29 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
         .unwrap()
 }
 
-/// The `model_ema` strategy on the stub's AUD/USD: a decision every second
-/// on its 1-second bars, each target held a second.
+/// The `model_ema` strategy on the stub's AUD/USD: a decision every two
+/// seconds on its 1-second bars, each target held a second, closed before
+/// the next.
 const MODEL_EMA_CONFIG: &str = r#"
-    instrument_ids = ["AUD/USD.SIM"]
-    bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" }
+    [data]
+    series = [
+        { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
+    ]
     warmup = "1s"
-    hold = "1s"
+
+    [trade]
+    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
 
     [model]
-    decision = { every = "1s" }
-    targets = { instrument_id = "AUD/USD.SIM", quantity = "1", horizon = "1s" }
+    decision = { every = "2s" }
+    targets = { horizon = "1s" }
     label = "horizon"
     retrain = "24h"
     window = "46h"
     holdout = "12h"
-    thresholds = { long = 0.6, short = 0.4 }
-    min_score = 0.5
+    margins = { long = 0.0, short = 0.0 }
+    min_pnl = 0.0
+    min_trades = 1
     learner = { kind = "fake" }
 "#;
 

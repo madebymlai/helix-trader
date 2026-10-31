@@ -3,24 +3,27 @@
 //!
 //! The primary is the strategy's own rule (`RuleConfig`), which decides on
 //! a side only when it signals (`ModelHandle::decide_on`), or a model
-//! (`ModelConfig` with a meta section), whose probability the thresholds
-//! make a side (`Thresholds::side`). Either way the meta model decides only
-//! when the primary signals, on the primary's features with its side and
-//! probability after them (`PRIMARY_FEATURES`; a rule's probability is
-//! missing, NaN), and learns whether the triple-barrier trade on the
-//! primary's side wins after its costs (`TargetsConfig::pnl_index`): a
-//! dataset row opens a long and a short at every decision, so the row has
-//! the trade of either side, and the meta's rows need no replay of their
-//! own.
+//! (`ModelConfig` with a meta section), whose side is the one its decision
+//! rule picks, on the expected net P&L of each side's calibrated
+//! probability (`payoff`). Either way the meta model decides only when the
+//! primary signals, on the primary's features with its side and the
+//! chosen side's probability after them (`PRIMARY_FEATURES`; a rule's
+//! probability is missing, NaN), and learns whether the triple-barrier
+//! trade on the primary's side wins after its costs
+//! (`TargetsConfig::pnl_index`): a dataset row opens a long and a short at
+//! every decision, so the row has the trade of either side, and the meta's
+//! rows need no replay of their own.
 //!
 //! A rule primary's rows are its decisions, its features carrying its
-//! side. A model primary's rows are its dataset's, each with the
-//! prediction of the primary model in use at it as a strategy would have
-//! used it (`store::Swap`): the latest valid then, trained on rows settled
-//! by its valid-from, so every prediction is out of sample. A row before
-//! the primary's first model has no prediction: the meta's window starts
-//! there at the earliest (`window_start`). A row the primary makes no trade
-//! of is no row of the meta.
+//! side. A model primary's rows are its dataset's, each decided by the
+//! models of each side in use at it as a strategy would have used them
+//! (`store::Swap`): the latest valid then, trained on rows settled by its
+//! valid-from, so every decision is out of sample; the worth of each
+//! side's stop is the row's own (`payoff::Realised::unit`). A row before
+//! the primary's first model has no decision: the meta's window starts
+//! there at the earliest (`window_start`). A row the primary makes no
+//! trade of is no row of the meta; a long-only primary gives it buys
+//! alone.
 //!
 //! Two levels at most: a meta section has no meta of its own (`config`).
 
@@ -31,11 +34,13 @@ use jiff::Timestamp;
 use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
 
 use super::{
-    config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
-    dataset::{self, Commission, DatasetRow},
+    config::{MetaConfig, ModelConfig, RuleConfig},
+    dataset::{self, DatasetRow, DatasetVenue},
     features::{FeatureSet, PRIMARY_FEATURES, primary_values},
+    holdout::Trade,
+    payoff::{self, Realised},
     store::{ModelStore, Swap},
-    targets::{Label, TargetsConfig},
+    targets::{Label, Side, TargetsConfig},
     train::Example,
 };
 use crate::strategy::DataRequirements;
@@ -49,9 +54,9 @@ pub struct Meta {
     /// The names of the meta's features, the primary's side and
     /// probability last.
     feature_names: Vec<String>,
-    /// Where the barrier's P&L of a long and of a short are among a row's
-    /// target values.
-    pnl: [usize; 2],
+    /// Where the barrier's P&L and commission of a long and of a short are
+    /// among a row's target values.
+    trades: [(usize, usize); 2],
     store: ModelStore,
 }
 
@@ -60,19 +65,19 @@ pub struct Meta {
 enum Primary {
     /// The strategy's rule: its side is in its rows' features.
     Rule,
-    /// A model, whose models are swapped in as the strategy does.
+    /// A model, whose sides' models are swapped in as the strategy does.
     Model {
-        store: ModelStore,
+        /// Each side traded, its margin and its store.
+        sides: Vec<(Side, f64, ModelStore)>,
         feature_names: Vec<String>,
         fingerprint: String,
-        thresholds: Thresholds,
     },
 }
 
 impl Meta {
     /// The meta model of `config`, the model of `strategy_id` deciding
-    /// with `features` on targets for a strategy of `requirements`, net of
-    /// `commission`, its models in the store under `models`; none if
+    /// with `features` on targets for a strategy of `requirements`,
+    /// run on `venue`, its models in the store under `models`; none if
     /// `config` has no meta section.
     ///
     /// # Errors
@@ -85,44 +90,58 @@ impl Meta {
         features: &FeatureSet,
         config: &ModelConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Option<Self>> {
         let Some(meta) = &config.meta else {
             return Ok(None);
         };
-        let primary = ModelStore::new(
-            models,
-            strategy_id,
-            features,
-            config,
-            requirements,
-            commission,
-        )?;
-        let store = primary.meta(meta, config.thresholds)?;
+        let sides = config
+            .margins
+            .sides()
+            .map(|(side, margin)| {
+                let store = ModelStore::new(
+                    models,
+                    strategy_id,
+                    features,
+                    config,
+                    requirements,
+                    venue,
+                    side,
+                )?;
+                Ok((side, margin, store))
+            })
+            .collect::<anyhow::Result<_>>()?;
         Ok(Some(Self {
             config: meta.clone(),
             feature_names: meta_names(features.names()),
-            pnl: pnl(&config.targets)?,
+            trades: trades(&config.targets)?,
             primary: Primary::Model {
-                store: primary,
+                sides,
                 feature_names: features.names().to_vec(),
                 fingerprint: dataset::fingerprint(
                     features,
                     config.decision,
                     &config.targets,
                     requirements,
-                    commission,
+                    venue,
                 )?
                 .to_string(),
-                thresholds: config.thresholds,
             },
-            store,
+            store: ModelStore::meta(
+                models,
+                strategy_id,
+                features,
+                config,
+                meta,
+                requirements,
+                venue,
+            )?,
         }))
     }
 
     /// The meta model of `config`, of `strategy_id`, whose primary is its
     /// rule, deciding with `features` on targets for a strategy of
-    /// `requirements`, net of `commission`, its models in the store under
+    /// `requirements`, run on `venue`, its models in the store under
     /// `models`.
     ///
     /// # Errors
@@ -136,7 +155,7 @@ impl Meta {
         features: &FeatureSet,
         config: &RuleConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         ensure!(
             features.has_primary(),
@@ -147,15 +166,8 @@ impl Meta {
             config: config.meta.clone(),
             primary: Primary::Rule,
             feature_names: features.names().to_vec(),
-            pnl: pnl(&config.targets)?,
-            store: ModelStore::of_rule(
-                models,
-                strategy_id,
-                features,
-                config,
-                requirements,
-                commission,
-            )?,
+            trades: trades(&config.targets)?,
+            store: ModelStore::of_rule(models, strategy_id, features, config, requirements, venue)?,
         })
     }
 
@@ -177,19 +189,26 @@ impl Meta {
     }
 
     /// The start of the window of a meta trained at `at`: its window back
-    /// from `at`, but not before the primary model's first valid-from; `at`
-    /// itself, an empty window, if the primary has no model before it.
+    /// from `at`, but not before the primary's first model of any side;
+    /// `at` itself, an empty window, if the primary has no model before
+    /// it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the primary's store cannot be read.
+    /// Returns an error if a primary's store cannot be read.
     pub fn window_start(&self, at: Timestamp) -> anyhow::Result<Timestamp> {
         let start = at - self.config.window;
-        let Primary::Model { store, .. } = &self.primary else {
+        let Primary::Model { sides, .. } = &self.primary else {
             return Ok(start);
         };
-        Ok(match store.valid_froms()?.first() {
-            Some(&first) if first < at => start.max(first),
+        let mut first = None::<Timestamp>;
+        for (_, _, store) in sides {
+            if let Some(&valid_from) = store.valid_froms()?.first() {
+                first = Some(first.map_or(valid_from, |first| first.min(valid_from)));
+            }
+        }
+        Ok(match first {
+            Some(first) if first < at => start.max(first),
             _ => at,
         })
     }
@@ -197,43 +216,66 @@ impl Meta {
     /// The meta's examples of the primary's dataset `rows`, in time order:
     /// each row the primary makes a trade of, its features with the
     /// primary's side and probability, its label whether the barrier's
-    /// trade on that side won. A model primary's prediction on a row is
-    /// that of its model in use then, none before its first.
+    /// trade on that side won. A model primary's decision on a row is that
+    /// of its sides' models in use then, none before the first, the rows'
+    /// trades read by `realised`, a model primary's.
     ///
     /// # Errors
     ///
-    /// Returns an error if the primary's store cannot be read, or a model
-    /// fails to predict.
-    pub(super) fn examples(&self, rows: &[&DatasetRow]) -> anyhow::Result<Vec<Example>> {
+    /// Returns an error if a primary's store cannot be read, a model fails
+    /// to predict, or a row's stop has no worth.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the primary is a model and `realised` is none.
+    pub(super) fn examples(
+        &self,
+        rows: &[&DatasetRow],
+        realised: Option<&Realised>,
+    ) -> anyhow::Result<Vec<Example>> {
         match &self.primary {
             Primary::Rule => Ok(rows
                 .iter()
                 .map(|row| {
                     let side = rule_side(&row.features);
-                    Example::of(row, self.wins(row, side))
+                    self.example(row, side)
                 })
                 .collect()),
             Primary::Model {
-                store,
+                sides,
                 feature_names,
                 fingerprint,
-                thresholds,
             } => {
-                let valid_froms = store.valid_froms()?;
-                let mut swap = Swap::new(store.clone(), feature_names.clone(), fingerprint.clone());
+                let realised = realised.expect("a model primary's rows are read by its payoffs");
+                let mut swaps = sides
+                    .iter()
+                    .map(|(side, margin, store)| {
+                        let valid_froms = store.valid_froms()?;
+                        let swap =
+                            Swap::new(store.clone(), feature_names.clone(), fingerprint.clone());
+                        Ok((*side, *margin, valid_froms, swap))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 let mut examples = vec![];
                 for row in rows {
-                    let Some((_, model)) = swap.at(Timestamp::from(row.ts_event), &valid_froms)
-                    else {
+                    let now = Timestamp::from(row.ts_event);
+                    let mut decided = vec![];
+                    for (side, margin, valid_froms, swap) in &mut swaps {
+                        let Some((_, model)) = swap.at(now, valid_froms) else {
+                            continue;
+                        };
+                        let probability = model.predict(&row.features)?;
+                        let payoff = model.payoff().context("a primary's model has its payoff")?;
+                        let expected = payoff.expected(probability) * realised.unit(row, *side)?;
+                        decided.push(((*side, probability), expected, *margin));
+                    }
+                    let Some((side, probability)) = payoff::pick(decided) else {
                         continue;
                     };
-                    let probability = model.predict(&row.features)?;
-                    let Some(side) = thresholds.side(probability) else {
-                        continue;
-                    };
+                    let side = side.order_side();
                     examples.push(Example {
                         features: meta_row(&row.features, side, probability),
-                        ..Example::of(row, self.wins(row, side))
+                        ..self.example(row, side)
                     });
                 }
                 Ok(examples)
@@ -241,11 +283,16 @@ impl Meta {
         }
     }
 
-    /// Whether the barrier's trade on `side` won in `row`.
-    fn wins(&self, row: &DatasetRow, side: OrderSide) -> bool {
-        let [long, short] = self.pnl;
-        let at = if side == OrderSide::Buy { long } else { short };
-        row.targets[at] > 0.0
+    /// The example of `row` on the barrier's trade on `side`: whether it
+    /// won, and the trade.
+    fn example(&self, row: &DatasetRow, side: OrderSide) -> Example {
+        let [long, short] = self.trades;
+        let (pnl, commission) = if side == OrderSide::Buy { long } else { short };
+        let trade = Trade {
+            pnl: row.targets[pnl],
+            commission: row.targets[commission],
+        };
+        Example::of(row, trade.pnl > 0.0, trade)
     }
 }
 
@@ -279,13 +326,16 @@ fn rule_side(features: &[f64]) -> OrderSide {
     }
 }
 
-/// Where the barrier's P&L of a long and of a short are among the values of
-/// a row of `targets`.
-fn pnl(targets: &TargetsConfig) -> anyhow::Result<[usize; 2]> {
-    [OrderSide::Buy, OrderSide::Sell]
-        .map(|side| targets.pnl_index(Label::Barrier, side))
+/// Where the barrier's P&L and commission of a long and of a short are
+/// among the values of a row of `targets`.
+fn trades(targets: &TargetsConfig) -> anyhow::Result<[(usize, usize); 2]> {
+    Side::BOTH
+        .map(|side| {
+            let pnl = targets.pnl_index(Label::Barrier, side)?;
+            Some((pnl, targets.commission_index(Label::Barrier, side)?))
+        })
         .into_iter()
         .collect::<Option<Vec<_>>>()
-        .and_then(|pnl| pnl.try_into().ok())
+        .and_then(|trades| trades.try_into().ok())
         .context("the meta model learns whether the primary's barrier trade wins, and the targets have no barrier")
 }

@@ -20,6 +20,7 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
+use std::path::Path;
 use tempfile::TempDir;
 
 use super::ts;
@@ -111,7 +112,14 @@ pub fn catalog() -> TempDir {
 /// fill-catalog's node writes them back, written through `fill_catalog`.
 pub fn catalog_of(quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    store(dir.path(), quotes, from, to);
+    dir
+}
+
+/// Stores the instrument and `quotes` in the catalog in `dir`, over
+/// `[from, to]`, as `catalog_of` does.
+pub fn store(dir: &Path, quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) {
+    let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let series = [(NautilusDataType::QuoteTick, INSTRUMENT_ID.to_owned())];
     let data: Vec<Data> = quotes.into_iter().map(Data::Quote).collect();
     let fill = fill_catalog(
@@ -126,7 +134,6 @@ pub fn catalog_of(quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) -> Tem
         .unwrap()
         .block_on(fill)
         .unwrap();
-    dir
 }
 
 /// A backtest of the hour bars over `[09:00, 12:00]` on the venue as IC

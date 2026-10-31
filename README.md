@@ -33,15 +33,18 @@ cp .env.example .env    # IB paper login, OKX API key, IC cTrader app
 cargo build --release
 
 cat > ema.toml <<'EOF'
-instrument_ids = ["BTC-USDT-SWAP.OKX"]
-trade_instrument_id = "BTC-USDT-SWAP.OKX"
-bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
-trade_size = "0.01"
-stop_loss_bps = 100
-take_profit_bps = 200
-hold = "24h"
+[data]
+series = [
+    { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+]
 warmup = "720h"
+
+[indicators]
+fast = { period = 10 }
+slow = { period = 30 }
+
+[trade]
+instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]
 EOF
 
 target/release/helix-trader fill-catalog ema --config ema.toml \
@@ -51,8 +54,13 @@ target/release/helix-trader backtest ema --config ema.toml \
 target/release/helix-trader live ema --config ema.toml
 ```
 
-The config is the universe: instruments, cadence and warmup live there and
-nowhere else. `--help` on each subcommand lists every flag.
+The config is the universe: instruments, cadence, warmup and the
+strategy's indicators live there and nowhere else. `--help` on each
+subcommand lists every flag. A bars series without `from` is built by
+Nautilus from the instrument's ticks, as its price type names: `BID`,
+`ASK` and `MID` bars from quotes, `LAST` bars from trades (CME futures on
+GLBX); with `from`, from source bars, as OKX's candles above
+(`src/strategy/README.md`, "Bars built from ticks").
 
 ## Tests
 

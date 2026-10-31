@@ -40,27 +40,28 @@ fn opted_in(test: &str) -> bool {
 /// account's is BTC-USD_UM_XPERP-310404), on hour bars of its 1-minute
 /// candles, without hyphens in its order ids, which OKX refuses.
 fn x_perp_ema_cross() -> EmaCrossConfig {
-    let config: EmaCrossConfig = toml::from_str(
+    EmaCrossConfig::load(
         r#"
-        instrument_ids = ["BTC-USD_UM_XPERP-310328.OKX"]
-        trade_instrument_id = "BTC-USD_UM_XPERP-310328.OKX"
-        bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }
-        composite = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" }
-        trade_size = "1"
-        stop_loss_bps = 100
-        take_profit_bps = 100
-        hold = "1h"
-        warmup = "30m"
-
         [base]
         strategy_id = "EMA_CROSS-001"
         order_id_tag = "001"
         use_hyphens_in_client_order_ids = false
+
+        [data]
+        series = [
+            { data = "bars", instrument_id = "BTC-USD_UM_XPERP-310328.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
+        ]
+        warmup = "30m"
+
+        [indicators]
+        fast = { period = 10 }
+        slow = { period = 30 }
+
+        [trade]
+        instruments = [{ instrument_id = "BTC-USD_UM_XPERP-310328.OKX", trade_size = "1" }]
         "#,
     )
-    .unwrap();
-    config.validate().unwrap();
-    config
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -77,7 +78,7 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     // Above OKX's highest leverage, 125.
     let leverage = Decimal::from(1000);
     let config = x_perp_ema_cross();
-    let requirements = config.bars.data_requirements();
+    let requirements = config.data_requirements();
     // An empty catalog of its own, which `Live` takes: the run is refused
     // before any node is built, so nothing reads it.
     let catalog = tempfile::tempdir().unwrap();
@@ -93,8 +94,9 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         recording: crate::recording(staging.path()),
     };
 
+    let strategy = EmaCross::live(config).unwrap();
     let err = live
-        .run(&requirements, EmaCross::live(config).unwrap())
+        .run(&requirements, &strategy.warmup(), strategy)
         .await
         .unwrap_err()
         .to_string();

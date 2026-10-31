@@ -8,31 +8,40 @@
 //! config. Inside, `mod.rs` is the thin Nautilus wiring: a struct holding a
 //! `StrategyCore`, wired with `nautilus_strategy!`, implementing `DataActor`
 //! (`on_start`, `on_bar`) and placing orders with Nautilus' own API. Pure
-//! modules beside it (the EMA's `signal.rs` and `bracket.rs`) turn bars
-//! into decisions, tested without an engine.
+//! modules beside it (the EMA's `signal.rs`) turn bars into decisions,
+//! tested without an engine; their trades go through the shared order
+//! module (`orders`): a Nautilus bracket or a market entry, closed at its
+//! time limit, set again at a restart.
 //!
 //! What most strategies share is a config struct and functions, never a
-//! base type or trait: `BarsConfig`, embedded in each strategy config with
-//! `#[serde(flatten)]`, holds the bars read, their warmup and their
-//! `Session`. The exception is a strategy trading on a learned model,
-//! which holds the harness' types (`model::features::FeatureSet`,
-//! `model::handle::ModelHandle`); `model_ema` is the example.
+//! base type: `StandardConfig`, the tables every strategy's TOML has, holds
+//! the series read, their warmup and their `Session`, the indicators read
+//! (`IndicatorsConfig`) and the instruments traded, beside the strategy's
+//! own table (its `Part`). The exception is a strategy trading on a learned
+//! model, which holds the harness' types (`model::features::FeatureSet`,
+//! `model::handle::ModelHandle`); `model_ema` is the example, its
+//! `[model]` table its own part.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
-//! 1-minute bars, OKX's candles) or from quotes; `warmup` asks for their
-//! history live and hands it back, so that no strategy knows how, and
-//! subscribes to them in a backtest, which requests none. The catalog
+//! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
+//! LAST bars); a `warmup::Warmup`, which
+//! each strategy holds, asks for their history live and hands it back, so
+//! that no strategy knows how, and subscribes to them in a backtest, which
+//! requests none. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
-mod config;
 pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
+mod indicators;
+pub mod orders;
 pub mod model_ema;
 mod session;
+mod standard;
 pub mod warmup;
 
-pub use config::{BarsConfig, CompositeSource};
+pub use indicators::{AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig};
+pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 pub use session::Session;
 
 use std::str::FromStr;
@@ -57,16 +66,19 @@ pub struct DataRequirements {
     /// The internal bar types the strategy reads and warms up on: their
     /// instruments are those it reads (see `instrument_ids`), and a live
     /// node sizes its cache to hold their warmup (see
-    /// `warmup::cache_config`).
+    /// `warmup::Warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
     /// of bars, book deltas and custom data among them (see
     /// `TickSeries`): fetched by fill-catalog from their instrument's
     /// source (Databento fetches a GLBX instrument's book and trades
     /// whatever is declared; no source serves custom data) and replayed in
-    /// a backtest as declared, with no warmup of their own. Their
-    /// instruments are read too: live sets up their clients but subscribes
-    /// to none of the ticks.
+    /// a backtest as declared, those of its harness among them
+    /// (`Part::harness_ticks`: a model strategy's traded quotes when no
+    /// series reads the traded instrument). Their instruments are read
+    /// too: live sets up their clients but subscribes to none of the
+    /// ticks, which the strategy (a model strategy's handle) subscribes to
+    /// and warms up on (`warmup::Warmup::reading`).
     pub ticks: Vec<TickSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
@@ -94,18 +106,23 @@ pub struct TickSeries {
 /// The data of a tick series: a Nautilus data type by any name Nautilus
 /// parses, one of those a strategy reads as they are (see `TickSeries`).
 fn series_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NautilusDataType, D::Error> {
-    let name = String::deserialize(deserializer)?;
-    let data = NautilusDataType::from_str(&name).map_err(de::Error::custom)?;
+    tick_data(&String::deserialize(deserializer)?).map_err(de::Error::custom)
+}
+
+/// The Nautilus data type `name` parses to, if a strategy reads it as it
+/// is (see `TickSeries`), or why not.
+fn tick_data(name: &str) -> Result<NautilusDataType, String> {
+    let data = NautilusDataType::from_str(name).map_err(|e| e.to_string())?;
     match data {
         NautilusDataType::QuoteTick
         | NautilusDataType::TradeTick
         | NautilusDataType::OrderBookDepth
         | NautilusDataType::OrderBookDelta
         | NautilusDataType::Custom { .. } => Ok(data),
-        _ => Err(de::Error::custom(format!(
+        _ => Err(format!(
             "{name} is not a series a strategy reads as it is: \
              quotes, trades, order_book_depths, order_book_deltas or Custom:<type name>"
-        ))),
+        )),
     }
 }
 

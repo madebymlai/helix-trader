@@ -1,248 +1,183 @@
 //! Model EMA, an example strategy trading on a learned model: at each
 //! decision of its model section, its model handle (`model::handle`)
-//! predicts on its features, the averages of its bars (`features.rs`),
-//! and a probability past a threshold is a trade, a market order of the
-//! targets' instrument and size on its side, closed `hold` after it is
-//! sent (`close_position`, on a time alert). It decides only once its
-//! indicators are initialized: warm from the replay in a backtest or a
-//! dataset run, from its warmup request live. Trades may overlap: on a
-//! hedging venue each is a position of its own, on a netting venue they
-//! add into one, which the first close then closes. A restart does not set
-//! again the alerts of the trades still open.
+//! predicts each side on its features, the averages of its bars
+//! (`features.rs`), and a side expected to clear its margin is a decision
+//! (`handle::Decision`), whose trade it sends as given through the shared
+//! order module (`decision.trade().send`, `strategy::orders`): the target
+//! its model was labelled on, as a dataset run sets it at the decision on
+//! that side, a bracket closed at the barrier's limit or a market entry
+//! closed at the horizon, both from the send. It hands the module its time
+//! events, which close the trades at their time, and the module sets the
+//! time of the trades still open again at start, as after a restart.
+//! Every target closes before the next decision (`ModelConfig::validate`),
+//! so trades do not overlap, on a hedging venue as on a netting one. It
+//! decides only once its indicators are initialized: warm from the replay
+//! in a backtest or a dataset run, from its warmup request live. Nautilus'
+//! IB execution client denies the reduce-only orders a bracket's legs and
+//! a time close are: it cannot trade live on IB (`live/ib/README.md`).
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
 //! or leaves each trade of the model (`model::meta`), and may size it.
 //!
 //! In a dataset run (`Mode::Dataset`, through `training`) it places no
-//! trade of its own: the handle opens each decision's targets and is
-//! handed the order, position and time events.
+//! trade of its own: the handle opens each decision's targets, through
+//! the same module, and is handed the order and position events; the
+//! module closes the targets at their time as it does the trades.
 
 mod config;
 mod features;
 
 pub use config::ModelEmaConfig;
 
-use std::{path::Path, rc::Rc};
-
-use anyhow::Context;
-use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
+    actor::{DataActor, DataActorNative},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
-use nautilus_core::UUID4;
 use nautilus_model::{
-    data::{Bar, QuoteTick},
-    events::{OrderDenied, OrderFilled, OrderRejected, PositionClosed},
-    identifiers::ClientOrderId,
-    instruments::Instrument,
-    orders::Order,
+    data::{Bar, OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick},
+    events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
 };
-use nautilus_trading::{
-    nautilus_strategy,
-    strategy::{Strategy, StrategyCore},
-};
+use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
+use std::{any::Any, path::Path, rc::Rc};
 
 use crate::{
     model::{
-        dataset::{Commission, Dataset},
+        dataset::{Dataset, DatasetVenue},
         decide,
         features::FeatureSet,
-        handle::{Mode, ModelHandle, Trade},
+        handle::{Mode, ModelHandle},
         train::Training,
         walk::WalkForward,
     },
-    rolls::ContinuousBars,
-    strategy::warmup,
+    strategy::{orders, warmup::Warmup},
 };
-
-/// The prefix of a trade's time alert, followed by its order's client
-/// order id.
-const HOLD_ALERT: &str = "MODEL_EMA-HOLD:";
 
 #[derive(Debug)]
 pub struct ModelEma {
     core: StrategyCore,
-    config: ModelEmaConfig,
-    features: Rc<FeatureSet>,
+    /// Its model handle, which owns its warmup.
     model: Rc<ModelHandle>,
-    /// The warmup requested at start, live; none in a backtest or a
-    /// dataset run, whose indicators warm on the replay.
-    warmup: Option<SignedDuration>,
-    /// The request group of the warmup of the last start.
-    warmup_group: UUID4,
 }
 
 impl ModelEma {
-    /// The strategy, its model handle in `mode`: live, it requests its
-    /// warmup (`BarsConfig::warmup`) at start, which hydrates its
+    /// The strategy, its model handle in `mode`: live, its warmup
+    /// (`DataConfig::warmup`) is requested at start, which hydrates its
     /// indicators; otherwise they warm on the data replayed.
     ///
     /// # Errors
     ///
-    /// Returns an error if the config is invalid.
+    /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
+    /// the base (`StrategyCore::new_checked`).
     pub fn new(config: ModelEmaConfig, mode: Mode) -> anyhow::Result<Self> {
-        config.validate()?;
-        let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
-        let warmup = matches!(mode, Mode::Live { .. }).then_some(config.bars.warmup);
+        let features = feature_set(&config)?;
         let model = ModelHandle::new(
-            strategy_id(&config)?,
-            Rc::clone(&features),
-            &config.model,
-            &config.bars.data_requirements(),
+            config.strategy_id(),
+            features,
+            &config.model(),
+            &config.data_requirements(),
             mode,
         )?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
-            config,
-            features,
             model,
-            warmup,
-            warmup_group: UUID4::new(),
         })
     }
 
-    /// Sends `trade`: a market order of its size on its side, and the time
-    /// alert closing it `hold` later. The size is rounded to the
-    /// instrument's size precision.
-    fn enter(&mut self, trade: Trade) -> anyhow::Result<()> {
-        let instrument_id = self.config.model.targets.instrument_id;
-        let instrument = self
-            .cache()
-            .instrument(&instrument_id)
-            .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?;
-        let size = trade.quantity.as_decimal();
-        let quantity = instrument
-            .try_make_qty_from_decimal(size, None)
-            // In the message, not as context: Nautilus logs only the top
-            // error of the chain.
-            .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
-        let order = self.order().market(
-            instrument_id,
-            trade.side,
-            quantity,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let id = order.client_order_id();
-        self.submit_order(order, None, None, None)?;
-        let at = Timestamp::from(self.clock().timestamp_ns()) + self.config.hold;
-        self.clock().set_time_alert(&hold_alert(id), at, None, None)
-    }
-
-    /// Closes the position the order `entry` went into, if it is open.
-    fn exit(&mut self, entry: ClientOrderId) -> anyhow::Result<()> {
-        let position = self.cache().position_for_order(&entry);
-        match position {
-            Some(position) if position.is_open() => {
-                self.close_position(&position, None, None, None, None, None, None)
-            }
-            _ => Ok(()),
-        }
+    /// Its warmup, its model handle's: a live node sizes its cache from
+    /// it.
+    #[must_use]
+    pub fn warmup(&self) -> Rc<Warmup> {
+        self.model.warmup()
     }
 }
 
 /// The training of the model of the strategy `config` describes, on its
-/// dataset, net of `commission`, in the catalog at `catalog` and its models
+/// dataset, run on `venue`, in the catalog at `catalog` and its models
 /// in the store under `models`; its replay runs the strategy in
 /// `Mode::Dataset`.
 ///
 /// # Errors
 ///
-/// Returns an error if the config is invalid, or as `Training::new` does.
+/// Returns an error as `Training::new` does.
 pub fn training(
     config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<Training> {
-    config.validate()?;
-    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    let features = feature_set(config)?;
     Training::new(
         catalog,
         models,
-        strategy_id(config)?,
+        config.strategy_id(),
         &features,
-        config.model.clone(),
-        &config.bars.data_requirements(),
-        commission,
+        config.model(),
+        &config.data_requirements(),
+        venue,
     )
 }
 
 /// The backtests of the model of the strategy `config` describes, on its
-/// dataset, net of `commission`, in the catalog at `catalog` and its models
+/// dataset, run on `venue`, in the catalog at `catalog` and its models
 /// in the store under `models`: their retrains and their scores.
 ///
 /// # Errors
 ///
-/// Returns an error if the config is invalid, or as `WalkForward::new`
-/// does.
+/// Returns an error as `WalkForward::new` does.
 pub fn walk_forward(
     config: &ModelEmaConfig,
     catalog: &Path,
     models: &Path,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<WalkForward> {
-    config.validate()?;
-    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    let features = feature_set(config)?;
     WalkForward::new(
         catalog,
         models,
-        strategy_id(config)?,
+        config.strategy_id(),
         &features,
-        config.model.clone(),
-        &config.bars.data_requirements(),
-        commission,
+        config.model(),
+        &config.data_requirements(),
+        venue,
     )
 }
 
-/// The dataset of the strategy `config` describes, net of `commission`, in
+/// The dataset of the strategy `config` describes, run on `venue`, in
 /// the catalog at `catalog`; its replay runs the strategy in
 /// `Mode::Dataset`.
 ///
 /// # Errors
 ///
-/// Returns an error if the config is invalid, or as `Dataset::new` does.
+/// Returns an error as `Dataset::new` does.
 pub fn dataset(
     config: &ModelEmaConfig,
     catalog: &Path,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<Dataset> {
-    config.validate()?;
-    let features = features::features(&config.bars.bar_types(), config.bars.warmup)?;
+    let features = feature_set(config)?;
+    let model = config.model();
     Dataset::new(
         catalog,
-        strategy_id(config)?,
+        config.strategy_id(),
         &features,
-        config.model.decision,
-        config.model.targets.clone(),
-        &config.bars.data_requirements(),
-        commission,
+        model.decision,
+        model.targets,
+        &config.data_requirements(),
+        venue,
     )
 }
 
-/// The strategy's id, from its base.
-fn strategy_id(config: &ModelEmaConfig) -> anyhow::Result<nautilus_model::identifiers::StrategyId> {
-    config
-        .base
-        .strategy_id
-        .context("the strategy has no id to key its models")
-}
-
-/// The name of the time alert closing the trade of `entry`.
-fn hold_alert(entry: ClientOrderId) -> String {
-    format!("{HOLD_ALERT}{entry}")
+/// The features of the strategy `config` describes: the averages of each
+/// of its bars series, warmed over its warmup.
+fn feature_set(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
+    let bar_types: Vec<_> = config.data.bar_types().collect();
+    features::features(&bar_types, config.data.warmup)
 }
 
 nautilus_strategy!(ModelEma, {
-    fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.model.on_order_filled(event);
+    fn on_order_canceled(&mut self, event: &OrderCanceled) {
+        self.model.on_order_canceled(self, event);
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
@@ -259,43 +194,48 @@ nautilus_strategy!(ModelEma, {
 });
 
 impl DataActor for ModelEma {
-    /// Subscribes to the bars, live after requesting the warmup, then
-    /// starts the model handle: the features, registered as its Nautilus
-    /// indicator, and the decisions.
+    /// Starts the model handle, which starts the warmup: live, it requests
+    /// the warmup of the bars and of the barrier's ATR, then subscribes to
+    /// them; then the features, registered as its Nautilus indicator, and
+    /// the decisions.
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let bar_types = self.config.bars.bar_types();
-        let continuous = ContinuousBars::default();
-        match self.warmup {
-            Some(warmup) => {
-                self.warmup_group = UUID4::new();
-                warmup::start(self, &bar_types, warmup, &continuous, self.warmup_group)?;
-            }
-            None => warmup::subscribe(self, &bar_types, &continuous),
-        }
-        Rc::clone(&self.model).start(self, &bar_types)
+        orders::arm_open_trades(self)?;
+        Rc::clone(&self.model).start(self)
     }
 
     /// Logs the end of the warmup; Nautilus logs a failed one as an error.
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        if warmup::finished(self.warmup_group, response)? {
-            log::info!("Warmup complete");
-        }
-        Ok(())
+        self.model.warmup().on_data_response(response)
     }
 
-    /// The warmup's bars reach only the cache: they are handed to the
-    /// features here.
+    /// The warmup's bars reach only the cache: the warmup hands them to
+    /// the features and the barrier's ATR.
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        for bar in warmup::bars(self, quotes) {
-            self.features.handle_bar(&bar)?;
-        }
-        Ok(())
+        self.model.warmup().on_historical(self, quotes)
+    }
+
+    fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
+        self.model.warmup().on_historical(self, trades)
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        for bar in warmup::bars(self, bars) {
-            self.features.handle_bar(&bar)?;
-        }
+        self.model.warmup().on_historical(self, bars)
+    }
+
+    /// Nautilus routes no book or custom data to indicators: the warmup
+    /// hands it to the features.
+    fn on_historical_book_depth(&mut self, depths: &[OrderBookDepth]) -> anyhow::Result<()> {
+        self.model.warmup().on_historical_book_depth(depths);
+        Ok(())
+    }
+
+    fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
+        self.model.warmup().on_historical_book_deltas(deltas);
+        Ok(())
+    }
+
+    fn on_historical_data(&mut self, data: &dyn Any) -> anyhow::Result<()> {
+        self.model.warmup().on_historical_data(data);
         Ok(())
     }
 
@@ -307,18 +247,188 @@ impl DataActor for ModelEma {
                 return Ok(());
             }
             return match Rc::clone(&self.model).decide(self)? {
-                Some(trade) => self.enter(trade),
+                Some(decision) => decision.trade().send(self),
                 None => Ok(()),
             };
         }
-        match event.name.strip_prefix(HOLD_ALERT) {
-            Some(entry) => self.exit(ClientOrderId::new_checked(entry)?),
-            None => Rc::clone(&self.model).on_time_event(self, event),
+        if !orders::on_time_event(self, event)? {
+            Rc::clone(&self.model).on_time_event(self, event)?;
         }
+        Ok(())
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
         self.model.on_stop();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use jiff::SignedDuration;
+    use nautilus_common::{
+        cache::Cache,
+        clock::{Clock, VirtualClock},
+        timer::TimeEventCallback,
+    };
+    use nautilus_core::UnixNanos;
+    use nautilus_model::{
+        enums::{OmsType, OrderSide},
+        events::OrderEventAny,
+        identifiers::{AccountId, InstrumentId, PositionId, TradeId, TraderId, VenueOrderId},
+        instruments::{InstrumentAny, stubs::audusd_sim},
+        orders::{Order, stubs::TestOrderEventStubs},
+        position::Position,
+        types::{Money, Price, Quantity},
+    };
+    use nautilus_portfolio::portfolio::Portfolio;
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::{
+        model::dataset::Commission,
+        strategy::orders::{Exits, Trade},
+    };
+
+    /// Trades AUD/USD on a horizon of 30 minutes, deciding hourly.
+    const CONFIG: &str = r#"
+        [data]
+        series = [
+            { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+        ]
+        warmup = "30h"
+
+        [trade]
+        instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
+
+        [model]
+        decision = { every = "1h" }
+        targets = { horizon = "30m" }
+        label = "horizon"
+        retrain = "24h"
+        window = "48h"
+        holdout = "12h"
+        margins = { long = 0.5, short = 0.5 }
+        min_pnl = 0.5
+        min_trades = 30
+        learner = { kind = "baseline" }
+    "#;
+
+    /// 2026-10-26T10:00:00Z, the time of the restart.
+    const NOW: u64 = 1_792_922_400_000_000_000;
+    const MINUTE: u64 = 60_000_000_000;
+
+    /// The strategy, backtesting on the empty store under `models`,
+    /// registered without a node on `cache` at `now`, started, and its
+    /// clock.
+    fn started(
+        cache: &Rc<RefCell<Cache>>,
+        models: &Path,
+        now: u64,
+    ) -> (ModelEma, Rc<RefCell<VirtualClock>>) {
+        let mode = Mode::Backtest {
+            models: models.to_path_buf(),
+            venue: DatasetVenue {
+                commission: Commission::Rate("0.00003".to_string()),
+                balance: Money::from("10000000 USD"),
+                leverage: Decimal::ONE,
+            },
+        };
+        let mut strategy = ModelEma::new(ModelEmaConfig::load(CONFIG).unwrap(), mode).unwrap();
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        clock.borrow_mut().advance_time(UnixNanos::from(now), true);
+        clock
+            .borrow_mut()
+            .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
+        let portfolio = Rc::new(RefCell::new(Portfolio::new(
+            clock.clone(),
+            cache.clone(),
+            None,
+        )));
+        strategy
+            .core
+            .register(
+                TraderId::from("HELIX-001"),
+                clock.clone(),
+                cache.clone(),
+                portfolio,
+            )
+            .unwrap();
+        DataActor::on_start(&mut strategy).unwrap();
+        (strategy, clock)
+    }
+
+    /// A market entry held 30 minutes, sent and filled 20 minutes before a
+    /// restart: started again, the strategy sets its time again, 10
+    /// minutes after the restart.
+    #[test]
+    fn a_restart_sets_the_time_of_its_open_trade_again() {
+        let aud = InstrumentAny::CurrencyPair(audusd_sim());
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        cache.borrow_mut().add_instrument(aud.clone()).unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let sent = NOW - 20 * MINUTE;
+        let (mut before, _) = started(&cache, models.path(), sent);
+        let trade = Trade {
+            instrument_id: InstrumentId::from("AUD/USD.SIM"),
+            side: OrderSide::Buy,
+            quantity: Quantity::from(100_000),
+            exits: Exits {
+                take_profit: None,
+                stop_loss: None,
+                time_limit: Some(SignedDuration::from_mins(30)),
+            },
+        };
+        trade.send(&mut before).unwrap();
+        let entry = cache
+            .borrow()
+            .orders(None, None, None, None, None)
+            .into_iter()
+            .next()
+            .unwrap()
+            .clone();
+        let account = AccountId::from("SIM-001");
+        let filled = TestOrderEventStubs::filled(
+            &entry,
+            &aud,
+            Some(TradeId::from("T-1")),
+            Some(PositionId::from("P-1")),
+            Some(Price::from("0.70010")),
+            None,
+            None,
+            None,
+            Some(UnixNanos::from(sent)),
+            Some(account),
+        );
+        for event in [
+            TestOrderEventStubs::submitted(&entry, account),
+            TestOrderEventStubs::accepted(&entry, account, VenueOrderId::from("V-1")),
+            filled.clone(),
+        ] {
+            cache.borrow_mut().update_order(&event).unwrap();
+        }
+        let OrderEventAny::Filled(fill) = filled else {
+            panic!("not a fill");
+        };
+        cache
+            .borrow_mut()
+            .add_position(&Position::new(&aud, fill), OmsType::Hedging)
+            .unwrap();
+
+        let (_strategy, clock) = started(&cache, models.path(), NOW);
+
+        let clock = clock.borrow();
+        let entry = entry.client_order_id();
+        let names = clock.timer_names();
+        let alert = names
+            .iter()
+            .find(|name| name.ends_with(entry.as_str()))
+            .unwrap_or_else(|| panic!("{names:?}"));
+        assert_eq!(
+            clock.next_time_ns(alert),
+            Some(UnixNanos::from(NOW + 10 * MINUTE))
+        );
     }
 }

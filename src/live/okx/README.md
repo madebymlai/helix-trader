@@ -66,7 +66,7 @@ OKXExecutionClientFactory::new()  // name() == "OKX"
 OKX instruments trade on bars of OKX's 1-minute candles, a composite bar
 type such as `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`.
 How warmup is requested is in `strategy/README.md`, "Warmup and training";
-the 5 s build delay of the live hour bars is in "Bars built from quotes".
+the 5 s build delay of the live hour bars is in "Bars built from ticks".
 What the OKX data client does:
 
 - **Warmup from the catalog, then the REST candles.** The node registers

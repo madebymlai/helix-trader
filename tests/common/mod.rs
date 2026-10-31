@@ -18,13 +18,13 @@ pub mod ic;
 pub mod recorder;
 pub mod rolls;
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use helix_trader::{
     backtest::{Backtest, commission_per_order, venue_oms_type},
     strategy::{
-        BarsConfig, Session,
-        ema::{Bps, EmaCross, EmaCrossConfig},
+        DataConfig, IndicatorsConfig, Part, Series, Session, TradeConfig, TradedInstrument,
+        ema::{EmaCross, EmaCrossConfig, EmaParams},
     },
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
@@ -32,7 +32,7 @@ use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, QuoteTick},
-    enums::{BarAggregation, PriceType},
+    enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, Symbol, Venue},
     instruments::{InstrumentAny, stubs::equity_aapl},
     types::{Currency, Money, Price, Quantity},
@@ -214,65 +214,48 @@ pub fn session() -> Session {
     }
 }
 
-/// How an EMA trade ends: its stop loss and take profit, in basis points
-/// from the close of the bar it was decided on, and its hold.
-#[derive(Debug, Clone, Copy)]
-pub struct Exits {
-    pub stop_loss_bps: i64,
-    pub take_profit_bps: i64,
-    pub hold: SignedDuration,
-}
-
-impl Exits {
-    /// Exits by time alone on the fixtures, whose prices move less than
-    /// 10%: stop loss and take profit 1000 bps away.
-    pub fn after(hold: SignedDuration) -> Self {
-        Self {
-            stop_loss_bps: 1000,
-            take_profit_bps: 1000,
-            hold,
-        }
-    }
-}
-
 /// The warmup of the EMA configs: a live node requests it, a backtest
 /// requests none.
 pub const LIVE_WARMUP: SignedDuration = SignedDuration::from_hours(1);
 
 /// The config of the EMA crossover reading and trading the instrument on
-/// its 1-hour MID bars: `fast` against `slow` bars, trades of 10 shares
-/// ending by `exits`, inside `session` if given.
-pub fn ema_config(
-    fast: usize,
-    slow: usize,
-    session: Option<Session>,
-    exits: Exits,
-) -> EmaCrossConfig {
-    let bars = BarsConfig::builder()
-        .instrument_ids(vec![InstrumentId::from(INSTRUMENT_ID)])
-        .bar_spec(BarSpecification::new(
-            1,
-            BarAggregation::Hour,
-            PriceType::Mid,
-        ))
-        .warmup(LIVE_WARMUP)
-        .maybe_session(session)
-        .build();
-    EmaCrossConfig::builder()
-        .bars(bars)
-        .trade_instrument_id(InstrumentId::from(INSTRUMENT_ID))
-        .fast_period(fast)
-        .slow_period(slow)
-        .trade_size(Quantity::from(10))
-        .stop_loss_bps(Bps::from(Decimal::from(exits.stop_loss_bps)))
-        .take_profit_bps(Bps::from(Decimal::from(exits.take_profit_bps)))
-        .hold(exits.hold)
-        .build()
+/// its 1-hour MID bars: `fast` against `slow` bars, trades of 10 shares,
+/// inside `session` if given. Its exits are its code's: a stop loss 50 bps
+/// and a take profit 100 bps from the close of the bar decided on, both
+/// rounded to the cent, and a hold of 4 hours.
+pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCrossConfig {
+    let instrument_id = InstrumentId::from(INSTRUMENT_ID);
+    EmaCrossConfig {
+        base: EmaParams::default_base(),
+        data: DataConfig {
+            series: vec![Series::Bars(BarType::new(
+                instrument_id,
+                BarSpecification::new(1, BarAggregation::Hour, PriceType::Mid),
+                AggregationSource::Internal,
+            ))],
+            warmup: LIVE_WARMUP,
+            session,
+        },
+        indicators: IndicatorsConfig(BTreeMap::from([("fast", fast), ("slow", slow)].map(
+            |(name, period)| {
+                let period = i64::try_from(period).unwrap();
+                let ema = toml::Table::from_iter([("period".to_string(), period.into())]);
+                (name.to_string(), ema)
+            },
+        ))),
+        trade: TradeConfig {
+            instruments: vec![TradedInstrument {
+                instrument_id,
+                trade_size: Quantity::from(10),
+            }],
+        },
+        own: EmaParams {},
+    }
 }
 
 /// The EMA crossover of `ema_config`, as a backtest runs it.
-pub fn ema_cross(fast: usize, slow: usize, session: Option<Session>, exits: Exits) -> EmaCross {
-    EmaCross::new(ema_config(fast, slow, session, exits)).unwrap()
+pub fn ema_cross(fast: usize, slow: usize, session: Option<Session>) -> EmaCross {
+    EmaCross::new(ema_config(fast, slow, session)).unwrap()
 }
 
 /// The shortest crossover, 1 against 2 bars, inside the session: the fast
@@ -280,8 +263,8 @@ pub fn ema_cross(fast: usize, slow: usize, session: Option<Session>, exits: Exit
 /// closes and then moves two thirds of the way to each new close. So once
 /// two bars are in, a bar closing above the slow EMA of the bars before it
 /// is long, at or below it short, and a bar changing the side is a cross.
-pub fn shortest_ema_cross(exits: Exits) -> EmaCross {
-    ema_cross(1, 2, Some(session()), exits)
+pub fn shortest_ema_cross() -> EmaCross {
+    ema_cross(1, 2, Some(session()))
 }
 
 /// The final EUR balance of the account.
@@ -325,15 +308,9 @@ pub mod wave {
         super::backtest(catalog, start(), end(), commission)
     }
 
-    /// The EMA crossover on the wave: 5 against 15 bars, stop loss and
-    /// take profit 50 bps away, held 4 hours at most.
+    /// The EMA crossover on the wave: 5 against 15 bars.
     pub fn ema_cross() -> EmaCross {
-        let exits = Exits {
-            stop_loss_bps: 50,
-            take_profit_bps: 50,
-            hold: SignedDuration::from_hours(4),
-        };
-        super::ema_cross(5, 15, Some(session()), exits)
+        super::ema_cross(5, 15, Some(session()))
     }
 }
 
@@ -439,41 +416,38 @@ pub mod trades {
         super::backtest(catalog, start, end(levels), commission)
     }
 
-    /// A trade ended by time:
+    /// A trade ended by time, the code's exits (`ema_config`) on the
+    /// shortest crossover:
     ///
     /// - 13:00 at 620.60, above 605.60: a cross up, buy 10 at the ask of
-    ///   the quote closing 13:00, 620.65, the slow EMA going to 615.60;
-    ///   its stop loss at 614.39 and take profit at 626.81 (620.60 less
+    ///   the quote closing 13:00, 620.65, the slow EMA going to 615.60; its
+    ///   stop loss at 617.50 and take profit at 626.81 (620.60 less 0.5%
     ///   and plus 1%, to the cent);
-    /// - 14:00 at 624.60 and 15:00 at 624.80, above the slow EMA (615.60,
-    ///   then 621.60): long, no cross. The bids after the entry, 623.96 to
-    ///   624.75, touch neither exit;
-    /// - 14:00, an hour after the entry filled: the time alert closes the
-    ///   long, a sell of 10 at the bid of the quote closing 14:00, 624.55,
-    ///   and cancels its stop loss and take profit.
+    /// - 14:00 at 624.60, 15:00 at 624.80 and 16:00 at 624.80, above the
+    ///   slow EMA (615.60, then 621.60, 623.73): long, no cross, the slow
+    ///   EMA going to 624.44; 17:00 and 18:00 (18:00 and 19:00 Frankfurt
+    ///   time) are out of the session and count for nothing. The bids
+    ///   after the entry, 623.96 to 624.85 until 17:00, touch neither exit;
+    /// - 17:00, 4 hours after the entry's send and fill: the time alert
+    ///   closes the long, a sell of 10 at the bid of the quote closing
+    ///   17:00, 624.30 + 0.60 − 0.05 = 624.85, and cancels its stop loss
+    ///   and take profit.
+    ///   An hour sooner it would have sold at 624.75, an hour later at
+    ///   624.95.
     ///
-    /// The 10 shares gain 3.90 each: the balance ends at 10039.00 EUR,
+    /// The 10 shares gain 4.20 each: the balance ends at 10042.00 EUR,
     /// after 4 orders (the entry, its two legs, the close). Had the run
-    /// started at 09:00, 13:00 to 15:00 would all be short (below 635.60,
-    /// 625.60, 624.93): no trade; had it started at 12:30, the crossover
-    /// would be cold until 14:00, then long: no trade either
+    /// started at 09:00, 13:00 to 16:00 would all be short (below 635.60,
+    /// 625.60, 624.93, 624.84): no trade; had it started at 12:30, the
+    /// crossover would be cold until 14:00, then long: no trade either
     /// (`backtest_warmup.rs`).
-    pub const TIME_EXIT: [f64; 3] = [620.0, 624.0, 624.2];
+    pub const TIME_EXIT: [f64; 6] = [620.0, 624.0, 624.2, 624.2, 624.3, 624.4];
     pub const TIME_EXIT_ORDERS: usize = 4;
-    pub const TIME_EXIT_BALANCE: &str = "10039.00 EUR";
+    pub const TIME_EXIT_BALANCE: &str = "10042.00 EUR";
 
-    /// The exits of `TIME_EXIT`: 100 bps, held an hour.
-    pub fn time_exit() -> Exits {
-        Exits {
-            stop_loss_bps: 100,
-            take_profit_bps: 100,
-            hold: SignedDuration::from_hours(1),
-        }
-    }
-
-    /// The shortest crossover with `exits`.
-    pub fn ema_cross(exits: Exits) -> EmaCross {
-        shortest_ema_cross(exits)
+    /// The shortest crossover.
+    pub fn ema_cross() -> EmaCross {
+        shortest_ema_cross()
     }
 }
 

@@ -7,10 +7,15 @@
 //! every strategy. Features and targets are list columns, so each strategy
 //! has the width of its own, and its rows are stored under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
-//! `targets::fingerprint` and the commission of its dataset runs,
-//! `Commission`): a change to the feature code, names or warmup, the
-//! decision rule, a target, what the strategy reads that a barrier's ATR is
-//! built from, or the commission finds no row, and the dataset is rebuilt.
+//! `targets::fingerprint`, the venue settings of its dataset runs,
+//! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
+//! names, warmup or version, the decision rule, a target, what the
+//! strategy reads that a barrier's ATR is built from, the commission,
+//! balance or leverage of its dataset runs, or the dataset version finds
+//! no row, and the dataset is rebuilt. The
+//! config is read by value, the code by version: the dataset's for the
+//! code making every strategy's rows, the strategy's own for its features
+//! (`FeatureSetBuilder::version`), each bumped by hand.
 //! The feature names are in the metadata of the rows' data type, which
 //! the catalog stores with each file and gives back with each row, so the
 //! rows do not repeat them; `read` checks them.
@@ -77,9 +82,11 @@ use nautilus_model::{
     custom_data,
     data::{CustomData, CustomDataTrait, Data, DataType, NautilusDataType},
     identifiers::StrategyId,
+    types::Money,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_serialization::arrow_custom_data;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -89,6 +96,17 @@ use super::{
     targets::{self, TargetRow, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
+
+/// The version of the code that makes every strategy's rows: the
+/// decisions (`decide`), the targets (`targets`), the shared feature code
+/// (`features`), and the Nautilus they run on, its indicators, matching
+/// engine and fill model. In every dataset's fingerprint: bumped by hand
+/// whenever what that code makes of the same data and config changes,
+/// a Nautilus pin bump changing indicators or fills included, which then
+/// rebuilds every dataset and model. The golden rows
+/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
+/// without a bump.
+pub const VERSION: u32 = 1;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -132,7 +150,7 @@ impl std::error::Error for SchemaMismatch {}
 pub struct Manifest {
     pub strategy_id: StrategyId,
     /// The fingerprint of the features, the decision rule, the targets and
-    /// the commission.
+    /// the venue of its dataset runs.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
@@ -155,10 +173,7 @@ pub struct Days {
 /// command line gives it, normalized (`main.rs`: no trailing zeros, so
 /// that every spelling of one commission is one key): per order
 /// (`--commission 3 USD`) or a rate on the value of each fill
-/// (`--commission-rate 0.00003`). Part of the dataset's
-/// fingerprint, so neither rows nor models of other costs are ever read;
-/// the run's balance and leverage, which deny no target of a dataset run,
-/// are not.
+/// (`--commission-rate 0.00003`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Commission {
     PerOrder(String),
@@ -172,6 +187,33 @@ impl Commission {
             Self::PerOrder(commission) => format!("commission per order {commission}"),
             Self::Rate(rate) => format!("commission rate {rate}"),
         }
+    }
+}
+
+/// The venue settings a dataset run takes, each of which its rows depend
+/// on: the commission its targets are net of, and its account's starting
+/// balance and leverage, under which Nautilus' risk engine denies an
+/// order the account cannot margin. Part of the dataset's fingerprint,
+/// normalized, so neither rows nor models of other settings are ever read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetVenue {
+    pub commission: Commission,
+    pub balance: Money,
+    pub leverage: Decimal,
+}
+
+impl DatasetVenue {
+    /// The settings as the fingerprint reads them: the balance and the
+    /// leverage without trailing zeros, so that every spelling of one is
+    /// one key.
+    fn fingerprint_part(&self) -> String {
+        format!(
+            "{}, balance {} {}, leverage {}",
+            self.commission.fingerprint_part(),
+            self.balance.as_decimal().normalize(),
+            self.balance.currency.code,
+            self.leverage.normalize()
+        )
     }
 }
 
@@ -189,7 +231,7 @@ pub struct Dataset {
 
 impl Dataset {
     /// The dataset of `strategy_id`, deciding with `features` on `rule`,
-    /// of `targets` for a strategy of `requirements`, net of `commission`,
+    /// of `targets` for a strategy of `requirements`, run on `venue`,
     /// in the catalog at `catalog`. Registers `DatasetRow` with Nautilus,
     /// as any reader of the catalog must.
     ///
@@ -204,14 +246,14 @@ impl Dataset {
         rule: DecisionRule,
         targets: TargetsConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         targets.validate(rule, requirements)?;
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
         Ok(Self {
             catalog: catalog.to_path_buf(),
             strategy_id,
-            fingerprint: fingerprint(features, rule, &targets, requirements, commission)?,
+            fingerprint: fingerprint(features, rule, &targets, requirements, venue)?,
             warmup: features.warmup(),
             feature_names: features.names().to_vec(),
             targets,
@@ -540,9 +582,9 @@ impl DatasetRow {
 }
 
 /// The fingerprint of a dataset of `features` deciding on `rule`, of
-/// `targets` for a strategy of `requirements`, net of `commission`: the
+/// `targets` for a strategy of `requirements`, run on `venue`: the
 /// decisions' (`decide::fingerprint`) extended by the targets'
-/// (`targets::fingerprint`) and the commission.
+/// (`targets::fingerprint`), the venue's settings and the dataset `VERSION`.
 ///
 /// # Errors
 ///
@@ -552,7 +594,19 @@ pub fn fingerprint(
     rule: DecisionRule,
     targets: &TargetsConfig,
     requirements: &DataRequirements,
-    commission: &Commission,
+    venue: &DatasetVenue,
+) -> anyhow::Result<Fingerprint> {
+    versioned_fingerprint(VERSION, features, rule, targets, requirements, venue)
+}
+
+/// `fingerprint` at the dataset version `version`.
+fn versioned_fingerprint(
+    version: u32,
+    features: &FeatureSet,
+    rule: DecisionRule,
+    targets: &TargetsConfig,
+    requirements: &DataRequirements,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<Fingerprint> {
     Ok(targets::fingerprint(
         decide::fingerprint(features, rule),
@@ -560,7 +614,8 @@ pub fn fingerprint(
         rule,
         requirements,
     )?
-    .with(commission.fingerprint_part().as_bytes()))
+    .with(venue.fingerprint_part().as_bytes())
+    .with(format!("dataset version {version}").as_bytes()))
 }
 
 /// The catalog type of the rows.
@@ -600,17 +655,12 @@ fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
 #[cfg(test)]
 mod tests {
     use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::{
-        enums::PriceType,
-        identifiers::InstrumentId,
-        types::{Money, Quantity},
-    };
-    use rust_decimal::Decimal;
+    use nautilus_model::{enums::PriceType, identifiers::InstrumentId, types::Quantity};
 
     use super::*;
     use crate::model::{
         decide::FeatureRow,
-        targets::{Barrier, Distance, Exit, Outcome, Outcomes},
+        targets::{Barrier, Distance, Distances, Exit, Outcome, Outcomes},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -657,9 +707,14 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million.
-    fn commission() -> Commission {
-        Commission::Rate("0.00003".to_string())
+    /// The venue of the dataset runs: a commission rate of 30 per million,
+    /// 10 million USD, no leverage.
+    fn venue() -> DatasetVenue {
+        DatasetVenue {
+            commission: Commission::Rate("0.00003".to_string()),
+            balance: Money::from("10000000 USD"),
+            leverage: Decimal::ONE,
+        }
     }
 
     fn dataset(catalog: &Path, strategy: &str, width: usize) -> Dataset {
@@ -670,7 +725,7 @@ mod tests {
             DecisionRule::Every(SignedDuration::from_hours(1)),
             targets(),
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
     }
@@ -681,14 +736,21 @@ mod tests {
 
     /// The row of the decision at `time`, settled an hour later: its
     /// features, a long winning `pnl` at its take profit and a short losing
-    /// as much at its stop on the barrier, the reverse at the horizon.
+    /// as much at its stop on the barrier, each 3 from its take profit and
+    /// 2 from its stop, the reverse at the horizon.
     fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let loss = format!("-{pnl}");
-        let outcome = |pnl: &str, exit| Outcome {
+        let outcome = |pnl: &str, exit, distances| Outcome {
             pnl: Money::from(&*format!("{pnl} USD")),
+            commission: Money::from("0.1 USD"),
             exit,
+            distances,
         };
+        let barrier = Some(Distances {
+            take_profit: Decimal::from(3),
+            stop: Decimal::from(2),
+        });
         TargetRow {
             decision: FeatureRow {
                 strategy_id: StrategyId::from(STRATEGY),
@@ -697,12 +759,12 @@ mod tests {
                 ts_init: ns,
             },
             barrier: Some(Outcomes {
-                long: outcome(pnl, Exit::TakeProfit),
-                short: outcome(&loss, Exit::Stop),
+                long: outcome(pnl, Exit::TakeProfit, barrier),
+                short: outcome(&loss, Exit::Stop, barrier),
             }),
             horizon: Some(Outcomes {
-                long: outcome(&loss, Exit::Time),
-                short: outcome(pnl, Exit::Time),
+                long: outcome(&loss, Exit::Time, None),
+                short: outcome(pnl, Exit::Time, None),
             }),
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
         }
@@ -713,7 +775,9 @@ mod tests {
         let ns = UnixNanos::from(at(time));
         DatasetRow {
             features,
-            targets: vec![pnl, 1.0, -pnl, -1.0, -pnl, 0.0, pnl, 0.0],
+            targets: vec![
+                pnl, 0.1, 1.0, 3.0, 2.0, -pnl, 0.1, -1.0, 3.0, 2.0, -pnl, 0.1, 0.0, pnl, 0.1, 0.0,
+            ],
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
             ts_event: ns,
             ts_init: ns,
@@ -936,7 +1000,10 @@ mod tests {
                 rule,
                 targets,
                 &requirements(),
-                &commission,
+                &DatasetVenue {
+                    commission,
+                    ..venue()
+                },
             )
             .unwrap()
         };
@@ -946,7 +1013,7 @@ mod tests {
             changed(
                 DecisionRule::Every(SignedDuration::from_mins(30)),
                 targets(),
-                commission(),
+                venue().commission,
             ),
             changed(
                 hourly,
@@ -954,7 +1021,7 @@ mod tests {
                     horizon: Some(SignedDuration::from_mins(30)),
                     ..targets()
                 },
-                commission(),
+                venue().commission,
             ),
             changed(hourly, targets(), Commission::Rate("0.00004".to_string())),
             changed(
@@ -1016,12 +1083,20 @@ mod tests {
             manifest.target_names,
             [
                 "barrier_long_pnl",
+                "barrier_long_commission",
                 "barrier_long_exit",
+                "barrier_long_take_profit",
+                "barrier_long_stop",
                 "barrier_short_pnl",
+                "barrier_short_commission",
                 "barrier_short_exit",
+                "barrier_short_take_profit",
+                "barrier_short_stop",
                 "horizon_long_pnl",
+                "horizon_long_commission",
                 "horizon_long_exit",
                 "horizon_short_pnl",
+                "horizon_short_commission",
                 "horizon_short_exit",
             ]
         );
@@ -1039,6 +1114,69 @@ mod tests {
             ]
         );
         assert_eq!(manifest.fingerprint, dataset.fingerprint().to_string());
+    }
+
+    /// Bumping the dataset version is a new fingerprint, so every dataset
+    /// and model is rebuilt.
+    #[test]
+    fn bumping_the_dataset_version_changes_the_fingerprint() {
+        let rule = DecisionRule::Every(SignedDuration::from_hours(1));
+        let at = |version| {
+            versioned_fingerprint(
+                version,
+                &features(1),
+                rule,
+                &targets(),
+                &requirements(),
+                &venue(),
+            )
+            .unwrap()
+        };
+        let current =
+            fingerprint(&features(1), rule, &targets(), &requirements(), &venue()).unwrap();
+
+        assert_eq!(current, at(VERSION));
+        assert_ne!(current, at(VERSION + 1));
+    }
+
+    /// Nautilus' risk engine denies an order its account cannot margin, so
+    /// a dataset run's balance and leverage can change its rows: another
+    /// of either is another fingerprint, another spelling of one is not.
+    #[test]
+    fn another_balance_or_leverage_of_the_dataset_run_is_another_fingerprint() {
+        let of = |venue: DatasetVenue| {
+            fingerprint(
+                &features(1),
+                DecisionRule::Every(SignedDuration::from_hours(1)),
+                &targets(),
+                &requirements(),
+                &venue,
+            )
+            .unwrap()
+        };
+
+        assert_ne!(
+            of(venue()),
+            of(DatasetVenue {
+                balance: Money::from("20000000 USD"),
+                ..venue()
+            })
+        );
+        assert_ne!(
+            of(venue()),
+            of(DatasetVenue {
+                leverage: Decimal::from(10),
+                ..venue()
+            })
+        );
+        assert_eq!(
+            of(venue()),
+            of(DatasetVenue {
+                balance: Money::from("10000000.00 USD"),
+                leverage: Decimal::new(100, 2),
+                ..venue()
+            })
+        );
     }
 
     #[test]
@@ -1102,7 +1240,7 @@ mod tests {
             DecisionRule::Every(SignedDuration::from_hours(1)),
             targets(),
             &requirements(),
-            &commission(),
+            &venue(),
         )
         .unwrap()
     }

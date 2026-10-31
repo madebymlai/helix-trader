@@ -12,7 +12,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 
-use super::config::EmaCrossConfig;
+use super::EmaCrossConfig;
 use crate::strategy::Session;
 
 /// The crossings of the fast EMA over the slow one on the traded
@@ -32,10 +32,10 @@ pub(super) struct Signal {
 impl Signal {
     pub(super) fn new(config: &EmaCrossConfig) -> Self {
         Self {
-            instrument_id: config.trade_instrument_id,
-            crossover: RefCell::new(Crossover::new(config.fast_period, config.slow_period)),
-            session: config.bars.session.clone(),
-            bar_length: config.bars.bar_spec.timedelta(),
+            instrument_id: config.trade_instrument_id(),
+            crossover: RefCell::new(Crossover::new(config.fast_ema(), config.slow_ema())),
+            session: config.data.session.clone(),
+            bar_length: config.trade_bar_type().spec().timedelta(),
         }
     }
 
@@ -108,10 +108,10 @@ struct Crossover {
 }
 
 impl Crossover {
-    fn new(fast_period: usize, slow_period: usize) -> Self {
+    const fn new(fast: ExponentialMovingAverage, slow: ExponentialMovingAverage) -> Self {
         Self {
-            fast: ExponentialMovingAverage::new(fast_period, None),
-            slow: ExponentialMovingAverage::new(slow_period, None),
+            fast,
+            slow,
             long: [None, None],
         }
     }
@@ -150,19 +150,22 @@ mod tests {
     /// its first two closes and then moves two thirds of the way to each
     /// new close. A close above the slow EMA of the bars before it is long.
     fn config() -> EmaCrossConfig {
-        toml::from_str(
+        EmaCrossConfig::load(
             r#"
-            instrument_ids = ["ESH4.CME", "ESM4.CME"]
-            trade_instrument_id = "ESM4.CME"
-            bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }
-            fast_period = 1
-            slow_period = 2
-            trade_size = "3"
-            stop_loss_bps = 100
-            take_profit_bps = 100
-            hold = "1h"
+            [data]
+            series = [
+                { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+                { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+            ]
             warmup = "24h"
             session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
+
+            [indicators]
+            fast = { period = 1 }
+            slow = { period = 2 }
+
+            [trade]
+            instruments = [{ instrument_id = "ESM4.CME", trade_size = "3" }]
             "#,
         )
         .unwrap()

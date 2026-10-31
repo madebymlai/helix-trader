@@ -1,30 +1,32 @@
 //! A backtest retraining on its schedule (`model::walk`), on a fixture
 //! catalog: the probe of `common::dataset` decides every hour on one
-//! feature, missing (NaN) from the first quote, so the fake learner
-//! predicts the mean of its training labels: each model's probability
-//! names it. Before the run, the dataset is built and a model trained at
-//! each daily retrain time of the span; in the run, every decision of a
-//! period trades on the model trained at its start. A second backtest of
-//! the span builds and trains nothing, and the scores of each period are
-//! its model's, whose prediction, the training mean, is the baseline's.
+//! feature, missing (NaN) from the first quote. Before the run, the
+//! dataset is built and, at each daily retrain time of the span, a long
+//! model published as a train would: a baseline of its own probability,
+//! calibrated (`common::dataset::baseline_of`), which names it. The walk
+//! has no edge for a train to earn on, so its trains would publish none
+//! (`backtest_train` trains on one). In the run, every decision of a
+//! period trades on the model published at its start. A second backtest
+//! of the span builds and publishes nothing, and the scores of each period
+//! are its model's, a constant ranking no row above another, as its
+//! baseline, the training mean.
 //! One node per thread: each build, train and run on a thread of its own.
 
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, commission, config, replay_on, requirements, rule, targets, trade_on,
-        walk,
+        Missing, STRATEGY, baseline_of, config, replay_on, requirements, rule, targets, trade_on,
+        venue, walk,
     },
     ic,
 };
 use helix_trader::model::{
-    config::{ModelConfig, Thresholds},
+    config::{Margins, ModelConfig},
     dataset::{self, Dataset},
     features::FeatureSet,
-    learner::LearnerConfig,
     store::ModelStore,
-    train::Training,
+    targets::{Label, Side},
     walk::WalkForward,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -43,14 +45,14 @@ fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// The probe's, retrained every day; every probability a trade, to record
-/// it.
+/// The probe's, of the long alone, retrained every day; every decision a
+/// long, to record its probability.
 fn config_daily() -> ModelConfig {
     ModelConfig {
         retrain: SignedDuration::from_hours(24),
-        thresholds: Thresholds {
-            long: f64::MIN_POSITIVE,
-            short: 0.0,
+        margins: Margins {
+            long: Some(f64::MIN),
+            short: None,
         },
         ..config()
     }
@@ -72,6 +74,20 @@ fn span() -> (Timestamp, Timestamp) {
     (start, start + SignedDuration::from_hours(72))
 }
 
+/// The store of the long models under `models`.
+fn long_store(models: &Path) -> ModelStore {
+    ModelStore::new(
+        models,
+        StrategyId::from(STRATEGY),
+        &features(),
+        &config_daily(),
+        &requirements(),
+        &venue(),
+        Side::Long,
+    )
+    .unwrap()
+}
+
 fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
     WalkForward::new(
         catalog.path(),
@@ -80,14 +96,15 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
         &features(),
         config_daily(),
         &requirements(),
-        &commission(),
+        &venue(),
     )
     .unwrap()
 }
 
 /// Prepares the backtest of the span, each build and train on a thread of
 /// its own, as a backtest's children each run a node of their own; the
-/// spans built and the times trained at.
+/// spans built and the times trained at, each publishing a baseline of
+/// `trues` tenths, 3 at the span's start and one more each day.
 fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
     let (start, end) = span();
     let (mut built, mut trained) = (vec![], vec![]);
@@ -107,7 +124,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                                 rule(),
                                 targets(),
                                 &requirements(),
-                                &commission(),
+                                &venue(),
                             )?;
                             let (first, last) = dataset::days(from, to);
                             dataset.build(first, last, |from, to| {
@@ -121,26 +138,14 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
             },
             |at| {
                 trained.push(at);
-                let outcome = std::thread::scope(|scope| {
-                    scope
-                        .spawn(|| {
-                            Training::new(
-                                catalog.path(),
-                                models,
-                                StrategyId::from(STRATEGY),
-                                &features(),
-                                config_daily(),
-                                &requirements(),
-                                &commission(),
-                            )
-                            .unwrap()
-                            .train_at(at, |from, to| replay_on(catalog, features(), from, to))
-                        })
-                        .join()
-                        .unwrap()
-                });
-                assert!(outcome.published(), "{outcome:?}");
-                Ok(())
+                let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+                long_store(models).publish(&baseline_of(
+                    &features(),
+                    &config_daily(),
+                    Side::Long,
+                    at,
+                    trues,
+                ))
             },
         )
         .unwrap();
@@ -161,23 +166,8 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
     // 21st.
     assert_eq!(built, [(start - SignedDuration::from_hours(46), end)]);
     assert_eq!(trained, retrains);
-    let store = ModelStore::new(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(),
-        &config_daily(),
-        &requirements(),
-        &commission(),
-    )
-    .unwrap();
-    let means: Vec<f64> = retrains
-        .iter()
-        .map(|&at| {
-            let stored = store.read(at).unwrap();
-            let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
-            model.predict(&[f64::NAN]).unwrap()
-        })
-        .collect();
+    let store = long_store(models.path());
+    let means: Vec<f64> = retrains.iter().map(|&at| predicts(&store, at)).collect();
     assert!(
         means[0] != means[1] && means[1] != means[2] && means[0] != means[2],
         "the models must differ to be told apart: {means:?}"
@@ -218,9 +208,27 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
     assert_eq!(prepare(&catalog, models.path()), (vec![], vec![]));
 }
 
-/// The fake's prediction on a missing feature is the mean of its fitted
-/// labels, as the baseline's: the model of each period scores as the
-/// baseline fitted at its start, on every decision of the span.
+/// The calibrated probability of the long model of `store` valid from
+/// `at` on the missing feature: the same on every row.
+fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
+    let fingerprint =
+        dataset::fingerprint(&features(), rule(), &targets(), &requirements(), &venue())
+            .unwrap()
+            .to_string();
+    store
+        .read(at)
+        .unwrap()
+        .load(features().names(), &fingerprint)
+        .unwrap()
+        .predict(&[f64::NAN])
+        .unwrap()
+}
+
+/// The model of each period predicts one probability on every decision of
+/// the period, its calibrated constant, as the baseline fitted at its
+/// start predicts the training mean: neither ranks a row above another
+/// (AUC 0.5), and the model's log loss is that of its constant against the
+/// longs' outcomes of the period, read from the dataset.
 #[test]
 fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
     let catalog = catalog();
@@ -232,15 +240,54 @@ fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
         .scores(start, end)
         .unwrap();
 
-    assert_eq!(scores.periods.len(), 3);
-    for (period, day) in scores.periods.iter().zip(0..) {
+    let store = long_store(models.path());
+    let rows = Dataset::new(
+        catalog.path(),
+        StrategyId::from(STRATEGY),
+        &features(),
+        rule(),
+        targets(),
+        &requirements(),
+        &venue(),
+    )
+    .unwrap()
+    .read(start, end)
+    .unwrap();
+    let pnl = targets().pnl_index(Label::Barrier, Side::Long).unwrap();
+    assert_eq!(scores.short, None);
+    let long = scores.long.unwrap();
+    assert_eq!(long.periods.len(), 3);
+    for (period, day) in long.periods.iter().zip(0..) {
         let from = start + SignedDuration::from_hours(24 * day);
+        let (from_ns, to_ns) = (
+            UnixNanos::from(from),
+            UnixNanos::from(from + SignedDuration::from_hours(24)),
+        );
+        let gained: Vec<bool> = rows
+            .iter()
+            .filter(|row| from_ns <= row.ts_event && row.ts_event < to_ns)
+            .map(|row| row.targets[pnl] > 0.0)
+            .collect();
+        let p = predicts(&store, from);
+        let loss = -gained
+            .iter()
+            .map(|&gained| if gained { p.ln() } else { (1.0 - p).ln() })
+            .sum::<f64>()
+            / gained.len() as f64;
         assert_eq!(period.models, [from]);
-        assert!(period.model.rows > 0, "{period:?}");
-        assert_eq!(period.model, period.baseline, "{period:?}");
-        assert_eq!(period.model.auc, Some(0.5), "{period:?}");
+        assert!(!gained.is_empty(), "{period:?}");
+        assert_eq!(
+            (period.model.rows, period.baseline.rows),
+            (gained.len(), gained.len())
+        );
+        assert_eq!(
+            (period.model.auc, period.baseline.auc),
+            (Some(0.5), Some(0.5)),
+            "{period:?}"
+        );
+        let log_loss = period.model.log_loss.unwrap();
+        assert!((log_loss - loss).abs() < 1e-12, "{log_loss} != {loss}");
     }
-    assert_eq!(scores.model, scores.baseline);
-    let rows: usize = scores.periods.iter().map(|period| period.model.rows).sum();
-    assert_eq!(scores.model.rows, rows);
+    let rows: usize = long.periods.iter().map(|period| period.model.rows).sum();
+    assert_eq!(long.model.rows, rows);
 }

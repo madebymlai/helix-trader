@@ -195,31 +195,54 @@ replayed as live.
 
 A strategy reading a futures root (`GC.GLBX`, see `rolls/README.md`)
 trades and reads its dated contracts, as in a backtest. At the start,
-`Live::run` takes for each instrument the strategy reads the contracts it
-needs up to its next roll (`rolls::contracts_at`, from the same calendar
-the backtest's table is built from): a root gives the contract standing
-for it now and the one it rolls into next, a plain instrument itself. Those are the node's
-instruments: each goes to the client of its venue like any instrument,
-loaded at connect, and the strategy claims its external orders. A config
-without a root loads what it did before.
+`Live::run` takes for each instrument the strategy reads the contracts of
+its next roll (`rolls::Transition::after`, from the same calendar the
+backtest's table is built from): the one standing for it now and the one
+it rolls into; a plain instrument itself. Those are the node's
+instruments at its start: each goes to the client of its venue like any
+instrument, loaded at connect, and the strategy claims its external
+orders. Loading the next one too covers a start just before a roll: the
+roll may pass before the strategy starts, or the roller's request for its
+post contract may still be in flight at the roll, and IB subscribes only
+to what it loaded. A config without a root loads what it did before.
 
-The strategy's `Roller` subscribes to the root's ticks on the contract in
-front and switches them to the next one at the roll (`rolls/README.md`,
-"The roller"). The node already holds that contract, since it loaded it at
-the start. A run spans one roll: after it the node does not hold the
-contract after the next one, so restart it before the root's second roll
-(GC rolls two to four months apart).
+The strategy's `Roller` (`Roller::live`) subscribes to the root's ticks on
+the contract in front and switches them to the next one at each roll
+(`rolls/README.md`, "The roller"). Each time it sets the alert of a roll
+(at its start, then at each roll for the following one) it requests that
+roll's post contract (`request_instrument`) with
+`force_instrument_update`, so the node loads it months before it is
+subscribed to, and a node rolls any number of times without a restart.
 
-The contracts are loaded at the start, not requested by the roller as it
-rolls. A request reaches the venue's client only if it skips the catalog
-(`force_instrument_update`, `data/src/engine/streaming.rs`
-`dispatch_instrument_request`), and a backtest's data client answers no
-instrument request (`backtest/src/data_client.rs` has no
-`request_instrument`, and the trait's default refuses it). An instrument
-answered from the catalog reaches the cache but not the client: IB's
-`subscribe_trades` looks the contract up in its own provider and fails
-without it (`adapters/interactive_brokers/src/data/core.rs`). One roller
-cannot do both.
+What Nautilus does with that, at the pin:
+
+- The data engine answers an instrument request from its catalogs when
+  one holds the instrument, into the cache only, unless the request has
+  `force_instrument_update`: then it goes to the venue's data client
+  (`data/src/engine/streaming.rs` `dispatch_instrument_request`). The
+  node's catalog may hold a contract fill-catalog stored, so the roller
+  forces the request.
+- IB's data client subscribes only to what its own instrument provider
+  holds: `subscribe_trades` fails with "Instrument ... not found in
+  provider" otherwise, as do quotes and book deltas
+  (`adapters/interactive_brokers/src/data/core.rs`). It has no
+  `subscribe_instrument` (the trait's default logs it as not implemented
+  and does nothing). Its `request_instrument` fetches the contract
+  details into the provider when the provider lacks the instrument, or
+  when the param is set, then answers; the data engine adds the answer to
+  the cache. The provider is loaded at connect with the start's
+  instruments (`load_ids`). IB reads the param as a string, the engine as
+  a boolean; the roller sends a boolean, and IB loads the contract anyway,
+  since its provider does not hold it.
+- Databento's live client subscribes by raw symbol, needing no loaded
+  instrument (`adapters/databento/src/data.rs` `subscribe_schema`,
+  `subscribe_dataset`); its `subscribe_instrument` subscribes the
+  definition schema, and its `request_instrument` fetches the definition
+  from Databento's historical API and answers it.
+- A backtest's data client answers no instrument request (the trait's
+  default refuses it), and the backtest registers every contract of its
+  slices before it runs, so a backtest's or a dataset run's roller
+  (`Roller::replayed`) requests nothing.
 
 Bars on a root are refused at the start, naming the contract to read
 instead. Nautilus' continuous bars take every roll's prices up front, in
@@ -468,7 +491,7 @@ let config = LiveNodeConfig {
     logging,
     catalogs: vec![DataCatalogConfig::new(catalog, None, None)], // absolute path
     streaming: Some(recording.streaming(&catalog)?), // see "Recording into the catalog"
-    cache: Some(warmup::cache_config(&bar_types, warmup)?), // holds the warmup bars
+    cache: Some(warmup.cache_config()?), // holds the warmup bars, the ATR's too
     data_engine: warmup::live_data_engine_config(&bar_types), // see the strategy README
     exec_engine: LiveExecutionEngineConfig {
         reconciliation: true,

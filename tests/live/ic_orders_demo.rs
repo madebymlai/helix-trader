@@ -41,7 +41,7 @@ use std::{
 use helix_trader::{
     data::IcConnection,
     live::{IcExecutionClientConfig, IcExecutionClientFactory, Live},
-    strategy::DataRequirements,
+    strategy::{DataRequirements, warmup::Warmup},
 };
 use jiff::SignedDuration;
 use nautilus_common::{
@@ -283,7 +283,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
 
     let ran = tokio::time::timeout(
         DEADLINE + Duration::from_secs(90),
-        live.run(&requirements, strategy),
+        live.run(&requirements, &Warmup::live(&requirements), strategy),
     )
     .await;
 

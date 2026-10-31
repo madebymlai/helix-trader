@@ -3,18 +3,20 @@
 //!
 //! A store is a directory per strategy id, fingerprint (that of its
 //! dataset: the features, the decision rule, the targets and the
-//! commission they are net of, see `dataset::fingerprint`) and training
+//! venue settings of its dataset runs, see `dataset::fingerprint`) and training
 //! settings (the learner and its settings, the label, the window, the
-//! holdout and the minimum score, below which a model is never
-//! published), so a model is only ever listed beside models of the same
-//! features, costs and training. Backtest and live read the same list.
+//! holdout and the minimums its holdout must meet to be published,
+//! `holdout::Minimums`), and side, the long or the short, keyed by its
+//! margin, which decides the trades its holdout is judged on, so a model
+//! is only ever listed beside models of the same features, costs,
+//! training, side and margin. Backtest and live read the same list.
 //!
-//! A meta model's store sits in a `meta/` directory under its primary's,
-//! keyed by its own training settings (its learner and settings, window,
-//! holdout and minimum score) and the primary's thresholds, which make its
-//! rows; a rule primary has no store of its own, its meta's `meta/` sits
-//! under the strategy id and fingerprint. A meta model is only ever listed beside
-//! meta models of the same primary.
+//! A meta model's store sits in a `meta/` directory beside its primary's
+//! sides, under their training settings, keyed by its own (its learner and
+//! settings, window, holdout, threshold and minimums) and the primary's
+//! margins, which make its rows; a rule primary has no store of its own,
+//! its meta's `meta/` sits under the strategy id and fingerprint. A meta model
+//! is only ever listed beside meta models of the same primary.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
 //! the latest valid then, checked before use, a model failing a check
@@ -22,10 +24,12 @@
 //!
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
-//! target spec and label, the learner, the holdout score and probe rows
-//! with the predictions the model made on them when fitted, and the model
-//! as its adapter saved it. A reloaded model is checked by predicting the
-//! probes, never by its bytes. The file is written beside its name, then
+//! target spec, label and side, the learner, the calibration of its
+//! predictions, a side's expected payoff, its holdout (`holdout::Holdout`)
+//! and probe rows with the calibrated predictions the model made on them
+//! when fitted, and the model as its adapter saved it. A loaded model's every prediction is
+//! calibrated (`LoadedModel`). A reloaded model is checked by predicting
+//! the probes, never by its bytes. The file is written beside its name, then
 //! renamed onto it, so a reader sees a whole model or none. A missing
 //! feature, NaN, has no JSON number: a probe row writes NaN and the
 //! infinities as strings.
@@ -42,12 +46,15 @@ use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    config::{MetaConfig, ModelConfig, RuleConfig, Thresholds},
-    dataset::{self, Commission},
+    calibration::Calibration,
+    config::{Margins, MetaConfig, ModelConfig, RuleConfig},
+    dataset::{self, DatasetVenue},
     decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
+    holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
-    targets::{Label, TargetsConfig},
+    payoff::Payoff,
+    targets::{Label, Side, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
 
@@ -84,7 +91,7 @@ pub struct ModelManifest {
     /// The time the model was trained at, from which it is valid.
     pub valid_from: Timestamp,
     /// The fingerprint of the features, the decision rule, the targets and
-    /// the commission.
+    /// the venue of its dataset runs.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
@@ -92,10 +99,18 @@ pub struct ModelManifest {
     pub targets: TargetsConfig,
     /// The target the model learned.
     pub label: Label,
+    /// The side of the target a primary's model learned; none for a meta
+    /// model, which learns the primary's.
+    pub side: Option<Side>,
     pub learner: LearnerConfig,
-    /// The model's AUC on the holdout.
-    pub score: f64,
-    /// Rows of the holdout and the model's predictions on them.
+    /// The calibration of the model's predictions.
+    pub calibration: Calibration,
+    /// A primary's expected win and loss of a trade of its side; none for
+    /// a meta model.
+    pub payoff: Option<Payoff>,
+    /// The model's holdout, as its publication read it.
+    pub holdout: Holdout,
+    /// Rows of the holdout and the model's calibrated predictions on them.
     pub probes: Vec<Probe>,
 }
 
@@ -108,16 +123,16 @@ pub struct Probe {
 }
 
 impl StoredModel {
-    /// The model, loaded by its manifest's learner and checked against a
-    /// strategy of `feature_names` and `fingerprint`: the manifest's feature
-    /// names in order and fingerprint are the strategy's, the model takes
-    /// as many features, and it predicts each probe to the bit as when
-    /// fitted.
+    /// The model, loaded by its manifest's learner with its calibration
+    /// and checked against a strategy of `feature_names` and
+    /// `fingerprint`: the manifest's feature names in order and
+    /// fingerprint are the strategy's, the model takes as many features,
+    /// and it predicts each probe to the bit as when fitted.
     ///
     /// # Errors
     ///
     /// Returns an error if the model cannot be loaded or fails a check.
-    pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<Model> {
+    pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<LoadedModel> {
         let manifest = &self.manifest;
         ensure!(
             manifest.feature_names == feature_names,
@@ -129,8 +144,12 @@ impl StoredModel {
             "its fingerprint {} is not the strategy's {fingerprint}",
             manifest.fingerprint
         );
-        let model = manifest.learner.load(&self.model)?;
-        let width = model.width();
+        let model = LoadedModel {
+            model: manifest.learner.load(&self.model)?,
+            calibration: manifest.calibration,
+            payoff: manifest.payoff,
+        };
+        let width = model.model.width();
         ensure!(
             width == manifest.feature_names.len(),
             "it takes {width} features, its manifest names {}",
@@ -149,63 +168,112 @@ impl StoredModel {
     }
 }
 
-impl ModelStore {
-    /// The store, under `root`, of the models of `strategy_id` deciding with
-    /// `features` as `config` says, on targets for a strategy of
-    /// `requirements`, net of `commission`, and trained as `config` says.
+/// A model as a strategy and a score use it: loaded, every prediction
+/// calibrated, and a primary's expected payoff.
+#[derive(Debug)]
+pub struct LoadedModel {
+    model: Model,
+    calibration: Calibration,
+    payoff: Option<Payoff>,
+}
+
+impl LoadedModel {
+    /// The model `model` fitted, its predictions calibrated by
+    /// `calibration`, a primary's of `payoff`.
+    #[must_use]
+    pub const fn new(model: Model, calibration: Calibration, payoff: Option<Payoff>) -> Self {
+        Self {
+            model,
+            calibration,
+            payoff,
+        }
+    }
+
+    /// The calibrated probability that the label of `row` is true.
     ///
     /// # Errors
     ///
-    /// Returns an error if the learner cannot be written as JSON, or as
-    /// `dataset::fingerprint` does.
+    /// As `Model::predict`.
+    pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
+        Ok(self.calibration.apply(self.model.predict(row)?))
+    }
+
+    /// A primary's expected win and loss of a trade of its side.
+    #[must_use]
+    pub const fn payoff(&self) -> Option<Payoff> {
+        self.payoff
+    }
+}
+
+impl ModelStore {
+    /// The store, under `root`, of the `side` models of `strategy_id`
+    /// deciding with `features` as `config` says, on targets for a strategy
+    /// of `requirements`, run on `venue`, and trained as `config`
+    /// says: `long/` or `short/` in the directory of its training settings,
+    /// keyed by the side's margin, which decides the trades its holdout
+    /// is judged on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the margins do not trade `side`, the learner
+    /// cannot be written as JSON, or as `dataset::fingerprint` does.
     pub fn new(
         root: &Path,
         strategy_id: StrategyId,
         features: &FeatureSet,
         config: &ModelConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
+        side: Side,
     ) -> anyhow::Result<Self> {
-        let settings = Fingerprint::default()
-            .with(serde_json::to_string(&config.learner)?.as_bytes())
-            .with(format!("{:?}", config.label).as_bytes())
-            .with(&config.window.as_nanos().to_le_bytes())
-            .with(&config.holdout.as_nanos().to_le_bytes())
-            .with(&config.min_score.to_le_bytes());
+        let margin = config
+            .margins
+            .of(side)
+            .with_context(|| format!("the margins trade no {}", side.name()))?;
         Ok(Self {
-            directory: dataset_directory(
-                root,
-                strategy_id,
-                features,
-                config.decision,
-                &config.targets,
-                requirements,
-                commission,
-            )?
-            .join(settings.to_string()),
+            directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
+                .join(side.name())
+                .join(
+                    Fingerprint::default()
+                        .with(&margin.to_le_bytes())
+                        .to_string(),
+                ),
         })
     }
 
-    /// The store of the meta model `meta` of this store's models, whose
-    /// trades `thresholds` make: within this store's directory, under
-    /// `meta/` and the meta's training settings, `thresholds` among them
-    /// (they make the meta's rows).
+    /// The store, under `root`, of the meta model `meta` of the model
+    /// primary of `strategy_id` deciding with `features` as `config` says,
+    /// on targets for a strategy of `requirements`, run on `venue`:
+    /// beside the primary's sides, under `meta/` and the meta's training
+    /// settings, the primary's margins among them (they make the meta's
+    /// rows).
     ///
     /// # Errors
     ///
-    /// Returns an error if the learner cannot be written as JSON.
-    pub fn meta(&self, meta: &MetaConfig, thresholds: Thresholds) -> anyhow::Result<Self> {
-        let settings = meta_settings(meta)?
-            .with(&thresholds.long.to_le_bytes())
-            .with(&thresholds.short.to_le_bytes());
+    /// Returns an error if a learner cannot be written as JSON, or as
+    /// `dataset::fingerprint` does.
+    pub fn meta(
+        root: &Path,
+        strategy_id: StrategyId,
+        features: &FeatureSet,
+        config: &ModelConfig,
+        meta: &MetaConfig,
+        requirements: &DataRequirements,
+        venue: &DatasetVenue,
+    ) -> anyhow::Result<Self> {
+        let Margins { long, short } = config.margins;
+        let settings =
+            meta_settings(meta)?.with(format!("long {long:?} short {short:?}").as_bytes());
         Ok(Self {
-            directory: self.directory.join(META).join(settings.to_string()),
+            directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
+                .join(META)
+                .join(settings.to_string()),
         })
     }
 
     /// The store, under `root`, of the meta models of `strategy_id`, whose
     /// primary is its rule, deciding with `features` as `config` says, on
-    /// targets for a strategy of `requirements`, net of `commission`.
+    /// targets for a strategy of `requirements`, run on `venue`.
     ///
     /// # Errors
     ///
@@ -217,7 +285,7 @@ impl ModelStore {
         features: &FeatureSet,
         config: &RuleConfig,
         requirements: &DataRequirements,
-        commission: &Commission,
+        venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             directory: dataset_directory(
@@ -227,7 +295,7 @@ impl ModelStore {
                 config.decision,
                 &config.targets,
                 requirements,
-                commission,
+                venue,
             )?
             .join(META)
             .join(meta_settings(&config.meta)?.to_string()),
@@ -304,7 +372,7 @@ impl ModelStore {
 
 /// The directory, under `root`, of the stores of `strategy_id` deciding
 /// with `features` on `rule`, of `targets` for a strategy of `requirements`,
-/// net of `commission`: its id and its dataset's fingerprint.
+/// run on `venue`: its id and its dataset's fingerprint.
 fn dataset_directory(
     root: &Path,
     strategy_id: StrategyId,
@@ -312,22 +380,57 @@ fn dataset_directory(
     rule: DecisionRule,
     targets: &TargetsConfig,
     requirements: &DataRequirements,
-    commission: &Commission,
+    venue: &DatasetVenue,
 ) -> anyhow::Result<PathBuf> {
-    let fingerprint = dataset::fingerprint(features, rule, targets, requirements, commission)?;
+    let fingerprint = dataset::fingerprint(features, rule, targets, requirements, venue)?;
     Ok(root
         .join(strategy_id.as_str())
         .join(fingerprint.to_string()))
 }
 
-/// The training settings of `meta`: its learner, window, holdout and
-/// minimum score.
+/// The directory, under `root`, of the models of the model primary of
+/// `strategy_id` deciding with `features` as `config` says, on targets for
+/// a strategy of `requirements`, run on `venue`: its dataset's, then
+/// its training settings, the learner and its settings, the label, the
+/// window, the holdout and the minimums of its holdout.
+fn primary_directory(
+    root: &Path,
+    strategy_id: StrategyId,
+    features: &FeatureSet,
+    config: &ModelConfig,
+    requirements: &DataRequirements,
+    venue: &DatasetVenue,
+) -> anyhow::Result<PathBuf> {
+    let settings = Fingerprint::default()
+        .with(serde_json::to_string(&config.learner)?.as_bytes())
+        .with(format!("{:?}", config.label).as_bytes())
+        .with(&config.window.as_nanos().to_le_bytes())
+        .with(&config.holdout.as_nanos().to_le_bytes())
+        .with(&config.min_pnl.to_le_bytes())
+        .with(&config.min_trades.to_le_bytes());
+    Ok(dataset_directory(
+        root,
+        strategy_id,
+        features,
+        config.decision,
+        &config.targets,
+        requirements,
+        venue,
+    )?
+    .join(settings.to_string()))
+}
+
+/// The training settings of `meta`: its learner, window, holdout, and
+/// the threshold deciding the trades its holdout is judged on, and the
+/// minimums of its holdout.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
-        .with(&meta.min_score.to_le_bytes()))
+        .with(&meta.threshold.to_le_bytes())
+        .with(&meta.min_pnl.to_le_bytes())
+        .with(&meta.min_trades.to_le_bytes()))
 }
 
 /// The models of a store as a strategy swaps them in, decision by decision
@@ -343,7 +446,7 @@ pub struct Swap {
     /// The fingerprint a model must carry.
     fingerprint: String,
     /// The model in use, and its valid-from.
-    current: Option<(Timestamp, Model)>,
+    current: Option<(Timestamp, LoadedModel)>,
     /// The valid-from of the last model read, in use or refused.
     read: Option<Timestamp>,
 }
@@ -370,7 +473,11 @@ impl Swap {
     /// The model in use at `now`, and its valid-from, among the models
     /// valid from `valid_froms`, the store's list in order: the latest
     /// valid then, swapped in if not read yet, unless it fails its checks.
-    pub fn at(&mut self, now: Timestamp, valid_froms: &[Timestamp]) -> Option<(Timestamp, &Model)> {
+    pub fn at(
+        &mut self,
+        now: Timestamp,
+        valid_froms: &[Timestamp],
+    ) -> Option<(Timestamp, &LoadedModel)> {
         let latest = valid_froms.iter().rfind(|&&time| time <= now).copied();
         if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
             self.read = Some(latest);
@@ -438,12 +545,18 @@ mod values {
 mod tests {
     use jiff::SignedDuration;
     use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::{enums::PriceType, identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::{
+        enums::PriceType,
+        identifiers::InstrumentId,
+        types::{Money, Quantity},
+    };
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::model::{
-        config::Thresholds,
+        dataset::Commission,
         decide::DecisionRule,
+        holdout::Earnings,
         learner::{LearnerConfig, TrainingSet},
     };
 
@@ -475,27 +588,39 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
-            .thresholds(Thresholds {
-                long: 0.6,
-                short: 0.4,
+            .margins(Margins {
+                long: Some(0.5),
+                short: Some(0.5),
             })
-            .min_score(0.5)
+            .min_pnl(1.0)
+            .min_trades(30)
             .learner(LearnerConfig::Fake {})
             .build()
     }
 
     fn store(root: &Path, config: &ModelConfig) -> ModelStore {
-        store_net_of(root, config, &commission())
+        store_net_of(root, config, &venue())
     }
 
-    fn store_net_of(root: &Path, config: &ModelConfig, commission: &Commission) -> ModelStore {
+    fn store_net_of(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelStore {
+        side_store(root, config, venue, Side::Long)
+    }
+
+    /// The store of the `side` models of `config`, run on `venue`.
+    fn side_store(
+        root: &Path,
+        config: &ModelConfig,
+        venue: &DatasetVenue,
+        side: Side,
+    ) -> ModelStore {
         ModelStore::new(
             root,
             StrategyId::from(STRATEGY),
             &features(),
             config,
             &requirements(),
-            commission,
+            venue,
+            side,
         )
         .unwrap()
     }
@@ -512,9 +637,14 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million.
-    fn commission() -> Commission {
-        Commission::Rate("0.00003".to_string())
+    /// The venue of the dataset runs: a commission rate of 30 per million,
+    /// 10 million USD, no leverage.
+    fn venue() -> DatasetVenue {
+        DatasetVenue {
+            commission: Commission::Rate("0.00003".to_string()),
+            balance: Money::from("10000000 USD"),
+            leverage: Decimal::ONE,
+        }
     }
 
     fn at(time: &str) -> Timestamp {
@@ -533,8 +663,19 @@ mod tests {
                 feature_names: vec!["mid".to_string()],
                 targets: config().targets,
                 label: Label::Horizon,
+                side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
-                score: 0.625,
+                calibration: Calibration { a: -4.0, b: 2.0 },
+                payoff: Some(Payoff {
+                    win: 1.5,
+                    loss: 1.25,
+                }),
+                holdout: Holdout {
+                    earnings: Earnings::default(),
+                    log_loss: 0.6,
+                    baseline_log_loss: 0.69,
+                    auc: Some(0.625),
+                },
                 probes: rows
                     .iter()
                     .map(|row| Probe {
@@ -655,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn other_training_settings_targets_or_minimum_score_list_none_of_the_models() {
+    fn other_training_settings_targets_minimums_or_margin_list_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
@@ -687,41 +828,136 @@ mod tests {
                 "{other:?}"
             );
         }
-        let gated = ModelConfig {
-            min_score: 0.9,
+        let held_to_more = [
+            ModelConfig {
+                min_pnl: 2.0,
+                ..config()
+            },
+            ModelConfig {
+                min_trades: 50,
+                ..config()
+            },
+            ModelConfig {
+                margins: Margins {
+                    long: Some(0.75),
+                    short: Some(0.5),
+                },
+                ..config()
+            },
+        ];
+        for other in held_to_more {
+            assert!(
+                store(dir.path(), &other).valid_froms().unwrap().is_empty(),
+                "{other:?}"
+            );
+        }
+        let other_short = ModelConfig {
+            margins: Margins {
+                long: Some(0.5),
+                short: None,
+            },
             ..config()
         };
-        assert!(store(dir.path(), &gated).valid_froms().unwrap().is_empty());
+        assert_eq!(
+            store(dir.path(), &other_short).valid_froms().unwrap().len(),
+            1
+        );
     }
 
-    /// A meta model published at one minimum score may score below
-    /// another: a meta of another minimum lists none of them.
+    /// The store of the meta model `meta` of `config`.
+    fn meta_store(root: &Path, config: &ModelConfig, meta: &MetaConfig) -> ModelStore {
+        ModelStore::meta(
+            root,
+            StrategyId::from(STRATEGY),
+            &features(),
+            config,
+            meta,
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+    }
+
+    /// A meta model published under one threshold and minimums may fall
+    /// short of others, and the primary's margins make its rows: a meta
+    /// of another threshold, minimums or margins lists none of them.
     #[test]
-    fn a_meta_model_of_another_minimum_score_is_not_listed() {
+    fn a_meta_model_of_another_threshold_minimums_or_margins_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = |min_score| {
+        let meta = |threshold, min_pnl| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(12))
-                .threshold(0.55)
-                .min_score(min_score)
+                .threshold(threshold)
+                .min_pnl(min_pnl)
+                .min_trades(20)
                 .learner(LearnerConfig::Fake {})
                 .build()
         };
-        let primary = store(dir.path(), &config());
-        primary
-            .meta(&meta(0.5), config().thresholds)
-            .unwrap()
+        meta_store(dir.path(), &config(), &meta(0.55, 1.0))
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+        let long_only = ModelConfig {
+            margins: Margins {
+                long: Some(0.5),
+                short: None,
+            },
+            ..config()
+        };
+
+        for (config, meta) in [
+            (config(), meta(0.55, 2.0)),
+            (config(), meta(0.6, 1.0)),
+            (long_only, meta(0.55, 1.0)),
+        ] {
+            assert!(
+                meta_store(dir.path(), &config, &meta)
+                    .valid_froms()
+                    .unwrap()
+                    .is_empty(),
+                "{config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_long_and_the_short_models_are_listed_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        side_store(dir.path(), &config(), &venue(), Side::Long)
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
 
+        let short = side_store(dir.path(), &config(), &venue(), Side::Short);
+
+        assert!(short.valid_froms().unwrap().is_empty());
+    }
+
+    /// Every prediction of a loaded model is calibrated, its probes too:
+    /// the fake predicts the first feature, 0.75, calibrated by a = -4 and
+    /// b = 2 to 1 / (1 + e^-1).
+    #[test]
+    fn a_loaded_model_predicts_through_its_calibration() {
+        let mut stored = model("2026-10-22T00:00:00Z", &[]);
+        stored.manifest.probes = vec![Probe {
+            row: vec![0.75],
+            prediction: 1.0 / (1.0 + (-1.0_f64).exp()),
+        }];
+
+        let loaded = stored
+            .load(&stored.manifest.feature_names, &stored.manifest.fingerprint)
+            .unwrap();
+
+        let prediction = loaded.predict(&[0.25]).unwrap();
         assert!(
-            primary
-                .meta(&meta(0.9), config().thresholds)
-                .unwrap()
-                .valid_froms()
-                .unwrap()
-                .is_empty()
+            (prediction - 1.0 / (1.0 + 1.0_f64.exp())).abs() < 1e-12,
+            "{prediction}"
+        );
+        assert_eq!(
+            loaded.payoff(),
+            Some(Payoff {
+                win: 1.5,
+                loss: 1.25
+            })
         );
     }
 
@@ -739,10 +975,17 @@ mod tests {
             Commission::PerOrder("3 USD".to_string()),
         ] {
             assert!(
-                store_net_of(dir.path(), &config(), &other)
-                    .valid_froms()
-                    .unwrap()
-                    .is_empty(),
+                store_net_of(
+                    dir.path(),
+                    &config(),
+                    &DatasetVenue {
+                        commission: other.clone(),
+                        ..venue()
+                    }
+                )
+                .valid_froms()
+                .unwrap()
+                .is_empty(),
                 "{other:?}"
             );
         }

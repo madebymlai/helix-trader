@@ -10,8 +10,10 @@
 //! fills and backtests read: the warmup comes from it first, from the
 //! venues for what it lacks, and IC's answers are written back to it (see
 //! `strategy::warmup`). A futures root's instruments are its contract in
-//! front at the start and the next one, which the strategy's roller
-//! switches to (see `rolls::contracts_at`); bars on a root are refused.
+//! front at the start and the one it rolls into next (see
+//! `rolls::Transition::after`); the strategy's roller loads each later one
+//! before switching to it (see `rolls::Roller::live`), so the node rolls
+//! without a restart; bars on a root are refused.
 
 mod ib;
 mod ic;
@@ -43,8 +45,11 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IcHistory, OkxHistory, catalog_path},
-    rolls::{Transition, contracts_at},
-    strategy::{DataRequirements, warmup},
+    rolls::Transition,
+    strategy::{
+        DataRequirements,
+        warmup::{self, Warmup},
+    },
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
@@ -79,18 +84,19 @@ pub struct Live {
 impl Live {
     /// Sets up the clients of the instruments of `requirements`, OKX's, IC's
     /// then IB's, then runs `strategy` on a live node until SIGINT or
-    /// SIGTERM. The strategy's warmup requests go to the data clients. A
-    /// root's instruments are its contract in front at the start and the
-    /// next one (see `README.md`, "Rolled roots"). The node is built, and
-    /// what the last run left staged promoted (`promote_staged`), before it
-    /// runs.
+    /// SIGTERM, its cache sized for `warmup`, the strategy's (see
+    /// `Warmup::cache_config`). The strategy's warmup requests go to the
+    /// data clients. A root's instruments are its contract in front at the
+    /// start and the next one (see `README.md`, "Rolled roots"). The node is
+    /// built, and what the last run left staged promoted (`promote_staged`),
+    /// before it runs.
     ///
     /// # Errors
     ///
     /// Returns an error if a bar type is on a root (live builds no
     /// continuous bars), if the cache cannot hold the warmup bars of a bar
-    /// type (see `warmup::cache_config`), if the catalog cannot be created
-    /// or its path is not UTF-8, if the staging directory is inside the
+    /// type the warmup builds (see `Warmup::cache_config`), if the catalog
+    /// cannot be created or its path is not UTF-8, if the staging directory is inside the
     /// catalog, the trader's instance id cannot be kept (see `Recording`),
     /// if what the last run left staged cannot be promoted
     /// (`promote_staged`), if an IC bar type is not built from quotes or
@@ -101,11 +107,16 @@ impl Live {
     /// if the strategy trades IB instruments and no account is given, if
     /// IB's clients cannot be set up (see `ib::clients`), or if the node
     /// fails (see `node::build`, `node::run`).
-    pub async fn run<S>(&self, requirements: &DataRequirements, strategy: S) -> anyhow::Result<()>
+    pub async fn run<S>(
+        &self,
+        requirements: &DataRequirements,
+        warmup: &Warmup,
+        strategy: S,
+    ) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
     {
-        let cache = warmup::cache_config(&requirements.bar_types, requirements.warmup)?;
+        let cache = warmup.cache_config()?;
         std::fs::create_dir_all(&self.catalog)
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
         let catalog = DataCatalogConfig::new(catalog_path(&self.catalog)?, None, None);
@@ -172,11 +183,15 @@ impl Live {
     }
 }
 
-/// The instruments the node loads, at `now`: each one `requirements`
-/// reads, a root replaced by the contracts it needs up to its next roll
-/// (see `rolls::contracts_at`), the one standing for it now and the one it
-/// rolls into, which the strategy's `Roller` subscribes to at the roll. A
-/// plain instrument stands for itself. Each once, in order.
+/// The instruments the node loads at its start, at `now`: each one
+/// `requirements` reads, a root replaced by the contracts of its next roll
+/// (see `rolls::Transition::after`), the one standing for it now and the
+/// one it rolls into, so the strategy's `Roller` subscribes to a loaded
+/// contract even if that roll passes before the strategy starts or while
+/// the roller's request for its post contract is in flight; the roller
+/// requests the post contract of each later roll (see
+/// `rolls::Roller::live`). A plain instrument stands for itself. Each
+/// once, in order.
 ///
 /// # Errors
 ///
@@ -199,7 +214,9 @@ fn loaded_instrument_ids(
     }
     let mut ids: Vec<InstrumentId> = Vec::new();
     for instrument_id in requirements.instrument_ids() {
-        for contract in contracts_at(instrument_id, now) {
+        let contracts = Transition::after(instrument_id, now)
+            .map_or_else(|| vec![instrument_id], |next| vec![next.pre, next.post]);
+        for contract in contracts {
             if !ids.contains(&contract) {
                 ids.push(contract);
             }
@@ -239,7 +256,8 @@ mod tests {
     }
 
     /// GC rolls into GCZ6 on 2026-07-29 and out of it into GCG7 on
-    /// 2026-11-26 (`rolls/README.md`, "GC against Databento").
+    /// 2026-11-26 (`rolls/README.md`, "GC against Databento"): the roller
+    /// requests the contracts of the later rolls (`rolls::Roller::live`).
     #[test]
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {
@@ -252,13 +270,12 @@ mod tests {
         );
     }
 
+    /// A start just before a roll loads the roll's post contract too, so
+    /// the roller subscribes to it even if the roll passes before the
+    /// strategy starts or its request for it is still in flight.
     #[test]
-    fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
+    fn a_root_loads_just_before_its_roll_the_pre_and_post_contracts() {
         let requirements = ticks(NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
-        assert_eq!(
-            loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
-            ids(&["GCZ6.GLBX", "GCG7.GLBX"])
-        );
         assert_eq!(
             loaded_instrument_ids(
                 &requirements,
@@ -266,6 +283,15 @@ mod tests {
             )
             .unwrap(),
             ids(&["GCQ6.GLBX", "GCZ6.GLBX"])
+        );
+    }
+
+    #[test]
+    fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
+        let requirements = ticks(NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
+        assert_eq!(
+            loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
+            ids(&["GCZ6.GLBX", "GCG7.GLBX"])
         );
     }
 
