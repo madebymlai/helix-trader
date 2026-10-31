@@ -14,19 +14,23 @@
 //! `handle_data`); no kind takes both paths. A live warmup's quotes and
 //! trades reach the set as registered, its depth and deltas through the
 //! warmup (`BookIndicator`, `Warmup::on_historical_book_depth` and
-//! `on_historical_book_deltas`). Bars built from a warmup's quotes,
-//! trades or source bars reach only the cache, not the indicators: the
-//! strategy's warmup hands them to `handle_bar` (`Warmup::on_historical`,
-//! the warmup a model strategy's `ModelHandle` builds).
+//! `on_historical_book_deltas`), its custom data too
+//! (`CustomDataIndicator`, `Warmup::on_historical_data`). Bars built from
+//! a warmup's quotes, trades or source bars reach only the cache, not the
+//! indicators: the strategy's warmup hands them to `handle_bar`
+//! (`Warmup::on_historical`, the warmup a model strategy's `ModelHandle`
+//! builds).
 //!
-//! A feature on the ticks of a futures root (`GC.GLBX`, see `rolls`) reads
-//! the contract standing for it: `register` sets it from the clock
-//! (`rolls::front`), and the set is registered with Nautilus for that
-//! contract's quotes and trades, its depth and deltas matched to it. The
-//! set's tick series (`ticks`) are what a `rolls::Roller` subscribes to,
-//! the model handle's; at the roller's transition, `roll` moves the root's
-//! features to the post contract, registered too, and resets them
-//! (Nautilus' `Indicator::reset`): their windows never mix two contracts,
+//! A feature on the ticks or custom data of a futures root (`GC.GLBX`, see
+//! `rolls`) reads the contract standing for it: `register` sets it from
+//! the clock (`rolls::front`), and the set is registered with Nautilus for
+//! that contract's quotes and trades, its depth, deltas and custom data
+//! (keyed by the contract's id) matched to it. The set's tick series
+//! (`ticks`), custom data among them, are what a `rolls::Roller`
+//! subscribes to and a live warmup requests, the model handle's; at the
+//! roller's transition, `roll` moves the root's features to the post
+//! contract, registered too, and resets them (Nautilus' `Indicator::reset`,
+//! a raw feature to no value): their windows never mix two contracts,
 //! which trade at different prices, and the set is not initialized until
 //! they refill, so decisions wait. Other instruments' features are
 //! untouched.
@@ -42,15 +46,15 @@
 //! The names and their order are fixed when the set is built; `values`
 //! snapshots the features in that order, once every one is initialized.
 //! A feature exposes its current value through `Feature`, which every
-//! Nautilus moving average has with no extra code. Custom data, which
-//! Nautilus' `Indicator` does not handle, feeds a raw feature: the value a
-//! function of the strategy reads from it.
+//! Nautilus moving average has with no extra code. Custom data of an
+//! instrument, which Nautilus' `Indicator` does not handle, feeds a raw
+//! feature: the value a function of the strategy reads from it.
 //!
 //! The set records, for each instrument, the time (`ts_init`) of the
 //! latest quote, trade, bar, depth or deltas a feature read
 //! (`last_update`), a root's under the root: a decision is fresh only if
 //! data of the traded instrument came since the previous one (`decide`).
-//! Custom data is of no instrument.
+//! Custom data is no update of its instrument.
 //!
 //! A set declares its warmup (`FeatureSetBuilder::warmup`), how much data
 //! its features read before a decision, such as the strategy's: a dataset
@@ -97,7 +101,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     rolls::{Transition, front},
-    strategy::{TickSeries, warmup::BookIndicator},
+    strategy::{
+        TickSeries,
+        warmup::{BookIndicator, CustomDataIndicator},
+    },
 };
 
 /// The names of a primary's side and probability, the last values of a
@@ -135,7 +142,8 @@ enum Slot {
     Bars(BarType, Box<dyn Feature>),
     Depth(Reading, Box<dyn Feature>),
     Deltas(Reading, Box<dyn Feature>),
-    Data(DataType, Read, Option<f64>),
+    /// The custom data of a type name, of the instrument read.
+    Data(Reading, String, Read, Option<f64>),
 }
 
 /// The instrument whose ticks a feature reads, a futures root or a plain
@@ -259,9 +267,9 @@ impl FeatureSet {
     }
 
     /// The tick series the features read as they are, quotes, trades,
-    /// depth and deltas, each of its declared instrument, a root or plain,
-    /// each once, in order: what a `rolls::Roller` subscribes to. Bars and
-    /// custom data are not among them.
+    /// depth, deltas and custom data, each of its declared instrument, a
+    /// root or plain, each once, in order: what a `rolls::Roller`
+    /// subscribes to and a live warmup requests. Bars are not among them.
     #[must_use]
     pub fn ticks(&self) -> Vec<TickSeries> {
         let mut ticks: Vec<TickSeries> = Vec::new();
@@ -290,8 +298,8 @@ impl FeatureSet {
     }
 
     /// Registers the set with `actor`'s Nautilus indicators, from its
-    /// `on_start`: each tick feature reads the contract standing for its
-    /// instrument now (`rolls::front`), and the set is registered for the
+    /// `on_start`: each tick or raw feature reads the contract standing for
+    /// its instrument now (`rolls::front`), and the set is registered for the
     /// quotes and trades of each such contract and the bars of each bar
     /// type a feature reads. Nautilus registers an indicator once per
     /// source, so a set registered again, on a restart, gets each update
@@ -299,7 +307,7 @@ impl FeatureSet {
     pub fn register<A: DataActor + DataActorNative>(self: &Rc<Self>, actor: &mut A) {
         let now = actor.clock().utc_now();
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Some((reading, _)) = slot.reading_mut() {
+            if let Some(reading) = slot.reading_mut() {
                 reading.contract = front(reading.instrument_id, now);
             }
         }
@@ -308,20 +316,15 @@ impl FeatureSet {
 
     /// Moves the features reading a root rolled by `roll` (those on its
     /// pre contract that are not the contract itself, read as a plain
-    /// instrument) to its post contract, registered with Nautilus, and
-    /// resets them (`Indicator::reset`): they are cold until they refill
-    /// on the post contract, so the set is not initialized and decisions
-    /// wait. The other features are untouched. From the roller's
-    /// transition (`rolls::Roller::on_time_event`).
+    /// instrument), tick and raw features alike, to its post contract,
+    /// registered with Nautilus, and resets them (`Indicator::reset`, a raw
+    /// feature to no value): they are cold until they refill on the post
+    /// contract, so the set is not initialized and decisions wait. The
+    /// other features are untouched. From the roller's transition
+    /// (`rolls::Roller::on_time_event`).
     pub fn roll<A: DataActorNative>(self: &Rc<Self>, actor: &mut A, roll: &Transition) {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Some((reading, feature)) = slot.reading_mut()
-                && reading.contract == roll.pre
-                && reading.instrument_id != roll.pre
-            {
-                reading.contract = roll.post;
-                feature.reset();
-            }
+            slot.roll(roll);
         }
         self.register_contracts(actor);
     }
@@ -342,17 +345,6 @@ impl FeatureSet {
                 }
                 Slot::Bars(bar_type, _) => core.register_indicator_for_bars(*bar_type, shared),
                 Slot::Depth(..) | Slot::Deltas(..) | Slot::Data(..) => {}
-            }
-        }
-    }
-
-    /// Feeds `data` to the raw features declared on its data type.
-    pub fn handle_data(&self, data: &CustomData) {
-        for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Data(data_type, read, value) = slot
-                && *data_type == data.data_type
-            {
-                *value = Some(read(data));
             }
         }
     }
@@ -389,6 +381,23 @@ impl BookIndicator for FeatureSet {
     }
 }
 
+/// The strategy's side of the set for custom data, which Nautilus routes to
+/// no indicator: the strategy forwards its live custom data, and its warmup
+/// that of its responses (`Warmup::feeding_custom_data`).
+impl CustomDataIndicator for FeatureSet {
+    /// Feeds `data` to the raw features declared on its data type.
+    fn handle_data(&self, data: &CustomData) {
+        for slot in self.slots.borrow_mut().iter_mut() {
+            if let Slot::Data(reading, type_name, read, value) = slot
+                && DataType::new(type_name, None, Some(reading.contract.to_string()))
+                    == data.data_type
+            {
+                *value = Some(read(data));
+            }
+        }
+    }
+}
+
 impl Slot {
     /// The feature's value, if it is initialized.
     fn value(&self) -> Option<f64> {
@@ -398,31 +407,62 @@ impl Slot {
             | Self::Bars(_, feature)
             | Self::Depth(_, feature)
             | Self::Deltas(_, feature) => feature.initialized().then(|| feature.value()),
-            Self::Data(_, _, value) => *value,
+            Self::Data(.., value) => *value,
         }
     }
 
-    /// What a tick feature reads, and the feature; none for bars and
-    /// custom data.
-    fn reading_mut(&mut self) -> Option<(&mut Reading, &mut Box<dyn Feature>)> {
+    /// What a tick feature or a raw feature reads; none for bars.
+    fn reading_mut(&mut self) -> Option<&mut Reading> {
         match self {
-            Self::Quotes(reading, feature)
-            | Self::Trades(reading, feature)
-            | Self::Depth(reading, feature)
-            | Self::Deltas(reading, feature) => Some((reading, feature)),
-            Self::Bars(..) | Self::Data(..) => None,
+            Self::Quotes(reading, _)
+            | Self::Trades(reading, _)
+            | Self::Depth(reading, _)
+            | Self::Deltas(reading, _)
+            | Self::Data(reading, ..) => Some(reading),
+            Self::Bars(..) => None,
         }
     }
 
-    /// The tick series a tick feature reads, of its declared instrument;
-    /// none for bars and custom data.
+    /// Moves the feature to `roll`'s post contract and resets it, if it
+    /// reads the root on the pre contract (see `FeatureSet::roll`).
+    fn roll(&mut self, roll: &Transition) {
+        let Some(reading) = self.reading_mut() else {
+            return;
+        };
+        if reading.contract == roll.pre && reading.instrument_id != roll.pre {
+            reading.contract = roll.post;
+            self.reset();
+        }
+    }
+
+    /// Makes the feature cold: an indicator reset (`Indicator::reset`), a
+    /// raw feature without a value.
+    fn reset(&mut self) {
+        match self {
+            Self::Quotes(_, feature)
+            | Self::Trades(_, feature)
+            | Self::Bars(_, feature)
+            | Self::Depth(_, feature)
+            | Self::Deltas(_, feature) => feature.reset(),
+            Self::Data(.., value) => *value = None,
+        }
+    }
+
+    /// The tick series a tick feature or a raw feature reads, of its
+    /// declared instrument; none for bars.
     fn tick_series(&self) -> Option<TickSeries> {
         let (data, reading) = match self {
             Self::Quotes(reading, _) => (NautilusDataType::QuoteTick, reading),
             Self::Trades(reading, _) => (NautilusDataType::TradeTick, reading),
             Self::Depth(reading, _) => (NautilusDataType::OrderBookDepth, reading),
             Self::Deltas(reading, _) => (NautilusDataType::OrderBookDelta, reading),
-            Self::Bars(..) | Self::Data(..) => return None,
+            Self::Data(reading, type_name, ..) => (
+                NautilusDataType::Custom {
+                    type_name: type_name.clone(),
+                },
+                reading,
+            ),
+            Self::Bars(..) => return None,
         };
         Some(TickSeries {
             data,
@@ -573,17 +613,26 @@ impl FeatureSetBuilder {
         )
     }
 
-    /// Declares a raw feature, named `name`, on the custom data of
-    /// `data_type`: its value is the last `read` of a data point,
-    /// initialized by the first.
+    /// Declares a raw feature, named `name`, on the custom data
+    /// `type_name` of `instrument_id` (see `strategy::TickSeries`): its
+    /// value is the last `read` of a data point, initialized by the first.
     #[must_use]
     pub fn data(
         self,
-        data_type: DataType,
+        type_name: &str,
+        instrument_id: InstrumentId,
         name: &str,
         read: impl Fn(&CustomData) -> f64 + 'static,
     ) -> Self {
-        self.declare(name, Slot::Data(data_type, Box::new(read), None))
+        self.declare(
+            name,
+            Slot::Data(
+                Reading::of(instrument_id),
+                type_name.to_string(),
+                Box::new(read),
+                None,
+            ),
+        )
     }
 
     /// Declares a rule primary's side and probability, `PRIMARY_FEATURES`,

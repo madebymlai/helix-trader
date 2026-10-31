@@ -226,7 +226,8 @@ impl Roller {
                     params,
                 ),
                 NautilusDataType::Custom { type_name } => {
-                    actor.subscribe_data(custom(type_name, contract), None, params);
+                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
+                    actor.subscribe_data(data_type, None, params);
                 }
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
@@ -263,7 +264,8 @@ impl Roller {
                     actor.unsubscribe_book_deltas(contract, None, None);
                 }
                 NautilusDataType::Custom { type_name } => {
-                    actor.unsubscribe_data(custom(type_name, contract), None, None);
+                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
+                    actor.unsubscribe_data(data_type, None, None);
                 }
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
@@ -277,12 +279,6 @@ impl Roller {
 #[must_use]
 pub fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
-}
-
-/// The data type of the custom data `type_name` of `contract`, keyed by
-/// its id (see `TickSeries`).
-fn custom(type_name: &str, contract: InstrumentId) -> DataType {
-    DataType::new(type_name, None, Some(contract.to_string()))
 }
 
 /// The name of the roll alert of `instrument_id`.

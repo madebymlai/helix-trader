@@ -275,8 +275,11 @@ deltas grouped into an event per `F_LAST` (`OrderBookDeltas`, in
 from the catalog by the backtest and added to the node's engine (see
 `src/backtest/README.md`, "Custom data"). The strategy subscribes to them
 itself, and live warms up on those its features read (a model
-strategy's, `Warmup::reading`); the cache keeps no more of them than
-Nautilus' default holds, the features reading them from the responses.
+strategy's, `Warmup::reading`), custom data with `request_data` naming
+the client `CATALOG`, which no node registers: Nautilus' data engine
+answers a request naming no registered client from the catalog alone
+(`warmup::CATALOG`). The cache keeps no more of them than Nautilus'
+default holds, the features reading them from the responses.
 Live sets up the clients of their instruments, as
 of every instrument of the requirements, but subscribes to none of them;
 live custom data reaches the strategy as it is published on the message
@@ -723,8 +726,9 @@ of its choosing (`model::features`, `model::decide`).
 - **Declaring.** `FeatureSet::builder()` takes each feature with its data
   kind and source and a name: `.quotes(instrument_id, name, indicator)`,
   `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
-  `.data(data_type, name, read)` for a raw feature of custom data, the last
-  value `read` from a data point. `.version(n)` sets the version of the
+  `.data(type_name, instrument_id, name, read)` for a raw feature of the
+  custom data `type_name` of an instrument (keyed by its id, see
+  `TickSeries`), the last value `read` from a data point. `.version(n)` sets the version of the
   strategy's feature code, in the fingerprint (0 if not given; see
   "Versions" for when to bump it);
   `.warmup(span)` declares how much data the features read before a
@@ -751,7 +755,9 @@ of its choosing (`model::features`, `model::decide`).
   request's response (a warmup's quotes), with no strategy code. Nautilus
   routes no depth, deltas or custom data to indicators: the strategy
   forwards them from `on_book_depth`, `on_book_deltas` and `on_data`
-  (`handle_depth`, `handle_deltas`, `handle_data`). Bars a warmup builds
+  (`handle_depth`, `handle_deltas`, `handle_data`), and the warmup those of
+  its responses from `on_historical_book_depth`, `on_historical_book_deltas`
+  and `on_historical_data`. Bars a warmup builds
   reach only the cache: a strategy hands those of `warmup::bars` to
   `handle_bar`. An update reaches only the features declared on its kind
   and source; an undeclared one is a no-op, never a panic of the
@@ -795,8 +801,10 @@ of its choosing (`model::features`, `model::decide`).
   decision on an event is fresh. The rule holds in every mode: a stale
   decision gives no row, no targets and no trade.
 - **Root ticks and the traded instrument.** A feature may read the
-  quotes, trades, depth or deltas of a futures root (`GC.GLBX`, in the
-  roll calendar, see `rolls/README.md`) rather than a dated contract. The
+  quotes, trades, depth, deltas or custom data of a futures root
+  (`GC.GLBX`, in the roll calendar, see `rolls/README.md`) rather than a
+  dated contract, a raw feature the custom data keyed by the contract's
+  id. The
   model handle owns a `rolls::Roller` built from the set's tick series
   (`FeatureSet::ticks`) and the traded instrument's quotes: its `start`
   subscribes a plain instrument once and a root on its front contract,
@@ -806,7 +814,8 @@ of its choosing (`model::features`, `model::decide`).
   `orders::on_time_event`, then to the handle, whose roller takes them
   first: at a roll it switches the subscriptions, and the root's features
   move to the post contract (`Transition::post`), registered there, and
-  are reset (Nautilus' `Indicator::reset`). Unadjusted ticks jump by the
+  are reset (Nautilus' `Indicator::reset`, a raw feature to no value).
+  Unadjusted ticks jump by the
   contract gap at a roll, so no window mixes two contracts: the set is
   not initialized, decisions wait on the strategy's
   `indicators_initialized` gate, and no row is made, until the root's
@@ -821,7 +830,9 @@ of its choosing (`model::features`, `model::decide`).
   decision after the warmup is warm. Nautilus hands the responses' quotes
   and trades to the features registered for the contract, and the
   warmup their depth and deltas (`Warmup::on_historical_book_depth`,
-  `on_historical_book_deltas`, in the live stream's `F_LAST` batches).
+  `on_historical_book_deltas`, in the live stream's `F_LAST` batches) and
+  custom data (`Warmup::on_historical_data`), which it requests from the
+  catalog alone.
   When no series of the strategy reads the
   traded instrument, as beside features on a root, the harness reads its
   quotes itself, for the decision's reference price, the venue's fills,

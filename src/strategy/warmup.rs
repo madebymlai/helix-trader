@@ -90,19 +90,26 @@
 //! in the batches the live stream carries (`batches`). Ticks arriving on
 //! the live stream while a venue's part of a response is pending reach the
 //! features before that part: Nautilus buffers no ticks for indicators as
-//! it aggregates bars across a request's end. Custom data is no tick
-//! feature's series: no warmup.
+//! it aggregates bars across a request's end.
+//!
+//! Custom data the features read (a raw feature's, a root's on its
+//! contract's data type) is requested in the same group over the same
+//! window with `request_data`, naming the client `CATALOG`, which no node
+//! registers: no data client serves custom data, and Nautilus answers the
+//! request from the catalog alone. Nautilus routes custom data to no
+//! indicator either, so the warmup hands the response's points to its
+//! custom data indicators (`CustomDataIndicator`), oldest first.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it. The
 //! functions are its parts: `start` from `on_start`, `bars` from
 //! `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
-//! `Warmup::on_historical_book_depth` and `on_historical_book_deltas` from
-//! the hooks of the same names, and `finished` from `on_data_response`,
-//! then, on bars on a root, `continuous_bars`; in a backtest or a dataset
-//! run `subscribe` from `on_start` alone.
+//! `Warmup::on_historical_book_depth`, `on_historical_book_deltas` and
+//! `on_historical_data` from the hooks of the same names, and `finished`
+//! from `on_data_response`, then, on bars on a root, `continuous_bars`; in
+//! a backtest or a dataset run `subscribe` from `on_start` alone.
 
-use std::{cell::Cell, collections::BTreeMap, fmt::Debug, rc::Rc};
+use std::{any::Any, cell::Cell, collections::BTreeMap, fmt::Debug, rc::Rc};
 
 use anyhow::{Context, bail, ensure};
 use jiff::{SignedDuration, Timestamp};
@@ -115,9 +122,12 @@ use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
-    data::{Bar, BarType, Data, NautilusDataType, OrderBookDelta, OrderBookDeltas, OrderBookDepth},
+    data::{
+        Bar, BarType, CustomData, Data, DataType, NautilusDataType, OrderBookDelta,
+        OrderBookDeltas, OrderBookDepth,
+    },
     enums::{AggregationSource, RecordFlag},
-    identifiers::Venue,
+    identifiers::{ClientId, Venue},
 };
 use serde_json::{Value, json};
 
@@ -125,6 +135,16 @@ use crate::{
     rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
     strategy::{DataRequirements, Source, TickSeries, bar_sources},
 };
+
+/// The data client a warmup's request of custom data names: no data client
+/// serves custom data, and Nautilus' data engine answers a request naming
+/// no registered client from its catalogs alone, planning no client leg
+/// for what they lack (`dispatch_date_range_request` in
+/// `data/src/engine/streaming.rs`: `if !has_client {
+/// missing_intervals.clear(); }`), and an empty response where they hold
+/// nothing. A live node registers its catalog (`live::node`); with none,
+/// the engine would send the request to the client and fail it.
+const CATALOG: &str = "CATALOG";
 
 /// What a warmup hands the book depth and deltas of its responses to,
 /// which Nautilus routes to no indicator (`ActorIndicator` reads quotes,
@@ -138,6 +158,13 @@ pub trait BookIndicator {
     fn handle_deltas(&self, deltas: &OrderBookDeltas);
 }
 
+/// What a warmup hands the custom data of its responses to, which Nautilus
+/// routes to no indicator: a model strategy's features.
+pub trait CustomDataIndicator {
+    /// Reads `data`, a point of the warmup, oldest first.
+    fn handle_data(&self, data: &CustomData);
+}
+
 /// A strategy's warmup, built from its data requirements for a live node
 /// (`live`) or a replay (`replayed`, a backtest or a dataset run): the one
 /// owner of the protocol above, so that a strategy holds one and its hooks
@@ -145,15 +172,16 @@ pub trait BookIndicator {
 /// strategy's own hooks, so a strategy calls `start` from `on_start`,
 /// `on_data_response` from `on_data_response`, `on_historical` from
 /// `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
-/// and `on_historical_book_depth` and `on_historical_book_deltas` from
-/// theirs.
+/// and `on_historical_book_depth`, `on_historical_book_deltas` and
+/// `on_historical_data` from theirs.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the barrier's
 /// ATR's) and of the tick series its features read (`reading`), and
 /// subscribes to the bars from the warmup's end; the bars of each response
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest
-/// first, its depth and deltas to its book indicators (`feeding_books`).
+/// first, its depth and deltas to its book indicators (`feeding_books`),
+/// its custom data to its custom data indicators (`feeding_custom_data`).
 /// On a replay `start` subscribes to the strategy's bar types alone: the
 /// harness subscribes to its own.
 /// The strategies read no bars on a root, so a warmup has no continuous
@@ -173,6 +201,8 @@ pub struct Warmup {
     indicators: Vec<SharedActorIndicator>,
     /// What the warmup's book depth and deltas are handed to.
     books: Vec<Rc<dyn BookIndicator>>,
+    /// What the warmup's custom data is handed to.
+    custom_data: Vec<Rc<dyn CustomDataIndicator>>,
     /// The request group of the last live start.
     group: Cell<UUID4>,
 }
@@ -210,6 +240,7 @@ impl Warmup {
             ticks: Vec::new(),
             indicators: Vec::new(),
             books: Vec::new(),
+            custom_data: Vec::new(),
             group: Cell::new(UUID4::new()),
         }
     }
@@ -235,12 +266,13 @@ impl Warmup {
     }
 
     /// The warmup requesting the history of `ticks` too, quotes, trades,
-    /// book depth or deltas of roots or plain instruments, each on the
-    /// contract standing for its instrument at the start (`rolls::front`):
-    /// the series a strategy's features read, which its roller subscribes
-    /// to from the warmup's end. Quotes and trades reach the indicators
-    /// Nautilus has registered for them; depth and deltas reach those
-    /// `feeding_books` names.
+    /// book depth, deltas or custom data of roots or plain instruments,
+    /// each on the contract standing for its instrument at the start
+    /// (`rolls::front`): the series a strategy's features read, which its
+    /// roller subscribes to from the warmup's end. Quotes and trades reach
+    /// the indicators Nautilus has registered for them; depth and deltas
+    /// reach those `feeding_books` names, custom data, requested from the
+    /// catalog alone (see `CATALOG`), those `feeding_custom_data` names.
     #[must_use]
     pub fn reading(mut self, ticks: Vec<TickSeries>) -> Self {
         self.ticks = ticks;
@@ -252,6 +284,14 @@ impl Warmup {
     #[must_use]
     pub fn feeding_books(mut self, books: Rc<dyn BookIndicator>) -> Self {
         self.books.push(books);
+        self
+    }
+
+    /// The warmup handing the custom data of its responses to `custom_data`
+    /// too.
+    #[must_use]
+    pub fn feeding_custom_data(mut self, custom_data: Rc<dyn CustomDataIndicator>) -> Self {
+        self.custom_data.push(custom_data);
         self
     }
 
@@ -345,6 +385,22 @@ impl Warmup {
         }
     }
 
+    /// Hands the custom data of `response`, a response to the warmup's
+    /// request, to the custom data indicators it feeds, oldest first, from
+    /// the actor's `on_historical_data`. Nautilus answers `request_data`
+    /// with a batch (`Vec<CustomData>`); any other payload is no response
+    /// of the warmup's.
+    pub fn on_historical_data(&self, response: &dyn Any) {
+        let Some(data) = response.downcast_ref::<Vec<CustomData>>() else {
+            return;
+        };
+        for point in data {
+            for custom_data in &self.custom_data {
+                custom_data.handle_data(point);
+            }
+        }
+    }
+
     /// The cache config of a live node running the warmup: sized for the
     /// warmup of every bar type it builds (see `cache_config`).
     ///
@@ -383,6 +439,7 @@ impl Debug for Warmup {
             .field("ticks", &self.ticks)
             .field("indicators", &self.indicators.len())
             .field("books", &self.books.len())
+            .field("custom_data", &self.custom_data.len())
             .field("group", &self.group)
             .finish()
     }
@@ -398,12 +455,14 @@ impl Debug for Warmup {
 /// type, the trades of the instrument of LAST bars, the quotes of the
 /// instrument of BID, ASK and MID bars; each tick series is requested on
 /// the contract standing for its instrument now, once with the bars built
-/// from it if any. The warmup of each request arrives in
-/// `on_historical_bars`, `on_historical_trades`, `on_historical_quotes`,
-/// `on_historical_book_depth` or `on_historical_book_deltas`; the end of
-/// the group in `on_data_response`, where `finished` tells it. `group` is
-/// the caller's, stored before the call: a group whose requests are all
-/// answered at once ends before this returns. No bar types and no ticks
+/// from it if any, custom data from the catalog alone (see `CATALOG`). The
+/// warmup of each request arrives in `on_historical_bars`,
+/// `on_historical_trades`, `on_historical_quotes`,
+/// `on_historical_book_depth`, `on_historical_book_deltas` or
+/// `on_historical_data`; the end of the group in `on_data_response`, where
+/// `finished` tells it. `group` is the caller's, stored before the call: a
+/// group whose requests are all answered at once ends before this returns.
+/// No bar types and no ticks
 /// make no request and no group, which `DataActor::request_group` refuses
 /// empty.
 ///
@@ -498,6 +557,16 @@ where
                         built.iter(),
                         [("book_type".to_string(), json!(DELTAS_BOOK_TYPE.to_string()))],
                     )),
+                )?,
+                // From the catalog alone (see `CATALOG`), with no params:
+                // no client answers to write back, no bars built from it.
+                NautilusDataType::Custom { type_name } => actor.request_data(
+                    DataType::new(&type_name, None, Some(tick.instrument_id.to_string())),
+                    ClientId::new(CATALOG),
+                    Some(start),
+                    Some(now),
+                    None,
+                    None,
                 )?,
                 data => unreachable!("{data} is not read by a tick feature"),
             },
@@ -831,15 +900,23 @@ fn warmup_bars(bar_type: &BarType, warmup: SignedDuration) -> anyhow::Result<usi
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-    use nautilus_common::actor::indicators::ActorIndicator;
+    use nautilus_common::{
+        actor::indicators::ActorIndicator,
+        cache::Cache,
+        clock::VirtualClock,
+        messages::data::{DataResponse, RequestCommand, RequestCustomData},
+        msgbus::{self, MessageBus, TypedHandler},
+    };
+    use nautilus_data::engine::DataEngine;
     use nautilus_model::{
         data::{BookOrder, QuoteTick, TradeTick, stubs::stub_depth10},
         enums::{BookAction, OrderSide, RecordFlag},
-        identifiers::InstrumentId,
+        identifiers::{InstrumentId, TraderId},
         types::{Price, Quantity},
     };
+    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
     use super::*;
     use crate::strategy::TickSeries;
@@ -1108,6 +1185,98 @@ mod tests {
         assert_eq!(built_from(&cached, trade.into()), [hour_last]);
         assert_eq!(built_from(&cached, quote.into()), [hour_mid]);
         assert_eq!(built_from(&cached, minute.into()), [composite]);
+    }
+
+    /// Custom data of the tests: an imbalance of a book.
+    #[nautilus_serialization::arrow_custom_data]
+    #[nautilus_model::custom_data]
+    pub struct Imbalance {
+        pub value: f64,
+        pub ts_event: UnixNanos,
+        pub ts_init: UnixNanos,
+    }
+
+    /// No data client serves custom data: Nautilus' data engine, with a
+    /// catalog and no data client, answers a request of it naming
+    /// `CATALOG` from the catalog alone, with the points in its window,
+    /// and fails none of it.
+    #[test]
+    fn a_custom_data_request_naming_the_catalog_is_answered_from_the_catalog_alone() {
+        MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
+            .register_message_bus();
+        nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
+        let at = |time: &str| -> Timestamp { format!("2026-08-10T{time}Z").parse().unwrap() };
+        let data_type = DataType::new("Imbalance", None, Some("GCZ6.GLBX".to_string()));
+        let points: Vec<CustomData> = [("13:00:00", 0.5), ("13:45:00", -0.25), ("14:15:00", 0.75)]
+            .map(|(time, value)| {
+                let ts = UnixNanos::from(at(time));
+                CustomData::new(Arc::new(Imbalance::new(value, ts, ts)), data_type.clone())
+            })
+            .to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        catalog
+            .write_custom_data_batch(
+                points,
+                Some(at("12:00:00").into()),
+                Some(at("14:30:00").into()),
+                None,
+            )
+            .unwrap();
+        let mut clock = VirtualClock::new();
+        clock.advance_time(at("14:30:00").into(), true);
+        let mut engine = DataEngine::new(
+            Rc::new(RefCell::new(clock)),
+            Rc::new(RefCell::new(Cache::default())),
+            None,
+        );
+        engine.register_catalog(Box::new(catalog), None);
+        let request_id = UUID4::new();
+        let answers: Rc<RefCell<Vec<DataResponseEnvelope>>> = Rc::default();
+        let saved = Rc::clone(&answers);
+        msgbus::register_response_handler(
+            &request_id,
+            TypedHandler::from(move |envelope: &DataResponseEnvelope| {
+                saved.borrow_mut().push(envelope.clone());
+            }),
+        );
+
+        engine
+            .execute_request(RequestCommand::Data(RequestCustomData::new(
+                ClientId::new(CATALOG),
+                data_type,
+                Some(at("13:30:00")),
+                Some(at("14:30:00")),
+                None,
+                request_id,
+                at("14:30:00").into(),
+                None,
+            )))
+            .unwrap();
+
+        let answers = answers.borrow();
+        let [answer] = answers.as_slice() else {
+            panic!("{} answers", answers.len())
+        };
+        assert_eq!(answer.failure_reason(), None);
+        let Some(DataResponse::Data(response)) = answer.response() else {
+            panic!("{answer:?}")
+        };
+        let values: Vec<f64> = response
+            .data
+            .downcast_ref::<Vec<CustomData>>()
+            .unwrap()
+            .iter()
+            .map(|point| {
+                point
+                    .data
+                    .as_any()
+                    .downcast_ref::<Imbalance>()
+                    .unwrap()
+                    .value
+            })
+            .collect();
+        assert_eq!(values, [-0.25, 0.75]);
     }
 
     #[test]

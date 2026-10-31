@@ -39,7 +39,7 @@ use nautilus_model::{
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
 };
 use nautilus_trading::{nautilus_strategy, strategy::StrategyCore};
-use std::{path::Path, rc::Rc};
+use std::{any::Any, path::Path, rc::Rc};
 
 use crate::{
     model::{
@@ -222,8 +222,8 @@ impl DataActor for ModelEma {
         self.model.warmup().on_historical(self, bars)
     }
 
-    /// Nautilus routes no book data to indicators: the warmup hands it to
-    /// the features.
+    /// Nautilus routes no book or custom data to indicators: the warmup
+    /// hands it to the features.
     fn on_historical_book_depth(&mut self, depths: &[OrderBookDepth]) -> anyhow::Result<()> {
         self.model.warmup().on_historical_book_depth(depths);
         Ok(())
@@ -231,6 +231,11 @@ impl DataActor for ModelEma {
 
     fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
         self.model.warmup().on_historical_book_deltas(deltas);
+        Ok(())
+    }
+
+    fn on_historical_data(&mut self, data: &dyn Any) -> anyhow::Result<()> {
+        self.model.warmup().on_historical_data(data);
         Ok(())
     }
 
