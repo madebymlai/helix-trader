@@ -144,7 +144,7 @@ impl Recording {
 ///
 /// Returns an error if the staged files cannot be promoted, the catalog
 /// already holding rows over them, or the writer cannot be reopened.
-pub fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
+pub(super) fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
     let kernel = node.kernel_mut();
     kernel
         .close_streaming_writer()
