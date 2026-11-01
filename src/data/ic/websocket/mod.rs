@@ -29,11 +29,19 @@
 //! every execution event and order error of the account, comes on the
 //! trade events (`trade_events`), with its `clientMsgId`.
 //!
-//! Historical requests go through the transport's rate limiter, keyed
-//! `HISTORICAL_KEY`: one every 250 ms, without burst, so fewer than
+//! Historical requests wait for their slot of Nautilus' `RateLimiter`,
+//! keyed `HISTORICAL_KEY`: one every 250 ms, without burst, so fewer than
 //! cTrader's 5 in any second, even after an idle spell (a burst of 5 then
 //! the refill could send 9 within one second). One every 200 ms got
-//! `BLOCKED_PAYLOAD_TYPE` ("You are being rate limited") on the demo.
+//! `BLOCKED_PAYLOAD_TYPE` ("You are being rate limited") on the demo. The
+//! caller waits, before its command goes to the handler, as Nautilus'
+//! `HttpClient` does: on the transport's keyed quota, the handler's loop
+//! would wait too, and hold the trade requests, the answers and the
+//! heartbeat. A slot counts only while the session is authenticated
+//! (`AuthTracker`, which the handler invalidates while it authenticates the
+//! account again on the same connection): the handler holds the requests
+//! meanwhile and sends them together once authenticated, faster than the
+//! limit.
 //!
 //! The transport's own heartbeat is off: cTrader counts its
 //! `ProtoHeartbeatEvent`, which the transport cannot send (it sends Ping
@@ -48,7 +56,7 @@ use nautilus_common::live::dst::time;
 use nautilus_live::task::{TaskJoinOutcome, TaskSlot, finish_task};
 use nautilus_network::{
     Message,
-    ratelimiter::quota::Quota,
+    ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota},
     websocket::{
         AuthTracker, MessageHandler, SubscriptionState, WebSocketClient, WebSocketConfig,
         split_topic,
@@ -61,7 +69,8 @@ use self::handler::{HandlerCommand, IcWsHandler, LOCK_RETRY};
 use super::{
     config::IcCredential,
     messages::{
-        IcError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent, open,
+        IcError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent,
+        is_historical, open,
     },
 };
 
@@ -157,6 +166,10 @@ pub(super) struct IcWebSocketClient {
     handler: TaskSlot<()>,
     /// The spot subscriptions, which the handler marks, confirms and fails.
     subscriptions: SubscriptionState,
+    /// The session's authentication, which the handler tracks.
+    auth: AuthTracker,
+    /// The slots of the historical requests.
+    historical: RateLimiter<Ustr, MonotonicClock>,
 }
 
 impl std::fmt::Debug for IcWebSocketClient {
@@ -203,10 +216,11 @@ impl IcWebSocketClient {
             .context("the cTrader WebSocket config")?;
         let historical = Quota::with_period(HISTORICAL_PERIOD)
             .context("the historical request period is zero")?;
+        let historical =
+            RateLimiter::new_with_quota(None, vec![(Ustr::from(HISTORICAL_KEY), historical)]);
         let client = WebSocketClient::builder()
             .config(config)
             .message_handler(message_handler)
-            .keyed_quotas(vec![(HISTORICAL_KEY.to_owned(), historical)])
             .connect()
             .await
             .with_context(|| format!("connecting to cTrader at {url}"))?;
@@ -244,6 +258,8 @@ impl IcWebSocketClient {
             cmd_tx,
             handler: handler_task,
             subscriptions,
+            auth: auth.clone(),
+            historical,
         };
         match auth
             .wait_for_result::<String>(AUTH_TIMEOUT, authenticated)
@@ -257,7 +273,8 @@ impl IcWebSocketClient {
         }
     }
 
-    /// Sends `request` and awaits its response.
+    /// Sends `request`, a historical one once its slot comes, and awaits
+    /// its response.
     ///
     /// # Errors
     ///
@@ -268,19 +285,37 @@ impl IcWebSocketClient {
         &self,
         request: &Req,
     ) -> Result<Res, IcError> {
-        let (reply, response) = oneshot::channel();
-        self.cmd_tx
-            .send(HandlerCommand::Request {
-                payload_type: Req::TYPE,
-                payload: request.encode_to_vec(),
-                reply,
-            })
-            .map_err(|_| IcError::ConnectionLost)?;
-        let envelope = time::timeout(REQUEST_TIMEOUT, response)
+        let answered = async {
+            if is_historical(Req::TYPE) {
+                self.historical_slot().await;
+            }
+            let (reply, response) = oneshot::channel();
+            self.cmd_tx
+                .send(HandlerCommand::Request {
+                    payload_type: Req::TYPE,
+                    payload: request.encode_to_vec(),
+                    reply,
+                })
+                .map_err(|_| IcError::ConnectionLost)?;
+            response.await.map_err(|_| IcError::ConnectionLost)?
+        };
+        let envelope = time::timeout(REQUEST_TIMEOUT, answered)
             .await
-            .map_err(|_| IcError::Timeout)?
-            .map_err(|_| IcError::ConnectionLost)??;
+            .map_err(|_| IcError::Timeout)??;
         open(&envelope)
+    }
+
+    /// Waits for a slot of the historical requests taken while the session
+    /// is authenticated; one taken while it authenticates again is spent.
+    /// A failed session takes none: the handler answers with its failure.
+    async fn historical_slot(&self) {
+        let keys = [Ustr::from(HISTORICAL_KEY)];
+        while self.auth.wait_for_authenticated(REQUEST_TIMEOUT).await {
+            self.historical.await_keys_ready(Some(&keys)).await;
+            if self.auth.is_authenticated() {
+                return;
+            }
+        }
     }
 
     /// Subscribes to the spot events of `symbol_id`, with their
@@ -789,6 +824,88 @@ mod tests {
             start.elapsed() < Duration::from_millis(900),
             "{:?}",
             start.elapsed()
+        );
+        client.disconnect().await;
+    }
+
+    /// A renewal holds the tick requests asked meanwhile: once the account
+    /// is authenticated again, they still reach cTrader at most five a
+    /// second.
+    #[tokio::test]
+    async fn tick_requests_held_by_a_renewal_reach_ctrader_at_most_five_a_second() {
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&arrivals);
+        let peer = token_peer(TokenVenue::new(), move |_, request| {
+            log.lock().unwrap().push(std::time::Instant::now());
+            vec![reply(request, &ProtoOaGetTickDataRes::default())]
+        });
+        let (url, _) = testing::start(slow_renewal(Duration::from_millis(1100), peer));
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let request = tick_request();
+
+        let answers = {
+            let mut ticks = std::pin::pin!(futures::future::join_all(
+                (0..7).map(|_| client.request::<_, ProtoOaGetTickDataRes>(&request)),
+            ));
+            // The tick requests are asked first.
+            assert!(futures::poll!(ticks.as_mut()).is_pending());
+            client.renew_token();
+            ticks.await
+        };
+
+        assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+        let arrivals = arrivals.lock().unwrap().clone();
+        assert_eq!(arrivals.len(), 7);
+        for six in arrivals.windows(6) {
+            let span = six[5] - six[0];
+            assert!(
+                span >= Duration::from_millis(900),
+                "6 tick requests within {span:?}"
+            );
+        }
+        client.disconnect().await;
+    }
+
+    /// A tick request waiting for its slot holds back no other frame: a
+    /// trade request asked meanwhile reaches cTrader before it.
+    #[tokio::test]
+    async fn a_trade_request_does_not_wait_behind_a_tick_request_held_at_the_limit() {
+        use crate::data::ic::messages::ProtoOaNewOrderReq;
+        let (url, received) = testing::start(|_, request| {
+            if let Some(actions) = accept_auth(request) {
+                return actions;
+            }
+            if request.payload_type == ProtoOaGetTickDataReq::TYPE {
+                return vec![reply(request, &ProtoOaGetTickDataRes::default())];
+            }
+            Vec::new()
+        });
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let request = tick_request();
+        let order = ProtoOaNewOrderReq {
+            ctid_trader_account_id: ACCOUNT_ID,
+            volume: 100,
+            ..Default::default()
+        };
+
+        let (sent, answers) = {
+            let mut ticks = std::pin::pin!(futures::future::join_all(
+                (0..2).map(|_| client.request::<_, ProtoOaGetTickDataRes>(&request)),
+            ));
+            // The tick requests are asked first.
+            assert!(futures::poll!(ticks.as_mut()).is_pending());
+            let sent = client.trade(&order, "N:O-1".to_owned()).await;
+            (sent, ticks.await)
+        };
+
+        assert_eq!(sent, Ok(Ok(())));
+        assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+        let tick = ProtoOaGetTickDataReq::TYPE;
+        assert_eq!(
+            payload_types(&received, 0)[2..],
+            [tick, ProtoOaNewOrderReq::TYPE, tick]
         );
         client.disconnect().await;
     }
