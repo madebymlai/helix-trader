@@ -28,7 +28,9 @@
 //!
 //! `ModelStrategy` is what a strategy trading on a model gives the
 //! harness: the binary's backtest, live, train and dataset runs are
-//! generic over it.
+//! generic over it. Its part of its config builds its features
+//! (`ModelPart`), and the harness answers from them what it reads
+//! (`reads`), which the load checks `[data]` against.
 
 pub mod calibration;
 pub mod config;
@@ -50,8 +52,7 @@ pub mod walk;
 
 use std::{fmt::Debug, path::Path, rc::Rc};
 
-use anyhow::ensure;
-use nautilus_common::{actor::DataActorNative, component::Component};
+use nautilus_common::{actor::DataActorNative, component::Component, config::ConfigResult};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use self::{
@@ -63,26 +64,79 @@ use self::{
 };
 use crate::strategy::{Part, Series, StandardConfig, catalog_series, warmup::Warmup};
 
-/// A strategy trading on a model, as the binary runs it: built of its
-/// config in a `Mode`, deciding on the features of that config, its
-/// dataset, its training and its walk forward built of them and of the
-/// config's model (`StandardConfig::model`). A Nautilus strategy, as a
-/// node runs it.
+/// The part of a strategy trading on a model (`Part::TAKES_MODEL`): the
+/// features its model decides on, built of its config. The load and every
+/// run build them here, so the features checked against `[data]` are the
+/// features run: its answer of what the strategy reads is the harness'
+/// (`reads`), and its strategy decides on them (`ModelStrategy`).
+pub trait ModelPart: Part {
+    /// The features its model decides on, as its code builds them of
+    /// `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the strategy's own errors building them of `config`, each
+    /// under its field.
+    fn features(config: &StandardConfig<Self>) -> ConfigResult<Rc<FeatureSet>>;
+}
+
+/// What a strategy trading on a model reads (`Part::reads`, its part's
+/// answer): the series its features read (`ModelPart::features`), their
+/// bar types (`FeatureSet::bar_types`) and their tick series
+/// (`FeatureSet::ticks`), then each series `[data]` lists that the
+/// barrier's ATR reads, its bars or the ticks they are built from
+/// (`catalog_series`). The ATR is built of what the strategy reads of the
+/// traded instrument (`TargetsConfig::atr_bars`), so it reads a series of
+/// `[data]` if one serves it, and needs none listed.
 ///
-/// The features are built of the config once on each of those paths
-/// (`features`), and checked against its `[data]` there: a run starts only
-/// if they read every series `[data]` lists but those the barrier's ATR
-/// reads, and none it does not list.
+/// # Errors
+///
+/// Returns the part's errors building the features.
+pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Series>> {
+    let features = P::features(config)?;
+    let mut read: Vec<Series> = features
+        .bar_types()
+        .into_iter()
+        .map(Series::Bars)
+        .chain(features.ticks().into_iter().map(Series::Ticks))
+        .collect();
+    let model = config.model();
+    // An ATR without bars is the targets' violation (`ModelConfig::validate`).
+    if let Ok(Some(atr)) = model
+        .targets
+        .atr_bars(model.decision, &config.data_requirements())
+    {
+        let built_of = catalog_series(&[atr.bar_type]);
+        let atr_reads = |series: &Series| match series {
+            Series::Bars(bar_type) => *bar_type == atr.bar_type,
+            Series::Ticks(ticks) => built_of.contains(&ticks.catalog_series()),
+        };
+        let by_atr: Vec<Series> = config
+            .data
+            .series
+            .iter()
+            .filter(|series| atr_reads(series) && !read.contains(series))
+            .cloned()
+            .collect();
+        read.extend(by_atr);
+    }
+    Ok(read)
+}
+
+/// A strategy trading on a model, as the binary runs it: built of its
+/// config in a `Mode`, deciding on the features its part builds of that
+/// config (`ModelPart::features`), its dataset, its training and its walk
+/// forward built of them and of the config's model
+/// (`StandardConfig::model`). A Nautilus strategy, as a node runs it.
 pub trait ModelStrategy:
     Strategy + StrategyNative + DataActorNative + Component + Debug + Sized + 'static
 {
-    /// Its own part of its config, which trades on a model
-    /// (`Part::TAKES_MODEL`).
-    type Params: Part;
+    /// Its own part of its config, which trades on a model and builds its
+    /// features.
+    type Params: ModelPart;
 
-    /// The strategy of `config`, deciding on `features`, those of `config`
-    /// checked against its `[data]` (`features`), its model handle in
-    /// `mode`.
+    /// The strategy of `config`, deciding on `features`, those its part
+    /// builds of `config`, its model handle in `mode`.
     ///
     /// # Errors
     ///
@@ -98,37 +152,15 @@ pub trait ModelStrategy:
     /// it.
     fn warmup(&self) -> Rc<Warmup>;
 
-    /// The features its model decides on, as its code builds them of
-    /// `config`; `features` checks them.
+    /// The strategy of `config`, deciding on the features its part builds
+    /// (`ModelPart::features`), its model handle in `mode`.
     ///
     /// # Errors
     ///
-    /// Returns an error if they cannot be built of `config`.
-    fn build_features(config: &StandardConfig<Self::Params>) -> anyhow::Result<Rc<FeatureSet>>;
-
-    /// The strategy of `config`, deciding on its features (`features`),
-    /// its model handle in `mode`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error as `features` and `with_features` do.
+    /// Returns an error as `ModelPart::features` and `with_features` do.
     fn new(config: StandardConfig<Self::Params>, mode: Mode) -> anyhow::Result<Self> {
-        let features = Self::features(&config)?;
+        let features = Self::Params::features(&config)?;
         Self::with_features(config, features, mode)
-    }
-
-    /// The features its model decides on, of `config` (`build_features`),
-    /// checked against `[data]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error as `build_features` does, or naming each series
-    /// the features read that `[data]` does not list, and each `[data]`
-    /// lists that neither they nor the barrier's ATR read.
-    fn features(config: &StandardConfig<Self::Params>) -> anyhow::Result<Rc<FeatureSet>> {
-        let features = Self::build_features(config)?;
-        check_series(&features, config)?;
-        Ok(features)
     }
 
     /// The dataset of the strategy `config` describes, run on `venue`, in
@@ -137,13 +169,13 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `features` and `Dataset::new` do.
+    /// Returns an error as `ModelPart::features` and `Dataset::new` do.
     fn dataset(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Dataset> {
-        let (features, model) = (Self::features(config)?, config.model());
+        let (features, model) = (Self::Params::features(config)?, config.model());
         Dataset::new(
             catalog,
             config.strategy_id(),
@@ -161,14 +193,14 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `features` and `Training::new` do.
+    /// Returns an error as `ModelPart::features` and `Training::new` do.
     fn training(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         models: &Path,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Training> {
-        let features = Self::features(config)?;
+        let features = Self::Params::features(config)?;
         Training::new(
             catalog,
             models,
@@ -187,14 +219,14 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `features` and `WalkForward::new` do.
+    /// Returns an error as `ModelPart::features` and `WalkForward::new` do.
     fn walk_forward(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         models: &Path,
         venue: &DatasetVenue,
     ) -> anyhow::Result<WalkForward> {
-        let features = Self::features(config)?;
+        let features = Self::Params::features(config)?;
         WalkForward::new(
             catalog,
             models,
@@ -207,99 +239,18 @@ pub trait ModelStrategy:
     }
 }
 
-/// Checks that `features`, of `config`, read the series of its `[data]`:
-/// each it lists, but one the barrier's ATR reads (its bars, or the ticks
-/// they are built from, `catalog_series`), and none it does not list.
-///
-/// # Errors
-///
-/// Returns an error naming each series read and not listed, then each
-/// listed and read by neither.
-fn check_series<P: Part>(features: &FeatureSet, config: &StandardConfig<P>) -> anyhow::Result<()> {
-    let read: Vec<Series> = features
-        .bar_types()
-        .into_iter()
-        .map(Series::Bars)
-        .chain(features.ticks().into_iter().map(Series::Ticks))
-        .collect();
-    let model = config.model();
-    let atr = model
-        .targets
-        .atr_bars(model.decision, &config.data_requirements())?;
-    let atr_reads = |series: &Series| {
-        atr.as_ref().is_some_and(|atr| match series {
-            Series::Bars(bar_type) => *bar_type == atr.bar_type,
-            Series::Ticks(ticks) => {
-                catalog_series(&[atr.bar_type]).contains(&ticks.catalog_series())
-            }
-        })
-    };
-    let listed = &config.data.series;
-    let unlisted = named(read.iter().filter(|series| !listed.contains(series)));
-    let unread = named(
-        listed
-            .iter()
-            .filter(|series| !read.contains(series) && !atr_reads(series)),
-    );
-    let mismatches: Vec<String> = [
-        unlisted
-            .map(|series| format!("the features read {series}, which [data] series does not list")),
-        unread.map(|series| {
-            format!(
-                "[data] series lists {series}, which neither the features nor the barrier's ATR \
-                 read"
-            )
-        }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    ensure!(
-        mismatches.is_empty(),
-        "the series of [data] are not those the features read: {}",
-        mismatches.join("; ")
-    );
-    Ok(())
-}
-
-/// `series` named in a list, if any.
-fn named<'a>(series: impl Iterator<Item = &'a Series>) -> Option<String> {
-    let names: Vec<String> = series.map(ToString::to_string).collect();
-    (!names.is_empty()).then(|| names.join(", "))
-}
-
 #[cfg(test)]
 mod tests {
-    use nautilus_common::actor::DataActor;
+    use nautilus_common::config::ConfigError;
     use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::{
-        data::NautilusDataType, enums::PriceType, identifiers::StrategyId, types::Money,
-    };
-    use nautilus_trading::{
-        nautilus_strategy,
-        strategy::{StrategyConfig, StrategyCore},
-    };
-    use rust_decimal::Decimal;
+    use nautilus_model::{data::NautilusDataType, enums::PriceType, identifiers::StrategyId};
+    use nautilus_trading::strategy::StrategyConfig;
     use serde::Deserialize;
 
     use super::*;
-    use crate::{
-        model::{dataset::Commission, handle::SettledRows},
-        strategy::Series,
-    };
 
-    /// A strategy trading on a model whose features read the series its
-    /// own `features` lists, an average of each.
-    #[derive(Debug)]
-    struct Probe {
-        core: StrategyCore,
-        warmup: Rc<Warmup>,
-    }
-
-    nautilus_strategy!(Probe);
-
-    impl DataActor for Probe {}
-
+    /// The part of a strategy trading on a model whose features read the
+    /// series its own `features` lists, an average of each.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProbeParams {
@@ -316,28 +267,14 @@ mod tests {
                 ..Default::default()
             }
         }
+
+        fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
+            reads(config)
+        }
     }
 
-    impl ModelStrategy for Probe {
-        type Params = ProbeParams;
-
-        fn with_features(
-            config: StandardConfig<ProbeParams>,
-            _features: Rc<FeatureSet>,
-            _mode: Mode,
-        ) -> anyhow::Result<Self> {
-            let warmup = Rc::new(Warmup::replayed(&config.data_requirements()));
-            Ok(Self {
-                core: StrategyCore::new_checked(config.base)?,
-                warmup,
-            })
-        }
-
-        fn warmup(&self) -> Rc<Warmup> {
-            Rc::clone(&self.warmup)
-        }
-
-        fn build_features(config: &StandardConfig<ProbeParams>) -> anyhow::Result<Rc<FeatureSet>> {
+    impl ModelPart for ProbeParams {
+        fn features(config: &StandardConfig<Self>) -> ConfigResult<Rc<FeatureSet>> {
             let average = || SimpleMovingAverage::new(2, Some(PriceType::Mid));
             let builder = config.own.features.iter().enumerate().fold(
                 FeatureSet::builder(),
@@ -360,7 +297,9 @@ mod tests {
                     }
                 },
             );
-            builder.build()
+            builder
+                .build()
+                .map_err(|e| ConfigError::invalid_value("features", format!("{e:#}")))
         }
     }
 
@@ -368,8 +307,12 @@ mod tests {
     const GC_TRADES: &str = r#"{ data = "trades", instrument_id = "GC.GLBX" }"#;
 
     /// The probe trading gold, its features reading `features`, its
-    /// `[data]` listing `series`, deciding hourly on the `targets`.
-    fn config(features: &[&str], series: &[&str], targets: &str) -> StandardConfig<ProbeParams> {
+    /// `[data]` listing `series`, deciding hourly on the `targets`, loaded.
+    fn load(
+        features: &[&str],
+        series: &[&str],
+        targets: &str,
+    ) -> anyhow::Result<StandardConfig<ProbeParams>> {
         let label = if targets.contains("barrier") {
             "barrier"
         } else {
@@ -401,7 +344,6 @@ mod tests {
             features.join(", "),
             series.join(", "),
         ))
-        .unwrap()
     }
 
     const HORIZON: &str = r#"{ horizon = "30m" }"#;
@@ -409,57 +351,93 @@ mod tests {
     const BARRIER: &str =
         r#"{ barrier = { take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" } }"#;
 
-    /// The message of the error refusing the features of `config`.
-    fn refused(config: &StandardConfig<ProbeParams>) -> String {
-        format!("{:#}", Probe::features(config).unwrap_err())
+    /// Each config error refusing the probe's config of `features`,
+    /// `series` and `targets` (see `load`): its field and its message.
+    fn refusals(features: &[&str], series: &[&str], targets: &str) -> Vec<(String, String)> {
+        let err = load(features, series, targets).unwrap_err();
+        let errors = match err.downcast_ref::<ConfigError>() {
+            Some(ConfigError::Multiple { errors }) => errors.clone(),
+            Some(err) => vec![err.clone()],
+            None => panic!("not a config error: {err}"),
+        };
+        errors
+            .into_iter()
+            .map(|err| match &err {
+                ConfigError::InvalidValue { field, .. } | ConfigError::Duplicate { field, .. } => {
+                    (field.clone(), err.to_string())
+                }
+                err => panic!("unexpected config error {err:?}"),
+            })
+            .collect()
     }
 
     #[test]
-    fn features_reading_every_series_of_data_and_no_other_are_built() {
-        let config = config(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], HORIZON);
-
-        let features = Probe::features(&config).unwrap();
-
-        assert_eq!(features.names().len(), 2);
+    fn features_reading_every_series_of_data_and_no_other_load() {
+        load(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], HORIZON).unwrap();
     }
 
     #[test]
-    fn a_series_of_data_no_feature_reads_is_refused_naming_it() {
-        let config = config(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], HORIZON);
+    fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it() {
+        let [(field, message)] = &refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], HORIZON)[..]
+        else {
+            panic!("not one refusal");
+        };
 
-        let err = refused(&config);
-
-        assert!(
-            err.contains("TradeTick of GC.GLBX") && err.contains("read"),
-            "{err}"
-        );
+        assert_eq!(field, "data.series[1]");
+        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
     }
 
     #[test]
     fn a_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let config = config(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], HORIZON);
+        let [(field, message)] = &refusals(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], HORIZON)[..]
+        else {
+            panic!("not one refusal");
+        };
 
-        let err = refused(&config);
-
-        assert!(err.contains("TradeTick of GC.GLBX"), "{err}");
+        assert_eq!(field, "data.series");
+        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
     }
 
     /// Hourly bars of silver the features read and `[data]` does not list,
-    /// the trades of GC `[data]` lists and no feature reads: both named.
+    /// the trades of GC `[data]` lists and no feature reads: each refused
+    /// under its field, naming it.
     #[test]
     fn both_mismatches_are_refused_at_once() {
         let silver_bars = GOLD_BARS
             .replace("XAUUSD", "XAGUSD")
             .replace("MINUTE", "HOUR");
-        let config = config(&[GOLD_BARS, &silver_bars], &[GOLD_BARS, GC_TRADES], HORIZON);
 
-        let err = refused(&config);
+        let mut refusals = refusals(&[GOLD_BARS, &silver_bars], &[GOLD_BARS, GC_TRADES], HORIZON);
+        refusals.sort();
 
-        assert!(
-            err.contains("XAGUSD.ICMARKETS-1-HOUR-MID-INTERNAL")
-                && err.contains("TradeTick of GC.GLBX"),
-            "{err}"
+        let [(missing, of_missing), (unread, of_unread)] = &refusals[..] else {
+            panic!("not two refusals: {refusals:?}");
+        };
+        assert_eq!(
+            (missing.as_str(), unread.as_str()),
+            ("data.series", "data.series[1]")
         );
+        assert!(
+            of_missing.contains("XAGUSD.ICMARKETS-1-HOUR-MID-INTERNAL"),
+            "{of_missing}"
+        );
+        assert!(of_unread.contains("TradeTick of GC.GLBX"), "{of_unread}");
+    }
+
+    /// Features on the MID bars of the GC root, listed: Nautilus builds a
+    /// root's bars from its contracts' trades, so these would never come,
+    /// refused under their series, naming them.
+    #[test]
+    fn bars_on_a_root_not_built_from_its_trades_are_refused_under_their_series() {
+        let root_bars = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
+
+        let refusals = refusals(&[root_bars], &[root_bars], HORIZON);
+
+        let [(field, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
+        };
+        assert_eq!(field, "data.series[0]");
+        assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
     }
 
     /// The features read GC's trades alone; the barrier's ATR is built of
@@ -468,9 +446,16 @@ mod tests {
     fn ticks_the_barrier_atr_reads_alone_are_read() {
         let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
-        Probe::features(&config(&[GC_TRADES], &[GC_TRADES, gold_quotes], BARRIER)).unwrap();
-        let err = refused(&config(&[GC_TRADES], &[GC_TRADES, gold_quotes], HORIZON));
-        assert!(err.contains("QuoteTick of XAUUSD.ICMARKETS"), "{err}");
+        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BARRIER).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], HORIZON);
+        let [(field, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
+        };
+        assert_eq!(field, "data.series[1]");
+        assert!(
+            message.contains("QuoteTick of XAUUSD.ICMARKETS"),
+            "{message}"
+        );
     }
 
     /// Deciding hourly, the barrier's ATR runs on gold's hourly bars of
@@ -479,45 +464,92 @@ mod tests {
     fn bars_the_barrier_atr_runs_on_alone_are_read() {
         let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
 
-        Probe::features(&config(&[GC_TRADES], &[GC_TRADES, &gold_hours], BARRIER)).unwrap();
-        let err = refused(&config(&[GC_TRADES], &[GC_TRADES, &gold_hours], HORIZON));
+        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BARRIER).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], HORIZON);
+        let [(field, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
+        };
+        assert_eq!(field, "data.series[1]");
         assert!(
-            err.contains("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"),
-            "{err}"
+            message.contains("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"),
+            "{message}"
         );
     }
 
-    /// Every run builds the features of the config and checks them first:
-    /// a backtest's walk forward and run, a live node's strategy, a
-    /// training and a dataset.
+    /// The barrier's ATR reads what it is built from, and nothing more:
+    /// its bars of gold's quotes leave the trades of GC unread.
     #[test]
-    fn no_strategy_dataset_training_or_walk_forward_is_built_of_mismatched_series() {
-        let config = config(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], HORIZON);
-        let dir = tempfile::tempdir().unwrap();
-        let venue = DatasetVenue {
-            commission: Commission::Rate("0.00003".to_string()),
-            balance: Money::from("10000000 USD"),
-            leverage: Decimal::ONE,
+    fn a_series_neither_the_features_nor_the_barrier_atr_read_is_refused() {
+        let refusals = refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], BARRIER);
+        let [(field, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
         };
-        let mode = Mode::Dataset {
-            rows: SettledRows::default(),
-        };
-        let (catalog, models) = (dir.path().join("catalog"), dir.path().join("models"));
+        assert_eq!(field, "data.series[1]");
+        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
+    }
 
-        for (run, err) in [
-            ("strategy", Probe::new(config.clone(), mode).err()),
-            ("dataset", Probe::dataset(&config, &catalog, &venue).err()),
-            (
-                "training",
-                Probe::training(&config, &catalog, &models, &venue).err(),
-            ),
-            (
-                "walk forward",
-                Probe::walk_forward(&config, &catalog, &models, &venue).err(),
-            ),
-        ] {
-            let err = format!("{:#}", err.unwrap_or_else(|| panic!("{run} built")));
-            assert!(err.contains("TradeTick of GC.GLBX"), "{run}: {err}");
-        }
+    /// An unread series and a horizon of an hour decided every hour are
+    /// both reported, each under its field.
+    #[test]
+    fn the_series_refusals_are_reported_with_the_other_violations() {
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GC_TRADES],
+            r#"{ horizon = "1h" }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
+        fields.sort();
+
+        assert_eq!(fields, ["data.series[1]", "model.targets.horizon"]);
+    }
+
+    /// The features read GC's trades once, and `[data]` lists them again:
+    /// refused under their second listing, naming them.
+    #[test]
+    fn a_tick_series_listed_twice_is_refused_under_its_second_listing() {
+        let err = load(
+            &[GOLD_BARS, GC_TRADES],
+            &[GC_TRADES, GOLD_BARS, GC_TRADES],
+            HORIZON,
+        )
+        .unwrap_err();
+
+        let Some(ConfigError::Duplicate {
+            field,
+            value: Some(value),
+        }) = err.downcast_ref::<ConfigError>()
+        else {
+            panic!("not one duplicate naming the series: {err}");
+        };
+        assert_eq!(field, "data.series[2]");
+        assert!(value.contains("TradeTick of GC.GLBX"), "{value}");
+    }
+
+    /// A series listed twice and a horizon of an hour decided every hour
+    /// are both reported, each under its field.
+    #[test]
+    fn a_series_listed_twice_is_reported_with_the_other_violations() {
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GOLD_BARS],
+            r#"{ horizon = "1h" }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
+        fields.sort();
+
+        assert_eq!(fields, ["data.series[1]", "model.targets.horizon"]);
+    }
+
+    /// The part's own error building the features is the answer: no
+    /// series is then refused for it.
+    #[test]
+    fn the_parts_error_building_the_features_is_reported_under_its_field() {
+        let refusals = refusals(&[], &[GOLD_BARS], HORIZON);
+        let fields: Vec<&str> = refusals.iter().map(|(field, _)| field.as_str()).collect();
+        assert_eq!(fields, ["features"]);
     }
 }

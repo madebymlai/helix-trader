@@ -26,7 +26,6 @@ mod backtest_dataset;
 mod backtest_ema_entries;
 mod backtest_ema_exits;
 mod backtest_ema_overlap;
-mod backtest_ema_read_only_instrument;
 mod backtest_ema_time_exit;
 mod backtest_features;
 mod backtest_golden_rows;

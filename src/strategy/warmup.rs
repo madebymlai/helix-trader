@@ -468,8 +468,9 @@ impl Debug for Warmup {
 ///
 /// # Errors
 ///
-/// Returns an error if a composite bar type's source bars are not
-/// external (built, not requested), or if a request fails.
+/// Returns an error if a request fails. A composite bar type's source bars
+/// are external, as the config's load requires (see
+/// `strategy::DataConfig`): they are requested, not built.
 pub fn start<A>(
     actor: &mut A,
     bar_types: &[BarType],
@@ -483,17 +484,6 @@ where
 {
     let now = actor.clock().utc_now();
     let start = now.checked_sub(warmup)?;
-    for source in bar_types
-        .iter()
-        .filter(|bar_type| bar_type.is_composite())
-        .map(BarType::composite)
-    {
-        ensure!(
-            source.is_externally_aggregated(),
-            "no warmup for bars built from {source}: the source bars of a \
-             composite bar type must be external"
-        );
-    }
     let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = bar_types
         .iter()
         .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());

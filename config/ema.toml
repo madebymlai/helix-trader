@@ -12,11 +12,10 @@
 # strategy_id = "EMA_CROSS-001"
 
 [data]
-# The series read (all stored in the catalog): hourly bars of the mid,
-# built by Nautilus from the quotes, of each instrument.
+# The series read (stored in the catalog): hourly bars of the mid, built
+# by Nautilus from the quotes, of the traded instrument.
 series = [
     { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
-    { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
 ]
 # How far back a live node's warmup request goes at start.
 warmup = "72h"

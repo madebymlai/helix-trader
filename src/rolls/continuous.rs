@@ -47,8 +47,8 @@ impl ContinuousBars {
     /// prices read from the catalog at `catalog`: at each transition, the
     /// pre contract's last trade of its slice and the post contract's
     /// first, as Nautilus takes them. A plain instrument has none. Bars on
-    /// a root are built from its trades: `DataRequirements::slices` refuses
-    /// others.
+    /// a root are built from its trades: the strategy config's load refuses
+    /// others (see `strategy::DataConfig`).
     ///
     /// # Errors
     ///

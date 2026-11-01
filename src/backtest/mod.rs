@@ -141,8 +141,8 @@ impl Backtest {
     ///
     /// Returns an error as `ContinuousBars::read` does: a root without a
     /// roll over `[start, end]`, a roll without a trade to price it. A bar
-    /// type on a root not built from trades is refused by `run` (see
-    /// `DataRequirements::slices`).
+    /// type on a root not built from trades is refused by the config's
+    /// load (see `strategy::DataConfig`).
     pub fn continuous_bars(
         &self,
         mode: ContinuousFutureAdjustmentType,
@@ -186,9 +186,7 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `DataRequirements::slices` does (bars on a root
-    /// not built from its trades), or if what the catalog stores cannot be
-    /// read.
+    /// Returns an error if what the catalog stores cannot be read.
     fn series(&self) -> anyhow::Result<Vec<SeriesSlice>> {
         let (from, to) = (self.start, self.end);
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
@@ -251,7 +249,7 @@ impl Backtest {
             .iter()
             .any(|book| books.iter().any(|stored| stored.series == book.series));
             let mut has_source = false;
-            for source in read(vec![*bar_type], vec![])? {
+            for source in read(vec![*bar_type], vec![]) {
                 has_source |= stored(&source)?;
             }
             if has_source || !has_book {
@@ -259,7 +257,7 @@ impl Backtest {
             }
         }
         Ok(SeriesSlice::merged(
-            read(built, self.ticks.clone())?
+            read(built, self.ticks.clone())
                 .into_iter()
                 .chain(books)
                 .chain(funding),
