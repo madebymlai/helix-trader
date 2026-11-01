@@ -28,7 +28,8 @@ points are under "Unverified".
 live/
   mod.rs    `Live`: the start sequence (clients by venue, logger), the
             entry point
-  node.rs   builds and runs the LiveNode, broker-agnostic
+  node.rs   builds and runs the LiveNode, broker-agnostic, on the
+            clients and cache database it is given
   recording.rs
             `Recording`: the streaming of the live data into the
             catalog, and the trader's kept instance id
@@ -44,8 +45,12 @@ live/
 
 Each broker gets its own folder next to `ib/`, returning the same shape: a
 data factory and config, an exec factory and config, and
-their routing (`node::Clients`). `node.rs` takes a list of them as `Box<dyn
-DataClientFactory>` and friends and never names a broker.
+their routing (`node::Clients`; the exec pair is optional, for a venue
+the node only reads, as the streaming tests' stub). `node::build` takes a
+list of them as `Box<dyn DataClientFactory>` and friends, and the cache
+database as Nautilus' `CacheDatabaseFactory` (`Live` starts Redis and
+gives it), and never names a broker. It is public, the one assembly
+`Live` and the streaming tests both build their node with.
 
 ## The command
 
@@ -475,7 +480,7 @@ usage.
 
 ## node.rs
 
-`node::run` builds the node through `LiveNodeBuilder::from_config`, with
+`node::build` builds the node through `LiveNodeBuilder::from_config`, with
 the engine configs as `LiveNodeConfig` fields. It registers the one
 catalog, writable (`LiveNodeConfig::catalogs`, enabled by
 `nautilus-live`'s `streaming` feature; its path absolute, as the
@@ -679,8 +684,11 @@ tests: see [`okx/README.md`](okx/README.md).
 - `tests/live/streaming.rs` runs a node without a broker, hermetic and
   ungated: a stub data client on `SIM` sends numbered quotes, trades and
   depth, an actor subscribes to them and to 1-second bars built from the
-  trades, and the node streams as `Recording` configures it, but
-  promoting every second rather than daily, the interval set on the
+  trades. The node is built by `node::build`, as `Live` builds it (what
+  the last run left staged promoted included), on the stub alone, with no
+  cache database, so its cache stays in memory, and it streams as
+  `Recording` configures it, but promoting every second rather than
+  daily, the interval set on the
   `StreamingConfig` it returns. The node runs in a child process (the
   test binary, filtered to `streamed_node`), stopping itself through
   `handle().stop()`, interrupted by the test with SIGINT as Ctrl-C would,

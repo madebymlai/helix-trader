@@ -2,13 +2,14 @@
 //!
 //! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since the
 //! engine configs are `LiveNodeConfig` fields, with the data and execution clients of
-//! each adapter the instruments need, each with its routing, and the cache
-//! persisted to Redis (`with_cache_database_factory`, see `redis`),
-//! promotes what the last run left staged once built (`promote_staged`), adds
-//! the strategy (`add_strategy`), claims its instruments' external
-//! orders, calls `run`, which stops on SIGINT or SIGTERM, and disposes the
-//! node, which closes the cache database. Follows the IB adapter's
-//! `node_exec_tester` example.
+//! each adapter the instruments need, Nautilus' factories and configs, each
+//! with its routing, and the cache persisted to the cache database its
+//! caller gives (`with_cache_database_factory`; `Live`'s is Redis, see
+//! `redis`), promotes what the last run left staged once built
+//! (`promote_staged`), adds the strategy (`add_strategy`), claims its
+//! instruments' external orders, calls `run`, which stops on SIGINT or
+//! SIGTERM, and disposes the node, which closes the cache database.
+//! Follows the IB adapter's `node_exec_tester` example.
 //! Never names a broker.
 
 use std::fmt::Debug;
@@ -16,7 +17,7 @@ use std::fmt::Debug;
 use anyhow::Context;
 use nautilus_common::{
     actor::DataActorNative,
-    cache::CacheConfig,
+    cache::{CacheConfig, database::CacheDatabaseFactory},
     component::Component,
     enums::Environment,
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
@@ -32,16 +33,15 @@ use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::config::{DataCatalogConfig, StreamingConfig};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
-use super::{recording::promote_staged, redis};
+use super::recording::promote_staged;
 
-/// One adapter's data and execution client factories and configs, and
-/// how Nautilus routes data and orders to them.
-pub(super) struct Clients {
-    pub(super) data_factory: Box<dyn DataClientFactory>,
-    pub(super) data_config: Box<dyn ClientConfig>,
-    pub(super) exec_factory: Box<dyn ExecutionClientFactory>,
-    pub(super) exec_config: Box<dyn ClientConfig>,
-    pub(super) routing: RoutingConfig,
+/// One adapter's data client factory and config, its execution client's if
+/// the node trades there, and how Nautilus routes data and orders to them.
+pub struct Clients {
+    pub data_factory: Box<dyn DataClientFactory>,
+    pub data_config: Box<dyn ClientConfig>,
+    pub exec: Option<(Box<dyn ExecutionClientFactory>, Box<dyn ClientConfig>)>,
+    pub routing: RoutingConfig,
 }
 
 /// Builds the live node of `trader_id`, as its `instance_id`, on the
@@ -51,10 +51,12 @@ pub(super) struct Clients {
 /// what the last run of its instance left staged (`promote_staged`), so
 /// that the catalog holds it before anything reads or writes it.
 ///
-/// The cache is persisted to Redis, started or reused first (see
-/// `redis::start`), under `trader_id`'s keys: the node loads the orders,
+/// The cache is persisted to `cache_database`, if given (`Live`'s Redis,
+/// see `redis::start`), under `trader_id`'s keys: the node loads the orders,
 /// positions and accounts of its earlier runs at start, then reconciles
-/// them with the venues, and checks open orders and positions as it runs.
+/// them with the venues, and checks open orders and positions as it runs;
+/// with none, the cache lives in memory.
+///
 /// `catalog` is registered, the directory fill-catalog fills and backtests
 /// read: it answers the historical requests first, the data clients
 /// what it lacks, and answers asked to are written back to it (see
@@ -63,11 +65,10 @@ pub(super) struct Clients {
 ///
 /// # Errors
 ///
-/// Returns an error if Redis cannot be started, if the node fails to build
-/// (two clients claiming the same route included), or what the last run
-/// staged cannot be promoted.
+/// Returns an error if the node fails to build (two clients claiming the
+/// same route included), or what the last run staged cannot be promoted.
 #[expect(clippy::too_many_arguments)]
-pub(super) async fn build(
+pub fn build(
     trader_id: TraderId,
     instance_id: UUID4,
     logging: LoggerConfig,
@@ -75,6 +76,7 @@ pub(super) async fn build(
     data_engine: LiveDataEngineConfig,
     streaming: StreamingConfig,
     catalog: DataCatalogConfig,
+    cache_database: Option<Box<dyn CacheDatabaseFactory>>,
     clients: Vec<Clients>,
 ) -> anyhow::Result<LiveNode> {
     let config = config(
@@ -86,25 +88,27 @@ pub(super) async fn build(
         streaming,
         catalog,
     );
-    let cache_database = redis::start().await?;
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
-        .with_cache_database_factory(Box::new(cache_database))
         .with_delay_post_stop_secs(5);
+    if let Some(cache_database) = cache_database {
+        builder = builder.with_cache_database_factory(cache_database);
+    }
     for clients in clients {
-        builder = builder
-            .add_data_client_with_routing(
+        builder = builder.add_data_client_with_routing(
+            None,
+            clients.data_factory,
+            clients.data_config,
+            clients.routing.clone(),
+        )?;
+        if let Some((exec_factory, exec_config)) = clients.exec {
+            builder = builder.add_exec_client_with_routing(
                 None,
-                clients.data_factory,
-                clients.data_config,
-                clients.routing.clone(),
-            )?
-            .add_exec_client_with_routing(
-                None,
-                clients.exec_factory,
-                clients.exec_config,
+                exec_factory,
+                exec_config,
                 clients.routing,
             )?;
+        }
     }
     let mut node = builder.build()?;
     promote_staged(&mut node)?;
