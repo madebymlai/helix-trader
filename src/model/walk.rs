@@ -27,10 +27,13 @@
 //! a model failing its checks refused and the current one kept, as the
 //! handle does, its probabilities calibrated. Every model is out of
 //! sample on its rows: trained at its valid-from on rows settled by then.
-//! Beside each, its baseline: the training mean, fitted at the start of
-//! each retrain period on the rows the schedule's plan has the model of
-//! that time fitted on (`Step::rows`), those before its holdout; none for
-//! a meta waiting there. Never retrained, the span is one period. The AUC
+//! Beside each, its baseline: the training mean of the rows the
+//! schedule's plan has the model of each retrain period's start fitted
+//! and calibrated on, those before its holdout, fitted where that model
+//! was (`Step::rows`): retrained, at the period's start; never retrained,
+//! the span one period, at the valid-from of the model in use at the
+//! start, or at the start for a model with none. None for a meta waiting
+//! there. The dataset is built back to the first of those rows. The AUC
 //! and log loss (`score`) of both are given per side, per retrain period
 //! and over the span, and what the model's decisions earned there
 //! (`holdout::Earnings`), its decision rule taking the trades it would
@@ -1490,5 +1493,100 @@ Short model scores, out of sample, over the span
             )
         );
         assert_eq!(period.model.rows, 5);
+    }
+
+    /// Never retrained, each side's model of the 7th is in use at a
+    /// backtest from the 8th: it trains nothing, and builds back to the
+    /// rows those models were fitted on, the 6th's, a window before the
+    /// start's own.
+    #[test]
+    fn a_backtest_never_retrained_builds_back_to_the_rows_its_models_in_use_were_fitted_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+        publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
+
+        let (built, trained) = prepared(
+            dir.path(),
+            &walk,
+            ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z"),
+            Some(&never()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            built,
+            [(at("2026-01-06T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
+        );
+        assert_eq!(trained, []);
+    }
+
+    /// Never retrained, the long's model of the 7th in use over a backtest
+    /// from the 8th: its baseline is fitted where it was, at the 7th, on
+    /// the rows of the 6th before the holdout from 18:00, two wins in three
+    /// (fitted at the start, on the 7th's, it would be 1/3); scored on the
+    /// 8th's two wins, `-ln 2/3`.
+    #[test]
+    fn a_backtest_never_retrained_scores_a_model_beside_the_baseline_fitted_where_it_was_trained() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+        publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
+        let span = ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z");
+        prepared(dir.path(), &walk, span, Some(&never())).unwrap();
+
+        let scores = walk.scores(at(span.0), at(span.1)).unwrap();
+
+        let long = scores.long.unwrap();
+        let [period] = &long.periods[..] else {
+            panic!("{long:?}");
+        };
+        assert_eq!(period.baseline.rows, 2);
+        close(period.baseline.log_loss, 0.405_465);
+    }
+
+    /// Never retrained, the long's model of the 7th is in use at a backtest
+    /// from the 8th, the short has none and its train there is refused: the
+    /// short's baseline is fitted at the start, on the rows of the 7th
+    /// before the holdout from 18:00, its wins where the long lost, two in
+    /// three; scored on the 8th's two losses, `-ln 1/3`.
+    #[test]
+    fn a_backtest_never_retrained_fits_the_baseline_of_a_model_with_none_in_use_at_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+        let fingerprint = dataset(dir.path(), &never()).fingerprint().to_string();
+        store(dir.path(), &never(), Side::Long)
+            .publish(&model(at("2026-01-07T00:00:00Z"), fingerprint))
+            .unwrap();
+        let span = ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z");
+        let (_, trained) = prepared(dir.path(), &walk, span, None).unwrap();
+        assert_eq!(trained, [at(span.0)]);
+
+        let scores = walk.scores(at(span.0), at(span.1)).unwrap();
+
+        let short = &scores.short.unwrap().periods[0];
+        assert_eq!(short.baseline.rows, 2);
+        close(short.baseline.log_loss, 1.098_612);
+    }
+
+    /// Retrained, the models of the 7th are in use over both periods, the
+    /// train of the 8th refused: the long's baseline of the 8th is fitted
+    /// at the period's start nonetheless, on the rows of the 7th before the
+    /// holdout from 18:00, one win in three (at the model's valid-from it
+    /// would be 2/3); scored on the 8th's two wins, `-ln 1/3`.
+    #[test]
+    fn a_retrained_backtest_fits_each_baseline_at_its_periods_start_an_earlier_model_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk(dir.path());
+        build(dir.path());
+        publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
+
+        let scores = walk
+            .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
+
+        let long = scores.long.unwrap();
+        let second = &long.periods[1];
+        assert_eq!(second.models, [at("2026-01-07T00:00:00Z")]);
+        assert_eq!(second.baseline.rows, 2);
+        close(second.baseline.log_loss, 1.098_612);
     }
 }
