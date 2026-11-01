@@ -215,8 +215,7 @@ impl IcClients {
         Clients {
             data_factory: Box::new(IcDataClientFactory),
             data_config: Box::new(self.data),
-            exec_factory: Box::new(IcExecutionClientFactory),
-            exec_config: Box::new(self.exec),
+            exec: Some((Box::new(IcExecutionClientFactory), Box::new(self.exec))),
             routing: RoutingConfig::default(),
         }
     }
@@ -385,10 +384,11 @@ mod tests {
             clock.clone(),
         );
         assert!(data.is_ok(), "{:#}", data.err().unwrap());
-        let exec = node_clients.exec_factory.create(
+        let (exec_factory, exec_config) = node_clients.exec.unwrap();
+        let exec = exec_factory.create(
             TraderId::from("HELIX-001"),
-            node_clients.exec_factory.name(),
-            node_clients.exec_config.as_ref(),
+            exec_factory.name(),
+            exec_config.as_ref(),
             cache.into(),
             clock,
         );

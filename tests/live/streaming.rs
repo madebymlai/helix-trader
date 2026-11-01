@@ -5,9 +5,11 @@
 //! a depth snapshot every `TICK`, each numbered in sequence (the quote's
 //! bid size less one, the trade's id, the depth's sequence); an actor
 //! subscribes to them and to 1-second bars Nautilus builds from the
-//! trades. The node streams as `Recording` configures it, into a temp-dir
-//! catalog, but promoting every `PROMOTION_MS` rather than daily, so that a
-//! test sees several promotions in seconds. The test, another process,
+//! trades. The node is built as `Live` builds it (`live::node::build`), on
+//! the stub alone, its cache in memory, and streams as `Recording`
+//! configures it, into a temp-dir catalog, but promoting every
+//! `PROMOTION_MS` rather than daily, so that a test sees several
+//! promotions in seconds. The test, another process,
 //! reads the catalog while the node runs and after it stops, and backtests
 //! and builds a dataset over it with the binary, a third.
 //!
@@ -31,21 +33,21 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use helix_trader::live::{Recording, promote_staged};
+use helix_trader::live::{self, Recording};
 use jiff::Timestamp;
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
-    cache::CacheView,
+    cache::{CacheConfig, CacheView},
     clients::DataClient,
     clock::Clock,
-    enums::Environment,
     factories::{ClientConfig, DataClientFactory},
     live::{runner::get_data_event_sender, sender::EventSender},
+    logging::logger::LoggerConfig,
     messages::DataEvent,
     nautilus_actor,
 };
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
-use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
+use nautilus_live::config::{LiveDataEngineConfig, RoutingConfig};
 use nautilus_model::{
     data::{
         Bar, BarType, Data, NautilusDataType, OrderBookDepth, QuoteTick, TradeTick,
@@ -314,8 +316,9 @@ fn streamed_node() {
         .unwrap();
 }
 
-/// Runs the node of `root` streaming as `Recording` configures it, but
-/// promoting every `promotion_interval`, until `stop_after`, or until
+/// Runs the node of `root`, built as `Live` builds it on the stub's data
+/// client and no cache database, streaming as `Recording` configures it,
+/// but promoting every `promotion_interval`, until `stop_after`, or until
 /// interrupted or killed.
 async fn run_node(
     root: &Path,
@@ -336,26 +339,23 @@ async fn run_node(
     };
     let mut streaming = recording.streaming(&catalog)?;
     streaming.promotion_interval_ms = Some(u64::try_from(promotion_interval.as_millis())?);
-    let config = LiveNodeConfig {
-        environment: Environment::Live,
-        trader_id,
-        instance_id: Some(recording.instance_id(trader_id)?),
-        streaming: Some(streaming),
-        catalogs: vec![catalog],
-        ..Default::default()
+    let stub = live::node::Clients {
+        data_factory: Box::new(StubFactory),
+        data_config: Box::new(StubConfig { first_seq }),
+        exec: None,
+        routing: RoutingConfig::default(),
     };
-    let mut node = LiveNodeBuilder::from_config(config)?
-        .with_name("STREAMING")
-        .with_delay_post_stop_secs(0)
-        .add_data_client(
-            None,
-            Box::new(StubFactory),
-            Box::new(StubConfig { first_seq }),
-        )?
-        .build()?;
-    // As `Live` starts it: what the last run staged promoted before the
-    // node runs.
-    promote_staged(&mut node)?;
+    let mut node = live::node::build(
+        trader_id,
+        recording.instance_id(trader_id)?,
+        LoggerConfig::default(),
+        CacheConfig::default(),
+        LiveDataEngineConfig::default(),
+        streaming,
+        catalog,
+        None,
+        vec![stub],
+    )?;
     if std::env::var(WRITE_BACK).is_ok() {
         write_back(root)?;
     }

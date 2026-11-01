@@ -17,7 +17,7 @@
 
 mod ib;
 mod ic;
-mod node;
+pub mod node;
 mod okx;
 mod recording;
 mod redis;
@@ -25,7 +25,7 @@ mod redis;
 pub use ic::{
     IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
 };
-pub use recording::{Recording, promote_staged};
+pub use recording::Recording;
 
 pub use crate::data::IbAccount;
 
@@ -105,8 +105,9 @@ impl Live {
     /// run (see `okx::clients`), if IC is unreachable or its account is not
     /// hedging or not `IC_ACCOUNT_ID`'s (see `ic::IcClients::check_account`),
     /// if the strategy trades IB instruments and no account is given, if
-    /// IB's clients cannot be set up (see `ib::clients`), or if the node
-    /// fails (see `node::build`, `node::run`).
+    /// IB's clients cannot be set up (see `ib::clients`), if Redis cannot
+    /// be started (see `redis::start`), or if the node fails (see
+    /// `node::build`, `node::run`).
     pub async fn run<S>(
         &self,
         requirements: &DataRequirements,
@@ -166,6 +167,7 @@ impl Live {
             let ib = ib::clients(account, self.client_id, &ib_ids).await?;
             clients.push(ib.into_node_clients());
         }
+        let cache_database = redis::start().await?;
         // Built first, which promotes what the last run left staged: the
         // warmup reads the catalog with it there.
         let node = node::build(
@@ -176,9 +178,9 @@ impl Live {
             data_engine,
             streaming,
             catalog,
+            Some(Box::new(cache_database)),
             clients,
-        )
-        .await?;
+        )?;
         node::run(node, &instrument_ids, strategy).await
     }
 }
