@@ -172,8 +172,8 @@ span the backtest replays.
 Bars on a root must be built from its trades (internal, LAST, not
 composite): the rolls are priced from trades, and Nautilus builds the
 continuous bars from the contracts' trades, so other bars would never
-come. `DataRequirements::slices` refuses others, naming the bar type, so
-backtest and fill-catalog refuse them before anything runs.
+come. The strategy config's load refuses others, under their series,
+naming the bar type, so no command starts on them.
 
 `read` fails, before any run:
 

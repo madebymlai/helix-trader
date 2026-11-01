@@ -275,10 +275,17 @@ impl DataConfig {
     /// Pushes the violations of `[data]`: no series; a bars series not
     /// aggregated on time (the session needs the bar's span), built from
     /// ticks but priced MARK (Nautilus builds bars from quotes or trades
-    /// alone), on a venue other than the first bars', or built from bars
+    /// alone), on a venue other than the first bars', built from bars
     /// beside a session (live, such bars arrive after their close, so a
-    /// session would drop its last bar there but not in a backtest); a
-    /// non-positive warmup; a session not opening before it closes.
+    /// session would drop its last bar there but not in a backtest), built
+    /// from internal source bars (a live warmup requests a composite's
+    /// source bars, and nothing stores internal ones), or on a futures root
+    /// of the roll calendar (`rolls::Transition`) but not built from its
+    /// trades (internal, LAST, not composite: Nautilus builds a root's
+    /// continuous bars from its contracts' trades, and their rolls are
+    /// priced from them, so other bars would never come), these two under
+    /// `data.series[i]`; a non-positive warmup; a session not opening
+    /// before it closes.
     fn validate(&self, errors: &mut ConfigErrorCollector) {
         errors.check(
             !self.series.is_empty(),
@@ -322,6 +329,35 @@ impl DataConfig {
             errors.check(
                 self.session.is_none() || !bar_type.is_composite(),
                 ConfigError::mutually_exclusive_fields(["data.session".to_string(), field("from")]),
+            );
+            if bar_type.is_composite() {
+                let source = bar_type.composite();
+                errors.check(
+                    source.is_externally_aggregated(),
+                    ConfigError::invalid_value(
+                        format!("data.series[{i}]"),
+                        format!(
+                            "bars {bar_type} are built from the internal bars {source}: the \
+                             source bars of a composite bar type must be external, since a live \
+                             warmup requests them"
+                        ),
+                    ),
+                );
+            }
+            // A root rolls at any time, after the epoch too. A series'
+            // bars are internal (see `Series`): LAST and not composite
+            // is the rest of the rule.
+            let on_root = Transition::after(instrument_id, Timestamp::UNIX_EPOCH).is_some();
+            errors.check(
+                !on_root || (!bar_type.is_composite() && spec.price_type == PriceType::Last),
+                ConfigError::invalid_value(
+                    format!("data.series[{i}]"),
+                    format!(
+                        "bars {bar_type} on the root {instrument_id} must be built from its \
+                         trades (internal, LAST, not composite): its continuous bars are built \
+                         and their rolls priced from trades"
+                    ),
+                ),
             );
         }
         errors.check(
@@ -931,6 +967,107 @@ mod tests {
             "warmup = \"2h\"\nsession = { time_zone = \"UTC\", open = \"08:00\", close = \"16:00\" }",
         );
         assert_eq!(error_fields(&toml), ["data.session", "data.series[0].from"]);
+    }
+
+    /// The warmup requests a composite's source bars, which internal ones,
+    /// built and never stored, cannot answer: refused under the series,
+    /// naming it.
+    #[test]
+    fn bars_from_internal_source_bars_are_refused_naming_them() {
+        let toml = COMPOSITE_TOML.replace(
+            "aggregation_source = \"EXTERNAL\"",
+            "aggregation_source = \"INTERNAL\"",
+        );
+        let err = load(&toml).unwrap_err();
+        assert_eq!(fields_of(&err), ["data.series[0]"]);
+        assert!(
+            err.to_string()
+                .contains("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-INTERNAL"),
+            "{err}"
+        );
+    }
+
+    /// A config reading the bars of `instrument_id`, a bars series' other
+    /// keys `bars`, and trading two contracts of the GC root.
+    fn gold_futures(instrument_id: &str, bars: &str) -> String {
+        format!(
+            r#"
+            [data]
+            series = [{{ data = "bars", instrument_id = "{instrument_id}", {bars} }}]
+            warmup = "720h"
+
+            [trade]
+            instruments = [
+                {{ instrument_id = "GCQ6.GLBX", trade_size = "1" }},
+                {{ instrument_id = "GCZ6.GLBX", trade_size = "1" }},
+            ]
+            "#
+        )
+    }
+
+    const HOUR_LAST: &str = r#"bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }"#;
+    const HOUR_MID: &str = r#"bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }"#;
+
+    /// Nautilus builds the continuous bars of GC.GLBX, a root of the roll
+    /// calendar, from its contracts' trades, and their rolls are priced
+    /// from them: its LAST bars load.
+    #[test]
+    fn bars_on_a_root_built_from_its_trades_load() {
+        load(&gold_futures("GC.GLBX", HOUR_LAST)).unwrap();
+    }
+
+    /// Bars on a root built from its quotes or from source bars would
+    /// never come: refused under the series, naming it.
+    #[test]
+    fn bars_on_a_root_not_built_from_its_trades_are_refused_naming_them() {
+        let from_minutes = format!(
+            "{HOUR_LAST}, from = {{ step = 1, aggregation = \"MINUTE\", aggregation_source = \"EXTERNAL\" }}"
+        );
+        for (bars, bar_type) in [
+            (HOUR_MID, "GC.GLBX-1-HOUR-MID-INTERNAL"),
+            (
+                from_minutes.as_str(),
+                "GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            ),
+        ] {
+            let err = load(&gold_futures("GC.GLBX", bars)).unwrap_err();
+            assert_eq!(fields_of(&err), ["data.series[0]"], "{bar_type}");
+            assert!(err.to_string().contains(bar_type), "{err}");
+        }
+    }
+
+    /// A contract of the root is a plain instrument: its bars may be
+    /// built from its quotes.
+    #[test]
+    fn bars_on_a_contract_of_a_root_need_not_be_built_from_its_trades() {
+        load(&gold_futures("GCZ6.GLBX", HOUR_MID)).unwrap();
+    }
+
+    /// The bars on a root not built from its trades, and those built from
+    /// internal source bars, are reported with the other violations.
+    #[test]
+    fn the_rules_of_bars_on_a_root_and_of_source_bars_are_reported_with_the_others() {
+        let toml = gold_futures("GC.GLBX", HOUR_MID)
+            .replace(
+                "price_type = \"MID\" } }]",
+                "price_type = \"MID\" } }, { data = \"bars\", instrument_id = \"GCZ6.GLBX\", \
+                 bar_spec = { step = 1, aggregation = \"HOUR\", price_type = \"LAST\" }, \
+                 from = { step = 1, aggregation = \"MINUTE\", aggregation_source = \"INTERNAL\" } }]",
+            )
+            .replace("\"720h\"", "\"0s\"")
+            .replace(
+                "{ instrument_id = \"GCZ6.GLBX\", trade_size = \"1\" }",
+                "{ instrument_id = \"GCZ6.GLBX\", trade_size = \"0\" }",
+            );
+        assert_eq!(
+            error_fields(&toml),
+            [
+                "data.series[0]",
+                "data.series[1]",
+                "data.warmup",
+                "trade.instruments[1].trade_size",
+            ]
+        );
     }
 
     #[test]

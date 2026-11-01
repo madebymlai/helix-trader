@@ -180,8 +180,14 @@ config or every violation out.
   as Nautilus' own `HurstVpinDirectionalConfig::validate` does: at least
   one series; each bars series aggregated on time (the session needs the
   bar's length), not priced `MARK` when built from ticks (no tick builds
-  it), on the venue of the first bars, and not built `from`
-  bars beside a session (see "Session"); a positive warmup; a session, if
+  it), on the venue of the first bars, not built `from`
+  bars beside a session (see "Session"), built `from` external source
+  bars alone (a live warmup requests them, and nothing stores internal
+  ones), and, on a futures root of the roll calendar, built from its
+  trades (internal, LAST, not composite: Nautilus builds a root's
+  continuous bars from its contracts' trades and their rolls are priced
+  from them, so other bars would never come), each of these two under
+  `data.series[i]`, naming the bar type; a positive warmup; a session, if
   any, opening before it closes; each indicator the strategy declares
   present, its table parsed by its arguments type (an unknown or
   mistyped argument fails) and built (`ExponentialMovingAverage::new_checked`
@@ -393,10 +399,8 @@ instrument's transition table (`rolls/README.md`) into `SeriesSlice`s: the
 series of each contract over the slice where it stands for the root. A
 plain instrument's series is one slice over the span, on itself. The
 slices of one series from several tables (a root's and a contract read
-beside it) are merged, so nothing is read twice. Bars on a root not built
-from its trades (internal, LAST, not composite) are refused there, naming
-the bar type: Nautilus builds a root's continuous bars from trades and
-prices their rolls from them, so other bars would never come.
+beside it) are merged, so nothing is read twice. Bars on a root are
+built from its trades, which the config's load requires (see "Config").
 fill-catalog fills Databento's series from them, contract by contract. A
 strategy reading the ticks of a root subscribes to them through a
 `rolls::Roller`, which switches them to the next contract at each roll and
@@ -1500,8 +1504,9 @@ on a root, so a `Warmup` has no continuous bars; the functions take them.
   (`request_quotes`), the response coming to `on_historical_quotes`. One
   request per series builds every bar type of it (the data engine feeds
   a trades response to the `LAST` aggregators of `bar_types` only, a
-  quotes response to the others). Source bars that are themselves internal
-  are refused (nothing stores them to request). `request_bars` of an
+  quotes response to the others). Source bars that are themselves
+  internal are refused at load (nothing stores them to request; see
+  "Config"). `request_bars` of an
   internal bar type does not build bars from ticks; only a request of
   their source with `bar_types` does.
 - **The params.** Each request runs over `[now - warmup, now]`, where

@@ -272,6 +272,23 @@ fn rejects_a_futures_root_traded() {
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
 
+/// The crossover reading the MID bars of the GC root, which it must
+/// trade to read them: Nautilus builds a root's bars from its contracts'
+/// trades, so these would never come, refused under the series with the
+/// root traded.
+#[test]
+fn rejects_bars_on_a_root_not_built_from_its_trades() {
+    let toml = TOML.replace("ESM4.CME", "GC.GLBX");
+    let mut fields = error_fields(&toml);
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["data.series[0]", "trade.instruments[0].instrument_id"]
+    );
+    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
+    assert!(err.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{err}");
+}
+
 /// Its bars of the instrument traded give execution its prices: no
 /// quotes of it are added.
 #[test]

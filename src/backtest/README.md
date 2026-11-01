@@ -143,9 +143,9 @@ reads its bars through `Backtest::continuous_bars(mode)`: the root's
 transitions over `[start, end]`, priced from the catalog,
 in the adjustment mode `mode` (`rolls/README.md`, "Continuous bars"). It
 fails before the run if a roll has no trade to price it
-(`backtest_continuous_bars.rs`). The run refuses bars on a root not built
-from its trades (internal, LAST, not composite), naming the bar type
-(`DataRequirements::slices`): they would never come.
+(`backtest_continuous_bars.rs`). Bars on a root not built from its
+trades (internal, LAST, not composite) would never come: the config's
+load refuses them, naming the bar type (`strategy/README.md`, "Config").
 
 ## The run
 

@@ -1079,7 +1079,7 @@ pub(super) mod tests {
             "2026-10-08T00:00:00Z".parse().unwrap(),
         );
 
-        let fills = candle_slices(&requirements.slices(start, end).unwrap()).unwrap();
+        let fills = candle_slices(&requirements.slices(start, end)).unwrap();
 
         assert_eq!(fills, [(BarType::from(BTC_MINUTES), start, end)]);
     }
@@ -1092,9 +1092,7 @@ pub(super) mod tests {
             warmup: SignedDuration::ZERO,
         };
         let start: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
-        let slices = requirements
-            .slices(start, start + SignedDuration::from_hours(24))
-            .unwrap();
+        let slices = requirements.slices(start, start + SignedDuration::from_hours(24));
 
         let err = candle_slices(&slices).unwrap_err();
 

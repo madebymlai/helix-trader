@@ -316,9 +316,8 @@ mod tests {
         catalog: &ParquetDataCatalog,
         instrument_ids: &[&str],
     ) -> Vec<(FillData, String, String, String)> {
-        let slices = ticks_of(instrument_ids)
-            .slices(ts("2026-07-28T00:00Z"), ts("2026-07-29T12:00Z"))
-            .unwrap();
+        let slices =
+            ticks_of(instrument_ids).slices(ts("2026-07-28T00:00Z"), ts("2026-07-29T12:00Z"));
         missing(catalog, &slices)
             .unwrap()
             .into_iter()

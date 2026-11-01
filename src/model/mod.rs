@@ -422,6 +422,22 @@ mod tests {
         assert!(of_unread.contains("TradeTick of GC.GLBX"), "{of_unread}");
     }
 
+    /// Features on the MID bars of the GC root, listed: Nautilus builds a
+    /// root's bars from its contracts' trades, so these would never come,
+    /// refused under their series, naming them.
+    #[test]
+    fn bars_on_a_root_not_built_from_its_trades_are_refused_under_their_series() {
+        let root_bars = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
+
+        let refusals = refusals(&[root_bars], &[root_bars], HORIZON);
+
+        let [(field, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
+        };
+        assert_eq!(field, "data.series[0]");
+        assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
+    }
+
     /// The features read GC's trades alone; the barrier's ATR is built of
     /// the quotes of the gold traded, which `[data]` lists for it.
     #[test]
