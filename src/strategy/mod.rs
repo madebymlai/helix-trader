@@ -17,11 +17,12 @@
 //! base type: `StandardConfig`, the tables every strategy's TOML has, holds
 //! the series read, their warmup and their `Session`, the indicators read
 //! (`IndicatorsConfig`), the instruments traded and the model of a strategy
-//! trading on one, beside the strategy's own table (its `Part`). The
-//! exception is a strategy trading on a learned model, which holds the
-//! harness' types (`model::features::FeatureSet`,
-//! `model::handle::ModelHandle`) and implements `model::ModelStrategy`;
-//! `model_ema` is the example.
+//! trading on one, beside the strategy's own table (its `Part`, which
+//! answers the series it reads, those its series list). The exception is
+//! a strategy trading on a learned model, which holds the harness' types
+//! (`model::features::FeatureSet`, `model::handle::ModelHandle`) and
+//! implements `model::ModelStrategy`, its part building its features
+//! (`model::ModelPart`); `model_ema` is the example.
 //!
 //! Strategies trade on bars Nautilus builds, from source bars (IB's
 //! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
@@ -47,7 +48,6 @@ pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, Traded
 
 use std::{fmt, str::FromStr};
 
-use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::{ClosedInterval, UnixNanos};
 use nautilus_model::{
@@ -58,7 +58,7 @@ use nautilus_model::{
 use nautilus_persistence::common::coverage::merge_closed_intervals;
 use serde::{Deserialize, Deserializer, de};
 
-use crate::rolls::{Slice, Transition, TransitionTable};
+use crate::rolls::{Slice, TransitionTable};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -195,28 +195,11 @@ impl DataRequirements {
     /// time order, on the slice's contract. A series of a plain instrument
     /// is one slice over the span on that instrument. The slices of one
     /// series from several tables (a root's and its contract's own) are
-    /// merged where they overlap or touch, so nothing is read twice.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming a bar type on a root that is not built from
-    /// its trades (internal, LAST, not composite): Nautilus builds its
-    /// continuous bars from the contracts' trades and prices their rolls
-    /// from them (see `rolls::ContinuousBars`), so such bars would never
-    /// come.
-    pub fn slices(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Vec<SeriesSlice>> {
-        for bar_type in &self.bar_types {
-            let instrument_id = bar_type.instrument_id();
-            ensure!(
-                Transition::after(instrument_id, start).is_none()
-                    || (bar_type.is_internally_aggregated()
-                        && !bar_type.is_composite()
-                        && bar_type.spec().price_type == PriceType::Last),
-                "bars {bar_type} on the root {instrument_id} must be built from its trades \
-                 (internal, LAST, not composite): its continuous bars are built and their \
-                 rolls priced from trades"
-            );
-        }
+    /// merged where they overlap or touch, so nothing is read twice. Bars
+    /// on a root are built from its contracts' trades, as the config's
+    /// load requires (see `DataConfig`).
+    #[must_use]
+    pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<SeriesSlice> {
         let slices = self.sources().into_iter().flat_map(|source| {
             TransitionTable::of(source.instrument_id(), start, end)
                 .slices()
@@ -226,7 +209,7 @@ impl DataRequirements {
                     slice,
                 })
         });
-        Ok(SeriesSlice::merged(slices))
+        SeriesSlice::merged(slices)
     }
 
     /// The contracts standing for the instruments read over `[start, end]`,
@@ -656,7 +639,7 @@ mod tests {
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         assert_eq!(
-            requirements.slices(start, end).unwrap(),
+            requirements.slices(start, end),
             [
                 series_slice(
                     NautilusDataType::TradeTick,
@@ -689,7 +672,7 @@ mod tests {
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         let roll = "2026-07-29T00:00Z";
         assert_eq!(
-            requirements.slices(start, end).unwrap(),
+            requirements.slices(start, end),
             [
                 series_slice(
                     NautilusDataType::TradeTick,
@@ -733,7 +716,7 @@ mod tests {
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         let roll = "2026-07-29T00:00Z";
         assert_eq!(
-            requirements.slices(start, end).unwrap(),
+            requirements.slices(start, end),
             [
                 series_slice(
                     NautilusDataType::TradeTick,
@@ -755,7 +738,7 @@ mod tests {
 
     /// The slices of `bar_type` over July and August 2026, across GC's
     /// roll of 29 July.
-    fn bar_slices(bar_type: &str) -> anyhow::Result<Vec<SeriesSlice>> {
+    fn bar_slices(bar_type: &str) -> Vec<SeriesSlice> {
         DataRequirements {
             bar_types: vec![BarType::from(bar_type)],
             ticks: vec![],
@@ -765,21 +748,9 @@ mod tests {
     }
 
     #[test]
-    fn bars_on_a_root_not_built_from_its_trades_are_refused_naming_the_bar_type() {
-        for bar_type in [
-            "GC.GLBX-1-MINUTE-MID-INTERNAL",
-            "GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-            "GC.GLBX-1-MINUTE-LAST-EXTERNAL",
-        ] {
-            let err = bar_slices(bar_type).unwrap_err().to_string();
-            assert!(err.contains(bar_type), "{err}");
-        }
-    }
-
-    #[test]
     fn bars_on_a_contract_need_not_be_built_from_trades() {
         assert_eq!(
-            bar_slices("GCZ6.GLBX-1-MINUTE-MID-INTERNAL").unwrap(),
+            bar_slices("GCZ6.GLBX-1-MINUTE-MID-INTERNAL"),
             [series_slice(
                 NautilusDataType::QuoteTick,
                 "GCZ6.GLBX",
@@ -804,7 +775,7 @@ mod tests {
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         assert_eq!(
-            requirements.slices(start, end).unwrap(),
+            requirements.slices(start, end),
             [
                 series_slice(
                     NautilusDataType::TradeTick,

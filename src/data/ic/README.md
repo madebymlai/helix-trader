@@ -200,9 +200,9 @@ OKX and AX adapters use them:
 | Primitive | Ours today | Nautilus native equivalent (path) | Verdict | Reason |
 | --- | --- | --- | --- | --- |
 | Spot subscription tracking | Nautilus' (before: two symbol sets in the handler, wanted and held on the connection) | `SubscriptionState` (`network/src/websocket/subscription.rs`; guide, "Subscription management") | migrated | Marked when asked, confirmed or failed by cTrader's answer, `reset_after_reconnect` for a new connection. The changes asked during a new account auth on the same connection wait in the handler, last of each symbol: cTrader keeps the connection's subscriptions then (`ALREADY_SUBSCRIBED`), and the state has no "not yet sent" mark. |
-| Authentication state | Nautilus' `AuthTracker`, begun per connection, succeeded or failed on cTrader's answers | `AuthTracker` and `WebSocketClient::set_auth_tracker` (`network/src/websocket/auth.rs`, `network/src/websocket/client.rs`; networking guide, "Liveness and recovery") | migrated | Now registered with the transport, which invalidates it when the connection drops and fails it at disconnect (the handler's own failure at close removed). Registered with `reconnect_buffer_waits_for_auth` false: the auth frames are binary, and the transport binds only text sends to a connection (`send_text_on_connection`), so they would wait behind the buffer they unblock. |
+| Authentication state | Nautilus' `AuthTracker`, begun per connection, succeeded or failed on cTrader's answers | `AuthTracker` and `WebSocketClient::set_auth_tracker` (`network/src/websocket/auth.rs`, `network/src/websocket/client.rs`; networking guide, "Liveness and recovery") | migrated | Now registered with the transport, which invalidates it when the connection drops and fails it at disconnect (the handler's own failure at close removed). Registered with `reconnect_buffer_waits_for_auth` false: the auth frames are binary, and the transport binds only text sends to a connection (`send_text_on_connection`), so they would wait behind the buffer they unblock. The handler reads it before it sends (the transport invalidates it at once on a dead connection, as `set_auth_tracker` documents, before `RECONNECTED`): requests and spot changes then wait for the new session, the heartbeat and a scheduled renewal are skipped. A frame already in the writer at the drop is still replayed before the new connection's auth, until Nautilus binds binary sends to a connection (nautilus_trader#5526). |
 | Reconnection | Nautilus' handler-mode `WebSocketClient` (backoff, `RECONNECTED`) | `WebSocketClient` (`network/src/websocket/client.rs`; networking guide, "Connection modes") | already native | The handler re-authenticates and replays on `RECONNECTED`, as the guide's "Reconnection and shutdown" asks. |
-| Rate limiting | Nautilus' keyed quota on the transport, `historical`, one per 250 ms | `Quota` and `keyed_quotas` (`network/src/ratelimiter/quota.rs`, `network/src/websocket/client.rs`) | already native | |
+| Rate limiting | Nautilus' `RateLimiter`, keyed `historical`, one per 250 ms, awaited by the caller while the session is authenticated (`AuthTracker::wait_for_authenticated`) | `RateLimiter` and `Quota` (`network/src/ratelimiter/mod.rs`, `network/src/ratelimiter/quota.rs`), as `HttpClient` awaits them (`network/src/http/client.rs`; guide, "Rate limiting": "Acquire all required quota before sending a request"); `keyed_quotas` of `WebSocketClient` (`network/src/websocket/client.rs`) | migrated | The transport's keyed quota waits inside `send_bytes`, in the handler's loop, which then held the trade requests, the answers and the heartbeat behind a tick request waiting for its slot. The caller's slot counts only while the session is authenticated (guide, "Authentication": "Gate private replay and commands until authentication succeeds"): the handler invalidates the `AuthTracker` while it authenticates the account again on the same connection, else the requests it held meanwhile would go out together. |
 | Application heartbeat | ours: a `ProtoHeartbeatEvent` every 10 s from the handler | `WebSocketConfig::heartbeat_interval_secs` / `heartbeat_payload` (`network/src/websocket/config.rs`) | keep: no native equivalent | The transport's heartbeat is a Ping or a text frame; cTrader counts only its binary protobuf `ProtoHeartbeatEvent`. The guide: "Keep application heartbeat messages in the venue handler". |
 | Request correlation | ours: `clientMsgId` per request, a map to its caller, requests waiting while the session authenticates | none (guide, "Subscription management": "The adapter provides the wire correlation"; "Tracked and external execution updates") | keep: no native equivalent | Nautilus leaves wire correlation to the adapter. |
 | Request timeout | ours: `tokio::time::timeout` of 60 s around a response | `RetryManager` (`network/src/retry.rs`) times out retried operations only | keep: no native equivalent | No request is retried, so there is no retry operation to bound; OKX's WebSocket client bounds its waits with a plain timeout too (`adapters/okx/src/websocket/client.rs`). |
@@ -315,8 +315,8 @@ A full page all in one millisecond would stop the fill with an error.
 ### Rate
 
 cTrader allows 5 historical requests a second per connection. Tick
-requests go through the transport's rate limiter at one every 250 ms,
-without burst: one every 200 ms was refused on the demo
+requests wait for Nautilus' rate limiter at one every 250 ms, without
+burst: one every 200 ms was refused on the demo
 (`BLOCKED_PAYLOAD_TYPE`, "You are being rate limited"). BID and ASK are
 fetched side by side, so the fill runs at the limiter's pace: a week of
 XAUUSD (727,000 ticks a side, about 150 requests) in about 38 s, of EURUSD
@@ -512,8 +512,11 @@ synthetic.
     account refused, malformed and unknown frames skipped,
     re-authentication after a reconnect; once cTrader ends the client's
     session, a reconnect requested, the request in flight failing and the
-    next served on the new, re-authenticated connection; tick requests at
-    most 5 a second, others unlimited; a trade request sent under its id,
+    next served on the new, re-authenticated connection; a trade request
+    asked while the transport reconnects sent once the new connection is
+    authenticated; tick requests at
+    most 5 a second, those held by a renewal too, others unlimited, a
+    trade request not waiting behind them; a trade request sent under its id,
     its answer and an event of the account coming as trade events, and one
     asked after cTrader ended the session sent on the next one;
   - `websocket/` (renewal), against a peer keeping one token pair as

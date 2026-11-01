@@ -57,8 +57,10 @@
 //! The handle owns a `rolls::Roller` of the features' tick series
 //! (`FeatureSet::ticks`, custom data among them) and of the tick series of
 //! the traded instrument its data requirements hold, which the harness
-//! reads for the decisions' freshness, its quotes (`traded_quotes`) among
-//! them when no series of the strategy reads it: `start` subscribes each
+//! reads for the decisions' freshness, its quotes among them when no
+//! series of the strategy reads it (`StandardConfig::data_requirements`,
+//! the decision's reference price, the venue's fills and the barrier's
+//! ATR then coming from them): `start` subscribes each
 //! on the contract standing for it, a plain instrument once, a root on its
 //! front contract with its roll alert, and the strategy hands the handle
 //! its time events (after `strategy::orders::on_time_event`), the roller
@@ -109,7 +111,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{CustomData, NautilusDataType},
+    data::CustomData,
     enums::OrderSide,
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
@@ -131,7 +133,7 @@ use super::{
 use crate::{
     rolls::Roller,
     strategy::{
-        DataRequirements, TickSeries,
+        DataRequirements,
         orders::{Exits, Trade},
         warmup::{BookIndicator, CustomDataIndicator, Warmup},
     },
@@ -750,21 +752,6 @@ impl ModelHandle {
     }
 }
 
-/// The quotes of `instrument_id`, the instrument a model strategy trades,
-/// which its harness reads when no series of the strategy reads it: the
-/// decision's reference price, the venue's fills, the barrier's ATR and
-/// the decisions' freshness (`decide::decide`) then come from them. The
-/// strategy's data requirements then hold them
-/// (`StandardConfig::data_requirements`), and the handle subscribes to
-/// them.
-#[must_use]
-pub fn traded_quotes(instrument_id: InstrumentId) -> TickSeries {
-    TickSeries {
-        data: NautilusDataType::QuoteTick,
-        instrument_id,
-    }
-}
-
 impl Trading {
     /// The decision of `strategy` at `now` on `row`, on the rule's `side`
     /// if the primary is a rule: a model primary's, of the side whose
@@ -999,7 +986,7 @@ mod tests {
     use nautilus_core::{UUID4, UnixNanos};
     use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        data::{Bar, BarType, QuoteTick, TradeTick},
+        data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
         enums::{AggressorSide, PriceType},
         identifiers::{ClientId, InstrumentId, TradeId, TraderId},
         instruments::{InstrumentAny, stubs::audusd_sim},
@@ -1023,7 +1010,7 @@ mod tests {
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
     };
-    use crate::strategy::AtrArgs;
+    use crate::strategy::{AtrArgs, TickSeries};
     use rust_decimal::Decimal;
 
     /// The holdout of the models of the tests, as a train publishes it.
@@ -1047,6 +1034,15 @@ mod tests {
 
     const STRATEGY: &str = "HANDLE-001";
     const AUD: &str = "AUD/USD.SIM";
+
+    /// The quotes of the AUD/USD traded, which the data requirements hold
+    /// when no series reads it.
+    fn aud_quotes() -> TickSeries {
+        TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from(AUD),
+        }
+    }
 
     #[derive(Debug)]
     struct Decider {
@@ -2601,7 +2597,7 @@ mod tests {
                     data: NautilusDataType::TradeTick,
                     instrument_id: InstrumentId::from("GC.GLBX"),
                 },
-                traded_quotes(InstrumentId::from(AUD)),
+                aud_quotes(),
             ],
             warmup: SignedDuration::from_hours(1),
         };
@@ -2701,11 +2697,7 @@ mod tests {
             instrument_id: InstrumentId::from(AUD),
         };
 
-        let sent = started_live(
-            features(),
-            vec![],
-            vec![traded_quotes(InstrumentId::from(AUD)), imbalance],
-        );
+        let sent = started_live(features(), vec![], vec![aud_quotes(), imbalance]);
 
         assert!(
             !sent
@@ -2726,11 +2718,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let sent = started_live(
-            features,
-            vec![hours],
-            vec![traded_quotes(InstrumentId::from(AUD))],
-        );
+        let sent = started_live(features, vec![hours], vec![aud_quotes()]);
 
         assert_sent(
             &sent,
@@ -2898,10 +2886,7 @@ mod tests {
         let features = last_imbalance("GC.GLBX");
         let (mut probe, _handle, sent, _models) = started_live_reading(
             Rc::clone(&features),
-            vec![
-                imbalances_of("GC.GLBX"),
-                traded_quotes(InstrumentId::from(AUD)),
-            ],
+            vec![imbalances_of("GC.GLBX"), aud_quotes()],
         );
 
         probe.handle_data_response(&catalog_answer(
@@ -2944,10 +2929,7 @@ mod tests {
         let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
         let requirements = DataRequirements {
             bar_types: vec![],
-            ticks: vec![
-                imbalances_of("GC.GLBX"),
-                traded_quotes(InstrumentId::from(AUD)),
-            ],
+            ticks: vec![imbalances_of("GC.GLBX"), aud_quotes()],
             warmup: SignedDuration::ZERO,
         };
         let features = last_imbalance("GC.GLBX");

@@ -304,7 +304,7 @@ impl Retraining {
     fn stored_until(&self, due: Timestamp) -> anyhow::Result<Timestamp> {
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
         let mut until = due;
-        for slice in self.requirements.slices(due, due)? {
+        for slice in self.requirements.slices(due, due) {
             let (data_type, identifier) = &slice.series;
             let last = catalog
                 .query_last_timestamp(&data_type.clone().into(), Some(identifier))

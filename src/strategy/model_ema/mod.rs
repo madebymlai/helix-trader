@@ -29,6 +29,7 @@ mod features;
 
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
+    config::{ConfigError, ConfigResult},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
@@ -46,11 +47,11 @@ use std::{any::Any, rc::Rc};
 
 use crate::{
     model::{
-        ModelStrategy, decide,
+        self, ModelPart, ModelStrategy, decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle},
     },
-    strategy::{Part, StandardConfig, orders, warmup::Warmup},
+    strategy::{Part, Series, StandardConfig, orders, warmup::Warmup},
 };
 
 /// Config of the `model_ema` strategy, loaded from TOML: the standard
@@ -78,6 +79,24 @@ impl Part for ModelEmaParams {
             strategy_id: Some(StrategyId::from("MODEL_EMA-001")),
             ..Default::default()
         }
+    }
+
+    /// What its features and the barrier's ATR read (`model::reads`).
+    fn reads(config: &ModelEmaConfig) -> ConfigResult<Vec<Series>> {
+        model::reads(config)
+    }
+}
+
+impl ModelPart for ModelEmaParams {
+    /// The averages of each of its bars series, warmed over its warmup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under `data.series` if it lists no bars series.
+    fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
+        let bar_types: Vec<_> = config.data.bar_types().collect();
+        features::features(&bar_types, config.data.warmup)
+            .map_err(|e| ConfigError::invalid_value("data.series", format!("{e:#}")))
     }
 }
 
@@ -121,12 +140,6 @@ impl ModelStrategy for ModelEma {
     /// it.
     fn warmup(&self) -> Rc<Warmup> {
         self.model.warmup()
-    }
-
-    /// The averages of each of its bars series, warmed over its warmup.
-    fn build_features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
-        let bar_types: Vec<_> = config.data.bar_types().collect();
-        features::features(&bar_types, config.data.warmup)
     }
 }
 
@@ -282,23 +295,83 @@ mod tests {
     fn the_features_of_the_example_config_read_its_series() {
         let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
 
-        ModelEma::features(&config).unwrap();
+        ModelEmaParams::features(&config).unwrap();
     }
 
-    /// Its features read bars alone: the quotes of the gold traded, which
-    /// the barrier's ATR of a horizon does not run on, are read by none.
-    #[test]
-    fn a_tick_series_its_features_do_not_read_is_refused() {
-        let config = ModelEmaConfig::load(&CONFIG.replace(
+    /// `CONFIG` listing the quotes of the AUD/USD traded before its bars.
+    fn with_quotes() -> String {
+        CONFIG.replace(
             "series = [",
             r#"series = [
             { data = "quotes", instrument_id = "AUD/USD.SIM" },"#,
-        ))
-        .unwrap();
+        )
+    }
 
-        let err = format!("{:#}", ModelEma::features(&config).unwrap_err());
+    /// Its features read bars alone: the quotes of the AUD/USD traded,
+    /// which the barrier's ATR of a horizon does not run on, are read by
+    /// none.
+    #[test]
+    fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
+        let err = ModelEmaConfig::load(&with_quotes()).unwrap_err();
 
-        assert!(err.contains("QuoteTick of AUD/USD.SIM"), "{err}");
+        let Some(ConfigError::InvalidValue { field, reason }) = err.downcast_ref::<ConfigError>()
+        else {
+            panic!("not one invalid value: {err}");
+        };
+        assert_eq!(field, "data.series[0]");
+        assert!(reason.contains("QuoteTick of AUD/USD.SIM"), "{reason}");
+    }
+
+    /// Labelled on a barrier 2 and 1 ATRs out, the barrier's ATR is built
+    /// of the quotes of the AUD/USD traded: it reads them.
+    #[test]
+    fn quotes_the_barrier_atr_is_built_of_load() {
+        let toml = with_quotes()
+            .replace(
+                r#"targets = { horizon = "30m" }"#,
+                r#"targets = { barrier = { take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" } }"#,
+            )
+            .replace(r#"label = "horizon""#, r#"label = "barrier""#);
+
+        ModelEmaConfig::load(&toml).unwrap();
+    }
+
+    /// Its features average each bars series once: listed again, it is
+    /// refused under its second listing, naming it, and not as features
+    /// of one name.
+    #[test]
+    fn a_bars_series_listed_twice_is_refused_under_its_second_listing() {
+        let bars = r#"{ data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },"#;
+        let toml = CONFIG.replace(bars, &[bars; 2].join("\n"));
+
+        let err = ModelEmaConfig::load(&toml).unwrap_err();
+
+        let Some(ConfigError::Duplicate {
+            field,
+            value: Some(value),
+        }) = err.downcast_ref::<ConfigError>()
+        else {
+            panic!("not one duplicate naming the series: {err}");
+        };
+        assert_eq!(field, "data.series[1]");
+        assert!(value.contains("AUD/USD.SIM-1-HOUR-MID-INTERNAL"), "{value}");
+    }
+
+    /// Its features are averages of bars: ticks alone give it none.
+    #[test]
+    fn a_config_without_bars_series_is_refused_under_the_series() {
+        let toml = CONFIG.replace(
+            r#"{ data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },"#,
+            r#"{ data = "quotes", instrument_id = "AUD/USD.SIM" },"#,
+        );
+
+        let err = ModelEmaConfig::load(&toml).unwrap_err();
+
+        let Some(ConfigError::InvalidValue { field, .. }) = err.downcast_ref::<ConfigError>()
+        else {
+            panic!("not one invalid value: {err}");
+        };
+        assert_eq!(field, "data.series");
     }
 
     /// Without `[base]`, its default: its strategy id alone, Nautilus

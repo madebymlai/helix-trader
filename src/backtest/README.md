@@ -144,9 +144,9 @@ reads its bars through `Backtest::continuous_bars(mode)`: the root's
 transitions over `[start, end]`, priced from the catalog,
 in the adjustment mode `mode` (`rolls/README.md`, "Continuous bars"). It
 fails before the run if a roll has no trade to price it
-(`backtest_continuous_bars.rs`). The run refuses bars on a root not built
-from its trades (internal, LAST, not composite), naming the bar type
-(`DataRequirements::slices`): they would never come.
+(`backtest_continuous_bars.rs`). Bars on a root not built from its
+trades (internal, LAST, not composite) would never come: the config's
+load refuses them, naming the bar type (`strategy/README.md`, "Config").
 
 ## The run
 
@@ -1339,8 +1339,7 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     `backtest_ema_time_exit.rs` (a trade closed its hold after the entry
     filled, at the market then), `backtest_ema_overlap.rs` (on a hedging
     venue a short opened beside a long still held, each closed by its own
-    alert), `backtest_ema_read_only_instrument.rs` (a second instrument
-    read, its bars crossing every hour, sends no order);
+    alert);
   - the warmup: `backtest_warmup.rs` (no warmup request, the crossover
     warming on the replay and deciding once initialized: a run from 10:00
     trades at 13:00, buying at the ask and selling at the bid of the quote

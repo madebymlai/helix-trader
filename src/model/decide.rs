@@ -35,9 +35,9 @@
 //! traded instrument a feature reads (`FeatureSet::last_update`), whatever
 //! their kind or venue, and its last quote and trade in the cache, of the
 //! series of it the model handle subscribes: those the strategy reads, or
-//! the quotes its harness reads when no series of the strategy reads the
-//! traded instrument (`handle::traded_quotes`), with no calendar of
-//! sessions. Not the data of
+//! the quotes its data requirements add when no series of the strategy
+//! reads the traded instrument (`StandardConfig::data_requirements`), with
+//! no calendar of sessions. Not the data of
 //! another instrument, which may trade while the traded one is closed, nor
 //! custom data, which may come on a weekend. The node builds no time bar
 //! for a period without data (`warmup::data_engine_config`), so a bar is

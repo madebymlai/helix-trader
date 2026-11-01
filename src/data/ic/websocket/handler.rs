@@ -20,11 +20,18 @@
 //! `ProtoOAAccountDisconnectEvent`: the token was renewed, by this session
 //! or another, or expired), the account is authenticated again with the
 //! file's pair, renewed first if refused; during a renewal or an auth such
-//! an event is the old token's, and ignored. Meanwhile new requests wait;
-//! those in flight keep awaiting their response; the spot subscriptions,
-//! which cTrader keeps on the connection, are not sent again: the
-//! (un)subscriptions asked meanwhile wait, and are sent once the account
-//! is authenticated again.
+//! an event is the old token's, and ignored. Meanwhile the authentication
+//! is invalidated and new requests wait; those in flight keep awaiting
+//! their response; the spot subscriptions, which cTrader keeps on the
+//! connection, are not sent again: the (un)subscriptions asked meanwhile
+//! wait, and are sent once the account is authenticated again.
+//!
+//! The transport invalidates the authentication as soon as it finds the
+//! connection dead, while the handler learns of the reconnect only from
+//! `RECONNECTED`, once the new connection is up: a frame sent meanwhile
+//! would wait for the new connection and reach it before its
+//! authentication. So from then on requests and spot changes wait, as
+//! during an auth, and the heartbeat and a scheduled renewal are skipped.
 //!
 //! Trade requests (orders, amendments, cancels, closes) go out under the
 //! `clientMsgId` their caller chose, who learns only whether the frame was
@@ -41,11 +48,10 @@ use nautilus_common::live::dst::time::{self, Duration, Instant, MissedTickBehavi
 use nautilus_core::{string::secret::SecretString, time::get_atomic_clock_realtime};
 use nautilus_network::{
     Message, RECONNECTED,
-    websocket::{AuthTracker, SubscriptionState, WebSocketClient},
+    websocket::{AuthTracker, SubscriptionState, WebSocketClient, auth::AuthState},
 };
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
-use ustr::Ustr;
 use zeroize::Zeroize;
 
 use super::super::{
@@ -57,14 +63,11 @@ use super::super::{
         ProtoOaErrorRes, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq,
         ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
         ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame,
-        is_historical, open, payload_name, secret_frame,
+        open, payload_name, secret_frame,
     },
     token::{TokenLock, TokenPair},
 };
-use super::{
-    AUTH_TIMEOUT, HISTORICAL_KEY, TradeEvent, TradeMessage, spot_subscribed, spot_symbol,
-    spot_topic,
-};
+use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
 
 /// How often a session tries the token file's lock while another session
 /// holds it.
@@ -199,6 +202,10 @@ pub(super) struct IcWsHandler {
     /// When to act without a message: renew on schedule (ready), try the
     /// lock again, or give up on an unanswered renewal.
     wake: Option<Instant>,
+    /// The session's authentication: authenticated only while the session
+    /// is ready, invalidated as it authenticates again on the same
+    /// connection too, which keeps the historical requests from taking
+    /// their slots meanwhile (see the outer client).
     auth: AuthTracker,
     cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: mpsc::UnboundedReceiver<Message>,
@@ -361,29 +368,30 @@ impl IcWsHandler {
         self.next_id.to_string()
     }
 
-    /// Sends one frame, first waiting for the rate limit of `keys`. No
-    /// frame content is logged: auth frames hold the secret and the token.
-    /// The transport takes the frame; its copies are out of the adapter's
-    /// reach.
-    async fn send(&self, frame: Vec<u8>, keys: Option<&[Ustr]>) -> Result<(), IcError> {
+    /// Sends one frame. No frame content is logged: auth frames hold the
+    /// secret and the token. The transport takes the frame; its copies are
+    /// out of the adapter's reach.
+    async fn send(&self, frame: Vec<u8>) -> Result<(), IcError> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| IcError::Transport("no connection".to_owned()))?;
         client
-            .send_bytes(frame, keys)
+            .send_bytes(frame, None)
             .await
             .map_err(|e| IcError::Transport(e.to_string()))
     }
 
     /// cTrader's keepalive: a `ProtoHeartbeatEvent` frame, every 10 s
-    /// (help.ctrader.com/open-api, "Establish a connection").
+    /// (help.ctrader.com/open-api, "Establish a connection"), on a live
+    /// connection only: it keeps that connection, as Nautilus skips a pong
+    /// while reconnecting (`WebSocketClient::send_pong`).
     async fn send_heartbeat(&self) {
-        if self.client.is_none() {
+        if !self.client.as_ref().is_some_and(WebSocketClient::is_active) {
             return;
         }
         if let Err(e) = self
-            .send(frame(&ProtoHeartbeatEvent::default(), None), None)
+            .send(frame(&ProtoHeartbeatEvent::default(), None))
             .await
         {
             log::warn!("cTrader heartbeat not sent: {e}");
@@ -411,7 +419,7 @@ impl IcWsHandler {
         let frame = secret_frame(&request, Some(id.clone()));
         request.client_id.zeroize();
         request.client_secret.zeroize();
-        match self.send(frame, None).await {
+        match self.send(frame).await {
             Ok(()) => self.session = Session::ApplicationAuth(id),
             Err(e) => self.fail_session(format!("sending the application auth: {e}")),
         }
@@ -452,6 +460,7 @@ impl IcWsHandler {
     /// pair another session renewed meanwhile; while another session holds
     /// the lock, tries again every `LOCK_RETRY`.
     async fn renew(&mut self) {
+        self.auth.invalidate();
         let lock = match self.credential.tokens.try_lock() {
             Ok(Some(lock)) => lock,
             Ok(None) => {
@@ -476,7 +485,7 @@ impl IcWsHandler {
         };
         let frame = secret_frame(&request, Some(id.clone()));
         request.refresh_token.zeroize();
-        match self.send(frame, None).await {
+        match self.send(frame).await {
             Ok(()) => {
                 log::info!("renewing the cTrader access token");
                 let deadline = Instant::now() + AUTH_TIMEOUT;
@@ -543,6 +552,7 @@ impl IcWsHandler {
     }
 
     async fn authenticate_account(&mut self) {
+        self.auth.invalidate();
         self.wake = None;
         let id = self.next_id();
         let mut request = ProtoOaAccountAuthReq {
@@ -552,7 +562,7 @@ impl IcWsHandler {
         };
         let frame = secret_frame(&request, Some(id.clone()));
         request.access_token.zeroize();
-        match self.send(frame, None).await {
+        match self.send(frame).await {
             Ok(()) => self.session = Session::AccountAuth(id),
             Err(e) => self.fail_session(format!("sending the account auth: {e}")),
         }
@@ -561,6 +571,8 @@ impl IcWsHandler {
     /// Acts on the time `wake` set.
     async fn woken(&mut self) {
         match self.session {
+            // The new connection's application auth renews the token if due.
+            Session::Ready if self.connection_dropped() => {}
             Session::Ready | Session::TokenLock => self.renew().await,
             // The renewal stays out: a late answer is still saved.
             Session::Renewal => self.fail_session(format!(
@@ -572,6 +584,17 @@ impl IcWsHandler {
             | Session::AccountAuth(_)
             | Session::Failed(_) => {}
         }
+    }
+
+    /// Whether the transport dropped the ready session's connection: it
+    /// invalidates the authentication at once (see the module docs). A
+    /// transport closed for good fails it instead: frames are then sent,
+    /// and fail at once. Temporary: once nautilus_trader#5526 (binary sends
+    /// bound to a connection) is released, the sends are bound to the
+    /// connection the session authenticated on, and this check gives way to
+    /// theirs.
+    fn connection_dropped(&self) -> bool {
+        self.auth.auth_state() == AuthState::Unauthenticated
     }
 
     async fn ready(&mut self) {
@@ -645,9 +668,10 @@ impl IcWsHandler {
 
     /// A spot (un)subscription of `symbol_id` asked by the outer client:
     /// sent if the session is ready, else marked for the new connection's
-    /// replay, or kept until the account is authenticated again.
+    /// replay, or kept until the account is authenticated again (or the
+    /// new connection's session, which takes them into the state).
     async fn change_spots(&mut self, symbol_id: i64, subscribe: bool) {
-        if matches!(self.session, Session::Ready) {
+        if matches!(self.session, Session::Ready) && !self.connection_dropped() {
             if self.mark_spots(symbol_id, subscribe) {
                 self.send_spots(subscribe, vec![symbol_id]).await;
             }
@@ -695,7 +719,7 @@ impl IcWsHandler {
             };
             frame(&request, Some(id.clone()))
         };
-        match self.send(frame, None).await {
+        match self.send(frame).await {
             Ok(()) => {
                 self.pending.insert(
                     id,
@@ -718,11 +742,13 @@ impl IcWsHandler {
 
     async fn request(&mut self, request: Queued) {
         match &self.session {
-            Session::Ready => self.dispatch(request).await,
+            Session::Ready if !self.connection_dropped() => self.dispatch(request).await,
             Session::Failed(reason) => {
                 request.awaiting.fail(IcError::Session(reason.clone()));
             }
-            Session::Unconnected
+            // The transport reconnects: the request waits for the new session.
+            Session::Ready
+            | Session::Unconnected
             | Session::ApplicationAuth(_)
             | Session::TokenLock
             | Session::Renewal
@@ -737,15 +763,13 @@ impl IcWsHandler {
             Awaiting::Caller(_) => self.next_id(),
             Awaiting::Trade { client_msg_id, .. } => client_msg_id.clone(),
         };
-        let historical = [Ustr::from(HISTORICAL_KEY)];
-        let keys = is_historical(request.payload_type).then_some(historical.as_slice());
         let frame = ProtoMessage {
             payload_type: request.payload_type,
             payload: Some(request.payload),
             client_msg_id: Some(id.clone()),
         }
         .encode_to_vec();
-        if let Err(e) = self.send(frame, keys).await {
+        if let Err(e) = self.send(frame).await {
             request.awaiting.fail(e);
             return;
         }
@@ -954,6 +978,7 @@ impl IcWsHandler {
             .is_some_and(WebSocketClient::request_reconnect)
         {
             log::warn!("cTrader ended the session ({name}): reconnecting");
+            self.auth.invalidate();
             self.wake = None;
             self.session = Session::Unconnected;
         } else {

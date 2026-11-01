@@ -216,11 +216,12 @@ fn moving_average_type_name<S: Serializer>(
 
 #[cfg(test)]
 mod tests {
+    use nautilus_common::config::ConfigResult;
     use nautilus_model::data::Bar;
     use nautilus_trading::strategy::StrategyConfig;
 
     use super::*;
-    use crate::strategy::{Part, StandardConfig};
+    use crate::strategy::{Part, Series, StandardConfig};
 
     /// A custom Nautilus indicator: initialized once a bar closes above
     /// its `level`.
@@ -287,6 +288,11 @@ mod tests {
 
         fn default_base() -> StrategyConfig {
             StrategyConfig::default()
+        }
+
+        /// Every series it lists.
+        fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
+            Ok(config.data.series.clone())
         }
 
         fn validate(_config: &StandardConfig<Self>, _errors: &mut ConfigErrorCollector) {}

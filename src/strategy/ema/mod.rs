@@ -13,10 +13,11 @@
 //! The config (`EmaCrossConfig`) lists the series read in `[data]`, whose
 //! bars it subscribes to through `strategy::warmup`, its warmup requested
 //! there live; `[trade]` names the one instrument traded, read on its one
-//! bars series, and `[indicators]` its fast and slow EMAs. Its signal is its
-//! Nautilus indicator, and it decides only once its indicators are
-//! initialized, on the replay in a backtest, on the warmup live. A
-//! minimal strategy to drive data, backtest and paper.
+//! bars series, the only series `[data]` lists, and `[indicators]` its
+//! fast and slow EMAs. Its signal is its Nautilus indicator, and it
+//! decides only once its indicators are initialized, on the replay in a
+//! backtest, on the warmup live. A minimal strategy to drive data,
+//! backtest and paper.
 
 mod signal;
 
@@ -25,7 +26,7 @@ use std::rc::Rc;
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
-    config::{ConfigError, ConfigErrorCollector},
+    config::{ConfigError, ConfigErrorCollector, ConfigResult},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
@@ -46,7 +47,7 @@ use serde::Deserialize;
 
 use self::signal::Signal;
 use crate::strategy::{
-    DataRequirements, Declaration, Declared, EmaArgs, Part, StandardConfig,
+    DataRequirements, Declaration, Declared, EmaArgs, Part, Series, StandardConfig,
     orders::{self, Exits, Trade},
     warmup::Warmup,
 };
@@ -71,9 +72,9 @@ pub type EmaCrossConfig = StandardConfig<EmaParams>;
 /// The crossover's part: no fields of its own. It reads two Nautilus
 /// `ExponentialMovingAverage`s, `[indicators.fast]` and
 /// `[indicators.slow]`, the fast one of the shorter period; it trades one
-/// instrument, the one of `[trade]`, on its one bars series of `[data]`;
-/// the other series are read only. Its exits are its code's
-/// (`TAKE_PROFIT_BPS`, `STOP_LOSS_BPS`, `HOLD`).
+/// instrument, the one of `[trade]`, on its one bars series of `[data]`,
+/// the only series it reads. Its exits are its code's (`TAKE_PROFIT_BPS`,
+/// `STOP_LOSS_BPS`, `HOLD`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaParams {}
@@ -98,8 +99,30 @@ impl Part for EmaParams {
         }
     }
 
-    /// The fast period not below the slow one, or the traded instrument
-    /// without exactly one bars series.
+    /// The bars series of the traded instrument, the first `[data]` lists:
+    /// the crossover reads these bars alone (`trade_bar_type`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the traded instrument if `[data]` lists no
+    /// bars series of it.
+    fn reads(config: &EmaCrossConfig) -> ConfigResult<Vec<Series>> {
+        let id = config.trade_instrument_id();
+        config
+            .data
+            .bar_types()
+            .find(|bar_type| bar_type.instrument_id() == id)
+            .map(|bar_type| vec![Series::Bars(bar_type)])
+            .ok_or_else(|| {
+                ConfigError::invalid_reference(
+                    "trade.instruments[0].instrument_id",
+                    id.to_string(),
+                    "has no bars series in data.series, the crossover reads one",
+                )
+            })
+    }
+
+    /// The fast period not below the slow one.
     fn validate(config: &EmaCrossConfig, errors: &mut ConfigErrorCollector) {
         let args = |declared| config.indicators.args(declared);
         if let (Some(fast), Some(slow)) = (args(FAST), args(SLOW)) {
@@ -108,19 +131,6 @@ impl Part for EmaParams {
                 ConfigError::range(
                     "indicators.fast.period",
                     format!("must be below the slow period {}", slow.period),
-                ),
-            );
-        }
-        if let Some(traded) = config.trade.instruments.first() {
-            let id = traded.instrument_id;
-            let bars = config.data.bar_types().filter(|b| b.instrument_id() == id);
-            let count = bars.count();
-            errors.check(
-                count == 1,
-                ConfigError::invalid_reference(
-                    "trade.instruments[0].instrument_id",
-                    id.to_string(),
-                    format!("has {count} bars series in data.series, the crossover reads one"),
                 ),
             );
         }
@@ -161,7 +171,8 @@ impl EmaCrossConfig {
         self.indicators.build(SLOW)
     }
 
-    /// The bars of the traded instrument, the ones the crossover reads.
+    /// The bars the crossover reads, its part's answer
+    /// (`EmaParams::reads`).
     ///
     /// # Panics
     ///
@@ -169,11 +180,10 @@ impl EmaCrossConfig {
     /// `validate` refuses.
     #[must_use]
     pub fn trade_bar_type(&self) -> BarType {
-        let id = self.trade_instrument_id();
-        self.data
-            .bar_types()
-            .find(|bar_type| bar_type.instrument_id() == id)
-            .expect("the traded instrument's bars validated")
+        match EmaParams::reads(self).as_deref() {
+            Ok([Series::Bars(bar_type)]) => *bar_type,
+            read => panic!("a validated config reads the traded instrument's bars: {read:?}"),
+        }
     }
 }
 

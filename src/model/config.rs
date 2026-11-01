@@ -10,7 +10,7 @@
 //! hold no third: a meta section has no meta section of its own, and
 //! writing one is refused at load as an unknown field.
 
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
@@ -21,10 +21,7 @@ use super::{
     learner::LearnerConfig,
     targets::{Label, Side, TargetsConfig, TargetsTable},
 };
-use crate::{
-    rolls::Transition,
-    strategy::{DataRequirements, TradedInstrument},
-};
+use crate::strategy::{DataRequirements, TradedInstrument};
 
 /// A strategy's model, loaded from TOML, such as
 ///
@@ -251,8 +248,8 @@ impl ModelConfig {
     /// there are several: the decision rule, the targets or the learner
     /// invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
     /// `LearnerConfig::validate`), the retrain interval not positive, the
-    /// targets trading a futures root, the barrier's ATR without bars built
-    /// from what the strategy reads of that instrument (see
+    /// barrier's ATR without bars built from what the strategy reads of
+    /// the instrument traded (see
     /// `TargetsConfig::atr_bars`) or warming over longer than its warmup,
     /// the label naming a target the config lacks, a target (the barrier's
     /// limit or the horizon) not shorter than the window, the holdout not
@@ -381,9 +378,9 @@ impl RuleConfig {
     ///
     /// Returns every violation, as `ModelConfig::validate` does: the
     /// decision rule or the targets invalid, the retrain interval not
-    /// positive, the targets trading a futures root, the barrier's ATR
-    /// without bars built from what it reads or warming over longer than
-    /// its warmup, or the meta model invalid (see `MetaConfig::validate`).
+    /// positive, the barrier's ATR without bars built from what it reads
+    /// or warming over longer than its warmup, or the meta model invalid
+    /// (see `MetaConfig::validate`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         validate_decisions(
@@ -489,17 +486,6 @@ fn validate_decisions(
             format!("the retrain interval {retrain:#} is not positive"),
         ),
     );
-    let traded = targets.instrument_id;
-    // A root rolls at any time: its first roll after the epoch tells it.
-    if let Some(roll) = Transition::after(traded, Timestamp::UNIX_EPOCH) {
-        errors.push(ConfigError::invalid_value(
-            "model.targets",
-            format!(
-                "the targets trade {traded}, a futures root: orders go to a contract, such as {}",
-                roll.pre
-            ),
-        ));
-    }
     // An ATR without bars is the targets' violation, pushed above.
     if let Ok(Some(atr)) = targets.atr_bars(rule, requirements) {
         // A dataset run replays the warmup before its first day, and no
@@ -829,23 +815,6 @@ mod tests {
         let config = parse(SECTION).unwrap();
 
         config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
-    }
-
-    /// GC.GLBX is a root of the roll calendar: its orders would go to no
-    /// contract. The error names the root and a contract of it.
-    #[test]
-    fn a_futures_root_traded_is_refused() {
-        let root = TradedInstrument {
-            instrument_id: InstrumentId::from("GC.GLBX"),
-            trade_size: Quantity::from(1),
-        };
-        let config = toml::from_str::<ModelSection>(SECTION)
-            .unwrap()
-            .trading(&root);
-
-        let err = format!("{:#}", config.validate(&reading("GC.GLBX")).unwrap_err());
-
-        assert!(err.contains("GC.GLBX") && err.contains("root"), "{err}");
     }
 
     #[test]

@@ -145,16 +145,15 @@ mod tests {
 
     use super::*;
 
-    /// The shortest crossover, 1 against 2 bars, on ESM4, reading ESH4 too.
-    /// The fast EMA is the close; the slow one starts as the average of
-    /// its first two closes and then moves two thirds of the way to each
-    /// new close. A close above the slow EMA of the bars before it is long.
+    /// The shortest crossover, 1 against 2 bars, on ESM4. The fast EMA is
+    /// the close; the slow one starts as the average of its first two
+    /// closes and then moves two thirds of the way to each new close. A
+    /// close above the slow EMA of the bars before it is long.
     fn config() -> EmaCrossConfig {
         EmaCrossConfig::load(
             r#"
             [data]
             series = [
-                { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
                 { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
             ]
             warmup = "24h"
@@ -298,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn bars_of_an_instrument_read_but_not_traded_neither_move_the_emas_nor_cross() {
+    fn bars_of_an_instrument_not_traded_neither_move_the_emas_nor_cross() {
         // ESH4 turning long and short in between leaves ESM4 short at 100
         // then long at 102.
         let signal = Signal::new(&config());

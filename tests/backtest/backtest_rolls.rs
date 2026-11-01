@@ -20,8 +20,8 @@ use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::Ti
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{
-        BarType, BookOrder, CustomData, DataType, NautilusDataType, OrderBookDelta,
-        OrderBookDeltas, OrderBookDepth, TradeTick,
+        BookOrder, CustomData, DataType, NautilusDataType, OrderBookDelta, OrderBookDeltas,
+        OrderBookDepth, TradeTick,
     },
     enums::{BookAction, BookType, OrderSide, RecordFlag},
     identifiers::{InstrumentId, StrategyId},
@@ -364,27 +364,6 @@ fn the_roller_keeps_a_contract_declared_beside_its_root_after_the_root_rolls_off
     // The root rolls from August's contract to December's; August's,
     // declared as itself, keeps arriving after the roll.
     assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
-}
-
-#[test]
-fn bars_on_a_root_built_from_quotes_are_refused_naming_the_bar_type() {
-    let catalog = rolls::catalog();
-    let bars = "GC.GLBX-30-MINUTE-MID-INTERNAL";
-    let backtest = Backtest {
-        bar_types: vec![BarType::from(bars)],
-        ..backtest(&catalog, vec![])
-    };
-
-    let err = backtest
-        .run(RollProbe {
-            core: StrategyCore::new(StrategyConfig::default()),
-            subscribe: Subscribe::Contracts,
-            got: Rc::default(),
-        })
-        .unwrap_err()
-        .to_string();
-
-    assert!(err.contains(bars), "{err}");
 }
 
 fn imbalances() -> NautilusDataType {
