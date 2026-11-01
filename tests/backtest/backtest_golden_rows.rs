@@ -32,15 +32,22 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp};
 
-/// Hourly decisions on IC's gold's 1-minute bars, warmed up 4 hours; a
-/// bracket 1.5 ATRs of 3 hourly bars in its favour, 7.5 bps against,
-/// closed after 45 minutes, and a horizon of 30 minutes, of one ounce.
+/// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
+/// 30 of them, warmed up 4 hours; a bracket 1.5 ATRs of 3 hourly bars in
+/// its favour, 7.5 bps against, closed after 45 minutes, and a horizon of
+/// 30 minutes, of one ounce.
 const CONFIG: &str = r#"
     [data]
     series = [
         { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
     ]
     warmup = "4h"
+
+    [indicators.fast]
+    period = 10
+
+    [indicators.slow]
+    period = 30
 
     [trade]
     instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]

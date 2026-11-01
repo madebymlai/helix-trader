@@ -9,7 +9,10 @@
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
-use crate::common::ic;
+use crate::common::{
+    features::{SmaArgs, tables},
+    ic,
+};
 use helix_trader::{
     backtest::{Backtest, commission_rate},
     model::{
@@ -17,7 +20,7 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         dataset::{self, Commission, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
-        features::{Feature, FeatureSet, PRIMARY_FEATURES},
+        features::{Feature, FeatureSet, FeatureSetBuilder, PRIMARY_FEATURES},
         handle::{Decision, Mode, ModelHandle, SettledRows},
         holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
@@ -25,7 +28,7 @@ use helix_trader::{
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, Distance, Label, Side, TargetRow, TargetsConfig},
     },
-    strategy::{DataRequirements, TickSeries, orders},
+    strategy::{DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, orders},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -35,10 +38,10 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
-use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicator};
+use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{CustomData, NautilusDataType, QuoteTick},
-    enums::{OmsType, PriceType},
+    enums::OmsType,
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Money, Quantity},
@@ -130,14 +133,19 @@ pub fn rule() -> DecisionRule {
     DecisionRule::Every(SignedDuration::from_hours(1))
 }
 
+/// The last mid of a quote, Nautilus' simple average of one,
+/// `[indicators.mid]`.
+pub const MID: Declared<SmaArgs> = Declared::new("mid");
+
+/// `[indicators.mid]`, as `[indicators]` holds it.
+pub fn mid_tables() -> IndicatorsConfig {
+    tables(r#"mid = { period = 1, price_type = "MID" }"#)
+}
+
 /// The probe's one feature, the last mid of IC's gold.
 pub fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(ic::INSTRUMENT_ID),
-            "mid",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
+        .quotes(InstrumentId::from(ic::INSTRUMENT_ID), MID, &mid_tables())
         .build()
         .unwrap()
 }
@@ -401,6 +409,31 @@ impl Feature for Missing {
     fn value(&self) -> f64 {
         f64::NAN
     }
+}
+
+/// The arguments of `Missing`: none.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissingArgs {}
+
+impl IndicatorArgs for MissingArgs {
+    type Indicator = Missing;
+
+    fn build(self) -> anyhow::Result<Missing> {
+        Ok(Missing::default())
+    }
+}
+
+/// The missing feature, `[indicators.missing]`.
+pub const MISSING: Declared<MissingArgs> = Declared::new("missing");
+
+/// The features of the missing one alone on the quotes of IC's gold.
+pub fn missing() -> FeatureSetBuilder {
+    FeatureSet::builder().quotes(
+        InstrumentId::from(ic::INSTRUMENT_ID),
+        MISSING,
+        &tables("missing = {}"),
+    )
 }
 
 /// The calibration of the baselines, `c(p) = 1 / (1 + e^(2 - 4p))`,

@@ -24,7 +24,7 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, backtest, baseline_of, config, meta_baseline_of, replay_on,
+        STRATEGY, backtest, baseline_of, config, meta_baseline_of, missing, replay_on,
         requirements, rule, targets, trade_on, venue, walk,
     },
     ic,
@@ -49,7 +49,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::OrderSide,
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
-    identifiers::{InstrumentId, StrategyId},
+    identifiers::StrategyId,
 };
 use nautilus_trading::{
     nautilus_strategy,
@@ -60,11 +60,7 @@ use tempfile::TempDir;
 /// The missing feature, and, for a rule primary, its side and
 /// probability.
 fn features(rule: bool) -> Rc<FeatureSet> {
-    let builder = FeatureSet::builder().quotes(
-        InstrumentId::from(ic::INSTRUMENT_ID),
-        "missing",
-        Missing::default(),
-    );
+    let builder = missing();
     if rule { builder.primary() } else { builder }
         .build()
         .unwrap()

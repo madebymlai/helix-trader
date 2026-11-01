@@ -1,16 +1,15 @@
 use std::str::FromStr;
 
-use nautilus_indicators::average::{MovingAverageType, sma::SimpleMovingAverage};
+use nautilus_indicators::average::MovingAverageType;
 use nautilus_model::{
     data::NautilusDataType,
-    enums::PriceType,
     identifiers::Symbol,
     instruments::{CryptoPerpetual, InstrumentAny},
     types::Currency,
 };
 
 use super::*;
-use crate::{model::features::FeatureSet, strategy::TickSeries};
+use crate::{model::features::testing::last_mid, strategy::TickSeries};
 
 const GOLD: &str = "XAUUSD.ICMARKETS";
 
@@ -642,12 +641,7 @@ fn an_exit_rounding_onto_the_reference_gives_no_exits() {
 
 #[test]
 fn the_fingerprint_changes_with_every_target_spec() {
-    let base = FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(GOLD),
-            "mid",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
+    let base = last_mid(InstrumentId::from(GOLD))
         .build()
         .unwrap()
         .fingerprint();
@@ -765,12 +759,7 @@ fn the_fingerprint_changes_with_every_target_spec() {
 /// and Nautilus' arguments, it keys the same targets as those written out.
 #[test]
 fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
-    let base = FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(GOLD),
-            "mid",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
+    let base = last_mid(InstrumentId::from(GOLD))
         .build()
         .unwrap()
         .fingerprint();

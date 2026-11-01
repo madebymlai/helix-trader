@@ -984,10 +984,9 @@ mod tests {
         timer::TimeEventCallback,
     };
     use nautilus_core::{UUID4, UnixNanos};
-    use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
         data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
-        enums::{AggressorSide, PriceType},
+        enums::AggressorSide,
         identifiers::{ClientId, InstrumentId, TradeId, TraderId},
         instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Price},
@@ -1004,13 +1003,14 @@ mod tests {
         calibration::Calibration,
         config::{Margins, Sizing},
         dataset::Commission,
+        features::testing::last_mid,
         holdout::{Earnings, Holdout, Refusal, Trades},
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
     };
-    use crate::strategy::{AtrArgs, TickSeries};
+    use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
     use rust_decimal::Decimal;
 
     /// The holdout of the models of the tests, as a train publishes it.
@@ -1127,14 +1127,7 @@ mod tests {
 
     /// The last mid of AUD/USD, warm once a quote came.
     fn features() -> Rc<FeatureSet> {
-        FeatureSet::builder()
-            .quotes(
-                InstrumentId::from(AUD),
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
-            .build()
-            .unwrap()
+        last_mid(InstrumentId::from(AUD)).build().unwrap()
     }
 
     /// Hands `features` a quote of AUD/USD made at `now`.
@@ -1179,15 +1172,21 @@ mod tests {
 
     /// The store of the long models under `models`.
     fn store(models: &Path) -> ModelStore {
-        side_store(models, &config(), Side::Long)
+        side_store(models, &features(), &config(), Side::Long)
     }
 
-    /// The store of the `side` models of `config` under `models`.
-    fn side_store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+    /// The store of the `side` models of `features` and `config` under
+    /// `models`.
+    fn side_store(
+        models: &Path,
+        features: &FeatureSet,
+        config: &ModelConfig,
+        side: Side,
+    ) -> ModelStore {
         ModelStore::new(
             models,
             StrategyId::from(STRATEGY),
-            &features(),
+            features,
             config,
             &requirements(),
             &venue(),
@@ -1233,11 +1232,12 @@ mod tests {
     /// expecting a win and a loss of 1, as the store keeps it for the
     /// probe's features, probed on one row.
     fn baseline(valid_from: &str, trues: usize) -> StoredModel {
-        baseline_for(&config(), Side::Long, valid_from, trues)
+        baseline_for(&features(), &config(), Side::Long, valid_from, trues)
     }
 
-    /// The baseline of `baseline`, of `config`'s `side`.
+    /// The baseline of `baseline`, of `features` and `config`'s `side`.
     fn baseline_for(
+        features: &FeatureSet,
         config: &ModelConfig,
         side: Side,
         valid_from: &str,
@@ -1252,7 +1252,7 @@ mod tests {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from: at(valid_from),
                 fingerprint: dataset::fingerprint(
-                    &features(),
+                    features,
                     config.decision,
                     &config.targets,
                     &requirements(),
@@ -1408,22 +1408,21 @@ mod tests {
 
     /// No feature reads AUD/USD, which it trades: its quote in the cache,
     /// made at the decision, the harness's, makes the decision fresh, and
-    /// the long model, of the same feature name, trades at 0.8 calibrated.
+    /// the long model of these features trades at 0.8 calibrated.
     #[test]
     fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
-        store(models.path())
-            .publish(&baseline("2026-10-22T00:00:00Z", 8))
+        let features = last_mid(InstrumentId::from("GBP/USD.SIM")).build().unwrap();
+        side_store(models.path(), &features, &config(), Side::Long)
+            .publish(&baseline_for(
+                &features,
+                &config(),
+                Side::Long,
+                "2026-10-22T00:00:00Z",
+                8,
+            ))
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let features = FeatureSet::builder()
-            .quotes(
-                InstrumentId::from("GBP/USD.SIM"),
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
-            .build()
-            .unwrap();
         features
             .handle_quote(&QuoteTick::new(
                 InstrumentId::from("GBP/USD.SIM"),
@@ -1461,14 +1460,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let gbp = InstrumentId::from("GBP/USD.SIM");
-        let features = FeatureSet::builder()
-            .quotes(
-                gbp,
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
-            .build()
-            .unwrap();
+        let features = last_mid(gbp).build().unwrap();
         let tick = |data, instrument_id| TickSeries {
             data,
             instrument_id,
@@ -1519,14 +1511,20 @@ mod tests {
         config: &ModelConfig,
         (long, short): (Option<usize>, Option<usize>),
     ) -> Rc<ModelHandle> {
+        let features = features();
         for (side, trues) in [(Side::Long, long), (Side::Short, short)] {
             if let Some(trues) = trues {
-                side_store(models, config, side)
-                    .publish(&baseline_for(config, side, "2026-10-22T00:00:00Z", trues))
+                side_store(models, &features, config, side)
+                    .publish(&baseline_for(
+                        &features,
+                        config,
+                        side,
+                        "2026-10-22T00:00:00Z",
+                        trues,
+                    ))
                     .unwrap();
             }
         }
-        let features = features();
         warm(&features, probe.clock().timestamp_ns());
         ModelHandle::new(
             StrategyId::from(STRATEGY),
@@ -2483,15 +2481,7 @@ mod tests {
 
     /// The rule primary of `config`: its features declare the side.
     fn rule_features() -> Rc<FeatureSet> {
-        FeatureSet::builder()
-            .quotes(
-                InstrumentId::from(AUD),
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
-            .primary()
-            .build()
-            .unwrap()
+        last_mid(InstrumentId::from(AUD)).primary().build().unwrap()
     }
 
     /// The decisions, barrier and retrain of `with_meta`, the trades of a
@@ -2737,8 +2727,27 @@ mod tests {
         )
     }
 
+    /// Nautilus' exponential average of two trades, warm from the second,
+    /// `[indicators.gc_2_trades]`.
+    const GC_2_TRADES: Declared<EmaArgs> = Declared::new("gc_2_trades");
+    /// The last close of a bar, Nautilus' exponential average of one,
+    /// `[indicators.hourly_close]`.
+    const HOURLY_CLOSE: Declared<EmaArgs> = Declared::new("hourly_close");
+
+    /// The tables of `GC_2_TRADES` and `HOURLY_CLOSE`, as `[indicators]`
+    /// holds them.
+    fn tables() -> IndicatorsConfig {
+        toml::from_str(
+            r#"
+            gc_2_trades = { period = 2 }
+            hourly_close = { period = 1 }
+            "#,
+        )
+        .unwrap()
+    }
+
     /// Live on 2026-08-10 at 14:30, a feature on the trades of the root
-    /// GC, the mean of its last two, reads GCZ6, the contract standing for
+    /// GC, an average of two, reads GCZ6, the contract standing for
     /// it (GC rolls into GCZ6 on 2026-07-29, `rolls/README.md`): the start
     /// requests GCZ6's trades over the hour of warmup, ending now, then
     /// subscribes to them from now, so the live stream starts where the
@@ -2753,11 +2762,7 @@ mod tests {
         let catalog = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
         let features = FeatureSet::builder()
-            .trades(
-                InstrumentId::from("GC.GLBX"),
-                "gc_2_trades",
-                SimpleMovingAverage::new(2, None),
-            )
+            .trades(InstrumentId::from("GC.GLBX"), GC_2_TRADES, &tables())
             .build()
             .unwrap();
         let requirements = DataRequirements {
@@ -2884,7 +2889,7 @@ mod tests {
     fn a_live_start_of_bar_features_requests_no_tick_history() {
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL");
         let features = FeatureSet::builder()
-            .bars(hours, "hourly_close", SimpleMovingAverage::new(1, None))
+            .bars(hours, HOURLY_CLOSE, &tables())
             .build()
             .unwrap();
 

@@ -9,7 +9,8 @@
 //! of its id and its fingerprint (`decide::fingerprint` extended by
 //! `targets::fingerprint`, the venue settings of its dataset runs,
 //! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
-//! names, warmup or version, the decision rule, a target, what the
+//! names, the arguments of their `[indicators]` tables, their warmup or
+//! version, the decision rule, a target, what the
 //! strategy reads that a barrier's ATR is built from, the commission,
 //! balance or leverage of its dataset runs, or the dataset version finds
 //! no row, and the dataset is rebuilt. The
@@ -654,27 +655,47 @@ fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::{enums::PriceType, identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::{identifiers::InstrumentId, types::Quantity};
 
     use super::*;
-    use crate::model::{
-        decide::FeatureRow,
-        targets::{Barrier, Distance, Distances, Exit, Outcome, Outcomes},
+    use crate::{
+        model::{
+            decide::FeatureRow,
+            targets::{Barrier, Distance, Distances, Exit, Outcome, Outcomes},
+        },
+        strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
     const STRATEGY: &str = "DATASET-001";
 
-    /// A feature set of `width` features on gold's quotes.
+    /// Nautilus' exponential averages of gold's mids, of 1, 2 and 3,
+    /// `[indicators.mid_<i>]`.
+    const MIDS: [Declared<EmaArgs>; 3] = [
+        Declared::new("mid_0"),
+        Declared::new("mid_1"),
+        Declared::new("mid_2"),
+    ];
+
+    /// The tables of `MIDS`, as `[indicators]` holds them.
+    fn tables() -> IndicatorsConfig {
+        toml::from_str(
+            r#"
+            mid_0 = { period = 1, price_type = "MID" }
+            mid_1 = { period = 2, price_type = "MID" }
+            mid_2 = { period = 3, price_type = "MID" }
+            "#,
+        )
+        .unwrap()
+    }
+
+    /// A feature set of `width` features on gold's quotes, `mid_0` and on.
     fn features(width: usize) -> std::rc::Rc<FeatureSet> {
-        (0..width)
-            .fold(FeatureSet::builder(), |builder, i| {
-                builder.quotes(
-                    InstrumentId::from(GOLD),
-                    &format!("mid_{i}"),
-                    SimpleMovingAverage::new(i + 1, Some(PriceType::Mid)),
-                )
+        let tables = tables();
+        MIDS[..width]
+            .iter()
+            .fold(FeatureSet::builder(), |builder, &mid| {
+                builder.quotes(InstrumentId::from(GOLD), mid, &tables)
             })
             .build()
             .unwrap()
@@ -1224,11 +1245,7 @@ mod tests {
     /// The dataset of one feature declaring a warmup of 2 hours.
     fn warmed(catalog: &Path) -> Dataset {
         let features = FeatureSet::builder()
-            .quotes(
-                InstrumentId::from(GOLD),
-                "mid_0",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
+            .quotes(InstrumentId::from(GOLD), MIDS[0], &tables())
             .warmup(SignedDuration::from_hours(2))
             .build()
             .unwrap();

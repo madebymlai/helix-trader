@@ -37,8 +37,9 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::Money;
 use tempfile::TempDir;
 
-/// Hourly decisions on IC's gold's 1-minute bars, warmed up an hour,
-/// learning whether the long of a 30-minute horizon gains, its trades, on
+/// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
+/// 30 of them, warmed up an hour, learning whether the long of a 30-minute
+/// horizon gains, its trades, on
 /// a window of 46 hours, the last 12 held out and the 12 before them
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
@@ -48,6 +49,12 @@ const CONFIG: &str = r#"
         { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
     ]
     warmup = "1h"
+
+    [indicators.fast]
+    period = 10
+
+    [indicators.slow]
+    period = 30
 
     [trade]
     instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]

@@ -12,9 +12,10 @@ use std::{collections::VecDeque, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Lcg, STRATEGY, config, features, replay, replay_of, replay_on, requirements, rule, targets,
-        venue, walk,
+        Lcg, MID, STRATEGY, config, features, mid_tables, replay, replay_of, replay_on,
+        requirements, rule, targets, venue, walk,
     },
+    features::tables,
     ic,
 };
 use helix_trader::{
@@ -24,13 +25,12 @@ use helix_trader::{
         features::{Feature, FeatureSet},
         targets::{Barrier, Distance, TargetsConfig},
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{DataRequirements, Declared, IndicatorArgs, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp, civil::Date};
-use nautilus_indicators::{average::sma::SimpleMovingAverage, indicator::Indicator};
+use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{NautilusDataType, QuoteTick},
-    enums::PriceType,
     identifiers::{InstrumentId, StrategyId},
 };
 use rust_decimal::Decimal;
@@ -140,17 +140,35 @@ impl Feature for WindowMean {
     }
 }
 
+/// The arguments of `WindowMean`: its `period`, in quotes.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowMeanArgs {
+    period: usize,
+}
+
+impl IndicatorArgs for WindowMeanArgs {
+    type Indicator = WindowMean;
+
+    fn build(self) -> anyhow::Result<WindowMean> {
+        Ok(WindowMean {
+            period: self.period,
+            mids: VecDeque::new(),
+        })
+    }
+}
+
+/// The two-hour mean, `[indicators.mean_2h]`.
+const MEAN_2H: Declared<WindowMeanArgs> = Declared::new("mean_2h");
+
 /// The mean of the last 1440 mids of IC's gold, two hours of its quotes,
 /// with a warmup of 3 hours.
 fn two_hour_mean() -> Rc<FeatureSet> {
     FeatureSet::builder()
         .quotes(
             InstrumentId::from(ic::INSTRUMENT_ID),
-            "mean_2h",
-            WindowMean {
-                period: 1440,
-                mids: VecDeque::new(),
-            },
+            MEAN_2H,
+            &tables("mean_2h = { period = 1440 }"),
         )
         .warmup(SignedDuration::from_hours(3))
         .build()
@@ -338,11 +356,7 @@ fn atr_config() -> ModelConfig {
 /// `warmup`.
 fn mid_warming_for(warmup: SignedDuration) -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(ic::INSTRUMENT_ID),
-            "mid",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
+        .quotes(InstrumentId::from(ic::INSTRUMENT_ID), MID, &mid_tables())
         .warmup(warmup)
         .build()
         .unwrap()

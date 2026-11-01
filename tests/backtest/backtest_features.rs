@@ -9,10 +9,17 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use crate::common::{INSTRUMENT_ID, MID_BAR_TYPE, backtest, catalog, minute_quotes, ts};
-use helix_trader::model::{
-    decide::{self, DecisionRule, FeatureRow},
-    features::FeatureSet,
+use crate::common::{
+    INSTRUMENT_ID, MID_BAR_TYPE, backtest, catalog,
+    features::{SmaArgs, tables},
+    minute_quotes, ts,
+};
+use helix_trader::{
+    model::{
+        decide::{self, DecisionRule, FeatureRow},
+        features::FeatureSet,
+    },
+    strategy::Declared,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -21,10 +28,8 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
-use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{BarType, CustomData},
-    enums::PriceType,
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
@@ -36,6 +41,11 @@ const STRATEGY: &str = "FEATURES-001";
 
 /// The probe's decisions, every 30 minutes.
 const EVERY: DecisionRule = DecisionRule::Every(SignedDuration::from_mins(30));
+
+/// The mean of the last three quote mids, `[indicators.mid_3_quotes]`.
+const MID_3_QUOTES: Declared<SmaArgs> = Declared::new("mid_3_quotes");
+/// The mean of the last two hour bars' closes, `[indicators.close_2_hours]`.
+const CLOSE_2_HOURS: Declared<SmaArgs> = Declared::new("close_2_hours");
 
 /// `hh:mm` UTC on the day of the ramp, Wednesday 7 January 2026.
 fn at(hh_mm: &str) -> Timestamp {
@@ -61,17 +71,15 @@ struct FeatureProbe {
 impl FeatureProbe {
     fn new() -> (Self, Rc<RefCell<Vec<FeatureRow>>>) {
         let instrument_id = InstrumentId::from(INSTRUMENT_ID);
+        let tables = tables(
+            r#"
+            mid_3_quotes = { period = 3, price_type = "MID" }
+            close_2_hours = { period = 2 }
+            "#,
+        );
         let features = FeatureSet::builder()
-            .quotes(
-                instrument_id,
-                "mid_3_quotes",
-                SimpleMovingAverage::new(3, Some(PriceType::Mid)),
-            )
-            .bars(
-                BarType::from(MID_BAR_TYPE),
-                "close_2_hours",
-                SimpleMovingAverage::new(2, None),
-            )
+            .quotes(instrument_id, MID_3_QUOTES, &tables)
+            .bars(BarType::from(MID_BAR_TYPE), CLOSE_2_HOURS, &tables)
             .build()
             .unwrap();
         let rows = Rc::new(RefCell::new(vec![]));

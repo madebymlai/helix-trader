@@ -16,7 +16,7 @@ use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Missing, STRATEGY, baseline_of, config, replay_on, requirements, rule, targets, trade_on,
+        STRATEGY, baseline_of, config, missing, replay_on, requirements, rule, targets, trade_on,
         venue, walk,
     },
     ic,
@@ -31,18 +31,11 @@ use helix_trader::model::{
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
-use nautilus_model::identifiers::{InstrumentId, StrategyId};
+use nautilus_model::identifiers::StrategyId;
 use tempfile::TempDir;
 
 fn features() -> Rc<FeatureSet> {
-    FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(ic::INSTRUMENT_ID),
-            "missing",
-            Missing::default(),
-        )
-        .build()
-        .unwrap()
+    missing().build().unwrap()
 }
 
 /// The probe's, of the long alone, retrained every day; every decision a

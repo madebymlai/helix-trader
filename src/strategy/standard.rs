@@ -65,7 +65,8 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
     /// The indicators its code reads, each by name and arguments
-    /// (`Declared`): `[indicators]` configures these and no other.
+    /// (`Declared`), a model part's features among them: `[indicators]`
+    /// configures these and no other.
     const INDICATORS: &'static [&'static dyn Declaration] = &[];
     /// Whether it trades on a model (`model::ModelStrategy`): if so its
     /// TOML has a `[model]`, it trades one instrument (`INSTRUMENTS` 1),
@@ -80,7 +81,8 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// subscribes to and registers indicators for: `[data] series` lists
     /// these, each once, and no other (see `StandardConfig::validate`). The
     /// load asks only of a config whose `[trade]` lists `INSTRUMENTS`
-    /// instruments and whose `[data]` lists each series once.
+    /// instruments, whose `[data]` lists each series once and whose
+    /// `[indicators]` builds every indicator of `INDICATORS`.
     ///
     /// # Errors
     ///
@@ -134,10 +136,15 @@ impl<P: Part> StandardConfig<P> {
     /// not list, under `data.series`, each naming the series. Nothing of a
     /// `[data]` listing a series again, which is its violation.
     fn validate_series(&self, errors: &mut ConfigErrorCollector) {
-        // What a strategy reads may depend on what it trades, and is asked
-        // of each series listed once: another count of instruments is
-        // `[trade]`'s violation, a series listed again `[data]`'s.
-        if self.trade.instruments.len() != P::INSTRUMENTS || self.data.repeats().next().is_some() {
+        // What a strategy reads may depend on what it trades and on its
+        // indicators (a model strategy's features), and is asked of each
+        // series listed once: another count of instruments is `[trade]`'s
+        // violation, a series listed again `[data]`'s, an indicator that
+        // does not build `[indicators]`'.
+        if self.trade.instruments.len() != P::INSTRUMENTS
+            || self.data.repeats().next().is_some()
+            || !self.indicators.builds(P::INDICATORS)
+        {
             return;
         }
         let read = match P::reads(self) {

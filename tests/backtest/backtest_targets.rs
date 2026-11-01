@@ -21,7 +21,10 @@
 
 use std::{cell::RefCell, collections::BTreeSet, path::PathBuf, rc::Rc, thread};
 
-use crate::common::ic;
+use crate::common::{
+    features::{SmaArgs, tables},
+    ic,
+};
 use helix_trader::{
     backtest::{Backtest, commission_rate},
     model::{
@@ -32,7 +35,7 @@ use helix_trader::{
             TargetsConfig,
         },
     },
-    strategy::{AtrArgs, DataRequirements, TickSeries, orders},
+    strategy::{AtrArgs, DataRequirements, Declared, TickSeries, orders},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -42,10 +45,9 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
-use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{Bar, BarType, CustomData, NautilusDataType, QuoteTick, TradeTick},
-    enums::{AggressorSide, OmsType, PriceType},
+    enums::{AggressorSide, OmsType},
     events::{OrderCanceled, OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId, Symbol, TradeId},
     instruments::{CryptoPerpetual, InstrumentAny},
@@ -59,6 +61,14 @@ use nautilus_trading::{
 use rust_decimal::Decimal;
 
 const STRATEGY: &str = "TARGETS-001";
+
+/// The mid of the last quote, Nautilus' simple average of one,
+/// `[indicators.mid]`.
+const MID: Declared<SmaArgs> = Declared::new("mid");
+/// The price of the last trade, `[indicators.last]`.
+const LAST: Declared<SmaArgs> = Declared::new("last");
+/// The close of the last bar, `[indicators.close]`.
+const CLOSE: Declared<SmaArgs> = Declared::new("close");
 
 /// What the probe decides on: the mid of the last quote of an instrument,
 /// the price of its last trade, or the close of the last bar of a bar
@@ -138,18 +148,17 @@ impl TargetProbe {
         targets: TargetsConfig,
         every: SignedDuration,
     ) -> (Self, Rc<RefCell<Record>>) {
+        let tables = tables(
+            r#"
+            mid = { period = 1, price_type = "MID" }
+            last = { period = 1 }
+            close = { period = 1 }
+            "#,
+        );
         let features = match source {
-            Source::Quotes(id) => FeatureSet::builder().quotes(
-                id,
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            ),
-            Source::Trades(id) => {
-                FeatureSet::builder().trades(id, "last", SimpleMovingAverage::new(1, None))
-            }
-            Source::Bars(bar_type) => {
-                FeatureSet::builder().bars(bar_type, "close", SimpleMovingAverage::new(1, None))
-            }
+            Source::Quotes(id) => FeatureSet::builder().quotes(id, MID, &tables),
+            Source::Trades(id) => FeatureSet::builder().trades(id, LAST, &tables),
+            Source::Bars(bar_type) => FeatureSet::builder().bars(bar_type, CLOSE, &tables),
         }
         .build()
         .unwrap();

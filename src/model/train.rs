@@ -643,9 +643,7 @@ mod tests {
     use std::rc::Rc;
 
     use jiff::SignedDuration;
-    use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        enums::PriceType,
         identifiers::InstrumentId,
         instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Quantity},
@@ -654,30 +652,37 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::model::{
-        config::{Margins, MetaConfig},
-        dataset::Commission,
-        decide::{DecisionRule, FeatureRow},
-        holdout::Trades,
-        learner::LearnerConfig,
-        targets::{
-            Barrier, Distance, Distances, Exit, Label, Outcome as TargetOutcome, Outcomes,
-            TargetRow, TargetsConfig,
+    use crate::{
+        model::{
+            config::{Margins, MetaConfig},
+            dataset::Commission,
+            decide::{DecisionRule, FeatureRow},
+            holdout::Trades,
+            learner::LearnerConfig,
+            targets::{
+                Barrier, Distance, Distances, Exit, Label, Outcome as TargetOutcome, Outcomes,
+                TargetRow, TargetsConfig,
+            },
         },
+        strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
 
     const AUD: &str = "AUD/USD.SIM";
     const STRATEGY: &str = "TRAIN-001";
 
-    fn features(width: usize) -> Rc<FeatureSet> {
-        (0..width)
-            .fold(FeatureSet::builder(), |builder, i| {
-                builder.quotes(
-                    InstrumentId::from(AUD),
-                    &format!("mid_{i}"),
-                    SimpleMovingAverage::new(i + 1, Some(PriceType::Mid)),
-                )
-            })
+    /// The last mid of AUD/USD, Nautilus' exponential average of one,
+    /// `[indicators.mid_0]`.
+    const MID: Declared<EmaArgs> = Declared::new("mid_0");
+
+    /// The table of `MID`, as `[indicators]` holds it.
+    fn tables() -> IndicatorsConfig {
+        toml::from_str(r#"mid_0 = { period = 1, price_type = "MID" }"#).unwrap()
+    }
+
+    /// The one feature, `mid_0`.
+    fn features() -> Rc<FeatureSet> {
+        FeatureSet::builder()
+            .quotes(InstrumentId::from(AUD), MID, &tables())
             .build()
             .unwrap()
     }
@@ -756,7 +761,7 @@ mod tests {
             &catalog(dir),
             &dir.join("models"),
             StrategyId::from(STRATEGY),
-            &features(1),
+            &features(),
             config,
             &requirements(),
             &venue(),
@@ -1152,7 +1157,7 @@ mod tests {
         assert_eq!(
             manifest.fingerprint,
             crate::model::dataset::fingerprint(
-                &features(1),
+                &features(),
                 config().decision,
                 &config().targets,
                 &requirements(),
@@ -1430,7 +1435,7 @@ mod tests {
                     strategy_id: StrategyId::from(STRATEGY),
                     valid_from: at(valid_from),
                     fingerprint: crate::model::dataset::fingerprint(
-                        &features(1),
+                        &features(),
                         config.decision,
                         &config.targets,
                         &requirements(),
@@ -1617,11 +1622,7 @@ mod tests {
     fn a_rule_primarys_meta_model_learns_whether_the_rules_side_wins() {
         let dir = tempfile::tempdir().unwrap();
         let features = FeatureSet::builder()
-            .quotes(
-                InstrumentId::from(AUD),
-                "mid_0",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
+            .quotes(InstrumentId::from(AUD), MID, &tables())
             .primary()
             .build()
             .unwrap();

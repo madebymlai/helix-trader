@@ -14,16 +14,20 @@ use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{STRATEGY, replay_on, requirements, rule, targets, venue},
+    features::tables,
     ic,
 };
-use helix_trader::model::{
-    config::{Margins, ModelConfig},
-    dataset,
-    features::{Feature, FeatureSet},
-    holdout::{Holdout, Refusal},
-    learner::LearnerConfig,
-    targets::{Label, Side},
-    train::{Kept, Outcome, Trained, Training},
+use helix_trader::{
+    model::{
+        config::{Margins, ModelConfig},
+        dataset,
+        features::{Feature, FeatureSet},
+        holdout::{Holdout, Refusal},
+        learner::LearnerConfig,
+        targets::{Label, Side},
+        train::{Kept, Outcome, Trained, Training},
+    },
+    strategy::{Declared, IndicatorArgs},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
@@ -100,12 +104,28 @@ impl Feature for Cheap {
     }
 }
 
+/// The arguments of `Cheap`: none.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheapArgs {}
+
+impl IndicatorArgs for CheapArgs {
+    type Indicator = Cheap;
+
+    fn build(self) -> anyhow::Result<Cheap> {
+        Ok(Cheap::default())
+    }
+}
+
+/// `Cheap`, `[indicators.cheap]`.
+const CHEAP: Declared<CheapArgs> = Declared::new("cheap");
+
 fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
         .quotes(
             InstrumentId::from(ic::INSTRUMENT_ID),
-            "cheap",
-            Cheap::default(),
+            CHEAP,
+            &tables("cheap = {}"),
         )
         .build()
         .unwrap()
