@@ -3,17 +3,21 @@
 //! the out-of-sample scores it reports after.
 //!
 //! Before the run (`WalkForward::prepare`), the dataset is built over the
-//! span, from the reach of the plan of the first retrain (`Plan::reach`:
+//! span, from the reach of the plan of the first train (`Plan::reach`:
 //! the first row its models read) to the end of the span's last day
 //! (`Dataset::build`), so that the last retrain period has targets to
-//! score; then the models are trained at every retrain time of the span
-//! (`Schedule::times`) whose plan fits a model (`Schedule::plan`), each
-//! planned once the trains before it published. Each build and train is a
-//! child process in a backtest (one Nautilus node per process), handed in
-//! by the caller; a train then finds the days it reads built and replays
-//! none. A model in the store is reused, so a second backtest of the same
-//! span builds and trains nothing. A train that kept a model's current
-//! one published none, so the next backtest trains at that time again.
+//! score; then the models are trained at every train time of the span
+//! (`Schedule::times`: each retrain time, or, never retrained, the start
+//! alone) whose plan fits a model (`Schedule::plan`), each planned once
+//! the trains before it published. Never retrained, a backtest whose
+//! primary or meta then has no model in use at its start is refused: it
+//! would trade nothing (`Schedule::ensure_trades`). Each build and train
+//! is a child process in a backtest (one Nautilus node per process),
+//! handed in by the caller; a train then finds the days it reads built
+//! and replays none. A model in the store is reused, so a second backtest
+//! of the same span builds and trains nothing. A train that kept a
+//! model's current one published none, so the next backtest trains at
+//! that time again.
 //! The run then trades on the stores as they are: at each decision, the
 //! latest model of each side valid then (`handle`).
 //!
@@ -26,13 +30,14 @@
 //! Beside each, its baseline: the training mean, fitted at the start of
 //! each retrain period on the rows the schedule's plan has the model of
 //! that time fitted on (`Step::rows`), those before its holdout; none for
-//! a meta waiting there. The AUC and log loss (`score`) of both are given
-//! per side, per retrain period and over the span, and what the model's
-//! decisions earned there (`holdout::Earnings`), its decision rule taking
-//! the trades it would have taken (`holdout::Rule`: a side's expected net
-//! P&L clearing its margin, a meta's probability its threshold), beside
-//! every trade of the rows it decided, at the commission and at 1.5 times
-//! it: the figures a train's holdout is judged on, out of sample.
+//! a meta waiting there. Never retrained, the span is one period. The AUC
+//! and log loss (`score`) of both are given per side, per retrain period
+//! and over the span, and what the model's decisions earned there
+//! (`holdout::Earnings`), its decision rule taking the trades it would
+//! have taken (`holdout::Rule`: a side's expected net P&L clearing its
+//! margin, a meta's probability its threshold), beside every trade of the
+//! rows it decided, at the commission and at 1.5 times it: the figures a
+//! train's holdout is judged on, out of sample.
 
 use std::{collections::BTreeSet, fmt, path::Path};
 
@@ -174,18 +179,20 @@ impl WalkForward {
     }
 
     /// Prepares a backtest over `[start, end)`: if the dataset lacks a day
-    /// from the reach of the plan of the span's first retrain time
+    /// from the reach of the plan of the span's first train time
     /// (`Plan::reach`) to the span's end, `build` builds it over that span
-    /// (`Dataset::build` of its days); then `train` trains at each retrain
-    /// time of the span whose plan fits a model (`Schedule::plan`,
-    /// `Training::train_at`), in time order, each planned after the trains
-    /// before it: a primary model they publish gives the meta its rows
-    /// from then on.
+    /// (`Dataset::build` of its days); then `train` trains at each train
+    /// time of the span (`Schedule::times`) whose plan fits a model
+    /// (`Schedule::plan`, `Training::train_at`), in time order, each
+    /// planned after the trains before it: a primary model they publish
+    /// gives the meta its rows from then on. A backtest that could then
+    /// trade nothing is refused (`Schedule::ensure_trades`).
     ///
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset or a store
-    /// cannot be read, or as `build` and `train` do.
+    /// cannot be read, as `build` and `train` do, or, never retrained, if
+    /// the primary or the meta has no model in use at `start`.
     pub fn prepare(
         &self,
         start: Timestamp,
@@ -204,7 +211,7 @@ impl WalkForward {
                 train(at)?;
             }
         }
-        Ok(())
+        self.schedule.ensure_trades(start, &self.valid_froms()?)
     }
 
     /// The scores of a backtest over `[start, end)`, prepared (`prepare`):
@@ -541,6 +548,7 @@ mod tests {
         holdout::{Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
+        schedule::Retrain,
         store::{ModelManifest, StoredModel},
         targets::{Barrier, Distance, Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
     };
@@ -602,13 +610,18 @@ mod tests {
     }
 
     fn walk(dir: &Path) -> WalkForward {
+        walk_of(dir, config())
+    }
+
+    /// The walk of `config` in `dir`, its catalog and store side by side.
+    fn walk_of(dir: &Path, config: ModelConfig) -> WalkForward {
         std::fs::create_dir_all(dir.join("catalog")).unwrap();
         WalkForward::new(
             &dir.join("catalog"),
             &dir.join("models"),
             StrategyId::from(STRATEGY),
             &features(),
-            config(),
+            config,
             &requirements(),
             &venue(),
         )
@@ -1165,17 +1178,7 @@ Short model scores, out of sample, over the span
 
     /// The walk of `with_meta` in `dir`, its catalog and store side by side.
     fn meta_walk(dir: &Path) -> WalkForward {
-        std::fs::create_dir_all(dir.join("catalog")).unwrap();
-        WalkForward::new(
-            &dir.join("catalog"),
-            &dir.join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            with_meta(),
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        walk_of(dir, with_meta())
     }
 
     /// The store of the meta models of `meta_walk(dir)`.
@@ -1308,5 +1311,184 @@ Short model scores, out of sample, over the span
         };
         assert!(at("Long model") < at("Short model"), "{text}");
         assert!(at("Short model") < at("Meta model"), "{text}");
+    }
+
+    /// `config`, never retrained.
+    fn never() -> ModelConfig {
+        ModelConfig {
+            retrain: Retrain::Never,
+            ..config()
+        }
+    }
+
+    /// What a backtest's preparation asked for: the spans built and the
+    /// times trained at.
+    type Asked = (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>);
+
+    /// What `prepare` of `walk`, in `dir`, over `[start, end)` asked for,
+    /// or its error. The build writes the dataset; a train publishes a
+    /// model of each side of `published`, if any, as a train of it would,
+    /// and none if its holdouts fell short.
+    fn prepared(
+        dir: &Path,
+        walk: &WalkForward,
+        (start, end): (&str, &str),
+        published: Option<&ModelConfig>,
+    ) -> anyhow::Result<Asked> {
+        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
+        walk.prepare(
+            at(start),
+            at(end),
+            |from, to| {
+                built.borrow_mut().push((from, to));
+                build(dir);
+                Ok(())
+            },
+            |at| {
+                trained.borrow_mut().push(at);
+                if let Some(config) = published {
+                    publish(dir, config, at);
+                }
+                Ok(())
+            },
+        )?;
+        Ok((built.take(), trained.take()))
+    }
+
+    /// Never retrained, the backtest from 12:00 of the 7th trains at its
+    /// start alone, off the daily grid, and builds from its window back
+    /// from there.
+    #[test]
+    fn a_backtest_never_retrained_builds_its_window_and_trains_at_its_start_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+
+        let (built, trained) = prepared(
+            dir.path(),
+            &walk,
+            ("2026-01-07T12:00:00Z", "2026-01-09T00:00:00Z"),
+            Some(&never()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            built,
+            [(at("2026-01-06T12:00:00Z"), at("2026-01-09T00:00:00Z"))]
+        );
+        assert_eq!(trained, [at("2026-01-07T12:00:00Z")]);
+    }
+
+    /// The models trained at the first backtest's start, 12:00 of the 7th,
+    /// are in use at a second's of the same span, and at one from the 8th.
+    #[test]
+    fn a_second_backtest_never_retrained_of_the_span_or_from_later_trains_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+        let end = "2026-01-09T00:00:00Z";
+        prepared(
+            dir.path(),
+            &walk,
+            ("2026-01-07T12:00:00Z", end),
+            Some(&never()),
+        )
+        .unwrap();
+
+        for start in ["2026-01-07T12:00:00Z", "2026-01-08T00:00:00Z"] {
+            let (_, trained) = prepared(dir.path(), &walk, (start, end), Some(&never())).unwrap();
+
+            assert_eq!(trained, [], "from {start}");
+        }
+    }
+
+    /// Never retrained, the train at the start published no side: the
+    /// backtest would trade nothing, and is refused, naming the primary.
+    #[test]
+    fn a_backtest_never_retrained_with_no_primary_model_at_its_start_is_refused_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+
+        let err = prepared(
+            dir.path(),
+            &walk,
+            ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("primary"), "{err}");
+        assert!(!err.contains("meta"), "{err}");
+    }
+
+    /// Never retrained, on an empty store, the train at the start fits the
+    /// primary and its meta waits, no primary model before it: the
+    /// backtest is refused, naming the meta.
+    #[test]
+    fn a_backtest_never_retrained_whose_meta_waits_at_its_start_is_refused_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ModelConfig {
+            retrain: Retrain::Never,
+            ..with_meta()
+        };
+        let walk = walk_of(dir.path(), config.clone());
+
+        let err = prepared(
+            dir.path(),
+            &walk,
+            ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z"),
+            Some(&config),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("meta"), "{err}");
+        assert!(!err.contains("primary"), "{err}");
+    }
+
+    /// Retrained, a backtest whose every train published nothing runs: a
+    /// later retrain may publish, and its primary's scores stay.
+    #[test]
+    fn a_retrained_backtest_whose_trains_were_all_refused_still_runs() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (_, trained) = prepared(
+            dir.path(),
+            &walk(dir.path()),
+            ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            trained,
+            [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")]
+        );
+    }
+
+    /// Never retrained, the models trained at the start, the 7th, are used
+    /// over the whole span: one period, the 7th to the 9th, of the five
+    /// rows decided in it.
+    #[test]
+    fn a_backtest_never_retrained_scores_the_span_as_one_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), never());
+        let span = ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z");
+        prepared(dir.path(), &walk, span, Some(&never())).unwrap();
+
+        let scores = walk.scores(at(span.0), at(span.1)).unwrap();
+
+        let long = scores.long.unwrap();
+        let [period] = &long.periods[..] else {
+            panic!("{long:?}");
+        };
+        assert_eq!(
+            (period.from, period.to, period.models.clone()),
+            (
+                at("2026-01-07T00:00:00Z"),
+                at("2026-01-09T00:00:00Z"),
+                vec![at("2026-01-07T00:00:00Z")]
+            )
+        );
+        assert_eq!(period.model.rows, 5);
     }
 }
