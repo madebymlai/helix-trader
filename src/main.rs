@@ -70,9 +70,10 @@ enum Command {
     /// Runs the strategy on a live node with Interactive Brokers, IC
     /// Markets or OKX; stops on Ctrl-C.
     Live(LiveArgs),
-    /// Trains the strategy's model at a time, replaying the days its
-    /// dataset lacks, and prints the model published, or fails with why
-    /// the current one was kept.
+    /// Trains the strategy's models at a time, those without one valid
+    /// from it, replaying the days its dataset lacks, and prints each
+    /// model published or in use, or fails with why a current one was
+    /// kept.
     Train(Box<TrainArgs>),
     /// Builds the strategy's dataset over the days from --start to --end,
     /// those it lacks, by a dataset run of the strategy over the catalog
@@ -138,7 +139,7 @@ struct BacktestArgs {
     leverage: Decimal,
     /// The model store a strategy trading on a model reads its models
     /// from: at each decision, the latest valid then. The backtest first
-    /// trains at each retrain time of its span the store lacks.
+    /// trains at each retrain time of its span the models the store lacks.
     #[arg(long, default_value = "models")]
     models: PathBuf,
     /// Starting balance of the account of the dataset runs that build a
@@ -589,10 +590,10 @@ fn is_ib(id: InstrumentId) -> bool {
 /// Builds the strategy from its config, runs it over the window of the
 /// catalog and prints the results to stdout. A strategy trading on a
 /// model is first retrained on its schedule (`model::walk`): its dataset
-/// built over the span and a model trained at each retrain time the store
-/// lacks, each by a child process of this binary (`dataset`, `train`),
-/// on the backtest's catalog, store and costs and the dataset balance;
-/// the out-of-sample scores of its models follow the results.
+/// built over the span and its models trained at each retrain time the
+/// store lacks one, each by a child process of this binary (`dataset`,
+/// `train`), on the backtest's catalog, store and costs and the dataset
+/// balance; the out-of-sample scores of its models follow the results.
 fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
@@ -697,8 +698,8 @@ impl Children {
         )
     }
 
-    /// Trains the model at `at`: published, or the current one kept, its
-    /// reason printed to standard error; either way no error.
+    /// Trains the models at `at`: published or in use, or a current one
+    /// kept, its reason printed to standard error; either way no error.
     ///
     /// # Errors
     ///
@@ -708,7 +709,7 @@ impl Children {
         let mut args = self.args("train");
         args.extend(["--models".into(), self.models.clone().into_os_string()]);
         match Launcher::process(binary, args).launch(at).wait() {
-            Retrained::Published => {}
+            Retrained::Succeeded => {}
             Retrained::Kept(why) => {
                 eprintln!("the retrain at {at}: {why}");
             }
@@ -887,15 +888,17 @@ fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
     Ok(train)
 }
 
-/// Prints the outcome of a train that published every model it trained;
-/// one that kept a current model is an error, its reason: the command fails, so that the
-/// live node that started it knows why (`model::launcher`).
+/// Prints the outcome of a train that kept no model, each model published
+/// or its current one in use; one that kept a current model, refused,
+/// failed or a meta waiting, is an error, its reason: the command fails,
+/// so that the live node or the backtest that started it knows why
+/// (`model::launcher`).
 ///
 /// # Errors
 ///
 /// Returns an error if the train kept a current model.
 fn reported(trained: &Trained) -> anyhow::Result<()> {
-    ensure!(trained.published(), "{trained}");
+    ensure!(trained.succeeded(), "{trained}");
     println!("{trained}");
     Ok(())
 }
@@ -1314,6 +1317,44 @@ mod tests {
         assert!(reported(&published.into()).is_ok());
         let err = reported(&meta_kept).unwrap_err().to_string();
         assert!(err.contains("meta") && err.contains("0.48"), "{err}");
+    }
+
+    /// A rerun of a train finds the long's model published: kept in use, it
+    /// is no failure, and the train exits 0.
+    #[test]
+    fn a_train_keeping_no_model_succeeds_its_models_in_use_or_published() {
+        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
+        let trained = Trained {
+            long: Some(Outcome::InUse { valid_from: t }),
+            short: Some(Outcome::Published {
+                valid_from: t,
+                holdout: Holdout {
+                    earnings: Earnings::default(),
+                    log_loss: 0.6,
+                    baseline_log_loss: 0.69,
+                    auc: Some(0.6),
+                },
+            }),
+            meta: None,
+        };
+
+        assert!(reported(&trained).is_ok());
+    }
+
+    /// The meta of a primary with no model before the train waits: the
+    /// train fails, saying why.
+    #[test]
+    fn a_train_whose_meta_waits_fails_saying_so() {
+        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
+        let trained = Trained {
+            long: Some(Outcome::InUse { valid_from: t }),
+            short: None,
+            meta: Some(Outcome::Kept(Kept::Waiting)),
+        };
+
+        let err = reported(&trained).unwrap_err().to_string();
+
+        assert!(err.contains("waiting for primary decisions"), "{err}");
     }
 
     /// The arguments of a `model_ema` live node retraining at a commission

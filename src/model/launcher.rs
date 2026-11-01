@@ -8,9 +8,9 @@
 //! the dataset days it lacks through a Nautilus node of its own and a
 //! process holds one node; in tests a thread of this process
 //! (`Launcher::in_process`). The child's exit status says what it did:
-//! success is a published model, a failure the current one kept, the
-//! reason the error it printed last (`train` exits with an error when it
-//! keeps the model).
+//! success is a train that kept no model, each published or its current
+//! one in use; a failure, a current model kept, the reason the error it
+//! printed last (`train` exits with an error when it keeps a model).
 //!
 //! `Retraining` is a live model handle's side of it: a Nautilus timer
 //! named after the strategy (`schedule::timer`), started on an
@@ -24,8 +24,8 @@
 //! series read, if that time is not past the previous retrain's, the
 //! catalog having gained nothing since, or if a retrain is still running.
 //! The handle polls it at each decision: a finished retrain is
-//! logged, as info when it published, as an error with its reason when it
-//! kept the current model, and the next may start. The model a retrain
+//! logged, as info when it succeeded, as an error with its reason when it
+//! kept a current model, and the next may start. The model a retrain
 //! publishes is the handle's from its next decision, which lists the store
 //! again (`handle`).
 //!
@@ -81,8 +81,9 @@ pub struct Running {
 /// What a finished train did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retrained {
-    /// It published every model it trained, valid from its time.
-    Published,
+    /// It kept no model: each model it trained was published, valid from
+    /// its time, or its current one is in use.
+    Succeeded,
     /// It kept the current model; why, or why it failed.
     Kept(String),
 }
@@ -114,8 +115,8 @@ impl Launcher {
         Self {
             train: Arc::new(move |at| {
                 let trained = train(at);
-                if trained.published() {
-                    Retrained::Published
+                if trained.succeeded() {
+                    Retrained::Succeeded
                 } else {
                     Retrained::Kept(trained.to_string())
                 }
@@ -154,7 +155,7 @@ fn child(command: &mut Command) -> Retrained {
         }
     }
     match child.wait() {
-        Ok(status) if status.success() => Retrained::Published,
+        Ok(status) if status.success() => Retrained::Succeeded,
         Ok(status) => Retrained::Kept(failure(tail.make_contiguous(), &status.to_string())),
         Err(e) => Retrained::Kept(format!("waiting for the train: {e}")),
     }
@@ -337,8 +338,8 @@ impl Retraining {
         };
         *self.running.borrow_mut() = None;
         match retrained {
-            Retrained::Published => {
-                log::info!("the retrain at {at} published a model valid from {at}")
+            Retrained::Succeeded => {
+                log::info!("the retrain at {at} succeeded, its models published or in use")
             }
             Retrained::Kept(why) => log::error!("the retrain at {at}: {why}"),
         }
@@ -354,7 +355,7 @@ impl fmt::Debug for Launcher {
 impl fmt::Display for Retrained {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Published => write!(f, "published a model"),
+            Self::Succeeded => write!(f, "succeeded"),
             Self::Kept(why) => write!(f, "{why}"),
         }
     }
@@ -420,13 +421,25 @@ mod tests {
         ));
     }
 
+    /// A train finding its model published at its time keeps it in use:
+    /// it kept no model, and succeeded.
     #[test]
-    fn a_child_is_told_the_time_and_succeeding_publishes() {
+    fn an_in_process_train_whose_model_is_in_use_succeeds() {
+        let launcher = Launcher::in_process(|at| Outcome::InUse { valid_from: at }.into());
+
+        assert_eq!(
+            launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
+            Retrained::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_child_is_told_the_time_and_its_success_is_the_retrains() {
         let launcher = shell(r#"[ "$1" = --at ] && [ "$2" = 2026-10-22T00:00:00Z ]"#);
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Published
+            Retrained::Succeeded
         );
     }
 
