@@ -2386,6 +2386,35 @@ mod tests {
         assert_eq!(trade.probability, c(0.8));
     }
 
+    /// The meta model taking a trade from 0.6, learned by LightGBM at its
+    /// defaults.
+    fn lightgbm_meta() -> MetaConfig {
+        MetaConfig {
+            learner: LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
+            ..meta(None)
+        }
+    }
+
+    /// A meta model valid from midnight of the 22nd, of a strategy
+    /// deciding with `features` as `decision` says (its decisions and
+    /// targets), fitted by `learner` on `rows` of `META_NAMES`, row after
+    /// row, labelled `labels`: it predicts what `learner` learned,
+    /// calibrated by `CALIBRATION`.
+    fn learned_of(
+        features: &FeatureSet,
+        decision: (DecisionRule, &TargetsConfig),
+        learner: &LearnerConfig,
+        (rows, labels): (Vec<f64>, Vec<bool>),
+    ) -> StoredModel {
+        let fitted = learner
+            .fit(&TrainingSet::new(META_NAMES.len(), rows, labels).unwrap())
+            .unwrap();
+        let mut meta = baseline_of(features, decision, &META_NAMES, "2026-10-22T00:00:00Z", 5);
+        meta.manifest.learner = learner.clone();
+        meta.model = fitted.save().unwrap();
+        meta
+    }
+
     /// A meta model of `config` valid from midnight of the 22nd, which
     /// learned on rows of its features in their order, the mid, 0.7, then
     /// the primary's side, 1 a buy and -1 a sell, then its probability,
@@ -2403,20 +2432,12 @@ mod tests {
                 labels.push(side > 0.0 && hundredths >= 70);
             }
         }
-        let learner = config.meta.as_ref().unwrap().learner.clone();
-        let fitted = learner
-            .fit(&TrainingSet::new(3, rows, labels).unwrap())
-            .unwrap();
-        let mut meta = baseline_of(
+        learned_of(
             &features(),
             (config.decision, &config.targets),
-            &META_NAMES,
-            "2026-10-22T00:00:00Z",
-            5,
-        );
-        meta.manifest.learner = learner;
-        meta.model = fitted.save().unwrap();
-        meta
+            &config.meta.as_ref().unwrap().learner,
+            (rows, labels),
+        )
     }
 
     /// The decision at noon of the 22nd on a primary model of `side`
@@ -2424,10 +2445,7 @@ mod tests {
     /// model LightGBM learned (`learned_meta`).
     fn learned_meta_decision(side: Side, trues: usize) -> Option<Decision> {
         let models = tempfile::tempdir().unwrap();
-        let config = with_meta(MetaConfig {
-            learner: LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
-            ..meta(None)
-        });
+        let config = with_meta(lightgbm_meta());
         let handle = primary_meta_handle(
             models.path(),
             &config,
@@ -2476,50 +2494,63 @@ mod tests {
             .unwrap()
     }
 
-    fn rule_config() -> RuleConfig {
-        let config = with_meta(meta(None));
+    /// The decisions, barrier and retrain of `with_meta`, the trades of a
+    /// rule primary taken by `meta`.
+    fn rule_config(meta: MetaConfig) -> RuleConfig {
+        let config = with_meta(meta.clone());
         RuleConfig {
             decision: config.decision,
             targets: config.targets,
             retrain: config.retrain,
-            meta: meta(None),
+            meta,
         }
+    }
+
+    /// The probe's handle trading in a backtest on the rule primary of
+    /// `config` (`rule_features`), its meta model `meta` under `models`,
+    /// its features warm by a quote at noon of the 22nd.
+    fn rule_handle(models: &Path, config: &RuleConfig, meta: &StoredModel) -> Rc<ModelHandle> {
+        let features = rule_features();
+        ModelStore::of_rule(
+            models,
+            StrategyId::from(STRATEGY),
+            &features,
+            config,
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+        .publish(meta)
+        .unwrap();
+        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
+        ModelHandle::of_rule(
+            StrategyId::from(STRATEGY),
+            features,
+            config,
+            &requirements(),
+            Mode::Backtest {
+                models: models.to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap()
     }
 
     #[test]
     fn a_rule_primarys_side_is_traded_if_its_meta_model_takes_it() {
         let models = tempfile::tempdir().unwrap();
-        let config = rule_config();
-        let features = rule_features();
-        ModelStore::of_rule(
+        let config = rule_config(meta(None));
+        let handle = rule_handle(
             models.path(),
-            StrategyId::from(STRATEGY),
-            &features,
             &config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
-        .publish(&baseline_of(
-            &features,
-            (config.decision, &config.targets),
-            &META_NAMES,
-            "2026-10-22T00:00:00Z",
-            7,
-        ))
-        .unwrap();
-        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
-        let handle = ModelHandle::of_rule(
-            StrategyId::from(STRATEGY),
-            features,
-            &config,
-            &requirements(),
-            Mode::Backtest {
-                models: models.path().to_path_buf(),
-                venue: venue(),
-            },
-        )
-        .unwrap();
+            &baseline_of(
+                &rule_features(),
+                (config.decision, &config.targets),
+                &META_NAMES,
+                "2026-10-22T00:00:00Z",
+                7,
+            ),
+        );
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
         let without_side = handle.decide(&mut probe).unwrap();
@@ -2544,6 +2575,53 @@ mod tests {
         );
     }
 
+    /// A meta model of the rule primary of `config` valid from midnight of
+    /// the 22nd, which learned on rows of its features in their order, the
+    /// mid, 0.7, then the rule's side, 1 a buy and -1 a sell, then its
+    /// probability, missing as a rule has none, that the rule's buys win
+    /// and its sells never: fitted by the learner of `config`'s meta on 30
+    /// buys and 30 sells, 30 rows on each side of a split where LightGBM's
+    /// leaves need 20, so that it predicts near 1 on a buy and near 0 on a
+    /// sell, 0.88 and 0.12 calibrated, either side of the threshold.
+    fn learned_rule_meta(config: &RuleConfig) -> StoredModel {
+        let (mut rows, mut labels) = (vec![], vec![]);
+        for side in [1.0, -1.0] {
+            for _ in 0..30 {
+                rows.extend([0.7, side, f64::NAN]);
+                labels.push(side > 0.0);
+            }
+        }
+        learned_of(
+            &rule_features(),
+            (config.decision, &config.targets),
+            &config.meta.learner,
+            (rows, labels),
+        )
+    }
+
+    /// The decision at noon of the 22nd on the rule's `side`, its trade
+    /// taken from 0.6 by the meta model LightGBM learned
+    /// (`learned_rule_meta`).
+    fn learned_rule_meta_decision(side: OrderSide) -> Option<Decision> {
+        let models = tempfile::tempdir().unwrap();
+        let config = rule_config(lightgbm_meta());
+        let handle = rule_handle(models.path(), &config, &learned_rule_meta(&config));
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        handle.decide_on(&mut probe, side).unwrap()
+    }
+
+    /// The meta model is given the rule's side after its features: it
+    /// takes a buy, which it learned wins, and refuses a sell, which it
+    /// learned never does.
+    #[test]
+    fn a_rule_primarys_meta_model_decides_on_its_side() {
+        let buy = learned_rule_meta_decision(OrderSide::Buy);
+        let sell = learned_rule_meta_decision(OrderSide::Sell);
+
+        assert_eq!(buy.map(|trade| trade.side), Some(OrderSide::Buy));
+        assert_eq!(sell, None);
+    }
+
     #[test]
     fn a_rule_primarys_features_must_declare_its_side() {
         let models = tempfile::tempdir().unwrap();
@@ -2551,7 +2629,7 @@ mod tests {
         let err = ModelHandle::of_rule(
             StrategyId::from(STRATEGY),
             features(),
-            &rule_config(),
+            &rule_config(meta(None)),
             &requirements(),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
