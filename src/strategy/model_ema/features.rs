@@ -1,111 +1,200 @@
 //! The `model_ema` strategy's features: on the bars of each bar type it
-//! reads, a fast and a slow exponential moving average of the closes, named
-//! after the bar type, such as `XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:ema_10`.
+//! reads, its fast and its slow exponential moving average of the closes,
+//! Nautilus' `ExponentialMovingAverage`s of `[indicators.fast]` and
+//! `[indicators.slow]`, named by the feature set's rule: after the bar
+//! type and the table, such as
+//! `XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`, when several bar types
+//! are read, `fast` and `slow` when one is.
 
 use std::rc::Rc;
 
-use jiff::SignedDuration;
-use nautilus_indicators::average::ema::ExponentialMovingAverage;
-use nautilus_model::data::BarType;
+use crate::{
+    model::features::FeatureSet,
+    strategy::{Declared, EmaArgs},
+};
 
-use crate::model::features::FeatureSet;
+use super::ModelEmaConfig;
 
-/// The periods of the averages, in bars: the fast, then the slow.
-const PERIODS: [usize; 2] = [10, 30];
+/// The fast average of each bars series, `[indicators.fast]`.
+pub(super) const FAST: Declared<EmaArgs> = Declared::new("fast");
+/// The slow average of each bars series, `[indicators.slow]`.
+pub(super) const SLOW: Declared<EmaArgs> = Declared::new("slow");
 
 /// The version of these features, in the fingerprint of the strategy's
 /// dataset and models: bumped whenever what they compute changes and
-/// their names do not, such as the kind of average or the price it reads.
-/// The golden rows (`tests/backtest/backtest_golden_rows.rs`) fail on a
-/// change made without a bump.
+/// their names and tables do not, such as the kind of average. Their
+/// arguments, their periods and the price they read, are in the
+/// fingerprint by value. The golden rows
+/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
+/// without a bump.
 const VERSION: u32 = 1;
 
-/// The features of `bar_types`, the averages of each in turn, warmed by
-/// the strategy's `warmup`, which a dataset build replays before its first
-/// day.
+/// The features of `config`: the averages of each of its bar types in
+/// turn, the fast then the slow, warmed by the strategy's warmup, which a
+/// dataset build replays before its first day.
 ///
 /// # Errors
 ///
-/// Returns an error if there is no bar type, or the warmup is negative.
-pub fn features(bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Result<Rc<FeatureSet>> {
-    bar_types
-        .iter()
-        .flat_map(|&bar_type| PERIODS.map(|period| (bar_type, period)))
+/// Returns an error if it reads no bar type.
+///
+/// # Panics
+///
+/// Panics if `[indicators]` does not build both averages, which the load
+/// refuses.
+pub fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
+    config
+        .data
+        .bar_types()
+        .flat_map(|bar_type| [FAST, SLOW].map(|average| (bar_type, average)))
         .fold(
-            FeatureSet::builder().version(VERSION).warmup(warmup),
-            |builder, (bar_type, period)| {
-                builder.bars(
-                    bar_type,
-                    &format!("{bar_type}:ema_{period}"),
-                    ExponentialMovingAverage::new(period, None),
-                )
-            },
+            FeatureSet::builder()
+                .version(VERSION)
+                .warmup(config.data.warmup),
+            |builder, (bar_type, average)| builder.bars(bar_type, average, &config.indicators),
         )
         .build()
 }
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
     use nautilus_common::actor::indicators::ActorIndicator;
-    use nautilus_model::data::Bar;
+    use nautilus_model::data::{Bar, BarType};
 
     use super::*;
+    use crate::{model::ModelPart, strategy::model_ema::ModelEmaParams};
 
     const GOLD: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
-    const HOUR: SignedDuration = SignedDuration::from_hours(1);
+    const SILVER: &str = "XAGUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
+    const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#;
+
+    /// The strategy trading gold on its minute bars, its fast average of
+    /// 2 bars and its slow one of 3, warmed up over 3 hours.
+    const CONFIG: &str = r#"
+        [data]
+        series = [
+            { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
+        ]
+        warmup = "3h"
+
+        [indicators.fast]
+        period = 2
+
+        [indicators.slow]
+        period = 3
+
+        [trade]
+        instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+
+        [model]
+        decision = { every = "1h" }
+        targets = { horizon = "30m" }
+        label = "horizon"
+        retrain = "24h"
+        window = "48h"
+        holdout = "12h"
+        margins = { long = 0.5, short = 0.5 }
+        min_pnl = 0.5
+        min_trades = 30
+        learner = { kind = "baseline" }
+    "#;
+
+    /// The features of the strategy `toml` configures, as its part builds
+    /// them of the loaded config.
+    fn features_of(toml: &str) -> Rc<FeatureSet> {
+        ModelEmaParams::features(&ModelEmaConfig::load(toml).unwrap()).unwrap()
+    }
+
+    /// `CONFIG` reading silver's minute bars after gold's.
+    fn with_silver() -> String {
+        let silver_bars = GOLD_BARS.replace("XAUUSD", "XAGUSD");
+        CONFIG.replace(GOLD_BARS, &format!("{GOLD_BARS}\n{silver_bars}"))
+    }
+
+    /// A minute bar of gold closing at `close`.
+    fn bar(close: &str) -> Bar {
+        Bar::new(
+            BarType::from(GOLD),
+            close.into(),
+            close.into(),
+            close.into(),
+            close.into(),
+            1.into(),
+            0.into(),
+            0.into(),
+        )
+    }
 
     /// A dataset build replays the strategy's warmup before its first day.
     #[test]
     fn the_features_declare_the_strategys_warmup() {
-        let warmup = SignedDuration::from_hours(3);
-
-        assert_eq!(
-            features(&[BarType::from(GOLD)], warmup).unwrap().warmup(),
-            warmup
-        );
+        assert_eq!(features_of(CONFIG).warmup(), SignedDuration::from_hours(3));
     }
 
+    /// Each table feeds one feature of one bar type.
     #[test]
-    fn each_bar_type_has_a_fast_and_a_slow_average_in_order() {
-        let silver = "XAGUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
+    fn the_averages_of_one_bar_type_are_named_after_their_tables() {
+        assert_eq!(features_of(CONFIG).names(), ["fast", "slow"]);
+    }
 
-        let features = features(&[BarType::from(GOLD), BarType::from(silver)], HOUR).unwrap();
-
+    /// Each table feeds a feature of each bar type.
+    #[test]
+    fn the_averages_of_several_bar_types_are_named_after_each_and_their_tables_in_order() {
         assert_eq!(
-            features.names(),
+            features_of(&with_silver()).names(),
             [
-                format!("{GOLD}:ema_10"),
-                format!("{GOLD}:ema_30"),
-                format!("{silver}:ema_10"),
-                format!("{silver}:ema_30"),
+                format!("{GOLD}:fast"),
+                format!("{GOLD}:slow"),
+                format!("{SILVER}:fast"),
+                format!("{SILVER}:slow"),
             ]
         );
     }
 
-    /// Flat closes: each average is the close once warm, the slow after
-    /// 30 bars.
+    /// Closes of 1, 2 and 3: Nautilus' averages start from the mean of
+    /// their first period, then weigh each close 2 / (period + 1). The
+    /// fast one is 1.5 after two bars, then 1.5 + 2/3 (3 - 1.5) = 2.5; the
+    /// slow one is warm after three, at 2.
     #[test]
-    fn the_features_are_warm_after_the_slow_period() {
-        let features = features(&[BarType::from(GOLD)], HOUR).unwrap();
-        let bar = |close: &str| {
-            Bar::new(
-                BarType::from(GOLD),
-                close.into(),
-                close.into(),
-                close.into(),
-                close.into(),
-                1.into(),
-                0.into(),
-                0.into(),
+    fn the_averages_are_of_the_periods_their_tables_set() {
+        let features = features_of(CONFIG);
+
+        features.handle_bar(&bar("1.00")).unwrap();
+        features.handle_bar(&bar("2.00")).unwrap();
+        assert_eq!(features.values(), None);
+        features.handle_bar(&bar("3.00")).unwrap();
+
+        let values = features.values().unwrap();
+        assert!((values[0] - 2.5).abs() < 1e-9, "{values:?}");
+        assert!((values[1] - 2.0).abs() < 1e-9, "{values:?}");
+    }
+
+    /// Rows and models of a fast average of 2 bars are not those of one of
+    /// 4, with no version bump.
+    #[test]
+    fn a_changed_period_changes_the_fingerprint() {
+        let changed = CONFIG.replace("period = 2", "period = 4");
+
+        assert_ne!(
+            features_of(&changed).fingerprint(),
+            features_of(CONFIG).fingerprint()
+        );
+    }
+
+    /// Nautilus parses a `PriceType` in any case: `"mid"` is the price
+    /// `"MID"` is, and keys the same rows and models.
+    #[test]
+    fn a_price_type_written_in_another_case_keeps_the_fingerprint() {
+        let price_type = |name: &str| {
+            CONFIG.replace(
+                "period = 2",
+                &format!("period = 2\nprice_type = \"{name}\""),
             )
         };
 
-        for _ in 0..29 {
-            features.handle_bar(&bar("4000.00")).unwrap();
-        }
-        assert_eq!(features.values(), None);
-        features.handle_bar(&bar("4000.00")).unwrap();
-
-        assert_eq!(features.values(), Some(vec![4000.0, 4000.0]));
+        assert_eq!(
+            features_of(&price_type("mid")).fingerprint(),
+            features_of(&price_type("MID")).fingerprint()
+        );
     }
 }

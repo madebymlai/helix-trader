@@ -1,5 +1,15 @@
 //! A strategy's features: Nautilus indicators, each declared once with its
-//! name, its data kind and its source, fed by Nautilus whatever the kind.
+//! data kind and its source, fed by Nautilus whatever the kind.
+//!
+//! A feature is built of a declared indicator's table in `[indicators]`
+//! (`strategy::Declared`, `IndicatorsConfig`), never by hand: the builder
+//! takes the declaration and the tables, builds the indicator, names the
+//! feature and carries the table's arguments into the fingerprint. A
+//! feature is named after its table (`fast`) when the table feeds that
+//! feature alone, and after the series it reads and its table
+//! (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`, `QuoteTick of
+//! XAUUSD.ICMARKETS:fast`) when the table feeds several. A raw feature of
+//! custom data has no table, and is named by the strategy.
 //!
 //! The set is one Nautilus indicator (`ActorIndicator`), shared between
 //! Nautilus and the strategy as an `Rc` (Nautilus' registration takes a
@@ -61,10 +71,14 @@
 //! build replays it before its first day (`dataset`).
 //!
 //! The fingerprint covers what makes the features what they are: their
-//! names in order, the warmup, and the version of the strategy's feature
+//! names in order, the arguments of each table they are built from by
+//! value (`IndicatorsConfig::canonical_args`: parsed, so however the TOML
+//! spells them), the warmup, and the version of the strategy's feature
 //! code (`FeatureSetBuilder::version`), bumped by hand when what it
-//! computes changes. The code shared by every set, this module and
-//! Nautilus' indicators, is versioned with the dataset (`dataset::VERSION`).
+//! computes changes. An indicator the strategy builds of `[indicators]`
+//! for its own logic is not in it. The code shared by every set, this
+//! module and Nautilus' indicators, is versioned with the dataset
+//! (`dataset::VERSION`).
 //!
 //! A strategy whose primary is a rule of its own declares the primary's
 //! side and probability as the set's last two values (`primary`): the
@@ -102,7 +116,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     rolls::{Transition, front},
     strategy::{
-        TickSeries,
+        Declaration, Declared, IndicatorArgs, IndicatorsConfig, TickSeries,
         warmup::{BookIndicator, CustomDataIndicator},
     },
 };
@@ -169,14 +183,54 @@ pub struct FeatureSet {
     primary: Option<Cell<Option<[f64; 2]>>>,
 }
 
-/// Declares the features of a `FeatureSet`, each with its source and a
-/// name, in the order of their values.
+/// Declares the features of a `FeatureSet`, each with its source, in the
+/// order of their values: a feature of a declared indicator's table, or a
+/// raw feature of custom data. An indicator is never handed in built:
+///
+/// ```
+/// # use helix_trader::{model::features::FeatureSet, strategy::{Declared, EmaArgs, IndicatorsConfig}};
+/// # use nautilus_model::identifiers::InstrumentId;
+/// const MID: Declared<EmaArgs> = Declared::new("mid");
+/// let indicators: IndicatorsConfig =
+///     toml::from_str(r#"mid = { period = 1, price_type = "MID" }"#).unwrap();
+///
+/// let features = FeatureSet::builder()
+///     .quotes(InstrumentId::from("AUD/USD.SIM"), MID, &indicators)
+///     .build()
+///     .unwrap();
+///
+/// assert_eq!(features.names(), ["mid"]);
+/// ```
+///
+/// ```compile_fail
+/// # use helix_trader::model::features::FeatureSet;
+/// # use nautilus_indicators::average::ema::ExponentialMovingAverage;
+/// # use nautilus_model::identifiers::InstrumentId;
+/// let features = FeatureSet::builder()
+///     .quotes(
+///         InstrumentId::from("AUD/USD.SIM"),
+///         "mid",
+///         ExponentialMovingAverage::new(1, None),
+///     )
+///     .build();
+/// ```
 pub struct FeatureSetBuilder {
-    names: Vec<String>,
+    names: Vec<Name>,
     slots: Vec<Slot>,
+    /// The arguments of each table a feature is built from, by its name,
+    /// in canonical form (`IndicatorsConfig::canonical_args`).
+    arguments: BTreeMap<&'static str, String>,
     version: u32,
     warmup: SignedDuration,
     primary: bool,
+}
+
+/// How a declared feature is named (see `FeatureSetBuilder::build`).
+enum Name {
+    /// After the `[indicators]` table it is built from.
+    Table(&'static str),
+    /// As the strategy gives it: a raw feature's.
+    Given(String),
 }
 
 /// A SHA-256 hash of what makes rows, models and decisions comparable:
@@ -191,6 +245,7 @@ impl FeatureSet {
         FeatureSetBuilder {
             names: vec![],
             slots: vec![],
+            arguments: BTreeMap::new(),
             version: 0,
             warmup: SignedDuration::ZERO,
             primary: false,
@@ -252,8 +307,8 @@ impl FeatureSet {
             .all(|slot| slot.value().is_some())
     }
 
-    /// The fingerprint of the feature names in order, the strategy's
-    /// feature version and the warmup.
+    /// The fingerprint of the feature names in order, the arguments of
+    /// their tables, the strategy's feature version and the warmup.
     #[must_use]
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
@@ -484,6 +539,19 @@ impl Slot {
             instrument_id: reading.instrument_id,
         })
     }
+
+    /// The series the feature reads, as a feature's name has it: the bar
+    /// type of bars, the tick series of ticks (`QuoteTick of
+    /// XAUUSD.ICMARKETS`), a root's as the root.
+    fn series(&self) -> String {
+        match self {
+            Self::Bars(bar_type, _) => bar_type.to_string(),
+            slot => slot
+                .tick_series()
+                .expect("a feature not on bars reads ticks")
+                .to_string(),
+        }
+    }
 }
 
 impl Reading {
@@ -564,68 +632,116 @@ impl ActorIndicator for FeatureSet {
 }
 
 impl FeatureSetBuilder {
-    /// Declares `feature`, named `name`, on the quotes of `instrument_id`.
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, on the quotes of `instrument_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if its table is missing, does not parse or is refused,
+    /// which the load refuses of an indicator the strategy declares
+    /// (`Part::INDICATORS`).
     #[must_use]
-    pub fn quotes(
+    pub fn quotes<A>(
         self,
         instrument_id: InstrumentId,
-        name: &str,
-        feature: impl Feature + 'static,
-    ) -> Self {
-        self.declare(
-            name,
-            Slot::Quotes(Reading::of(instrument_id), Box::new(feature)),
-        )
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        self.table(declared, indicators, |feature| {
+            Slot::Quotes(Reading::of(instrument_id), feature)
+        })
     }
 
-    /// Declares `feature`, named `name`, on the trades of `instrument_id`.
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, on the trades of `instrument_id`.
+    ///
+    /// # Panics
+    ///
+    /// As `quotes`.
     #[must_use]
-    pub fn trades(
+    pub fn trades<A>(
         self,
         instrument_id: InstrumentId,
-        name: &str,
-        feature: impl Feature + 'static,
-    ) -> Self {
-        self.declare(
-            name,
-            Slot::Trades(Reading::of(instrument_id), Box::new(feature)),
-        )
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        self.table(declared, indicators, |feature| {
+            Slot::Trades(Reading::of(instrument_id), feature)
+        })
     }
 
-    /// Declares `feature`, named `name`, on the bars of `bar_type`.
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, on the bars of `bar_type`.
+    ///
+    /// # Panics
+    ///
+    /// As `quotes`.
     #[must_use]
-    pub fn bars(self, bar_type: BarType, name: &str, feature: impl Feature + 'static) -> Self {
-        self.declare(name, Slot::Bars(bar_type, Box::new(feature)))
+    pub fn bars<A>(
+        self,
+        bar_type: BarType,
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        self.table(declared, indicators, |feature| {
+            Slot::Bars(bar_type, feature)
+        })
     }
 
-    /// Declares `feature`, named `name`, on the book depth of
-    /// `instrument_id`.
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, on the book depth of `instrument_id`.
+    ///
+    /// # Panics
+    ///
+    /// As `quotes`.
     #[must_use]
-    pub fn depth(
+    pub fn depth<A>(
         self,
         instrument_id: InstrumentId,
-        name: &str,
-        feature: impl Feature + 'static,
-    ) -> Self {
-        self.declare(
-            name,
-            Slot::Depth(Reading::of(instrument_id), Box::new(feature)),
-        )
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        self.table(declared, indicators, |feature| {
+            Slot::Depth(Reading::of(instrument_id), feature)
+        })
     }
 
-    /// Declares `feature`, named `name`, on the book deltas of
-    /// `instrument_id`.
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, on the book deltas of `instrument_id`.
+    ///
+    /// # Panics
+    ///
+    /// As `quotes`.
     #[must_use]
-    pub fn deltas(
+    pub fn deltas<A>(
         self,
         instrument_id: InstrumentId,
-        name: &str,
-        feature: impl Feature + 'static,
-    ) -> Self {
-        self.declare(
-            name,
-            Slot::Deltas(Reading::of(instrument_id), Box::new(feature)),
-        )
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        self.table(declared, indicators, |feature| {
+            Slot::Deltas(Reading::of(instrument_id), feature)
+        })
     }
 
     /// Declares a raw feature, named `name`, on the custom data
@@ -640,7 +756,7 @@ impl FeatureSetBuilder {
         read: impl Fn(&CustomData) -> f64 + 'static,
     ) -> Self {
         self.declare(
-            name,
+            Name::Given(name.to_string()),
             Slot::Data(
                 Reading::of(instrument_id),
                 type_name.to_string(),
@@ -678,19 +794,39 @@ impl FeatureSetBuilder {
         self
     }
 
-    /// The feature set, shared.
+    /// The feature set, shared. A feature of a table is named after the
+    /// table if the table feeds it alone, `<series>:<table>` if it feeds
+    /// several, the series the feature's (see the module for both forms);
+    /// a raw feature as given. The fingerprint hashes, each part
+    /// told apart (`Fingerprint::with`), the names in order, then
+    /// `indicators.<table> <arguments>` of each table a feature is built
+    /// from, by table name, the arguments in canonical form
+    /// (`IndicatorsConfig::canonical_args`), then `version <n>` and
+    /// `warmup <ns> ns`.
     ///
     /// # Errors
     ///
     /// Returns an error if no feature is declared, two share a name, or
     /// the warmup is negative.
-    pub fn build(mut self) -> anyhow::Result<Rc<FeatureSet>> {
+    pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
         ensure!(!self.names.is_empty(), "a feature set needs a feature");
+        let mut names: Vec<String> = self
+            .names
+            .iter()
+            .zip(&self.slots)
+            .map(|(name, slot)| match name {
+                Name::Table(table) if self.feeds_several(table) => {
+                    format!("{}:{table}", slot.series())
+                }
+                Name::Table(table) => (*table).to_string(),
+                Name::Given(name) => name.clone(),
+            })
+            .collect();
         if self.primary {
-            self.names.extend(PRIMARY_FEATURES.map(String::from));
+            names.extend(PRIMARY_FEATURES.map(String::from));
         }
         let mut seen = BTreeSet::new();
-        if let Some(name) = self.names.iter().find(|name| !seen.insert(*name)) {
+        if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
             bail!("two features are named {name}");
         }
         ensure!(
@@ -698,18 +834,22 @@ impl FeatureSetBuilder {
             "the features' warmup {:#} is negative",
             self.warmup
         );
+        let arguments = self
+            .arguments
+            .iter()
+            .map(|(table, args)| format!("indicators.{table} {args}"));
         let version = format!("version {}", self.version);
         let warmup = format!("warmup {} ns", self.warmup.as_nanos());
-        let fingerprint = self
-            .names
+        let fingerprint = names
             .iter()
-            .map(String::as_str)
-            .chain([version.as_str(), warmup.as_str()])
+            .cloned()
+            .chain(arguments)
+            .chain([version, warmup])
             .fold(Fingerprint::default(), |hash, part| {
                 hash.with(part.as_bytes())
             });
         Ok(Rc::new(FeatureSet {
-            names: self.names,
+            names,
             slots: RefCell::new(self.slots),
             updates: RefCell::default(),
             warmup: self.warmup,
@@ -718,8 +858,37 @@ impl FeatureSetBuilder {
         }))
     }
 
-    fn declare(mut self, name: &str, slot: Slot) -> Self {
-        self.names.push(name.to_string());
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, read from the source `slot` gives it, its table's
+    /// arguments recorded for the fingerprint.
+    fn table<A>(
+        mut self,
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+        slot: impl FnOnce(Box<dyn Feature>) -> Slot,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        let table = declared.name();
+        self.arguments
+            .insert(table, indicators.canonical_args(declared));
+        let feature = Box::new(indicators.build(declared));
+        self.declare(Name::Table(table), slot(feature))
+    }
+
+    /// Whether `table` feeds more than one of the features.
+    fn feeds_several(&self, table: &str) -> bool {
+        self.names
+            .iter()
+            .filter(|name| matches!(name, Name::Table(of) if *of == table))
+            .nth(1)
+            .is_some()
+    }
+
+    fn declare(mut self, name: Name, slot: Slot) -> Self {
+        self.names.push(name);
         self.slots.push(slot);
         self
     }
@@ -746,5 +915,7 @@ impl Display for Fingerprint {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod testing;
 #[cfg(test)]
 mod tests;

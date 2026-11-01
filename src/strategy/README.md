@@ -17,8 +17,9 @@ Each strategy is one folder, and everything about it lives there:
 strategy/<name>/
   mod.rs        Nautilus wiring, kept thin, and its part of the config
                 (the EMA's: its indicators, its count of instruments, its
-                rules; model_ema's: its count of instruments, its model
-                taken) and its exits, constants or computed
+                rules; model_ema's: its indicators, its count of
+                instruments, its model taken) and its exits, constants or
+                computed
   config.rs     its part of the config, when it is large
   book.rs       the pure core: from bars to decisions (the EMA's signal.rs)
   ...           more pure modules as needed (features.rs, tree.rs, ...)
@@ -122,9 +123,9 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   let fast: ExponentialMovingAverage = config.indicators.build(FAST);
   ```
 
-  The arguments type (`strategy::IndicatorArgs`, any `Deserialize`)
-  parses the table and builds the indicator, a Nautilus `Indicator`
-  registered by the strategy as Nautilus' own are
+  The arguments type (`strategy::IndicatorArgs`, any `Deserialize` and
+  `Serialize`) parses the table and builds the indicator, a Nautilus
+  `Indicator` registered by the strategy as Nautilus' own are
   (`register_indicator_for_bars`, `_quotes`, `_trades`, an
   `Rc<RefCell<_>>` of it or a type holding it). For Nautilus' indicators
   the crate has its constructor's arguments by their Nautilus names,
@@ -136,8 +137,12 @@ instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
   which panics at load on an argument it refuses (its `new_checked` is
   not public). A custom indicator brings its own arguments type. The
   shared config keeps each table as written (`IndicatorsConfig`) and
-  knows no indicator type. The barrier's ATR of a model strategy is not
-  one of them: it is the harness', not the strategy's code's.
+  knows no indicator type. A model strategy's features are such
+  indicators too, its code handing each declared table to its feature
+  set (see "Features and decisions"); the TOML marks no role, and a table
+  the code builds itself is its own logic's. The barrier's ATR of a model
+  strategy is not one of them: it is the harness', not the strategy's
+  code's.
 - `[trade] instruments` pairs each traded instrument with its
   `trade_size`, a Nautilus `Quantity` (a string, `"1"`). The traded
   instrument's execution data comes from `[trade]` itself, whatever the
@@ -219,9 +224,12 @@ code subscribes to and registers indicators for. Its part answers what
 they are (`Part::reads`, required, no default), and its code reads
 through that same answer, so the check and the run cannot disagree. The
 load compares the two, once `[trade]` lists as many instruments as the
-strategy trades (what it reads may depend on them) and `[data]` lists
-each series once (a repeat is `[data]`'s own violation, see above), and
-reports each mismatch with every other violation, naming the series:
+strategy trades (what it reads may depend on them), `[data]` lists
+each series once (a repeat is `[data]`'s own violation, see above) and
+`[indicators]` builds every indicator it declares (a model strategy's
+features are built of them; a missing or refused table is
+`[indicators]`' own violation), and reports each mismatch with every
+other violation, naming the series:
 
 ```text
 invalid data.series[1]: the strategy does not read bars EURUSD.ICMARKETS-1-HOUR-MID-INTERNAL
@@ -268,15 +276,20 @@ violation reported at once with the others, each under its field of
 `[model]`, such as `model.targets.horizon`). The quotes of the traded
 instrument its data requirements add when no series reads it, as every
 strategy's do, serve its harness too (see "Root ticks and the traded
-instrument"). Its part with no fields of its own:
+instrument"). Its part with no fields of its own, its two averages
+declared as the EMA's are (`[indicators.fast]`, `[indicators.slow]`):
 
 ```rust
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEmaParams {}
 
+const FAST: Declared<EmaArgs> = Declared::new("fast");
+const SLOW: Declared<EmaArgs> = Declared::new("slow");
+
 impl Part for ModelEmaParams {
     const INSTRUMENTS: usize = 1;
+    const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &SLOW];
     const TAKES_MODEL: bool = true;
 
     fn default_base() -> StrategyConfig { /* MODEL_EMA-001 */ }
@@ -297,7 +310,7 @@ impl Part for ModelEmaParams {
 
 impl ModelPart for ModelEmaParams {
     fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
-        /* the averages of each bars series, a builder error under data.series */
+        /* FAST and SLOW of each bars series, from config.indicators, a builder error under data.series */
     }
 }
 ```
@@ -839,25 +852,40 @@ Nautilus indicators, and decides on them on a clock cadence or on an event
 of its choosing (`model::features`, `model::decide`).
 
 - **Declaring.** `FeatureSet::builder()` takes each feature with its data
-  kind and source and a name: `.quotes(instrument_id, name, indicator)`,
-  `.trades(..)`, `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`, and
-  `.data(type_name, instrument_id, name, read)` for a raw feature of the
-  custom data `type_name` of an instrument (keyed by its id, see
-  `TickSeries`), the last value `read` from a data point. `.version(n)` sets the version of the
-  strategy's feature code, in the fingerprint (0 if not given; see
-  "Versions" for when to bump it);
+  kind and source, of an indicator the strategy declares
+  (`Part::INDICATORS`, see "Config") and its table in `[indicators]`:
+  `.quotes(instrument_id, DECLARED, &config.indicators)`, `.trades(..)`,
+  `.bars(bar_type, ..)`, `.depth(..)`, `.deltas(..)`. That one call builds
+  the indicator of its table, names the feature and puts the table's
+  arguments in the fingerprint; no call takes an indicator built by hand,
+  so no feature's settings are in code. Which features exist and which
+  series each reads stay the code's: a table adds or removes none. An
+  indicator the strategy builds of its own table for its own logic
+  (`config.indicators.build`) is no feature. `.data(type_name,
+  instrument_id, name, read)` declares a raw feature of the custom data
+  `type_name` of an instrument (keyed by its id, see `TickSeries`), the
+  last value `read` from a data point, named `name`: it has no settings.
+  `.version(n)` sets the version of the strategy's feature code, in the
+  fingerprint (0 if not given; see "Versions" for when to bump it);
   `.warmup(span)` declares how much data the features read before a
   decision, which a dataset build replays before its first day (see
   "Dataset"): a strategy passes its own warmup, `model_ema/` its `warmup`;
   none unless given. For a recursive indicator, an exponential average or
   Wilder's ATR, give several times its period, 5 to 10: its first value
   keeps a weight that decays only exponentially, e^-1 to e^-2 a period
-  (see "Dataset"). `build()` refuses an empty set, two features of one
-  name and a negative warmup. The names and their order are fixed there, and the values come in that order. A feature is a Nautilus
-  `Indicator` exposing its value (`Feature`), which every Nautilus moving
-  average does as it is; another indicator, or one of ours, implements
-  `Feature::value`. A strategy whose primary is its own rule declares
-  `.primary()`: the set's last two values are then the rule's side and
+  (see "Dataset"). `build()` names each feature of a table after the
+  table, `fast`, when the table feeds it alone, and after the series it
+  reads and the table when the table feeds several: bars by their bar
+  type, `XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL:fast`, ticks by their kind
+  and instrument, `QuoteTick of XAUUSD.ICMARKETS:fast`, a root's as the
+  root. It refuses an empty set, two features of one name and a negative
+  warmup. The names and their order are fixed there, and the values come
+  in that order. A feature is a Nautilus `Indicator` exposing its value
+  (`Feature`), which every Nautilus moving average does as it is; another
+  indicator, or one of ours, implements `Feature::value`, and its
+  arguments type builds it (`IndicatorArgs`). A strategy whose primary
+  is its own rule declares `.primary()`: the set's last two values are
+  then the rule's side and
   probability, `primary_side` and `primary_probability`, given at each
   decision on a side (see "Meta-labeling"), the set having no values
   without one.
@@ -982,8 +1010,14 @@ of its choosing (`model::features`, `model::decide`).
   it. Cold features give no decision and publish nothing.
 - **Fingerprint.** The config is hashed by value, the code by version.
   `decide::fingerprint(&features, rule)` hashes the feature names in
-  order, the strategy's feature version, the features' warmup and the
-  rule; `targets::fingerprint(fingerprint, &config, rule, &requirements)`
+  order, the arguments of each table the features are built from, the
+  strategy's feature version, the features' warmup and the rule. The
+  arguments are the table parsed by its arguments type, then serialized
+  (`IndicatorsConfig::canonical_args`, JSON, Nautilus' types by their own
+  serde), not the TOML as written: `"15m"` and `"900s"`, or `"MID"` and
+  `"mid"`, are one fingerprint, another period another. The tables
+  `[indicators]` holds for the strategy's own logic are not in it.
+  `targets::fingerprint(fingerprint, &config, rule, &requirements)`
   adds the targets, their barrier's ATR as it runs (its period and its
   bars, whose source is what the strategy reads), and
   `dataset::fingerprint(&features, rule, &targets, &requirements,
@@ -1001,7 +1035,8 @@ of its choosing (`model::features`, `model::decide`).
   hand. A strategy author bumps their feature version (`.version(n)`,
   `model_ema/` its `VERSION`) whenever what the features compute changes
   and their names, warmup and config do not: another indicator, input or
-  formula under the same name. Renames, comments and refactors computing
+  formula under the same name. A changed argument of a feature's table
+  is config, in the fingerprint by value: it needs no bump. Renames, comments and refactors computing
   the same values need no bump. The harness's `dataset::VERSION` is
   bumped whenever the code making every strategy's rows changes what it
   makes of the same data and config: the decisions (`model::decide`),

@@ -521,9 +521,7 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use jiff::SignedDuration;
-    use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        enums::PriceType,
         identifiers::InstrumentId,
         types::{Money, Quantity},
     };
@@ -535,6 +533,7 @@ mod tests {
         config::{Margins, MetaConfig},
         dataset::Commission,
         decide::{DecisionRule, FeatureRow},
+        features::testing::last_mid,
         holdout::{Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
@@ -546,14 +545,7 @@ mod tests {
     const STRATEGY: &str = "WALK-001";
 
     fn features() -> Rc<FeatureSet> {
-        FeatureSet::builder()
-            .quotes(
-                InstrumentId::from(GOLD),
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
-            .build()
-            .unwrap()
+        last_mid(InstrumentId::from(GOLD)).build().unwrap()
     }
 
     /// The fake learner on hourly decisions, learning whether the long of

@@ -7,10 +7,9 @@ use nautilus_common::{
     timer::TimeEventCallback,
 };
 use nautilus_core::UUID4;
-use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{QuoteTick, TradeTick},
-    enums::{AggressorSide, PriceType},
+    enums::AggressorSide,
     identifiers::{InstrumentId, TradeId, TraderId},
     types::{Price, Quantity},
 };
@@ -21,6 +20,7 @@ use nautilus_trading::{
 };
 
 use super::*;
+use crate::strategy::{Declared, EmaArgs, IndicatorsConfig};
 use nautilus_common::actor::indicators::ActorIndicator;
 
 const STRATEGY: &str = "PROBE-001";
@@ -81,14 +81,27 @@ fn every(minutes: i64) -> DecisionRule {
     DecisionRule::Every(SignedDuration::from_mins(minutes))
 }
 
-/// The mean of the last two mids of AUD/USD.
+/// The last mid, Nautilus' exponential average of one, `[indicators.mid]`.
+const MID: Declared<EmaArgs> = Declared::new("mid");
+/// Nautilus' exponential average of two mids, the mean of the first two
+/// once both came, `[indicators.mid_2]`.
+const MID_2: Declared<EmaArgs> = Declared::new("mid_2");
+
+/// The tables of the features, as `[indicators]` holds them.
+fn tables() -> IndicatorsConfig {
+    toml::from_str(
+        r#"
+        mid = { period = 1, price_type = "MID" }
+        mid_2 = { period = 2, price_type = "MID" }
+        "#,
+    )
+    .unwrap()
+}
+
+/// The average of two mids of AUD/USD.
 fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(AUD),
-            "mid_2",
-            SimpleMovingAverage::new(2, Some(PriceType::Mid)),
-        )
+        .quotes(InstrumentId::from(AUD), MID_2, &tables())
         .build()
         .unwrap()
 }
@@ -293,17 +306,10 @@ fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
 #[test]
 fn data_of_another_instrument_makes_no_decision_fresh() {
     let (probe, _clock) = registered(NOW);
+    let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(AUD),
-            "aud",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
-        .quotes(
-            InstrumentId::from(GBP),
-            "gbp",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
+        .quotes(InstrumentId::from(AUD), MID, &tables)
+        .quotes(InstrumentId::from(GBP), MID, &tables)
         .build()
         .unwrap();
     features
@@ -324,11 +330,7 @@ fn data_of_another_instrument_makes_no_decision_fresh() {
 fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
     let (probe, _clock) = registered(NOW);
     let features = FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(GBP),
-            "gbp",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
+        .quotes(InstrumentId::from(GBP), MID, &tables())
         .build()
         .unwrap();
     features

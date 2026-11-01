@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use crate::common::{
     dataset::{self, probe_reading},
+    features::{SmaArgs, tables},
     ic,
     rolls::{self, POST, PRE, ROOT, trade, tuesday, wednesday},
 };
@@ -21,13 +22,11 @@ use helix_trader::{
         features::FeatureSet,
         handle::{Mode, SettledRows},
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{DataRequirements, Declared, IndicatorsConfig, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
-use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{NautilusDataType, TradeTick},
-    enums::PriceType,
     identifiers::InstrumentId,
 };
 
@@ -63,14 +62,26 @@ fn catalog() -> tempfile::TempDir {
     catalog
 }
 
+/// The mean of the last two trades, `[indicators.root_2_trades]`.
+const ROOT_2_TRADES: Declared<SmaArgs> = Declared::new("root_2_trades");
+/// The mean of the last 60 mids, `[indicators.gold_60_mids]`.
+const GOLD_60_MIDS: Declared<SmaArgs> = Declared::new("gold_60_mids");
+
+/// The tables of `ROOT_2_TRADES` and `GOLD_60_MIDS`, as `[indicators]`
+/// holds them.
+fn root_tables() -> IndicatorsConfig {
+    tables(
+        r#"
+        root_2_trades = { period = 2 }
+        gold_60_mids = { period = 60, price_type = "MID" }
+        "#,
+    )
+}
+
 /// The mean of the root's last two trades.
 fn root_trades() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .trades(
-            InstrumentId::from(ROOT),
-            "root_2_trades",
-            SimpleMovingAverage::new(2, None),
-        )
+        .trades(InstrumentId::from(ROOT), ROOT_2_TRADES, &root_tables())
         .build()
         .unwrap()
 }
@@ -178,17 +189,10 @@ fn features_on_a_root_read_each_contract_in_turn_reset_at_the_roll() {
 /// a mid of 4000.10.
 #[test]
 fn a_roll_leaves_the_features_of_other_instruments_untouched() {
+    let tables = root_tables();
     let features = FeatureSet::builder()
-        .trades(
-            InstrumentId::from(ROOT),
-            "root_2_trades",
-            SimpleMovingAverage::new(2, None),
-        )
-        .quotes(
-            InstrumentId::from(ic::INSTRUMENT_ID),
-            "gold_60_mids",
-            SimpleMovingAverage::new(60, Some(PriceType::Mid)),
-        )
+        .trades(InstrumentId::from(ROOT), ROOT_2_TRADES, &tables)
+        .quotes(InstrumentId::from(ic::INSTRUMENT_ID), GOLD_60_MIDS, &tables)
         .build()
         .unwrap();
 

@@ -1,6 +1,6 @@
 # Model EMA (`src/strategy/model_ema/`), read into `ModelEmaConfig`: an
 # example strategy trading on a learned model, whose features are a fast
-# and a slow EMA of each bars series it reads:
+# and a slow EMA of each bars series it reads, set in [indicators]:
 #   cargo run --release -- train model_ema --config config/model_ema.toml ...
 #   cargo run --release -- backtest model_ema --config config/model_ema.toml ...
 # Every field is described in `src/strategy/README.md`.
@@ -28,6 +28,20 @@ series = [
 # build's lead-in: enough for the slow average's 30 bars and the barrier's
 # ATR.
 warmup = "72h"
+
+# The model's two averages of each bars series' closes, each a Nautilus
+# ExponentialMovingAverage by its constructor's arguments, as the EMA
+# crossover's: `period` in bars, and optionally `price_type`, the price it
+# reads of quotes (LAST by default; bars give their close). Each feature is
+# named after its bars and its table, XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL:fast
+# and so on (after its table alone, `fast`, if one bars series is read).
+# The arguments key the dataset and the models by value: another period
+# rebuilds them, the same one written otherwise does not.
+[indicators.fast]
+period = 10
+
+[indicators.slow]
+period = 30
 
 [trade]
 # The one instrument traded, whose targets the model learns, and the size

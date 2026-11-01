@@ -12,6 +12,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::Deserializ
 /// `[indicators]`: each `[indicators.<name>]` table as the TOML has it,
 /// the arguments of the indicator the strategy declares by that name
 /// (`Part::INDICATORS`), which parses and builds it (see `IndicatorArgs`).
+/// A table is no feature or logic of its own: a model strategy's code
+/// makes one a feature by handing it to its feature set
+/// (`model::features::FeatureSetBuilder`), and builds any other itself
+/// (`build`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct IndicatorsConfig(pub BTreeMap<String, toml::Table>);
@@ -20,8 +24,10 @@ pub struct IndicatorsConfig(pub BTreeMap<String, toml::Table>);
 /// it is built: a Nautilus `Indicator`, Nautilus' own or the strategy's,
 /// registered by the strategy as any other. For Nautilus' indicators the
 /// arguments are its constructor's, by their Nautilus names (`EmaArgs`,
-/// `AtrArgs`); a custom indicator brings its own.
-pub trait IndicatorArgs: DeserializeOwned {
+/// `AtrArgs`); a custom indicator brings its own. They serialize as they
+/// parse, Nautilus' types through their own serde, so that a feature's
+/// arguments enter its fingerprint by value (`canonical_args`).
+pub trait IndicatorArgs: DeserializeOwned + Serialize {
     type Indicator: Indicator;
 
     /// # Errors
@@ -83,11 +89,11 @@ impl<A: IndicatorArgs> Declaration for Declared<A> {
 /// The arguments of a Nautilus `ExponentialMovingAverage`, built by its
 /// `new_checked`: `period`, and `price_type`, the price it reads of quotes
 /// (`LAST` left out; bars give their close).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaArgs {
     pub period: usize,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_type: Option<PriceType>,
 }
 
@@ -148,10 +154,46 @@ impl IndicatorsConfig {
     /// builder, which `validate` refuses of a declared indicator.
     #[must_use]
     pub fn build<A: IndicatorArgs>(&self, declared: Declared<A>) -> A::Indicator {
-        let table = &self.0[declared.name];
-        parse::<A>(table)
-            .and_then(A::build)
+        self.parsed(declared)
+            .build()
             .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))
+    }
+
+    /// The arguments of `declared` in canonical form: its table parsed,
+    /// then serialized as JSON, so that the arguments its type parses
+    /// equal are one string however the TOML spells them (a duration
+    /// `"15m"` or `"900s"`, a Nautilus `PriceType` `"MID"` or `"mid"`, the
+    /// keys in any order), and different ones are two.
+    ///
+    /// # Panics
+    ///
+    /// Panics if its table is missing or does not parse, which `validate`
+    /// refuses of a declared indicator.
+    #[must_use]
+    pub fn canonical_args<A: IndicatorArgs>(&self, declared: Declared<A>) -> String {
+        serde_json::to_string(&self.parsed(declared))
+            .unwrap_or_else(|e| panic!("indicator {} arguments serialize: {e}", declared.name))
+    }
+
+    /// The arguments of `declared`, parsed of its table.
+    ///
+    /// # Panics
+    ///
+    /// As `canonical_args`.
+    fn parsed<A: IndicatorArgs>(&self, declared: Declared<A>) -> A {
+        parse(&self.0[declared.name])
+            .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))
+    }
+
+    /// Whether the table of every indicator of `declared` is there, parses
+    /// and builds: what `validate` asks of them, and what the strategy's
+    /// code needs to build them.
+    pub(super) fn builds(&self, declared: &[&dyn Declaration]) -> bool {
+        declared.iter().all(|declaration| {
+            self.0
+                .get(declaration.name())
+                .is_some_and(|table| declaration.check(table).is_ok())
+        })
     }
 
     /// Pushes the violations of `[indicators]` against the indicators the
@@ -254,7 +296,7 @@ mod tests {
     }
 
     /// The custom indicator's own arguments: a positive `level`.
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct BreakoutArgs {
         level: f64,

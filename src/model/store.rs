@@ -544,9 +544,7 @@ mod values {
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_indicators::average::sma::SimpleMovingAverage;
     use nautilus_model::{
-        enums::PriceType,
         identifiers::InstrumentId,
         types::{Money, Quantity},
     };
@@ -556,6 +554,7 @@ mod tests {
     use crate::model::{
         dataset::Commission,
         decide::DecisionRule,
+        features::testing::last_mid,
         holdout::Earnings,
         learner::{LearnerConfig, TrainingSet},
     };
@@ -564,14 +563,7 @@ mod tests {
     const STRATEGY: &str = "STORE-001";
 
     fn features() -> std::rc::Rc<FeatureSet> {
-        FeatureSet::builder()
-            .quotes(
-                InstrumentId::from(GOLD),
-                "mid",
-                SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-            )
-            .build()
-            .unwrap()
+        last_mid(InstrumentId::from(GOLD)).build().unwrap()
     }
 
     fn config() -> ModelConfig {

@@ -13,6 +13,7 @@
 
 pub mod cache;
 pub mod dataset;
+pub mod features;
 pub mod glbx;
 pub mod ic;
 pub mod recorder;

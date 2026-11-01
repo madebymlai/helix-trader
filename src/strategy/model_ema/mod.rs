@@ -1,7 +1,8 @@
 //! Model EMA, an example strategy trading on a learned model: at each
 //! decision of its model section, its model handle (`model::handle`)
-//! predicts each side on its features, the averages of its bars
-//! (`features.rs`), and a side expected to clear its margin is a decision
+//! predicts each side on its features, the averages of its bars of
+//! `[indicators.fast]` and `[indicators.slow]` (`features.rs`), and a
+//! side expected to clear its margin is a decision
 //! (`handle::Decision`), whose trade it sends as given through the shared
 //! order module (`decision.trade().send`, `strategy::orders`): the target
 //! its model was labelled on, as a dataset run sets it at the decision on
@@ -51,23 +52,26 @@ use crate::{
         features::FeatureSet,
         handle::{Mode, ModelHandle},
     },
-    strategy::{Part, Series, StandardConfig, orders, warmup::Warmup},
+    strategy::{Declaration, Part, Series, StandardConfig, orders, warmup::Warmup},
 };
 
 /// Config of the `model_ema` strategy, loaded from TOML: the standard
-/// tables, its model in `[model]`, and no fields of its own
-/// (`ModelEmaParams`).
+/// tables, its averages in `[indicators]`, its model in `[model]`, and no
+/// fields of its own (`ModelEmaParams`).
 pub type ModelEmaConfig = StandardConfig<ModelEmaParams>;
 
 /// The strategy's part: no fields of its own. It trades on a model, whose
 /// targets trade the one instrument of `[trade]`, of its size; its
-/// features are read from every bars series of `[data]`.
+/// features are a fast and a slow Nautilus `ExponentialMovingAverage`,
+/// `[indicators.fast]` and `[indicators.slow]`, of every bars series of
+/// `[data]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEmaParams {}
 
 impl Part for ModelEmaParams {
     const INSTRUMENTS: usize = 1;
+    const INDICATORS: &'static [&'static dyn Declaration] = &[&features::FAST, &features::SLOW];
     const TAKES_MODEL: bool = true;
 
     /// The strategy's id alone, `MODEL_EMA-001`: Nautilus tags its orders
@@ -88,14 +92,14 @@ impl Part for ModelEmaParams {
 }
 
 impl ModelPart for ModelEmaParams {
-    /// The averages of each of its bars series, warmed over its warmup.
+    /// The averages of each of its bars series, of its tables, warmed
+    /// over its warmup.
     ///
     /// # Errors
     ///
     /// Returns an error under `data.series` if it lists no bars series.
     fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
-        let bar_types: Vec<_> = config.data.bar_types().collect();
-        features::features(&bar_types, config.data.warmup)
+        features::features(config)
             .map_err(|e| ConfigError::invalid_value("data.series", format!("{e:#}")))
     }
 }
@@ -260,13 +264,20 @@ mod tests {
         strategy::orders::{Exits, Trade},
     };
 
-    /// Trades AUD/USD on a horizon of 30 minutes, deciding hourly.
+    /// Trades AUD/USD on a horizon of 30 minutes, deciding hourly on its
+    /// averages of 10 and 30 hourly bars.
     const CONFIG: &str = r#"
         [data]
         series = [
             { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
         ]
         warmup = "30h"
+
+        [indicators.fast]
+        period = 10
+
+        [indicators.slow]
+        period = 30
 
         [trade]
         instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
@@ -372,6 +383,75 @@ mod tests {
             panic!("not one invalid value: {err}");
         };
         assert_eq!(field, "data.series");
+    }
+
+    /// The fields of the config errors refusing `toml`.
+    fn refused_fields(toml: &str) -> Vec<String> {
+        let err = ModelEmaConfig::load(toml).unwrap_err();
+        let errors = match err.downcast_ref::<ConfigError>() {
+            Some(ConfigError::Multiple { errors }) => errors.clone(),
+            Some(err) => vec![err.clone()],
+            None => panic!("not a config error: {err}"),
+        };
+        errors
+            .into_iter()
+            .map(|err| match err {
+                ConfigError::MissingField { field }
+                | ConfigError::UnsupportedField { field, .. }
+                | ConfigError::InvalidValue { field, .. }
+                | ConfigError::Range { field, .. } => field,
+                err => panic!("unexpected config error {err:?}"),
+            })
+            .collect()
+    }
+
+    /// Its slow average has no table: refused under it, not built.
+    #[test]
+    fn a_missing_average_table_is_refused_under_its_name() {
+        let toml = CONFIG.replace("[indicators.slow]\n        period = 30\n", "");
+
+        assert_eq!(refused_fields(&toml), ["indicators.slow"]);
+    }
+
+    /// Its features are its code's: a table it does not declare adds
+    /// none.
+    #[test]
+    fn a_table_it_does_not_declare_is_refused_under_its_name() {
+        let toml = CONFIG.replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]");
+
+        assert_eq!(refused_fields(&toml), ["indicators.medium"]);
+    }
+
+    /// Nautilus' `ExponentialMovingAverage::new_checked` refuses a period
+    /// of 0.
+    #[test]
+    fn a_period_nautilus_refuses_is_refused_under_its_table() {
+        let toml = CONFIG.replace("period = 10", "period = 0");
+
+        assert_eq!(refused_fields(&toml), ["indicators.fast"]);
+    }
+
+    /// A refused period, a table it does not declare and a horizon of an
+    /// hour decided every hour are reported at once, each under its
+    /// field.
+    #[test]
+    fn its_table_refusals_are_reported_with_the_other_violations() {
+        let toml = CONFIG
+            .replace("period = 10", "period = 0")
+            .replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]")
+            .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+
+        let mut fields = refused_fields(&toml);
+        fields.sort();
+
+        assert_eq!(
+            fields,
+            [
+                "indicators.fast",
+                "indicators.medium",
+                "model.targets.horizon"
+            ]
+        );
     }
 
     /// Without `[base]`, its default: its strategy id alone, Nautilus

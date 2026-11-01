@@ -554,14 +554,20 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
 }
 
 /// The `model_ema` strategy on the stub's AUD/USD: a decision every two
-/// seconds on its 1-second bars, each target held a second, closed before
-/// the next.
+/// seconds on its averages of 10 and 30 of its 1-second bars, each target
+/// held a second, closed before the next.
 const MODEL_EMA_CONFIG: &str = r#"
     [data]
     series = [
         { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
     ]
     warmup = "1s"
+
+    [indicators.fast]
+    period = 10
+
+    [indicators.slow]
+    period = 30
 
     [trade]
     instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]

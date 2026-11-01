@@ -71,7 +71,10 @@ use crate::strategy::{Part, Series, StandardConfig, catalog_series, warmup::Warm
 /// (`reads`), and its strategy decides on them (`ModelStrategy`).
 pub trait ModelPart: Part {
     /// The features its model decides on, as its code builds them of
-    /// `config`.
+    /// `config`: each of an indicator it declares (`Part::INDICATORS`),
+    /// built of its table in `config.indicators`
+    /// (`features::FeatureSetBuilder`), or a raw feature of custom data.
+    /// The load asks once those tables build.
     ///
     /// # Errors
     ///
@@ -241,16 +244,72 @@ pub trait ModelStrategy:
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
     use nautilus_common::config::ConfigError;
-    use nautilus_indicators::average::sma::SimpleMovingAverage;
-    use nautilus_model::{data::NautilusDataType, enums::PriceType, identifiers::StrategyId};
+    use nautilus_indicators::indicator::Indicator;
+    use nautilus_model::{data::NautilusDataType, identifiers::StrategyId};
     use nautilus_trading::strategy::StrategyConfig;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
     use super::*;
+    use crate::{
+        model::features::Feature,
+        strategy::{Declaration, Declared, EmaArgs, IndicatorArgs},
+    };
+
+    /// A custom indicator of the probe over a span of time: its value the
+    /// span in seconds, initialized from the start.
+    struct Span(SignedDuration);
+
+    impl Indicator for Span {
+        fn name(&self) -> String {
+            "Span".to_string()
+        }
+
+        fn has_inputs(&self) -> bool {
+            false
+        }
+
+        fn initialized(&self) -> bool {
+            true
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    impl Feature for Span {
+        fn value(&self) -> f64 {
+            self.0.as_secs_f64()
+        }
+    }
+
+    /// The arguments of `Span`: a positive duration, written as `[data]
+    /// warmup` is.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SpanArgs {
+        span: SignedDuration,
+    }
+
+    impl IndicatorArgs for SpanArgs {
+        type Indicator = Span;
+
+        fn build(self) -> anyhow::Result<Span> {
+            anyhow::ensure!(self.span.is_positive(), "span must be positive");
+            Ok(Span(self.span))
+        }
+    }
+
+    /// The probe's feature on each series it lists, `[indicators.span]`.
+    const SPAN: Declared<SpanArgs> = Declared::new("span");
+    /// An EMA the probe declares for its own logic, which its strategy
+    /// would build itself (`config.indicators.build(FILTER)`), not as a
+    /// feature, `[indicators.filter]`.
+    const FILTER: Declared<EmaArgs> = Declared::new("filter");
 
     /// The part of a strategy trading on a model whose features read the
-    /// series its own `features` lists, an average of each.
+    /// series its own `features` lists, its span on each, a custom
+    /// data's last value; its filter is its own logic's.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProbeParams {
@@ -259,6 +318,7 @@ mod tests {
 
     impl Part for ProbeParams {
         const INSTRUMENTS: usize = 1;
+        const INDICATORS: &'static [&'static dyn Declaration] = &[&SPAN, &FILTER];
         const TAKES_MODEL: bool = true;
 
         fn default_base() -> StrategyConfig {
@@ -275,26 +335,23 @@ mod tests {
 
     impl ModelPart for ProbeParams {
         fn features(config: &StandardConfig<Self>) -> ConfigResult<Rc<FeatureSet>> {
-            let average = || SimpleMovingAverage::new(2, Some(PriceType::Mid));
+            let tables = &config.indicators;
             let builder = config.own.features.iter().enumerate().fold(
                 FeatureSet::builder(),
-                |builder, (i, series)| {
-                    let name = i.to_string();
-                    match series {
-                        Series::Bars(bar_type) => builder.bars(*bar_type, &name, average()),
-                        Series::Ticks(ticks) => match &ticks.data {
-                            NautilusDataType::QuoteTick => {
-                                builder.quotes(ticks.instrument_id, &name, average())
-                            }
-                            NautilusDataType::TradeTick => {
-                                builder.trades(ticks.instrument_id, &name, average())
-                            }
-                            NautilusDataType::Custom { type_name } => {
-                                builder.data(type_name, ticks.instrument_id, &name, |_| 0.0)
-                            }
-                            data => panic!("the probe reads no {data}"),
-                        },
-                    }
+                |builder, (i, series)| match series {
+                    Series::Bars(bar_type) => builder.bars(*bar_type, SPAN, tables),
+                    Series::Ticks(ticks) => match &ticks.data {
+                        NautilusDataType::QuoteTick => {
+                            builder.quotes(ticks.instrument_id, SPAN, tables)
+                        }
+                        NautilusDataType::TradeTick => {
+                            builder.trades(ticks.instrument_id, SPAN, tables)
+                        }
+                        NautilusDataType::Custom { type_name } => {
+                            builder.data(type_name, ticks.instrument_id, &i.to_string(), |_| 0.0)
+                        }
+                        data => panic!("the probe reads no {data}"),
+                    },
                 },
             );
             builder
@@ -306,12 +363,32 @@ mod tests {
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } }"#;
     const GC_TRADES: &str = r#"{ data = "trades", instrument_id = "GC.GLBX" }"#;
 
+    /// The probe's tables: a span of 15 minutes, a filter of 5.
+    const TABLES: &str = r#"
+        [indicators.span]
+        span = "15m"
+
+        [indicators.filter]
+        period = 5
+    "#;
+
     /// The probe trading gold, its features reading `features`, its
-    /// `[data]` listing `series`, deciding hourly on the `targets`, loaded.
+    /// `[data]` listing `series`, deciding hourly on the `targets`, of
+    /// `TABLES`, loaded.
     fn load(
         features: &[&str],
         series: &[&str],
         targets: &str,
+    ) -> anyhow::Result<StandardConfig<ProbeParams>> {
+        load_of(features, series, targets, TABLES)
+    }
+
+    /// The probe as `load` has it, its `[indicators]` `tables`.
+    fn load_of(
+        features: &[&str],
+        series: &[&str],
+        targets: &str,
+        tables: &str,
     ) -> anyhow::Result<StandardConfig<ProbeParams>> {
         let label = if targets.contains("barrier") {
             "barrier"
@@ -325,6 +402,8 @@ mod tests {
             [data]
             series = [{}]
             warmup = "14h"
+
+            {tables}
 
             [trade]
             instruments = [{{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }}]
@@ -551,5 +630,88 @@ mod tests {
         let refusals = refusals(&[], &[GOLD_BARS], HORIZON);
         let fields: Vec<&str> = refusals.iter().map(|(field, _)| field.as_str()).collect();
         assert_eq!(fields, ["features"]);
+    }
+
+    /// The probe's features on gold's bars, of the tables `tables`, as its
+    /// part builds them of the loaded config.
+    fn features_of(tables: &str) -> Rc<FeatureSet> {
+        ProbeParams::features(&load_of(&[GOLD_BARS], &[GOLD_BARS], HORIZON, tables).unwrap())
+            .unwrap()
+    }
+
+    /// The span of 15 minutes, 900 s, is its feature's value.
+    #[test]
+    fn a_feature_is_built_of_its_table() {
+        assert_eq!(features_of(TABLES).values(), Some(vec![900.0]));
+    }
+
+    /// Rows and models of a span of 15 minutes are not those of one of
+    /// 30, with no code of the part's own.
+    #[test]
+    fn a_features_changed_argument_changes_the_fingerprint() {
+        let changed = TABLES.replace(r#""15m""#, r#""30m""#);
+
+        assert_ne!(
+            features_of(&changed).fingerprint(),
+            features_of(TABLES).fingerprint()
+        );
+    }
+
+    /// 15 minutes written as 900 seconds is the same span.
+    #[test]
+    fn a_features_argument_written_otherwise_keeps_the_fingerprint() {
+        let otherwise = TABLES.replace(r#""15m""#, r#""900s""#);
+
+        assert_eq!(
+            features_of(&otherwise).fingerprint(),
+            features_of(TABLES).fingerprint()
+        );
+    }
+
+    /// The rows do not depend on the filter, which the part declares for
+    /// its own logic and never hands to its features.
+    #[test]
+    fn an_indicator_of_the_parts_own_logic_is_not_in_the_fingerprint() {
+        let changed = TABLES.replace("period = 5", "period = 6");
+
+        assert_eq!(
+            features_of(&changed).fingerprint(),
+            features_of(TABLES).fingerprint()
+        );
+    }
+
+    /// A span its arguments refuse and the filter's table missing are
+    /// reported, each under its table, with the model's violation; the
+    /// features, which need the span, are not built.
+    #[test]
+    fn the_tables_refusals_are_reported_with_the_other_violations() {
+        let tables = TABLES
+            .replace(r#""15m""#, r#""0s""#)
+            .replace("[indicators.filter]\n        period = 5\n", "");
+
+        let err =
+            load_of(&[GOLD_BARS], &[GOLD_BARS], r#"{ horizon = "1h" }"#, &tables).unwrap_err();
+
+        let Some(ConfigError::Multiple { errors }) = err.downcast_ref::<ConfigError>() else {
+            panic!("not several config errors: {err}");
+        };
+        let mut fields: Vec<String> = errors
+            .iter()
+            .map(|err| match err {
+                ConfigError::MissingField { field } | ConfigError::InvalidValue { field, .. } => {
+                    field.clone()
+                }
+                err => panic!("unexpected config error {err:?}"),
+            })
+            .collect();
+        fields.sort();
+        assert_eq!(
+            fields,
+            [
+                "indicators.filter",
+                "indicators.span",
+                "model.targets.horizon"
+            ]
+        );
     }
 }

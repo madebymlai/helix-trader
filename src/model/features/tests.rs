@@ -1,10 +1,9 @@
-use std::{cell::Cell, sync::Arc};
+use std::sync::Arc;
 
 use nautilus_common::{actor::DataActor, cache::Cache, clock::VirtualClock};
-use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::{
     data::{BookOrder, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
-    enums::{AggressorSide, BookAction, OrderSide, PriceType},
+    enums::{AggressorSide, BookAction, OrderSide},
     identifiers::{TradeId, TraderId},
     types::{Price, Quantity},
 };
@@ -15,6 +14,7 @@ use nautilus_trading::{
 };
 
 use super::*;
+use crate::strategy::EmaArgs;
 
 const AUD: &str = "AUD/USD.SIM";
 const GBP: &str = "GBP/USD.SIM";
@@ -25,9 +25,28 @@ fn id(s: &str) -> InstrumentId {
     InstrumentId::from(s)
 }
 
-/// A moving average of the last `period` mids, or prices.
-fn sma(period: usize) -> SimpleMovingAverage {
-    SimpleMovingAverage::new(period, Some(PriceType::Mid))
+/// The last mid of a quote, price of a trade or close of a bar: Nautilus'
+/// exponential average of one, `[indicators.last]`.
+const LAST: Declared<EmaArgs> = Declared::new("last");
+/// Nautilus' exponential average of two mids, prices or closes, the mean
+/// of the first two once both came, `[indicators.two]`.
+const TWO: Declared<EmaArgs> = Declared::new("two");
+/// The tests' count of depth and deltas, `[indicators.book]`.
+const BOOK: Declared<BookCountArgs> = Declared::new("book");
+/// The tests' feature failing on every quote, `[indicators.failing]`.
+const FAILING: Declared<FailingQuotesArgs> = Declared::new("failing");
+
+/// The tables of the tests' features, as `[indicators]` holds them.
+fn tables() -> IndicatorsConfig {
+    toml::from_str(
+        r#"
+        last = { period = 1, price_type = "MID" }
+        two = { period = 2, price_type = "MID" }
+        book = {}
+        failing = {}
+        "#,
+    )
+    .unwrap()
 }
 
 /// A quote of `instrument` with the mid `mid`, 0.0002 wide.
@@ -71,9 +90,8 @@ fn bar(bar_type: &str, close: f64) -> Bar {
 
 /// A feature counting the depth and deltas it gets, initialized by the
 /// first, its value the count.
-#[derive(Default)]
 struct BookCount {
-    count: Rc<Cell<usize>>,
+    count: usize,
 }
 
 impl Indicator for BookCount {
@@ -82,29 +100,42 @@ impl Indicator for BookCount {
     }
 
     fn has_inputs(&self) -> bool {
-        self.count.get() > 0
+        self.count > 0
     }
 
     fn initialized(&self) -> bool {
-        self.count.get() > 0
+        self.count > 0
     }
 
     fn handle_depth(&mut self, _depth: &OrderBookDepth) {
-        self.count.set(self.count.get() + 1);
+        self.count += 1;
     }
 
     fn handle_deltas(&mut self, _deltas: &OrderBookDeltas) {
-        self.count.set(self.count.get() + 1);
+        self.count += 1;
     }
 
     fn reset(&mut self) {
-        self.count.set(0);
+        self.count = 0;
     }
 }
 
 impl Feature for BookCount {
     fn value(&self) -> f64 {
-        self.count.get() as f64
+        self.count as f64
+    }
+}
+
+/// The arguments of `BookCount`: none.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BookCountArgs {}
+
+impl IndicatorArgs for BookCountArgs {
+    type Indicator = BookCount;
+
+    fn build(self) -> anyhow::Result<BookCount> {
+        Ok(BookCount { count: 0 })
     }
 }
 
@@ -185,27 +216,92 @@ fn read_level(data: &CustomData) -> f64 {
 }
 
 #[test]
-fn the_names_keep_the_order_of_their_declaration() {
+fn a_table_feeding_one_feature_names_it_after_the_table() {
+    let tables = tables();
+
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), "bars", sma(2))
-        .quotes(id(AUD), "quotes", sma(1))
-        .trades(id(AUD), "trades", sma(1))
+        .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap();
 
-    assert_eq!(features.names(), ["bars", "quotes", "trades"]);
+    assert_eq!(features.names(), ["last"]);
+}
+
+/// Bars by their bar type, ticks by their kind and instrument.
+#[test]
+fn a_table_feeding_several_features_names_each_after_its_series_and_the_table() {
+    let tables = tables();
+
+    let features = FeatureSet::builder()
+        .bars(BarType::from(AUD_BARS), LAST, &tables)
+        .quotes(id(AUD), LAST, &tables)
+        .trades(id(GBP), LAST, &tables)
+        .depth(id(AUD), BOOK, &tables)
+        .deltas(id(GBP), BOOK, &tables)
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        features.names(),
+        [
+            "AUD/USD.SIM-1-MINUTE-MID-INTERNAL:last",
+            "QuoteTick of AUD/USD.SIM:last",
+            "TradeTick of GBP/USD.SIM:last",
+            "OrderBookDepth of AUD/USD.SIM:book",
+            "OrderBookDelta of GBP/USD.SIM:book",
+        ]
+    );
+}
+
+/// `last` feeds two features, `two` one.
+#[test]
+fn each_table_is_named_by_the_features_it_feeds_itself() {
+    let tables = tables();
+
+    let features = FeatureSet::builder()
+        .quotes(id(AUD), LAST, &tables)
+        .quotes(id(AUD), TWO, &tables)
+        .quotes(id(GBP), LAST, &tables)
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        features.names(),
+        [
+            "QuoteTick of AUD/USD.SIM:last",
+            "two",
+            "QuoteTick of GBP/USD.SIM:last"
+        ]
+    );
 }
 
 #[test]
+fn the_names_keep_the_order_of_their_declaration() {
+    let tables = tables();
+
+    let features = FeatureSet::builder()
+        .bars(BarType::from(AUD_BARS), TWO, &tables)
+        .data("Level", id(AUD), "level", read_level)
+        .quotes(id(AUD), LAST, &tables)
+        .build()
+        .unwrap();
+
+    assert_eq!(features.names(), ["two", "level", "last"]);
+}
+
+/// A table read twice on one series names two features alike.
+#[test]
 fn two_features_of_one_name_are_an_error() {
+    let tables = tables();
+
     let err = FeatureSet::builder()
-        .quotes(id(AUD), "mid", sma(1))
-        .quotes(id(GBP), "mid", sma(1))
+        .quotes(id(AUD), LAST, &tables)
+        .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("mid"), "{err}");
+    assert!(err.contains("QuoteTick of AUD/USD.SIM:last"), "{err}");
 }
 
 #[test]
@@ -215,10 +311,11 @@ fn a_set_without_features_is_an_error() {
 
 #[test]
 fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
+    let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "aud", sma(1))
-        .quotes(id(GBP), "gbp", sma(1))
-        .trades(id(AUD), "aud_trades", sma(1))
+        .quotes(id(AUD), LAST, &tables)
+        .quotes(id(GBP), LAST, &tables)
+        .trades(id(AUD), LAST, &tables)
         .build()
         .unwrap();
 
@@ -236,9 +333,10 @@ fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
 
 #[test]
 fn a_bar_reaches_only_the_features_on_its_bar_type() {
+    let tables = tables();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), "mid", sma(1))
-        .bars(BarType::from(AUD_BID_BARS), "bid", sma(1))
+        .bars(BarType::from(AUD_BARS), LAST, &tables)
+        .bars(BarType::from(AUD_BID_BARS), LAST, &tables)
         .build()
         .unwrap();
 
@@ -251,26 +349,24 @@ fn a_bar_reaches_only_the_features_on_its_bar_type() {
     assert!((values[1] - 0.6).abs() < 1e-9, "{values:?}");
 }
 
+/// Each feature counts what reaches it: the deltas feature is cold until
+/// deltas of its instrument come, and each counts one.
 #[test]
 fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
-    let (depth_count, deltas_count) = (BookCount::default(), BookCount::default());
-    let (on_depth, on_deltas) = (
-        Rc::clone(&depth_count.count),
-        Rc::clone(&deltas_count.count),
-    );
+    let tables = tables();
     let depth = stub_depth10();
     let features = FeatureSet::builder()
-        .depth(depth.instrument_id, "depth", depth_count)
-        .deltas(depth.instrument_id, "deltas", deltas_count)
+        .depth(depth.instrument_id, BOOK, &tables)
+        .deltas(depth.instrument_id, BOOK, &tables)
         .build()
         .unwrap();
 
     features.handle_depth(&depth);
     features.handle_deltas(&deltas(GBP));
 
-    assert_eq!((on_depth.get(), on_deltas.get()), (1, 0));
+    assert_eq!(features.values(), None);
     features.handle_deltas(&deltas(&depth.instrument_id.to_string()));
-    assert_eq!((on_depth.get(), on_deltas.get()), (1, 1));
+    assert_eq!(features.values(), Some(vec![1.0, 1.0]));
 }
 
 /// A moving average has no depth, deltas or trade handler of its own:
@@ -278,7 +374,7 @@ fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
 #[test]
 fn an_update_of_a_kind_no_feature_reads_is_a_no_op() {
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), "mid", sma(1))
+        .bars(BarType::from(AUD_BARS), LAST, &tables())
         .build()
         .unwrap();
 
@@ -326,11 +422,25 @@ impl Feature for FailingQuotes {
     }
 }
 
+/// The arguments of `FailingQuotes`: none.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailingQuotesArgs {}
+
+impl IndicatorArgs for FailingQuotesArgs {
+    type Indicator = FailingQuotes;
+
+    fn build(self) -> anyhow::Result<FailingQuotes> {
+        Ok(FailingQuotes::default())
+    }
+}
+
 #[test]
 fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
+    let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "failing", FailingQuotes::default())
-        .quotes(id(AUD), "mid", sma(1))
+        .quotes(id(AUD), FAILING, &tables)
+        .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap();
 
@@ -342,9 +452,10 @@ fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
 
 #[test]
 fn the_values_wait_for_every_feature() {
+    let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "mid_2", sma(2))
-        .quotes(id(AUD), "mid_1", sma(1))
+        .quotes(id(AUD), TWO, &tables)
+        .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap();
 
@@ -386,11 +497,12 @@ macro_rules! at {
 #[test]
 fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
     let depth = stub_depth10();
+    let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "quotes", sma(1))
-        .trades(id(AUD), "trades", sma(1))
-        .bars(BarType::from(AUD_BARS), "bars", sma(1))
-        .depth(depth.instrument_id, "depth", BookCount::default())
+        .quotes(id(AUD), LAST, &tables)
+        .trades(id(AUD), LAST, &tables)
+        .bars(BarType::from(AUD_BARS), LAST, &tables)
+        .depth(depth.instrument_id, BOOK, &tables)
         .build()
         .unwrap();
 
@@ -411,7 +523,7 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
 #[test]
 fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "quotes", sma(1))
+        .quotes(id(AUD), LAST, &tables())
         .data("Level", id(AUD), "level", read_level)
         .build()
         .unwrap();
@@ -429,14 +541,15 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
 /// no bars.
 #[test]
 fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
+    let tables = tables();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), "bars", sma(1))
-        .trades(id(GBP), "gbp_trades", sma(1))
-        .quotes(id(AUD), "aud_quotes", sma(1))
+        .bars(BarType::from(AUD_BARS), LAST, &tables)
+        .trades(id(GBP), LAST, &tables)
+        .quotes(id(AUD), LAST, &tables)
         .data("Level", id(AUD), "level", read_level)
-        .quotes(id(AUD), "aud_quotes_2", sma(2))
-        .depth(id(AUD), "aud_depth", sma(1))
-        .deltas(id(GBP), "gbp_deltas", sma(1))
+        .quotes(id(AUD), TWO, &tables)
+        .depth(id(AUD), BOOK, &tables)
+        .deltas(id(GBP), BOOK, &tables)
         .build()
         .unwrap();
     let tick = |data, instrument: &str| TickSeries {
@@ -465,11 +578,12 @@ fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
 /// type once, in the order declared, and no ticks.
 #[test]
 fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
+    let tables = tables();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), "mid_fast", sma(1))
-        .quotes(id(AUD), "aud_quotes", sma(1))
-        .bars(BarType::from(AUD_BID_BARS), "bid", sma(1))
-        .bars(BarType::from(AUD_BARS), "mid_slow", sma(2))
+        .bars(BarType::from(AUD_BARS), LAST, &tables)
+        .quotes(id(AUD), LAST, &tables)
+        .bars(BarType::from(AUD_BID_BARS), LAST, &tables)
+        .bars(BarType::from(AUD_BARS), TWO, &tables)
         .build()
         .unwrap();
 
@@ -481,7 +595,7 @@ fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
 
 /// A set of one feature on AUD's mids, given `warmup` if any.
 fn warming(warmup: Option<SignedDuration>) -> Rc<FeatureSet> {
-    let builder = FeatureSet::builder().quotes(id(AUD), "mid", sma(1));
+    let builder = FeatureSet::builder().quotes(id(AUD), LAST, &tables());
     match warmup {
         Some(warmup) => builder.warmup(warmup),
         None => builder,
@@ -514,7 +628,7 @@ fn the_fingerprint_changes_with_the_warmup() {
 #[test]
 fn a_negative_warmup_is_an_error() {
     let err = FeatureSet::builder()
-        .quotes(id(AUD), "mid", sma(1))
+        .quotes(id(AUD), LAST, &tables())
         .warmup(SignedDuration::from_hours(-1))
         .build()
         .unwrap_err()
@@ -523,10 +637,12 @@ fn a_negative_warmup_is_an_error() {
     assert!(err.contains("warmup"), "{err}");
 }
 
+/// The fingerprint of raw features named `names` and `version`: a raw
+/// feature has no table, so its name alone is in it.
 fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
-        .quotes(id(AUD), names[0], sma(1))
-        .bars(BarType::from(AUD_BARS), names[1], sma(2))
+        .data("Level", id(AUD), names[0], read_level)
+        .data("Level", id(GBP), names[1], read_level)
         .version(version)
         .build()
         .unwrap()
@@ -553,8 +669,8 @@ fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
 #[test]
 fn a_set_without_a_version_is_of_version_nought() {
     let unversioned = FeatureSet::builder()
-        .quotes(id(AUD), "a", sma(1))
-        .bars(BarType::from(AUD_BARS), "b", sma(2))
+        .data("Level", id(AUD), "a", read_level)
+        .data("Level", id(GBP), "b", read_level)
         .build()
         .unwrap()
         .fingerprint();
@@ -609,10 +725,11 @@ fn registered() -> Probe {
 #[test]
 fn registered_features_get_quotes_trades_and_bars_through_nautilus() {
     let mut probe = registered();
+    let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "quotes", sma(1))
-        .trades(id(GBP), "trades", sma(1))
-        .bars(BarType::from(AUD_BARS), "bars", sma(1))
+        .quotes(id(AUD), LAST, &tables)
+        .trades(id(GBP), LAST, &tables)
+        .bars(BarType::from(AUD_BARS), LAST, &tables)
         .build()
         .unwrap();
     features.register(&mut probe);
@@ -632,7 +749,7 @@ fn registered_features_get_quotes_trades_and_bars_through_nautilus() {
 fn a_set_registered_twice_gets_each_update_once() {
     let mut probe = registered();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "quotes", sma(2))
+        .quotes(id(AUD), TWO, &tables())
         .build()
         .unwrap();
     features.register(&mut probe);
@@ -646,14 +763,14 @@ fn a_set_registered_twice_gets_each_update_once() {
 #[test]
 fn a_rule_primarys_side_and_probability_are_the_last_two_names() {
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "mid", sma(1))
+        .quotes(id(AUD), LAST, &tables())
         .primary()
         .build()
         .unwrap();
 
     assert_eq!(
         features.names(),
-        ["mid", "primary_side", "primary_probability"]
+        ["last", "primary_side", "primary_probability"]
     );
 }
 
@@ -662,7 +779,7 @@ fn a_rule_primarys_side_and_probability_are_the_last_two_names() {
 #[test]
 fn a_rule_primarys_values_are_there_only_on_a_side() {
     let features = FeatureSet::builder()
-        .quotes(id(AUD), "mid", sma(1))
+        .quotes(id(AUD), LAST, &tables())
         .primary()
         .build()
         .unwrap();
@@ -681,12 +798,13 @@ fn a_rule_primarys_values_are_there_only_on_a_side() {
 
 #[test]
 fn declaring_a_rule_primary_changes_the_fingerprint() {
+    let tables = tables();
     let plain = FeatureSet::builder()
-        .quotes(id(AUD), "mid", sma(1))
+        .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap();
     let ruled = FeatureSet::builder()
-        .quotes(id(AUD), "mid", sma(1))
+        .quotes(id(AUD), LAST, &tables)
         .primary()
         .build()
         .unwrap();
