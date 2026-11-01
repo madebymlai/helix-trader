@@ -128,7 +128,10 @@ pub struct RuleConfig<T = TargetsConfig> {
 #[serde(deny_unknown_fields)]
 pub struct MetaConfig {
     /// How far back from a retrain its rows go; never before the
-    /// primary's first model, whose predictions the rows need.
+    /// primary's first model, whose predictions the rows need. Never
+    /// retrained, a model primary trained with its meta, neither in use,
+    /// is trained as of this much before the meta, so its out-of-sample
+    /// decisions over the window are the meta's rows.
     pub window: SignedDuration,
     /// The last part of the window the model is scored on and not fitted
     /// on.
