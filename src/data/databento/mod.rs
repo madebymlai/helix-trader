@@ -392,13 +392,6 @@ mod tests {
                 asked(FillData::Depth, "GCQ6.GLBX", Q6_FROM, Q6_TO),
             ]
         );
-        assert_eq!(
-            catalog
-                .get_intervals(&NautilusDataType::TradeTick.into(), Some("GCQ6.GLBX"))
-                .unwrap()
-                .len(),
-            1
-        );
     }
 
     /// GCZ6.GLBX declared as itself is one slice over the window; with

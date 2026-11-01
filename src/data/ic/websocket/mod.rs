@@ -732,64 +732,60 @@ mod tests {
         }
     }
 
-    /// cTrader allows 5 historical requests a second per connection: in
-    /// any second, at most 5 tick requests reach it, however many wait.
+    /// How long seven requests asked at once take, at least, held to
+    /// cTrader's 5 historical requests a second: six gaps, each wider than
+    /// 200 ms (one every 200 ms was refused on the demo, `ic/README.md`,
+    /// "Rate"), so above 1.2 s, with a margin for the round trips at that
+    /// pace.
+    const SEVEN_HISTORICAL: Duration = Duration::from_millis(1250);
+
+    /// cTrader allows 5 historical requests a second per connection: seven
+    /// tick requests asked at once are answered no sooner than
+    /// `SEVEN_HISTORICAL`.
     #[tokio::test]
     async fn tick_requests_reach_ctrader_at_most_five_a_second() {
-        let arrivals = Arc::new(Mutex::new(Vec::new()));
-        let log = Arc::clone(&arrivals);
-        let (url, _) = testing::start(move |_, request| {
+        let (url, _) = testing::start(|_, request| {
             if let Some(actions) = accept_auth(request) {
                 return actions;
             }
-            let at = std::time::Instant::now();
-            if request.payload_type == ProtoOaGetTickDataReq::TYPE {
-                log.lock().unwrap().push(at);
-                return vec![reply(request, &ProtoOaGetTickDataRes::default())];
-            }
-            symbols_peer(0, request)
+            vec![reply(request, &ProtoOaGetTickDataRes::default())]
         });
         let (credential, _tokens) = testing::credential();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         let request = tick_request();
+        let start = std::time::Instant::now();
 
         let answers = futures::future::join_all(
             (0..7).map(|_| client.request::<_, ProtoOaGetTickDataRes>(&request)),
         )
         .await;
 
+        let elapsed = start.elapsed();
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
-        let arrivals = arrivals.lock().unwrap().clone();
-        assert_eq!(arrivals.len(), 7);
-        for six in arrivals.windows(6) {
-            let span = six[5] - six[0];
-            assert!(
-                span >= Duration::from_millis(900),
-                "6 tick requests within {span:?}"
-            );
-        }
+        assert!(elapsed >= SEVEN_HISTORICAL, "7 tick requests in {elapsed:?}");
         client.disconnect().await;
     }
 
+    /// Seven symbol requests asked at once are answered sooner than seven
+    /// requests at most 5 a second could be.
     #[tokio::test]
     async fn other_requests_are_not_held_to_the_historical_limit() {
         let (url, _) = testing::start(symbols_peer);
         let (credential, _tokens) = testing::credential();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let requests: Vec<_> = (0..7).map(symbol_request).collect();
         let start = std::time::Instant::now();
 
-        for id in 0..7 {
-            client
-                .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(id))
-                .await
-                .unwrap();
-        }
+        let answers = futures::future::join_all(
+            requests
+                .iter()
+                .map(|request| client.request::<_, ProtoOaSymbolByIdRes>(request)),
+        )
+        .await;
 
-        assert!(
-            start.elapsed() < Duration::from_millis(900),
-            "{:?}",
-            start.elapsed()
-        );
+        let elapsed = start.elapsed();
+        assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+        assert!(elapsed < SEVEN_HISTORICAL, "7 symbol requests in {elapsed:?}");
         client.disconnect().await;
     }
 
@@ -1040,50 +1036,10 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Waits until `condition` holds, up to 10 s.
-    async fn eventually(condition: impl Fn() -> bool) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("not within 10 s");
-    }
-
     /// Synthetic, as OpenApiModelMessages.proto defines the code: cTrader
-    /// refusing the spot subscription of a symbol it does not list.
-    #[tokio::test]
-    async fn a_refused_spot_subscription_is_marked_failed() {
-        let (url, _received) = testing::start(|connection, request| {
-            if request.payload_type == ProtoOaSubscribeSpotsReq::TYPE
-                && decode::<ProtoOaSubscribeSpotsReq>(request).symbol_id == [41]
-            {
-                let error = ProtoOaErrorRes {
-                    error_code: "SYMBOL_NOT_FOUND".to_owned(),
-                    ..Default::default()
-                };
-                return vec![reply(request, &error)];
-            }
-            spots_peer(connection, request)
-        });
-        let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
-
-        client.subscribe_spots(41).unwrap();
-        client.subscribe_spots(1).unwrap();
-        assert_eq!(next_spot(&mut spots).await, spot_event(1));
-        eventually(|| client.subscriptions.len() == 1).await;
-
-        assert_eq!(client.subscriptions.pending_subscribe_topics(), ["spot:41"]);
-        assert_eq!(client.subscriptions.all_topics(), ["spot:1", "spot:41"]);
-        client.disconnect().await;
-    }
-
-    /// Synthetic, as above; the peer refuses on the first connection only,
-    /// which it closes once it has answered the subscription of symbol 1.
+    /// refusing the spot subscription of a symbol it does not list, on the
+    /// first connection only, which it closes once it has answered the
+    /// subscription of symbol 1.
     #[tokio::test]
     async fn a_refused_spot_subscription_is_sent_again_on_the_next_connection() {
         let (url, received) = testing::start(|connection, request| {
@@ -1109,7 +1065,7 @@ mod tests {
 
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
-        next_spot(&mut spots).await;
+        assert_eq!(next_spot(&mut spots).await, spot_event(1));
         testing::wait_until(&received, |_| !spot_subscriptions(&received, 1).is_empty()).await;
 
         let again: Vec<Vec<i64>> = spot_subscriptions(&received, 1)
@@ -1348,7 +1304,7 @@ mod tests {
     /// account authenticated again with the renewed token: the request was
     /// in flight across the renewal, the subscription kept by cTrader.
     #[tokio::test]
-    async fn a_running_session_renews_on_schedule_keeping_spots_and_requests_in_flight() {
+    async fn a_request_in_flight_across_a_renewal_is_answered_and_the_spots_kept() {
         let venue = TokenVenue::new();
         let held = Arc::new(Mutex::new(None::<ProtoMessage>));
         let renewed = Arc::clone(&venue);
@@ -1372,21 +1328,29 @@ mod tests {
             }
             actions
         });
-        let (credential, _dir) = credential_expiring(due_after(Duration::from_secs(1)));
-        let tokens = credential.tokens.clone();
+        let (credential, _dir) = testing::credential();
         let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
         client.subscribe_spots(41).unwrap();
         next_spot(&mut spots).await;
+        let request = symbol_request(3);
 
-        let in_flight = client
-            .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(3))
-            .await;
+        let (in_flight, ()) = tokio::join!(
+            client.request::<_, ProtoOaSymbolByIdRes>(&request),
+            async {
+                testing::wait_until(&received, |frames| {
+                    frames
+                        .iter()
+                        .any(|(_, f)| f.payload_type == ProtoOaSymbolByIdReq::TYPE)
+                })
+                .await;
+                client.renew_token();
+            },
+        );
 
         assert_eq!(in_flight, Ok(symbols(&[3])));
         assert_eq!(next_spot(&mut spots).await, spot_event(41));
-        assert_eq!(renewals(&received), [REFRESH_TOKEN]);
         assert_eq!(
             account_auths(&received, 0),
             [ACCESS_TOKEN.to_owned(), renewed_access(1)]
@@ -1396,13 +1360,28 @@ mod tests {
             1,
             "subscribed again"
         );
-        assert_eq!(stored(&tokens).0, renewed_access(1));
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_running_session_renews_its_token_on_schedule() {
+        let venue = TokenVenue::new();
+        let (url, received) = testing::start(venue_peer(&venue));
+        let (credential, _dir) = credential_expiring(due_after(Duration::from_secs(1)));
+        let tokens = credential.tokens.clone();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+
+        testing::wait_until(&received, |_| {
+            account_auths(&received, 0).last() == Some(&renewed_access(1))
+        })
+        .await;
+
         assert_eq!(
-            client
-                .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(4))
-                .await,
-            Ok(symbols(&[4]))
+            account_auths(&received, 0),
+            [ACCESS_TOKEN.to_owned(), renewed_access(1)]
         );
+        assert_eq!(renewals(&received), [REFRESH_TOKEN]);
+        assert_eq!(stored(&tokens).0, renewed_access(1));
         client.disconnect().await;
     }
 

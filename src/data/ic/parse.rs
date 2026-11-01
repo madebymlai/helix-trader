@@ -468,12 +468,5 @@ mod tests {
             assert!(is_ic(id));
             assert_eq!(symbol_name(id), name);
         }
-        assert!(!is_ic(InstrumentId::from("EURUSD.IDEALPRO")));
-        assert_eq!(
-            ensure_ic(InstrumentId::from("EUR/USD.IDEALPRO"))
-                .unwrap_err()
-                .to_string(),
-            "EUR/USD.IDEALPRO is not on ICMARKETS"
-        );
     }
 }

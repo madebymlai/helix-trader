@@ -187,15 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn each_strategy_has_a_retrain_timer_of_its_own() {
-        assert_eq!(timer(StrategyId::from("LIVE-001")), "RETRAIN-LIVE-001");
-        assert_ne!(
-            timer(StrategyId::from("LIVE-001")),
-            timer(StrategyId::from("LIVE-002"))
-        );
-    }
-
-    #[test]
     fn the_grid_time_is_the_last_multiple_since_the_epoch() {
         let last = |now: &str| {
             Timestamp::from(

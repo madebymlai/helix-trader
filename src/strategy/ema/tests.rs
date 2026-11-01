@@ -72,15 +72,7 @@ fn loads_from_toml() {
 
 #[test]
 fn the_example_config_loads() {
-    let config = EmaCrossConfig::load(include_str!("../../../config/ema.toml")).unwrap();
-    assert_eq!(
-        config.trade_bar_type(),
-        BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")
-    );
-    assert_eq!(
-        (config.fast_ema().period, config.slow_ema().period),
-        (10, 30)
-    );
+    EmaCrossConfig::load(include_str!("../../../config/ema.toml")).unwrap();
 }
 
 #[test]

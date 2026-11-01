@@ -21,7 +21,7 @@ fn an_hour_without_quotes_yields_no_bar() {
     });
     let catalog = common::catalog(&quotes, at("06:00"), at("15:00"));
     let start = at("07:00");
-    let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE), None);
+    let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
 
     common::backtest(catalog.path(), start, at("15:00"), "0 EUR")
         .run(recorder)

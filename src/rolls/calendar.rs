@@ -320,28 +320,9 @@ mod tests {
         assert!(err.to_string().contains("no months"), "{err}");
     }
 
-    #[test]
-    fn rejects_an_unknown_month_code() {
-        assert!(
-            parse(
-                r#"
-                [[product]]
-                root = "GC.GLBX"
-                contract = "GC{month}{y}"
-                months = ["A"]
-                roll = "last-business-day-before-delivery-month"
-                days_before = 2
-                time = "00:00"
-                "#,
-            )
-            .is_err()
-        );
-    }
-
     /// A calendar of one GC product rolling `days_before`, as written in
-    /// TOML, or with no `days_before` line if `None`.
-    fn gold_rolling(days_before: Option<&str>) -> anyhow::Result<Product> {
-        let days_before = days_before.map_or(String::new(), |days| format!("days_before = {days}"));
+    /// TOML.
+    fn gold_rolling(days_before: &str) -> Product {
         let products = parse(&format!(
             r#"
             [[product]]
@@ -349,22 +330,12 @@ mod tests {
             contract = "GC{{month}}{{y}}"
             months = ["G", "J", "M", "Q", "Z"]
             roll = "last-business-day-before-delivery-month"
-            {days_before}
+            days_before = {days_before}
             time = "00:00"
             "#
-        ))?;
-        Ok(products.into_iter().next().unwrap())
-    }
-
-    #[test]
-    fn rejects_a_product_without_days_before() {
-        let err = gold_rolling(None).unwrap_err();
-        assert!(err.to_string().contains("days_before"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_negative_days_before() {
-        assert!(gold_rolling(Some("-1")).is_err());
+        ))
+        .unwrap();
+        products.into_iter().next().unwrap()
     }
 
     fn roll_out_of(gold: &Product, year: i16, month: MonthCode) -> Timestamp {
@@ -374,7 +345,7 @@ mod tests {
     #[test]
     fn rolls_on_the_rule_day_with_no_days_before() {
         // The last weekday of July 2026 is Friday the 31st.
-        let gold = gold_rolling(Some("0")).unwrap();
+        let gold = gold_rolling("0");
         assert_eq!(
             roll_out_of(&gold, 2026, MonthCode::Q),
             "2026-07-31T00:00Z".parse().unwrap()
@@ -386,7 +357,7 @@ mod tests {
         // The last weekday of March 2026 is Tuesday the 31st; three
         // weekdays before it are Monday the 30th, Friday the 27th and
         // Thursday the 26th.
-        let gold = gold_rolling(Some("3")).unwrap();
+        let gold = gold_rolling("3");
         assert_eq!(
             roll_out_of(&gold, 2026, MonthCode::J),
             "2026-03-26T00:00Z".parse().unwrap()

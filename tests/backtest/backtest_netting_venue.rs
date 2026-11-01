@@ -1,15 +1,15 @@
-//! The same strategy as `backtest_hedging_venue.rs`, its `oms_type` unset,
-//! on a netting venue, as IB's and OKX's: two overlapping trades
-//! (`common::overlap`) add into one position at their average price. One
-//! node per thread, so one run per test.
+//! IB's venue keeps positions as its netting account does
+//! (`venue_oms_type`): on SXR8.IBIS, two overlapping trades of a recorder,
+//! its `oms_type` unset (`common::overlap`), add into one position at
+//! their average price. One node per thread, so one run per test.
 
 use crate::common::overlap;
-use nautilus_model::enums::{OmsType, PositionSide};
+use nautilus_model::enums::PositionSide;
 use rust_decimal::Decimal;
 
 #[test]
 fn two_overlapping_trades_add_into_one_position_at_their_average_price() {
-    let record = overlap::run(|_| OmsType::Netting);
+    let record = overlap::run();
 
     let record = record.borrow();
     let [position] = record.positions.as_slice() else {

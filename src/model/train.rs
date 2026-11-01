@@ -1374,13 +1374,21 @@ mod tests {
             "{below}"
         );
         for text in [published.to_string(), below.to_string()] {
-            for figure in [
-                "3 trades", "1.250000", "8 trades", "0.400000", "1.125000", "0.300000", "0.610000",
-                "0.690000", "0.625000",
-            ] {
-                assert!(text.contains(figure), "{figure}: {text}");
+            let written = figures(&text);
+            for figure in [3.0, 1.25, 8.0, 0.4, 1.125, 0.3, 0.61, 0.69, 0.625] {
+                assert!(
+                    written.iter().any(|&number| (number - figure).abs() < 1e-9),
+                    "{figure}: {text}"
+                );
             }
         }
+    }
+
+    /// The numbers `text` writes, whatever their places.
+    fn figures(text: &str) -> Vec<f64> {
+        text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .filter_map(|word| word.trim_end_matches('.').parse().ok())
+            .collect()
     }
 
     /// The section of `config` with a meta model on the fake learner, on a
@@ -1560,14 +1568,15 @@ mod tests {
         assert_eq!(probes, [&vec![0.3, 1.0, long], &vec![0.7, 1.0, long]]);
     }
 
+    /// The meta's window of 36 hours is longer than the primary's 24.
     #[test]
-    fn the_primary_trains_before_its_meta_model_on_one_replay_of_the_longer_window() {
+    fn a_train_with_a_meta_model_replays_once_from_the_longer_windows_first_day() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
         primaries(&training);
         let mut replays = vec![];
 
-        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
+        training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
             replays.push((from, to));
             Ok(meta_rows())
         });
@@ -1575,10 +1584,6 @@ mod tests {
         assert_eq!(
             replays,
             [(at("2026-01-05T00:00:00Z"), at("2026-01-07T00:00:00Z"))]
-        );
-        assert!(
-            trained.long.is_some() && trained.short.is_some() && trained.meta.is_some(),
-            "{trained:?}"
         );
     }
 
@@ -1703,21 +1708,40 @@ mod tests {
     }
 
     #[test]
-    fn a_train_of_several_models_reads_as_each_outcome() {
+    fn a_train_is_published_only_if_every_model_is() {
         let published = Outcome::Published {
             valid_from: at("2026-01-07T00:00:00Z"),
             holdout: holdout(),
         };
-        let trained = Trained {
+        let short_kept = Trained {
             long: Some(published.clone()),
+            short: Some(Outcome::Kept(Kept::Failed("no short row".to_string()))),
+            meta: Some(published.clone()),
+        };
+        let meta_kept = Trained {
+            long: Some(published.clone()),
+            short: Some(published.clone()),
+            meta: Some(Outcome::Kept(Kept::Failed("no row".to_string()))),
+        };
+
+        assert!(!short_kept.published());
+        assert!(!meta_kept.published());
+        assert!(Trained::from(published).published());
+    }
+
+    #[test]
+    fn a_train_of_several_models_reads_as_each_outcome() {
+        let trained = Trained {
+            long: Some(Outcome::Published {
+                valid_from: at("2026-01-07T00:00:00Z"),
+                holdout: holdout(),
+            }),
             short: Some(Outcome::Kept(Kept::Failed("no short row".to_string()))),
             meta: Some(Outcome::Kept(Kept::Failed("no row".to_string()))),
         };
 
         let text = trained.to_string();
 
-        assert!(!trained.published());
-        assert!(Trained::from(published).published());
         assert!(
             text.contains("long") && text.contains("short") && text.contains("meta"),
             "{text}"

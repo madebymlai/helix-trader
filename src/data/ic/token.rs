@@ -300,6 +300,7 @@ mod tests {
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
+            mpsc,
         },
     };
 
@@ -421,27 +422,31 @@ mod tests {
         assert!(other.try_lock().unwrap().is_some());
     }
 
-    /// Two writers replace the pair over and over while a reader reads:
-    /// every read is one whole pair, and the file ends with the last one
-    /// written.
+    /// Two writers replace the pair over and over while a reader, which
+    /// read the seed before they started, reads on: every read is one
+    /// whole pair, and the file ends with the last one written.
     #[test]
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), pair("seedaccess", "seedrefresh", None));
         store.try_load().unwrap().unwrap();
         let done = Arc::new(AtomicBool::new(false));
+        let (first_read, reading) = mpsc::channel();
         let reader = {
             let (store, done) = (store.clone(), Arc::clone(&done));
             std::thread::spawn(move || {
-                let mut reads = 0;
-                while !done.load(Ordering::Relaxed) {
+                let read_whole = || {
                     let (access, refresh, _) = exposed(&store.read().unwrap());
                     assert_eq!(access.replace("access", "refresh"), refresh);
-                    reads += 1;
+                };
+                read_whole();
+                first_read.send(()).unwrap();
+                while !done.load(Ordering::Relaxed) {
+                    read_whole();
                 }
-                reads
             })
         };
+        reading.recv().expect("the reader's first read");
         let writers: Vec<_> = ["a", "b"]
             .into_iter()
             .map(|writer| {
@@ -468,7 +473,7 @@ mod tests {
         }
         done.store(true, Ordering::Relaxed);
 
-        assert!(reader.join().unwrap() > 0);
+        reader.join().unwrap();
         let (access, _, _) = exposed(&store.read().unwrap());
         assert!(["a99access", "b99access"].contains(&access.as_str()));
     }

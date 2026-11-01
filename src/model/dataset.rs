@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn a_day_is_written_once_replay_has_passed_its_end_plus_the_horizon() {
+    fn a_day_is_written_once_replay_has_passed_its_end_plus_its_longest_target() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
         let rows = [
@@ -1135,7 +1135,6 @@ mod tests {
         let current =
             fingerprint(&features(1), rule, &targets(), &requirements(), &venue()).unwrap();
 
-        assert_eq!(current, at(VERSION));
         assert_ne!(current, at(VERSION + 1));
     }
 

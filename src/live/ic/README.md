@@ -459,8 +459,8 @@ limits") away from IC, however long the history takes.
   credential variable refused before anything connects, an instrument of
   another venue and bars not built from quotes refused, the clients loading
   the instruments of the bars, the factories creating unconnected clients on
-  `ICMARKETS` (the execution client hedging, on `ICMARKETS-DEMO`), IC's
-  execution client in the node's clients.
+  `ICMARKETS` (the execution client hedging, on `ICMARKETS-DEMO`), the
+  node's factories creating IC's clients from their configs.
 - Against the mock cTrader peer of `data/ic/testing.rs`, on the responses
   in `data/ic/testdata/` (positions, orders and deals synthetic):
   - `spots.rs`: the captured spot events into quotes (both sides at their
@@ -492,8 +492,9 @@ limits") away from IC, however long the history takes.
     before the acceptance and events twice making one acceptance and one
     fill; an unanswered order staying submitted until a query finds it
     filled; an unanswered order IC's order list lacks reported rejected by
-    a query; a bracket riding on its entry, its legs accepted as
-    `690004734-SL` and `-TP`, a moved stop loss sent with the take profit
+    a query; an order this session never sent concluded absent, and an
+    absent entry concluded once with its legs; a bracket riding on its
+    entry, its legs accepted as `690004734-SL` and `-TP`, a moved stop loss sent with the take profit
     kept, a removed take profit keeping the stop loss; a move after an
     unanswered cancel or move carrying it, on a position and on a pending
     entry; a refused cancel of both protections rejecting the cancel of
@@ -509,8 +510,7 @@ limits") away from IC, however long the history takes.
   - `orders.rs`: tags and protection ids read back; market, bracket entry
     and stop requests; order types and flags cTrader lacks denied;
   - `dispatch.rs`: an order whose request may still wait to go out not
-    concluded absent, one this session never sent concluded, an absent
-    entry taking its legs, a leg alone not concluded;
+    concluded absent;
   - `data.rs`, the `DataClient` against the mock peer: the instruments sent
     at connect on venue `ICMARKETS`; subscribed quotes from the captured
     spot events; an unsubscription sent; a quote request answered from the

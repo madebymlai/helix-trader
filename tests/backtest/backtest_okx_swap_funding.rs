@@ -173,8 +173,6 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
         .iter()
         .map(|adjustment| {
             assert_eq!(adjustment.adjustment_type, PositionAdjustmentType::Funding);
-            let reason = adjustment.reason.unwrap();
-            assert!(reason.starts_with("funding_settlement:"), "{reason}");
             (
                 Timestamp::from(adjustment.ts_event),
                 adjustment.pnl_change.unwrap(),

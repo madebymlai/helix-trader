@@ -674,9 +674,23 @@ mod tests {
         ]
     }
 
-    /// Builds the dataset of `walk` from the 6th to the 8th.
-    fn build(walk: &WalkForward) {
-        walk.dataset
+    /// The dataset of a walk in `dir` as `config` says, in its catalog.
+    fn dataset(dir: &Path, config: &ModelConfig) -> Dataset {
+        Dataset::new(
+            &dir.join("catalog"),
+            StrategyId::from(STRATEGY),
+            &features(),
+            config.decision,
+            config.targets.clone(),
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+    }
+
+    /// Builds the dataset of `walk(dir)` from the 6th to the 8th.
+    fn build(dir: &Path) {
+        dataset(dir, &config())
             .write(
                 &rows(),
                 at("2026-01-06T00:00:00Z"),
@@ -690,7 +704,7 @@ mod tests {
 
     /// A fake model valid from `valid_from`, of `fingerprint`, calibrated
     /// by `CALIBRATION`.
-    fn model(walk: &WalkForward, valid_from: Timestamp, fingerprint: String) -> StoredModel {
+    fn model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.5], vec![true]).unwrap();
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
@@ -698,7 +712,7 @@ mod tests {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from,
                 fingerprint,
-                feature_names: walk.feature_names.clone(),
+                feature_names: features().names().to_vec(),
                 targets: config().targets,
                 label: Label::Horizon,
                 side: Some(Side::Long),
@@ -720,37 +734,47 @@ mod tests {
         }
     }
 
-    /// Publishes a fake model valid from `valid_from` for each side.
-    fn publish(walk: &WalkForward, valid_from: Timestamp) {
-        let fingerprint = walk.dataset.fingerprint().to_string();
-        for (_, _, store) in &walk.stores {
-            store
-                .publish(&model(walk, valid_from, fingerprint.clone()))
+    /// The store of the `side` models of a walk in `dir` as `config` says.
+    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+        ModelStore::new(
+            &dir.join("models"),
+            StrategyId::from(STRATEGY),
+            &features(),
+            config,
+            &requirements(),
+            &venue(),
+            side,
+        )
+        .unwrap()
+    }
+
+    /// Publishes a fake model valid from `valid_from` for each side of a
+    /// walk in `dir` as `config` says.
+    fn publish(dir: &Path, config: &ModelConfig, valid_from: Timestamp) {
+        let fingerprint = dataset(dir, config).fingerprint().to_string();
+        for (side, _) in config.margins.sides() {
+            store(dir, config, side)
+                .publish(&model(valid_from, fingerprint.clone()))
                 .unwrap();
         }
     }
 
-    /// The store of the long models of `walk`.
-    fn long(walk: &WalkForward) -> &ModelStore {
-        &walk.stores[0].2
-    }
-
-    /// What `prepare` over the 7th and the 8th asked for: the spans built
-    /// and the times trained at. The build writes the dataset, a train
-    /// publishes a model.
-    fn prepare(walk: &WalkForward) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
+    /// What `prepare` of `walk(dir)` over the 7th and the 8th asked for:
+    /// the spans built and the times trained at. The build writes the
+    /// dataset, a train publishes a model.
+    fn prepare(dir: &Path, walk: &WalkForward) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
         let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
         walk.prepare(
             at("2026-01-07T00:00:00Z"),
             at("2026-01-09T00:00:00Z"),
             |from, to| {
                 built.borrow_mut().push((from, to));
-                build(walk);
+                build(dir);
                 Ok(())
             },
             |at| {
                 trained.borrow_mut().push(at);
-                publish(walk, at);
+                publish(dir, &config(), at);
                 Ok(())
             },
         )
@@ -762,7 +786,7 @@ mod tests {
     fn a_backtest_builds_from_its_first_window_then_trains_at_each_retrain_time() {
         let dir = tempfile::tempdir().unwrap();
 
-        let (built, trained) = prepare(&walk(dir.path()));
+        let (built, trained) = prepare(dir.path(), &walk(dir.path()));
 
         assert_eq!(
             built,
@@ -778,18 +802,18 @@ mod tests {
     fn a_second_backtest_of_the_span_builds_and_trains_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        prepare(&walk);
+        prepare(dir.path(), &walk);
 
-        assert_eq!(prepare(&walk), (vec![], vec![]));
+        assert_eq!(prepare(dir.path(), &walk), (vec![], vec![]));
     }
 
     #[test]
     fn a_model_in_the_store_is_reused() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        publish(&walk, at("2026-01-07T00:00:00Z"));
+        publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
 
-        let (_, trained) = prepare(&walk);
+        let (_, trained) = prepare(dir.path(), &walk);
 
         assert_eq!(trained, [at("2026-01-08T00:00:00Z")]);
     }
@@ -813,7 +837,7 @@ mod tests {
     fn each_period_scores_the_model_in_use_and_the_baseline_fitted_at_its_start() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        prepare(&walk);
+        prepare(dir.path(), &walk);
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -863,7 +887,7 @@ mod tests {
     fn each_period_reports_what_the_models_decisions_earned_beside_every_trade() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        prepare(&walk);
+        prepare(dir.path(), &walk);
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -895,10 +919,10 @@ mod tests {
     fn a_model_failing_its_checks_is_not_scored_and_the_current_one_is() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        build(&walk);
-        publish(&walk, at("2026-01-07T00:00:00Z"));
-        long(&walk)
-            .publish(&model(&walk, at("2026-01-08T00:00:00Z"), "f".repeat(64)))
+        build(dir.path());
+        publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
+        store(dir.path(), &config(), Side::Long)
+            .publish(&model(at("2026-01-08T00:00:00Z"), "f".repeat(64)))
             .unwrap();
 
         let scores = walk
@@ -914,8 +938,8 @@ mod tests {
     fn rows_before_any_model_have_no_model_score_but_the_baselines() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        build(&walk);
-        publish(&walk, at("2026-01-08T00:00:00Z"));
+        build(dir.path());
+        publish(dir.path(), &config(), at("2026-01-08T00:00:00Z"));
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -1061,7 +1085,7 @@ Short model scores, out of sample, over the span
             at("2026-01-07T00:00:00Z"),
             at("2026-01-08T00:00:00Z"),
         ] {
-            publish(&walk, at);
+            publish(dir.path(), &with_meta(), at);
         }
         let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
 
@@ -1104,18 +1128,35 @@ Short model scores, out of sample, over the span
         .unwrap()
     }
 
-    /// A train of `walk` at `at`, as `Training::train_at` publishes: the
-    /// primary, and the meta if the primary had a model before `at`.
-    fn train_both(walk: &WalkForward, at: Timestamp) -> anyhow::Result<()> {
-        let earlier = long(walk).valid_froms()?.first().is_some_and(|&t| t < at);
-        publish(walk, at);
+    /// The store of the meta models of `meta_walk(dir)`.
+    fn meta_store(dir: &Path) -> ModelStore {
+        Meta::of_model(
+            &dir.join("models"),
+            StrategyId::from(STRATEGY),
+            &features(),
+            &with_meta(),
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+        .unwrap()
+        .store()
+        .clone()
+    }
+
+    /// A train of `meta_walk(dir)` at `at`, as `Training::train_at`
+    /// publishes: the primary, and the meta if the primary had a model
+    /// before `at`.
+    fn train_both(dir: &Path, at: Timestamp) -> anyhow::Result<()> {
+        let config = with_meta();
+        let earlier = store(dir, &config, Side::Long)
+            .valid_froms()?
+            .first()
+            .is_some_and(|&t| t < at);
+        publish(dir, &config, at);
         if earlier {
-            let fingerprint = walk.dataset.fingerprint().to_string();
-            walk.meta
-                .as_ref()
-                .unwrap()
-                .store()
-                .publish(&model(walk, at, fingerprint))?;
+            let fingerprint = dataset(dir, &config).fingerprint().to_string();
+            meta_store(dir).publish(&model(at, fingerprint))?;
         }
         Ok(())
     }
@@ -1128,8 +1169,13 @@ Short model scores, out of sample, over the span
         let dir = tempfile::tempdir().unwrap();
         let walk = meta_walk(dir.path());
         let span = (at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"));
-        walk.prepare(span.0, span.1, |_, _| Ok(()), |at| train_both(&walk, at))
-            .unwrap();
+        walk.prepare(
+            span.0,
+            span.1,
+            |_, _| Ok(()),
+            |at| train_both(dir.path(), at),
+        )
+        .unwrap();
         let trained = RefCell::new(vec![]);
 
         walk.prepare(
@@ -1158,17 +1204,17 @@ Short model scores, out of sample, over the span
             at("2026-01-08T00:00:00Z"),
             end,
             |_, _| Ok(()),
-            |at| train_both(&walk, at),
+            |at| train_both(dir.path(), at),
         )
         .unwrap();
-        let meta = walk.meta.as_ref().unwrap().store();
+        let meta = meta_store(dir.path());
         assert_eq!(meta.valid_froms().unwrap(), [at("2026-01-09T00:00:00Z")]);
 
         walk.prepare(
             at("2026-01-07T00:00:00Z"),
             end,
             |_, _| Ok(()),
-            |at| train_both(&walk, at),
+            |at| train_both(dir.path(), at),
         )
         .unwrap();
 

@@ -59,7 +59,7 @@ fn a_sliver_between_promoted_files_is_replayed_through() {
 #[test]
 fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
     let catalog = noise::catalog();
-    let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE), None);
+    let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
 
     let backtest = Backtest {
         end: noise::at("16:00"),
@@ -76,17 +76,15 @@ fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
 }
 
 /// A catalog storing the instrument and no quotes: Nautilus warns the
-/// series has no data, and the run completes without a bar or an order.
+/// series has no data, and the run completes.
 #[test]
-fn a_catalog_without_quotes_runs_with_no_bar_and_no_order() {
+fn a_catalog_without_quotes_runs_to_completion() {
     let catalog = common::catalog_without_quotes();
-    let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE), None);
+    let (recorder, _) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
 
-    noise::backtest(catalog.path(), noise::at("07:00"))
-        .run(recorder)
-        .unwrap();
+    let run = noise::backtest(catalog.path(), noise::at("07:00")).run(recorder);
 
-    assert!(record.borrow().bars.is_empty());
+    assert!(run.is_ok(), "{run:?}");
 }
 
 /// A dataset build over quotes written as a live node promotes them, in

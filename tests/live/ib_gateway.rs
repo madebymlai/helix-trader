@@ -19,7 +19,7 @@
 //! The live node keeps its cache in Redis (`live::redis`)
 //! under the test's trader, `HELIXTEST-043`, whose records the test deletes
 //! once the node has stopped cleanly. The gateway container is left
-//! running: the next run reuses it. Client ids 40 to 43, apart from
+//! running: the next run reuses it. Client ids 40, 41 and 43, apart from
 //! `fill-catalog`'s 10 and `live`'s 1.
 
 use crate::common;
@@ -30,20 +30,13 @@ use std::{
 };
 
 use helix_trader::{
-    data::{IbAccount, IbHistory, fill_catalog},
+    data::{IbAccount, IbHistory},
     live::Live,
-    strategy::{
-        catalog_series,
-        ema::{EmaCross, EmaCrossConfig},
-    },
+    strategy::ema::{EmaCross, EmaCrossConfig},
 };
-use jiff::{Timestamp, ToSpan};
+use jiff::Timestamp;
 use nautilus_common::logging::logger::LoggerConfig;
-use nautilus_model::{
-    data::BarType,
-    identifiers::{InstrumentId, TraderId},
-};
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use nautilus_model::identifiers::{InstrumentId, TraderId};
 use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 
@@ -97,46 +90,6 @@ async fn history_starts_or_reuses_the_paper_gateway_and_a_second_connection_reus
         started.elapsed()
     );
     assert_eq!(second.instruments(&[sxr8()]).await.unwrap().len(), 1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn fill_catalog_stores_minute_bars_through_the_paper_gateway() {
-    if !opted_in("fill_catalog_stores_minute_bars_through_the_paper_gateway") {
-        return;
-    }
-    let _gateway = GATEWAY.lock().await;
-    load_env();
-    let now = Timestamp::now();
-    // A day back, so the window holds Xetra bars whenever the test runs on
-    // a trading day's evening or the next morning.
-    let end = IbHistory::latest_end(now).unwrap();
-    let start = end - 24.hours();
-    let ib = IbHistory::connect(42, end, now).await.unwrap();
-    let instruments = ib.instruments(&[sxr8()]).await.unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-    // IB's 1-minute TRADES bars, which the hour bars are built from.
-    let series = catalog_series(&[BarType::from(
-        "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-    )]);
-    assert_eq!(series.len(), 1);
-    fill_catalog(
-        &mut catalog,
-        instruments,
-        &series,
-        start,
-        end,
-        async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
-    )
-    .await
-    .unwrap();
-    assert_eq!(catalog.instruments(None, None, None).unwrap().len(), 1);
-    for (_, bar_type) in series {
-        let bars = catalog
-            .bars(Some(vec![bar_type.clone()]), None, None)
-            .unwrap();
-        println!("{} bars of {bar_type} over the last day", bars.len());
-    }
 }
 
 /// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars, warmed

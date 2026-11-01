@@ -430,7 +430,9 @@ mod tests {
         let err = refused(&config);
 
         assert!(
-            err.contains("TradeTick of GC.GLBX") && err.contains("read"),
+            err.contains(
+                "TradeTick of GC.GLBX, which neither the features nor the barrier's ATR read"
+            ),
             "{err}"
         );
     }
@@ -441,7 +443,10 @@ mod tests {
 
         let err = refused(&config);
 
-        assert!(err.contains("TradeTick of GC.GLBX"), "{err}");
+        assert!(
+            err.contains("TradeTick of GC.GLBX, which [data] series does not list"),
+            "{err}"
+        );
     }
 
     /// Hourly bars of silver the features read and `[data]` does not list,

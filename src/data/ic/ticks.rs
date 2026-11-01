@@ -390,6 +390,10 @@ mod tests {
         Tick { ms, price }
     }
 
+    /// The most one tick request spans, as Spotware's docs give it: a
+    /// week, 7 × 86,400,000 ms.
+    const A_WEEK: i64 = 604_800_000;
+
     /// The ticks of `pages`, which no failure cut short.
     fn complete(pages: Pages) -> Vec<Tick> {
         assert!(pages.failure.is_none(), "{:?}", pages.failure);
@@ -465,9 +469,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_long_window_is_asked_a_week_at_a_time_from_its_end() {
-        let all = [tick(1, 1), tick(WEEK_MS + 5, 2), tick(2 * WEEK_MS + 5, 3)];
+        let all = [tick(1, 1), tick(A_WEEK + 5, 2), tick(2 * A_WEEK + 5, 3)];
         let mut asked = vec![];
-        let end = 2 * WEEK_MS + 100;
+        let end = 2 * A_WEEK + 100;
 
         let ticks = complete(side_ticks(0, end, venue(&all, &mut asked)).await);
 
@@ -475,8 +479,8 @@ mod tests {
         assert_eq!(
             asked,
             [
-                (end - WEEK_MS, end),
-                (end - 2 * WEEK_MS, end - WEEK_MS),
+                (end - A_WEEK, end),
+                (end - 2 * A_WEEK, end - A_WEEK),
                 (0, 100)
             ]
         );
@@ -541,7 +545,7 @@ mod tests {
         let before = last_before(100, venue(&all, &mut asked)).await.unwrap();
 
         assert_eq!(before, Some(tick(99, 3)));
-        assert_eq!(asked, [(100 - WEEK_MS, 100)]);
+        assert_eq!(asked, [(100 - A_WEEK, 100)]);
         assert_eq!(
             last_before(1, venue(&all, &mut vec![])).await.unwrap(),
             None

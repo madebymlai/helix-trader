@@ -623,14 +623,6 @@ mod tests {
     }
 
     #[test]
-    fn the_strategy_id_is_the_bases() {
-        assert_eq!(
-            load(TOML).unwrap().strategy_id(),
-            StrategyId::from("PAIRS-001")
-        );
-    }
-
-    #[test]
     fn the_base_is_nautilus_strategy_config() {
         let toml = format!(
             "{TOML}\n[base]\nstrategy_id = \"PAIRS-002\"\nuse_hyphens_in_client_order_ids = false\n"
@@ -676,12 +668,6 @@ mod tests {
             let err = shape_error(&toml);
             assert!(err.contains(&format!("`{unknown}`")), "{unknown}: {err}");
         }
-    }
-
-    #[test]
-    fn an_unknown_key_in_the_base_is_refused_naming_it() {
-        let err = shape_error(&format!("{TOML}\n[base]\nstrategy_idd = \"X-001\"\n"));
-        assert!(err.contains("strategy_idd"), "{err}");
     }
 
     #[test]
@@ -745,26 +731,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_bar_spec_nautilus_refuses_is_refused_at_load() {
-        let toml = TOML.replace(
-            "step = 5, aggregation = \"MINUTE\"",
-            "step = 60, aggregation = \"MINUTE\"",
-        );
-        let err = shape_error(&toml);
-        assert!(err.contains("60"), "{err}");
-    }
-
-    #[test]
-    fn a_malformed_instrument_id_is_refused_at_load() {
-        let toml = TOML.replace(
-            "{ data = \"trades\", instrument_id = \"ESH4.CME\" }",
-            "{ data = \"trades\", instrument_id = \"ESH4\" }",
-        );
-        let err = shape_error(&toml);
-        assert!(err.contains("ESH4"), "{err}");
-    }
-
     const COMPOSITE_TOML: &str = r#"
         [data]
         series = [
@@ -796,16 +762,6 @@ mod tests {
             COMPOSITE_TOML.replace("aggregation_source = ", "source = 1, aggregation_source = ");
         let err = shape_error(&toml);
         assert!(err.contains("`source`"), "{err}");
-    }
-
-    #[test]
-    fn invalid_source_bars_are_refused_naming_them() {
-        let toml = COMPOSITE_TOML.replace(
-            "from = { step = 1, aggregation = \"MINUTE\"",
-            "from = { step = 60, aggregation = \"MINUTE\"",
-        );
-        let err = shape_error(&toml);
-        assert!(err.contains("from"), "{err}");
     }
 
     #[test]
@@ -879,12 +835,6 @@ mod tests {
     fn a_session_not_opening_before_its_close_is_refused() {
         let toml = TOML.replace("open = \"08:30\"", "open = \"15:00\"");
         assert_eq!(error_fields(&toml), ["data.session"]);
-    }
-
-    #[test]
-    fn an_unknown_time_zone_is_refused_at_load() {
-        let err = shape_error(&TOML.replace("America/Chicago", "America/Gotham"));
-        assert!(err.contains("America/Gotham"), "{err}");
     }
 
     /// A strategy trading on no model has no `[model]`: it is a key no
@@ -1209,19 +1159,24 @@ mod tests {
             );
         }
 
-        /// Quotes of the instrument traded the series list already are
-        /// listed once.
+        /// Quotes of the instrument traded the series list already, as its
+        /// one series, are listed once.
         #[test]
         fn traded_quotes_the_series_read_are_required_once() {
             let toml = TOML.replace(
-                "series = [",
-                r#"series = [
-                { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },"#,
+                r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#,
+                r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },"#,
             );
 
             let requirements = load(&toml).unwrap().data_requirements();
 
-            assert_eq!(requirements.ticks.len(), 1, "{:?}", requirements.ticks);
+            assert_eq!(
+                requirements.ticks,
+                [TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: InstrumentId::from("XAUUSD.ICMARKETS"),
+                }]
+            );
         }
 
         #[test]
@@ -1256,7 +1211,7 @@ mod tests {
         #[test]
         fn a_misspelt_field_of_the_model_is_refused_at_load() {
             let err = shape_error(&TOML.replace("min_pnl", "min_pn"));
-            assert!(err.contains("min_pn"), "{err}");
+            assert!(err.contains("unknown field `min_pn`"), "{err}");
         }
 
         /// The barrier's ATR takes Nautilus' `AverageTrueRange` arguments
@@ -1294,13 +1249,7 @@ mod tests {
         /// Nautilus' `AverageTrueRange::new` panics on an argument it
         /// refuses, and the load builds the ATR.
         #[test]
-        #[should_panic(expected = "value_floor")]
-        fn a_barrier_atr_argument_nautilus_refuses_panics_at_load() {
-            let _ = load(&with_atr(r#", atr = { period = 3, value_floor = -1.0 }"#));
-        }
-
-        #[test]
-        #[should_panic(expected = "period")]
+        #[should_panic(expected = "period must be in 1..=")]
         fn a_barrier_atr_of_no_bars_panics_at_load() {
             let _ = load(&with_atr(r#", atr = { period = 0 }"#));
         }

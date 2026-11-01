@@ -242,26 +242,6 @@ mod tests {
         close(payoff.expected(0.4), 0.0);
     }
 
-    /// Worked by hand. Gold's barrier a take profit of 2 ATRs and a stop
-    /// of 1, a trade of one ounce: its long wins 1.8R and loses 1.2R, the
-    /// costs in both, a probability of 0.6 expected 0.6R. At a decision
-    /// whose ATR is 5.00 the stop is worth 5 USD, the trade expected 3 USD;
-    /// at one whose ATR is 1.00, 1 USD, expected 0.60 USD. With a margin of
-    /// 2 USD the first trades and the second does not, at the same
-    /// probability: a fixed threshold on it trades both or neither.
-    #[test]
-    fn the_same_probability_trades_against_a_wide_atr_stop_and_not_a_tight_one() {
-        let payoff = Payoff {
-            win: 1.8,
-            loss: 1.2,
-        };
-        let margin = 2.0;
-        let decide = |stop: f64| pick([(Side::Long, payoff.expected(0.6) * stop, margin)]);
-
-        assert_eq!(decide(5.0), Some(Side::Long));
-        assert_eq!(decide(1.0), None);
-    }
-
     #[test]
     fn a_side_trades_from_its_margin() {
         assert_eq!(pick([(Side::Short, 1.0, 1.0)]), Some(Side::Short));

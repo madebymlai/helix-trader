@@ -364,12 +364,34 @@ mod tests {
         assert!(!client.is_connected());
     }
 
+    /// As the node does: each client created by its factory, under the
+    /// factory's name, from its config.
     #[test]
-    fn the_node_gets_ic_s_execution_client() {
+    fn the_node_gets_factories_that_create_ic_s_clients_from_their_configs() {
+        let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let (exec_tx, _exec_events) = tokio::sync::mpsc::unbounded_channel();
+        replace_exec_event_sender(exec_tx);
         let clients = clients(&[gold_bars()], vars(&demo())).unwrap();
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
 
         let node_clients = clients.into_node_clients();
 
-        assert_eq!(node_clients.exec_factory.name(), "ICMARKETS");
+        let data = node_clients.data_factory.create(
+            node_clients.data_factory.name(),
+            node_clients.data_config.as_ref(),
+            cache.clone().into(),
+            clock.clone(),
+        );
+        assert!(data.is_ok(), "{:#}", data.err().unwrap());
+        let exec = node_clients.exec_factory.create(
+            TraderId::from("HELIX-001"),
+            node_clients.exec_factory.name(),
+            node_clients.exec_config.as_ref(),
+            cache.into(),
+            clock,
+        );
+        assert!(exec.is_ok(), "{:#}", exec.err().unwrap());
     }
 }

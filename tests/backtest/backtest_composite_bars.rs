@@ -91,7 +91,7 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
         .block_on(fill)
         .unwrap();
 
-    let (recorder, record) = Recorder::new(BarType::from(COMPOSITE), None);
+    let (recorder, record) = Recorder::new(BarType::from(COMPOSITE));
     let mut backtest = common::backtest(dir.path(), at("10:30"), at("15:00"), "0 EUR");
     backtest.bar_types = bar_types.to_vec();
     backtest.run(recorder).unwrap();

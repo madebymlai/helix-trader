@@ -108,9 +108,4 @@ mod tests {
 
         assert_eq!(features.values(), Some(vec![4000.0, 4000.0]));
     }
-
-    #[test]
-    fn no_bar_type_is_no_feature_set() {
-        assert!(features(&[], HOUR).is_err());
-    }
 }

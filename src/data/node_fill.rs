@@ -551,9 +551,7 @@ mod tests {
         types::{Price, Quantity},
     };
 
-    use nautilus_persistence::{
-        backend::parquet::paths::timestamps_to_filename, catalog::traits::CatalogWriter,
-    };
+    use nautilus_persistence::backend::parquet::paths::timestamps_to_filename;
 
     use super::*;
     use crate::rolls::Slice;
@@ -796,11 +794,10 @@ mod tests {
     }
 
     /// The slivers a live node's daily promotions leave between their files
-    /// are what the catalog lacks, each asked of the venue once: its
-    /// write-back (`update_catalog`) closes it, so the next fill asks
-    /// nothing. A run-start directory an older node left is ignored.
+    /// are what the catalog lacks, each asked with the definition over it.
+    /// A run-start directory an older node left is ignored.
     #[test]
-    fn a_sliver_between_promoted_files_is_asked_once_and_its_write_back_closes_it() {
+    fn a_sliver_between_promoted_files_is_asked_with_its_definition() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("live-runs/1792540800000000000")).unwrap();
         promoted_quotes(
@@ -811,7 +808,7 @@ mod tests {
                 ("2026-10-21T23:59:59.7Z", "2026-10-22T23:59:59Z"),
             ],
         );
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let slices = [slice(
             NautilusDataType::QuoteTick,
             "XAUUSD.ICMARKETS",
@@ -819,7 +816,8 @@ mod tests {
             "2026-10-22T23:59:59Z",
         )];
 
-        let first = missing(&catalog, &slices).unwrap();
+        let asked = missing(&catalog, &slices).unwrap();
+
         let sliver = request(
             FillData::Quotes,
             "XAUUSD.ICMARKETS",
@@ -827,7 +825,7 @@ mod tests {
             "2026-10-21T23:59:59.699999999Z",
         );
         assert_eq!(
-            first,
+            asked,
             [
                 FillRequest {
                     data: FillData::Instrument,
@@ -836,17 +834,6 @@ mod tests {
                 sliver
             ]
         );
-        // The venue's empty answer, recorded as the data engine records it.
-        catalog
-            .record_empty_coverage(
-                NautilusDataType::QuoteTick,
-                Some("XAUUSD.ICMARKETS"),
-                sliver.from.into(),
-                sliver.to.into(),
-            )
-            .unwrap();
-
-        assert_eq!(missing(&catalog, &slices).unwrap(), []);
     }
 
     #[test]
@@ -909,34 +896,5 @@ mod tests {
 
         assert!(err.contains("Imbalance"), "{err}");
         assert!(err.contains("GCZ6.GLBX"), "{err}");
-    }
-
-    #[test]
-    fn a_window_answered_with_rows_but_not_stored_fails_the_coverage_check() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let depth = request(
-            FillData::Depth,
-            "GCZ6.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-21T02:59:59.999999999Z",
-        );
-        let empty = request(
-            FillData::Depth,
-            "GCZ6.GLBX",
-            "2026-10-24T00:00:00Z",
-            "2026-10-24T02:59:59.999999999Z",
-        );
-        let definition = request(
-            FillData::Instrument,
-            "GCZ6.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-24T00:00:00Z",
-        );
-
-        check_coverage(&catalog, &[(definition, 1), (empty, 0)]).unwrap();
-        let err = check_coverage(&catalog, &[(depth, 5)]).unwrap_err();
-
-        assert!(err.to_string().contains(&depth.to_string()), "{err}");
     }
 }

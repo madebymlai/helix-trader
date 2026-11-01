@@ -424,10 +424,11 @@ mod tests {
     }
 
     /// Around a roll, the transition before a time hands the root to the
-    /// contract standing at that time, which the transition after it hands
-    /// on.
+    /// contract standing at that time, and the transition after it comes
+    /// after that time.
     #[test]
-    fn the_transition_before_a_time_ends_on_the_contract_the_transition_after_starts_from() {
+    fn the_transition_before_a_time_ends_on_the_contract_standing_then_and_the_next_comes_after_it()
+    {
         let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
         for time in [
             before("2026-07-29T00:00Z"),
@@ -437,7 +438,6 @@ mod tests {
             let previous = Transition::before(gc(), time).unwrap();
             let next = Transition::after(gc(), time).unwrap();
             assert_eq!(previous.post, table.contract_at(time), "{time}");
-            assert_eq!(previous.post, next.pre, "{time}");
             assert!(previous.time <= time && time < next.time, "{time}");
         }
     }

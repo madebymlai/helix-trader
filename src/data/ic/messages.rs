@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_payload_type_is_named_by_its_number() {
+    fn a_payload_type_is_named_as_the_proto_spells_it_or_by_its_number() {
         assert_eq!(payload_name(2131), "PROTO_OA_SPOT_EVENT");
         assert_eq!(payload_name(51), "HEARTBEAT_EVENT");
         assert_eq!(payload_name(9999), "9999");

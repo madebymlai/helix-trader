@@ -336,6 +336,7 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_starts_no_child()
     let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
 
     assert!(!stdout.contains("days of the dataset"), "{stdout}");
+    assert!(!stdout.contains("the dataset holds every day"), "{stdout}");
     assert!(!stderr.contains("the retrain at"), "{stderr}");
     let scores = stdout.find("Long model scores").expect(&stdout);
     assert!(stdout.find("Final balances").unwrap() < scores, "{stdout}");

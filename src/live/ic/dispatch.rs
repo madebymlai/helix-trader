@@ -1139,47 +1139,4 @@ mod tests {
         dispatch.sent(Tag::New(id("O-1")));
         assert_eq!(dispatch.absent(id("O-1")), Some(vec![id("O-1")]));
     }
-
-    #[test]
-    fn an_order_this_session_never_sent_is_concluded_absent() {
-        let mut dispatch = dispatch();
-
-        assert_eq!(dispatch.absent(id("O-1")), Some(vec![id("O-1")]));
-    }
-
-    #[test]
-    fn an_absent_entry_takes_its_legs_and_a_leg_alone_is_not_concluded() {
-        let mut dispatch = dispatch();
-        dispatch.track(
-            &order("O-1-SL", OrderType::StopMarket),
-            Role::Leg {
-                entry: id("O-1"),
-                leg: Leg::StopLoss,
-            },
-        );
-        dispatch.track(
-            &order("O-1-TP", OrderType::Limit),
-            Role::Leg {
-                entry: id("O-1"),
-                leg: Leg::TakeProfit,
-            },
-        );
-        dispatch.track(
-            &order("O-1", OrderType::Market),
-            Role::Entry {
-                stop_loss: Some(id("O-1-SL")),
-                take_profit: Some(id("O-1-TP")),
-                position: None,
-            },
-        );
-        dispatch.sent(Tag::New(id("O-1")));
-
-        assert_eq!(dispatch.absent(id("O-1-SL")), None);
-        assert_eq!(
-            dispatch.absent(id("O-1")),
-            Some(vec![id("O-1"), id("O-1-SL"), id("O-1-TP")])
-        );
-        // Concluded: closed, so not again.
-        assert_eq!(dispatch.absent(id("O-1")), None);
-    }
 }

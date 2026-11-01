@@ -746,21 +746,27 @@ mod tests {
         assert_eq!(xau.lot_size, Some(Quantity::from(100)));
         assert_eq!(eur.price_precision, 5);
         let requests = requests(&received);
-        let types: Vec<u32> = requests.iter().map(|f| f.payload_type).collect();
+        let mut types: Vec<u32> = requests.iter().map(|f| f.payload_type).collect();
+        types.sort_unstable();
         assert_eq!(types, [2112, 2114, 2116, 2121, 2177, 2177]);
-        let details =
-            ProtoOaSymbolByIdReq::decode(requests[2].payload.as_deref().unwrap()).unwrap();
+        let details = requests
+            .iter()
+            .find(|f| f.payload_type == ProtoOaSymbolByIdReq::TYPE)
+            .unwrap();
+        let details = ProtoOaSymbolByIdReq::decode(details.payload.as_deref().unwrap()).unwrap();
         assert_eq!(details.ctid_trader_account_id, ACCOUNT_ID);
         assert_eq!(details.symbol_id, [41, 1]);
-        let leverages: Vec<(i64, i64)> = requests[4..]
+        let mut leverages: Vec<(i64, i64)> = requests
             .iter()
+            .filter(|f| f.payload_type == ProtoOaGetDynamicLeverageByIdReq::TYPE)
             .map(|f| {
                 let asked = ProtoOaGetDynamicLeverageByIdReq::decode(f.payload.as_deref().unwrap())
                     .unwrap();
                 (asked.ctid_trader_account_id, asked.leverage_id)
             })
             .collect();
-        assert_eq!(leverages, [(ACCOUNT_ID, 52_543), (ACCOUNT_ID, 52_531)]);
+        leverages.sort_unstable();
+        assert_eq!(leverages, [(ACCOUNT_ID, 52_531), (ACCOUNT_ID, 52_543)]);
         history.disconnect().await;
     }
 
@@ -776,9 +782,13 @@ mod tests {
 
         let instruments = history.instruments(&ids).await.unwrap();
 
-        for instrument in &instruments {
-            assert_eq!(instrument.margin_init(), Decimal::ONE / Decimal::from(30));
-            assert_eq!(instrument.margin_maint(), instrument.margin_init());
+        let [gold, euro_dollar] = instruments.as_slice() else {
+            panic!("{instruments:?}");
+        };
+        let at_1_30 = Decimal::ONE / Decimal::from(30);
+        for instrument in [gold, euro_dollar] {
+            assert_eq!(instrument.margin_init(), at_1_30);
+            assert_eq!(instrument.margin_maint(), at_1_30);
         }
         history.disconnect().await;
     }

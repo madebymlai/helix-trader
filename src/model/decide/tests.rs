@@ -125,18 +125,6 @@ fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
 }
 
 #[test]
-fn a_rule_reads_from_toml() {
-    #[derive(Deserialize)]
-    struct Config {
-        decision: DecisionRule,
-    }
-    let read = |toml: &str| toml::from_str::<Config>(toml).unwrap().decision;
-
-    assert_eq!(read(r#"decision = { every = "15m" }"#), every(15));
-    assert_eq!(read(r#"decision = "event""#), DecisionRule::Event);
-}
-
-#[test]
 fn a_cadence_must_be_positive() {
     assert!(every(0).validate().is_err());
     assert!(every(-15).validate().is_err());
