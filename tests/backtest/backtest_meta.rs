@@ -8,10 +8,10 @@
 //! the meta model in use takes the primary's trade.
 //!
 //! A model primary of the long alone trades long at every decision. Its
-//! meta model's first retrain has no primary model before it, so no rows;
-//! the next ones hold out the primary's longs, every one of which the
-//! meta's threshold takes, refused for earning no more than every trade.
-//! With no meta model the first day, no trade.
+//! meta model's first retrain has no primary model before it, so it waits
+//! for primary decisions; the next ones hold out the primary's longs,
+//! every one of which the meta's threshold takes, refused for earning no
+//! more than every trade. With no meta model the first day, no trade.
 //!
 //! A rule primary, the probe's own, signals a long at even hours and a
 //! short at odd ones, but none every third hour: the dataset has a row of
@@ -37,6 +37,7 @@ use helix_trader::model::{
     handle::{Decision, Mode, ModelHandle, SettledRows},
     holdout::Earnings,
     learner::LearnerConfig,
+    schedule::Retrain,
     store::ModelStore,
     targets::{Side, TargetRow},
     train::{Kept, Outcome, Trained, Training},
@@ -84,7 +85,7 @@ fn meta() -> MetaConfig {
 /// every decision, its trades taken by `meta`.
 fn model_primary() -> ModelConfig {
     ModelConfig {
-        retrain: SignedDuration::from_hours(24),
+        retrain: Retrain::Every(SignedDuration::from_hours(24)),
         margins: Margins {
             long: Some(f64::MIN),
             short: None,
@@ -102,7 +103,7 @@ fn rule_primary() -> RuleConfig {
     RuleConfig {
         decision: rule(),
         targets: targets(),
-        retrain: SignedDuration::from_hours(24),
+        retrain: Retrain::Every(SignedDuration::from_hours(24)),
         meta: MetaConfig {
             window: SignedDuration::from_hours(46),
             holdout: SignedDuration::from_hours(18),
@@ -151,10 +152,11 @@ fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64
 }
 
 /// Prepares the backtest of the span of the model primary: the dataset
-/// built, then at each retrain time the primary's long model published
-/// straight, a baseline of `trues` tenths (3 at the span's start and one
-/// more each day), and the primary and its meta model trained; what each
-/// train did.
+/// built, then at each retrain time the primary and its meta model
+/// trained, and the primary's long model published straight after, a
+/// baseline of `trues` tenths (3 at the span's start and one more each
+/// day), which the train would keep in use had it been published before;
+/// what each train did.
 fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let mut trained = vec![];
@@ -190,14 +192,6 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
             })
         },
         |at| {
-            let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
-            primary_store(models).publish(&baseline_of(
-                &features(false),
-                &model_primary(),
-                Side::Long,
-                at,
-                trues,
-            ))?;
             let outcome = on_thread(|| {
                 Training::new(
                     catalog.path(),
@@ -212,7 +206,14 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                 .train_at(at, |from, to| replay_on(catalog, features(false), from, to))
             });
             trained.push((at, outcome));
-            Ok(())
+            let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+            primary_store(models).publish(&baseline_of(
+                &features(false),
+                &model_primary(),
+                Side::Long,
+                at,
+                trues,
+            ))
         },
     )
     .unwrap();
@@ -270,8 +271,9 @@ fn a_model_primarys_meta_model_trains_on_its_trades_and_takes_them_in_the_run() 
             .all(|(_, trained)| matches!(trained.long, Some(Outcome::Kept(Kept::Refused { .. })))),
         "{trained:?}"
     );
-    assert!(
-        matches!(trained[0].1.meta, Some(Outcome::Kept(Kept::Failed(_)))),
+    assert_eq!(
+        trained[0].1.meta,
+        Some(Outcome::Kept(Kept::Waiting)),
         "no primary model before the first retrain: {:?}",
         trained[0].1
     );

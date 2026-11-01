@@ -10,42 +10,58 @@
 //! a side whose holdout falls short keeps its current model, the other
 //! may publish.
 //!
-//! A train at `t` takes the rows of the window ending at `t`
-//! (`ModelConfig::window`), building the days the dataset lacks by one
-//! replay to `t` (`Dataset::settled`), and drops the rows not settled at
-//! `t`: no row's targets reach past the train, so the purge between the
-//! rows and the model's first use is the longest target, by
+//! What a train at `t` does to each model is the schedule's plan
+//! (`schedule::Schedule::plan`), from the stores' valid-froms alone: a
+//! model with a current model at `t` keeps it, in use (retrained, the one
+//! valid from `t`; never retrained, the latest valid by `t`, so each model
+//! is trained once); a model primary's meta with no primary model before
+//! `t` waits for primary decisions; the others are fitted, as of `t`, or,
+//! never retrained, a primary's sides with neither them nor the meta in
+//! use, as of `t` less the meta's window, the meta at `t` on their
+//! decisions. With nothing to fit the train replays nothing.
+//!
+//! A model fitted as of `t'`, the train's time or before it, takes the
+//! rows of the window ending at `t'` (`ModelConfig::window`), the days
+//! the dataset lacks built by one replay to the train's time from the
+//! first row a fit reads (`Dataset::settled`), and drops the rows not
+//! settled at `t'`: no row's targets reach past `t'`, so the purge
+//! between the rows and the model's first use is the longest target, by
 //! construction. The window ends in the holdout (`ModelConfig::holdout`)
 //! and, before it, the calibration, as long, each part's rows taken with
 //! the same gap: a model is fitted on the rows before the calibration
 //! settled at its start, calibrated by Platt scaling
 //! (`calibration::Calibration`) on its predictions on the calibration's
 //! rows settled at the holdout's start, and judged on the holdout
-//! (`holdout::Holdout`): its calibrated probabilities' log loss against
-//! the baseline's, the training mean of the rows before the holdout
-//! (`baseline`), and what its decision rule (`holdout::Rule`) would have
-//! earned on the holdout's trades, the side's trade of each row for a
-//! primary, a side's expected payoff (`payoff::Payoff`, of the realised
-//! values of the rows before the holdout) on the row's unit clearing its
-//! margin, beside taking every trade; its AUC reported. A holdout meeting
-//! the minimums (`ModelConfig::min_pnl`, `ModelConfig::min_trades`,
-//! `Holdout::refusal`) publishes the model in its side's store (`store`),
-//! valid from `t`, with its calibration, its payoff, its holdout, and its
-//! manifest probing it on rows of the holdout; else the current model is
-//! kept.
+//! (`holdout::Holdout`): its calibrated probabilities' log loss
+//! against the baseline's, the training mean of the rows before the
+//! holdout (`baseline`), and what its decision rule (`holdout::Rule`)
+//! would have earned on the holdout's trades, the side's trade of each
+//! row for a primary, a side's expected payoff (`payoff::Payoff`, of the
+//! realised values of the rows before the holdout) on the row's unit
+//! clearing its margin, beside taking every trade; its AUC reported. A
+//! holdout meeting the minimums (`ModelConfig::min_pnl`,
+//! `ModelConfig::min_trades`, `Holdout::refusal`) publishes the model in
+//! its side's store (`store`), valid from `t'`, with its calibration, its
+//! payoff, its holdout, and its manifest probing it on rows of the
+//! holdout; else the current model is kept.
 //!
 //! With a meta model (`model::meta`), the primary trains first, then the
 //! meta, on the same rows, of the one replay: the meta's window is its
 //! own (`MetaConfig::window`), from the primary's first model on, and its
 //! rows are made from the primary's out-of-sample decisions, those of the
-//! models of the store the primary used at each decision, the ones just
-//! published valid from `t` used by none. Fitting, calibrating, judging
-//! and publishing are the primary's, in the meta's store, its rule the
-//! primary's trade taken from its threshold (`MetaConfig::threshold`). A
-//! strategy whose primary is its rule trains its meta model alone.
+//! models of the store the primary used at each decision, read once the
+//! sides published: the ones just published valid from `t` used by none,
+//! those of a train at two times, valid from the window's start, used
+//! throughout it; and should the sides of such a train publish none, the
+//! meta waits for primary decisions (`Plan::meta_after_sides`). Fitting,
+//! calibrating, judging and publishing are the primary's, in the meta's
+//! store, its rule the primary's trade taken from its threshold
+//! (`MetaConfig::threshold`). A strategy whose primary is its rule trains
+//! its meta model alone.
 //!
 //! A train never errors: what goes wrong is an outcome, the current model
-//! kept with the reason (`Kept`), for each model trained.
+//! kept with the reason (`Kept`), for each model trained. It succeeds when
+//! it kept no model (`Trained::succeeded`).
 
 use std::{fmt, path::Path};
 
@@ -63,6 +79,7 @@ use super::{
     learner::{LearnerConfig, Model, TrainingSet},
     meta::Meta,
     payoff::{Payoff, Realised},
+    schedule::{Models, Retrain, Schedule, Step},
     score,
     store::{LoadedModel, ModelManifest, ModelStore, Probe, StoredModel},
     targets::{Label, Side, TargetRow, TargetsConfig},
@@ -82,11 +99,13 @@ pub struct Training {
     /// How the rows' trades read in the primary's payoffs; none for a
     /// strategy whose primary is its rule.
     realised: Option<Realised>,
-    /// The model of each side the primary trades; none for a strategy
-    /// whose primary is its rule.
-    sides: Vec<Level>,
-    /// The meta model, if any.
-    meta: Option<(Level, Meta)>,
+    /// What each train does to each model.
+    schedule: Schedule,
+    /// Each model: of each side the primary trades, none for a strategy
+    /// whose primary is its rule, and the meta model, if any.
+    levels: Models<Level>,
+    /// How the meta model's rows are made, if there is one.
+    meta: Option<Meta>,
 }
 
 /// How the models of one level, a primary's side or a meta, are fitted,
@@ -99,7 +118,6 @@ struct Level {
     label: Label,
     /// The side of the target a primary's model learns; none for a meta.
     side: Option<Side>,
-    window: SignedDuration,
     holdout: SignedDuration,
     /// Which trades of the holdout its model takes.
     rule: Rule,
@@ -126,18 +144,10 @@ pub(super) struct Example {
     pub settled_at: UnixNanos,
 }
 
-/// What a train did: the outcome of each model it trained, the primary's
-/// sides first.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Trained {
-    /// The long model's; none if the primary trades no long, or is a rule.
-    pub long: Option<Outcome>,
-    /// The short model's; none if the primary trades no short, or is a
-    /// rule.
-    pub short: Option<Outcome>,
-    /// The meta model's, if the strategy has one.
-    pub meta: Option<Outcome>,
-}
+/// What a train did: the outcome of each model of the strategy, none for
+/// a model it has not (a side the primary does not trade, or both of a
+/// rule primary's, or the meta of a strategy without one).
+pub type Trained = Models<Outcome>;
 
 /// What a train did to one model.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +156,13 @@ pub enum Outcome {
     Published {
         valid_from: Timestamp,
         holdout: Holdout,
+    },
+    /// None was fitted: the current model, valid from `valid_from`, is in
+    /// use (`schedule::Step::Keep`), of a strategy retrained as `retrain`
+    /// says, which says how it reads (`Retrain::in_use`).
+    InUse {
+        valid_from: Timestamp,
+        retrain: Retrain,
     },
     /// No model was published: the current one, if any, stays.
     Kept(Kept),
@@ -163,6 +180,10 @@ pub enum Kept {
     /// The dataset holds rows that do not match the strategy's features or
     /// targets; the mismatch.
     SchemaMismatch(String),
+    /// A model primary's meta waits for primary decisions to learn from: no
+    /// primary model is valid before the train, so none was fitted
+    /// (`schedule::Step::Wait`).
+    Waiting,
 }
 
 impl Training {
@@ -187,36 +208,33 @@ impl Training {
         venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         let realised = Realised::new(catalog, &config.targets, config.label)?;
-        let sides = config
-            .margins
-            .sides()
-            .map(|(side, margin)| {
-                Ok(Level {
-                    feature_names: features.names().to_vec(),
-                    label: config.label,
-                    side: Some(side),
-                    window: config.window,
-                    holdout: config.holdout,
-                    rule: Rule::Margin(margin),
-                    minimums: config.minimums(),
-                    learner: config.learner.clone(),
-                    store: ModelStore::new(
-                        models,
-                        strategy_id,
-                        features,
-                        &config,
-                        requirements,
-                        venue,
-                        side,
-                    )?,
+        let side = |side| {
+            config
+                .margins
+                .of(side)
+                .map(|margin| {
+                    Ok::<_, anyhow::Error>(Level {
+                        feature_names: features.names().to_vec(),
+                        label: config.label,
+                        side: Some(side),
+                        holdout: config.holdout,
+                        rule: Rule::Margin(margin),
+                        minimums: config.minimums(),
+                        learner: config.learner.clone(),
+                        store: ModelStore::new(
+                            models,
+                            strategy_id,
+                            features,
+                            &config,
+                            requirements,
+                            venue,
+                            side,
+                        )?,
+                    })
                 })
-            })
-            .collect::<anyhow::Result<_>>()?;
-        let meta = Meta::of_model(models, strategy_id, features, &config, requirements, venue)?
-            .map(|meta| {
-                let level = Level::of_meta(&meta);
-                (level, meta)
-            });
+                .transpose()
+        };
+        let meta = Meta::of_model(models, strategy_id, features, &config, requirements, venue)?;
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -228,9 +246,14 @@ impl Training {
                 requirements,
                 venue,
             )?,
+            schedule: Schedule::of_model(&config),
+            levels: Models {
+                long: side(Side::Long)?,
+                short: side(Side::Short)?,
+                meta: meta.as_ref().map(Level::of_meta),
+            },
             targets: config.targets,
             realised: Some(realised),
-            sides,
             meta,
         })
     }
@@ -266,10 +289,15 @@ impl Training {
                 requirements,
                 venue,
             )?,
+            schedule: Schedule::of_rule(&config),
             targets: config.targets,
             realised: None,
-            sides: vec![],
-            meta: Some((Level::of_meta(&meta), meta)),
+            levels: Models {
+                long: None,
+                short: None,
+                meta: Some(Level::of_meta(&meta)),
+            },
+            meta: Some(meta),
         })
     }
 
@@ -277,74 +305,110 @@ impl Training {
     /// trades that side.
     #[must_use]
     pub fn store(&self, side: Side) -> Option<&ModelStore> {
-        self.sides
-            .iter()
-            .find(|level| level.side == Some(side))
-            .map(|level| &level.store)
+        self.levels.side(side).map(|level| &level.store)
     }
 
     /// The store the meta model is published in, if there is one.
     #[must_use]
     pub fn meta_store(&self) -> Option<&ModelStore> {
-        self.meta.as_ref().map(|(level, _)| &level.store)
+        self.levels.meta.as_ref().map(|level| &level.store)
     }
 
-    /// Trains at `at`: `replay` runs the strategy over a span of the days
-    /// the dataset lacks and returns the rows it settled (see
-    /// `Dataset::settled`), once for every model. Publishes each side's
-    /// model, or keeps its current one with the reason, then the meta
-    /// model.
+    /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
+    /// the stores' valid-froms: `replay` runs the strategy over a span of
+    /// the days the dataset lacks and returns the rows it settled (see
+    /// `Dataset::settled`), once, from where the plan's fits start, and not
+    /// at all if it fits none. Fits each side's model the plan fits, as of
+    /// its time, then the meta model as the plan has it once the sides are
+    /// fitted (`Plan::meta_after_sides`), its rows the primary's decisions
+    /// by the store as the sides left it: each fitted is published, or its
+    /// current model kept with the reason; a model the plan keeps is in
+    /// use, and a meta the plan makes wait is kept, waiting.
     pub fn train_at(
         &self,
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
     ) -> Trained {
-        let from = self
-            .sides
-            .iter()
-            .chain(self.meta.iter().map(|(level, _)| level))
-            .map(|level| level.window)
-            .max()
-            .map_or(at, |window| at - window);
-        let rows = match self.dataset.settled(from, at, replay) {
-            Ok(rows) => rows,
-            Err(e) => {
-                let side = |side| self.store(side).map(|_| kept(&e));
-                return Trained {
-                    long: side(Side::Long),
-                    short: side(Side::Short),
-                    meta: self.meta.as_ref().map(|_| kept(&e)),
-                };
-            }
+        let plan = match self.valid_froms() {
+            Ok(valid_froms) => self.schedule.plan(at, &valid_froms),
+            Err(e) => return self.levels.as_ref().map(|_| kept(&e)),
         };
+        let rows = match plan.replay_from() {
+            Some(from) => self.dataset.settled(from, at, replay),
+            None => Ok(vec![]),
+        };
+        let steps = plan.steps();
         let side = |side: Side| {
-            let level = self.sides.iter().find(|level| level.side == Some(side))?;
-            let realised = self.realised.as_ref()?;
-            let start = UnixNanos::from(at - level.window);
-            let examples = rows
-                .iter()
-                .filter(|row| row.ts_event >= start)
-                .map(|row| Example::of_side(row, side, realised))
-                .collect::<anyhow::Result<Vec<_>>>();
-            Some(match examples {
-                Ok(examples) => self.fit(level, at, examples),
-                Err(e) => kept(&e),
-            })
+            let (level, step, realised) = (
+                self.levels.side(side)?,
+                steps.side(side)?,
+                self.realised.as_ref()?,
+            );
+            Some(self.step(level, *step, &rows, |rows| {
+                rows.iter()
+                    .map(|row| Example::of_side(row, side, realised))
+                    .collect()
+            }))
         };
         let (long, short) = (side(Side::Long), side(Side::Short));
-        let meta = self.meta.as_ref().map(|(level, meta)| {
-            let examples = meta.window_start(at).and_then(|start| {
-                let start = UnixNanos::from(start);
-                let rows: Vec<&DatasetRow> =
-                    rows.iter().filter(|row| row.ts_event >= start).collect();
-                meta.examples(&rows, self.realised.as_ref())
-            });
-            match examples {
-                Ok(examples) => self.fit(level, at, examples),
-                Err(e) => kept(&e),
+        let meta = || {
+            let (level, meta) = (self.levels.meta.as_ref()?, self.meta.as_ref()?);
+            let step = match self.valid_froms() {
+                Ok(valid_froms) => plan.meta_after_sides(&valid_froms)?,
+                Err(e) => return Some(kept(&e)),
+            };
+            Some(self.step(level, step, &rows, |rows| {
+                meta.examples(rows, self.realised.as_ref())
+            }))
+        };
+        Models {
+            long,
+            short,
+            meta: meta(),
+        }
+    }
+
+    /// The valid-froms of the store of each model.
+    fn valid_froms(&self) -> anyhow::Result<Models<Vec<Timestamp>>> {
+        self.levels
+            .as_ref()
+            .try_map(|level| level.store.valid_froms())
+    }
+
+    /// What a train does to `level`'s model at `step`: its current model
+    /// in use; a meta waiting; or a model fitted as of the step's time on
+    /// the `examples` of the replay's `rows` in its rows (`Step::rows`),
+    /// published, or the current model kept with the reason.
+    fn step(
+        &self,
+        level: &Level,
+        step: Step,
+        rows: &anyhow::Result<Vec<DatasetRow>>,
+        examples: impl FnOnce(&[&DatasetRow]) -> anyhow::Result<Vec<Example>>,
+    ) -> Outcome {
+        let (from, at) = match step {
+            Step::Keep { valid_from, .. } => {
+                return Outcome::InUse {
+                    valid_from,
+                    retrain: self.schedule.retrain(),
+                };
             }
-        });
-        Trained { long, short, meta }
+            Step::Wait => return Outcome::Kept(Kept::Waiting),
+            Step::Fit { from, at } => (from, at),
+        };
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => return kept(e),
+        };
+        let (start, end) = (UnixNanos::from(from), UnixNanos::from(at));
+        let rows: Vec<&DatasetRow> = rows
+            .iter()
+            .filter(|row| start <= row.ts_event && row.ts_event < end && row.settled_at <= end)
+            .collect();
+        match examples(&rows) {
+            Ok(examples) => self.fit(level, at, examples),
+            Err(e) => kept(&e),
+        }
     }
 
     /// Fits `level`'s model at `at` on `examples`, in time order, and
@@ -453,7 +517,6 @@ impl Level {
             feature_names: meta.feature_names().to_vec(),
             label: Label::Barrier,
             side: None,
-            window: config.window,
             holdout: config.holdout,
             rule: Rule::Threshold(config.threshold),
             minimums: config.minimums(),
@@ -503,13 +566,12 @@ impl Example {
 }
 
 impl Trained {
-    /// Whether every model trained was published.
+    /// Whether the train succeeded: it kept no model, each published or
+    /// its current one in use.
     #[must_use]
-    pub fn published(&self) -> bool {
-        [&self.long, &self.short, &self.meta]
-            .into_iter()
-            .flatten()
-            .all(|outcome| matches!(outcome, Outcome::Published { .. }))
+    pub fn succeeded(&self) -> bool {
+        self.iter()
+            .all(|outcome| !matches!(outcome, Outcome::Kept(_)))
     }
 }
 
@@ -623,6 +685,10 @@ impl fmt::Display for Outcome {
                     "published a model valid from {valid_from}, holdout {holdout}"
                 )
             }
+            Self::InUse {
+                valid_from,
+                retrain,
+            } => write!(f, "{}", retrain.in_use(*valid_from)),
             Self::Kept(kept) => write!(f, "kept the current model: {kept}"),
         }
     }
@@ -634,6 +700,10 @@ impl fmt::Display for Kept {
             Self::Refused { why, holdout } => write!(f, "{why} (holdout {holdout})"),
             Self::Failed(why) => write!(f, "failed: {why}"),
             Self::SchemaMismatch(why) => write!(f, "schema mismatch: {why}"),
+            Self::Waiting => write!(
+                f,
+                "waiting for primary decisions: no primary model is valid before the train"
+            ),
         }
     }
 }
@@ -1137,6 +1207,118 @@ mod tests {
         );
     }
 
+    /// The long's model valid from the train's time, a baseline published
+    /// beforehand, is kept in use, not fitted again; the short, with none,
+    /// is fitted and published.
+    #[test]
+    fn a_model_already_published_at_the_trains_time_is_kept_in_use_and_the_other_fitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), config());
+        let t = at("2026-01-07T00:00:00Z");
+        primary(
+            training.store(Side::Long).unwrap(),
+            Side::Long,
+            "2026-01-07T00:00:00Z",
+            0.8,
+        );
+
+        let trained = training.train_at(t, |_, _| Ok(rows()));
+
+        assert_eq!(
+            trained.long,
+            Some(Outcome::InUse {
+                valid_from: t,
+                retrain: config().retrain
+            })
+        );
+        assert!(
+            matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
+            "{trained:?}"
+        );
+        let long = training.store(Side::Long).unwrap().read(t).unwrap();
+        assert_eq!(long.manifest.learner, LearnerConfig::Baseline {});
+    }
+
+    /// Both sides have a model valid from the train's time: a rerun of the
+    /// train fits nothing, and so replays nothing.
+    #[test]
+    fn a_train_with_every_model_in_use_replays_nothing_and_reports_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), config());
+        let t = at("2026-01-07T00:00:00Z");
+        for side in Side::BOTH {
+            primary(
+                training.store(side).unwrap(),
+                side,
+                "2026-01-07T00:00:00Z",
+                0.5,
+            );
+        }
+        let mut replays = vec![];
+
+        let trained = training.train_at(t, |from, to| {
+            replays.push((from, to));
+            Ok(rows())
+        });
+
+        assert_eq!(replays, []);
+        let in_use = Outcome::InUse {
+            valid_from: t,
+            retrain: config().retrain,
+        };
+        assert_eq!(
+            trained,
+            Trained {
+                long: Some(in_use.clone()),
+                short: Some(in_use),
+                meta: None,
+            }
+        );
+    }
+
+    /// `config`, never retrained.
+    fn never() -> ModelConfig {
+        ModelConfig {
+            retrain: Retrain::Never,
+            ..config()
+        }
+    }
+
+    /// Never retrained, the long's model of the 6th is current at the
+    /// train of the 7th: kept in use, not fitted again; the short, with
+    /// none, is fitted and published.
+    #[test]
+    fn never_retrained_a_model_valid_before_the_train_is_kept_in_use_and_the_other_fitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), never());
+        let t = at("2026-01-07T00:00:00Z");
+        let sixth = at("2026-01-06T00:00:00Z");
+        primary(
+            training.store(Side::Long).unwrap(),
+            Side::Long,
+            "2026-01-06T00:00:00Z",
+            0.8,
+        );
+
+        let trained = training.train_at(t, |_, _| Ok(rows()));
+
+        assert_eq!(
+            trained.long,
+            Some(Outcome::InUse {
+                valid_from: sixth,
+                retrain: Retrain::Never
+            })
+        );
+        assert!(
+            matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
+            "{trained:?}"
+        );
+        assert_eq!(
+            training.store(Side::Long).unwrap().valid_froms().unwrap(),
+            [sixth]
+        );
+    }
+
     #[test]
     fn a_published_model_carries_its_schema_targets_and_learner() {
         let dir = tempfile::tempdir().unwrap();
@@ -1573,12 +1755,21 @@ mod tests {
         assert_eq!(probes, [&vec![0.3, 1.0, long], &vec![0.7, 1.0, long]]);
     }
 
-    /// The meta's window of 36 hours is longer than the primary's 24.
+    /// The meta's window of 36 hours is longer than the primary's 24, and
+    /// starts after the primary's first models, of the 5th.
     #[test]
     fn a_train_with_a_meta_model_replays_once_from_the_longer_windows_first_day() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
         primaries(&training);
+        for side in Side::BOTH {
+            primary(
+                training.store(side).unwrap(),
+                side,
+                "2026-01-05T00:00:00Z",
+                0.5,
+            );
+        }
         let mut replays = vec![];
 
         training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
@@ -1592,16 +1783,255 @@ mod tests {
         );
     }
 
+    /// The meta's window of 36 hours starts on the 5th, before the
+    /// primary's first models, of 06:00 of the 6th, where its rows start:
+    /// the one replay starts with the sides' window, on the 6th.
     #[test]
-    fn a_meta_model_without_a_primary_model_before_it_is_kept() {
+    fn a_train_replays_no_day_before_the_primarys_first_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(36));
+        primaries(&training);
+        let mut replays = vec![];
+
+        training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
+            replays.push((from, to));
+            Ok(meta_rows())
+        });
+
+        assert_eq!(
+            replays,
+            [(at("2026-01-06T00:00:00Z"), at("2026-01-07T00:00:00Z"))]
+        );
+    }
+
+    /// No primary model is valid before the train, so no row of the meta
+    /// has a primary decision: the meta waits, and none is fitted, the
+    /// sides fitted and published as ever.
+    #[test]
+    fn a_meta_model_without_a_primary_model_before_it_waits() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(meta_rows()));
 
+        assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
         assert!(
-            matches!(trained.meta, Some(Outcome::Kept(Kept::Failed(_)))),
+            training
+                .meta_store()
+                .unwrap()
+                .valid_froms()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Never retrained, the primary's models of the 6th, the last valid
+    /// from 21:00, are in use at the train of the 7th: kept, their
+    /// decisions give the meta its rows, and the meta is fitted alone,
+    /// learning from the very models in use.
+    #[test]
+    fn never_retrained_a_meta_whose_primary_is_in_use_is_fitted_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(
+            dir.path(),
+            ModelConfig {
+                retrain: Retrain::Never,
+                ..with_meta(24)
+            },
+        );
+        primaries(&training);
+        let t = at("2026-01-07T00:00:00Z");
+        let last = at("2026-01-06T21:00:00Z");
+
+        let trained = training.train_at(t, |_, _| Ok(meta_rows()));
+
+        let in_use = Outcome::InUse {
+            valid_from: last,
+            retrain: Retrain::Never,
+        };
+        assert_eq!(
+            (trained.long.as_ref(), trained.short.as_ref()),
+            (Some(&in_use), Some(&in_use))
+        );
+        assert!(
+            matches!(trained.meta, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
             "{trained:?}"
+        );
+        for side in Side::BOTH {
+            let valid_froms = training.store(side).unwrap().valid_froms().unwrap();
+            assert_eq!(valid_froms.last(), Some(&last), "{side:?}");
+        }
+    }
+
+    /// `with_meta` on a meta window of 24 hours, never retrained.
+    fn never_with_meta() -> ModelConfig {
+        ModelConfig {
+            retrain: Retrain::Never,
+            ..with_meta(24)
+        }
+    }
+
+    /// The decisions of the 7th, of the sides as `rows` of the 6th fit
+    /// them (`a_train_fits_calibrates_and_judges_each_side_on_its_part_of_the_window`):
+    /// on the feature p the long calibrated 1 / (1 + 4^(1 - 2p)), a win of
+    /// 1.5R and a loss of 0.75R, the short 1 / (1 + 4^(2p - 1)), 1.125R and
+    /// 1R, each trading from an expected 0.5 USD on stops worth 2 USD.
+    /// Fitted on, two longs at 0.5 (the long expecting 0.75 USD, the short
+    /// 0.125), a win and a loss (meta labels true, false); calibrated on, a
+    /// short at 0.25 losing and a long at 0.75 winning, the meta's fake
+    /// predicting their first feature; held out, a short at 0.3 losing and
+    /// a long at 0.7 winning, the side picked calibrated 1 / (1 + 4^-0.4)
+    /// either way.
+    fn decisions_of_the_seventh() -> Vec<TargetRow> {
+        vec![
+            row("2026-01-07T08:00:00Z", vec![0.5], true, hour()),
+            row("2026-01-07T10:00:00Z", vec![0.5], false, hour()),
+            row("2026-01-07T13:00:00Z", vec![0.25], true, hour()),
+            row("2026-01-07T15:00:00Z", vec![0.75], true, hour()),
+            row("2026-01-07T19:00:00Z", vec![0.3], true, hour()),
+            row("2026-01-07T20:00:00Z", vec![0.7], true, hour()),
+        ]
+    }
+
+    /// The train at the 8th of `config` in `dir`, on an empty store,
+    /// replaying `rows` and the decisions of the 7th: the training, what
+    /// it did, and the spans it replayed.
+    fn two_time(
+        dir: &Path,
+        config: ModelConfig,
+    ) -> (Training, Trained, Vec<(Timestamp, Timestamp)>) {
+        let training = training(dir, config);
+        let mut replays = vec![];
+        let trained = training.train_at(at("2026-01-08T00:00:00Z"), |from, to| {
+            replays.push((from, to));
+            Ok(rows()
+                .into_iter()
+                .chain(decisions_of_the_seventh())
+                .collect())
+        });
+        (training, trained, replays)
+    }
+
+    /// Never retrained, on an empty store, the train of the 8th fits the
+    /// sides as of the 7th, the meta's window of 24 hours before it, and
+    /// publishes them valid from then, and the meta at the 8th.
+    #[test]
+    fn never_retrained_on_an_empty_store_a_train_fits_the_sides_as_of_the_metas_window_before_it_and_the_meta_at_it()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
+
+        let (training, trained, _) = two_time(dir.path(), never_with_meta());
+
+        for (outcome, valid_from) in [
+            (&trained.long, seventh),
+            (&trained.short, seventh),
+            (&trained.meta, eighth),
+        ] {
+            let Some(Outcome::Published {
+                valid_from: published,
+                ..
+            }) = outcome
+            else {
+                panic!("{trained:?}");
+            };
+            assert_eq!(*published, valid_from, "{trained:?}");
+        }
+        for side in Side::BOTH {
+            assert_eq!(
+                training.store(side).unwrap().valid_froms().unwrap(),
+                [seventh]
+            );
+        }
+        assert_eq!(
+            training.meta_store().unwrap().valid_froms().unwrap(),
+            [eighth]
+        );
+    }
+
+    /// The sides fitted as of the 7th are fitted, calibrated and judged
+    /// as a train at the 7th would: on `rows`, the holdout's win at 23:30
+    /// of the 6th, settled after the 7th, not among them.
+    #[test]
+    fn a_two_time_trains_sides_are_judged_on_rows_settled_by_their_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (training, _, _) = two_time(dir.path(), never_with_meta());
+
+        let long = training
+            .store(Side::Long)
+            .unwrap()
+            .read(at("2026-01-07T00:00:00Z"))
+            .unwrap();
+
+        close(long.manifest.calibration.apply(0.25), 1.0 / 3.0);
+        let probes: Vec<&Vec<f64>> = long.manifest.probes.iter().map(|p| &p.row).collect();
+        assert_eq!(probes, [&vec![0.8], &vec![0.3]]);
+    }
+
+    /// The meta at the 8th learns from the decisions of the sides just
+    /// published over its window, the 7th: held out, the short's at 0.3 and
+    /// the long's at 0.7, each side's probability 1 / (1 + 4^-0.4).
+    #[test]
+    fn a_two_time_trains_meta_learns_from_the_sides_decisions_over_its_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (training, _, _) = two_time(dir.path(), never_with_meta());
+
+        let meta = training
+            .meta_store()
+            .unwrap()
+            .read(at("2026-01-08T00:00:00Z"))
+            .unwrap();
+
+        let probability = 1.0 / (1.0 + 4_f64.powf(-0.4));
+        let probes: Vec<&Vec<f64>> = meta.manifest.probes.iter().map(|p| &p.row).collect();
+        let [short, long] = probes[..] else {
+            panic!("{probes:?}");
+        };
+        assert_eq!((short[0], short[1]), (0.3, -1.0));
+        close(short[2], probability);
+        assert_eq!((long[0], long[1]), (0.7, 1.0));
+        close(long[2], probability);
+    }
+
+    /// One replay serves both: from the sides' window back from the 7th,
+    /// the 6th, to the train, the 8th.
+    #[test]
+    fn a_two_time_train_replays_once_from_the_sides_window_to_its_time() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (_, _, replays) = two_time(dir.path(), never_with_meta());
+
+        assert_eq!(
+            replays,
+            [(at("2026-01-06T00:00:00Z"), at("2026-01-08T00:00:00Z"))]
+        );
+    }
+
+    /// Each side taking one trade of its holdout, below a minimum of two,
+    /// neither publishes as of the 7th: the meta has no primary decision
+    /// to learn from, and waits, with no fit attempted, as the train says.
+    #[test]
+    fn a_primary_refused_in_a_two_time_train_leaves_the_meta_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let two = ModelConfig {
+            min_trades: 2,
+            ..never_with_meta()
+        };
+
+        let (training, trained, _) = two_time(dir.path(), two);
+
+        for outcome in [&trained.long, &trained.short] {
+            assert!(
+                matches!(outcome, Some(Outcome::Kept(Kept::Refused { .. }))),
+                "{trained:?}"
+            );
+        }
+        assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
+        assert!(
+            trained
+                .to_string()
+                .contains("waiting for primary decisions"),
+            "{trained}"
         );
         assert!(
             training
@@ -1709,25 +2139,72 @@ mod tests {
     }
 
     #[test]
-    fn a_train_is_published_only_if_every_model_is() {
+    fn a_train_succeeds_unless_it_kept_a_model() {
+        let t = at("2026-01-07T00:00:00Z");
         let published = Outcome::Published {
-            valid_from: at("2026-01-07T00:00:00Z"),
+            valid_from: t,
             holdout: holdout(),
         };
-        let short_kept = Trained {
-            long: Some(published.clone()),
-            short: Some(Outcome::Kept(Kept::Failed("no short row".to_string()))),
-            meta: Some(published.clone()),
+        let in_use = Outcome::InUse {
+            valid_from: t,
+            retrain: Retrain::Every(SignedDuration::from_hours(24)),
         };
-        let meta_kept = Trained {
+        let fitted_or_in_use = Trained {
             long: Some(published.clone()),
-            short: Some(published.clone()),
-            meta: Some(Outcome::Kept(Kept::Failed("no row".to_string()))),
+            short: Some(in_use.clone()),
+            meta: Some(in_use.clone()),
+        };
+        let short_kept = Trained {
+            short: Some(Outcome::Kept(Kept::Failed("no short row".to_string()))),
+            ..fitted_or_in_use.clone()
+        };
+        let meta_waiting = Trained {
+            meta: Some(Outcome::Kept(Kept::Waiting)),
+            ..fitted_or_in_use.clone()
         };
 
-        assert!(!short_kept.published());
-        assert!(!meta_kept.published());
-        assert!(Trained::from(published).published());
+        assert!(fitted_or_in_use.succeeded());
+        assert!(Trained::from(in_use).succeeded());
+        assert!(!short_kept.succeeded());
+        assert!(!meta_waiting.succeeded());
+    }
+
+    /// A model kept in use reads with its valid-from; a waiting meta as
+    /// waiting for primary decisions.
+    #[test]
+    fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting() {
+        let in_use = Outcome::InUse {
+            valid_from: at("2026-01-07T00:00:00Z"),
+            retrain: Retrain::Every(SignedDuration::from_hours(24)),
+        }
+        .to_string();
+        let waiting = Outcome::Kept(Kept::Waiting).to_string();
+
+        assert!(
+            in_use.contains("in use") && in_use.contains("2026-01-07T00:00:00Z"),
+            "{in_use}"
+        );
+        assert!(
+            waiting.contains("waiting for primary decisions"),
+            "{waiting}"
+        );
+    }
+
+    /// Never retrained, a model in use reads as in use since its
+    /// valid-from, and never retrained.
+    #[test]
+    fn a_model_in_use_never_retrained_reads_as_in_use_since_its_valid_from() {
+        let in_use = Outcome::InUse {
+            valid_from: at("2026-01-06T00:00:00Z"),
+            retrain: Retrain::Never,
+        }
+        .to_string();
+
+        assert!(
+            in_use.contains("in use since 2026-01-06T00:00:00Z")
+                && in_use.contains("never retrained"),
+            "{in_use}"
+        );
     }
 
     #[test]

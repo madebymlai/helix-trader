@@ -1,8 +1,9 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
 //! targets of its decisions and the one its model learns, how often a
-//! model is retrained and the window it is trained on, the least its
-//! holdout earns to be published, the margins its expected P&L must clear
-//! to trade a side, and its learner; and, optionally, the meta model filtering its trades.
+//! model is retrained, if ever, and the window it is trained on, the
+//! least its holdout earns to be published, the margins its expected P&L
+//! must clear to trade a side, and its learner; and, optionally, the meta
+//! model filtering its trades.
 //!
 //! A strategy has at most two levels of models: a primary, its rule
 //! (`RuleConfig`) or a model (`ModelConfig`), and one meta model
@@ -19,6 +20,7 @@ use super::{
     decide::DecisionRule,
     holdout::Minimums,
     learner::LearnerConfig,
+    schedule::Retrain,
     targets::{Label, Side, TargetsConfig, TargetsTable},
 };
 use crate::strategy::{DataRequirements, TradedInstrument};
@@ -53,8 +55,11 @@ pub struct ModelConfig<T = TargetsConfig> {
     pub label: Label,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
-    /// (`model::schedule`).
-    pub retrain: SignedDuration,
+    /// (`model::schedule`). Left out, never: each model is trained once and
+    /// kept (`Retrain::Never`).
+    #[serde(default)]
+    #[builder(default, into)]
+    pub retrain: Retrain,
     /// How far back from a retrain its rows go, such as `"720h"`.
     pub window: SignedDuration,
     /// The last part of the window the model is scored on and not fitted
@@ -105,8 +110,11 @@ pub struct RuleConfig<T = TargetsConfig> {
     pub decision: DecisionRule,
     /// The targets of each decision; a barrier, which the meta model learns.
     pub targets: T,
-    /// How often the meta model is retrained, as `ModelConfig::retrain`.
-    pub retrain: SignedDuration,
+    /// How often the meta model is retrained, as `ModelConfig::retrain`;
+    /// left out, never.
+    #[serde(default)]
+    #[builder(default, into)]
+    pub retrain: Retrain,
     /// The meta model.
     pub meta: MetaConfig,
 }
@@ -114,12 +122,16 @@ pub struct RuleConfig<T = TargetsConfig> {
 /// A meta model: on each decision the primary makes a trade of, whether
 /// the triple-barrier trade on the primary's side wins, learned from the
 /// primary's features, its side and its probability. It is retrained on
-/// the primary's schedule, right after the primary.
+/// the primary's schedule, right after the primary, or, the primary never
+/// retrained, trained once and kept.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct MetaConfig {
     /// How far back from a retrain its rows go; never before the
-    /// primary's first model, whose predictions the rows need.
+    /// primary's first model, whose predictions the rows need. Never
+    /// retrained, a model primary trained with its meta, neither in use,
+    /// is trained as of this much before the meta, so its out-of-sample
+    /// decisions over the window are the meta's rows.
     pub window: SignedDuration,
     /// The last part of the window the model is scored on and not fitted
     /// on.
@@ -465,12 +477,12 @@ impl MetaConfig {
 }
 
 /// Pushes onto `errors` the violations of what every model section has:
-/// the decision `rule`, the `targets`, the `retrain` interval, against the
-/// strategy's `requirements`.
+/// the decision `rule`, the `targets`, the `retrain` (`Retrain::validate`),
+/// against the strategy's `requirements`.
 fn validate_decisions(
     rule: DecisionRule,
     targets: &TargetsConfig,
-    retrain: SignedDuration,
+    retrain: Retrain,
     requirements: &DataRequirements,
     errors: &mut ConfigErrorCollector,
 ) {
@@ -479,13 +491,7 @@ fn validate_decisions(
             .map_err(|e| ConfigError::invalid_value("model.decision", format!("{e:#}"))),
     );
     errors.collect(targets.validate(rule, requirements));
-    errors.check(
-        retrain.is_positive(),
-        ConfigError::invalid_value(
-            "model.retrain",
-            format!("the retrain interval {retrain:#} is not positive"),
-        ),
-    );
+    retrain.validate(errors);
     // An ATR without bars is the targets' violation, pushed above.
     if let Ok(Some(atr)) = targets.atr_bars(rule, requirements) {
         // A dataset run replays the warmup before its first day, and no
@@ -655,7 +661,10 @@ mod tests {
         );
         assert_eq!(config.targets.instrument_id, InstrumentId::from(GOLD));
         assert_eq!(config.label, Label::Barrier);
-        assert_eq!(config.retrain, SignedDuration::from_hours(24));
+        assert_eq!(
+            config.retrain,
+            Retrain::Every(SignedDuration::from_hours(24))
+        );
         assert_eq!(config.window, SignedDuration::from_hours(48));
         assert_eq!(config.holdout, SignedDuration::from_hours(12));
         assert_eq!(
@@ -680,11 +689,21 @@ mod tests {
         assert!(refused(&section("retrain_every = \"24h\"")).contains("retrain_every"));
     }
 
+    /// One load shows every mistake: a retrain interval not positive is
+    /// reported under `model.retrain`, beside a minimum of no trade.
     #[test]
-    fn a_retrain_interval_not_positive_is_refused() {
+    fn a_retrain_interval_not_positive_is_refused_with_the_sections_other_violations() {
         for retrain in ["0h", "-24h"] {
-            let toml = section(&format!(r#"retrain = "{retrain}""#));
-            assert!(refused(&toml).contains("retrain interval"), "{retrain}");
+            let toml = section(&format!(r#"retrain = "{retrain}""#))
+                .replace("min_trades = 30", "min_trades = 0");
+
+            let err = refused(&toml);
+
+            assert!(
+                err.contains("model.retrain") && err.contains("retrain interval"),
+                "{retrain}: {err}"
+            );
+            assert!(err.contains("model.min_trades"), "{retrain}: {err}");
         }
     }
 

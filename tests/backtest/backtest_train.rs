@@ -283,7 +283,9 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
             .join()
             .unwrap()
     });
-    assert!(first.published(), "{first:?}");
+    for outcome in [first.long, first.short] {
+        published(outcome);
+    }
     // The minimums key the store: the stricter one holds the models as if
     // it had published them.
     let published = training(&catalog, models.path(), 1.0);

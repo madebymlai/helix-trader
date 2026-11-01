@@ -25,6 +25,7 @@ use helix_trader::model::{
     config::{Margins, ModelConfig},
     dataset::{self, Dataset},
     features::FeatureSet,
+    schedule::Retrain,
     store::ModelStore,
     targets::{Label, Side},
     walk::WalkForward,
@@ -42,7 +43,7 @@ fn features() -> Rc<FeatureSet> {
 /// long, to record its probability.
 fn config_daily() -> ModelConfig {
     ModelConfig {
-        retrain: SignedDuration::from_hours(24),
+        retrain: Retrain::Every(SignedDuration::from_hours(24)),
         margins: Margins {
             long: Some(f64::MIN),
             short: None,

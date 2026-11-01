@@ -20,8 +20,12 @@
 //! (`store::Swap`): the latest valid then, trained on rows settled by its
 //! valid-from, so every decision is out of sample; the worth of each
 //! side's stop is the row's own (`payoff::Realised::unit`). A row before
-//! the primary's first model has no decision: the meta's window starts
-//! there at the earliest (`window_start`). A row the primary makes no
+//! the primary's first model has no decision: the meta's rows start
+//! there at the earliest, and with no primary model before a train the
+//! meta waits (`schedule::Schedule::plan`). Never retrained, with neither
+//! in use, one train fits the primary as of the meta's window before it
+//! and the meta at it, on that primary's decisions over the window: the
+//! meta filters the very primary it learned. A row the primary makes no
 //! trade of is no row of the meta; a long-only primary gives it buys
 //! alone.
 //!
@@ -186,31 +190,6 @@ impl Meta {
     #[must_use]
     pub const fn store(&self) -> &ModelStore {
         &self.store
-    }
-
-    /// The start of the window of a meta trained at `at`: its window back
-    /// from `at`, but not before the primary's first model of any side;
-    /// `at` itself, an empty window, if the primary has no model before
-    /// it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a primary's store cannot be read.
-    pub fn window_start(&self, at: Timestamp) -> anyhow::Result<Timestamp> {
-        let start = at - self.config.window;
-        let Primary::Model { sides, .. } = &self.primary else {
-            return Ok(start);
-        };
-        let mut first = None::<Timestamp>;
-        for (_, _, store) in sides {
-            if let Some(&valid_from) = store.valid_froms()?.first() {
-                first = Some(first.map_or(valid_from, |first| first.min(valid_from)));
-            }
-        }
-        Ok(match first {
-            Some(first) if first < at => start.max(first),
-            _ => at,
-        })
     }
 
     /// The meta's examples of the primary's dataset `rows`, in time order:

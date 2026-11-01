@@ -19,7 +19,9 @@
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! targets in a dataset run; `schedule` is when a model is retrained, on
-//! a fixed UTC grid; `launcher` starts a live strategy's retrains, one
+//! a fixed UTC grid, or that it never is, and what each train does to
+//! each model; `launcher`
+//! starts a live strategy's retrains, one
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
