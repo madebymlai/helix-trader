@@ -1,66 +1,26 @@
-and publishes it in the model store, or keeps the current one and fails with why. Backtest and live read the same store (`--models`); a live node retrains on its model's interval by starting `train` as a child process. |<p align="center">
+<p align="center">
   <img src="docs/assets/banner.svg" alt="helix trader" width="100%">
 </p>
 
-A systematic trading system in Rust, built on
-[NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same
-strategy type runs in backtest, paper and live, on Interactive Brokers and
-OKX and IC Markets (cTrader, a hedging account). Nautilus owns data, simulation, execution and the portfolio; this repo
-adds only what Nautilus lacks.
+# Helix trader
 
-## Commands
-
-One binary with one subcommand per process, since Nautilus allows one node
-per process. Each takes the strategy name and its TOML config.
-
-| Command | Does |
-|---|---|
-| `fill-catalog` | Fills the Parquet catalog with the strategy's history: OKX's archive and API for OKX instruments, IC Markets' cTrader for IC instruments (tick quotes), Interactive Brokers for the rest. |
-| `backtest` | Runs the strategy over a window of the catalog, with commissions, leverage and funding, and prints the results. |
-| `live` | Runs the strategy on a live node against IB, OKX or IC Markets, until Ctrl-C, warmed up from the same catalog and the venues for the rest; IC's answers are written back to the catalog. |
-| `train` | Trains a model strategy's model at a time (`--at`) on the window of its dataset ending then, replaying the days it lacks, and publishes it in the model store or keeps the current one, printing why. Backtest and live read the same store (`--models`). |
+A systematic trading system in Rust built on [NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same strategy type runs in backtest, paper and live on Interactive Brokers, OKX and IC Markets (cTrader hedging account).
 
 ## Quick start
 
-Requires Rust 1.99+, `clang`, `cmake` (to build LightGBM), `mold` (the linker
-set in `.cargo/config.toml`), `protoc` (for IC's cTrader messages), and Docker or
-Podman for the IB Gateway and for the Redis that holds the live node's cache
-(`docker pull docker.io/library/redis:7.4.11-alpine` once; see
-`src/live/README.md`).
+The build requires Rust (minimum in [Cargo.toml](Cargo.toml)), clang, cmake, mold and protoc; the linker is set in [.cargo/config.toml](.cargo/config.toml). IB Gateway and the live cache also require Docker or Podman.
+
+The maintained example uses IC Markets. Follow the [IC data setup](src/data/ic/README.md) and create `.env` from [.env.example](.env.example) before filling its catalog.
 
 ```sh
-cp .env.example .env    # IB paper login, OKX API key, IC cTrader app
 cargo build --release
-
-cat > ema.toml <<'EOF'
-[data]
-series = [
-    { data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },
-]
-warmup = "720h"
-
-[indicators]
-fast = { period = 10 }
-slow = { period = 30 }
-
-[trade]
-instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]
-EOF
-
-target/release/helix-trader fill-catalog ema --config ema.toml \
-  --start 2026-01-01 --end 2026-10-01
-target/release/helix-trader backtest ema --config ema.toml \
-  --start 2026-02-01 --end 2026-10-01 --commission-rate 0.0005 --balance "10000 USDT"
-target/release/helix-trader live ema --config ema.toml
+target/release/helix-trader fill-catalog ema --config config/ema.toml --start 2026-01-01 --end 2026-10-01
+target/release/helix-trader backtest ema --config config/ema.toml --start 2026-02-01 --end 2026-10-01 --commission-rate 0.00003 --balance "10000 USD"
 ```
 
-The config is the universe: instruments, cadence, warmup and the
-strategy's indicators live there and nowhere else. `--help` on each
-subcommand lists every flag. A bars series without `from` is built by
-Nautilus from the instrument's ticks, as its price type names: `BID`,
-`ASK` and `MID` bars from quotes, `LAST` bars from trades (CME futures on
-GLBX); with `from`, from source bars, as OKX's candles above
-(`src/strategy/README.md`, "Bars built from ticks").
+Check the config and venue requirements when changing instruments. Before running `live`, follow [live setup and the relevant venue guide](src/live/README.md), including account mode and credentials. Live trading can place real orders; use a demo account first. Each command's `--help` lists its options.
+
+`fill-catalog` collects the configured history; `backtest` replays it; `live` runs a node until stopped; `train` publishes models for model strategies. The strategy config is the universe shared by these commands.
 
 ## Tests
 
@@ -68,29 +28,18 @@ GLBX); with `from`, from source bars, as OKX's candles above
 cargo test
 ```
 
-Integration tests run full Nautilus nodes, one per test, in two test
-binaries: `backtest` (`tests/backtest/`) and `live` (`tests/live/`). The
-tests against real venues, in `live`, are skipped unless enabled:
-`NAUTILUS_IB_RUN=1` for the IB paper gateway, `NAUTILUS_OKX_RUN=1` for the
-OKX demo account, `NAUTILUS_IC_RUN=1` for IC's cTrader demo; run one module
-of them at a time:
-
-```sh
-NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture
-```
+Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, or `NAUTILUS_IC_RUN=1`. Run one live module per process, for example `NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture`. Read the relevant [live](src/live/README.md) and venue documentation first: tests can place orders or rotate tokens.
 
 ## Documentation
 
-| Document | Covers |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rules, the pinned Nautilus version, process-wide constraints |
-| [src/data/README.md](src/data/README.md) | Filling the catalog; IB, IC and OKX history in `ib/`, `ic/` and `okx/` |
-| [src/strategy/README.md](src/strategy/README.md) | Writing a strategy, its config, warmup |
-| [src/backtest/README.md](src/backtest/README.md) | The backtest run, costs, fills, leverage, results |
-| [src/live/README.md](src/live/README.md) | Live nodes; IB, IC and OKX clients in `ib/`, `ic/` and `okx/` |
-| [src/rolls/README.md](src/rolls/README.md) | Futures roots, the roll calendar, the transition table and its slices |
+- [Architecture](docs/ARCHITECTURE.md): design and process constraints.
+- [Data](src/data/README.md): catalog filling and venue history.
+- [Strategy](src/strategy/README.md): strategy authoring and configuration.
+- [Model](src/model/README.md): model strategy internals.
+- [Backtest](src/backtest/README.md): replay, costs and limitations.
+- [Live](src/live/README.md): node operations and venue setup.
+- [Rolls](src/rolls/README.md): futures calendar and continuous bars.
 
 ## Disclaimer
 
-A personal research project, not financial advice. Trading carries risk of
-loss; run live only what you have backtested and paper traded.
+A personal research project, not financial advice. Trading carries risk of loss; run live only what you have backtested and paper traded.
