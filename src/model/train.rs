@@ -12,9 +12,11 @@
 //!
 //! What a train at `t` does to each model is the schedule's plan
 //! (`schedule::Schedule::plan`), from the stores' valid-froms alone: a
-//! model with a model valid from `t` keeps it, in use; a model primary's
-//! meta with no primary model before `t` waits for primary decisions; the
-//! others are fitted. With nothing to fit the train replays nothing.
+//! model with a current model at `t` keeps it, in use (retrained, the one
+//! valid from `t`; never retrained, the latest valid by `t`, so each model
+//! is trained once); a model primary's meta with no primary model before
+//! `t` waits for primary decisions; the others are fitted. With nothing to
+//! fit the train replays nothing.
 //!
 //! A model fitted at `t` takes the rows of the window ending at `t`
 //! (`ModelConfig::window`), the days the dataset lacks built by one
@@ -70,7 +72,7 @@ use super::{
     learner::{LearnerConfig, Model, TrainingSet},
     meta::Meta,
     payoff::{Payoff, Realised},
-    schedule::{Models, Schedule, Step},
+    schedule::{Models, Retrain, Schedule, Step},
     score,
     store::{LoadedModel, ModelManifest, ModelStore, Probe, StoredModel},
     targets::{Label, Side, TargetRow, TargetsConfig},
@@ -149,8 +151,12 @@ pub enum Outcome {
         holdout: Holdout,
     },
     /// None was fitted: the current model, valid from `valid_from`, is in
-    /// use (`schedule::Step::Keep`).
-    InUse { valid_from: Timestamp },
+    /// use (`schedule::Step::Keep`), of a strategy retrained as `retrain`
+    /// says, which says how it reads (`Retrain::in_use`).
+    InUse {
+        valid_from: Timestamp,
+        retrain: Retrain,
+    },
     /// No model was published: the current one, if any, stays.
     Kept(Kept),
 }
@@ -367,7 +373,12 @@ impl Training {
         examples: impl FnOnce(&[&DatasetRow]) -> anyhow::Result<Vec<Example>>,
     ) -> Outcome {
         let (from, at) = match step {
-            Step::Keep { valid_from, .. } => return Outcome::InUse { valid_from },
+            Step::Keep { valid_from, .. } => {
+                return Outcome::InUse {
+                    valid_from,
+                    retrain: self.schedule.retrain(),
+                };
+            }
             Step::Wait => return Outcome::Kept(Kept::Waiting),
             Step::Fit { from, at } => (from, at),
         };
@@ -660,7 +671,10 @@ impl fmt::Display for Outcome {
                     "published a model valid from {valid_from}, holdout {holdout}"
                 )
             }
-            Self::InUse { valid_from } => write!(f, "in use, valid from {valid_from}"),
+            Self::InUse {
+                valid_from,
+                retrain,
+            } => write!(f, "{}", retrain.in_use(*valid_from)),
             Self::Kept(kept) => write!(f, "kept the current model: {kept}"),
         }
     }
@@ -1196,7 +1210,13 @@ mod tests {
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
-        assert_eq!(trained.long, Some(Outcome::InUse { valid_from: t }));
+        assert_eq!(
+            trained.long,
+            Some(Outcome::InUse {
+                valid_from: t,
+                retrain: config().retrain
+            })
+        );
         assert!(
             matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
             "{trained:?}"
@@ -1228,13 +1248,60 @@ mod tests {
         });
 
         assert_eq!(replays, []);
+        let in_use = Outcome::InUse {
+            valid_from: t,
+            retrain: config().retrain,
+        };
         assert_eq!(
             trained,
             Trained {
-                long: Some(Outcome::InUse { valid_from: t }),
-                short: Some(Outcome::InUse { valid_from: t }),
+                long: Some(in_use.clone()),
+                short: Some(in_use),
                 meta: None,
             }
+        );
+    }
+
+    /// `config`, never retrained.
+    fn never() -> ModelConfig {
+        ModelConfig {
+            retrain: Retrain::Never,
+            ..config()
+        }
+    }
+
+    /// Never retrained, the long's model of the 6th is current at the
+    /// train of the 7th: kept in use, not fitted again; the short, with
+    /// none, is fitted and published.
+    #[test]
+    fn never_retrained_a_model_valid_before_the_train_is_kept_in_use_and_the_other_fitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), never());
+        let t = at("2026-01-07T00:00:00Z");
+        let sixth = at("2026-01-06T00:00:00Z");
+        primary(
+            training.store(Side::Long).unwrap(),
+            Side::Long,
+            "2026-01-06T00:00:00Z",
+            0.8,
+        );
+
+        let trained = training.train_at(t, |_, _| Ok(rows()));
+
+        assert_eq!(
+            trained.long,
+            Some(Outcome::InUse {
+                valid_from: sixth,
+                retrain: Retrain::Never
+            })
+        );
+        assert!(
+            matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
+            "{trained:?}"
+        );
+        assert_eq!(
+            training.store(Side::Long).unwrap().valid_froms().unwrap(),
+            [sixth]
         );
     }
 
@@ -1744,6 +1811,44 @@ mod tests {
         );
     }
 
+    /// Never retrained, the primary's models of the 6th, the last valid
+    /// from 21:00, are in use at the train of the 7th: kept, their
+    /// decisions give the meta its rows, and the meta is fitted alone,
+    /// learning from the very models in use.
+    #[test]
+    fn never_retrained_a_meta_whose_primary_is_in_use_is_fitted_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(
+            dir.path(),
+            ModelConfig {
+                retrain: Retrain::Never,
+                ..with_meta(24)
+            },
+        );
+        primaries(&training);
+        let t = at("2026-01-07T00:00:00Z");
+        let last = at("2026-01-06T21:00:00Z");
+
+        let trained = training.train_at(t, |_, _| Ok(meta_rows()));
+
+        let in_use = Outcome::InUse {
+            valid_from: last,
+            retrain: Retrain::Never,
+        };
+        assert_eq!(
+            (trained.long.as_ref(), trained.short.as_ref()),
+            (Some(&in_use), Some(&in_use))
+        );
+        assert!(
+            matches!(trained.meta, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
+            "{trained:?}"
+        );
+        for side in Side::BOTH {
+            let valid_froms = training.store(side).unwrap().valid_froms().unwrap();
+            assert_eq!(valid_froms.last(), Some(&last), "{side:?}");
+        }
+    }
+
     /// The rule's decisions of the 6th, its side among their features:
     /// fitted, a long winning, a short losing and a short winning (labels
     /// true, false, true); calibrated on, a short losing at 0.25 and a long
@@ -1846,7 +1951,10 @@ mod tests {
             valid_from: t,
             holdout: holdout(),
         };
-        let in_use = Outcome::InUse { valid_from: t };
+        let in_use = Outcome::InUse {
+            valid_from: t,
+            retrain: Retrain::Every(SignedDuration::from_hours(24)),
+        };
         let fitted_or_in_use = Trained {
             long: Some(published.clone()),
             short: Some(in_use.clone()),
@@ -1873,6 +1981,7 @@ mod tests {
     fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting() {
         let in_use = Outcome::InUse {
             valid_from: at("2026-01-07T00:00:00Z"),
+            retrain: Retrain::Every(SignedDuration::from_hours(24)),
         }
         .to_string();
         let waiting = Outcome::Kept(Kept::Waiting).to_string();
@@ -1884,6 +1993,23 @@ mod tests {
         assert!(
             waiting.contains("waiting for primary decisions"),
             "{waiting}"
+        );
+    }
+
+    /// Never retrained, a model in use reads as in use since its
+    /// valid-from, and never retrained.
+    #[test]
+    fn a_model_in_use_never_retrained_reads_as_in_use_since_its_valid_from() {
+        let in_use = Outcome::InUse {
+            valid_from: at("2026-01-06T00:00:00Z"),
+            retrain: Retrain::Never,
+        }
+        .to_string();
+
+        assert!(
+            in_use.contains("in use since 2026-01-06T00:00:00Z")
+                && in_use.contains("never retrained"),
+            "{in_use}"
         );
     }
 

@@ -1,7 +1,19 @@
-//! When a strategy's models are trained, and what each train does: every
-//! `ModelConfig::retrain`, on the fixed UTC grid of the interval's
-//! multiples since the Unix epoch, whatever the run start, in a backtest
-//! as live; at each train, what is done to each model (`Plan`).
+//! When a strategy's models are trained, and what each train does: as
+//! its `Retrain` says (`ModelConfig::retrain`), every interval, on the
+//! fixed UTC grid of the interval's multiples since the Unix epoch,
+//! whatever the run start, in a backtest as live; or never, each model
+//! trained once, when a train finds none of it in use, and kept. At each
+//! train, what is done to each model (`Plan`).
+//!
+//! Retrained and never retrained differ in the arms of `Retrain` in this
+//! module alone, so no caller tells them apart: the section's validation
+//! (`Retrain::validate`), the live timer (`start`), a run's train times
+//! (`Schedule::times`), the current model at a train's time
+//! (`Retrain::current`), how a model kept in use reads
+//! (`Retrain::in_use`), and the refusal of a backtest that would trade
+//! nothing (`Schedule::ensure_trades`). The model store reads it once
+//! more, as a key: models of another retrain, or of none, are another
+//! store's (`store`).
 //!
 //! The grid is kept by a Nautilus timer, named after the strategy
 //! (`timer`, so several strategies retrain in one process), which `start`
@@ -9,29 +21,36 @@
 //! fires it at that time plus whole intervals. A live node's clock fires
 //! it as it goes (`launcher`); a backtest, which trains before its run,
 //! takes the times the same timer fires over its span on a virtual clock
-//! of its own (`Schedule::times`).
+//! of its own (`Schedule::times`). Never retrained, no timer is started,
+//! and a backtest trains at its start alone, then, should its primary or
+//! its meta have no model in use there, is refused: it would trade
+//! nothing, and no train comes after.
 //!
 //! A train at `t` is planned (`Schedule::plan`) from the valid-froms of
 //! the stores alone, model by model (the long, the short and the meta,
-//! `Models`): a model whose current model at `t` exists keeps it, the one
-//! valid exactly from `t`, retrained as the strategy is; the others are
-//! fitted as of `t`, on the rows of their window back from `t` settled by
-//! then; but a model primary's meta, whose rows are the primary's
-//! decisions, waits while no primary model is valid before `t`, and its
-//! rows start at the primary's first model at the earliest. The plan
-//! answers whether the train fits anything, where its one replay starts
-//! (`Plan::replay_from`), and how far back the rows of its models reach
-//! (`Plan::reach`), those a kept model was fitted on included, which its
-//! baseline is fitted on (`Step::rows`).
+//! `Models`): a model whose current model at `t` exists keeps it, in use
+//! (retrained, the one valid exactly from `t`; never retrained, the
+//! latest valid at or before `t`); the others are fitted as of `t`, on
+//! the rows of their window back from `t` settled by then; but a model
+//! primary's meta, whose rows are the primary's decisions, waits while no
+//! primary model is valid before `t`, and its rows start at the primary's
+//! first model at the earliest. Never retrained, a meta whose primary is
+//! in use is so fitted alone, on the decisions of the very models it will
+//! filter. The plan answers whether the train fits anything, where its
+//! one replay starts (`Plan::replay_from`), and how far back the rows of
+//! its models reach (`Plan::reach`), those of a kept model's window back
+//! from `t` included, which its baseline is fitted on (`Step::rows`).
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     clock::{Clock, VirtualClock},
+    config::{ConfigError, ConfigErrorCollector},
     timer::{TimeEvent, TimeEventCallback},
 };
 use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::identifiers::StrategyId;
+use serde::Deserialize;
 
 use super::{
     config::{ModelConfig, RuleConfig},
@@ -41,11 +60,25 @@ use super::{
 /// The name of the timer `times` fires on its own clock.
 const GRID: &str = "RETRAIN";
 
+/// How a strategy's models are retrained: every interval, or never,
+/// each model trained once and kept. A `[model]` section gives the
+/// interval, such as `retrain = "168h"`; without one, never.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "SignedDuration")]
+pub enum Retrain {
+    /// At every multiple of the interval since the Unix epoch.
+    Every(SignedDuration),
+    /// Never: each model is trained once, when a train finds none of it
+    /// in use, and kept.
+    #[default]
+    Never,
+}
+
 /// When a strategy trains, and what a train does to each of its models:
-/// its retrain interval, and the windows of its models' rows.
+/// its retrain, and the windows of its models' rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schedule {
-    every: SignedDuration,
+    retrain: Retrain,
     /// The window of a model primary's sides; none for a rule primary.
     primary: Option<SignedDuration>,
     /// The meta model's window, if there is one.
@@ -64,8 +97,9 @@ pub struct Models<T> {
 /// What a train at a time does to one model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Keeps its current model, valid from `valid_from`, which was fitted
-    /// on the rows from `from`.
+    /// Keeps its current model, valid from `valid_from`; `from` starts
+    /// its window back from the train's time, the rows its model was
+    /// fitted on when valid from that time.
     Keep {
         from: Timestamp,
         valid_from: Timestamp,
@@ -92,7 +126,7 @@ impl Schedule {
     #[must_use]
     pub fn of_model(config: &ModelConfig) -> Self {
         Self {
-            every: config.retrain,
+            retrain: config.retrain,
             primary: Some(config.window),
             meta: config.meta.as_ref().map(|meta| meta.window),
         }
@@ -103,33 +137,47 @@ impl Schedule {
     #[must_use]
     pub const fn of_rule(config: &RuleConfig) -> Self {
         Self {
-            every: config.retrain,
+            retrain: config.retrain,
             primary: None,
             meta: Some(config.meta.window),
         }
     }
 
-    /// The train times of a run over `[from, to)`, in order: the last grid
-    /// time not after `from`, whose models are those in use at the run's
-    /// start, then each grid time before `to` (`times`).
+    /// How the strategy is retrained.
+    #[must_use]
+    pub const fn retrain(&self) -> Retrain {
+        self.retrain
+    }
+
+    /// The train times of a run over `[from, to)`, in order: retrained, the
+    /// last grid time not after `from`, whose models are those in use at
+    /// the run's start, then each grid time before `to` (`times`); never
+    /// retrained, `from` alone.
     ///
     /// # Errors
     ///
-    /// As `times`.
+    /// Returns an error if `from` is not before `to`, or, retrained, as
+    /// `times`.
     pub fn times(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Timestamp>> {
-        times(self.every, from, to)
+        match self.retrain {
+            Retrain::Every(every) => times(every, from, to),
+            Retrain::Never => {
+                anyhow::ensure!(from < to, "the span {from} to {to} is empty");
+                Ok(vec![from])
+            }
+        }
     }
 
     /// The plan of a train at `at`, the stores of the models holding
     /// models valid from `valid_froms`: a model keeps its current model at
-    /// `at`, if any (`current`), else is fitted as of `at` on the rows of
-    /// its window back from `at`; but a model primary's meta waits while no
-    /// primary model is valid before `at`, and its rows start at the
-    /// primary's first model at the earliest, since a row before it has no
-    /// decision of the primary.
+    /// `at`, if any (`Retrain::current`), else is fitted as of `at` on the
+    /// rows of its window back from `at`; but a model primary's meta waits
+    /// while no primary model is valid before `at`, and its rows start at
+    /// the primary's first model at the earliest, since a row before it has
+    /// no decision of the primary.
     #[must_use]
     pub fn plan(&self, at: Timestamp, valid_froms: &Models<Vec<Timestamp>>) -> Plan {
-        let step = |valid_froms: &[Timestamp], from| match current(valid_froms, at) {
+        let step = |valid_froms: &[Timestamp], from| match self.retrain.current(valid_froms, at) {
             Some(valid_from) => Step::Keep { from, valid_from },
             None => Step::Fit { from, at },
         };
@@ -161,6 +209,47 @@ impl Schedule {
                 meta: meta(),
             },
         }
+    }
+
+    /// Refuses a run from `start` that could trade nothing, the stores of
+    /// the models holding models valid from `valid_froms`: never
+    /// retrained, no train comes after the start, so a model primary with
+    /// no side's model in use there, or a meta with none, would trade
+    /// nothing; retrained, a later retrain may publish one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the primary, the meta, or both, with no
+    /// model in use at `start`, never retrained.
+    pub fn ensure_trades(
+        &self,
+        start: Timestamp,
+        valid_froms: &Models<Vec<Timestamp>>,
+    ) -> anyhow::Result<()> {
+        if let Retrain::Every(_) = self.retrain {
+            return Ok(());
+        }
+        let in_use =
+            |valid_froms: &Vec<Timestamp>| self.retrain.current(valid_froms, start).is_some();
+        let mut idle = vec![];
+        if self.primary.is_some()
+            && ![&valid_froms.long, &valid_froms.short]
+                .into_iter()
+                .flatten()
+                .any(in_use)
+        {
+            idle.push("no side of the primary has a model in use");
+        }
+        if valid_froms.meta.as_ref().is_some_and(|meta| !in_use(meta)) {
+            idle.push("the meta has no model in use");
+        }
+        anyhow::ensure!(
+            idle.is_empty(),
+            "never retrained, the strategy would trade nothing from {start}, where {}: no \
+             train comes after it",
+            idle.join(" and ")
+        );
+        Ok(())
     }
 }
 
@@ -204,10 +293,52 @@ impl Plan {
     }
 }
 
-/// The current model at `at` of a store holding models valid from
-/// `valid_froms`, retrained: the one valid exactly from `at`.
-fn current(valid_froms: &[Timestamp], at: Timestamp) -> Option<Timestamp> {
-    valid_froms.contains(&at).then_some(at)
+impl Retrain {
+    /// Pushes onto `errors` the violation of an interval not positive,
+    /// under `model.retrain`.
+    pub fn validate(self, errors: &mut ConfigErrorCollector) {
+        if let Self::Every(every) = self {
+            errors.check(
+                every.is_positive(),
+                ConfigError::invalid_value(
+                    "model.retrain",
+                    format!("the retrain interval {every:#} is not positive"),
+                ),
+            );
+        }
+    }
+
+    /// How a model a train kept in use reads, its current model valid from
+    /// `valid_from`: retrained, valid from then; never retrained, in use
+    /// since then.
+    #[must_use]
+    pub fn in_use(self, valid_from: Timestamp) -> String {
+        match self {
+            Self::Every(_) => format!("in use, valid from {valid_from}"),
+            Self::Never => format!("in use since {valid_from}, never retrained"),
+        }
+    }
+
+    /// The current model at `at` of a store holding models valid from
+    /// `valid_froms`: retrained, the one valid exactly from `at`; never
+    /// retrained, the latest valid at or before `at`.
+    fn current(self, valid_froms: &[Timestamp], at: Timestamp) -> Option<Timestamp> {
+        match self {
+            Self::Every(_) => valid_froms.contains(&at).then_some(at),
+            Self::Never => valid_froms
+                .iter()
+                .copied()
+                .filter(|&valid_from| valid_from <= at)
+                .max(),
+        }
+    }
+}
+
+/// A retrain every `every`.
+impl From<SignedDuration> for Retrain {
+    fn from(every: SignedDuration) -> Self {
+        Self::Every(every)
+    }
 }
 
 impl Step {
@@ -278,18 +409,22 @@ pub fn timer(strategy_id: StrategyId) -> String {
     format!("RETRAIN-{strategy_id}")
 }
 
-/// Starts the retrain timer `timer` of `every` on `actor`'s clock, from
-/// the last grid time not after now, so it first fires on the next one.
+/// Starts the retrain timer `timer` of `retrain` on `actor`'s clock:
+/// retrained, from the last grid time not after now, so it first fires on
+/// the next one; never retrained, none.
 ///
 /// # Errors
 ///
-/// Returns an error if `every` is not positive or Nautilus refuses the
-/// timer.
+/// Returns an error if the interval is not positive or Nautilus refuses
+/// the timer.
 pub fn start<A: DataActor + DataActorNative>(
     actor: &A,
     timer: &str,
-    every: SignedDuration,
+    retrain: Retrain,
 ) -> anyhow::Result<()> {
+    let Retrain::Every(every) = retrain else {
+        return Ok(());
+    };
     let clock = actor.clock();
     let start = last_grid_time(clock.timestamp_ns(), every)?;
     clock.set_timer_ns(
@@ -453,9 +588,17 @@ mod tests {
     /// 48, retrained every day.
     fn daily() -> Schedule {
         Schedule {
-            every: day(),
+            retrain: Retrain::Every(day()),
             primary: Some(hours(24)),
             meta: Some(hours(48)),
+        }
+    }
+
+    /// `daily`'s models, never retrained.
+    fn never() -> Schedule {
+        Schedule {
+            retrain: Retrain::Never,
+            ..daily()
         }
     }
 
@@ -484,8 +627,10 @@ mod tests {
         }
     }
 
+    const FIFTH: &str = "2026-01-05T00:00:00Z";
     const SIXTH: &str = "2026-01-06T00:00:00Z";
     const SEVENTH: &str = "2026-01-07T00:00:00Z";
+    const EIGHTH: &str = "2026-01-08T00:00:00Z";
 
     #[test]
     fn on_an_empty_store_the_sides_fit_on_their_window_and_the_meta_waits() {
@@ -603,6 +748,52 @@ mod tests {
         let plan = daily().plan(at(SEVENTH), &stores(&[], &[], &[]));
 
         assert_eq!(plan.reach(), at(SIXTH));
+    }
+
+    #[test]
+    fn a_run_never_retrained_trains_at_its_start_alone() {
+        let times = never()
+            .times(at("2026-10-21T15:20:00Z"), at("2026-10-24T00:00:01Z"))
+            .unwrap();
+
+        assert_eq!(times, [at("2026-10-21T15:20:00Z")]);
+    }
+
+    /// The valid-from of the model `step` keeps in use, if it keeps one.
+    fn in_use(step: Option<Step>) -> Option<Timestamp> {
+        match step? {
+            Step::Keep { valid_from, .. } => Some(valid_from),
+            Step::Fit { .. } | Step::Wait => None,
+        }
+    }
+
+    /// Never retrained, the current model at the train is the latest valid
+    /// at or before it: the long's of the 6th, not its later one of the
+    /// 8th; the short's of the 7th itself. The meta's only model, of the
+    /// 8th, is after the train: it has none, and fits, from the long's
+    /// first model, the 5th.
+    #[test]
+    fn never_retrained_the_latest_model_valid_by_the_train_is_kept_and_the_others_fitted() {
+        let plan = never().plan(
+            at(SEVENTH),
+            &stores(&[FIFTH, SIXTH, EIGHTH], &[SEVENTH], &[EIGHTH]),
+        );
+
+        assert_eq!(in_use(plan.steps.long), Some(at(SIXTH)));
+        assert_eq!(in_use(plan.steps.short), Some(at(SEVENTH)));
+        assert_eq!(plan.steps.meta, Some(fit(FIFTH, SEVENTH)));
+    }
+
+    /// Never retrained, the primary's models of the 6th are in use at the
+    /// train of the 7th: kept, they give the meta its rows from the 6th,
+    /// and the meta fits alone.
+    #[test]
+    fn never_retrained_a_meta_whose_primary_is_in_use_fits_alone() {
+        let plan = never().plan(at(SEVENTH), &stores(&[SIXTH], &[SIXTH], &[]));
+
+        assert_eq!(in_use(plan.steps.long), Some(at(SIXTH)));
+        assert_eq!(in_use(plan.steps.short), Some(at(SIXTH)));
+        assert_eq!(plan.steps.meta, Some(fit(SIXTH, SEVENTH)));
     }
 
     #[test]

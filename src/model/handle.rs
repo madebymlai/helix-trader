@@ -94,7 +94,9 @@
 //! Live, the handle also retrains its model (`launcher::Retraining`): the
 //! retrain timer, keyed by the strategy, launches a train at each retrain
 //! time, one at a time, and `decide` first polls the running one, so the
-//! model it publishes is used from the next decision.
+//! model it publishes is used from the next decision. Never retrained, no
+//! timer is started and no train launched: the handle trades on the store
+//! as it is, a model `train --at` publishes used from the next decision.
 
 use std::{
     cell::RefCell,
@@ -127,6 +129,7 @@ use super::{
     launcher::{Launcher, Retraining},
     meta::{Meta, meta_row},
     payoff,
+    schedule::Retrain,
     store::{LoadedModel, ModelStore, Swap},
     targets::{self, BarrierExits, Label, Side, Stops, TargetRow, Targets, TargetsConfig},
 };
@@ -150,7 +153,7 @@ pub enum Mode {
     },
     /// Trades live on the models of the store under `models` whose targets
     /// are those of its retrains' dataset runs, on `venue`, deciding
-    /// the live node's bar build delay late, and retrains on the
+    /// the live node's bar build delay late, and retrains, if ever, on the
     /// config's interval through `launcher`, each retrain launched at its
     /// time, trained at the last time the catalog at `catalog` holds for
     /// every series the strategy reads, if before it
@@ -475,14 +478,14 @@ impl ModelHandle {
     }
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
-    /// `targets`, retrained every `retrain`, for a strategy of
+    /// `targets`, retrained as `retrain` says, for a strategy of
     /// `requirements`, in `mode`: trading on the models `primary` reads
     /// under the store's root, of the targets of the dataset runs on the
     /// mode's venue, or opening the targets.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
-        (rule, targets, retrain): (DecisionRule, &TargetsConfig, SignedDuration),
+        (rule, targets, retrain): (DecisionRule, &TargetsConfig, Retrain),
         requirements: &DataRequirements,
         mode: Mode,
         primary: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Primary>,
@@ -569,7 +572,7 @@ impl ModelHandle {
     /// trading on a barrier, a rule's or a model's labelled on it, or, in a
     /// dataset run, the targets', and collects the rows they settle); then
     /// starts the decision cadence, live `Warmup::live_bar_build_delay`
-    /// late, and live the retrain timer.
+    /// late, and live the retrain timer, if retrained (`schedule::start`).
     ///
     /// # Errors
     ///
@@ -2007,6 +2010,112 @@ mod tests {
 
         let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
         assert_eq!(Timestamp::from(next), at("2026-10-22T12:00:00.010Z"));
+    }
+
+    /// `config`, never retrained.
+    fn never_retrained() -> ModelConfig {
+        ModelConfig {
+            retrain: Retrain::Never,
+            ..config()
+        }
+    }
+
+    /// The probe's handle trading live, never retrained, on the models
+    /// under `models` and the catalog at `catalog`, through `launcher`,
+    /// for a strategy of `requirements`, started.
+    fn never_retrained_live(
+        probe: &mut Decider,
+        models: &Path,
+        catalog: &Path,
+        launcher: Launcher,
+        requirements: &DataRequirements,
+    ) -> Rc<ModelHandle> {
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            &never_retrained(),
+            requirements,
+            live(models.to_path_buf(), catalog, launcher),
+        )
+        .unwrap();
+        handle.start(probe).unwrap();
+        handle
+    }
+
+    #[test]
+    fn a_live_handle_never_retrained_starts_no_retrain_timer() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
+
+        never_retrained_live(
+            &mut probe,
+            models.path(),
+            catalog.path(),
+            Launcher::in_process(|_| unreachable!()),
+            &requirements(),
+        );
+
+        let timer = crate::model::schedule::timer(StrategyId::from(STRATEGY));
+        assert_eq!(clock.borrow().next_time_ns(&timer), None);
+    }
+
+    /// Run past three midnights, a daily strategy's retrain times, on a
+    /// catalog holding quotes past them all, a live handle never retrained
+    /// launches no train.
+    #[test]
+    fn a_live_handle_never_retrained_launches_no_train() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = catalog_ending("2026-10-26T00:00:00Z");
+        let (launched, launches) = std::sync::mpsc::channel();
+        let launcher = Launcher::in_process(move |at| {
+            launched.send(at).unwrap();
+            crate::model::train::Outcome::Published {
+                valid_from: at,
+                holdout: HOLDOUT,
+            }
+            .into()
+        });
+        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
+        let handle = never_retrained_live(
+            &mut probe,
+            models.path(),
+            catalog.path(),
+            launcher,
+            &requirements(),
+        );
+
+        run_to(&handle, &mut probe, &clock, "2026-10-25T12:00:00Z");
+        drop(handle);
+
+        assert_eq!(launches.recv(), Err(std::sync::mpsc::RecvError));
+    }
+
+    /// The bar-build delay is live mode's, not retraining's: a live handle
+    /// never retrained decides on composite bars as late as a retrained
+    /// one.
+    #[test]
+    fn a_live_handle_never_retrained_waits_for_composite_bars() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from(
+                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..requirements()
+        };
+        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
+
+        never_retrained_live(
+            &mut probe,
+            models.path(),
+            catalog.path(),
+            Launcher::in_process(|_| unreachable!()),
+            &requirements,
+        );
+
+        let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
+        assert_eq!(Timestamp::from(next), at("2026-10-22T12:00:05.010Z"));
     }
 
     /// Live trading on the models under `models`, retraining through

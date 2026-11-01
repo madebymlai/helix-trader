@@ -37,6 +37,7 @@ use helix_trader::model::{
     handle::{Decision, Mode, ModelHandle, SettledRows},
     holdout::Earnings,
     learner::LearnerConfig,
+    schedule::Retrain,
     store::ModelStore,
     targets::{Side, TargetRow},
     train::{Kept, Outcome, Trained, Training},
@@ -84,7 +85,7 @@ fn meta() -> MetaConfig {
 /// every decision, its trades taken by `meta`.
 fn model_primary() -> ModelConfig {
     ModelConfig {
-        retrain: SignedDuration::from_hours(24),
+        retrain: Retrain::Every(SignedDuration::from_hours(24)),
         margins: Margins {
             long: Some(f64::MIN),
             short: None,
@@ -102,7 +103,7 @@ fn rule_primary() -> RuleConfig {
     RuleConfig {
         decision: rule(),
         targets: targets(),
-        retrain: SignedDuration::from_hours(24),
+        retrain: Retrain::Every(SignedDuration::from_hours(24)),
         meta: MetaConfig {
             window: SignedDuration::from_hours(46),
             holdout: SignedDuration::from_hours(18),

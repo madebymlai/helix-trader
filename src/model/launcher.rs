@@ -15,7 +15,8 @@
 //! `Retraining` is a live model handle's side of it: a Nautilus timer
 //! named after the strategy (`schedule::timer`), started on an
 //! epoch-aligned time (`schedule::start`), fires at every multiple of the
-//! retrain interval since the epoch; each firing launches a train at once,
+//! retrain interval since the epoch, and, never retrained, is not started,
+//! so no train is launched; each firing launches a train at once,
 //! at the last time the catalog holds for every series the strategy reads
 //! (the earliest of their last stored timestamps, Nautilus'
 //! `ParquetDataCatalog::query_last_timestamp`), never past the grid time:
@@ -47,7 +48,7 @@ use std::{
 };
 
 use anyhow::Context;
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
@@ -58,7 +59,10 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
-use super::{schedule, train::Trained};
+use super::{
+    schedule::{self, Retrain},
+    train::Trained,
+};
 use crate::strategy::DataRequirements;
 
 /// The most lines of a child's standard error kept for the reason it
@@ -213,7 +217,7 @@ fn ended() -> Retrained {
 #[derive(Debug)]
 pub(super) struct Retraining {
     timer: String,
-    every: SignedDuration,
+    retrain: Retrain,
     catalog: PathBuf,
     requirements: DataRequirements,
     launcher: Launcher,
@@ -223,19 +227,19 @@ pub(super) struct Retraining {
 }
 
 impl Retraining {
-    /// The retrains of `strategy_id`, `every` interval, of a strategy of
-    /// `requirements` reading the catalog at `catalog`, launched by
-    /// `launcher`.
+    /// The retrains of `strategy_id`, retrained as `retrain` says, of a
+    /// strategy of `requirements` reading the catalog at `catalog`,
+    /// launched by `launcher`.
     pub(super) fn new(
         strategy_id: StrategyId,
-        every: SignedDuration,
+        retrain: Retrain,
         catalog: PathBuf,
         requirements: DataRequirements,
         launcher: Launcher,
     ) -> Self {
         Self {
             timer: schedule::timer(strategy_id),
-            every,
+            retrain,
             catalog,
             requirements,
             launcher,
@@ -244,14 +248,15 @@ impl Retraining {
         }
     }
 
-    /// Starts the retrain timer on `actor`, on the last grid time not
-    /// after now, so it first fires on the next one.
+    /// Starts the retrain timer on `actor` (`schedule::start`): retrained,
+    /// on the last grid time not after now, so it first fires on the next
+    /// one; never retrained, none, so no retrain is launched.
     ///
     /// # Errors
     ///
     /// Returns an error if Nautilus refuses the timer.
     pub(super) fn start<A: DataActor + DataActorNative>(&self, actor: &A) -> anyhow::Result<()> {
-        schedule::start(actor, &self.timer, self.every)
+        schedule::start(actor, &self.timer, self.retrain)
     }
 
     /// Launches the retrain due at the grid time of `event`, if it is the
@@ -365,6 +370,7 @@ impl fmt::Display for Retrained {
 mod tests {
     use std::{path::Path, sync::Mutex};
 
+    use jiff::SignedDuration;
     use nautilus_model::{
         data::{NautilusDataType, QuoteTick},
         identifiers::InstrumentId,
@@ -425,7 +431,13 @@ mod tests {
     /// it kept no model, and succeeded.
     #[test]
     fn an_in_process_train_whose_model_is_in_use_succeeds() {
-        let launcher = Launcher::in_process(|at| Outcome::InUse { valid_from: at }.into());
+        let launcher = Launcher::in_process(|at| {
+            Outcome::InUse {
+                valid_from: at,
+                retrain: Retrain::Every(SignedDuration::from_hours(24)),
+            }
+            .into()
+        });
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
@@ -524,7 +536,7 @@ mod tests {
         };
         Retraining::new(
             StrategyId::from("LIVE-001"),
-            SignedDuration::from_hours(24),
+            Retrain::Every(SignedDuration::from_hours(24)),
             catalog.to_path_buf(),
             DataRequirements {
                 bar_types: vec![],

@@ -139,7 +139,9 @@ struct BacktestArgs {
     leverage: Decimal,
     /// The model store a strategy trading on a model reads its models
     /// from: at each decision, the latest valid then. The backtest first
-    /// trains at each retrain time of its span the models the store lacks.
+    /// trains at each retrain time of its span the models the store lacks;
+    /// never retrained, at its start alone, and refuses to run if its
+    /// primary or its meta then has no model in use there.
     #[arg(long, default_value = "models")]
     models: PathBuf,
     /// Starting balance of the account of the dataset runs that build a
@@ -295,7 +297,7 @@ struct LiveArgs {
     #[arg(long, default_value = "models")]
     models: PathBuf,
     /// The costs of the dataset runs of the retrains, for a strategy
-    /// trading on a model.
+    /// trading on a model, retrained or not: they key the model store.
     #[command(flatten)]
     retrain: RetrainCosts,
 }
@@ -303,7 +305,9 @@ struct LiveArgs {
 /// The costs of the dataset runs of a live node's retrains, as `train`
 /// takes them (its `--commission` or `--commission-rate`, and
 /// `--balance`), its leverage the node's. Checked as `train` checks them,
-/// and kept normalized, for the `train` the node starts.
+/// and kept normalized, for the `train` the node starts. Required of a
+/// strategy never retrained too: they key the store its models are read
+/// from (`dataset::fingerprint`).
 #[derive(Debug, Args)]
 struct RetrainCosts {
     /// Commission charged once per order in a retrain, for example "3 USD".
@@ -339,8 +343,9 @@ impl RetrainCosts {
             (Some(commission), _) => Ok(dataset::Commission::PerOrder(commission.clone())),
             (None, Some(rate)) => Ok(dataset::Commission::Rate(rate.clone())),
             (None, None) => bail!(
-                "a strategy trading on a model retrains: give the commission of its \
-                 dataset runs (--retrain-commission or --retrain-commission-rate)"
+                "the costs of a model strategy's dataset runs key the model store it reads its \
+                 models from: give their commission (--retrain-commission or \
+                 --retrain-commission-rate)"
             ),
         }
     }
@@ -352,8 +357,8 @@ impl RetrainCosts {
     /// Returns an error if it was not given.
     fn balance(&self) -> anyhow::Result<&str> {
         self.retrain_balance.as_deref().context(
-            "a strategy trading on a model retrains: give the starting balance of its \
-             dataset runs (--retrain-balance)",
+            "the costs of a model strategy's dataset runs key the model store it reads its \
+             models from: give their starting balance (--retrain-balance)",
         )
     }
 
@@ -589,8 +594,8 @@ fn is_ib(id: InstrumentId) -> bool {
 
 /// Builds the strategy from its config, runs it over the window of the
 /// catalog and prints the results to stdout. A strategy trading on a
-/// model is first retrained on its schedule (`model::walk`): its dataset
-/// built over the span and its models trained at each retrain time the
+/// model is first trained on its schedule (`model::walk`): its dataset
+/// built over the span and its models trained at each train time the
 /// store lacks one, each by a child process of this binary (`dataset`,
 /// `train`), on the backtest's catalog, store and costs and the dataset
 /// balance; the out-of-sample scores of its models follow the results.
@@ -766,8 +771,8 @@ impl Children {
 }
 
 /// Builds the strategy from its config and runs it live until Ctrl-C. A
-/// strategy trading on a model retrains in a child process, this binary's
-/// `train` (see `retrain_args`).
+/// strategy trading on a model retrains, if ever, in a child process,
+/// this binary's `train` (see `retrain_args`).
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
@@ -792,7 +797,8 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 }
 
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, its
-/// retrains in child processes (`retrain_args`).
+/// retrains, if ever, in child processes (`retrain_args`), on the models
+/// of the store its dataset costs key.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
@@ -980,8 +986,10 @@ mod tests {
     use super::*;
     use helix_trader::model::{
         holdout::{Earnings, Holdout, Refusal},
+        schedule::Retrain,
         train::{Kept, Outcome},
     };
+    use jiff::SignedDuration;
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]
@@ -1325,7 +1333,10 @@ mod tests {
     fn a_train_keeping_no_model_succeeds_its_models_in_use_or_published() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let trained = Trained {
-            long: Some(Outcome::InUse { valid_from: t }),
+            long: Some(Outcome::InUse {
+                valid_from: t,
+                retrain: Retrain::Every(SignedDuration::from_hours(24)),
+            }),
             short: Some(Outcome::Published {
                 valid_from: t,
                 holdout: Holdout {
@@ -1347,7 +1358,10 @@ mod tests {
     fn a_train_whose_meta_waits_fails_saying_so() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let trained = Trained {
-            long: Some(Outcome::InUse { valid_from: t }),
+            long: Some(Outcome::InUse {
+                valid_from: t,
+                retrain: Retrain::Every(SignedDuration::from_hours(24)),
+            }),
             short: None,
             meta: Some(Outcome::Kept(Kept::Waiting)),
         };
@@ -1421,6 +1435,24 @@ mod tests {
             let err = retrain_args(&parse_live(&argv).unwrap())
                 .unwrap_err()
                 .to_string();
+            assert!(err.contains(LIVE_RETRAINING[missing]), "{err}");
+        }
+    }
+
+    /// A strategy never retrained reads its models from the store keyed by
+    /// the costs of its dataset runs as well: the live node asks for them
+    /// as it builds its venue, saying so.
+    #[test]
+    fn live_without_its_dataset_costs_is_refused_saying_they_key_the_model_store() {
+        for missing in [3, 5] {
+            let argv = [&LIVE_RETRAINING[..missing], &LIVE_RETRAINING[missing + 2..]].concat();
+            let err = parse_live(&argv)
+                .unwrap()
+                .retrain
+                .venue(Decimal::ONE)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("model store"), "{err}");
             assert!(err.contains(LIVE_RETRAINING[missing]), "{err}");
         }
     }

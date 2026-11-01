@@ -42,7 +42,7 @@ use std::{
 };
 
 use anyhow::{Context, ensure};
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +55,7 @@ use super::{
     holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
     payoff::Payoff,
+    schedule::Retrain,
     targets::{Label, Side, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
@@ -429,12 +430,17 @@ fn primary_directory(
     .join(settings.to_string()))
 }
 
-/// The retrain interval `retrain` as the training settings a store is
-/// keyed by hold it: a strategy retrained at another interval publishes to
-/// and reads from another store, so a weekly-retrained strategy never
-/// trades on a model a daily-retrained one published between its retrains.
-fn retrain_setting(retrain: SignedDuration) -> String {
-    format!("retrain every {}", retrain.as_nanos())
+/// The retrain `retrain` as the training settings a store is keyed by
+/// hold it, its interval or never: a strategy retrained at another
+/// interval, or never, publishes to and reads from another store, so a
+/// weekly-retrained strategy never trades on a model a daily-retrained one
+/// published between its retrains, nor a strategy never retrained on a
+/// retrained one's.
+fn retrain_setting(retrain: Retrain) -> String {
+    match retrain {
+        Retrain::Every(every) => format!("retrain every {}", every.as_nanos()),
+        Retrain::Never => "retrain never".to_string(),
+    }
 }
 
 /// The training settings of `meta`: its learner, window, holdout, and
@@ -951,8 +957,8 @@ mod tests {
     }
 
     /// The store of the meta models of a rule primary deciding and
-    /// targeting as `config()`, retrained every `retrain`.
-    fn rule_store(root: &Path, retrain: SignedDuration) -> ModelStore {
+    /// targeting as `config()`, retrained as `retrain` says.
+    fn rule_store(root: &Path, retrain: Retrain) -> ModelStore {
         let config = config();
         ModelStore::of_rule(
             root,
@@ -970,8 +976,8 @@ mod tests {
         .unwrap()
     }
 
-    /// `config()`, retrained every `retrain`.
-    fn retrained(retrain: SignedDuration) -> ModelConfig {
+    /// `config()`, retrained as `retrain` says.
+    fn retrained(retrain: Retrain) -> ModelConfig {
         ModelConfig {
             retrain,
             ..config()
@@ -984,17 +990,10 @@ mod tests {
     /// side's, a model primary's meta's and a rule primary's meta's alike.
     #[test]
     fn a_store_lists_only_the_models_of_its_retrain_interval() {
-        let stores: [(&str, fn(&Path, SignedDuration) -> ModelStore); 3] = [
-            ("a side's", |root, retrain| store(root, &retrained(retrain))),
-            ("a model primary's meta's", |root, retrain| {
-                meta_store(root, &retrained(retrain), &meta_config())
-            }),
-            ("a rule primary's meta's", rule_store),
-        ];
-        let daily = SignedDuration::from_hours(24);
-        let weekly = SignedDuration::from_hours(168);
+        let daily = Retrain::Every(SignedDuration::from_hours(24));
+        let weekly = Retrain::Every(SignedDuration::from_hours(168));
 
-        for (kind, store) in stores {
+        for (kind, store) in stores() {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), daily)
                 .publish(&model("2026-10-23T00:00:00Z", &[vec![0.5]]))
@@ -1012,6 +1011,50 @@ mod tests {
                 store(dir.path(), weekly).valid_froms().unwrap(),
                 [at("2026-10-22T00:00:00Z")],
                 "{kind} weekly store"
+            );
+        }
+    }
+
+    /// The store under a root of a strategy retrained as a `Retrain` says.
+    type StoreOf = fn(&Path, Retrain) -> ModelStore;
+
+    /// Each kind of store, of a strategy retrained as a `Retrain` says: a
+    /// side's, a model primary's meta's and a rule primary's meta's.
+    fn stores() -> [(&'static str, StoreOf); 3] {
+        [
+            ("a side's", |root, retrain| store(root, &retrained(retrain))),
+            ("a model primary's meta's", |root, retrain| {
+                meta_store(root, &retrained(retrain), &meta_config())
+            }),
+            ("a rule primary's meta's", rule_store),
+        ]
+    }
+
+    /// A strategy never retrained trades on the models trained for it
+    /// alone: its store lists none a retrained one published, nor does a
+    /// retrained one's list its, of each kind of store.
+    #[test]
+    fn a_store_never_retrained_and_a_retrained_one_list_none_of_each_others_models() {
+        let daily = Retrain::Every(SignedDuration::from_hours(24));
+
+        for (kind, store) in stores() {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), daily)
+                .publish(&model("2026-10-23T00:00:00Z", &[vec![0.5]]))
+                .unwrap();
+            store(dir.path(), Retrain::Never)
+                .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+                .unwrap();
+
+            assert_eq!(
+                store(dir.path(), Retrain::Never).valid_froms().unwrap(),
+                [at("2026-10-22T00:00:00Z")],
+                "{kind} store never retrained"
+            );
+            assert_eq!(
+                store(dir.path(), daily).valid_froms().unwrap(),
+                [at("2026-10-23T00:00:00Z")],
+                "{kind} daily store"
             );
         }
     }
