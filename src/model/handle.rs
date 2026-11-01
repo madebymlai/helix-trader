@@ -248,6 +248,11 @@ pub struct ModelHandle {
     strategy_id: StrategyId,
     features: Rc<FeatureSet>,
     rule: DecisionRule,
+    /// How long after its grid times the cadence decides, before its
+    /// margin: live, the node's bar build delay
+    /// (`Warmup::live_bar_build_delay`); none in a backtest or a dataset
+    /// run.
+    delay: SignedDuration,
     /// The instrument traded, whose data makes a decision fresh.
     traded: InstrumentId,
     serving: Serving,
@@ -506,6 +511,10 @@ impl ModelHandle {
             Mode::Live { .. } => Roller::live(ticks),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(ticks),
         };
+        let delay = match mode {
+            Mode::Live { .. } => warmup.live_bar_build_delay(),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => SignedDuration::ZERO,
+        };
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -543,6 +552,7 @@ impl ModelHandle {
             strategy_id,
             features: Rc::clone(features),
             rule,
+            delay,
             traded,
             serving,
             warmup: Rc::new(warmup),
@@ -575,17 +585,13 @@ impl ModelHandle {
         self.features.register(strategy);
         self.warmup.start(strategy)?;
         self.roller.start(strategy)?;
-        let delay = match &self.serving {
+        match &self.serving {
             Serving::Trading(trading) => {
                 if let Some(stops) = self.serving.stops() {
                     stops.start(strategy);
                 }
-                match &trading.retraining {
-                    Some(retraining) => {
-                        retraining.start(strategy)?;
-                        self.warmup.live_bar_build_delay()
-                    }
-                    None => SignedDuration::ZERO,
+                if let Some(retraining) = &trading.retraining {
+                    retraining.start(strategy)?;
                 }
             }
             Serving::Dataset { targets, rows } => {
@@ -598,10 +604,9 @@ impl ModelHandle {
                 });
                 let topic = get_custom_topic(&TargetRow::data_type(self.strategy_id));
                 msgbus::subscribe_any(topic.into(), handler, None);
-                SignedDuration::ZERO
             }
-        };
-        decide::start(strategy, self.rule, delay)
+        }
+        decide::start(strategy, self.rule, self.delay)
     }
 
     /// The strategy's warmup, which the handle builds and starts: its
@@ -1976,6 +1981,32 @@ mod tests {
             )),
             at("2026-10-22T12:00:05.010Z")
         );
+    }
+
+    #[test]
+    fn a_dataset_runs_cadence_does_not_wait_for_composite_bars() {
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from(
+                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..requirements()
+        };
+        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            &config(),
+            &requirements,
+            Mode::Dataset {
+                rows: SettledRows::default(),
+            },
+        )
+        .unwrap();
+
+        handle.start(&mut probe).unwrap();
+
+        let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
+        assert_eq!(Timestamp::from(next), at("2026-10-22T12:00:00.010Z"));
     }
 
     /// Live trading on the models under `models`, retraining through
