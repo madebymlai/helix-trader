@@ -350,6 +350,27 @@ mod tests {
         ModelEmaConfig::load(&toml).unwrap();
     }
 
+    /// Its features average each bars series once: listed again, it is
+    /// refused under its second listing, naming it, and not as features
+    /// of one name.
+    #[test]
+    fn a_bars_series_listed_twice_is_refused_under_its_second_listing() {
+        let bars = r#"{ data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },"#;
+        let toml = CONFIG.replace(bars, &[bars; 2].join("\n"));
+
+        let err = ModelEmaConfig::load(&toml).unwrap_err();
+
+        let Some(ConfigError::Duplicate {
+            field,
+            value: Some(value),
+        }) = err.downcast_ref::<ConfigError>()
+        else {
+            panic!("not one duplicate naming the series: {err}");
+        };
+        assert_eq!(field, "data.series[1]");
+        assert!(value.contains("AUD/USD.SIM-1-HOUR-MID-INTERNAL"), "{value}");
+    }
+
     /// Its features are averages of bars: ticks alone give it none.
     #[test]
     fn a_config_without_bars_series_is_refused_under_the_series() {
