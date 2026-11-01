@@ -1005,7 +1005,7 @@ mod tests {
         config::{Margins, Sizing},
         dataset::Commission,
         holdout::{Earnings, Holdout, Refusal, Trades},
-        learner::{LearnerConfig, TrainingSet},
+        learner::{LearnerConfig, LightGbmConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
         targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
@@ -2258,6 +2258,27 @@ mod tests {
         config: &ModelConfig,
         meta_trues: Option<usize>,
     ) -> Rc<ModelHandle> {
+        let meta = meta_trues.map(|trues| {
+            baseline_of(
+                &features(),
+                (config.decision, &config.targets),
+                &META_NAMES,
+                "2026-10-22T00:00:00Z",
+                trues,
+            )
+        });
+        primary_meta_handle(models, config, (Side::Long, 6), meta.as_ref())
+    }
+
+    /// The handle of `meta_handle`, its primary a model of `side`
+    /// predicting `trues` tenths from midnight, its meta model `meta`, if
+    /// any.
+    fn primary_meta_handle(
+        models: &Path,
+        config: &ModelConfig,
+        (side, trues): (Side, usize),
+        meta: Option<&StoredModel>,
+    ) -> Rc<ModelHandle> {
         let features = features();
         ModelStore::new(
             models,
@@ -2266,7 +2287,7 @@ mod tests {
             config,
             &requirements(),
             &venue(),
-            Side::Long,
+            side,
         )
         .unwrap()
         .publish(&baseline_of(
@@ -2274,10 +2295,10 @@ mod tests {
             (config.decision, &config.targets),
             &["mid"],
             "2026-10-22T00:00:00Z",
-            6,
+            trues,
         ))
         .unwrap();
-        if let Some(trues) = meta_trues {
+        if let Some(meta) = meta {
             ModelStore::meta(
                 models,
                 StrategyId::from(STRATEGY),
@@ -2288,13 +2309,7 @@ mod tests {
                 &venue(),
             )
             .unwrap()
-            .publish(&baseline_of(
-                &features,
-                (config.decision, &config.targets),
-                &META_NAMES,
-                "2026-10-22T00:00:00Z",
-                trues,
-            ))
+            .publish(meta)
             .unwrap();
         }
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
@@ -2369,6 +2384,83 @@ mod tests {
         let quantity = trade.quantity.as_f64();
         assert!((quantity - 1_131.967_938).abs() < 1e-6, "{quantity}");
         assert_eq!(trade.probability, c(0.8));
+    }
+
+    /// A meta model of `config` valid from midnight of the 22nd, which
+    /// learned on rows of its features in their order, the mid, 0.7, then
+    /// the primary's side, 1 a buy and -1 a sell, then its probability,
+    /// that the primary's buys win from a probability of 0.7 and its sells
+    /// never: fitted by the learner of `config`'s meta on a buy and a sell
+    /// at each probability from 0.40 to 0.99 by 0.01, at least 30 rows on
+    /// each side of a split where LightGBM's leaves need 20, so that it
+    /// predicts near 1 on those wins and near 0 elsewhere, 0.88 and 0.12
+    /// calibrated, either side of the threshold.
+    fn learned_meta(config: &ModelConfig) -> StoredModel {
+        let (mut rows, mut labels) = (vec![], vec![]);
+        for side in [1.0, -1.0] {
+            for hundredths in 40..100 {
+                rows.extend([0.7, side, f64::from(hundredths) / 100.0]);
+                labels.push(side > 0.0 && hundredths >= 70);
+            }
+        }
+        let learner = config.meta.as_ref().unwrap().learner.clone();
+        let fitted = learner
+            .fit(&TrainingSet::new(3, rows, labels).unwrap())
+            .unwrap();
+        let mut meta = baseline_of(
+            &features(),
+            (config.decision, &config.targets),
+            &META_NAMES,
+            "2026-10-22T00:00:00Z",
+            5,
+        );
+        meta.manifest.learner = learner;
+        meta.model = fitted.save().unwrap();
+        meta
+    }
+
+    /// The decision at noon of the 22nd on a primary model of `side`
+    /// predicting `trues` tenths, its trade taken from 0.6 by the meta
+    /// model LightGBM learned (`learned_meta`).
+    fn learned_meta_decision(side: Side, trues: usize) -> Option<Decision> {
+        let models = tempfile::tempdir().unwrap();
+        let config = with_meta(MetaConfig {
+            learner: LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
+            ..meta(None)
+        });
+        let handle = primary_meta_handle(
+            models.path(),
+            &config,
+            (side, trues),
+            Some(&learned_meta(&config)),
+        );
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        handle.decide(&mut probe).unwrap()
+    }
+
+    /// The meta model reads the primary's probability from its place in
+    /// the row, after its side: it takes a buy at c(0.8) = 0.768525, which
+    /// it learned wins, and refuses one at c(0.6) = 0.598688, which it
+    /// learned loses.
+    #[test]
+    fn a_meta_model_decides_on_the_primarys_probability() {
+        let above = learned_meta_decision(Side::Long, 8);
+        let below = learned_meta_decision(Side::Long, 6);
+
+        assert_eq!(above.map(|trade| trade.side), Some(OrderSide::Buy));
+        assert_eq!(below, None);
+    }
+
+    /// The meta model is given the primary's side after its features: at
+    /// c(0.8) it takes a buy, which it learned wins, and refuses a sell,
+    /// which it learned never does.
+    #[test]
+    fn a_meta_model_decides_on_the_primarys_side() {
+        let buy = learned_meta_decision(Side::Long, 8);
+        let sell = learned_meta_decision(Side::Short, 8);
+
+        assert_eq!(buy.map(|trade| trade.side), Some(OrderSide::Buy));
+        assert_eq!(sell, None);
     }
 
     /// The rule primary of `config`: its features declare the side.
