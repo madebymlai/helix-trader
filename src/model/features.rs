@@ -71,13 +71,15 @@
 //! build replays it before its first day (`dataset`).
 //!
 //! The fingerprint covers what makes the features what they are: their
-//! names in order, the arguments of each table they are built from by
-//! value (`IndicatorsConfig::canonical_args`: parsed, so however the TOML
-//! spells them), the warmup, and the version of the strategy's feature
-//! code (`FeatureSetBuilder::version`), bumped by hand when what it
-//! computes changes. An indicator the strategy builds of `[indicators]`
-//! for its own logic is not in it. The code shared by every set, this
-//! module and Nautilus' indicators, is versioned with the dataset
+//! names in order, the series each reads (which the name of a feature
+//! named after its table alone, or of a raw feature, does not tell), the
+//! arguments of each table they are built from by value
+//! (`IndicatorsConfig::canonical_args`: parsed, so however the TOML spells
+//! them), the warmup, and the version of the strategy's feature code
+//! (`FeatureSetBuilder::version`), bumped by hand when what it computes
+//! changes. An indicator the strategy builds of `[indicators]` for its own
+//! logic is not in it. The code shared by every set, this module and
+//! Nautilus' indicators, is versioned with the dataset
 //! (`dataset::VERSION`).
 //!
 //! A strategy whose primary is a rule of its own declares the primary's
@@ -540,9 +542,9 @@ impl Slot {
         })
     }
 
-    /// The series the feature reads, as a feature's name has it: the bar
-    /// type of bars, the tick series of ticks (`QuoteTick of
-    /// XAUUSD.ICMARKETS`), a root's as the root.
+    /// The series the feature reads, as a feature's name and the
+    /// fingerprint have it: the bar type of bars, the tick series of
+    /// ticks (`QuoteTick of XAUUSD.ICMARKETS`), a root's as the root.
     fn series(&self) -> String {
         match self {
             Self::Bars(bar_type, _) => bar_type.to_string(),
@@ -799,6 +801,7 @@ impl FeatureSetBuilder {
     /// several, the series the feature's (see the module for both forms);
     /// a raw feature as given. The fingerprint hashes, each part
     /// told apart (`Fingerprint::with`), the names in order, then
+    /// `series <series>` of each feature in that order, then
     /// `indicators.<table> <arguments>` of each table a feature is built
     /// from, by table name, the arguments in canonical form
     /// (`IndicatorsConfig::canonical_args`), then `version <n>` and
@@ -834,6 +837,10 @@ impl FeatureSetBuilder {
             "the features' warmup {:#} is negative",
             self.warmup
         );
+        let series = self
+            .slots
+            .iter()
+            .map(|slot| format!("series {}", slot.series()));
         let arguments = self
             .arguments
             .iter()
@@ -843,6 +850,7 @@ impl FeatureSetBuilder {
         let fingerprint = names
             .iter()
             .cloned()
+            .chain(series)
             .chain(arguments)
             .chain([version, warmup])
             .fold(Fingerprint::default(), |hash, part| {

@@ -24,7 +24,7 @@ pub(super) const SLOW: Declared<EmaArgs> = Declared::new("slow");
 /// dataset and models: bumped whenever what they compute changes and
 /// their names and tables do not, such as the kind of average. Their
 /// arguments, their periods and the price they read, are in the
-/// fingerprint by value. The golden rows
+/// fingerprint by value, as is the bar type each reads. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
 /// without a bump.
 const VERSION: u32 = 1;
@@ -177,6 +177,31 @@ mod tests {
 
         assert_ne!(
             features_of(&changed).fingerprint(),
+            features_of(CONFIG).fingerprint()
+        );
+    }
+
+    /// Rows and models of gold's minute bars are not those of its
+    /// 5-minute bars, though one series names the features after their
+    /// tables alone.
+    #[test]
+    fn another_bar_spec_changes_the_fingerprint() {
+        let five_minutes = CONFIG.replace("step = 1,", "step = 5,");
+
+        assert_ne!(
+            features_of(&five_minutes).fingerprint(),
+            features_of(CONFIG).fingerprint()
+        );
+    }
+
+    /// Rows and models of gold's bars are not those of silver's, though
+    /// one series names the features after their tables alone.
+    #[test]
+    fn another_instrument_changes_the_fingerprint() {
+        let silver = CONFIG.replace("XAUUSD", "XAGUSD");
+
+        assert_ne!(
+            features_of(&silver).fingerprint(),
             features_of(CONFIG).fingerprint()
         );
     }

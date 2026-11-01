@@ -1172,15 +1172,21 @@ mod tests {
 
     /// The store of the long models under `models`.
     fn store(models: &Path) -> ModelStore {
-        side_store(models, &config(), Side::Long)
+        side_store(models, &features(), &config(), Side::Long)
     }
 
-    /// The store of the `side` models of `config` under `models`.
-    fn side_store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+    /// The store of the `side` models of `features` and `config` under
+    /// `models`.
+    fn side_store(
+        models: &Path,
+        features: &FeatureSet,
+        config: &ModelConfig,
+        side: Side,
+    ) -> ModelStore {
         ModelStore::new(
             models,
             StrategyId::from(STRATEGY),
-            &features(),
+            features,
             config,
             &requirements(),
             &venue(),
@@ -1226,11 +1232,12 @@ mod tests {
     /// expecting a win and a loss of 1, as the store keeps it for the
     /// probe's features, probed on one row.
     fn baseline(valid_from: &str, trues: usize) -> StoredModel {
-        baseline_for(&config(), Side::Long, valid_from, trues)
+        baseline_for(&features(), &config(), Side::Long, valid_from, trues)
     }
 
-    /// The baseline of `baseline`, of `config`'s `side`.
+    /// The baseline of `baseline`, of `features` and `config`'s `side`.
     fn baseline_for(
+        features: &FeatureSet,
         config: &ModelConfig,
         side: Side,
         valid_from: &str,
@@ -1245,7 +1252,7 @@ mod tests {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from: at(valid_from),
                 fingerprint: dataset::fingerprint(
-                    &features(),
+                    features,
                     config.decision,
                     &config.targets,
                     &requirements(),
@@ -1401,15 +1408,21 @@ mod tests {
 
     /// No feature reads AUD/USD, which it trades: its quote in the cache,
     /// made at the decision, the harness's, makes the decision fresh, and
-    /// the long model, of the same feature name, trades at 0.8 calibrated.
+    /// the long model of these features trades at 0.8 calibrated.
     #[test]
     fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
-        store(models.path())
-            .publish(&baseline("2026-10-22T00:00:00Z", 8))
+        let features = last_mid(InstrumentId::from("GBP/USD.SIM")).build().unwrap();
+        side_store(models.path(), &features, &config(), Side::Long)
+            .publish(&baseline_for(
+                &features,
+                &config(),
+                Side::Long,
+                "2026-10-22T00:00:00Z",
+                8,
+            ))
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let features = last_mid(InstrumentId::from("GBP/USD.SIM")).build().unwrap();
         features
             .handle_quote(&QuoteTick::new(
                 InstrumentId::from("GBP/USD.SIM"),
@@ -1498,14 +1511,20 @@ mod tests {
         config: &ModelConfig,
         (long, short): (Option<usize>, Option<usize>),
     ) -> Rc<ModelHandle> {
+        let features = features();
         for (side, trues) in [(Side::Long, long), (Side::Short, short)] {
             if let Some(trues) = trues {
-                side_store(models, config, side)
-                    .publish(&baseline_for(config, side, "2026-10-22T00:00:00Z", trues))
+                side_store(models, &features, config, side)
+                    .publish(&baseline_for(
+                        &features,
+                        config,
+                        side,
+                        "2026-10-22T00:00:00Z",
+                        trues,
+                    ))
                     .unwrap();
             }
         }
-        let features = features();
         warm(&features, probe.clock().timestamp_ns());
         ModelHandle::new(
             StrategyId::from(STRATEGY),

@@ -638,7 +638,7 @@ fn a_negative_warmup_is_an_error() {
 }
 
 /// The fingerprint of raw features named `names` and `version`: a raw
-/// feature has no table, so its name alone is in it.
+/// feature has no table, so its name and the series it reads are in it.
 fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
         .data("Level", id(AUD), names[0], read_level)
@@ -663,6 +663,22 @@ fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
     assert_ne!(base, fingerprint(["a", "b"], 2));
     // Names are told apart from each other, not only concatenated.
     assert_ne!(fingerprint(["ab", "c"], 1), fingerprint(["a", "bc"], 1));
+}
+
+/// A raw feature's name is the strategy's: what it reads is in the
+/// fingerprint besides, the type name and the instrument of its data.
+#[test]
+fn the_fingerprint_changes_with_the_custom_data_a_raw_feature_reads() {
+    let reading = |type_name: &str, instrument: &str| {
+        FeatureSet::builder()
+            .data(type_name, id(instrument), "level", read_level)
+            .build()
+            .unwrap()
+            .fingerprint()
+    };
+
+    assert_ne!(reading("Level", GBP), reading("Level", AUD));
+    assert_ne!(reading("Depth", AUD), reading("Level", AUD));
 }
 
 /// A set without a version is of version 0, as one given it.
