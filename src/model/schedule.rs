@@ -233,15 +233,15 @@ impl Schedule {
                 None => step(valid_froms, window, Timestamp::MIN),
             })
         };
-        // The primary's first model, of either side, its fits before `at`
-        // included.
-        let first = primary(valid_froms).chain(early).min();
+        // The primary's first model before `at`, of either side, its fits
+        // before `at` included: a model primary's meta waits without one.
+        let first = first_before(at, primary(valid_froms).chain(early));
         let meta = || {
             let (window, meta) = (self.meta?, valid_froms.meta.as_deref()?);
             Some(match (self.primary, first) {
                 (None, _) => step(meta, window, Timestamp::MIN),
-                (Some(_), Some(first)) if first < at => step(meta, window, first),
-                (Some(_), _) => Step::Wait,
+                (Some(_), Some(first)) => step(meta, window, first),
+                (Some(_), None) => Step::Wait,
             })
         };
         Plan {
