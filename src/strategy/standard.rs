@@ -28,7 +28,8 @@ use crate::{
 /// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
 ///   one.
 /// - `[data]`: what the strategy reads (see `DataConfig`), its series
-///   those its part answers it reads (`Part::reads`) and no other.
+///   those its part answers it reads (`Part::reads`), each once, and no
+///   other.
 /// - `[indicators]`: the indicators its code reads, by name (see
 ///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
 ///   without one.
@@ -77,8 +78,9 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     fn default_base() -> StrategyConfig;
     /// The series the strategy reads of `config`, those its code
     /// subscribes to and registers indicators for: `[data] series` lists
-    /// these and no other (see `StandardConfig::validate`). The load asks
-    /// only of a config whose `[trade]` lists `INSTRUMENTS` instruments.
+    /// these, each once, and no other (see `StandardConfig::validate`). The
+    /// load asks only of a config whose `[trade]` lists `INSTRUMENTS`
+    /// instruments and whose `[data]` lists each series once.
     ///
     /// # Errors
     ///
@@ -129,11 +131,13 @@ impl<P: Part> StandardConfig<P> {
     /// Pushes onto `errors` the strategy's own errors reading the config
     /// (`Part::reads`), or else each series `[data]` lists that it does not
     /// read, under `data.series[i]`, then each it reads that `[data]` does
-    /// not list, under `data.series`, each naming the series.
+    /// not list, under `data.series`, each naming the series. Nothing of a
+    /// `[data]` listing a series again, which is its violation.
     fn validate_series(&self, errors: &mut ConfigErrorCollector) {
-        // What a strategy reads may depend on what it trades: another
-        // count of instruments is `[trade]`'s violation.
-        if self.trade.instruments.len() != P::INSTRUMENTS {
+        // What a strategy reads may depend on what it trades, and is asked
+        // of each series listed once: another count of instruments is
+        // `[trade]`'s violation, a series listed again `[data]`'s.
+        if self.trade.instruments.len() != P::INSTRUMENTS || self.data.repeats().next().is_some() {
             return;
         }
         let read = match P::reads(self) {
@@ -242,7 +246,8 @@ impl<P: Part> StandardConfig<P> {
 #[serde(deny_unknown_fields)]
 pub struct DataConfig {
     /// The series read, bars and ticks (see `Series`): those the
-    /// strategy's part answers it reads (`Part::reads`), and no other.
+    /// strategy's part answers it reads (`Part::reads`), each once, and no
+    /// other.
     pub series: Vec<Series>,
     /// How far back the warmup history a live node requests at start
     /// starts; a backtest requests none, its strategy warming on the
@@ -272,25 +277,40 @@ impl DataConfig {
         })
     }
 
-    /// Pushes the violations of `[data]`: no series; a bars series not
-    /// aggregated on time (the session needs the bar's span), built from
-    /// ticks but priced MARK (Nautilus builds bars from quotes or trades
-    /// alone), on a venue other than the first bars', built from bars
-    /// beside a session (live, such bars arrive after their close, so a
-    /// session would drop its last bar there but not in a backtest), built
-    /// from internal source bars (a live warmup requests a composite's
-    /// source bars, and nothing stores internal ones), or on a futures root
-    /// of the roll calendar (`rolls::Transition`) but not built from its
-    /// trades (internal, LAST, not composite: Nautilus builds a root's
-    /// continuous bars from its contracts' trades, and their rolls are
-    /// priced from them, so other bars would never come), these two under
-    /// `data.series[i]`; a non-positive warmup; a session not opening
-    /// before it closes.
+    /// Each listing of a series after its first, by its index.
+    fn repeats(&self) -> impl Iterator<Item = (usize, &Series)> + '_ {
+        self.series
+            .iter()
+            .enumerate()
+            .filter(|&(i, series)| self.series[..i].contains(series))
+    }
+
+    /// Pushes the violations of `[data]`: no series; a series listed
+    /// again, under each listing after its first, naming it; a bars series
+    /// not aggregated on time (the session needs the bar's span), built
+    /// from ticks but priced MARK (Nautilus builds bars from quotes or
+    /// trades alone), on a venue other than the first bars', built from
+    /// bars beside a session (live, such bars arrive after their close, so
+    /// a session would drop its last bar there but not in a backtest),
+    /// built from internal source bars (a live warmup requests a
+    /// composite's source bars, and nothing stores internal ones), or on a
+    /// futures root of the roll calendar (`rolls::Transition`) but not
+    /// built from its trades (internal, LAST, not composite: Nautilus
+    /// builds a root's continuous bars from its contracts' trades, and
+    /// their rolls are priced from them, so other bars would never come),
+    /// these two under `data.series[i]`, naming the bar type; a
+    /// non-positive warmup; a session not opening before it closes.
     fn validate(&self, errors: &mut ConfigErrorCollector) {
         errors.check(
             !self.series.is_empty(),
             ConfigError::empty_field("data.series"),
         );
+        for (i, series) in self.repeats() {
+            errors.push(ConfigError::duplicate(
+                format!("data.series[{i}]"),
+                Some(series.to_string()),
+            ));
+        }
         let venue = self
             .bar_types()
             .next()
@@ -673,22 +693,27 @@ mod tests {
         fields_of(&load(toml).unwrap_err())
     }
 
-    /// The fields of the config errors `err` holds, in order.
-    fn fields_of(err: &anyhow::Error) -> Vec<String> {
+    /// The config errors `err` holds, in order.
+    fn errors_of(err: &anyhow::Error) -> Vec<ConfigError> {
         let err = err
             .downcast_ref::<ConfigError>()
             .unwrap_or_else(|| panic!("not a config error: {err}"));
-        let errors = match err {
+        match err {
             ConfigError::Multiple { errors } => errors.clone(),
             err => vec![err.clone()],
-        };
-        errors
+        }
+    }
+
+    /// The fields of the config errors `err` holds, in order.
+    fn fields_of(err: &anyhow::Error) -> Vec<String> {
+        errors_of(err)
             .iter()
             .flat_map(|err| match err {
                 ConfigError::InvalidValue { field, .. }
                 | ConfigError::Range { field, .. }
                 | ConfigError::EmptyField { field }
                 | ConfigError::MissingField { field }
+                | ConfigError::Duplicate { field, .. }
                 | ConfigError::InvalidReference { field, .. } => vec![field.clone()],
                 ConfigError::MutuallyExclusiveFields { fields } => fields.clone(),
                 err => panic!("unexpected config error {err:?}"),
@@ -1120,6 +1145,33 @@ mod tests {
         let end = TOML.find("warmup").unwrap();
         let toml = format!("{}series = []\n{}", &TOML[..start], &TOML[end..]);
         assert_eq!(error_fields(&toml), ["data.series"]);
+    }
+
+    /// The trades of ESH4 listed three times: each listing after the first
+    /// is refused under its field, naming them, with the other violations.
+    #[test]
+    fn a_series_listed_again_is_refused_under_each_later_listing_with_the_other_violations() {
+        let trades = r#"{ data = "trades", instrument_id = "ESH4.CME" },"#;
+        let toml = TOML
+            .replace(trades, &[trades; 3].join("\n"))
+            .replace("\"720h\"", "\"0s\"")
+            .replace("spread = 3", "spread = 0");
+
+        let err = load(&toml).unwrap_err();
+
+        assert_eq!(
+            fields_of(&err),
+            ["data.series[3]", "data.series[4]", "data.warmup", "spread"]
+        );
+        for err in &errors_of(&err)[..2] {
+            let ConfigError::Duplicate {
+                value: Some(value), ..
+            } = err
+            else {
+                panic!("not a duplicate naming the series: {err:?}");
+            };
+            assert!(value.contains("TradeTick of ESH4.CME"), "{value}");
+        }
     }
 
     #[test]

@@ -178,16 +178,18 @@ config or every violation out.
   each violation a `ConfigError` with its field (`data.series[1].bar_spec`,
   `indicators.slow`, `trade.instruments`), all of them reported at once,
   as Nautilus' own `HurstVpinDirectionalConfig::validate` does: at least
-  one series; each bars series aggregated on time (the session needs the
-  bar's length), not priced `MARK` when built from ticks (no tick builds
-  it), on the venue of the first bars, not built `from`
-  bars beside a session (see "Session"), built `from` external source
-  bars alone (a live warmup requests them, and nothing stores internal
-  ones), and, on a futures root of the roll calendar, built from its
-  trades (internal, LAST, not composite: Nautilus builds a root's
-  continuous bars from its contracts' trades and their rolls are priced
-  from them, so other bars would never come), each of these two under
-  `data.series[i]`, naming the bar type; a positive warmup; a session, if
+  one series; each series listed once (each listing after the first is
+  refused, Nautilus' `ConfigError::duplicate`); each bars series
+  aggregated on time (the session needs the bar's length), not priced
+  `MARK` when built from ticks (no tick builds it), on the venue of the
+  first bars, not built `from` bars beside a session (see "Session"),
+  built `from` external source bars alone (a live warmup requests them,
+  and nothing stores internal ones), and, on a futures root of the roll
+  calendar, built from its trades (internal, LAST, not composite:
+  Nautilus builds a root's continuous bars from its contracts' trades
+  and their rolls are priced from them, so other bars would never come);
+  the repeat and these last two each under the series' own field,
+  `data.series[i]`, naming it (see below); a positive warmup; a session, if
   any, opening before it closes; each indicator the strategy declares
   present, its table parsed by its arguments type (an unknown or
   mistyped argument fails) and built (`ExponentialMovingAverage::new_checked`
@@ -201,6 +203,15 @@ config or every violation out.
   rules (`Part::validate`: for the EMA, the fast period below the slow
   one).
 
+A series listed again, bars on a root not built from its trades and
+bars built from internal source bars:
+
+```text
+duplicate data.series[2]: TradeTick of GC.GLBX
+invalid data.series[0]: bars GC.GLBX-1-HOUR-MID-INTERNAL on the root GC.GLBX must be built from its trades (internal, LAST, not composite): its continuous bars are built and their rolls priced from trades
+invalid data.series[0]: bars BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-INTERNAL are built from the internal bars BTC-USDT-SWAP.OKX-1-MINUTE-LAST-INTERNAL: the source bars of a composite bar type must be external, since a live warmup requests them
+```
+
 ### Series read
 
 `[data] series` lists exactly the series the strategy reads, those its
@@ -208,8 +219,9 @@ code subscribes to and registers indicators for. Its part answers what
 they are (`Part::reads`, required, no default), and its code reads
 through that same answer, so the check and the run cannot disagree. The
 load compares the two, once `[trade]` lists as many instruments as the
-strategy trades (what it reads may depend on them), and reports each
-mismatch with every other violation, naming the series:
+strategy trades (what it reads may depend on them) and `[data]` lists
+each series once (a repeat is `[data]`'s own violation, see above), and
+reports each mismatch with every other violation, naming the series:
 
 ```text
 invalid data.series[1]: the strategy does not read bars EURUSD.ICMARKETS-1-HOUR-MID-INTERNAL

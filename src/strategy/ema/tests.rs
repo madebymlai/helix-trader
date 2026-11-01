@@ -211,6 +211,25 @@ fn rejects_bars_of_another_instrument_as_unread() {
     assert!(err.contains("ESH4.CME-1-HOUR-MID-INTERNAL"), "{err}");
 }
 
+/// The crossover reads its bars series once: listed again, it is refused
+/// under its second listing, naming it.
+#[test]
+fn rejects_its_bars_series_listed_twice() {
+    let toml = listing(
+        r#"{ data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
+    );
+    let err = EmaCrossConfig::load(&toml).unwrap_err();
+    let Some(ConfigError::Duplicate {
+        field,
+        value: Some(value),
+    }) = err.downcast_ref::<ConfigError>()
+    else {
+        panic!("not one duplicate naming the series: {err}");
+    };
+    assert_eq!(field, "data.series[1]");
+    assert!(value.contains("ESM4.CME-1-HOUR-MID-INTERNAL"), "{value}");
+}
+
 /// The crossover reads bars alone, even of the instrument it trades.
 #[test]
 fn rejects_ticks_of_the_trade_instrument_as_unread() {

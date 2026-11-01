@@ -363,7 +363,9 @@ mod tests {
         errors
             .into_iter()
             .map(|err| match &err {
-                ConfigError::InvalidValue { field, .. } => (field.clone(), err.to_string()),
+                ConfigError::InvalidValue { field, .. } | ConfigError::Duplicate { field, .. } => {
+                    (field.clone(), err.to_string())
+                }
                 err => panic!("unexpected config error {err:?}"),
             })
             .collect()
@@ -493,6 +495,45 @@ mod tests {
         let mut fields: Vec<String> = refusals(
             &[GOLD_BARS],
             &[GOLD_BARS, GC_TRADES],
+            r#"{ horizon = "1h" }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
+        fields.sort();
+
+        assert_eq!(fields, ["data.series[1]", "model.targets.horizon"]);
+    }
+
+    /// The features read GC's trades once, and `[data]` lists them again:
+    /// refused under their second listing, naming them.
+    #[test]
+    fn a_tick_series_listed_twice_is_refused_under_its_second_listing() {
+        let err = load(
+            &[GOLD_BARS, GC_TRADES],
+            &[GC_TRADES, GOLD_BARS, GC_TRADES],
+            HORIZON,
+        )
+        .unwrap_err();
+
+        let Some(ConfigError::Duplicate {
+            field,
+            value: Some(value),
+        }) = err.downcast_ref::<ConfigError>()
+        else {
+            panic!("not one duplicate naming the series: {err}");
+        };
+        assert_eq!(field, "data.series[2]");
+        assert!(value.contains("TradeTick of GC.GLBX"), "{value}");
+    }
+
+    /// A series listed twice and a horizon of an hour decided every hour
+    /// are both reported, each under its field.
+    #[test]
+    fn a_series_listed_twice_is_reported_with_the_other_violations() {
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GOLD_BARS],
             r#"{ horizon = "1h" }"#,
         )
         .into_iter()
