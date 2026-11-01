@@ -1053,6 +1053,78 @@ mod tests {
         client.disconnect().await;
     }
 
+    /// A trade request asked while the transport reconnects, the session
+    /// still ready as far as the handler knows, goes out on the new
+    /// connection only once it is authenticated.
+    #[tokio::test]
+    async fn a_trade_request_during_a_reconnect_goes_out_once_authenticated_again() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::data::ic::messages::ProtoOaNewOrderReq;
+        let reconnecting = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&reconnecting);
+        let (url, received) = testing::start_delayed(
+            move |connection| {
+                if connection == 0 {
+                    return Duration::ZERO;
+                }
+                seen.store(true, Ordering::SeqCst);
+                Duration::from_millis(1500)
+            },
+            |connection, request| {
+                if let Some(actions) = accept_auth(request) {
+                    return actions;
+                }
+                if connection == 0 {
+                    return vec![Action::Close];
+                }
+                Vec::new()
+            },
+        );
+        let (credential, _tokens) = testing::credential();
+        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let order = ProtoOaNewOrderReq {
+            ctid_trader_account_id: ACCOUNT_ID,
+            volume: 100,
+            ..Default::default()
+        };
+
+        let first = symbol_request(1);
+
+        let (lost, sent) = {
+            // The first request closes the connection.
+            let mut lost = std::pin::pin!(client.request::<_, ProtoOaSymbolByIdRes>(&first));
+            assert!(futures::poll!(lost.as_mut()).is_pending());
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !reconnecting.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let sent = client.trade(&order, "N:O-1".to_owned()).await;
+            (lost.await, sent)
+        };
+
+        assert_eq!(lost, Err(IcError::ConnectionLost));
+        assert_eq!(sent, Ok(Ok(())));
+        testing::wait_until(&received, |frames| {
+            frames
+                .iter()
+                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaNewOrderReq::TYPE)
+        })
+        .await;
+        assert_eq!(
+            payload_types(&received, 1),
+            [
+                ProtoOaApplicationAuthReq::TYPE,
+                ProtoOaAccountAuthReq::TYPE,
+                ProtoOaNewOrderReq::TYPE
+            ]
+        );
+        client.disconnect().await;
+    }
+
     /// Synthetic: a spot event of `symbol_id` as OpenApiMessages.proto
     /// defines it, both sides and the time.
     fn spot_event(symbol_id: i64) -> ProtoOaSpotEvent {

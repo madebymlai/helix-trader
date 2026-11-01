@@ -26,6 +26,13 @@
 //! connection, are not sent again: the (un)subscriptions asked meanwhile
 //! wait, and are sent once the account is authenticated again.
 //!
+//! The transport invalidates the authentication as soon as it finds the
+//! connection dead, while the handler learns of the reconnect only from
+//! `RECONNECTED`, once the new connection is up: a frame sent meanwhile
+//! would wait for the new connection and reach it before its
+//! authentication. So from then on requests and spot changes wait, as
+//! during an auth, and the heartbeat and a scheduled renewal are skipped.
+//!
 //! Trade requests (orders, amendments, cancels, closes) go out under the
 //! `clientMsgId` their caller chose, who learns only whether the frame was
 //! sent: their outcome comes as trade events, the execution events and
@@ -41,7 +48,7 @@ use nautilus_common::live::dst::time::{self, Duration, Instant, MissedTickBehavi
 use nautilus_core::{string::secret::SecretString, time::get_atomic_clock_realtime};
 use nautilus_network::{
     Message, RECONNECTED,
-    websocket::{AuthTracker, SubscriptionState, WebSocketClient},
+    websocket::{AuthTracker, SubscriptionState, WebSocketClient, auth::AuthState},
 };
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
@@ -376,9 +383,11 @@ impl IcWsHandler {
     }
 
     /// cTrader's keepalive: a `ProtoHeartbeatEvent` frame, every 10 s
-    /// (help.ctrader.com/open-api, "Establish a connection").
+    /// (help.ctrader.com/open-api, "Establish a connection"), on a live
+    /// connection only: it keeps that connection, as Nautilus skips a pong
+    /// while reconnecting (`WebSocketClient::send_pong`).
     async fn send_heartbeat(&self) {
-        if self.client.is_none() {
+        if !self.client.as_ref().is_some_and(WebSocketClient::is_active) {
             return;
         }
         if let Err(e) = self
@@ -562,6 +571,8 @@ impl IcWsHandler {
     /// Acts on the time `wake` set.
     async fn woken(&mut self) {
         match self.session {
+            // The new connection's application auth renews the token if due.
+            Session::Ready if self.connection_dropped() => {}
             Session::Ready | Session::TokenLock => self.renew().await,
             // The renewal stays out: a late answer is still saved.
             Session::Renewal => self.fail_session(format!(
@@ -573,6 +584,17 @@ impl IcWsHandler {
             | Session::AccountAuth(_)
             | Session::Failed(_) => {}
         }
+    }
+
+    /// Whether the transport dropped the ready session's connection: it
+    /// invalidates the authentication at once (see the module docs). A
+    /// transport closed for good fails it instead: frames are then sent,
+    /// and fail at once. Temporary: once nautilus_trader#5526 (binary sends
+    /// bound to a connection) is released, the sends are bound to the
+    /// connection the session authenticated on, and this check gives way to
+    /// theirs.
+    fn connection_dropped(&self) -> bool {
+        self.auth.auth_state() == AuthState::Unauthenticated
     }
 
     async fn ready(&mut self) {
@@ -646,9 +668,10 @@ impl IcWsHandler {
 
     /// A spot (un)subscription of `symbol_id` asked by the outer client:
     /// sent if the session is ready, else marked for the new connection's
-    /// replay, or kept until the account is authenticated again.
+    /// replay, or kept until the account is authenticated again (or the
+    /// new connection's session, which takes them into the state).
     async fn change_spots(&mut self, symbol_id: i64, subscribe: bool) {
-        if matches!(self.session, Session::Ready) {
+        if matches!(self.session, Session::Ready) && !self.connection_dropped() {
             if self.mark_spots(symbol_id, subscribe) {
                 self.send_spots(subscribe, vec![symbol_id]).await;
             }
@@ -719,11 +742,13 @@ impl IcWsHandler {
 
     async fn request(&mut self, request: Queued) {
         match &self.session {
-            Session::Ready => self.dispatch(request).await,
+            Session::Ready if !self.connection_dropped() => self.dispatch(request).await,
             Session::Failed(reason) => {
                 request.awaiting.fail(IcError::Session(reason.clone()));
             }
-            Session::Unconnected
+            // The transport reconnects: the request waits for the new session.
+            Session::Ready
+            | Session::Unconnected
             | Session::ApplicationAuth(_)
             | Session::TokenLock
             | Session::Renewal

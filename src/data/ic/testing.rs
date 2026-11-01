@@ -173,6 +173,16 @@ pub(crate) type Received = Arc<Mutex<Vec<(usize, ProtoMessage)>>>;
 pub(crate) fn start(
     script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
 ) -> (String, Received) {
+    start_delayed(|_| Duration::ZERO, script)
+}
+
+/// `start`, each connection's WebSocket handshake answered `handshake` of
+/// its number late: the transport reconnects that long.
+pub(crate) fn start_delayed(
+    handshake: impl Fn(usize) -> Duration + Send + Sync + 'static,
+    script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
+) -> (String, Received) {
+    let handshake = Arc::new(handshake);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let received: Received = Arc::default();
@@ -182,7 +192,9 @@ pub(crate) fn start(
         for (connection, stream) in listener.incoming().enumerate() {
             let log = Arc::clone(&log);
             let script = Arc::clone(&script);
+            let handshake = Arc::clone(&handshake);
             std::thread::spawn(move || {
+                std::thread::sleep(handshake(connection));
                 let Ok(mut socket) = tungstenite::accept(stream.unwrap()) else {
                     return;
                 };
