@@ -350,7 +350,7 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_okx::{OKXInstrumentType, common::urls::get_ws_base_url_public};
+    use nautilus_okx::OKXInstrumentType;
 
     use super::*;
 
@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn both_clients_trade_on_the_eea_demo_never_the_real_account() {
+    fn both_clients_trade_in_the_eea_on_the_given_environment() {
         let clients = configs(&[xperp()], OKXEnvironment::Demo).unwrap();
         assert_eq!(
             (clients.data.environment, clients.data.region),
@@ -390,12 +390,17 @@ mod tests {
         );
         assert_eq!(clients.exec.http_base_url(), "https://eea.okx.com");
         assert_eq!(
-            clients.data.ws_public_url(),
-            get_ws_base_url_public(OKXRegion::Eea, OKXEnvironment::Demo)
-        );
-        assert_eq!(
             clients.exec.ws_private_url(),
             "wss://wseeapap.okx.com/ws/v5/private"
+        );
+        let live = configs(&[xperp()], OKXEnvironment::Live).unwrap();
+        assert_eq!(
+            (live.data.environment, live.data.region),
+            (OKXEnvironment::Live, OKXRegion::Eea)
+        );
+        assert_eq!(
+            (live.exec.environment, live.exec.region),
+            (OKXEnvironment::Live, OKXRegion::Eea)
         );
     }
 
@@ -471,14 +476,18 @@ mod tests {
 
     #[test]
     fn a_refused_empty_or_foreign_leverage_answer_is_an_error() {
+        let error = |body: &[u8]| leverage_of(xperp(), body).unwrap_err().to_string();
         let refused = br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#;
-        let err = leverage_of(xperp(), refused).unwrap_err().to_string();
+        let err = error(refused);
         assert!(err.contains("51001"), "{err}");
         let empty = br#"{"code":"0","msg":"","data":[]}"#;
-        assert!(leverage_of(xperp(), empty).is_err());
-        let foreign = br#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","lever":"3"}]}"#;
-        assert!(leverage_of(xperp(), foreign).is_err());
-        let split = br#"{"code":"0","msg":"","data":[{"instId":"BTC-USD_UM_XPERP-310328","lever":"3"},{"instId":"BTC-USD_UM_XPERP-310328","lever":"5"}]}"#;
-        assert!(leverage_of(xperp(), split).is_err());
+        let err = error(empty);
+        assert!(err.contains("no leverage"), "{err}");
+        let foreign = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USDT-SWAP","lever":"3","mgnMode":"cross","posSide":"net"}]}"#;
+        let err = error(foreign);
+        assert!(err.contains("BTC-USDT-SWAP"), "{err}");
+        let split = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"},{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"5","mgnMode":"cross","posSide":"net"}]}"#;
+        let err = error(split);
+        assert!(err.contains("3 and 5"), "{err}");
     }
 }

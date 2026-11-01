@@ -1,5 +1,5 @@
 //! The EMA crossover with a trade size finer than the instrument's whole
-//! shares: 10.5 rounds to the nearest even share count, so it trades as 10
+//! shares: 10.4 rounds to the nearest share count, so it trades as 10
 //! shares do (`common::trades`, `TIME_EXIT`). One node per thread, so one
 //! run per test.
 
@@ -10,7 +10,7 @@ use nautilus_model::types::Quantity;
 #[test]
 fn a_trade_size_off_the_share_grid_trades_the_rounded_size_and_the_run_completes() {
     let mut config = common::ema_config(1, 2, Some(common::session()));
-    config.trade.instruments[0].trade_size = Quantity::from("10.5");
+    config.trade.instruments[0].trade_size = Quantity::from("10.4");
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     let result = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR")

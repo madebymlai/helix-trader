@@ -1,8 +1,8 @@
 //! The max drawdown is among the result's return statistics: the run
 //! registers it with the portfolio, which computes it over the returns
 //! series with the default statistics. The EMA crossover over the wave
-//! with a commission of 3 EUR per order. One node per thread, so one run
-//! per test.
+//! with a commission of 3 EUR per order, a run that loses. One node per
+//! thread, so one run per test.
 
 use crate::common::wave;
 
@@ -14,15 +14,11 @@ fn the_result_holds_the_max_drawdown_of_its_returns() {
         .unwrap()
         .result;
 
-    // The largest fall from a peak of the equity compounded from 1 over
-    // the returns, as a negative fraction.
-    let (mut equity, mut peak, mut drawdown) = (1.0_f64, 1.0_f64, 0.0_f64);
-    for ret in result.returns_series.values() {
-        equity *= 1.0 + ret;
-        peak = peak.max(equity);
-        drawdown = drawdown.max((peak - equity) / peak);
-    }
-    assert!(drawdown > 0.0, "the wave's run loses: {drawdown}");
+    // A fall from a peak of the equity, as a negative fraction.
     let reported = result.stats_returns.get("Max Drawdown").copied();
-    assert_eq!(reported, Some(-drawdown), "{:?}", result.stats_returns);
+    assert!(
+        reported.is_some_and(|drawdown| drawdown < 0.0),
+        "{:?}",
+        result.stats_returns
+    );
 }

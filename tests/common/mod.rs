@@ -7,7 +7,7 @@
 //! that a run with the shortest crossover trades and exits at times and
 //! prices worked out by hand; steps, for the recording strategy's
 //! overlapping trades; noise, for the recording strategy of `recorder.rs`
-//! to check every price of the bars; a fall, for its stop.
+//! to check every price of the bars.
 
 #![allow(dead_code, reason = "each test module uses part of the fixture")]
 
@@ -33,7 +33,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, QuoteTick},
     enums::{AggregationSource, BarAggregation, PriceType},
-    identifiers::{InstrumentId, Symbol, Venue},
+    identifiers::{InstrumentId, Symbol},
     instruments::{InstrumentAny, stubs::equity_aapl},
     types::{Currency, Money, Price, Quantity},
 };
@@ -157,15 +157,6 @@ pub fn stepped_quotes(
         let minute = 60 - bar.duration_since(close).as_mins();
         level(bar).map(|level| level + 0.01 * minute as f64)
     })
-}
-
-/// The quote among `quotes` stamped 1 ns before `close`.
-pub fn quote_before(quotes: &[QuoteTick], close: Timestamp) -> QuoteTick {
-    let ts: UnixNanos = (close - NANOSECOND).into();
-    *quotes
-        .iter()
-        .find(|quote| quote.ts_event == ts)
-        .unwrap_or_else(|| panic!("no quote 1 ns before {close}"))
 }
 
 /// A new temporary catalog holding the instrument and no quotes.
@@ -489,58 +480,26 @@ pub mod noise {
         recorder::Recorder,
         std::rc::Rc<std::cell::RefCell<recorder::Record>>,
     ) {
-        recorder::Recorder::new(BarType::from(MID_BAR_TYPE), None)
-    }
-}
-
-/// A fall on Wednesday 7 January 2026: a mid of 620 a minute from 10:00
-/// UTC to 13:00, then 0.50 lower each minute: 619.50 at 13:01, 600.00 at
-/// 13:40, 590.00 from 14:00 to 15:00.
-pub mod fall {
-    use super::*;
-
-    /// `hh:mm` UTC on the day of the fall.
-    pub fn at(hh_mm: &str) -> Timestamp {
-        ts(&format!("2026-01-07T{hh_mm}:00Z"))
-    }
-
-    pub fn quotes() -> Vec<QuoteTick> {
-        minute_quotes(at("10:00"), at("15:00"), |close| {
-            let since = close.duration_since(at("13:00")).as_mins();
-            Some(620.0 - 0.5 * since.clamp(0, 60) as f64)
-        })
-    }
-
-    pub fn catalog() -> TempDir {
-        super::catalog(&quotes(), at("10:00"), at("15:00"))
-    }
-
-    pub fn backtest(catalog: &Path) -> Backtest {
-        super::backtest(catalog, at("12:30"), at("15:00"), "0 EUR")
+        recorder::Recorder::new(BarType::from(MID_BAR_TYPE))
     }
 }
 
 /// Two overlapping trades on the steps, from 12:30: a
 /// recorder, its `oms_type` unset, buys 10 shares on the 13:00 bar, at the
 /// ask of the quote closing it, 620.65, and 10 more on the 14:00 bar, at
-/// 580.65, and closes neither. A netting venue holds them as one long
-/// position of 20 at their average, 600.65; a hedging venue as two of 10,
-/// one at each price.
+/// 580.65, and closes neither. A netting venue, as IB's, holds them as one
+/// long position of 20 at their average, 600.65.
 pub mod overlap {
     use std::{cell::RefCell, rc::Rc};
 
-    use nautilus_model::enums::{OmsType, OrderSide};
+    use nautilus_model::enums::OrderSide;
 
     use super::*;
 
-    /// Runs the recorder on a venue keeping positions as `venue_oms` says
-    /// and returns its record.
-    pub fn run(venue_oms: fn(Venue) -> OmsType) -> Rc<RefCell<recorder::Record>> {
+    /// Runs the recorder on the backtest's venue and returns its record.
+    pub fn run() -> Rc<RefCell<recorder::Record>> {
         let catalog = steps::catalog();
-        let backtest = Backtest {
-            venue_oms,
-            ..steps::backtest(catalog.path(), steps::at("12:30"))
-        };
+        let backtest = steps::backtest(catalog.path(), steps::at("12:30"));
         let (recorder, record) = recorder::Recorder::trading(
             BarType::from(MID_BAR_TYPE),
             vec![

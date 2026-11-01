@@ -275,10 +275,14 @@ mod tests {
     };
 
     use super::*;
-    use crate::{rolls::Slice, strategy::catalog_series};
+    use crate::rolls::Slice;
 
     const SWAP: &str = "BTC-USDT-SWAP.OKX";
     const XPERP: &str = "BTC-USD_UM_XPERP-310404.OKX";
+    /// The source bars of the composite hour bars of `backtest`, sorted by
+    /// instrument: `BTC-USDT` before `BTC-USD_`.
+    const SWAP_MINUTE_BARS: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
+    const XPERP_MINUTE_BARS: &str = "BTC-USD_UM_XPERP-310404.OKX-1-MINUTE-LAST-EXTERNAL";
 
     /// A backtest on the composite hour bars of `instruments`.
     fn backtest(catalog: &std::path::Path, instruments: &[&str]) -> Backtest {
@@ -362,8 +366,11 @@ mod tests {
             .write_to_parquet(&[funding], None, None, None)
             .unwrap();
         let backtest = backtest(dir.path(), &[XPERP, SWAP]);
-        let mut expected = catalog_series(&backtest.bar_types);
-        expected.push((NautilusDataType::FundingRateUpdate, SWAP.to_string()));
+        let expected = vec![
+            (NautilusDataType::Bar, SWAP_MINUTE_BARS.to_string()),
+            (NautilusDataType::Bar, XPERP_MINUTE_BARS.to_string()),
+            (NautilusDataType::FundingRateUpdate, SWAP.to_string()),
+        ];
         assert_eq!(backtest.series().unwrap(), whole(&backtest, expected));
     }
 
@@ -507,9 +514,10 @@ mod tests {
     fn a_catalog_without_funding_replays_the_series_the_bars_are_built_from() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = backtest(dir.path(), &[XPERP, SWAP]);
-        assert_eq!(
-            backtest.series().unwrap(),
-            whole(&backtest, catalog_series(&backtest.bar_types))
-        );
+        let expected = vec![
+            (NautilusDataType::Bar, SWAP_MINUTE_BARS.to_string()),
+            (NautilusDataType::Bar, XPERP_MINUTE_BARS.to_string()),
+        ];
+        assert_eq!(backtest.series().unwrap(), whole(&backtest, expected));
     }
 }

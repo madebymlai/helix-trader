@@ -221,10 +221,13 @@ mod tests {
         data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
         enums::AggressorSide,
         identifiers::TradeId,
-        instruments::stubs::{equity_aapl, futures_contract_es},
+        instruments::{
+            NautilusInstrumentType,
+            stubs::{equity_aapl, futures_contract_es},
+        },
         types::{Price, Quantity},
     };
-    use nautilus_persistence::catalog::types::HasCatalogDataType;
+    use nautilus_persistence::catalog::types::{CatalogDataType, HasCatalogDataType};
 
     fn instrument() -> InstrumentAny {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))
@@ -332,6 +335,11 @@ mod tests {
         ParquetDataCatalog::new(dir.path(), None, None, None, None)
     }
 
+    /// The kinds of data `catalog` stores.
+    fn stored_kinds(catalog: &ParquetDataCatalog) -> HashSet<CatalogDataType> {
+        catalog.list_data_types().unwrap().into_iter().collect()
+    }
+
     #[tokio::test]
     async fn only_instruments_and_quotes_are_stored() {
         let dir = tempfile::tempdir().unwrap();
@@ -346,12 +354,13 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id(), es_id());
         assert_eq!(stored_quotes(&mut catalog, es_id()), vec![50]);
-        let mut kinds: Vec<String> = std::fs::read_dir(dir.path().join("data"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        kinds.sort();
-        assert_eq!(kinds, ["futures_contract", "quotes"]);
+        assert_eq!(
+            stored_kinds(&catalog),
+            HashSet::from([
+                CatalogDataType::Instrument(NautilusInstrumentType::FuturesContract),
+                CatalogDataType::Data(NautilusDataType::QuoteTick)
+            ])
+        );
     }
 
     /// Every file under `dir`, by path relative to it, with its bytes.
@@ -875,12 +884,13 @@ mod tests {
             .get_intervals(&NautilusDataType::Bar.into(), Some(BARS))
             .unwrap();
         assert_eq!(intervals, vec![(0, 100), (101, 200)]);
-        let mut kinds: Vec<String> = std::fs::read_dir(dir.path().join("data"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        kinds.sort();
-        assert_eq!(kinds, ["bars", "futures_contract"]);
+        assert_eq!(
+            stored_kinds(&catalog),
+            HashSet::from([
+                CatalogDataType::Instrument(NautilusInstrumentType::FuturesContract),
+                CatalogDataType::Data(NautilusDataType::Bar)
+            ])
+        );
     }
 
     #[tokio::test]

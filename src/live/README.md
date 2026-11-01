@@ -169,7 +169,7 @@ logged, the bars of the other segments kept).
 A market order needs no quote subscription: the risk engine prices it from
 the latest cached external LAST bar (`risk/src/engine/mod.rs`,
 `market_order_price`), here IB's last minute bar, as it does in a
-backtest (`backtest_ib_minute_bars.rs`). It would deny the order
+backtest. It would deny the order
 (`MARKET_PRICE_UNAVAILABLE`) on MID bars alone.
 
 Measured on paper (`tests/live/ib_minute_bars.rs`, SXR8.IBIS, 2-hour warmup):
@@ -682,9 +682,10 @@ tests: see [`okx/README.md`](okx/README.md).
   trades, and the node streams as `Recording` configures it, but
   promoting every second rather than daily, the interval set on the
   `StreamingConfig` it returns. The node runs in a child process (the
-  test binary, filtered to `streamed_node`),
-  stopping itself through `handle().stop()` or killed, and the test reads
-  the catalog from its own process: a clean prefix of each series while
+  test binary, filtered to `streamed_node`), stopping itself through
+  `handle().stop()`, interrupted by the test with SIGINT as Ctrl-C would,
+  or killed, and the test reads the catalog from its own process: a
+  clean prefix of each series while
   the node runs, everything after a clean stop with no staging file left,
   the built bars under `EXTERNAL`, the instrument definition, and after a
   crash and a restart the crashed run's staged data promoted, before an

@@ -180,6 +180,8 @@ const STREAMED: [NautilusDataType; 9] = [
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn recording(staging: PathBuf) -> Recording {
@@ -224,23 +226,21 @@ mod tests {
         let streaming = recording(dir.path().join("staging"))
             .streaming(&catalog(&dir.path().join("catalog")))
             .unwrap();
-        let data_types = streaming.data_types.unwrap();
-        for streamed in [
-            NautilusDataType::Instrument,
-            NautilusDataType::QuoteTick,
-            NautilusDataType::TradeTick,
-            NautilusDataType::OrderBookDelta,
-            NautilusDataType::OrderBookDepth,
-            NautilusDataType::Bar,
-            NautilusDataType::FundingRateUpdate,
-        ] {
-            assert!(data_types.contains(&streamed), "{streamed} not streamed");
-        }
-        assert!(
-            !data_types
-                .iter()
-                .any(|t| matches!(t, NautilusDataType::Custom { .. })),
-            "{data_types:?}"
+        let streamed: HashSet<NautilusDataType> =
+            streaming.data_types.unwrap().into_iter().collect();
+        assert_eq!(
+            streamed,
+            HashSet::from([
+                NautilusDataType::Instrument,
+                NautilusDataType::QuoteTick,
+                NautilusDataType::TradeTick,
+                NautilusDataType::OrderBookDelta,
+                NautilusDataType::OrderBookDepth,
+                NautilusDataType::Bar,
+                NautilusDataType::MarkPriceUpdate,
+                NautilusDataType::IndexPriceUpdate,
+                NautilusDataType::FundingRateUpdate,
+            ])
         );
         assert_eq!(streaming.record_types, None);
         assert_eq!(streaming.record_filters, None);

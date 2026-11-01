@@ -63,10 +63,11 @@ that none is denied.
 
 On the time exit of the tests (`common::trades`, `TIME_EXIT`: EMA 1/2 on
 1-HOUR-MID internal bars, 10 shares, the EMA's stop loss of 50 bps and
-take profit of 100 bps, held 4 hours, Xetra's session, run from 10:00, 3
-EUR commission) it prints `Orders: 4` (the entry, its two legs, the
-close), `PnL (total): 36.000000` (42.00 without commission, less 2 filled
-orders × 3 EUR) and a final balance of `10036.00 EUR` (`backtest_commission_per_order.rs`).
+take profit of 100 bps, held 4 hours, Xetra's session, run from 10:00, a
+commission rate of 2%) it prints `Orders: 4` (the entry, its two legs, the
+close), `Commission: 249.100000` (2% of the two fills, 6,206.50 and
+6,248.50 EUR) and a final balance of `9792.90 EUR` (42.00 without
+commission, less the 249.10) (`backtest_commission_rate.rs`).
 
 ## The entry point
 
@@ -271,7 +272,7 @@ position mode `live` requires). `main` passes `venue_oms_type` as
 With an unset strategy OMS, Nautilus takes the venue's: two
 overlapping buys make one position at their average on a netting venue,
 two positions on a hedging one (`backtest_netting_venue.rs`,
-`backtest_hedging_venue.rs`).
+`backtest_ic_hedging.rs`).
 
 **Several venues.** A strategy reading one venue's data and trading on
 another (CME gold's book on `GLBX`, IC's gold on `ICMARKETS`) gets a
@@ -369,8 +370,7 @@ instrument among its `instrument_ids`, and the catalog decides. Nautilus replays
 with the other data, in time order: to the instrument's venue, and to the
 data engine, which publishes them to a strategy subscribed with
 `subscribe_book_depth` (`on_book_depth`) and, the subscription managed,
-keeps the cache's book (`cache.order_book`) as the last snapshot
-(`backtest_book_depth.rs`).
+keeps the cache's book (`cache.order_book`) as the last snapshot.
 
 An instrument read for its book alone has its bars left out: when none of
 the series its bars are built from is stored but its book is (CME gold's
@@ -538,8 +538,7 @@ order fills at most the close's share of the minute's volume at the close
 and the rest one tick worse (0.0001 on SXR8). Outside Xetra's continuous
 trading most TRADES bars have volume 0 (they carry the last trade price):
 such a minute sets only the last price, and an order on it fills against
-the book the last traded minute left. `backtest_ib_minute_bars.rs` and
-Verified on IB data.
+the book the last traded minute left. Verified on IB data.
 
 IB's BID, ASK and MID bars are not stored: they have volume 0, and the
 matching engine takes a bar quote of size zero for an empty side
@@ -557,7 +556,7 @@ Known limits of fills on quotes:
 
 - **Resting orders** (stop, limit) are checked once per quote, every
   minute, never against the bars: a stop fills on the first minute quote
-  crossing it (`backtest_stop.rs`), but one the price crosses and leaves
+  crossing it (`backtest_ema_exits.rs`), but one the price crosses and leaves
   within a minute fills only if a minute's closing quote crosses it.
 - **Missing quotes.** A minute without a quote fills on the last earlier
   one, silently, stale by the gap (overnight, at the open); with no quote
@@ -831,8 +830,8 @@ window (see No check before the run). The stored funding reaches the
 last funding time before the catalog fill ran, but an X-Perp's starts
 only about 3 months before its first fill (all OKX keeps,
 `data/okx/README.md`): use the swap for longer studies.
-`backtest_okx_swap_funding.rs` and `backtest_okx_xperp_funding.rs` check a
-long paying and receiving at two funding times.
+`backtest_okx_swap_funding.rs` checks a long paying and receiving at two
+funding times.
 
 ### Fills on candles
 
@@ -1350,20 +1349,19 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     move the EMAs nor trade; overnight, without quotes, there are no bars),
     `backtest_without_session.rs` (without a session every bar counts, the
     one spanning midnight included);
-  - the costs: `backtest_commission_per_order.rs` (charged on each filled
-    order, not on the legs cancelled), `backtest_commission_rate.rs` (each
-    fill charged the rate on its value, and the report's costs: the half
-    spread of each fill, the gross PnL), `backtest_trade_size_off_grid.rs`
-    (10.5 shares trade as 10);
+  - the costs: `backtest_commission_rate.rs` (each fill charged the rate
+    on its value, and the report's costs: the half spread of each fill,
+    the gross PnL), `backtest_trade_size_off_grid.rs`
+    (10.4 shares trade as 10);
   - a wave over days, on which the EMA 5/15 crosses several times:
     `backtest_max_drawdown.rs` checks that the result's `stats_returns`
-    hold `Max Drawdown`, the largest fall from a peak of the equity
-    compounded over its returns series.
+    hold `Max Drawdown`, negative (Nautilus' `MaxDrawdown` computes it
+    over the returns series).
   - `backtest_catalog_gaps.rs`: no check of ours before a run: the time
     exit's quotes in two files with a sliver between them, as a live node
     promotes them, trade as one file; a window reaching past the stored
     quotes gets the bars of what is stored; a catalog without quotes runs
-    with no bar; a dataset build of a day replays through a sliver and
+    to completion; a dataset build of a day replays through a sliver and
     stores its 24 rows.
   - Streamed data, in the live test binary (`tests/live/streaming.rs`, a
     stub node in a child process, promoting every second rather than
@@ -1378,24 +1376,14 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   orders of a chosen side and size, are tested with a recording strategy
   (`tests/common/recorder.rs`)
   that subscribes through `strategy::warmup` as a real one does in a
-  backtest, records every bar it gets and can rest a sell stop or send
-  market orders:
+  backtest, records every bar it gets and can send market orders:
   - `backtest_bars.rs` and `backtest_bars_on_close.rs` (noise, a mid of
     its own every minute; runs from 12:30 and from 13:00): every bar has
     the open, high, low and close worked out from its hour's minute quotes
     from the run start on: off an hour the first bar holds the half hour
     replayed, on a close the first bar is the next, whole.
-  - `backtest_stop.rs` (a fall of 0.50 a minute): a sell stop rested on
-    the 13:00 bar fills at the bid of the first minute quote at or below
-    it, 13:39:59.999999999, not at the next bar.
   - `backtest_quote_gap.rs` (a mid of its own every minute, but no quote
     in two hours of the run): neither hour yields a bar; every other bar is as worked out from its hour's quotes.
-  - `backtest_ib_minute_bars.rs`: `fill_catalog` stores the one series
-    `catalog_series` lists for a composite
-    `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, minute bars stamped
-    at their close with a volume, as IB gives TRADES bars; the hour bars
-    have the prices of their minutes, and two market orders fill in full at
-    the close of the minute closing their decision bar (see Fills).
   - `backtest_composite_bars.rs`: `fill_catalog` stores the external
     minute bars a fake source returns for a composite
     `1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL` bar type, and a recorder
@@ -1404,20 +1392,14 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_okx_swap.rs`: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` with
     margins of 1, on minute bars stamped as `fill-catalog` stores OKX's
     candles (open, close). A recorder on the composite hour
-    bars buys 2 contracts on the first and sells 3 on the second: each
-    hour bar holds the minutes opening in its hour (a minute moved by one
-    shows in a high or a low), the fills at the close of the hour's last
-    minute, 0.05% on each fill's value, at 1x the short left open locking
-    its whole value at entry, and `Spread: n/a` in the report's costs.
+    bars gets each hour bar holding the minutes opening in its hour (a
+    minute moved by one shows in a high or a low); a run on the candles
+    alone, a buy on the first hour bar, reports `Spread: n/a` in its
+    costs.
   - `backtest_okx_swap_funding.rs`: the same swap held long across two
     funding times with stored funding: a Nautilus funding settlement at
     each, -0.2 USDT at +0.01% on 2,000 USDT, +0.404 at -0.02% on 2,020, in
     the final balance.
-  - `backtest_okx_xperp.rs`: the same bars and orders on
-    BTC-USD_UM_XPERP-310404.OKX, a `CryptoFuture` of 0.0001 BTC a contract
-    settled in USD, with margins of 1: 200 contracts bought and 300 sold,
-    the commission and PnL in USD at two decimals, at 10x the short left
-    open locking a tenth of its value.
   - `backtest_ic_quotes.rs`: XAUUSD.ICMARKETS, a `CurrencyPair` with
     IC's margins on the demo (1 / 30), unleveraged, on irregular millisecond quotes sized 10,000 as IC's fill
     stores them, written through `fill_catalog` (`common::ic`). A recorder
@@ -1430,11 +1412,6 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
   - `backtest_ic_hedging.rs`: on the same quotes, the venue
     `venue_oms_type(ICMARKETS)`, two buys of 10 oz on two bars are two
     open positions, at 4006.10 and 4012.15.
-  - `backtest_book_depth.rs`: CME gold, GC.v.0.GLBX, a `FuturesContract`
-    with book depth snapshots of 10 levels and no quotes (`common::glbx`):
-    a strategy subscribed to its book depth, managed, gets the snapshots
-    of the run's window in order, the cache's book holding each as it
-    arrives; gold's MID bars, without a source, are left out.
   - `backtest_book_deltas_and_custom_data.rs`: CME gold's book deltas
     (an event before the run, an event of two deltas, one of one) and its
     `Imbalance`s, a custom data type of the tests' (`common::glbx`),
@@ -1494,10 +1471,9 @@ on a weekend, PnL -111.80, a final balance of 9888.20 EUR instead of
     at 10:00 and replayed before the timer closing the hour, and a minute
     reaching 100,120 filling the take profit at its limit and the stop at
     its trigger. Orders above the
-    instrument's largest are denied, logged, and the denial drops each
-    decision, unsettled: the run ends before the first decision's horizon, so no
-    time alert can have, and no decision is open at the stop
-    (`Targets::open_decisions`). Over
+    instrument's largest are denied, logged, and leave each decision
+    unsettled, without a row: the run ends before the first decision's
+    horizon and time limit. Over
     two days of a random walk, the rows are the same from a dataset run
     and from a trading run, every decision whose time limit passes before
     the end settled on 10M USD, while the purge leaves the cache a few

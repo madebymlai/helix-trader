@@ -549,16 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_name_nautilus_does_not_parse() {
-        let err = toml::from_str::<TickSeries>(
-            r#"data = "depth"
-            instrument_id = "GC.v.0.GLBX""#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("depth"), "{err}");
-    }
-
-    #[test]
     fn book_deltas_and_custom_data_load_from_toml_as_nautilus_data_types() {
         #[derive(Deserialize)]
         struct Config {

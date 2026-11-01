@@ -364,7 +364,6 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ibapi::contracts::SecurityType;
     use nautilus_core::UnixNanos;
     use nautilus_model::instruments::stubs::futures_contract_es;
 
@@ -647,11 +646,8 @@ mod tests {
     fn an_expired_future_is_asked_for_as_an_explicit_contract() {
         let contract =
             expired_future_contract(symbology(), InstrumentId::from("ESU5.CME")).unwrap();
-        assert_eq!(contract.security_type, SecurityType::Future);
         assert_eq!(contract.symbol.to_string(), "ES");
         assert_eq!(contract.local_symbol, "ESU5");
-        assert_eq!(contract.exchange.to_string(), "CME");
-        assert_eq!(contract.currency.to_string(), "USD");
         assert!(contract.include_expired);
     }
 

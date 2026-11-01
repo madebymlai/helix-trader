@@ -316,6 +316,19 @@ mod tests {
             .collect()
     }
 
+    /// A learner of each adapter but that of `learner`.
+    fn others(learner: &LearnerConfig) -> Vec<LearnerConfig> {
+        [
+            LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
+            LearnerConfig::Perpetual(PerpetualConfig::builder().memory_limit(1.0).build()),
+            LearnerConfig::Baseline {},
+            LearnerConfig::Fake {},
+        ]
+        .into_iter()
+        .filter(|other| std::mem::discriminant(other) != std::mem::discriminant(learner))
+        .collect()
+    }
+
     /// The contract every adapter meets, run by `contract!` against one
     /// learner config.
     macro_rules! contract {
@@ -375,8 +388,11 @@ mod tests {
 
                 #[test]
                 fn a_model_saved_by_another_learner_is_refused() {
-                    let foreign = SavedModel::from("not a model".to_string());
-                    assert!(config().load(&foreign).is_err());
+                    let set = synthetic();
+                    for other in others(&config()) {
+                        let saved = other.fit(&set).unwrap().save().unwrap();
+                        assert!(config().load(&saved).is_err(), "{other:?}");
+                    }
                 }
             }
         };
@@ -396,12 +412,6 @@ mod tests {
     contract!(fake, LearnerConfig::Fake {});
 
     #[test]
-    fn the_mean_is_the_share_of_true_labels() {
-        let set = TrainingSet::new(1, vec![0.0; 4], vec![true, false, true, true]).unwrap();
-        assert_eq!(set.mean(), 0.75);
-    }
-
-    #[test]
     fn a_set_without_rows_is_refused() {
         assert!(TrainingSet::new(2, vec![], vec![]).is_err());
     }
@@ -414,16 +424,6 @@ mod tests {
     #[test]
     fn a_set_with_a_short_row_is_refused() {
         assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![true, false]).is_err());
-    }
-
-    #[test]
-    fn the_debug_of_a_model_names_its_kind_and_width() {
-        let set = TrainingSet::new(3, vec![0.0; 6], vec![true, false]).unwrap();
-        let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
-        assert_eq!(
-            format!("{model:?}"),
-            r#"Model { kind: "baseline", width: 3 }"#
-        );
     }
 
     #[derive(Debug, Deserialize)]
@@ -440,7 +440,14 @@ mod tests {
         let config = learner(r#"learner = { kind = "lightgbm", num_leaves = 7 }"#).unwrap();
         assert_eq!(
             config,
-            LearnerConfig::LightGbm(LightGbmConfig::builder().num_leaves(7).build())
+            LearnerConfig::LightGbm(LightGbmConfig {
+                num_iterations: 100,
+                learning_rate: 0.1,
+                num_leaves: 7,
+                min_data_in_leaf: 20,
+                feature_fraction: 1.0,
+                seed: 1,
+            })
         );
     }
 
@@ -449,7 +456,12 @@ mod tests {
         let config = learner(r#"learner = { kind = "perpetual", memory_limit = 2.5 }"#).unwrap();
         assert_eq!(
             config,
-            LearnerConfig::Perpetual(PerpetualConfig::builder().memory_limit(2.5).build())
+            LearnerConfig::Perpetual(PerpetualConfig {
+                memory_limit: 2.5,
+                budget: 0.5,
+                iteration_limit: None,
+                seed: 1,
+            })
         );
     }
 

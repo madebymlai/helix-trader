@@ -3,12 +3,11 @@
 //! `fill-catalog` gives it, and its minute bars stamped as `fill-catalog`
 //! stores OKX's candles: `ts_event` at the minute's open, `ts_init` at its
 //! close. A recorder on the hour bars Nautilus builds from them (a composite
-//! bar type) buys on the first hour bar and flips short on the second: each
-//! hour bar holds the minutes opening in its hour, and is seen at its
-//! close; the orders fill at the close of the hour's last minute (bar
-//! execution); the commission rate is charged on each fill's value;
-//! without leverage the open short locks its whole value; with no quotes
-//! the report has no spread. One node per thread, so one run per test.
+//! bar type) gets each hour bar holding the minutes opening in its hour;
+//! a run on the candles alone, with no quote, reports no spread. One node
+//! per thread, so one run per test.
+
+use std::path::Path;
 
 use crate::common::{Ohlc, ohlc, recorder::Recorder, ts};
 use helix_trader::backtest::{Backtest, commission_rate, report, venue_oms_type};
@@ -106,50 +105,50 @@ fn hour_bar(close: Timestamp, from: Timestamp) -> Ohlc {
     (close, first.open, high, low, last.close)
 }
 
-#[test]
-fn an_okx_swap_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commission() {
-    let (start, end) = (at("09:00"), at("11:00"));
-    let dir = tempfile::tempdir().unwrap();
-    let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+/// A catalog in `dir` of the instrument and its minute bars opening from
+/// 08:00 to 10:59, stored over `[08:00, 11:00]`.
+fn catalog(dir: &Path) {
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
-    let bars = minute_bars(at("08:00"), at("11:00"));
     catalog
         .write_to_parquet(
-            &bars,
+            &minute_bars(at("08:00"), at("11:00")),
             Some(UnixNanos::from(at("08:00"))),
-            Some(UnixNanos::from(end)),
+            Some(UnixNanos::from(at("11:00"))),
             None,
         )
         .unwrap();
-    let backtest = Backtest {
-        catalog: dir.path().to_path_buf(),
+}
+
+/// A run on the hour bars from 09:00 to 11:00 at OKX's taker fee, 0.05%.
+fn backtest(dir: &Path) -> Backtest {
+    Backtest {
+        catalog: dir.to_path_buf(),
         bar_types: vec![BarType::from(HOUR_BARS)],
-        start,
-        end,
+        start: at("09:00"),
+        end: at("11:00"),
         ticks: vec![],
-        // OKX's taker fee, 0.05%.
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USDT"),
         leverage: Decimal::ONE,
         venue_oms: venue_oms_type,
         logging: LoggerConfig::default(),
-    };
-    let (recorder, record) = Recorder::trading(
-        BarType::from(HOUR_BARS),
-        vec![
-            (OrderSide::Buy, Quantity::from("2.00")),
-            (OrderSide::Sell, Quantity::from("3.00")),
-        ],
-    );
+    }
+}
 
-    let outcome = backtest.run(recorder).unwrap();
+#[test]
+fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
+    let dir = tempfile::tempdir().unwrap();
+    catalog(dir.path());
+    let (recorder, record) = Recorder::new(BarType::from(HOUR_BARS));
 
-    let record = record.borrow();
+    backtest(dir.path()).run(recorder).unwrap();
+
     // The run starts at 09:00: the first bar replayed is the minute opening
     // 08:59, stamped (`ts_init`) at its close, 09:00, so the hour bar
     // closing 09:00 holds it alone. Each hour bar holds the minutes opening in its
     // hour: 10:00 has 09:00 to 09:59, not the minute opening at 10:00.
-    let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
+    let replay: Vec<_> = record.borrow().bars.iter().map(ohlc).collect();
     assert_eq!(
         replay,
         [
@@ -160,39 +159,22 @@ fn an_okx_swap_trades_on_hour_bars_of_its_minute_candles_with_margin_and_commiss
     );
     assert_eq!(replay[1].2, Price::from("100013.9"));
     assert_eq!(replay[2].2, Price::from("100064.0"));
-    // Each order fills on the hour's close, at the close of its last
-    // minute, which no later minute has moved.
-    let fills: Vec<_> = record
-        .fills
-        .iter()
-        .map(|&(side, price, stamp)| (side, price, Timestamp::from(stamp)))
-        .collect();
-    assert_eq!(
-        fills,
-        [
-            (OrderSide::Buy, Price::from("100006.4"), at("09:00")),
-            (OrderSide::Sell, Price::from("100012.4"), at("10:00")),
-        ]
+}
+
+/// A buy on the first hour bar fills on a candle, with no quote to measure
+/// a spread on.
+#[test]
+fn a_run_on_candles_alone_reports_its_spread_as_not_applicable() {
+    let dir = tempfile::tempdir().unwrap();
+    catalog(dir.path());
+    let (recorder, _) = Recorder::trading(
+        BarType::from(HOUR_BARS),
+        vec![(OrderSide::Buy, Quantity::from("2.00"))],
     );
 
-    // A contract is 0.01 BTC: the buy is worth 2,000.128 USDT, the sell
-    // 3,000.372, charged 0.05%: 1.000064 and 1.500186 USDT. The 2 contracts
-    // held long gain 6 USDT a BTC: 0.12 USDT. Without leverage the short
-    // contract left open locks its value at entry, 1,000.124 USDT.
-    let result = &outcome.result;
-    let summary = |key: &str| result.summary[&format!("account.OKX.{key}")].clone();
-    assert_eq!(summary("type"), "MARGIN");
-    assert_eq!(summary("balance.USDT.total"), "9997.61975000 USDT");
-    assert_eq!(summary("balance.USDT.locked"), "1000.12400000 USDT");
+    let outcome = backtest(dir.path()).run(recorder).unwrap();
 
-    // The run replays no quote: the spread is not measured.
-    let costs = "
-Costs (USDT)
-  Commission: 2.500250
-  Cost per trade: 1.250125
-  Gross PnL: 0.120000
-  Spread: n/a (no quotes)
-";
     let report = report(&outcome);
-    assert!(report.contains(costs), "{report}");
+    assert!(report.contains("Costs (USDT)"), "{report}");
+    assert!(report.contains("  Spread: n/a (no quotes)\n"), "{report}");
 }

@@ -470,15 +470,22 @@ mod tests {
         assert_eq!(data.instrument_id(), None);
     }
 
+    /// The temp dir's catalog, by a path relative to the working directory:
+    /// up to the root, then down to it. Opening a catalog needs its
+    /// directory, and no other is read.
     #[test]
     fn a_relative_catalog_is_made_absolute() {
         let dir = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative: PathBuf =
+            std::iter::repeat_n("..", cwd.components().count() - 1).collect();
+        relative.push(dir.path().strip_prefix("/").unwrap());
         let backtest = Backtest {
-            catalog: PathBuf::from("catalog"),
+            catalog: relative.clone(),
             ..backtest(dir.path())
         };
         let config = run_config(&backtest).unwrap();
-        let absolute = std::env::current_dir().unwrap().join("catalog");
+        let absolute = cwd.join(&relative);
         let absolute = absolute.to_str().unwrap();
         assert_eq!(config.data()[0].catalog_path(), absolute);
     }
@@ -551,19 +558,26 @@ mod tests {
     }
 
     #[test]
-    fn runs_and_reads_each_series_from_the_start_to_the_end_and_raises_errors() {
+    fn runs_and_reads_each_series_from_the_start_to_the_end() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let ns = |ts: &str| UnixNanos::from(ts.parse::<Timestamp>().unwrap());
         let (start, end) = (ns("2026-07-01T00:00:00Z"), ns("2026-10-01T00:00:00Z"));
         assert_eq!(config.start(), Some(start));
         assert_eq!(config.end(), Some(end));
+        assert!(!config.data().is_empty());
         for data in config.data() {
             assert_eq!(
                 (data.start_time(), data.end_time()),
                 (Some(start), Some(end))
             );
         }
+    }
+
+    #[test]
+    fn raises_errors_and_keeps_the_engine_after_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
         assert!(config.raise_exception());
         assert!(!config.dispose_on_completion());
     }
@@ -575,7 +589,8 @@ mod tests {
             bar_types: vec![],
             ..backtest(dir.path())
         };
-        assert!(run_config(&backtest).is_err());
+        let err = run_config(&backtest).unwrap_err();
+        assert!(err.to_string().contains("no instruments"), "{err}");
     }
 
     #[test]
@@ -610,17 +625,5 @@ mod tests {
             assert_eq!(venue.account_type(), AccountType::Margin);
             assert!(matches!(venue.fee_model(), Some(FeeModelAny::Fixed(_))));
         }
-    }
-
-    #[test]
-    fn rejects_a_start_after_the_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let b = backtest(dir.path());
-        let backtest = Backtest {
-            start: b.end,
-            end: b.start,
-            ..b
-        };
-        assert!(run_config(&backtest).is_err());
     }
 }

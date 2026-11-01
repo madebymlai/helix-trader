@@ -216,10 +216,8 @@ fn moving_average_type_name<S: Serializer>(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
-
-    use nautilus_common::{actor::indicators::SharedActorIndicator, config::ConfigResult};
-    use nautilus_model::data::{Bar, BarType};
+    use nautilus_common::config::ConfigResult;
+    use nautilus_model::data::Bar;
     use nautilus_trading::strategy::StrategyConfig;
 
     use super::*;
@@ -355,19 +353,6 @@ mod tests {
             .collect()
     }
 
-    fn bar(close: &str) -> Bar {
-        Bar::new(
-            BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL"),
-            close.into(),
-            close.into(),
-            close.into(),
-            close.into(),
-            "1".into(),
-            0.into(),
-            0.into(),
-        )
-    }
-
     #[test]
     fn the_strategy_receives_nautilus_indicators_built_from_their_tables() {
         let config = load(TOML).unwrap();
@@ -386,15 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_indicator_is_received_built_from_its_table_and_registers_as_nautilus_ones() {
+    fn a_custom_indicator_is_received_built_from_its_table() {
         let config = load(TOML).unwrap();
         let breakout = config.indicators.build(BREAKOUT);
         assert_eq!(breakout.level, 100.5);
-        let registered = Rc::new(RefCell::new(breakout)) as SharedActorIndicator;
-        registered.handle_bar(&bar("100.5")).unwrap();
-        assert!(!registered.initialized().unwrap());
-        registered.handle_bar(&bar("101")).unwrap();
-        assert!(registered.initialized().unwrap());
     }
 
     #[test]

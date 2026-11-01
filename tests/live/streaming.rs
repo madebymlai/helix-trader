@@ -24,7 +24,7 @@ use std::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    process::{Child, Command, Output},
+    process::{Child, Command, ExitStatus, Output},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -75,7 +75,7 @@ const ROOT: &str = "HELIX_STREAMING_ROOT";
 /// config `Recording` gives in place of its daily one.
 const PROMOTION_MS: &str = "HELIX_STREAMING_PROMOTION_MS";
 /// When the child's node stops itself, in milliseconds after it starts;
-/// unset, it runs until killed.
+/// unset, it runs until interrupted (`interrupt`) or killed.
 const STOP_MS: &str = "HELIX_STREAMING_STOP_MS";
 /// The number of the child's first tick.
 const FIRST_SEQ: &str = "HELIX_STREAMING_FIRST_SEQ";
@@ -86,33 +86,40 @@ const WRITE_BACK: &str = "HELIX_STREAMING_WRITE_BACK";
 /// How long a child gets to do what the test waits for.
 const PATIENCE: Duration = Duration::from_secs(60);
 
+/// The reader reads until the catalog has grown under it and holds a few
+/// bars, then the node is interrupted.
 #[test]
 fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(6_000), 0);
-    let mut prefixes_while_running = Vec::new();
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut prefixes_while_running: Vec<Read> = Vec::new();
     let deadline = Instant::now() + PATIENCE;
-    while node.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "the node did not stop");
+    loop {
         let read = Read::of(dir.path());
-        if node.try_wait().unwrap().is_none() && read.quotes > 0 {
+        assert!(node.try_wait().unwrap().is_none(), "the node stopped");
+        let grown = prefixes_while_running
+            .first()
+            .is_some_and(|first| first.quotes < read.quotes);
+        let bars = read.bars;
+        if read.quotes > 0 {
             prefixes_while_running.push(read);
         }
+        if grown && bars >= 3 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the catalog did not grow under the reader to 3 bars while the node ran: \
+             {prefixes_while_running:?}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(node.wait().unwrap().success());
-    let mut counts: Vec<u64> = prefixes_while_running.iter().map(|r| r.quotes).collect();
-    counts.dedup();
-    assert!(
-        counts.len() >= 2,
-        "the catalog did not grow under the reader while the node ran: {counts:?}"
-    );
+    assert!(interrupt(&mut node).success());
     let last = Read::of(dir.path());
     for read in &prefixes_while_running {
         assert!(read.quotes <= last.quotes && read.trades <= last.trades);
         assert!(read.depths <= last.depths && read.bars <= last.bars);
     }
-    assert!(last.bars >= 3, "{} bars", last.bars);
 }
 
 #[test]
@@ -253,12 +260,8 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
 #[test]
 fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(5_000), 0);
-    assert!(node.wait().unwrap().success());
-    let promoted = catalog(dir.path())
-        .get_intervals(&NautilusDataType::QuoteTick.into(), Some(INSTRUMENT_ID))
-        .unwrap();
-    assert!(promoted.len() >= 2, "one promotion: {promoted:?}");
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let (first, last) = streamed_span(dir.path());
 
     let backtest = backtest(dir.path(), first, last);
@@ -280,12 +283,8 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
 #[test]
 fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(5_000), 0);
-    assert!(node.wait().unwrap().success());
-    let promoted = catalog(dir.path())
-        .get_intervals(&NautilusDataType::QuoteTick.into(), Some(INSTRUMENT_ID))
-        .unwrap();
-    assert!(promoted.len() >= 2, "one promotion: {promoted:?}");
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let (first, last) = streamed_span(dir.path());
 
     let dataset = dataset(dir.path(), first, last);
@@ -317,7 +316,7 @@ fn streamed_node() {
 
 /// Runs the node of `root` streaming as `Recording` configures it, but
 /// promoting every `promotion_interval`, until `stop_after`, or until
-/// killed.
+/// interrupted or killed.
 async fn run_node(
     root: &Path,
     promotion_interval: Duration,
@@ -646,6 +645,41 @@ fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
         } else if now > first {
             return;
         }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Stops `node` as Ctrl-C would, its signal handler stopping it cleanly:
+/// how it exited.
+fn interrupt(node: &mut Child) -> ExitStatus {
+    let status = Command::new("kill")
+        .args(["-INT", &node.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Some(exit) = node.try_wait().unwrap() {
+            return exit;
+        }
+        assert!(Instant::now() < deadline, "the node did not stop on SIGINT");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Interrupts `node` (`interrupt`) once it has promoted `files` files of
+/// quotes into the catalog of `root`: how it exited.
+fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let promoted = catalog(root)
+            .get_intervals(&NautilusDataType::QuoteTick.into(), Some(INSTRUMENT_ID))
+            .unwrap();
+        if promoted.len() >= files {
+            return interrupt(node);
+        }
+        assert!(Instant::now() < deadline, "promoted {promoted:?}");
+        assert!(node.try_wait().unwrap().is_none(), "the node stopped");
         std::thread::sleep(Duration::from_millis(100));
     }
 }

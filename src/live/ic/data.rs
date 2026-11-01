@@ -95,6 +95,7 @@ impl IcDataClient {
             url,
             connection.credential.clone(),
             instrument_ids,
+            get_atomic_clock_realtime(),
         )
     }
 
@@ -103,6 +104,7 @@ impl IcDataClient {
         url: String,
         credential: IcCredential,
         instrument_ids: Vec<InstrumentId>,
+        clock: &'static AtomicTime,
     ) -> Self {
         Self {
             client_id,
@@ -113,7 +115,7 @@ impl IcDataClient {
             session_tasks: TaskGroup::new(),
             command_tasks: TaskGroup::new(),
             data_sender: get_data_event_sender(),
-            clock: get_atomic_clock_realtime(),
+            clock,
         }
     }
 
@@ -556,22 +558,32 @@ mod tests {
     type Events = mpsc::UnboundedReceiver<DataEvent>;
 
     /// A client of XAUUSD and EURUSD on the peer `script` plays, connected,
-    /// and the node's data events.
+    /// the node's data events, the frames received and its token file's
+    /// directory.
     async fn connected(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
-    ) -> (IcDataClient, Events, Received) {
+    ) -> (IcDataClient, Events, Received, tempfile::TempDir) {
+        connected_at(script, get_atomic_clock_realtime()).await
+    }
+
+    /// As `connected`, the client's clock `clock`.
+    async fn connected_at(
+        script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
+        clock: &'static AtomicTime,
+    ) -> (IcDataClient, Events, Received, tempfile::TempDir) {
         let (url, received) = testing::start(script);
         let (tx, events) = mpsc::unbounded_channel();
         replace_data_event_sender(tx);
-        let (credential, _tokens) = testing::credential();
+        let (credential, tokens) = testing::credential();
         let mut client = IcDataClient::with_endpoint(
             ClientId::from("ICMARKETS"),
             url,
             credential,
             vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
+            clock,
         );
         client.connect().await.unwrap();
-        (client, events, received)
+        (client, events, received, tokens)
     }
 
     async fn next_event(events: &mut Events) -> DataEvent {
@@ -646,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn connecting_sends_the_instruments_to_the_node_on_icmarkets() {
-        let (mut client, mut events, _) = connected(peer(vec![], vec![])).await;
+        let (mut client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
 
         let mut ids = Vec::new();
         for _ in 0..2 {
@@ -666,9 +678,13 @@ mod tests {
         assert!(client.is_disconnected());
     }
 
+    /// The client's clock stopped 210 ms after the captured spot event.
     #[tokio::test]
     async fn subscribed_quotes_come_from_the_spot_events_at_their_time() {
-        let (mut client, mut events, received) = connected(peer(vec![], vec![])).await;
+        let received_at = UnixNanos::new(1_793_017_476_000_000_000);
+        let clock = Box::leak(Box::new(AtomicTime::new(false, received_at)));
+        let (mut client, mut events, received, _tokens) =
+            connected_at(peer(vec![], vec![]), clock).await;
         skip_instruments(&mut events).await;
 
         client.subscribe_quotes(subscribe(XAUUSD)).unwrap();
@@ -680,7 +696,7 @@ mod tests {
         assert_eq!(quote.bid_price, Price::from("4017.96"));
         assert_eq!(quote.ask_price, Price::from("4018.01"));
         assert_eq!(quote.ts_event, UnixNanos::new(1_793_017_475_790_000_000));
-        assert!(quote.ts_init >= quote.ts_event);
+        assert_eq!(quote.ts_init, received_at);
         assert_eq!(quote.bid_size, Quantity::from(10_000));
         let asked: Vec<ProtoOaSubscribeSpotsReq> = received_of(&received);
         assert_eq!(asked.len(), 1);
@@ -691,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unsubscription_ends_the_spot_subscription() {
-        let (mut client, mut events, received) = connected(peer(vec![], vec![])).await;
+        let (mut client, mut events, received, _tokens) = connected(peer(vec![], vec![])).await;
         skip_instruments(&mut events).await;
         client.subscribe_quotes(subscribe(XAUUSD)).unwrap();
         next_quote(&mut events).await;
@@ -773,7 +789,7 @@ mod tests {
     #[tokio::test]
     async fn a_quote_request_is_answered_from_the_tick_history_of_its_window() {
         let (s, bids, asks) = window_ticks();
-        let (mut client, mut events, _) = connected(peer(bids, asks)).await;
+        let (mut client, mut events, _, _tokens) = connected(peer(bids, asks)).await;
         skip_instruments(&mut events).await;
         let asked = request(
             Some(at("2026-10-01T00:00:00Z")),
@@ -801,7 +817,7 @@ mod tests {
     #[tokio::test]
     async fn a_limit_keeps_the_newest_quotes() {
         let (s, bids, asks) = window_ticks();
-        let (mut client, mut events, _) = connected(peer(bids, asks)).await;
+        let (mut client, mut events, _, _tokens) = connected(peer(bids, asks)).await;
         skip_instruments(&mut events).await;
 
         client
@@ -848,7 +864,7 @@ mod tests {
             }
             peer(vec![], vec![])(0, request)
         };
-        let (mut client, mut events, _) = connected(script).await;
+        let (mut client, mut events, _, _tokens) = connected(script).await;
         skip_instruments(&mut events).await;
 
         client
@@ -947,7 +963,7 @@ mod tests {
             tick(s + 2_000, 400_060_000),
             tick(s + hour + 30 * minute + 1_000, 400_070_000),
         ];
-        let (client, mut events, received) = connected(peer(bids, asks)).await;
+        let (client, mut events, received, _tokens) = connected(peer(bids, asks)).await;
         skip_instruments(&mut events).await;
         let dir = tempfile::tempdir().unwrap();
         let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
@@ -1011,7 +1027,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_instrument_request_is_answered_with_the_loaded_instrument_written_back_once() {
-        let (client, mut events, _) = connected(peer(vec![], vec![])).await;
+        let (client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
         skip_instruments(&mut events).await;
         let dir = tempfile::tempdir().unwrap();
         let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
@@ -1077,7 +1093,7 @@ mod tests {
             actions.extend(answer(connection, request));
             actions
         };
-        let (mut client, mut events, received) = connected(script).await;
+        let (mut client, mut events, received, _tokens) = connected(script).await;
         skip_instruments(&mut events).await;
         client.subscribe_quotes(subscribe(XAUUSD)).unwrap();
         testing::wait_until(&received, |frames| {
@@ -1111,7 +1127,7 @@ mod tests {
             }
             actions
         };
-        let (mut client, mut events, received) = connected(script).await;
+        let (mut client, mut events, received, _tokens) = connected(script).await;
         skip_instruments(&mut events).await;
 
         client.subscribe_quotes(subscribe(XAUUSD)).unwrap();
@@ -1135,16 +1151,17 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// The renewal is answered 300 ms after its request, after `stop`.
+    /// The renewal is answered once the test opens the gate: after `stop`,
+    /// the disconnect under way.
     #[tokio::test]
     async fn a_token_renewal_in_flight_at_stop_is_saved_by_the_disconnect() {
+        let (open, gate) = std::sync::mpsc::channel::<()>();
         let mut answer = peer(vec![], vec![]);
         let (url, received) = testing::start(move |connection, request| {
             if request.payload_type == ProtoOaRefreshTokenReq::TYPE {
-                return vec![testing::slow_renewal_answer(
-                    request,
-                    Duration::from_millis(300),
-                )];
+                // Opened by the test, or closed by its end.
+                let _ = gate.recv();
+                return vec![testing::renewal_answer(request)];
             }
             answer(connection, request)
         });
@@ -1156,6 +1173,7 @@ mod tests {
             url,
             credential.clone(),
             vec![InstrumentId::from(XAUUSD)],
+            get_atomic_clock_realtime(),
         );
         client.connect().await.unwrap();
         client.session().unwrap().history.renew_token();
@@ -1167,7 +1185,10 @@ mod tests {
         .await;
 
         client.stop().unwrap();
-        client.disconnect().await.unwrap();
+        let (disconnected, ()) = tokio::join!(client.disconnect(), async {
+            open.send(()).unwrap();
+        });
+        disconnected.unwrap();
 
         assert_eq!(
             testing::stored_access_token(&credential),
@@ -1178,7 +1199,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_quote_request_without_a_start_is_refused() {
-        let (mut client, _events, _) = connected(peer(vec![], vec![])).await;
+        let (mut client, _events, _, _tokens) = connected(peer(vec![], vec![])).await;
 
         let err = client
             .request_quotes(request(None, at("2026-10-01T01:00:00Z"), None))
@@ -1190,7 +1211,7 @@ mod tests {
 
     #[tokio::test]
     async fn quotes_of_an_instrument_not_loaded_are_refused() {
-        let (mut client, _events, _) = connected(peer(vec![], vec![])).await;
+        let (mut client, _events, _, _tokens) = connected(peer(vec![], vec![])).await;
 
         let err = client
             .subscribe_quotes(subscribe("GBPUSD.ICMARKETS"))

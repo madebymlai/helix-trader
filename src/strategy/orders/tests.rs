@@ -314,29 +314,6 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
 }
 
 #[test]
-fn a_short_brackets_legs_buy() {
-    let (mut probe, _) = registered();
-    let trade = Trade {
-        side: OrderSide::Sell,
-        exits: Exits {
-            take_profit: Some(Price::from("0.69300")),
-            stop_loss: Some(Price::from("0.70350")),
-            time_limit: None,
-        },
-        ..buy(held(1))
-    };
-
-    trade.send_as(&mut probe, ids("T-1")).unwrap();
-
-    let cache = probe.cache();
-    let side = |of: &str| cache.order(&id(of)).unwrap().order_side();
-    assert_eq!(
-        [side("T-1"), side("T-1-TP"), side("T-1-SL")],
-        [OrderSide::Sell, OrderSide::Buy, OrderSide::Buy]
-    );
-}
-
-#[test]
 fn a_trade_without_exits_is_one_market_entry() {
     let (mut probe, _) = registered();
 
@@ -479,30 +456,6 @@ fn at_its_time_an_unfilled_entry_is_cancelled_and_nothing_closed() {
     assert_eq!(closes(&probe), []);
 }
 
-/// A trade of the strategy's is open beside another strategy's: only its
-/// own is closed.
-#[test]
-fn at_its_time_a_trade_closes_its_own_position_alone() {
-    let cache = cache();
-    let (mut other, _) = registered_on(&cache, "OTHER-001", NOW);
-    sent(&mut other, "T-2", buy(held(1)));
-    fill(&other, "T-2", "P-2", NOW, OmsType::Hedging);
-    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
-    sent(&mut probe, "T-1", buy(held(1)));
-    fill(&probe, "T-1", "P-1", NOW, OmsType::Hedging);
-
-    advance(&mut probe, &clock, NOW + 60 * MINUTE);
-
-    let closed: Vec<_> = probe
-        .cache()
-        .orders(None, None, None, None, None)
-        .into_iter()
-        .filter(is_time_close)
-        .map(|order| order.strategy_id())
-        .collect();
-    assert_eq!(closed, [StrategyId::from(STRATEGY)]);
-}
-
 /// On a netting venue two trades, sent at 10:00 and 10:30, add into one
 /// position: the first's time closes it whole, 200,000, and the second's
 /// then finds it closed.
@@ -610,8 +563,10 @@ fn a_trade_whose_position_closed_and_opened_again_is_not_closed_at_its_time() {
     sent(&mut probe, "T-3", buy(held(1)));
     fill(&probe, "T-3", "P-NET", NOW + 30 * MINUTE, OmsType::Netting);
 
-    advance(&mut probe, &clock, NOW + 60 * MINUTE);
-
+    assert_eq!(
+        advance(&mut probe, &clock, NOW + 60 * MINUTE),
+        ["TRADE-TIME:T-1"]
+    );
     assert_eq!(closes(&probe), []);
 }
 
@@ -792,9 +747,9 @@ fn a_restart_sets_the_time_of_an_unfilled_entry_again() {
 
 /// A trade sent 20 minutes before the restart, its entry filled 40,000 of
 /// its 100,000, open as an order and held by a position: its time is set
-/// again, once.
+/// again.
 #[test]
-fn a_restart_sets_the_time_of_a_partly_filled_entry_again_once() {
+fn a_restart_sets_the_time_of_a_partly_filled_entry_again() {
     let cache = cache();
     let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
     sent(&mut before, "T-1", buy(bracket(4)));

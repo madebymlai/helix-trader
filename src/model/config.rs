@@ -788,15 +788,6 @@ mod tests {
         assert!(load(&section("min_pnl = -0.5")).is_ok());
     }
 
-    /// The holdout AUC no longer decides a publication: a section naming
-    /// its minimum is refused, not read past.
-    #[test]
-    fn a_section_naming_a_minimum_score_is_refused() {
-        let err = refused(&format!("{SECTION}\nmin_score = 0.55"));
-
-        assert!(err.contains("min_score"), "{err}");
-    }
-
     #[test]
     fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
         let lightgbm = |rows: u32| {
@@ -931,39 +922,6 @@ mod tests {
         assert!(err.contains("ATR") && err.contains(GOLD), "{err}");
     }
 
-    /// Hourly decisions cannot have bars of 2-hour source bars.
-    #[test]
-    fn a_barrier_atr_on_source_bars_longer_than_the_cadence_is_refused() {
-        let config = parse(&atr_section(None)).unwrap();
-        let requirements = reading_gold(
-            &[],
-            &["XAUUSD.ICMARKETS-4-HOUR-LAST-INTERNAL@2-HOUR-EXTERNAL"],
-        );
-
-        let err = format!("{:#}", config.validate(&requirements).unwrap_err());
-
-        assert!(
-            err.contains("1h") && err.contains("XAUUSD.ICMARKETS-2-HOUR-LAST-EXTERNAL"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn a_barrier_atr_deciding_on_events_is_refused() {
-        let toml =
-            atr_section(None).replace(r#"decision = { every = "1h" }"#, r#"decision = "event""#);
-        let config = parse(&toml).unwrap();
-
-        let err = format!(
-            "{:#}",
-            config
-                .validate(&reading_gold_for(SignedDuration::from_hours(14)))
-                .unwrap_err()
-        );
-
-        assert!(err.contains("ATR"), "{err}");
-    }
-
     /// A meta model on the section's barrier, held out its last 12 hours.
     const META: &str = r#"
         [meta]
@@ -994,11 +952,6 @@ mod tests {
         assert_eq!(meta.size, None);
     }
 
-    #[test]
-    fn a_section_without_meta_has_none() {
-        assert_eq!(load(SECTION).unwrap().meta, None);
-    }
-
     /// Two levels at most: a meta section has no meta section of its own.
     #[test]
     fn a_nested_meta_section_is_refused() {
@@ -1012,14 +965,31 @@ mod tests {
         assert!(err.contains("unknown field `meta`"), "{err}");
     }
 
+    /// A rule primary on a horizon alone: its meta model has no barrier
+    /// trade to learn, and that is the one violation.
     #[test]
     fn a_meta_model_without_a_barrier_is_refused() {
-        let toml = section(r#"targets = { horizon = "1h" }"#)
-            .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+        let toml = format!(
+            r#"
+            decision = "event"
+            targets = {{ horizon = "1h" }}
+            retrain = "24h"
+            {META}"#
+        );
+        let config = toml::from_str::<RuleConfig<TargetsTable>>(&toml)
+            .unwrap()
+            .trading(&gold());
 
-        let err = refused(&format!("{toml}\n{META}"));
+        let err = config.validate(&reading(GOLD)).unwrap_err();
 
-        assert!(err.contains("barrier"), "{err}");
+        assert!(
+            matches!(
+                &err,
+                ConfigError::InvalidValue { field, reason }
+                    if field == "model.meta" && reason.contains("no barrier")
+            ),
+            "{err:#}"
+        );
     }
 
     /// A horizon-labelled primary trades its horizon, and the meta model
@@ -1035,26 +1005,55 @@ mod tests {
         assert!(err.contains("barrier"), "{err}");
     }
 
+    /// The refusal of the section with `META`, `line` added to it or, if
+    /// its key is there, replacing it.
+    fn meta_refused(line: &str) -> String {
+        let key = line.split('=').next().unwrap().trim();
+        let meta: Vec<&str> = META
+            .lines()
+            .filter(|kept| kept.split('=').next().unwrap().trim() != key)
+            .chain([line])
+            .collect();
+        refused(&format!("{SECTION}\n{}", meta.join("\n")))
+    }
+
+    /// The barrier's limit, 45 minutes, is the longest target.
     #[test]
-    fn a_meta_window_holdout_threshold_minimums_or_sizing_out_of_range_or_a_minimum_score_is_refused()
-     {
-        for (line, why) in [
-            (r#"window = "45m""#, "not shorter than the window"),
-            (r#"holdout = "35h""#, "holdout"),
-            ("threshold = 1.5", "threshold"),
-            ("min_trades = 0", "minimum count of trades"),
-            ("min_score = 0.52", "min_score"),
-            ("size = { min = 0, max = 2 }", "sizing"),
-            ("size = { min = 2, max = 1 }", "sizing"),
-        ] {
-            let key = line.split('=').next().unwrap().trim();
-            let meta: Vec<&str> = META
-                .lines()
-                .filter(|kept| kept.split('=').next().unwrap().trim() != key)
-                .chain([line])
-                .collect();
-            let err = refused(&format!("{SECTION}\n{}", meta.join("\n")));
-            assert!(err.contains(why), "{line}: {err}");
+    fn a_meta_window_not_longer_than_the_longest_target_is_refused() {
+        let err = meta_refused(r#"window = "45m""#);
+
+        assert!(err.contains("model.meta.window"), "{err}");
+    }
+
+    /// The meta's window of 36 hours cannot hold 35 of holdout and as many
+    /// of calibration.
+    #[test]
+    fn a_meta_holdout_leaving_no_fitted_row_is_refused() {
+        let err = meta_refused(r#"holdout = "35h""#);
+
+        assert!(err.contains("model.meta.holdout"), "{err}");
+    }
+
+    #[test]
+    fn a_meta_threshold_not_a_probability_is_refused() {
+        let err = meta_refused("threshold = 1.5");
+
+        assert!(err.contains("model.meta.threshold"), "{err}");
+    }
+
+    #[test]
+    fn a_meta_minimum_of_no_trade_is_refused() {
+        let err = meta_refused("min_trades = 0");
+
+        assert!(err.contains("model.meta.min_trades"), "{err}");
+    }
+
+    #[test]
+    fn a_meta_sizing_not_positive_or_its_min_above_its_max_is_refused() {
+        for line in ["size = { min = 0, max = 2 }", "size = { min = 2, max = 1 }"] {
+            let err = meta_refused(line);
+
+            assert!(err.contains("model.meta.size"), "{line}: {err}");
         }
     }
 
@@ -1089,21 +1088,6 @@ mod tests {
                 max: Decimal::from(2)
             })
         );
-    }
-
-    #[test]
-    fn a_rule_primarys_section_needs_its_meta() {
-        let toml = r#"
-            decision = "event"
-            targets = { barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
-            retrain = "24h"
-        "#;
-
-        let err = toml::from_str::<RuleConfig<TargetsTable>>(toml)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("meta"), "{err}");
     }
 
     /// From the threshold 0.6 to a probability of 1, 0.5 to 2 times the

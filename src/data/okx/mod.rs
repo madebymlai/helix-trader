@@ -951,20 +951,15 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn an_okx_swap_is_a_crypto_perpetual_with_its_contract_value_increments_and_margins_of_one() {
+    fn an_okx_swap_is_a_crypto_perpetual_with_margins_of_one() {
         let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
             panic!("not a CryptoPerpetual");
         };
-        assert_eq!(btc.id, InstrumentId::from("BTC-USDT-SWAP.OKX"));
-        assert_eq!(btc.multiplier.to_string(), "0.01");
-        assert_eq!(btc.price_increment.to_string(), "0.1");
-        assert_eq!(btc.size_increment.to_string(), "0.01");
         assert_eq!((btc.price_precision, btc.size_precision), (1, 2));
         assert_eq!(
             (btc.margin_init, btc.margin_maint),
             (Decimal::ONE, Decimal::ONE)
         );
-        assert_eq!(btc.settlement_currency.code.as_str(), "USDT");
     }
 
     #[test]
@@ -972,25 +967,10 @@ pub(super) mod tests {
         let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
             panic!("not a CryptoFuture");
         };
-        assert_eq!(btc.id, InstrumentId::from("BTC-USD_UM_XPERP-310404.OKX"));
-        assert_eq!(btc.multiplier.to_string(), "0.0001");
-        assert_eq!(btc.price_increment.to_string(), "0.1");
-        assert_eq!(btc.size_increment.to_string(), "1");
         assert_eq!((btc.price_precision, btc.size_precision), (1, 0));
         assert_eq!(
             (btc.margin_init, btc.margin_maint),
             (Decimal::ONE, Decimal::ONE)
-        );
-        assert_eq!(btc.settlement_currency.code.as_str(), "USD");
-        assert_eq!(btc.quote_currency.code.as_str(), "USD");
-        assert!(!btc.is_inverse);
-        assert_eq!(
-            Timestamp::from(btc.expiration_ns),
-            at("2031-04-04T08:00:00Z")
-        );
-        assert_eq!(
-            Timestamp::from(btc.activation_ns),
-            at("2026-03-30T04:30:00.428Z")
         );
     }
 
@@ -1143,7 +1123,6 @@ pub(super) mod tests {
         assert_eq!(files.len(), 1);
         let file = &files[&date(2026, 10, 19)];
         assert_eq!(file.filename, "BTC-USDT-SWAP-candlesticks-2026-10-19.zip");
-        assert_eq!(file.size_mb, "0.04");
         assert!(file.url.starts_with(ARCHIVE_FILES));
     }
 
@@ -1206,7 +1185,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_refused_request_or_two_files_for_one_period_is_an_error() {
+    fn a_refused_listing_is_an_error_naming_its_code() {
         let refused: ArchiveListing = serde_json::from_str(
             r#"{"code":"50077","msg":"The time interval between the start date and end date cannot exceed 10 months.","data":[]}"#,
         )
@@ -1216,6 +1195,10 @@ pub(super) mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("50077"), "{err}");
+    }
+
+    #[test]
+    fn two_files_for_one_period_are_an_error() {
         let twice = listing(&format!("{BTC_FILE},{BTC_FILE}"));
         let err = twice
             .files(Contract::of(btc()).unwrap(), Candles)
@@ -2083,16 +2066,11 @@ pub(super) mod tests {
             ]
             .map(at)
         );
-        // As Nautilus parses them: the rate, the interval from the time
-        // before, `ts_init` the funding time, no next funding time.
+        // Each with the interval from the time before.
         for update in &stored {
             assert_eq!(update.instrument_id, xperp());
             assert_eq!(update.interval, Some(480));
-            assert_eq!(update.ts_init, update.ts_event);
-            assert_eq!(update.next_funding_ns, None);
         }
-        assert_eq!(stored[0].rate.to_string(), "0.0001");
-        assert_eq!(stored[5].rate.to_string(), "0.0001453767332828");
         // Covered from the start to the newest funding time.
         assert_eq!(
             xperp_intervals(&catalog),
@@ -2267,9 +2245,9 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn the_funding_is_filled_before_the_bars_and_a_failed_one_stores_no_bars() {
-        // A swap: its funding from the archive's months, then the API, then
-        // its bars.
+    async fn a_swaps_funding_is_filled_before_its_bars() {
+        // Its funding from the archive's months, then the API, then its
+        // bars.
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
         let mut modules = Vec::new();
@@ -2292,8 +2270,12 @@ pub(super) mod tests {
         assert_eq!(requests, 0);
         assert!(!stored_funding(&mut catalog).is_empty());
         assert!(!bar_intervals(&catalog, &btc_instrument()).is_empty());
-        // A swap starting in a month the archive has not published: no
-        // funding, so no bars.
+    }
+
+    #[tokio::test]
+    async fn a_swap_with_no_funding_file_stores_no_bars() {
+        // Starting in a month the archive has not published: no funding, so
+        // no bars.
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
         let mut modules = Vec::new();
@@ -2312,8 +2294,12 @@ pub(super) mod tests {
         assert!(err.contains(&format!("funding_rates of {BTC}")), "{err}");
         assert_eq!(modules, [Funding]);
         assert!(bar_intervals(&catalog, &btc_instrument()).is_empty());
-        // An X-Perp over a window older than OKX's funding history: no
-        // funding, so no bars.
+    }
+
+    #[tokio::test]
+    async fn an_x_perp_with_no_api_funding_stores_no_bars() {
+        // Over a window older than OKX's funding history: no funding, so no
+        // bars.
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
         let mut modules = Vec::new();

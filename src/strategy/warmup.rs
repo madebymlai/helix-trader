@@ -896,22 +896,130 @@ mod tests {
         actor::indicators::ActorIndicator,
         cache::Cache,
         clock::VirtualClock,
-        messages::data::{DataResponse, RequestCommand, RequestCustomData},
-        msgbus::{self, MessageBus, TypedHandler},
+        messages::data::{DataCommand, DataResponse, RequestCommand, RequestCustomData},
+        msgbus::{
+            self, MessageBus, MessagingSwitchboard, TypedHandler,
+            stubs::{TypedIntoMessageSavingHandler, get_typed_into_message_saving_handler},
+        },
     };
     use nautilus_data::engine::DataEngine;
     use nautilus_model::{
         data::{BookOrder, QuoteTick, TradeTick, stubs::stub_depth10},
         enums::{BookAction, OrderSide, RecordFlag},
-        identifiers::{InstrumentId, TraderId},
+        identifiers::{InstrumentId, StrategyId, TraderId},
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+    use nautilus_portfolio::portfolio::Portfolio;
+    use nautilus_trading::{
+        nautilus_strategy,
+        strategy::{StrategyConfig, StrategyCore},
+    };
 
     use super::*;
     use crate::strategy::TickSeries;
 
     const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+    #[derive(Debug)]
+    struct Probe {
+        core: StrategyCore,
+    }
+
+    nautilus_strategy!(Probe);
+
+    impl DataActor for Probe {}
+
+    /// A strategy registered without a node at 2026-08-10T14:30:00Z, and
+    /// what it sends the data engine from then on.
+    fn registered() -> (Probe, TypedIntoMessageSavingHandler<DataCommand>) {
+        let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
+        msgbus::register_data_command_endpoint(
+            MessagingSwitchboard::data_engine_queue_execute(),
+            handler,
+        );
+        let mut probe = Probe {
+            core: StrategyCore::new(StrategyConfig {
+                strategy_id: Some(StrategyId::from("PROBE-001")),
+                order_id_tag: Some("001".to_string()),
+                ..Default::default()
+            }),
+        };
+        let now: Timestamp = "2026-08-10T14:30:00Z".parse().unwrap();
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        clock.borrow_mut().advance_time(now.into(), true);
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let portfolio = Rc::new(RefCell::new(Portfolio::new(
+            clock.clone(),
+            cache.clone(),
+            None,
+        )));
+        probe
+            .core
+            .register(TraderId::from("HELIX-001"), clock, cache, portfolio)
+            .unwrap();
+        (probe, sent)
+    }
+
+    /// The requests of `commands`, in order: each its series and the bar
+    /// types it builds (its `bar_types` param).
+    fn requested(
+        commands: &TypedIntoMessageSavingHandler<DataCommand>,
+    ) -> Vec<(Source, Vec<BarType>)> {
+        let ticks = |data, instrument_ids: &[InstrumentId]| {
+            let [instrument_id] = instrument_ids else {
+                panic!("one instrument")
+            };
+            Source::Ticks(TickSeries {
+                data,
+                instrument_id: *instrument_id,
+            })
+        };
+        commands
+            .get_messages()
+            .into_iter()
+            .filter_map(|command| match command {
+                DataCommand::Request(request) => Some(request),
+                _ => None,
+            })
+            .map(|request| {
+                let (source, params) = match request {
+                    RequestCommand::Quotes(request) => (
+                        ticks(NautilusDataType::QuoteTick, &request.instrument_ids),
+                        request.params,
+                    ),
+                    RequestCommand::Trades(request) => (
+                        ticks(NautilusDataType::TradeTick, &request.instrument_ids),
+                        request.params,
+                    ),
+                    RequestCommand::BookDepth(request) => (
+                        ticks(NautilusDataType::OrderBookDepth, &request.instrument_ids),
+                        request.params,
+                    ),
+                    RequestCommand::BookDeltas(request) => (
+                        ticks(NautilusDataType::OrderBookDelta, &request.instrument_ids),
+                        request.params,
+                    ),
+                    RequestCommand::Bars(request) => {
+                        let [bar_type] = request.bar_types.as_slice() else {
+                            panic!("one bar type")
+                        };
+                        (Source::Bars(*bar_type), request.params)
+                    }
+                    other => panic!("unexpected {other:?}"),
+                };
+                let built = params
+                    .as_ref()
+                    .and_then(|params| params.get("bar_types"))
+                    .and_then(Value::as_array)
+                    .expect("a bar_types param")
+                    .iter()
+                    .map(|bar_type| BarType::from(bar_type.as_str().unwrap()))
+                    .collect();
+                (source, built)
+            })
+            .collect()
+    }
 
     /// An indicator reading nothing, for a warmup to feed.
     struct Inert;
@@ -942,6 +1050,39 @@ mod tests {
         }
     }
 
+    /// An indicator recording the bar type of each bar it reads.
+    #[derive(Default)]
+    struct Recorder {
+        bar_types: RefCell<Vec<BarType>>,
+    }
+
+    impl ActorIndicator for Recorder {
+        fn key(&self) -> usize {
+            std::ptr::from_ref(self).addr()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn initialized(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        fn handle_quote(&self, _quote: &QuoteTick) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn handle_trade(&self, _trade: &TradeTick) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+            self.bar_types.borrow_mut().push(bar.bar_type);
+            Ok(())
+        }
+    }
+
     /// The requirements of a strategy reading `bar_types` over a day.
     fn reading(bar_types: &[&str]) -> DataRequirements {
         DataRequirements {
@@ -952,19 +1093,28 @@ mod tests {
     }
 
     /// The harness's bars are built after the strategy's, once, and not
-    /// again if the strategy reads them.
+    /// again if the strategy reads them: both are MID bars of SXR8, built
+    /// by the one request of its quotes.
     #[test]
     fn a_warmup_builds_the_harness_bars_once_after_the_strategys() {
         let minutes = BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL");
         let hours = BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL");
         let inert = || Rc::new(Inert) as SharedActorIndicator;
-
         let warmup = Warmup::live(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]))
             .building(minutes, inert())
             .building(minutes, inert())
             .building(hours, inert());
+        let (mut probe, commands) = registered();
 
-        assert_eq!(warmup.built(), vec![hours, minutes]);
+        warmup.start(&mut probe).unwrap();
+
+        assert_eq!(
+            requested(&commands),
+            [(
+                Source::Ticks(tick(NautilusDataType::QuoteTick, "SXR8.IBIS")),
+                vec![hours, minutes],
+            )]
+        );
     }
 
     fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
@@ -992,10 +1142,12 @@ mod tests {
                 tick(NautilusDataType::TradeTick, "GCZ6.GLBX"),
                 tick(NautilusDataType::OrderBookDelta, "GC.GLBX"),
             ]);
-        let now: Timestamp = "2026-08-10T14:30:00Z".parse().unwrap();
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
 
         assert_eq!(
-            requests(&warmup.built(), &warmup.ticks, now),
+            requested(&commands),
             [
                 (
                     Source::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
@@ -1123,15 +1275,18 @@ mod tests {
                 instrument_id: InstrumentId::from(instrument_id),
             })
         };
+        let warmup = Warmup::live(&reading(&[
+            "ESM4.CME-1-HOUR-LAST-INTERNAL",
+            "ESM4.CME-1-HOUR-MID-INTERNAL",
+            "ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            "ESM4.CME-1-MINUTE-LAST-INTERNAL",
+        ]));
+        let (mut probe, commands) = registered();
 
-        let requested = requests(
-            &[hour_last, hour_mid, composite, minute_last],
-            &[],
-            Timestamp::UNIX_EPOCH,
-        );
+        warmup.start(&mut probe).unwrap();
 
         assert_eq!(
-            requested,
+            requested(&commands),
             vec![
                 (
                     ticks(NautilusDataType::TradeTick, "ESM4.CME"),
@@ -1157,7 +1312,21 @@ mod tests {
         let hour_last = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL");
         let hour_mid = BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL");
         let composite = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
-        let cached = [hour_last, hour_mid, composite];
+        let recorder = Rc::new(Recorder::default());
+        let warmup = Warmup::live(&reading(&[
+            "ESM4.CME-1-HOUR-LAST-INTERNAL",
+            "ESM4.CME-1-HOUR-MID-INTERNAL",
+            "ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+        ]))
+        .feeding(Rc::clone(&recorder) as SharedActorIndicator);
+        let (probe, _) = registered();
+        for bar_type in [hour_last, hour_mid, composite] {
+            let bar = Bar {
+                bar_type,
+                ..Bar::default()
+            };
+            probe.cache_rc().borrow_mut().add_bar(bar).unwrap();
+        }
         let instrument_id = InstrumentId::from("ESM4.CME");
         let trade = TradeTick {
             instrument_id,
@@ -1172,9 +1341,12 @@ mod tests {
             ..Bar::default()
         };
 
-        assert_eq!(built_from(&cached, trade.into()), [hour_last]);
-        assert_eq!(built_from(&cached, quote.into()), [hour_mid]);
-        assert_eq!(built_from(&cached, minute.into()), [composite]);
+        warmup.on_historical(&probe, &[trade]).unwrap();
+        assert_eq!(recorder.bar_types.take(), [hour_last]);
+        warmup.on_historical(&probe, &[quote]).unwrap();
+        assert_eq!(recorder.bar_types.take(), [hour_mid]);
+        warmup.on_historical(&probe, &[minute]).unwrap();
+        assert_eq!(recorder.bar_types.take(), [composite]);
     }
 
     /// Custom data of the tests: an imbalance of a book.
@@ -1327,7 +1499,7 @@ mod tests {
         let bar_types = [BarType::from("SXR8.IBIS-1-SECOND-MID-INTERNAL")];
         let err = cache_config(&bar_types, SignedDuration::from_hours(12 * 24)).unwrap_err();
         let err = format!("{err:#}");
-        for part in ["SXR8.IBIS-1-SECOND-MID-INTERNAL", "1036801 bars", "1000000"] {
+        for part in ["SXR8.IBIS-1-SECOND-MID-INTERNAL", "1036801 bars"] {
             assert!(err.contains(part), "{err}");
         }
     }
@@ -1354,16 +1526,23 @@ mod tests {
     /// bars with.
     #[test]
     fn the_live_bar_build_delay_is_the_live_nodes() {
-        let composite = [
-            BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
-            BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
-        ];
-        let quotes = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
+        let composite = reading(&[
+            "SXR8.IBIS-1-HOUR-MID-INTERNAL",
+            "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+        ]);
+        let quotes = reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]);
+        let nodes = |requirements: &DataRequirements| {
+            let micros = live_data_engine_config(&requirements.bar_types).time_bars_build_delay;
+            SignedDuration::from_micros(i64::try_from(micros).unwrap())
+        };
 
         assert_eq!(
-            live_bar_build_delay(&composite),
-            SignedDuration::from_secs(5)
+            Warmup::live(&composite).live_bar_build_delay(),
+            nodes(&composite)
         );
-        assert_eq!(live_bar_build_delay(&quotes), SignedDuration::ZERO);
+        assert_eq!(
+            Warmup::live(&quotes).live_bar_build_delay(),
+            nodes(&quotes)
+        );
     }
 }

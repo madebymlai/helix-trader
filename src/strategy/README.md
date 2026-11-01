@@ -1107,7 +1107,7 @@ of its choosing (`model::features`, `model::decide`).
   sign. A denied or rejected order, or an entry not filled by its time
   (cancelled then by the module, `on_order_canceled`), leaves the
   decision unsettled, logged, and so do positions still open
-  at the stop (`open_decisions()` counts the decisions still open). A
+  at the stop. A
   barrier hit at the same nanosecond as the time limit
   counts: Nautilus hands the venue the quote before the alert. On bars
   alone the venue fills an entry at the last close, a take profit at its
@@ -1669,5 +1669,6 @@ ATR" above).
   where each cross, stop loss, take profit and hold is worked out by hand
   (`backtest_ema_*.rs`, backtest README, "Tests"). A recording strategy in
   `tests/common` checks what the EMA cannot show: every price of the bars,
-  orders of a given side and size, and positions on a netting and on a
-  hedging venue (`backtest_netting_venue.rs`, `backtest_hedging_venue.rs`).
+  orders of a given side and size, and positions on IB's netting venue and
+  IC's hedging one, as `venue_oms_type` keeps them
+  (`backtest_netting_venue.rs`, `backtest_ic_hedging.rs`).

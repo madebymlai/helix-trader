@@ -6,6 +6,7 @@
 //! submitted, and every order event the client emits is applied to them,
 //! as the execution engine does.
 
+use nautilus_common::messages::ExecutionReport;
 use nautilus_model::{
     enums::{ContingencyType, OmsType},
     events::OrderEventAny,
@@ -53,6 +54,19 @@ fn decoded<M: Payload>(bytes: &[u8]) -> M {
 
 fn execution(bytes: &[u8]) -> ProtoOaExecutionEvent {
     decoded(bytes)
+}
+
+/// Synthetic: a deal IC made after the captured ones.
+const LATER_DEAL: i64 = 953_555_999;
+
+/// The captured fill `bytes` under a deal IC made later, `LATER_DEAL`:
+/// evidence of an order already filled, which the client reports.
+fn later_deal(bytes: &[u8]) -> ProtoOaExecutionEvent {
+    let mut execution = execution(bytes);
+    if let Some(deal) = execution.deal.as_mut() {
+        deal.deal_id = LATER_DEAL;
+    }
+    execution
 }
 
 /// `execution` under the request's `clientMsgId`.
@@ -228,6 +242,18 @@ impl Node {
         assert!(next.is_err(), "unexpected {next:?}");
     }
 
+    /// Asserts the next execution event is the report of the fill of
+    /// `LATER_DEAL` (see `later_deal`), the last event IC sent: nothing
+    /// came before it.
+    async fn later_deal_next(&mut self) {
+        let event = self.next().await;
+        let ExecutionEvent::Report(ExecutionReport::OrderWithFills(_, fills)) = &event else {
+            panic!("not the report of the later deal: {event:?}");
+        };
+        let trades: Vec<String> = fills.iter().map(|f| f.trade_id.to_string()).collect();
+        assert_eq!(trades, ["953555999"]);
+    }
+
     /// Opens `id`, a Nautilus position of `quantity` oz of gold, long, in
     /// the cache, as reconciliation or a fill leaves it.
     fn open_position(&self, id: &str, quantity: u64) {
@@ -369,12 +395,6 @@ async fn a_market_order_is_sent_with_its_id_and_its_fill_carries_price_commissio
     assert_eq!(request.volume, 100);
     assert_eq!(request.client_order_id.as_deref(), Some("PROBE-1"));
     assert_eq!(node.tags::<ProtoOaNewOrderReq>(), ["N:PROBE-1"]);
-    let cached = node
-        .cache
-        .borrow()
-        .order_owned(&ClientOrderId::from("PROBE-1"))
-        .unwrap();
-    assert_eq!(cached.status(), OrderStatus::Filled);
     node.client.disconnect().await.unwrap();
 }
 
@@ -420,12 +440,6 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
     assert_eq!(node.tags::<ProtoOaAmendOrderReq>(), ["A:PROBE-2"]);
     let cancel = node.requests::<ProtoOaCancelOrderReq>();
     assert_eq!(cancel[0].order_id, 1_031_776_354);
-    let cached = node
-        .cache
-        .borrow()
-        .order_owned(&ClientOrderId::from("PROBE-2"))
-        .unwrap();
-    assert_eq!(cached.status(), OrderStatus::Canceled);
     node.client.disconnect().await.unwrap();
 }
 
@@ -458,6 +472,9 @@ async fn a_cancel_ic_refuses_is_rejected_and_the_order_stays_open() {
         t if t == ProtoOaNewOrderReq::TYPE => {
             vec![answer(request, &execution(EXECUTION_LIMIT_ACCEPTED))]
         }
+        t if t == ProtoOaAmendOrderReq::TYPE => {
+            vec![answer(request, &execution(EXECUTION_LIMIT_REPLACED))]
+        }
         _ => vec![event(
             &decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_ORDER_NOT_FOUND),
             request.client_msg_id.as_deref(),
@@ -480,12 +497,10 @@ async fn a_cancel_ic_refuses_is_rejected_and_the_order_stays_open() {
         rejected.reason.as_str(),
         "ORDER_NOT_FOUND: Order not found with id 1031776354"
     );
-    let cached = node
-        .cache
-        .borrow()
-        .order_owned(&ClientOrderId::from("PROBE-2"))
-        .unwrap();
-    assert_eq!(cached.status(), OrderStatus::Accepted);
+    // Still open: IC's answer to a modification of it updates it.
+    node.modify("PROBE-2", Some(Price::from("3821.73")), None);
+    let updated = node.order_events(1).await;
+    assert_eq!(kinds(&updated), [row("PROBE-2", "updated")]);
     node.client.disconnect().await.unwrap();
 }
 
@@ -497,6 +512,7 @@ async fn a_fill_before_the_acceptance_and_events_twice_make_one_acceptance_and_o
             answer(request, &filled),
             answer(request, &execution(EXECUTION_MARKET_ACCEPTED)),
             answer(request, &filled),
+            answer(request, &later_deal(EXECUTION_MARKET_FILLED)),
         ]
     })
     .await;
@@ -512,7 +528,7 @@ async fn a_fill_before_the_acceptance_and_events_twice_make_one_acceptance_and_o
             row("PROBE-1", "filled")
         ]
     );
-    node.quiet().await;
+    node.later_deal_next().await;
     node.client.disconnect().await.unwrap();
 }
 
@@ -548,7 +564,6 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
     .await;
     node.submit(&market("PROBE-1", OrderSide::Buy, 1), None);
     node.order_events(1).await;
-    node.quiet().await;
 
     assert!(node.client.retain_unresolved_submissions());
     node.client
@@ -627,17 +642,22 @@ fn bracket_on(
     [entry_order, stop, limit]
 }
 
-#[tokio::test]
-async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds() {
-    let mut node = Node::start(|request| match request.payload_type {
+/// The captured bracket entry PROBE-1 accepted and filled, its
+/// protections accepted on the position; IC moves them as the demo did.
+fn bracket_entry(request: &ProtoMessage) -> Vec<Action> {
+    match request.payload_type {
         t if t == ProtoOaNewOrderReq::TYPE => vec![
             answer(request, &execution(EXECUTION_MARKET_ACCEPTED)),
             answer(request, &execution(EXECUTION_MARKET_FILLED)),
             event(&execution(EXECUTION_PROTECTION_ACCEPTED), Some("PROBE-1")),
         ],
         _ => vec![answer(request, &execution(EXECUTION_PROTECTION_REPLACED))],
-    })
-    .await;
+    }
+}
+
+#[tokio::test]
+async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds() {
+    let mut node = Node::start(bracket_entry).await;
     let [entry, stop_loss, take_profit] = bracket("PROBE-1", "3992.78", "4052.78");
 
     node.submit_list(&[&entry, &stop_loss, &take_profit]);
@@ -669,10 +689,19 @@ async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds()
     assert_eq!(sent[0].order_type(), ProtoOaOrderType::Market);
     assert_eq!(sent[0].stop_loss, Some(3992.78));
     assert_eq!(sent[0].take_profit, Some(4052.78));
+    node.client.disconnect().await.unwrap();
+}
 
-    // Moving the stop loss sends both prices: cTrader drops one left out.
-    // The demo's answer moved the take profit too (to 4062.78): the legs
-    // follow it.
+/// Moving the stop loss sends both prices: cTrader drops one left out.
+/// The demo's answer moved the take profit too (to 4062.78): the legs
+/// follow it.
+#[tokio::test]
+async fn moving_a_positions_stop_loss_sends_both_prices_and_the_legs_follow_ics_answer() {
+    let mut node = Node::start(bracket_entry).await;
+    let [entry, stop_loss, take_profit] = bracket("PROBE-1", "3992.78", "4052.78");
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
+    node.order_events(7).await;
+
     node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
 
     let updated = node.order_events(2).await;
@@ -681,8 +710,11 @@ async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds()
     assert_eq!(amended[0].stop_loss, Some(3982.78));
     assert_eq!(amended[0].take_profit, Some(4052.78));
     assert_eq!(node.tags::<ProtoOaAmendPositionSltpReq>(), ["P:PROBE-1-SL"]);
+    assert_eq!(
+        kinds(&updated),
+        [row("PROBE-1-SL", "updated"), row("PROBE-1-TP", "updated")]
+    );
     let (sl, tp) = (node.cached("PROBE-1-SL"), node.cached("PROBE-1-TP"));
-    assert_eq!(kinds(&updated).len(), 2);
     assert_eq!(sl.trigger_price(), Some(Price::from("3982.78")));
     assert_eq!(tp.price(), Some(Price::from("4062.78")));
     node.client.disconnect().await.unwrap();
@@ -733,20 +765,22 @@ fn protected(bytes: &[u8]) -> ProtoOaExecutionEvent {
 
 /// The bracket of the demo's stop loss hit: entry PROBE-5, its stop loss
 /// at 4023.15 and take profit at 4053.51, the entry filled and its
-/// protections accepted, then `last`.
+/// protections accepted, then `last`; its order events, the later deal of
+/// the entry after them.
 async fn bracket_closed_by(last: ProtoOaExecutionEvent) -> Vec<OrderEventAny> {
     let mut node = Node::start(move |request| {
         vec![
             answer(request, &execution(EXECUTION_STOP_LOSS_ENTRY_FILLED)),
             event(&protected(EXECUTION_STOP_LOSS_ACCEPTED), Some("PROBE-5")),
             event(&last, Some("PROBE-5")),
+            answer(request, &later_deal(EXECUTION_STOP_LOSS_ENTRY_FILLED)),
         ]
     })
     .await;
     let [entry, stop_loss, take_profit] = bracket("PROBE-5", "4023.15", "4053.51");
     node.submit_list(&[&entry, &stop_loss, &take_profit]);
     let events = node.order_events(9).await;
-    node.quiet().await;
+    node.later_deal_next().await;
     node.client.disconnect().await.unwrap();
     events
 }
@@ -1273,6 +1307,84 @@ impl Node {
             ))
             .unwrap();
     }
+
+    /// Asserts the queries before concluded nothing: a query now, of
+    /// `UNSENT-1`, an order of the cache this session never sent, which
+    /// IC's order list does not hold, reports it rejected, and that report
+    /// is the next event.
+    async fn assert_nothing_concluded(&mut self) {
+        self.add(&[&market("UNSENT-1", OrderSide::Buy, 1)]);
+        self.query("UNSENT-1");
+        let event = self.next().await;
+        let ExecutionEvent::Report(ExecutionReport::Order(status)) = &event else {
+            panic!("not an order report: {event:?}");
+        };
+        assert_eq!(
+            status.client_order_id,
+            Some(ClientOrderId::from("UNSENT-1")),
+            "{event:?}"
+        );
+    }
+}
+
+/// The next event, an order report: its order and status.
+async fn next_order_report(node: &mut Node) -> (String, OrderStatus) {
+    let event = node.next().await;
+    let ExecutionEvent::Report(ExecutionReport::Order(status)) = &event else {
+        panic!("not an order report: {event:?}");
+    };
+    let id = status.client_order_id.expect("no client order id");
+    (id.to_string(), status.order_status)
+}
+
+#[tokio::test]
+async fn an_order_this_session_never_sent_is_concluded_absent() {
+    let mut node = Node::start(listing_nothing).await;
+    node.add(&[&market("PROBE-1", OrderSide::Buy, 1)]);
+
+    node.query("PROBE-1");
+
+    assert_eq!(
+        next_order_report(&mut node).await,
+        ("PROBE-1".to_owned(), OrderStatus::Rejected)
+    );
+    node.client.disconnect().await.unwrap();
+}
+
+/// The bracket's entry sent, IC answering nothing, its order list holding
+/// none.
+#[tokio::test]
+async fn an_absent_entry_is_concluded_once_with_its_legs() {
+    let mut node = Node::start(listing_nothing).await;
+    let [entry, stop_loss, take_profit] = bracket("PROBE-1", "3992.78", "4052.78");
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
+    node.order_events(3).await;
+    testing::wait_until(&node.received, |frames| {
+        frames
+            .iter()
+            .any(|(_, f)| f.payload_type == ProtoOaNewOrderReq::TYPE)
+    })
+    .await;
+
+    node.query("PROBE-1");
+
+    let mut rejected = Vec::new();
+    for _ in 0..3 {
+        rejected.push(next_order_report(&mut node).await);
+    }
+    rejected.sort();
+    assert_eq!(
+        rejected,
+        [
+            ("PROBE-1".to_owned(), OrderStatus::Rejected),
+            ("PROBE-1-SL".to_owned(), OrderStatus::Rejected),
+            ("PROBE-1-TP".to_owned(), OrderStatus::Rejected),
+        ]
+    );
+    // Concluded: not again.
+    node.query("PROBE-1");
+    node.assert_nothing_concluded().await;
+    node.client.disconnect().await.unwrap();
 }
 
 #[tokio::test]
@@ -1282,8 +1394,9 @@ async fn a_query_of_a_bracket_leg_from_before_a_restart_concludes_nothing() {
 
     node.query("PROBE-2-SL");
 
-    node.quiet().await;
-    assert_eq!(node.cached("PROBE-2-SL").status(), OrderStatus::Submitted);
+    node.assert_nothing_concluded().await;
+    // Nor was IC asked: the only order list it got is of UNSENT-1.
+    assert_eq!(node.requests::<ProtoOaOrderListReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }
 
@@ -1300,7 +1413,8 @@ async fn a_query_of_a_bracket_leg_whose_cancel_was_refused_after_a_restart_concl
 
     node.query("PROBE-2-SL");
 
-    node.quiet().await;
-    assert_eq!(node.cached("PROBE-2-SL").status(), OrderStatus::Submitted);
+    node.assert_nothing_concluded().await;
+    // Nor was IC asked: the only order list it got is of UNSENT-1.
+    assert_eq!(node.requests::<ProtoOaOrderListReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }

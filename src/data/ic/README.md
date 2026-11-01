@@ -523,9 +523,9 @@ synthetic.
     cTrader does (a renewal replaces it and ends the sessions of the old
     one): a pair of unknown expiry, or expiring within a day, renewed and
     saved before the account auth, one expiring later not; a running
-    session renewing on schedule, its spots and a request in flight kept;
-    an invalidated token renewed and the account authenticated again; a
-    token refused at start renewed; a refused renewal naming the
+    session renewing on schedule; a request in flight across a renewal
+    answered, the spots kept; an invalidated token renewed and the
+    account authenticated again; a token refused at start renewed; a refused renewal naming the
     Playground, the pair kept; a token refused even renewed naming the
     Playground, never a token; two sessions on one file, starting or due
     together, renewing once; a session whose token another renewed taking
@@ -536,8 +536,7 @@ synthetic.
     and refusing one held (`ALREADY_SUBSCRIBED`, as the demo), none sent
     again after a renewal, those changed during it sent once authenticated
     again;
-  - `websocket/` (subscription state): a refused spot subscription marked
-    failed (pending, not confirmed, the accepted one confirmed) and sent
+  - `websocket/` (subscription state): a refused spot subscription sent
     again on the next connection;
   - `mod.rs`: the instruments from assets, symbol list, details, the
     account's leverage and each symbol's dynamic leverage, at IC's margin

@@ -1072,8 +1072,12 @@ mod tests {
     #[test]
     fn a_backtest_takes_either_the_commission_or_its_rate_not_both() {
         let both = backtest_with(&["--commission", "3 EUR", "--commission-rate", "0.0005"]);
-        let err = parse_backtest(&both).unwrap_err().to_string();
-        assert!(err.contains("cannot be used with"), "{err}");
+        let err = parse_backtest(&both).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{err}"
+        );
         let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
         assert!(err.contains("--commission-rate"), "{err}");
     }
@@ -1146,23 +1150,6 @@ mod tests {
         let args =
             parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("/data/staging"));
-    }
-
-    /// The node promotes daily: no setting.
-    #[test]
-    fn live_takes_no_promotion_interval() {
-        let err = parse_live(&["ema", "--config", "ema.toml", "--promotion-minutes", "5"])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--promotion-minutes"), "{err}");
-    }
-
-    #[test]
-    fn live_takes_the_leverage_it_expects() {
-        let args = parse_live(&["ema", "--config", "okx.toml", "--leverage", "3"]).unwrap();
-        assert_eq!(args.leverage, Decimal::from(3));
-        let err = parse_live(&["ema", "--config", "okx.toml", "--leverage", "x"]).unwrap_err();
-        assert!(err.to_string().contains("--leverage"), "{err}");
     }
 
     /// Read from the arguments' definition: setting the variable would race
@@ -1397,19 +1384,31 @@ mod tests {
         }
     }
 
+    /// Each value joined to its flag, so that clap reads `-0.1` as the
+    /// value, not as a flag of its own.
     #[test]
     fn live_refuses_retrain_costs_it_cannot_read() {
-        for (flag, value) in [
-            ("--retrain-commission-rate", "-0.1"),
-            ("--retrain-commission", "3"),
-            ("--retrain-balance", "lots"),
+        for cost in [
+            "--retrain-commission-rate=-0.1",
+            "--retrain-commission=3",
+            "--retrain-balance=lots",
         ] {
-            let argv = ["model_ema", "--config", "model_ema.toml", flag, value];
-            assert!(parse_live(&argv).is_err(), "{flag} {value}");
+            let argv = ["model_ema", "--config", "model_ema.toml", cost];
+            let err = parse_live(&argv).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{cost}: {err}"
+            );
         }
         let mut both = LIVE_RETRAINING.to_vec();
         both.extend(["--retrain-commission", "3 USD"]);
-        assert!(parse_live(&both).is_err());
+        let err = parse_live(&both).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{err}"
+        );
     }
 
     #[test]

@@ -192,9 +192,53 @@ fn section<'a>(
 
 #[cfg(test)]
 mod tests {
-    use nautilus_core::UUID4;
+    use nautilus_core::{UUID4, UnixNanos};
+    use nautilus_model::{
+        enums::OrderType,
+        identifiers::ClientOrderId,
+        instruments::{InstrumentAny, stubs::equity_aapl},
+        orders::{
+            OrderAny, OrderTestBuilder,
+            stubs::{OrderFilledTestBuilder, TestOrderStubs},
+        },
+        types::{Currency, Money, Price, Quantity},
+    };
 
     use super::*;
+
+    /// SXR8.IBIS, priced in EUR.
+    fn sxr8() -> InstrumentAny {
+        let mut equity = equity_aapl();
+        equity.id = InstrumentId::from("SXR8.IBIS");
+        equity.currency = Currency::EUR();
+        InstrumentAny::Equity(equity)
+    }
+
+    /// A market order `id` of `instrument`, accepted, then filled on
+    /// `side` for `qty` at `px` at 2 ns, charged `commission`.
+    fn filled(
+        id: &str,
+        instrument: &InstrumentAny,
+        side: OrderSide,
+        qty: u64,
+        px: &str,
+        commission: &str,
+    ) -> OrderAny {
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .client_order_id(ClientOrderId::from(id))
+            .instrument_id(instrument.id())
+            .side(side)
+            .quantity(Quantity::from(qty))
+            .build();
+        let mut order = TestOrderStubs::make_accepted_order(&order);
+        let fill = OrderFilledTestBuilder::new(&order, instrument)
+            .last_px(Price::from(px))
+            .commission(Money::from(commission))
+            .ts_event(UnixNanos::from(2))
+            .build();
+        order.apply(fill).unwrap();
+        order
+    }
 
     fn outcome() -> Outcome {
         let stats = |pairs: &[(&str, f64)]| {
@@ -216,10 +260,10 @@ mod tests {
             elapsed_time_secs: 0.0,
             iterations: 0,
             total_events: 0,
-            total_orders: 9,
-            total_positions: 5,
+            total_orders: 5,
+            total_positions: 3,
             summary: [
-                ("orders.total", "9"),
+                ("orders.total", "5"),
                 ("account.IBIS.balance.EUR.total", "9942.00 EUR"),
                 ("account.IBIS.balance.EUR.free", "9000.00 EUR"),
             ]
@@ -245,43 +289,39 @@ mod tests {
             stats_general: stats(&[("Long Ratio", 0.5)]),
             returns_series: BTreeMap::new(),
         };
-        // 9 fills in EUR; a commission in GBP, of fills priced in EUR too.
-        let costs = BTreeMap::from([
-            (
-                "EUR".to_string(),
-                Costs {
-                    commission: Decimal::new(2700, 2),
-                    spread: Decimal::new(450, 2),
-                    trades: 9,
-                    unquoted: 0,
-                },
-            ),
-            (
-                "GBP".to_string(),
-                Costs {
-                    commission: Decimal::new(125, 2),
-                    ..Costs::default()
-                },
-            ),
-            // 2 fills on bars, with no quote to measure a spread on.
-            (
-                "USD".to_string(),
-                Costs {
-                    commission: Decimal::new(50, 2),
-                    unquoted: 2,
-                    trades: 2,
-                    ..Costs::default()
-                },
-            ),
-        ]);
-        Outcome { result, costs }
+        let (sxr8, aapl) = (sxr8(), InstrumentAny::Equity(equity_aapl()));
+        let mut cache = Cache::default();
+        cache.add_instrument(sxr8.clone()).unwrap();
+        cache.add_instrument(aapl.clone()).unwrap();
+        // Three fills of 10 SXR8.IBIS in EUR, each 0.10 off the mid of
+        // 100.00, 1.00 EUR of spread: two charged 3 EUR, one 1.25 GBP. Two
+        // fills of AAPL.XNAS in USD, of no quote, each charged 0.25 USD.
+        for order in [
+            filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR"),
+            filled("O-2", &sxr8, OrderSide::Sell, 10, "99.90", "3 EUR"),
+            filled("O-3", &sxr8, OrderSide::Buy, 10, "100.10", "1.25 GBP"),
+            filled("O-4", &aapl, OrderSide::Buy, 1, "150.00", "0.25 USD"),
+            filled("O-5", &aapl, OrderSide::Sell, 1, "150.00", "0.25 USD"),
+        ] {
+            cache.add_order(order, None, None, false).unwrap();
+        }
+        let quote = QuoteTick::new(
+            sxr8.id(),
+            Price::from("99.90"),
+            Price::from("100.10"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+        );
+        Outcome::new(result, &cache, &[quote]).unwrap()
     }
 
     #[test]
     fn prints_the_counts_the_costs_and_every_statistic_sorted_by_section() {
         let expected = "\
-Orders: 9
-Positions: 5
+Orders: 5
+Positions: 3
 
 PnL statistics (CHF)
   PnL (total): 2.500000
@@ -297,10 +337,10 @@ PnL statistics (USD)
   PnL (total): 1.500000
 
 Costs (EUR)
-  Commission: 27.000000
-  Cost per trade: 3.500000
-  Gross PnL: -26.500000
-  Spread: 4.500000
+  Commission: 6.000000
+  Cost per trade: 3.000000
+  Gross PnL: -49.000000
+  Spread: 3.000000
 
 Costs (GBP)
   Commission: 1.250000

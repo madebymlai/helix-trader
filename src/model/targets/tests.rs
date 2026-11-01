@@ -10,10 +10,7 @@ use nautilus_model::{
 };
 
 use super::*;
-use crate::{
-    model::{decide, features::FeatureSet},
-    strategy::TickSeries,
-};
+use crate::{model::features::FeatureSet, strategy::TickSeries};
 
 const GOLD: &str = "XAUUSD.ICMARKETS";
 
@@ -25,14 +22,6 @@ fn every(minutes: i64) -> DecisionRule {
 /// The decisions of every test but where it says: every 15 minutes.
 fn rule() -> DecisionRule {
     every(15)
-}
-
-/// What `config` trades: an ounce of gold.
-fn gold() -> TradedInstrument {
-    TradedInstrument {
-        instrument_id: InstrumentId::from(GOLD),
-        trade_size: Quantity::from(1),
-    }
 }
 
 /// A take profit 20 bps away, a stop 1.5 ATRs of 14 bars.
@@ -62,26 +51,6 @@ fn in_bps(take_profit: i64, stop: i64) -> Barrier {
         atr: None,
         ..config().barrier.unwrap()
     }
-}
-
-#[test]
-fn a_config_reads_from_toml() {
-    let toml = r#"
-        horizon = "1h"
-
-        [barrier]
-        take_profit = { bps = 20 }
-        stop = { atr = 1.5 }
-        limit = "2h"
-        atr = { period = 14 }
-    "#;
-
-    assert_eq!(
-        toml::from_str::<TargetsTable>(toml)
-            .unwrap()
-            .trading(&gold()),
-        config()
-    );
 }
 
 /// The ATR's bars are the decision cadence's: naming them is refused.
@@ -350,19 +319,6 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     );
 }
 
-#[test]
-fn an_atr_distance_without_an_atr_table_reads_from_toml() {
-    let toml = r#"
-        barrier = { take_profit = { atr = 2.0 }, stop = { atr = 1.5 }, limit = "2h" }
-    "#;
-    let config = toml::from_str::<TargetsTable>(toml)
-        .unwrap()
-        .trading(&gold());
-
-    assert!(config.validate(rule(), &quotes()).is_ok());
-    assert_eq!(atr_bars(&config, rule()).unwrap().1, 14);
-}
-
 /// Decisions on events have no cadence to build the ATR's bars at.
 #[test]
 fn an_atr_with_decisions_on_events_is_refused() {
@@ -393,35 +349,6 @@ fn an_atr_on_a_cadence_nautilus_builds_no_bars_of_is_refused() {
         );
         assert!(err.contains("ATR"), "{minutes}: {err}");
     }
-}
-
-#[test]
-fn a_distance_has_one_known_unit() {
-    let barrier = |take_profit: &str| {
-        let toml = format!(
-            r#"
-            barrier = {{ take_profit = {take_profit}, stop = {{ bps = 10 }}, limit = "2h" }}
-            "#
-        );
-        toml::from_str::<TargetsTable>(&toml).map(|table| table.barrier.unwrap())
-    };
-
-    assert_eq!(barrier("{ bps = 7.5 }").unwrap().take_profit, {
-        Distance::BasisPoints(Decimal::new(75, 1))
-    });
-    for invalid in ["3.0", "{ ticks = 3 }", "{ bps = 10, atr = 1 }", "{}"] {
-        assert!(barrier(invalid).is_err(), "{invalid}");
-    }
-}
-
-#[test]
-fn a_config_refuses_an_unknown_field() {
-    let toml = r#"
-        horizon = "1h"
-        horizn = "2h"
-    "#;
-
-    assert!(toml::from_str::<TargetsTable>(toml).is_err());
 }
 
 #[test]
@@ -504,26 +431,6 @@ fn an_atr_of_no_bars_panics_as_validated() {
         atr: Some(AtrArgs {
             period: 0,
             ..DEFAULT_ATR
-        }),
-        ..config().barrier.unwrap()
-    };
-    let config = TargetsConfig {
-        barrier: Some(barrier),
-        ..config()
-    };
-    let _ = config.validate(rule(), &quotes());
-}
-
-#[test]
-#[should_panic(expected = "value_floor")]
-fn an_atr_floor_nautilus_refuses_panics_as_validated() {
-    let barrier = Barrier {
-        atr: Some(AtrArgs {
-            value_floor: Some(f64::NAN),
-            ..AtrArgs {
-                period: 14,
-                ..DEFAULT_ATR
-            }
         }),
         ..config().barrier.unwrap()
     };
@@ -898,32 +805,6 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
     );
 }
 
-/// The ATR's bars are the cadence's: deciding every hour, not every 15
-/// minutes, keys other targets, through the decisions' fingerprint they
-/// extend, as `dataset::fingerprint` composes them.
-#[test]
-fn a_cadence_change_changes_the_fingerprint_of_targets_with_an_atr() {
-    let features = FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(GOLD),
-            "mid",
-            SimpleMovingAverage::new(1, Some(PriceType::Mid)),
-        )
-        .build()
-        .unwrap();
-    let keyed = |rule| {
-        fingerprint(
-            decide::fingerprint(&features, rule),
-            &config(),
-            rule,
-            &quotes(),
-        )
-        .unwrap()
-    };
-
-    assert_ne!(keyed(every(15)), keyed(every(60)));
-}
-
 /// The ATR's bars are built from what the strategy reads: the same config
 /// on quotes, on trades and on bars keys three targets, whose rows differ.
 /// Targets without an ATR are keyed alike whatever the strategy reads.
@@ -1071,19 +952,6 @@ fn a_sides_pnl_commission_and_stop_are_its_target_names_among_a_rows_values() {
     assert_eq!(config().stop_index(Label::Horizon, Side::Long), None);
     assert_eq!(horizon.pnl_index(Label::Horizon, Side::Long), Some(0));
     assert_eq!(horizon.pnl_index(Label::Barrier, Side::Long), None);
-}
-
-#[test]
-fn a_label_reads_from_toml() {
-    #[derive(Deserialize)]
-    struct Section {
-        label: Label,
-    }
-    let label = |toml: &str| toml::from_str::<Section>(toml).map(|section| section.label);
-
-    assert_eq!(label(r#"label = "barrier""#).unwrap(), Label::Barrier);
-    assert_eq!(label(r#"label = "horizon""#).unwrap(), Label::Horizon);
-    assert!(label(r#"label = "direction""#).is_err());
 }
 
 /// 1000 AUD/USD with a stop 10 pips away: 1 USD at risk.

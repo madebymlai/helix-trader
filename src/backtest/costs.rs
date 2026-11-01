@@ -103,13 +103,9 @@ mod tests {
     }
 
     #[test]
-    fn charges_the_commission_on_the_first_fill_whatever_its_size() {
-        assert_eq!(commission(&order(), 10), Money::from("3 USD"));
-    }
-
-    #[test]
     fn charges_nothing_on_later_fills_of_the_same_order() {
         let mut order = order();
+        assert_eq!(commission(&order, 4), Money::from("3 USD"));
         let fill = OrderFilledTestBuilder::new(&order, &instrument())
             .last_qty(Quantity::from(4))
             .build();

@@ -488,25 +488,25 @@ Unit tests sit in a `#[cfg(test)] mod tests` at the bottom of each file.
   empty catalog lacks (a definition, then each series over its slice, a
   rolled root's contracts each over its own), only what is outside a
   stored interval, nothing (not even a definition) for a covered window;
-  a sliver between a live node's promoted files asked once, beside a
-  leftover run-start directory of older nodes, and nothing once its
-  write-back is recorded; book deltas asked as deltas; bars and custom
-  data refused, naming the series; the coverage check failing a window
-  answered with rows but not stored, not a definition or an empty window.
+  a sliver between a live node's promoted files asked with its
+  definition, beside a leftover run-start directory of older nodes; book
+  deltas asked as deltas; bars and custom data refused, naming the
+  series.
 - `tests/node_fill/`, fill-catalog's fill at its seam: `missing`, then a
   `NodeFill` whose live node holds a fake data client answering as
   Databento's, and the catalog:
   - a day a request, each written back, the definition first and its
     price precision on each data request, the empty weekend after Friday
-    joining it; a wider fill asking only the new day (the definition from
+    covered; a wider fill asking only the new day (the definition from
     the catalog); the same fill again building no node;
+  - a sliver between two stored files, as a live node's promotions leave
+    one, asked once with its definition and closed by its write-back;
   - a client answering 50 ms later asked one window at a time, in order;
-    empty windows before any stored data recorded only once they touch it;
   - book deltas a day a request, written back;
   - a failed request (`RequestFailed`, a failure envelope, a refused
     request) failing the fill naming the request and its reason, writing
     nothing, asking nothing after it; a silent client failing it after the
     timeout;
   - rows the engine does not write back (another contract's) failing the
-    coverage check; a covered window asking nothing.
+    coverage check.
 - `ib/`, `ib/gateway.rs`, `ic/`, `okx/` and `databento/`: see their READMEs.

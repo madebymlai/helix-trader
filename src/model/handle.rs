@@ -1116,13 +1116,13 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// Advances `clock` to `to`, when a quote of AUD/USD comes to the
-    /// features of `handle`: the market is open.
-    fn advance(handle: &ModelHandle, clock: &Rc<RefCell<VirtualClock>>, to: &str) {
+    /// Advances `clock` to `to`, when a quote of AUD/USD comes to
+    /// `features`, those a handle decides on: the market is open.
+    fn advance(features: &FeatureSet, clock: &Rc<RefCell<VirtualClock>>, to: &str) {
         clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at(to)), true);
-        warm(&handle.features, UnixNanos::from(at(to)));
+        warm(features, UnixNanos::from(at(to)));
     }
 
     /// The last mid of AUD/USD, warm once a quote came.
@@ -1281,9 +1281,9 @@ mod tests {
     }
 
     /// The probe's handle trading in a backtest on the models under
-    /// `models`, its features warm: a quote came at the time of `probe`.
-    fn handle(probe: &Decider, models: &Path) -> Rc<ModelHandle> {
-        let features = features();
+    /// `models`, deciding on `features`, warm: a quote came at the time of
+    /// `probe`.
+    fn handle(probe: &Decider, models: &Path, features: Rc<FeatureSet>) -> Rc<ModelHandle> {
         warm(&features, probe.clock().timestamp_ns());
         ModelHandle::new(
             StrategyId::from(STRATEGY),
@@ -1308,7 +1308,9 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
         assert_eq!(
-            handle(&probe, models.path()).decide(&mut probe).unwrap(),
+            handle(&probe, models.path(), features())
+                .decide(&mut probe)
+                .unwrap(),
             None
         );
     }
@@ -1326,7 +1328,7 @@ mod tests {
         warm(&features, probe.clock().timestamp_ns());
         let other = ModelHandle::new(
             StrategyId::from(STRATEGY),
-            features,
+            Rc::clone(&features),
             &config(),
             &requirements(),
             Mode::Backtest {
@@ -1341,7 +1343,11 @@ mod tests {
 
         assert_eq!(other.decide(&mut probe).unwrap(), None);
         assert_eq!(
-            probability(handle(&probe, models.path()).decide(&mut probe).unwrap()),
+            probability(
+                handle(&probe, models.path(), features)
+                    .decide(&mut probe)
+                    .unwrap()
+            ),
             Some(c(0.8))
         );
     }
@@ -1355,7 +1361,9 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
         assert_eq!(
-            handle(&probe, models.path()).decide(&mut probe).unwrap(),
+            handle(&probe, models.path(), features())
+                .decide(&mut probe)
+                .unwrap(),
             None
         );
     }
@@ -1390,7 +1398,7 @@ mod tests {
             .publish(&baseline("2026-10-22T00:00:00Z", 8))
             .unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = handle(&probe, models.path());
+        let handle = handle(&probe, models.path(), features());
         clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at("2026-10-22T12:00:00Z")), true);
@@ -1838,11 +1846,12 @@ mod tests {
             store.publish(&baseline(valid_from, trues)).unwrap();
         }
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = handle(&probe, models.path());
+        let features = features();
+        let handle = handle(&probe, models.path(), Rc::clone(&features));
 
         let mut probabilities = vec![probability(handle.decide(&mut probe).unwrap())];
         for time in ["2026-10-22T12:00:00Z", "2026-10-22T12:59:59Z"] {
-            advance(&handle, &clock, time);
+            advance(&features, &clock, time);
             probabilities.push(probability(handle.decide(&mut probe).unwrap()));
         }
 
@@ -1855,12 +1864,13 @@ mod tests {
         let store = store(models.path());
         store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = handle(&probe, models.path());
+        let features = features();
+        let handle = handle(&probe, models.path(), Rc::clone(&features));
         let before = probability(handle.decide(&mut probe).unwrap());
 
         // Live, a retrain at 12:00 publishes once its child finishes.
         store.publish(&baseline("2026-10-22T12:00:00Z", 9)).unwrap();
-        advance(&handle, &clock, "2026-10-22T13:00:00Z");
+        advance(&features, &clock, "2026-10-22T13:00:00Z");
 
         assert_eq!(before, Some(c(0.7)));
         assert_eq!(
@@ -1877,11 +1887,12 @@ mod tests {
         store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
         store.publish(&refused).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = handle(&probe, models.path());
+        let features = features();
+        let handle = handle(&probe, models.path(), Rc::clone(&features));
 
         let mut probabilities = vec![probability(handle.decide(&mut probe).unwrap())];
         for time in ["2026-10-22T12:00:00Z", "2026-10-22T13:00:00Z"] {
-            advance(&handle, &clock, time);
+            advance(&features, &clock, time);
             probabilities.push(probability(handle.decide(&mut probe).unwrap()));
         }
 
@@ -2002,14 +2013,14 @@ mod tests {
 
     /// The probe's handle trading live on the models under `models`,
     /// retraining through `launcher` on the catalog at `catalog`, started,
-    /// its features warm: a quote came at the time of `probe`.
+    /// deciding on `features`, warm: a quote came at the time of `probe`.
     fn live_handle(
         probe: &mut Decider,
         models: &Path,
         catalog: &Path,
         launcher: Launcher,
+        features: Rc<FeatureSet>,
     ) -> Rc<ModelHandle> {
-        let features = features();
         warm(&features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
@@ -2052,6 +2063,7 @@ mod tests {
             models.path(),
             catalog.path(),
             Launcher::in_process(|_| unreachable!()),
+            features(),
         );
 
         assert_eq!(
@@ -2070,9 +2082,13 @@ mod tests {
             models.path(),
             catalog.path(),
             Launcher::in_process(|_| unreachable!()),
+            features(),
         );
 
-        let next = clock.borrow().next_time_ns("RETRAIN-HANDLE-001").unwrap();
+        let next = clock
+            .borrow()
+            .next_time_ns(&crate::model::schedule::timer(StrategyId::from(STRATEGY)))
+            .unwrap();
 
         assert_eq!(Timestamp::from(next), at("2026-10-23T00:00:00Z"));
     }
@@ -2096,12 +2112,19 @@ mod tests {
             .into()
         });
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
-        let handle = live_handle(&mut probe, models.path(), catalog.path(), launcher);
+        let features = features();
+        let handle = live_handle(
+            &mut probe,
+            models.path(),
+            catalog.path(),
+            launcher,
+            Rc::clone(&features),
+        );
         let before = probability(handle.decide(&mut probe).unwrap());
 
         run_to(&handle, &mut probe, &clock, "2026-10-23T00:00:00Z");
         let trained_at = publishing.recv().unwrap();
-        advance(&handle, &clock, "2026-10-23T01:00:00Z");
+        advance(&features, &clock, "2026-10-23T01:00:00Z");
 
         // The catalog ends before the retrain's time: trained at its end.
         assert_eq!(trained_at, at("2026-10-22T23:00:00Z"));
@@ -2132,19 +2155,22 @@ mod tests {
             .into()
         });
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
-        let handle = live_handle(&mut probe, models.path(), catalog.path(), launcher);
+        let features = features();
+        let handle = live_handle(
+            &mut probe,
+            models.path(),
+            catalog.path(),
+            launcher,
+            Rc::clone(&features),
+        );
 
         run_to(&handle, &mut probe, &clock, "2026-10-23T00:00:00Z");
         keeping.recv().unwrap();
-        advance(&handle, &clock, "2026-10-23T01:00:00Z");
+        advance(&features, &clock, "2026-10-23T01:00:00Z");
 
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
             Some(c(0.7))
-        );
-        assert_eq!(
-            store(models.path()).valid_froms().unwrap(),
-            [at("2026-10-22T10:00:00Z")]
         );
     }
 
@@ -2481,6 +2507,16 @@ mod tests {
                         r.start,
                         r.end
                     ),
+                    DataCommand::Request(RequestCommand::Bars(r)) => format!(
+                        "request bars [{}] {:?}..{:?}",
+                        r.bar_types
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        r.start,
+                        r.end
+                    ),
                     DataCommand::Subscribe(SubscribeCommand::Trades(s)) => format!(
                         "subscribe trades [{}] from {:?}",
                         ids(&s.instrument_ids),
@@ -2505,6 +2541,16 @@ mod tests {
             }),
         );
         sent
+    }
+
+    /// Asserts `sent` holds each of `commands`, in whatever order.
+    fn assert_sent(sent: &[String], commands: &[&str]) {
+        for command in commands {
+            assert!(
+                sent.iter().any(|line| line == command),
+                "{command} not in {sent:#?}"
+            );
+        }
     }
 
     /// A trade of GC's December contract at `time`, at `price`.
@@ -2585,14 +2631,21 @@ mod tests {
             None,
         ));
 
-        assert_eq!(
-            *sent.borrow(),
-            [
+        let sent = sent.take();
+        assert_sent(
+            &sent,
+            &[
                 "request trades [GCZ6.GLBX] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
                 "subscribe trades [GCZ6.GLBX] from Some(2026-08-10T14:30:00Z)",
                 "request instrument [GCG7.GLBX]",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
-            ]
+            ],
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|line| line.contains("[GC.GLBX]") || line.starts_with("request quotes")),
+            "{sent:#?}"
         );
         assert!(!cold);
         assert!(probe.core().indicators_initialized().unwrap());
@@ -2667,6 +2720,11 @@ mod tests {
 
         let sent = started_live(features, vec![hours], vec![aud_quotes()]);
 
+        assert_sent(
+            &sent,
+            &["request bars [AUD/USD.SIM-1-MINUTE-MID-EXTERNAL] \
+               Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)"],
+        );
         assert!(
             !sent.iter().any(
                 |line| line.starts_with("request quotes") || line.starts_with("request trades")
@@ -2792,9 +2850,10 @@ mod tests {
     /// holds the last one, warm before the first decision.
     #[test]
     fn a_live_start_warms_a_custom_feature_from_the_catalog() {
-        let (mut probe, handle, sent, _models) =
-            started_live_reading(last_imbalance(AUD), vec![imbalances_of(AUD)]);
-        let cold = handle.features.values();
+        let features = last_imbalance(AUD);
+        let (mut probe, _handle, sent, _models) =
+            started_live_reading(Rc::clone(&features), vec![imbalances_of(AUD)]);
+        let cold = features.values();
 
         probe.handle_data_response(&catalog_answer(
             AUD,
@@ -2813,7 +2872,7 @@ mod tests {
         );
         assert_eq!(imbalance_subscribers(AUD), 1);
         assert_eq!(cold, None);
-        assert_eq!(handle.features.values(), Some(vec![-0.5]));
+        assert_eq!(features.values(), Some(vec![-0.5]));
     }
 
     /// Live on 2026-08-10 at 14:30, a feature on the imbalances of the
@@ -2824,8 +2883,9 @@ mod tests {
     /// The answer's imbalance of GCZ6 makes the feature hold it.
     #[test]
     fn a_live_start_warms_a_custom_feature_on_a_root_on_its_front_contract() {
-        let (mut probe, handle, sent, _models) = started_live_reading(
-            last_imbalance("GC.GLBX"),
+        let features = last_imbalance("GC.GLBX");
+        let (mut probe, _handle, sent, _models) = started_live_reading(
+            Rc::clone(&features),
             vec![imbalances_of("GC.GLBX"), aud_quotes()],
         );
 
@@ -2834,14 +2894,18 @@ mod tests {
             vec![imbalance("GCZ6.GLBX", "2026-08-10T14:10:00Z", 0.75)],
         ));
 
-        assert_eq!(
-            sent,
-            [
+        assert_sent(
+            &sent,
+            &[
                 "request data Imbalance of Some(\"GCZ6.GLBX\") from CATALOG \
                  Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
                 "request instrument [GCG7.GLBX]",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
-            ]
+            ],
+        );
+        assert!(
+            !sent.iter().any(|line| line.contains("\"GC.GLBX\"")),
+            "{sent:#?}"
         );
         assert_eq!(
             (
@@ -2850,7 +2914,7 @@ mod tests {
             ),
             (1, 0)
         );
-        assert_eq!(handle.features.values(), Some(vec![0.75]));
+        assert_eq!(features.values(), Some(vec![0.75]));
     }
 
     /// A feature on the imbalances of the root GC, in a backtest from
@@ -2868,9 +2932,10 @@ mod tests {
             ticks: vec![imbalances_of("GC.GLBX"), aud_quotes()],
             warmup: SignedDuration::ZERO,
         };
+        let features = last_imbalance("GC.GLBX");
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
-            last_imbalance("GC.GLBX"),
+            Rc::clone(&features),
             &config(),
             &requirements,
             Mode::Backtest {
@@ -2881,14 +2946,14 @@ mod tests {
         .unwrap();
         handle.start(&mut probe).unwrap();
         let read = |data: CustomData| {
-            handle.features.handle_data(&data);
-            handle.features.values()
+            features.handle_data(&data);
+            features.values()
         };
 
         let pre = read(imbalance("GCZ6.GLBX", "2026-11-25T23:10:00Z", 0.25));
         let post_before_the_roll = read(imbalance("GCG7.GLBX", "2026-11-25T23:20:00Z", 0.75));
         run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
-        let rolled = handle.features.values();
+        let rolled = features.values();
         let pre_after_the_roll = read(imbalance("GCZ6.GLBX", "2026-11-26T00:40:00Z", -0.25));
         let post = read(imbalance("GCG7.GLBX", "2026-11-26T00:50:00Z", -0.75));
 

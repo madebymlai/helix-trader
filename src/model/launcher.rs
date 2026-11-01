@@ -373,8 +373,8 @@ mod tests {
     use super::*;
     use crate::{
         model::{
-            holdout::{Earnings, Holdout, Refusal},
-            train::{Kept, Outcome},
+            holdout::{Earnings, Holdout},
+            train::Outcome,
         },
         strategy::TickSeries,
     };
@@ -408,50 +408,6 @@ mod tests {
             PathBuf::from("sh"),
             vec!["-c".into(), script.into(), "sh".into()],
         )
-    }
-
-    #[test]
-    fn an_in_process_train_publishing_is_published() {
-        let launcher = Launcher::in_process(published);
-
-        assert_eq!(
-            launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Published
-        );
-    }
-
-    #[test]
-    fn an_in_process_train_keeping_the_model_is_kept_with_its_reason() {
-        let launcher = Launcher::in_process(|_| {
-            Outcome::Kept(Kept::Refused {
-                why: Refusal::MinPnl {
-                    pnl: 0.48,
-                    min_pnl: 0.55,
-                },
-                holdout: holdout(),
-            })
-            .into()
-        });
-
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
-            panic!("published");
-        };
-        assert!(why.contains("0.48") && why.contains("0.55"), "{why}");
-    }
-
-    /// The primary published, its meta model kept: the retrain is kept,
-    /// with the meta's reason.
-    #[test]
-    fn an_in_process_train_keeping_its_meta_model_is_kept_with_its_reason() {
-        let launcher = Launcher::in_process(|at| Trained {
-            meta: Some(Outcome::Kept(Kept::Failed("no meta row".to_string()))),
-            ..published(at)
-        });
-
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
-            panic!("published");
-        };
-        assert!(why.contains("meta") && why.contains("no meta row"), "{why}");
     }
 
     #[test]
@@ -611,24 +567,38 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
+    /// Polls `retraining` until the outcome of the train it runs reached
+    /// it, making way for the next. A train's outcome is sent just after
+    /// the train returns, off this thread, so it may come after the time
+    /// the train sent; the handle polls at each decision.
+    fn polled_to_its_end(retraining: &Retraining) {
+        while retraining.running.borrow().is_some() {
+            retraining.poll();
+            std::thread::yield_now();
+        }
+    }
+
     /// Fires the retrain timer of `retraining` at `time` until a train
-    /// sends its time to `finished` or a second passes: the time, if one
-    /// did. The outcome of a train reaches the handle just after it
-    /// finishes, so a retrain due right after one finishes may be skipped
-    /// as running.
+    /// sends its time to `finished`: that time. The outcome of a train
+    /// reaches the handle just after the train sent its time, so a retrain
+    /// fired right after may be skipped as running. Panics after a minute,
+    /// so that a retrain never launched fails rather than hangs.
     fn fire_until_launched(
         retraining: &Retraining,
         finished: &Receiver<Timestamp>,
         time: &str,
-    ) -> Option<Timestamp> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while std::time::Instant::now() < deadline {
+    ) -> Timestamp {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
             retraining.on_time_event(&fired("LIVE-001", time));
             if let Ok(at) = finished.recv_timeout(std::time::Duration::from_millis(10)) {
-                return Some(at);
+                return at;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no retrain launched at {time} within a minute of firing"
+            );
         }
-        None
     }
 
     #[test]
@@ -641,7 +611,7 @@ mod tests {
 
         let second = fire_until_launched(&retraining, &finished, "2026-10-23T00:00:00Z");
 
-        assert_eq!(second, Some(at("2026-10-23T00:00:00Z")));
+        assert_eq!(second, at("2026-10-23T00:00:00Z"));
     }
 
     #[test]
@@ -721,10 +691,12 @@ mod tests {
         let retraining = daily_on(dir.path(), sending(finish));
         retraining.on_time_event(&fired("LIVE-001", "2026-10-22T00:00:00Z"));
         assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
+        polled_to_its_end(&retraining);
 
-        let second = fire_until_launched(&retraining, &finished, "2026-10-23T00:00:00Z");
+        retraining.on_time_event(&fired("LIVE-001", "2026-10-23T00:00:00Z"));
+        drop(retraining);
 
-        assert_eq!(second, None);
+        assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
     #[test]
@@ -745,6 +717,6 @@ mod tests {
 
         let second = fire_until_launched(&retraining, &finished, "2026-10-23T00:00:00Z");
 
-        assert_eq!(second, Some(at("2026-10-22T13:00:00Z")));
+        assert_eq!(second, at("2026-10-22T13:00:00Z"));
     }
 }

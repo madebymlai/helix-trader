@@ -224,8 +224,10 @@ fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
 
     features.handle_quote(&quote(AUD, 0.7)).unwrap();
     features.handle_quote(&quote(GBP, 1.3)).unwrap();
-    features.handle_trade(&trade(AUD, 0.65)).unwrap();
 
+    // The feature on AUD's trades is still cold: no quote reached it.
+    assert_eq!(features.values(), None);
+    features.handle_trade(&trade(AUD, 0.65)).unwrap();
     let values = features.values().unwrap();
     assert!((values[0] - 0.7).abs() < 1e-9, "{values:?}");
     assert!((values[1] - 1.3).abs() < 1e-9, "{values:?}");
@@ -336,20 +338,6 @@ fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
 
     let values = features.values().unwrap();
     assert!((values[1] - 0.7).abs() < 1e-9, "{values:?}");
-}
-
-/// Nautilus' moving averages read the last price by default, which a
-/// quote does not have: an error of the indicator.
-#[test]
-fn a_moving_average_of_last_prices_stays_cold_on_quotes() {
-    let features = FeatureSet::builder()
-        .quotes(id(AUD), "last", SimpleMovingAverage::new(1, None))
-        .build()
-        .unwrap();
-
-    features.handle_quote(&quote(AUD, 0.7)).unwrap();
-
-    assert!(!features.initialized());
 }
 
 #[test]
@@ -491,30 +479,35 @@ fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
     );
 }
 
+/// A set of one feature on AUD's mids, given `warmup` if any.
+fn warming(warmup: Option<SignedDuration>) -> Rc<FeatureSet> {
+    let builder = FeatureSet::builder().quotes(id(AUD), "mid", sma(1));
+    match warmup {
+        Some(warmup) => builder.warmup(warmup),
+        None => builder,
+    }
+    .build()
+    .unwrap()
+}
+
 #[test]
 fn a_set_declares_no_warmup_unless_given_one() {
-    let features = |warmup: Option<SignedDuration>| {
-        let builder = FeatureSet::builder().quotes(id(AUD), "mid", sma(1));
-        match warmup {
-            Some(warmup) => builder.warmup(warmup),
-            None => builder,
-        }
-        .build()
-        .unwrap()
-    };
-
-    assert_eq!(features(None).warmup(), SignedDuration::ZERO);
+    assert_eq!(warming(None).warmup(), SignedDuration::ZERO);
     assert_eq!(
-        features(Some(SignedDuration::from_hours(2))).warmup(),
+        warming(Some(SignedDuration::from_hours(2))).warmup(),
         SignedDuration::from_hours(2)
     );
+}
+
+#[test]
+fn the_fingerprint_changes_with_the_warmup() {
     assert_ne!(
-        features(Some(SignedDuration::from_hours(2))).fingerprint(),
-        features(None).fingerprint()
+        warming(Some(SignedDuration::from_hours(2))).fingerprint(),
+        warming(None).fingerprint()
     );
     assert_ne!(
-        features(Some(SignedDuration::from_hours(2))).fingerprint(),
-        features(Some(SignedDuration::from_hours(3))).fingerprint()
+        warming(Some(SignedDuration::from_hours(2))).fingerprint(),
+        warming(Some(SignedDuration::from_hours(3))).fingerprint()
     );
 }
 

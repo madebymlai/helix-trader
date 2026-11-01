@@ -851,6 +851,14 @@ mod tests {
                 "{other:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_short_margin_does_not_key_the_long_models() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), &config())
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
         let other_short = ModelConfig {
             margins: Margins {
                 long: Some(0.5),
@@ -858,9 +866,10 @@ mod tests {
             },
             ..config()
         };
+
         assert_eq!(
-            store(dir.path(), &other_short).valid_froms().unwrap().len(),
-            1
+            store(dir.path(), &other_short).valid_froms().unwrap(),
+            [at("2026-10-22T00:00:00Z")]
         );
     }
 

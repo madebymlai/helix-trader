@@ -137,7 +137,13 @@ impl IcExecutionClient {
         instrument_ids: Vec<InstrumentId>,
     ) -> Self {
         let url = connection.environment.url().to_owned();
-        Self::with_endpoint(core, url, connection.credential.clone(), instrument_ids)
+        Self::with_endpoint(
+            core,
+            url,
+            connection.credential.clone(),
+            instrument_ids,
+            get_atomic_clock_realtime(),
+        )
     }
 
     fn with_endpoint(
@@ -145,8 +151,8 @@ impl IcExecutionClient {
         url: String,
         credential: IcCredential,
         instrument_ids: Vec<InstrumentId>,
+        clock: &'static AtomicTime,
     ) -> Self {
-        let clock = get_atomic_clock_realtime();
         let mut emitter = ExecutionEventEmitter::new(
             clock,
             core.trader_id,
@@ -1498,6 +1504,20 @@ mod tests {
         Received,
         tempfile::TempDir,
     ) {
+        started_at(venue, get_atomic_clock_realtime())
+    }
+
+    /// As `started`, the client's clock `clock`.
+    fn started_at(
+        venue: Script,
+        clock: &'static AtomicTime,
+    ) -> (
+        IcExecutionClient,
+        Rc<RefCell<Cache>>,
+        Events,
+        Received,
+        tempfile::TempDir,
+    ) {
         let (url, received) = testing::start(peer(venue));
         let (tx, events) = mpsc::unbounded_channel();
         replace_exec_event_sender(tx);
@@ -1518,6 +1538,7 @@ mod tests {
             url,
             credential,
             vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
+            clock,
         );
         client.start().unwrap();
         (client, cache, events, received, tokens)
@@ -1676,7 +1697,29 @@ mod tests {
     async fn connecting_publishes_the_captured_account_state_and_waits_for_the_node() {
         let (mut client, cache, mut events, _, _tokens) = started(Script::default());
 
-        let state = connect(&mut client, &mut events, &cache).await;
+        let state = {
+            let connecting = client.connect();
+            tokio::pin!(connecting);
+            // The account state is published; the node has not registered it.
+            let state = tokio::select! {
+                biased;
+                connected = &mut connecting => {
+                    panic!("connected before the node registered the account: {connected:?}")
+                }
+                event = events.recv() => match event {
+                    Some(ExecutionEvent::Account(state)) => state,
+                    other => panic!("not an account state: {other:?}"),
+                },
+            };
+            // Still connecting until it does.
+            assert!(futures::poll!(&mut connecting).is_pending());
+            cache
+                .borrow_mut()
+                .add_account(AccountAny::from_events(std::slice::from_ref(&state)).unwrap())
+                .unwrap();
+            connecting.await.unwrap();
+            state
+        };
 
         // As captured: balance 100000000 at moneyDigits 2, in EUR (asset 5).
         let eur = Currency::from("EUR");
@@ -1986,12 +2029,12 @@ mod tests {
         assert!(!mass_status.reports_complete());
     }
 
+    /// The client's clock stopped at `T0` + 1 h.
     #[tokio::test]
     async fn a_longer_lookback_reads_the_deals_from_its_start() {
-        let venue = gold_venue();
-        let (mut client, cache, mut events, received, _tokens) = started(venue);
+        let clock = Box::leak(Box::new(AtomicTime::new(false, ns(T0 + 3_600_000))));
+        let (mut client, cache, mut events, received, _tokens) = started_at(gold_venue(), clock);
         connect(&mut client, &mut events, &cache).await;
-        let before = client.now();
 
         let mass_status = client
             .generate_mass_status(Some(60 * 24 * 365 * 10))
@@ -1999,14 +2042,11 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        // 3650 days before 2026-10-25T11:00:00Z: 2016-10-27T11:00:00Z,
+        // before the opening of the first position (T0).
+        let from = 1_477_566_000_000;
         let asked: Vec<ProtoOaDealListReq> = requests_of(&received);
-        let from = asked[0].from_timestamp.unwrap();
-        let ten_years_ms = 10 * 365 * 24 * 3_600_000;
-        assert!(from < T0, "{from}");
-        assert!(
-            (millis(before) - ten_years_ms - from).abs() < 60_000,
-            "{from}"
-        );
+        assert_eq!(asked[0].from_timestamp, Some(from));
         assert_eq!(mass_status.lookback_start(), Some(ns(from)));
         client.disconnect().await.unwrap();
     }
@@ -2062,11 +2102,20 @@ mod tests {
     /// with nothing open and no deal.
     #[tokio::test]
     async fn an_account_with_nothing_open_reports_nothing() {
-        let (mass_status, received) = mass_status(Script::default(), None).await;
+        let (mass_status, _) = mass_status(Script::default(), None).await;
 
         assert!(mass_status.position_reports().is_empty());
         assert!(mass_status.order_reports().is_empty());
         assert!(mass_status.fill_reports().is_empty());
+    }
+
+    /// The stop loss and take profit orders are the positions' (see
+    /// `stop_loss_and_take_profit_are_open_reduce_only_orders_of_their_position`):
+    /// the reconcile request does not list them as orders of their own.
+    #[tokio::test]
+    async fn the_reconcile_request_reads_protections_from_positions_not_as_orders() {
+        let (_, received) = mass_status(Script::default(), None).await;
+
         let reconcile: Vec<ProtoOaReconcileReq> = requests_of(&received);
         assert_eq!(reconcile.last().unwrap().ctid_trader_account_id, ACCOUNT_ID);
         assert_eq!(

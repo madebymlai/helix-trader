@@ -2,13 +2,12 @@
 //! `strategy::warmup` as a real strategy does in a backtest, on a plain
 //! instrument or, given its continuous bars, on a root, records every bar
 //! it gets, every fill, and on stop the adjustments of its positions
-//! (funding), the orders denied and its account's margins, and can rest a
-//! sell stop on its first bar or send market orders of its choosing on the
-//! first bars, close its positions by their ids on given bars, and on stop
-//! its positions. It leaves its `oms_type` unset, so it keeps positions as
-//! the venue does. For the tests that need what the EMA crossover cannot
-//! show: the bars' open, high and low, stop orders, fills of a given side
-//! and size, funding, and positions.
+//! (funding), the orders denied and its account's margins, and can send
+//! market orders of its choosing on the first bars, close its positions by
+//! their ids on given bars, and on stop its positions. It leaves its
+//! `oms_type` unset, so it keeps positions as the venue does. For the tests
+//! that need what the EMA crossover cannot show: the bars' open, high and
+//! low, fills of a given side and size, funding, and positions.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -53,8 +52,6 @@ pub struct Recorder {
     bar_type: BarType,
     /// The continuous bars of its bar type, if on a root.
     continuous: ContinuousBars,
-    /// The trigger of the sell stop of 10 shares sent on the first bar.
-    stop: Option<Price>,
     /// The market order sent on each of the first bars, in order.
     market: Vec<(OrderSide, Quantity)>,
     /// The bars, by index, on which it closes its open positions
@@ -64,9 +61,8 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// A recorder of `bar_type`, resting a sell stop at `stop` if given,
-    /// and the record it fills.
-    pub fn new(bar_type: BarType, stop: Option<Price>) -> (Self, Rc<RefCell<Record>>) {
+    /// A recorder of `bar_type`, and the record it fills.
+    pub fn new(bar_type: BarType) -> (Self, Rc<RefCell<Record>>) {
         let record = Rc::new(RefCell::new(Record::default()));
         let recorder = Self {
             core: StrategyCore::new(StrategyConfig {
@@ -76,7 +72,6 @@ impl Recorder {
             }),
             bar_type,
             continuous: ContinuousBars::default(),
-            stop,
             market: vec![],
             close_on: vec![],
             record: Rc::clone(&record),
@@ -90,7 +85,7 @@ impl Recorder {
         bar_type: BarType,
         continuous: ContinuousBars,
     ) -> (Self, Rc<RefCell<Record>>) {
-        let (recorder, record) = Self::new(bar_type, None);
+        let (recorder, record) = Self::new(bar_type);
         (
             Self {
                 continuous,
@@ -106,7 +101,7 @@ impl Recorder {
         bar_type: BarType,
         market: Vec<(OrderSide, Quantity)>,
     ) -> (Self, Rc<RefCell<Record>>) {
-        let (recorder, record) = Self::new(bar_type, None);
+        let (recorder, record) = Self::new(bar_type);
         (Self { market, ..recorder }, record)
     }
 
@@ -160,7 +155,6 @@ impl DataActor for Recorder {
 
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
         let index = self.record.borrow().bars.len();
-        let first = index == 0;
         self.record.borrow_mut().bars.push(*bar);
         if self.close_on.contains(&index) {
             let instrument_id = bar.bar_type.instrument_id();
@@ -186,27 +180,6 @@ impl DataActor for Recorder {
             );
             self.submit_order(order, None, None, None)?;
         }
-        let Some(trigger) = self.stop.filter(|_| first) else {
-            return Ok(());
-        };
-        let order = self.order().stop_market(
-            bar.bar_type.instrument_id(),
-            OrderSide::Sell,
-            Quantity::from(10),
-            trigger,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        self.submit_order(order, None, None, None)
+        Ok(())
     }
 }

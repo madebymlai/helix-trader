@@ -429,13 +429,17 @@ BTC-USDT-SWAP,0.0004,1788249600000
     }
 
     #[test]
-    fn funding_rows_out_of_order_or_alone_are_an_error() {
+    fn funding_rows_out_of_order_are_an_error_naming_the_row() {
         let rows = "\
 BTC-USDT-SWAP,0.0001,1788220800000
 BTC-USDT-SWAP,0.0002,1788192000000
 ";
         let err = read_funding(&zipped_funding(rows)).unwrap_err().to_string();
         assert!(err.contains("row 2"), "{err}");
+    }
+
+    #[test]
+    fn a_single_funding_row_is_an_error() {
         let err = read_funding(&zipped_funding("BTC-USDT-SWAP,0.0001,1788192000000\n"))
             .unwrap_err()
             .to_string();

@@ -292,11 +292,10 @@ pub(crate) fn stored_access_token(credential: &IcCredential) -> String {
         .to_owned()
 }
 
-/// cTrader's answer to `request`, a renewal, `delay` late: a new pair
-/// whose access token is `renewed_access(1)` (synthetic, as
-/// OpenApiMessages.proto defines it).
-pub(crate) fn slow_renewal_answer(request: &ProtoMessage, delay: Duration) -> Action {
-    std::thread::sleep(delay);
+/// cTrader's answer to `request`, a renewal: a new pair whose access
+/// token is `renewed_access(1)` (synthetic, as OpenApiMessages.proto
+/// defines it).
+pub(crate) fn renewal_answer(request: &ProtoMessage) -> Action {
     let renewed = ProtoOaRefreshTokenRes {
         access_token: renewed_access(1),
         token_type: "bearer".to_owned(),

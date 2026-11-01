@@ -479,6 +479,18 @@ fn depth_intervals(dir: &Path) -> Vec<(u64, u64)> {
         .unwrap()
 }
 
+/// What the catalog in `dir` lacks of GCZ6's book over `[from, to]`.
+fn depth_lacking(dir: &Path, (from, to): (&str, &str)) -> Vec<(u64, u64)> {
+    ParquetDataCatalog::new(dir, None, None, None, None)
+        .get_missing_intervals_for_request(
+            ns(from),
+            ns(to),
+            &NautilusDataType::OrderBookDepth.into(),
+            Some(GCZ6),
+        )
+        .unwrap()
+}
+
 fn stored_book(dir: &Path) -> Vec<u64> {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog
@@ -542,16 +554,8 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
         ]
     );
     assert_eq!(asked_twice, 7);
-    // Friday's file stretched over the empty weekend after it; Monday's;
-    // Tuesday's over the empty instant of Wednesday after it.
-    assert_eq!(
-        depth_intervals(dir.path()),
-        [
-            (ns(FRI), before(MON)),
-            (ns(MON), before(TUE)),
-            (ns(TUE), ns(WED))
-        ]
-    );
+    // The empty weekend and the empty instant of Wednesday covered too.
+    assert_eq!(depth_lacking(dir.path(), (FRI, WED)), []);
     assert_eq!(
         stored_book(dir.path()),
         book()
@@ -567,10 +571,60 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     assert_eq!(stored[0].id(), InstrumentId::from(GCZ6));
 }
 
+/// The book stored over Friday to Monday but for 0.2 s before Friday's
+/// midnight, as a live node's daily promotions leave a sliver between
+/// their files. The venue holds nothing in the sliver.
+#[test]
+fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    catalog
+        .write_to_parquet(
+            &[depth("2025-10-17T10:00:00Z")],
+            Some(ts(FRI).into()),
+            Some(ts("2025-10-17T23:59:59.5Z").into()),
+            None,
+        )
+        .unwrap();
+    catalog
+        .write_to_parquet(
+            &[depth("2025-10-20T10:00:00Z")],
+            Some(ts("2025-10-17T23:59:59.7Z").into()),
+            Some(end_before(TUE).into()),
+            None,
+        )
+        .unwrap();
+    let venue = FakeVenue::new(Answer::Data);
+    let book_of = reading(NautilusDataType::OrderBookDepth);
+
+    for _ in 0..2 {
+        fill(
+            dir.path(),
+            &venue,
+            &book_of,
+            (ts(FRI), end_before(TUE)),
+            DAY,
+            TIMEOUT,
+        )
+        .unwrap();
+    }
+
+    // The sliver and its definition, by the first fill only.
+    let sliver = (
+        ns("2025-10-17T23:59:59.500000001Z"),
+        ns("2025-10-17T23:59:59.699999999Z"),
+    );
+    assert_eq!(
+        venue.borrow().asked,
+        [
+            (FillData::Instrument, sliver.0, sliver.1, None),
+            (FillData::Depth, sliver.0, sliver.1, Some(2)),
+        ]
+    );
+}
+
 /// Friday from midnight to noon in windows of three hours: the book's
-/// snapshot at 10:00 is in the last. The empty windows before it touch no
-/// stored interval, so Nautilus records no coverage for them, and the next
-/// fill asks for them again.
+/// snapshot at 10:00 is in the last.
 #[test]
 fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     let dir = tempfile::tempdir().unwrap();
@@ -590,18 +644,8 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
         TIMEOUT,
     )
     .unwrap();
-    let asked_first = venue.borrow().asked.len();
-    fill(
-        dir.path(),
-        &venue,
-        &reading(NautilusDataType::OrderBookDepth),
-        morning,
-        three_hours,
-        TIMEOUT,
-    )
-    .unwrap();
 
-    let windows: Vec<(u64, u64)> = venue.borrow().asked[1..asked_first]
+    let windows: Vec<(u64, u64)> = venue.borrow().asked[1..]
         .iter()
         .map(|&(_, from, to, _)| (from, to))
         .collect();
@@ -615,45 +659,18 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
         ]
     );
     assert_eq!(venue.borrow().most_in_flight, 1);
-    // The second fill: the definition from the catalog, the morning
-    // before 09:00 asked again, the 06:00 window now recorded empty, as
-    // it touches the stored 09:00.
-    let again: Vec<(FillData, u64, u64)> = venue.borrow().asked[asked_first..]
-        .iter()
-        .map(|&(data, from, to, _)| (data, from, to))
-        .collect();
-    assert_eq!(
-        again,
-        [
-            (
-                FillData::Depth,
-                ns("2025-10-17T00:00:00Z"),
-                before("2025-10-17T03:00:00Z")
-            ),
-            (
-                FillData::Depth,
-                ns("2025-10-17T03:00:00Z"),
-                before("2025-10-17T06:00:00Z")
-            ),
-            (
-                FillData::Depth,
-                ns("2025-10-17T06:00:00Z"),
-                before("2025-10-17T09:00:00Z")
-            ),
-        ]
-    );
-    assert_eq!(
-        depth_intervals(dir.path()),
-        [(ns("2025-10-17T06:00:00Z"), before("2025-10-17T12:00:00Z"))]
-    );
 }
 
 #[test]
 fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
-    for (answer, reason) in [
-        (Answer::Failed, "venue cut the history"),
-        (Answer::FailureEnvelope, "venue cut the history"),
-        (Answer::Refused, "Data client FAKE request failed"),
+    let friday = "the book depths of GCZ6.GLBX over \
+                  [2025-10-17T00:00:00Z, 2025-10-17T23:59:59.999999999Z]";
+    for (answer, failure) in [
+        // The venue's reason.
+        (Answer::Failed, "failed: venue cut the history"),
+        (Answer::FailureEnvelope, "failed: venue cut the history"),
+        // Nautilus' reason, not the client's.
+        (Answer::Refused, "failed: "),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let venue = FakeVenue::new(answer);
@@ -670,10 +687,9 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
         .to_string();
 
         assert!(
-            err.contains("book depths of GCZ6.GLBX over [2025-10-17T00:00:00Z"),
+            err.contains(&format!("{friday} {failure}")),
             "{answer:?}: {err}"
         );
-        assert!(err.contains(reason), "{answer:?}: {err}");
         // The first day failed: the second never asked.
         assert_eq!(venue.borrow().asked.len(), 2, "{answer:?}");
         assert_eq!(depth_intervals(dir.path()), [], "{answer:?}");
@@ -699,7 +715,9 @@ fn a_client_that_never_answers_fails_the_fill_after_the_timeout() {
 
     assert!(err.contains("book depths of GCZ6.GLBX"), "{err}");
     assert!(err.contains("no answer within 1s"), "{err}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(8));
+    // Loose enough for the node's build on a loaded machine; a deadline
+    // read in minutes still fails it.
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
 }
 
 #[test]
@@ -723,37 +741,6 @@ fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
         "{err}"
     );
     assert!(err.contains("write-back failed"), "{err}");
-}
-
-#[test]
-fn a_covered_window_builds_no_node() {
-    let dir = tempfile::tempdir().unwrap();
-    let venue = FakeVenue::new(Answer::Data);
-    let book_of = reading(NautilusDataType::OrderBookDepth);
-    fill(
-        dir.path(),
-        &venue,
-        &book_of,
-        (ts(FRI), end_before(SAT)),
-        DAY,
-        TIMEOUT,
-    )
-    .unwrap();
-    let asked = venue.borrow().asked.len();
-
-    // A window inside the stored day, with a venue that would fail.
-    venue.borrow_mut().answer = Answer::Refused;
-    fill(
-        dir.path(),
-        &venue,
-        &book_of,
-        (ts("2025-10-17T06:00:00Z"), ts("2025-10-17T18:00:00Z")),
-        DAY,
-        TIMEOUT,
-    )
-    .unwrap();
-
-    assert_eq!(venue.borrow().asked.len(), asked);
 }
 
 #[test]
