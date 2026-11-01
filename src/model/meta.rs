@@ -22,7 +22,10 @@
 //! side's stop is the row's own (`payoff::Realised::unit`). A row before
 //! the primary's first model has no decision: the meta's rows start
 //! there at the earliest, and with no primary model before a train the
-//! meta waits (`schedule::Schedule::plan`). A row the primary makes no
+//! meta waits (`schedule::Schedule::plan`). Never retrained, with neither
+//! in use, one train fits the primary as of the meta's window before it
+//! and the meta at it, on that primary's decisions over the window: the
+//! meta filters the very primary it learned. A row the primary makes no
 //! trade of is no row of the meta; a long-only primary gives it buys
 //! alone.
 //!

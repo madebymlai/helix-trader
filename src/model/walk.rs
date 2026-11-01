@@ -1183,11 +1183,16 @@ Short model scores, out of sample, over the span
 
     /// The store of the meta models of `meta_walk(dir)`.
     fn meta_store(dir: &Path) -> ModelStore {
+        meta_store_of(dir, &with_meta())
+    }
+
+    /// The store of the meta models of a walk in `dir` as `config` says.
+    fn meta_store_of(dir: &Path, config: &ModelConfig) -> ModelStore {
         Meta::of_model(
             &dir.join("models"),
             StrategyId::from(STRATEGY),
             &features(),
-            &with_meta(),
+            config,
             &requirements(),
             &venue(),
         )
@@ -1420,29 +1425,92 @@ Short model scores, out of sample, over the span
         assert!(!err.contains("meta"), "{err}");
     }
 
-    /// Never retrained, on an empty store, the train at the start fits the
-    /// primary and its meta waits, no primary model before it: the
-    /// backtest is refused, naming the meta.
-    #[test]
-    fn a_backtest_never_retrained_whose_meta_waits_at_its_start_is_refused_naming_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = ModelConfig {
+    /// `with_meta`, never retrained.
+    fn never_with_meta() -> ModelConfig {
+        ModelConfig {
             retrain: Retrain::Never,
             ..with_meta()
-        };
-        let walk = walk_of(dir.path(), config.clone());
+        }
+    }
 
-        let err = prepared(
-            dir.path(),
-            &walk,
-            ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z"),
-            Some(&config),
-        )
-        .unwrap_err()
-        .to_string();
+    /// What `prepare` of the walk of `never_with_meta` in `dir` over the
+    /// 7th and the 8th asked for, or its error, on an empty store. A train
+    /// publishes as a train of two times would: if `primary`, a model of
+    /// each side valid from the meta's window of 48 hours before it, and
+    /// if `meta`, a meta model valid from it.
+    fn prepared_two_time(dir: &Path, primary: bool, meta: bool) -> anyhow::Result<Asked> {
+        let config = never_with_meta();
+        let walk = walk_of(dir, config.clone());
+        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
+        walk.prepare(
+            at("2026-01-07T00:00:00Z"),
+            at("2026-01-09T00:00:00Z"),
+            |from, to| {
+                built.borrow_mut().push((from, to));
+                Ok(())
+            },
+            |at| {
+                trained.borrow_mut().push(at);
+                if primary {
+                    publish(dir, &config, at - SignedDuration::from_hours(48));
+                }
+                if meta {
+                    let fingerprint = dataset(dir, &config).fingerprint().to_string();
+                    meta_store_of(dir, &config).publish(&model(at, fingerprint))?;
+                }
+                Ok(())
+            },
+        )?;
+        Ok((built.take(), trained.take()))
+    }
+
+    /// Never retrained, on an empty store, the plan of the train at the
+    /// start, the 7th, fits the sides as of the 5th, on their window back
+    /// from there: the backtest builds from the 4th, trains at the start
+    /// alone, and runs, the sides of the 5th and the meta of the 7th in
+    /// use.
+    #[test]
+    fn a_backtest_never_retrained_on_an_empty_store_builds_back_to_the_plans_reach_and_has_both_in_use_at_its_start()
+     {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (built, trained) = prepared_two_time(dir.path(), true, true).unwrap();
+
+        assert_eq!(
+            built,
+            [(at("2026-01-04T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
+        );
+        assert_eq!(trained, [at("2026-01-07T00:00:00Z")]);
+    }
+
+    /// Never retrained, on an empty store, the train at the start
+    /// publishes the sides as of the meta's window before it, and its
+    /// meta's holdout falls short: the backtest is refused, naming the
+    /// meta.
+    #[test]
+    fn a_backtest_never_retrained_whose_meta_was_refused_at_its_start_is_refused_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = prepared_two_time(dir.path(), true, false)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("meta"), "{err}");
         assert!(!err.contains("primary"), "{err}");
+    }
+
+    /// Never retrained, on an empty store, the train at the start
+    /// publishes no side, and so leaves the meta waiting: the backtest is
+    /// refused, naming the primary and the meta.
+    #[test]
+    fn a_backtest_never_retrained_whose_primary_was_refused_at_its_start_is_refused_naming_both() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = prepared_two_time(dir.path(), false, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("primary") && err.contains("meta"), "{err}");
     }
 
     /// Retrained, a backtest whose every train published nothing runs: a
