@@ -7,24 +7,26 @@
 //!
 //! Retrained and never retrained differ in the arms of `Retrain` in this
 //! module alone, so no caller tells them apart: the section's validation
-//! (`Retrain::validate`), the live timer (`start`), a run's train times
-//! (`Schedule::times`), the current model at a train's time
-//! (`Retrain::current`), how a model kept in use reads
-//! (`Retrain::in_use`), and the refusal of a backtest that would trade
-//! nothing (`Schedule::ensure_trades`). The model store reads it once
-//! more, as a key: models of another retrain, or of none, are another
-//! store's (`store`).
+//! (`Retrain::validate`), a run's train times (`Schedule::times`), the
+//! current model at a train's time (`Retrain::current`), how a model kept
+//! in use reads (`Retrain::in_use`), and the refusal of a backtest that
+//! would trade nothing (`Schedule::ensure_trades`). The model store reads
+//! it once more, as a key: models of another retrain, or of none, are
+//! another store's (`store`); and a live node once, building the retrain
+//! actor of a strategy only if it is retrained
+//! (`launcher::RetrainActor::new`).
 //!
-//! The grid is kept by a Nautilus timer, named after the strategy
-//! (`timer`, so several strategies retrain in one process), which `start`
-//! sets on a clock from an epoch-aligned time (`last_grid_time`): Nautilus
-//! fires it at that time plus whole intervals. A live node's clock fires
-//! it as it goes (`launcher`); a backtest, which trains before its run,
-//! takes the times the same timer fires over its span on a virtual clock
-//! of its own (`Schedule::times`). Never retrained, no timer is started,
-//! and a backtest trains at its start alone, then, should its primary or
-//! its meta have no model in use there, is refused: it would trade
-//! nothing, and no train comes after.
+//! The grid is kept by a Nautilus timer, which `start` sets on a clock
+//! from an epoch-aligned time (`last_grid_time`): Nautilus fires it at
+//! that time plus whole intervals. Live, the retrain actor of a strategy,
+//! one per strategy retrained, sets it on the actor's own clock at its
+//! start, which fires it as it goes (`launcher`); a backtest, which trains
+//! before its run, takes the times the same timer fires over its span on a
+//! virtual clock of its own (`Schedule::times`). Never retrained, a live
+//! node has no retrain actor, so no timer is set, and a backtest trains at
+//! its start alone, then, should its primary or its meta have no model in
+//! use there, is refused: it would trade nothing, and no train comes
+//! after.
 //!
 //! A train at `t` is planned (`Schedule::plan`) from the valid-froms of
 //! the stores alone, model by model (the long, the short and the meta,
@@ -57,7 +59,6 @@ use nautilus_common::{
     timer::{TimeEvent, TimeEventCallback},
 };
 use nautilus_core::{DurationNanos, UnixNanos};
-use nautilus_model::identifiers::StrategyId;
 use serde::Deserialize;
 
 use super::{config::ModelConfig, targets::Side};
@@ -406,15 +407,9 @@ fn first_before(at: Timestamp, valid_froms: impl Iterator<Item = Timestamp>) -> 
     valid_froms.filter(|&valid_from| valid_from < at).min()
 }
 
-/// The name of the retrain timer of `strategy_id`.
-#[must_use]
-pub fn timer(strategy_id: StrategyId) -> String {
-    format!("RETRAIN-{strategy_id}")
-}
-
-/// Starts the retrain timer `timer` of `retrain` on `actor`'s clock:
-/// retrained, from the last grid time not after now, so it first fires on
-/// the next one; never retrained, none.
+/// Starts the retrain timer `timer` on `actor`'s clock, firing every
+/// `every` from the last grid time not after now, so it first fires on the
+/// next one.
 ///
 /// # Errors
 ///
@@ -423,11 +418,8 @@ pub fn timer(strategy_id: StrategyId) -> String {
 pub fn start<A: DataActor + DataActorNative>(
     actor: &A,
     timer: &str,
-    retrain: Retrain,
+    every: SignedDuration,
 ) -> anyhow::Result<()> {
-    let Retrain::Every(every) = retrain else {
-        return Ok(());
-    };
     let clock = actor.clock();
     let start = last_grid_time(clock.timestamp_ns(), every)?;
     clock.set_timer_ns(

@@ -26,7 +26,7 @@ use helix_trader::{
     model::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
-        launcher::{Launcher, Retrained},
+        launcher::{Launcher, RetrainActor, Retrained},
         targets::TargetRow,
         train::Trained,
     },
@@ -814,7 +814,8 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
             let config = load_config::<EmaParams>(&args.config)?;
             let requirements = config.data_requirements();
             let strategy = EmaCross::live(config)?;
-            live.run(&requirements, &strategy.warmup(), strategy).await
+            live.run(&requirements, &strategy.warmup(), strategy, None)
+                .await
         }
         Strategy::ModelEma => live_on_models::<ModelEma>(&args, &live).await,
         #[cfg(gold_scalp)]
@@ -822,22 +823,29 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Runs the model strategy `S` of `args` on `live` until Ctrl-C, its
-/// retrains, if ever, in child processes (`Children::of_live`), on the
-/// models of the store its dataset costs key.
+/// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
+/// models of the store its dataset costs key, beside the actor of its
+/// retrains if it is retrained (`RetrainActor`), each retrain in a child
+/// process (`Children::of_live`) on the node's catalog.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
     let children = Children::of_live(args)?;
+    let requirements = config.data_requirements();
+    let retraining = RetrainActor::new(
+        config.strategy_id(),
+        config.model().retrain,
+        args.catalog.clone(),
+        requirements.clone(),
+        Launcher::process(program, children.train_args()),
+    );
     let mode = Mode::Live {
         models: args.models.clone(),
-        launcher: Launcher::process(program, children.train_args()),
         venue: children.venue,
-        catalog: args.catalog.clone(),
     };
-    let requirements = config.data_requirements();
     let strategy = S::new(config, mode)?;
-    live.run(&requirements, &strategy.warmup(), strategy).await
+    live.run(&requirements, &strategy.warmup(), strategy, retraining)
+        .await
 }
 
 /// The dataset runs of a process: the strategy over the catalog in

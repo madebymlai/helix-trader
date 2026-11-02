@@ -6,7 +6,8 @@
 //! with its routing, and the cache persisted to the cache database its
 //! caller gives (`with_cache_database_factory`; `Live`'s is Redis, see
 //! `redis`), promotes what the last run left staged once built
-//! (`promote_staged`), adds the strategy (`add_strategy`), claims its
+//! (`promote_staged`), adds the actor of the strategy's retrains, if it is
+//! retrained (`add_actor`), then the strategy (`add_strategy`), claims its
 //! instruments' external orders, calls `run`, which stops on SIGINT or
 //! SIGTERM, and disposes the node, which closes the cache database.
 //! Follows the IB adapter's `node_exec_tester` example.
@@ -34,6 +35,7 @@ use nautilus_persistence::config::{DataCatalogConfig, StreamingConfig};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::recording::promote_staged;
+use crate::model::launcher::RetrainActor;
 
 /// One adapter's data client factory and config, its execution client's if
 /// the node trades there, and how Nautilus routes data and orders to them.
@@ -115,20 +117,22 @@ pub fn build(
     Ok(node)
 }
 
-/// Adds `strategy` to `node` claiming the external orders of
+/// Adds `retraining`, the actor of the retrains of `strategy` if it is
+/// retrained, then `strategy` to `node` claiming the external orders of
 /// `instrument_ids`, and runs it until SIGINT or SIGTERM, then disposes
 /// it.
 ///
 /// # Errors
 ///
-/// Returns an error if the node fails to load its cache, the strategy
-/// cannot be added or claim its instruments, or the node fails to start,
-/// run or stop (orders still unresolved after the post-stop delay
-/// included).
+/// Returns an error if the node fails to load its cache, the retrain actor
+/// or the strategy cannot be added, the strategy cannot claim its
+/// instruments, or the node fails to start, run or stop (orders still
+/// unresolved after the post-stop delay included).
 pub(super) async fn run<S>(
     mut node: LiveNode,
     instrument_ids: &[InstrumentId],
     strategy: S,
+    retraining: Option<RetrainActor>,
 ) -> anyhow::Result<()>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -143,6 +147,9 @@ where
         .filter(|id| !claimed.contains(id))
         .copied()
         .collect();
+    if let Some(retraining) = retraining {
+        node.add_actor(retraining)?;
+    }
     node.add_strategy(strategy)?;
     node.register_external_order_claims(strategy_id, &unclaimed)?;
     // As Nautilus documents it: disposing closes the cache database.
