@@ -26,7 +26,7 @@ use helix_trader::model::{
     dataset::{self, Dataset},
     features::FeatureSet,
     schedule::Retrain,
-    store::ModelStore,
+    store::{ModelSet, ModelStore},
     targets::{Label, Side},
     walk::WalkForward,
 };
@@ -70,16 +70,19 @@ fn span() -> (Timestamp, Timestamp) {
 
 /// The store of the long models under `models`.
 fn long_store(models: &Path) -> ModelStore {
-    ModelStore::new(
+    ModelSet::new(
         models,
         StrategyId::from(STRATEGY),
         &features(),
         &config_daily(),
         &requirements(),
         &venue(),
-        Side::Long,
     )
     .unwrap()
+    .side(Side::Long)
+    .unwrap()
+    .store()
+    .clone()
 }
 
 fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {

@@ -26,12 +26,13 @@ use crate::common::{
 use helix_trader::{
     backtest::Backtest,
     model::{
-        ModelStrategy,
+        ModelPart, ModelStrategy,
         handle::Mode,
         launcher::{Launcher, Retrained},
+        store::ModelSet,
         targets::Side,
     },
-    strategy::model_ema::{ModelEma, ModelEmaConfig},
+    strategy::model_ema::{ModelEma, ModelEmaConfig, ModelEmaParams},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::Money;
@@ -139,12 +140,20 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         at,
         6,
     );
-    ModelEma::training(&config, catalog.path(), models, &venue())
-        .unwrap()
-        .store(Side::Long)
-        .unwrap()
-        .publish(&model)
-        .unwrap();
+    ModelSet::new(
+        models,
+        config.strategy_id(),
+        &ModelEmaParams::features(&config).unwrap(),
+        &config.model(),
+        &config.data_requirements(),
+        &venue(),
+    )
+    .unwrap()
+    .side(Side::Long)
+    .unwrap()
+    .store()
+    .publish(&model)
+    .unwrap();
 }
 
 /// `train` at t refuses the fake, and its store stays empty: no trade.

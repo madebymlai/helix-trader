@@ -24,6 +24,7 @@ use helix_trader::{
         features::{Feature, FeatureSet},
         holdout::{Holdout, Refusal},
         learner::LearnerConfig,
+        store::{ModelSet, ModelStore},
         targets::{Label, Side},
         train::{Kept, Outcome, Trained, Training},
     },
@@ -166,6 +167,24 @@ fn training(catalog: &TempDir, models: &Path, min_pnl: f64) -> Training {
     .unwrap()
 }
 
+/// The store under `models` of the `side` models of a training of
+/// `min_pnl`, as `training` keys it.
+fn store(models: &Path, min_pnl: f64, side: Side) -> ModelStore {
+    ModelSet::new(
+        models,
+        StrategyId::from(STRATEGY),
+        &features(),
+        &config(min_pnl),
+        &requirements(),
+        &venue(),
+    )
+    .unwrap()
+    .side(side)
+    .unwrap()
+    .store()
+    .clone()
+}
+
 /// Quotes from 23:00 of the 20th of October 2026 to 03:00 of the 23rd.
 fn catalog() -> TempDir {
     let (from, to) = (
@@ -252,7 +271,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
             .unwrap()
             .to_string();
     for side in Side::BOTH {
-        let stored = training.store(side).unwrap().read(t()).unwrap();
+        let stored = store(models.path(), 1.0, side).read(t()).unwrap();
         let model = stored
             .load(features().names(), &fingerprint)
             .unwrap_or_else(|e| panic!("{side:?}: {e:#}"));
@@ -288,11 +307,10 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
     }
     // The minimums key the store: the stricter one holds the models as if
     // it had published them.
-    let published = training(&catalog, models.path(), 1.0);
     let stricter = training(&catalog, models.path(), 3.0);
     for side in Side::BOTH {
-        let current = published.store(side).unwrap().read(t()).unwrap();
-        stricter.store(side).unwrap().publish(&current).unwrap();
+        let current = store(models.path(), 1.0, side).read(t()).unwrap();
+        store(models.path(), 3.0, side).publish(&current).unwrap();
     }
 
     let trained = stricter.train_at(t() + SignedDuration::from_hours(1), |from, to| {
@@ -310,6 +328,9 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
         assert_eq!(min_pnl, 3.0);
     }
     for side in Side::BOTH {
-        assert_eq!(stricter.store(side).unwrap().valid_froms().unwrap(), [t()]);
+        assert_eq!(
+            store(models.path(), 3.0, side).valid_froms().unwrap(),
+            [t()]
+        );
     }
 }

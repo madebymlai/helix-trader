@@ -32,7 +32,7 @@ use helix_trader::model::{
     holdout::Earnings,
     learner::LearnerConfig,
     schedule::Retrain,
-    store::ModelStore,
+    store::{ModelSet, ModelStore},
     targets::Side,
     train::{Kept, Outcome, Trained, Training},
     walk::WalkForward,
@@ -183,32 +183,27 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
     trained
 }
 
-/// The store of the model primary's long models under `models`.
-fn primary_store(models: &Path) -> ModelStore {
-    ModelStore::new(
+/// The model primary's models under `models`.
+fn model_set(models: &Path) -> ModelSet {
+    ModelSet::new(
         models,
         StrategyId::from(STRATEGY),
         &features(),
         &model_primary(),
         &requirements(),
         &venue(),
-        Side::Long,
     )
     .unwrap()
 }
 
+/// The store of the model primary's long models under `models`.
+fn primary_store(models: &Path) -> ModelStore {
+    model_set(models).side(Side::Long).unwrap().store().clone()
+}
+
 /// The store of the model primary's meta models under `models`.
 fn meta_store(models: &Path) -> ModelStore {
-    ModelStore::meta(
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        &model_primary(),
-        &meta(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
+    model_set(models).meta().unwrap().store().clone()
 }
 
 /// The fixture has no edge: a train refuses each model it fits, the

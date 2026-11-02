@@ -427,19 +427,6 @@ impl<T> Models<T> {
             meta: self.meta.map(&mut f),
         }
     }
-
-    /// The value of `f` of each model's, or the first error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first error of `f`, the long's first.
-    pub fn try_map<U, E>(self, mut f: impl FnMut(T) -> Result<U, E>) -> Result<Models<U>, E> {
-        Ok(Models {
-            long: self.long.map(&mut f).transpose()?,
-            short: self.short.map(&mut f).transpose()?,
-            meta: self.meta.map(&mut f).transpose()?,
-        })
-    }
 }
 
 /// The valid-froms of the stores of the primary's sides, of

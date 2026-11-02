@@ -26,7 +26,7 @@ use crate::{
 use helix_trader::model::{
     config::{Margins, ModelConfig},
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-    store::{ModelStore, Probe},
+    store::{ModelSet, ModelStore, Probe},
     targets::{Barrier, Distance, Side, TargetsConfig},
 };
 use jiff::SignedDuration;
@@ -35,16 +35,19 @@ use nautilus_model::{identifiers::StrategyId, types::Money};
 use rust_decimal::Decimal;
 
 fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-    ModelStore::new(
+    ModelSet::new(
         models,
         StrategyId::from(STRATEGY),
         &features(),
         config,
         &requirements(),
         &venue(),
-        side,
     )
     .unwrap()
+    .side(side)
+    .unwrap()
+    .store()
+    .clone()
 }
 
 /// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late;
