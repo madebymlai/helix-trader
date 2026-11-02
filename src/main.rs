@@ -305,7 +305,8 @@ struct LiveArgs {
 /// The costs of the dataset runs of a live node's retrains, as `train`
 /// takes them (its `--commission` or `--commission-rate`, and
 /// `--balance`), its leverage the node's. Checked as `train` checks them,
-/// and kept normalized, for the `train` the node starts. Required of a
+/// the commission kept normalized, for the `train` the node starts
+/// (`Children::of_live`). Required of a
 /// strategy never retrained too: they key the store its models are read
 /// from (`dataset::fingerprint`).
 #[derive(Debug, Args)]
@@ -319,8 +320,8 @@ struct RetrainCosts {
     retrain_commission_rate: Option<String>,
     /// Starting balance of a retrain's dataset run, large enough that no
     /// target is denied, for example "10000000 USD".
-    #[arg(long, value_parser = money_text)]
-    retrain_balance: Option<String>,
+    #[arg(long, value_parser = parse_money)]
+    retrain_balance: Option<Money>,
 }
 
 impl LiveArgs {
@@ -350,13 +351,13 @@ impl RetrainCosts {
         }
     }
 
-    /// The starting balance of the retrains' dataset runs, as given.
+    /// The starting balance of the retrains' dataset runs.
     ///
     /// # Errors
     ///
     /// Returns an error if it was not given.
-    fn balance(&self) -> anyhow::Result<&str> {
-        self.retrain_balance.as_deref().context(
+    fn balance(&self) -> anyhow::Result<Money> {
+        self.retrain_balance.context(
             "the costs of a model strategy's dataset runs key the model store it reads its \
              models from: give their starting balance (--retrain-balance)",
         )
@@ -370,7 +371,7 @@ impl RetrainCosts {
     fn venue(&self, leverage: Decimal) -> anyhow::Result<dataset::DatasetVenue> {
         Ok(dataset::DatasetVenue {
             commission: self.commission()?,
-            balance: parse_money(self.balance()?).map_err(anyhow::Error::msg)?,
+            balance: self.balance()?,
             leverage,
         })
     }
@@ -436,11 +437,6 @@ fn commission_text(s: &str) -> anyhow::Result<String> {
 /// A commission rate, checked, normalized.
 fn commission_rate_text(s: &str) -> anyhow::Result<String> {
     parse_commission_rate(s).map(|commission| commission.normalized)
-}
-
-/// An amount and a currency code, checked, as given.
-fn money_text(s: &str) -> Result<String, String> {
-    parse_money(s).map(|_| s.to_string())
 }
 
 /// Reads the config of the strategy of part `P` from `path` and validates
@@ -641,7 +637,7 @@ fn backtest_on_models<S: ModelStrategy>(
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
-    let children = Children::of(args)?;
+    let children = Children::of_backtest(args)?;
     let walk = S::walk_forward(&config, &args.run.catalog, &args.models, &children.venue)?;
     walk.prepare(
         start,
@@ -659,20 +655,24 @@ fn backtest_on_models<S: ModelStrategy>(
     Ok(())
 }
 
-/// The child processes a backtest of a strategy trading on a model starts
-/// before its run, a Nautilus node each: this binary's `dataset` and
-/// `train`, on the backtest's strategy, config, catalog, store, commission
-/// and leverage, and its dataset balance. Each inherits the backtest's
-/// output and environment, so its logs and its outcome show as they come.
-/// A train runs as live's do (`Launcher::process`): one that kept the
-/// current model, which `train` reports by failing, is a kept retrain.
+/// The child processes of a strategy trading on a model, a Nautilus node
+/// each, this binary's `dataset` and `train` on the strategy, config,
+/// catalog, store and dataset venue of the process starting them: a
+/// backtest's, which builds its dataset and trains before its run, each
+/// child inheriting its output and environment so that its logs and its
+/// outcome show as they come; and a live node's, which retrains
+/// (`Launcher::process`). Either's `train` is the one command line
+/// (`train_args`), so a backtest and a live node hand a train the same
+/// flags. A train that kept the current model, which `train` reports by
+/// failing, is a kept retrain.
 struct Children {
     strategy: Strategy,
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
-    /// The venue of the dataset runs: the backtest's commission and
-    /// leverage, and its dataset balance.
+    /// The venue of the dataset runs: a backtest's commission and
+    /// leverage and its dataset balance, or a live node's retrain costs
+    /// and leverage.
     venue: dataset::DatasetVenue,
 }
 
@@ -682,7 +682,7 @@ impl Children {
     /// # Errors
     ///
     /// Returns an error if the backtest has no dataset balance.
-    fn of(args: &BacktestArgs) -> anyhow::Result<Self> {
+    fn of_backtest(args: &BacktestArgs) -> anyhow::Result<Self> {
         let balance = args
             .dataset_balance
             .context("a backtest of a strategy trading on a model needs --dataset-balance")?;
@@ -692,6 +692,23 @@ impl Children {
             catalog: args.run.catalog.clone(),
             models: args.models.clone(),
             venue: args.commission.venue(balance, args.leverage),
+        })
+    }
+
+    /// The children of the live node of `args`: its retrains, at their
+    /// costs and the node's leverage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commission or the balance of the retrains is
+    /// missing.
+    fn of_live(args: &LiveArgs) -> anyhow::Result<Self> {
+        Ok(Self {
+            strategy: args.strategy,
+            config: args.config.clone(),
+            catalog: args.catalog.clone(),
+            models: args.models.clone(),
+            venue: args.retrain.venue(args.leverage)?,
         })
     }
 
@@ -711,9 +728,10 @@ impl Children {
     /// Returns an error if this binary cannot be found.
     fn train(&self, at: Timestamp) -> anyhow::Result<()> {
         let binary = std::env::current_exe().context("finding this binary")?;
-        let mut args = self.args("train");
-        args.extend(["--models".into(), self.models.clone().into_os_string()]);
-        match Launcher::process(binary, args).launch(at).wait() {
+        match Launcher::process(binary, self.train_args())
+            .launch(at)
+            .wait()
+        {
             Retrained::Succeeded => {}
             Retrained::Kept(why) => {
                 eprintln!("the retrain at {at}: {why}");
@@ -742,8 +760,16 @@ impl Children {
         Ok(())
     }
 
-    /// The arguments of `subcommand` on the backtest's strategy, config,
-    /// catalog, commission, dataset balance and leverage.
+    /// The arguments of `train` but its `--at`, which the launcher gives:
+    /// those of `args`, and the store it publishes in.
+    fn train_args(&self) -> Vec<OsString> {
+        let mut args = self.args("train");
+        args.extend(["--models".into(), self.models.clone().into_os_string()]);
+        args
+    }
+
+    /// The arguments of `subcommand` on the strategy, config, catalog, and
+    /// the dataset runs' commission, balance and leverage.
     fn args(&self, subcommand: &str) -> Vec<OsString> {
         let strategy = self
             .strategy
@@ -772,7 +798,7 @@ impl Children {
 
 /// Builds the strategy from its config and runs it live until Ctrl-C. A
 /// strategy trading on a model retrains, if ever, in a child process,
-/// this binary's `train` (see `retrain_args`).
+/// this binary's `train` (see `Children`).
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
@@ -797,15 +823,16 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
 }
 
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, its
-/// retrains, if ever, in child processes (`retrain_args`), on the models
-/// of the store its dataset costs key.
+/// retrains, if ever, in child processes (`Children::of_live`), on the
+/// models of the store its dataset costs key.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
+    let children = Children::of_live(args)?;
     let mode = Mode::Live {
         models: args.models.clone(),
-        venue: args.retrain.venue(args.leverage)?,
-        launcher: Launcher::process(program, retrain_args(args)?),
+        launcher: Launcher::process(program, children.train_args()),
+        venue: children.venue,
         catalog: args.catalog.clone(),
     };
     let requirements = config.data_requirements();
@@ -853,45 +880,6 @@ impl DatasetRun {
         backtest.run_dataset(S::new(config.clone(), mode)?)?;
         Ok(rows.take())
     }
-}
-
-/// The arguments of the `train` a live node of `args` starts at each
-/// retrain, but its `--at`: the node's strategy, config, catalog, model
-/// store and leverage, and the retrains' costs.
-///
-/// # Errors
-///
-/// Returns an error if the commission or the balance of the retrains is
-/// missing.
-fn retrain_args(args: &LiveArgs) -> anyhow::Result<Vec<OsString>> {
-    let costs = &args.retrain;
-    let commission = costs.commission()?;
-    let commission = commission_args(&commission);
-    let balance = costs.balance()?;
-    let strategy = args
-        .strategy
-        .to_possible_value()
-        .context("every strategy has a command-line name")?;
-    let mut train: Vec<OsString> = vec!["train".into(), strategy.get_name().into()];
-    for (flag, value) in [
-        ("--config", args.config.as_os_str()),
-        ("--catalog", args.catalog.as_os_str()),
-        ("--models", args.models.as_os_str()),
-    ] {
-        train.extend([flag.into(), value.to_os_string()]);
-    }
-    train.extend(
-        [
-            "--leverage",
-            &args.leverage.to_string(),
-            commission[0],
-            commission[1],
-            "--balance",
-            balance,
-        ]
-        .map(OsString::from),
-    );
-    Ok(train)
 }
 
 /// Prints the outcome of a train that kept no model, each model published
@@ -1383,48 +1371,93 @@ mod tests {
         "10000000 USD",
     ];
 
+    /// The `train` `children` start, given its `--at`, parsed as this
+    /// binary parses it.
+    fn started_train(children: &Children) -> TrainArgs {
+        let argv: Vec<String> = children
+            .train_args()
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        let (subcommand, args) = argv.split_first().unwrap();
+        assert_eq!(subcommand, "train");
+        let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+        args.extend(["--at", "2026-10-23"]);
+        parse_train(&args).unwrap()
+    }
+
+    /// A live node's retrain is a `train` on the node's strategy, config,
+    /// catalog and store, at the retrains' commission and balance and the
+    /// node's leverage.
     #[test]
-    fn live_retrains_through_train_with_its_files_leverage_and_costs() {
+    fn a_live_nodes_retrain_parses_as_train_on_its_files_store_leverage_and_costs() {
         let mut argv = LIVE_RETRAINING.to_vec();
         argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
         argv.extend(["--leverage", "2"]);
 
-        let train = retrain_args(&parse_live(&argv).unwrap()).unwrap();
+        let children = Children::of_live(&parse_live(&argv).unwrap()).unwrap();
+        let train = started_train(&children);
 
+        assert_eq!(train.strategy, Strategy::ModelEma);
+        assert_eq!(train.config, PathBuf::from("model_ema.toml"));
+        assert_eq!(train.catalog, PathBuf::from("/data/catalog"));
+        assert_eq!(train.models, PathBuf::from("/data/models"));
         assert_eq!(
-            train,
-            [
-                "train",
-                "model_ema",
-                "--config",
-                "model_ema.toml",
-                "--catalog",
-                "/data/catalog",
-                "--models",
-                "/data/models",
-                "--leverage",
-                "2",
-                "--commission-rate",
-                "0.00003",
-                "--balance",
-                "10000000 USD",
-            ]
-            .map(std::ffi::OsString::from)
+            train.commission.venue(train.balance, train.leverage),
+            dataset::DatasetVenue {
+                commission: dataset::Commission::Rate("0.00003".to_string()),
+                balance: Money::from("10000000 USD"),
+                leverage: Decimal::from(2),
+            }
+        );
+        assert_eq!(
+            children.venue,
+            train.commission.venue(train.balance, train.leverage)
         );
     }
 
     #[test]
-    fn live_retrains_at_a_commission_per_order_too() {
+    fn a_live_nodes_retrain_parses_at_a_commission_per_order_too() {
         let mut argv = LIVE_RETRAINING.to_vec();
         argv.splice(3..5, ["--retrain-commission", "3 USD"]);
 
-        let train = retrain_args(&parse_live(&argv).unwrap()).unwrap();
+        let train = started_train(&Children::of_live(&parse_live(&argv).unwrap()).unwrap());
 
-        assert!(
-            train
-                .windows(2)
-                .any(|pair| pair == ["--commission", "3 USD"]),
-            "{train:?}"
+        assert_eq!(
+            train.commission.normalized(),
+            dataset::Commission::PerOrder("3 USD".to_string())
+        );
+    }
+
+    /// A backtest's train is a `train` on the backtest's strategy, config,
+    /// catalog and store, at its commission and leverage and its dataset
+    /// balance: the venue of its dataset runs.
+    #[test]
+    fn a_backtests_train_parses_as_train_on_its_files_store_and_dataset_costs() {
+        let mut argv = backtest_required();
+        argv[0] = "model_ema";
+        argv[2] = "model_ema.toml";
+        argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
+        argv.extend(["--dataset-balance", "10000000 EUR"]);
+
+        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
+        let train = started_train(&children);
+
+        assert_eq!(train.strategy, Strategy::ModelEma);
+        assert_eq!(train.config, PathBuf::from("model_ema.toml"));
+        assert_eq!(train.catalog, PathBuf::from("/data/catalog"));
+        assert_eq!(train.models, PathBuf::from("/data/models"));
+        assert_eq!(
+            train.commission.venue(train.balance, train.leverage),
+            dataset::DatasetVenue {
+                commission: dataset::Commission::PerOrder("3 EUR".to_string()),
+                balance: Money::from("10000000 EUR"),
+                leverage: Decimal::from(1),
+            }
+        );
+        assert_eq!(
+            children.venue,
+            train.commission.venue(train.balance, train.leverage)
         );
     }
 
@@ -1432,8 +1465,9 @@ mod tests {
     fn live_retraining_without_its_costs_is_refused_naming_them() {
         for missing in [3, 5] {
             let argv = [&LIVE_RETRAINING[..missing], &LIVE_RETRAINING[missing + 2..]].concat();
-            let err = retrain_args(&parse_live(&argv).unwrap())
-                .unwrap_err()
+            let err = Children::of_live(&parse_live(&argv).unwrap())
+                .err()
+                .unwrap()
                 .to_string();
             assert!(err.contains(LIVE_RETRAINING[missing]), "{err}");
         }
@@ -1613,13 +1647,13 @@ mod tests {
 
     #[test]
     fn a_backtest_of_a_model_strategy_needs_a_dataset_balance() {
-        let err = Children::of(&parse_backtest(&backtest_required()).unwrap())
+        let err = Children::of_backtest(&parse_backtest(&backtest_required()).unwrap())
             .err()
             .unwrap();
         assert!(err.to_string().contains("--dataset-balance"), "{err}");
         let mut argv = backtest_required();
         argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let children = Children::of(&parse_backtest(&argv).unwrap()).unwrap();
+        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
         assert_eq!(children.venue.balance, Money::from("10000000 EUR"));
     }
 
@@ -1630,7 +1664,7 @@ mod tests {
         argv[2] = "model_ema.toml";
         argv.extend(["--catalog", "/data/catalog"]);
         argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let children = Children::of(&parse_backtest(&argv).unwrap()).unwrap();
+        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
 
         assert_eq!(
             children.args("dataset"),
