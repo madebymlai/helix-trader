@@ -318,25 +318,6 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     );
 }
 
-/// Decisions on events have no cadence to build the ATR's bars at.
-#[test]
-fn an_atr_with_decisions_on_events_is_refused() {
-    let err = format!(
-        "{:#}",
-        config()
-            .validate(DecisionRule::Event, &quotes())
-            .unwrap_err()
-    );
-    let bps = TargetsConfig {
-        barrier: Some(in_bps(20, 10)),
-        ..config()
-    };
-
-    assert!(err.contains("ATR"), "{err}");
-    assert!(Targets::new(config(), DecisionRule::Event, &quotes()).is_err());
-    assert!(bps.validate(DecisionRule::Event, &quotes()).is_ok());
-}
-
 /// Nautilus builds only bars whose step divides the next unit
 /// (`BarSpecification::new_checked`): neither 90 nor 7 minutes divide an hour.
 #[test]

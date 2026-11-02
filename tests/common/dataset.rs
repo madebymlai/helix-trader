@@ -464,21 +464,20 @@ pub fn baseline_of(
 }
 
 /// A baseline meta model of the primary deciding on `features` as `config`
-/// says (its rule's, or its model's: the primary's side and probability
-/// after its features), valid from `valid_from`, predicting `trues`
-/// tenths whatever the row, as `baseline_of`.
+/// says (the primary's side and probability after its features), valid
+/// from `valid_from`, predicting `trues` tenths whatever the row, as
+/// `baseline_of`.
 pub fn meta_baseline_of(
     features: &FeatureSet,
     config: &ModelConfig,
     valid_from: Timestamp,
     trues: usize,
 ) -> StoredModel {
-    let primary = (!features.has_primary()).then_some(PRIMARY_FEATURES.map(String::from));
     let names = features
         .names()
         .iter()
         .cloned()
-        .chain(primary.into_iter().flatten())
+        .chain(PRIMARY_FEATURES.map(String::from))
         .collect();
     stored_baseline(features, config, names, None, valid_from, trues)
 }

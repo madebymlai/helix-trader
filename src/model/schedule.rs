@@ -63,10 +63,7 @@ use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::identifiers::StrategyId;
 use serde::Deserialize;
 
-use super::{
-    config::{ModelConfig, RuleConfig},
-    targets::Side,
-};
+use super::{config::ModelConfig, targets::Side};
 
 /// The name of the timer `times` fires on its own clock.
 const GRID: &str = "RETRAIN";
@@ -90,8 +87,8 @@ pub enum Retrain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schedule {
     retrain: Retrain,
-    /// The window of a model primary's sides; none for a rule primary.
-    primary: Option<SignedDuration>,
+    /// The window of the primary's sides.
+    primary: SignedDuration,
     /// The meta model's window, if there is one.
     meta: Option<SignedDuration>,
 }
@@ -138,19 +135,8 @@ impl Schedule {
     pub fn of_model(config: &ModelConfig) -> Self {
         Self {
             retrain: config.retrain,
-            primary: Some(config.window),
+            primary: config.window,
             meta: config.meta.as_ref().map(|meta| meta.window),
-        }
-    }
-
-    /// The schedule of the meta model of a section whose primary is its
-    /// rule.
-    #[must_use]
-    pub const fn of_rule(config: &RuleConfig) -> Self {
-        Self {
-            retrain: config.retrain,
-            primary: None,
-            meta: Some(config.meta.window),
         }
     }
 
@@ -212,11 +198,10 @@ impl Schedule {
         };
         // The time the sides are fitted as of, if before `at`.
         let early = self.meta.map(|window| at - window).filter(|&early| {
-            self.primary.is_some()
-                && [&valid_froms.long, &valid_froms.short]
-                    .into_iter()
-                    .flatten()
-                    .all(|side| current(side).is_none())
+            [&valid_froms.long, &valid_froms.short]
+                .into_iter()
+                .flatten()
+                .all(|side| current(side).is_none())
                 && valid_froms
                     .meta
                     .as_deref()
@@ -224,24 +209,23 @@ impl Schedule {
                 && current(&[early]).is_some()
         });
         let side = |valid_froms: &Option<Vec<Timestamp>>| {
-            let (valid_froms, window) = (valid_froms.as_deref()?, self.primary?);
+            let valid_froms = valid_froms.as_deref()?;
             Some(match early {
                 Some(early) => Step::Fit {
-                    from: early - window,
+                    from: early - self.primary,
                     at: early,
                 },
-                None => step(valid_froms, window, Timestamp::MIN),
+                None => step(valid_froms, self.primary, Timestamp::MIN),
             })
         };
         // The primary's first model before `at`, of either side, its fits
-        // before `at` included: a model primary's meta waits without one.
+        // before `at` included: the meta waits without one.
         let first = first_before(at, primary(valid_froms).chain(early));
         let meta = || {
             let (window, meta) = (self.meta?, valid_froms.meta.as_deref()?);
-            Some(match (self.primary, first) {
-                (None, _) => step(meta, window, Timestamp::MIN),
-                (Some(_), Some(first)) => step(meta, window, first),
-                (Some(_), None) => Step::Wait,
+            Some(match first {
+                Some(first) => step(meta, window, first),
+                None => Step::Wait,
             })
         };
         Plan {
@@ -275,11 +259,10 @@ impl Schedule {
         let in_use =
             |valid_froms: &Vec<Timestamp>| self.retrain.current(valid_froms, start).is_some();
         let mut idle = vec![];
-        if self.primary.is_some()
-            && ![&valid_froms.long, &valid_froms.short]
-                .into_iter()
-                .flatten()
-                .any(in_use)
+        if ![&valid_froms.long, &valid_froms.short]
+            .into_iter()
+            .flatten()
+            .any(in_use)
         {
             idle.push("no side of the primary has a model in use");
         }
@@ -305,18 +288,12 @@ impl Plan {
 
     /// The meta's step once the train fitted the sides, the stores of the
     /// models then holding models valid from `valid_froms`: as planned,
-    /// but a model primary's meta waits while no primary model is valid
-    /// before the train, as when the sides fitted before it published
-    /// none.
+    /// but the meta waits while no primary model is valid before the
+    /// train, as when the sides fitted before it published none.
     #[must_use]
     pub fn meta_after_sides(&self, valid_froms: &Models<Vec<Timestamp>>) -> Option<Step> {
-        let model_primary = self.steps.long.is_some() || self.steps.short.is_some();
         Some(match self.steps.meta? {
-            Step::Fit { .. }
-                if model_primary && first_before(self.at, primary(valid_froms)).is_none() =>
-            {
-                Step::Wait
-            }
+            Step::Fit { .. } if first_before(self.at, primary(valid_froms)).is_none() => Step::Wait,
             step => step,
         })
     }
@@ -465,8 +442,8 @@ impl<T> Models<T> {
     }
 }
 
-/// The valid-froms of the stores of a model primary's sides, of
-/// `valid_froms`; none for a rule primary.
+/// The valid-froms of the stores of the primary's sides, of
+/// `valid_froms`.
 fn primary(valid_froms: &Models<Vec<Timestamp>>) -> impl Iterator<Item = Timestamp> + '_ {
     valid_froms
         .long
@@ -667,7 +644,7 @@ mod tests {
     fn daily() -> Schedule {
         Schedule {
             retrain: Retrain::Every(day()),
-            primary: Some(hours(24)),
+            primary: hours(24),
             meta: Some(hours(48)),
         }
     }
@@ -770,36 +747,6 @@ mod tests {
         let plan = daily().plan(at(SEVENTH), &stores(&[SEVENTH], &[SEVENTH], &[]));
 
         assert_eq!(plan.steps.meta, Some(Step::Wait));
-    }
-
-    /// A rule primary's rows are its own decisions, made without a model:
-    /// retrained or never, its meta fits at the train.
-    #[test]
-    fn a_rule_primarys_meta_fits_on_its_window_on_an_empty_store() {
-        let empty = Models {
-            long: None,
-            short: None,
-            meta: Some(vec![]),
-        };
-        for schedule in [daily(), never()] {
-            let rule = Schedule {
-                primary: None,
-                ..schedule
-            };
-
-            let plan = rule.plan(at(SEVENTH), &empty);
-
-            assert_eq!(
-                plan.steps,
-                Models {
-                    long: None,
-                    short: None,
-                    meta: Some(fit("2026-01-05T00:00:00Z", SEVENTH)),
-                },
-                "{:?}",
-                schedule.retrain
-            );
-        }
     }
 
     /// The sides fit on the 6th; the meta, kept, was fitted from the 5th,

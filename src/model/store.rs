@@ -14,10 +14,8 @@
 //! A meta model's store sits in a `meta/` directory beside its primary's
 //! sides, under their training settings, keyed by its own (its learner and
 //! settings, window, holdout, threshold and minimums) and the primary's
-//! margins, which make its rows; a rule primary has no store of its own,
-//! its meta's `meta/` sits under the strategy id and fingerprint, keyed by
-//! its own settings and the rule's retrain interval. A meta model is only
-//! ever listed beside meta models of the same primary.
+//! margins, which make its rows. A meta model is only ever listed beside
+//! meta models of the same primary.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
 //! the latest valid then, checked before use, a model failing a check
@@ -48,7 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     calibration::Calibration,
-    config::{Margins, MetaConfig, ModelConfig, RuleConfig},
+    config::{Margins, MetaConfig, ModelConfig},
     dataset::{self, DatasetVenue},
     decide::DecisionRule,
     features::{FeatureSet, Fingerprint},
@@ -68,7 +66,7 @@ const EXTENSION: &str = "json";
 static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
 /// The directory of the meta models within the directory of their primary's
-/// models, or of a rule primary's dataset.
+/// models.
 const META: &str = "meta";
 
 /// The models of one strategy, fingerprint and training settings.
@@ -270,43 +268,6 @@ impl ModelStore {
             directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
                 .join(META)
                 .join(settings.to_string()),
-        })
-    }
-
-    /// The store, under `root`, of the meta models of `strategy_id`, whose
-    /// primary is its rule, deciding with `features` as `config` says, on
-    /// targets for a strategy of `requirements`, run on `venue`: under
-    /// `meta/` and the meta's training settings, the rule's retrain
-    /// interval among them.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the learner cannot be written as JSON, or as
-    /// `dataset::fingerprint` does.
-    pub fn of_rule(
-        root: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: &RuleConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            directory: dataset_directory(
-                root,
-                strategy_id,
-                features,
-                config.decision,
-                &config.targets,
-                requirements,
-                venue,
-            )?
-            .join(META)
-            .join(
-                meta_settings(&config.meta)?
-                    .with(retrain_setting(config.retrain).as_bytes())
-                    .to_string(),
-            ),
         })
     }
 
@@ -956,26 +917,6 @@ mod tests {
             .build()
     }
 
-    /// The store of the meta models of a rule primary deciding and
-    /// targeting as `config()`, retrained as `retrain` says.
-    fn rule_store(root: &Path, retrain: Retrain) -> ModelStore {
-        let config = config();
-        ModelStore::of_rule(
-            root,
-            StrategyId::from(STRATEGY),
-            &features(),
-            &RuleConfig {
-                decision: config.decision,
-                targets: config.targets,
-                retrain,
-                meta: meta_config(),
-            },
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
-    }
-
     /// `config()`, retrained as `retrain` says.
     fn retrained(retrain: Retrain) -> ModelConfig {
         ModelConfig {
@@ -987,7 +928,7 @@ mod tests {
     /// A weekly-retrained strategy trades on the models of its own
     /// retrains, never on one a daily-retrained strategy published between
     /// them: a store of either retrain lists its own models alone, a
-    /// side's, a model primary's meta's and a rule primary's meta's alike.
+    /// side's and a model primary's meta's alike.
     #[test]
     fn a_store_lists_only_the_models_of_its_retrain_interval() {
         let daily = Retrain::Every(SignedDuration::from_hours(24));
@@ -1019,14 +960,13 @@ mod tests {
     type StoreOf = fn(&Path, Retrain) -> ModelStore;
 
     /// Each kind of store, of a strategy retrained as a `Retrain` says: a
-    /// side's, a model primary's meta's and a rule primary's meta's.
-    fn stores() -> [(&'static str, StoreOf); 3] {
+    /// side's and a model primary's meta's.
+    fn stores() -> [(&'static str, StoreOf); 2] {
         [
             ("a side's", |root, retrain| store(root, &retrained(retrain))),
             ("a model primary's meta's", |root, retrain| {
                 meta_store(root, &retrained(retrain), &meta_config())
             }),
-            ("a rule primary's meta's", rule_store),
         ]
     }
 

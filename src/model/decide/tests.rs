@@ -142,7 +142,6 @@ fn a_cadence_must_be_positive() {
     assert!(every(0).validate().is_err());
     assert!(every(-15).validate().is_err());
     assert!(every(15).validate().is_ok());
-    assert!(DecisionRule::Event.validate().is_ok());
 }
 
 #[test]
@@ -214,15 +213,6 @@ fn the_cadence_keeps_the_grid_after_its_first_decision() {
         [QUARTER + MARGIN, QUARTER + 15 * 60 * SECOND + MARGIN]
     );
     assert!(events.iter().all(is_decision));
-}
-
-#[test]
-fn an_event_rule_sets_no_timer() {
-    let (probe, clock) = registered(NOW);
-
-    start(&probe, DecisionRule::Event, SignedDuration::ZERO).unwrap();
-
-    assert_eq!(clock.borrow().timer_count(), 0);
 }
 
 #[test]
@@ -356,14 +346,6 @@ fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
 }
 
 #[test]
-fn an_event_decides_on_whatever_data_came_last() {
-    let (probe, _clock) = registered(NOW);
-    let features = warm_until(NOW - 24 * 60 * 60 * SECOND);
-
-    assert!(decide(&probe, &features, DecisionRule::Event, aud()).is_some());
-}
-
-#[test]
 fn the_fingerprint_changes_with_the_rule() {
     let features = features();
 
@@ -374,10 +356,6 @@ fn the_fingerprint_changes_with_the_rule() {
     assert_ne!(
         fingerprint(&features, every(15)),
         fingerprint(&features, every(30))
-    );
-    assert_ne!(
-        fingerprint(&features, every(15)),
-        fingerprint(&features, DecisionRule::Event)
     );
     assert_ne!(fingerprint(&features, every(15)), features.fingerprint());
 }

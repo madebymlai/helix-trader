@@ -269,7 +269,7 @@ impl WalkForward {
             }
         }
         if let Some(meta) = &self.meta {
-            let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), Some(&self.realised))?;
+            let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), &self.realised)?;
             let models = Swap::new(
                 meta.store().clone(),
                 meta.feature_names().to_vec(),
@@ -342,7 +342,7 @@ impl WalkForward {
             return Ok(None);
         };
         let rows = self.settled(from, at)?;
-        let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), Some(&self.realised))?;
+        let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), &self.realised)?;
         let holdout = at - meta.config().holdout;
         fit_baseline(
             meta.feature_names().len(),

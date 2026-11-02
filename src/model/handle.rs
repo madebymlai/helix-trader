@@ -4,11 +4,11 @@
 //! The strategy shares a `ModelHandle` (an `Rc`), built from its features
 //! and the model section of its config, in a `Mode`. `start` from
 //! `on_start` registers the features (and starts the targets' ATR, in a
-//! dataset run) and starts the decision cadence; `decide`, at each
-//! decision (the cadence's timer, `decide::is_decision`, or an event of
-//! the strategy's choosing), snapshots the features, if the decision is
-//! fresh (data of the targets' instrument since the previous) and every
-//! one is initialized, and publishes their row (`decide::decide`), then:
+//! dataset run) and starts the decision cadence; `decide`, at a decision
+//! of the cadence (its timer, `decide::is_decision`), snapshots the
+//! features, if the decision is fresh (data of the targets' instrument
+//! since the previous) and every one is initialized, and publishes their
+//! row (`decide::decide`), then:
 //!
 //! - trading (`Mode::Backtest`, `Mode::Live`): takes, for each side of
 //!   the config's margins, the latest model of its store
@@ -39,9 +39,7 @@
 //! if the meta model in use, on the row with the primary's side and that
 //! side's probability, predicts at least its threshold, sized from that
 //! probability if the meta sizes (`MetaConfig::size`); no meta model valid
-//! yet is no trade. A strategy whose primary is its rule (`of_rule`)
-//! decides through `decide_on` with the rule's side, only when the rule
-//! signals: the meta model alone decides whether to take it.
+//! yet is no trade.
 //!
 //! A model is swapped in only inside `decide`, before it predicts: no
 //! decision mixes two models. A backtest and a live node read the same
@@ -105,7 +103,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
@@ -122,7 +120,7 @@ use nautilus_model::{
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
-    config::{MetaConfig, ModelConfig, RuleConfig},
+    config::{MetaConfig, ModelConfig},
     dataset::{self, DatasetVenue},
     decide::{self, DecisionRule},
     features::FeatureSet,
@@ -190,9 +188,8 @@ pub struct Decision {
     /// model of the side.
     pub probability: f64,
     /// The net P&L the primary's model of the side expects, in the
-    /// instrument's P&L currency, on the targets' size; none of a rule
-    /// primary, which has no model of its own.
-    pub expected_pnl: Option<f64>,
+    /// instrument's P&L currency, on the targets' size.
+    pub expected_pnl: f64,
     /// The price the target is set from (`targets::Stops`): the mid of the
     /// instrument's last quote, else its last trade, else its last close.
     pub reference: Price,
@@ -283,16 +280,9 @@ impl Serving {
         let Serving::Trading(trading) = self else {
             return None;
         };
-        match &trading.primary {
-            Primary::Model {
-                labelled: Labelled::Barrier(stops),
-                ..
-            }
-            | Primary::Rule { stops, .. } => Some(stops),
-            Primary::Model {
-                labelled: Labelled::Horizon(_),
-                ..
-            } => None,
+        match &trading.primary.labelled {
+            Labelled::Barrier(stops) => Some(stops),
+            Labelled::Horizon(_) => None,
         }
     }
 }
@@ -309,22 +299,16 @@ struct Trading {
     quantity: Quantity,
 }
 
-/// What picks the side of a trade.
+/// What picks the side of a trade: a model of each side traded, the
+/// target of its label, and the meta model taking its trades, if any.
 #[derive(Debug)]
-enum Primary {
-    /// A model of each side traded, the target of its label, and the meta
-    /// model taking its trades, if any.
-    Model {
-        sides: Vec<SideModels>,
-        labelled: Labelled,
-        meta: Option<MetaModels>,
-    },
-    /// The strategy's rule, the barrier its meta model learns, which its
-    /// trades are on, and the meta model taking them.
-    Rule { stops: Stops, meta: MetaModels },
+struct Primary {
+    sides: Vec<SideModels>,
+    labelled: Labelled,
+    meta: Option<MetaModels>,
 }
 
-/// The target a model primary's trades are on, its label's.
+/// The target the primary's trades are on, its label's.
 #[derive(Debug)]
 enum Labelled {
     /// The barrier's exits as the decision sets them; the worth of its
@@ -412,59 +396,10 @@ impl ModelHandle {
                         .context("the label is the horizon, and the targets have none")?,
                 ),
             };
-            Ok(Primary::Model {
+            Ok(Primary {
                 sides,
                 labelled,
                 meta,
-            })
-        };
-        Self::built(
-            strategy_id,
-            &features,
-            (config.decision, &config.targets, config.retrain),
-            requirements,
-            mode,
-            primary,
-        )
-    }
-
-    /// The handle of `strategy_id`, whose primary is its rule, deciding on
-    /// `features` as `config` says, for a strategy of `requirements`, in
-    /// `mode`: the strategy decides through `decide_on`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `features` do not declare the primary's side
-    /// and probability (`FeatureSetBuilder::primary`), the decision rule is
-    /// invalid, the store cannot be keyed, the targets have no barrier or,
-    /// in a dataset run, are invalid.
-    pub fn of_rule(
-        strategy_id: StrategyId,
-        features: Rc<FeatureSet>,
-        config: &RuleConfig,
-        requirements: &DataRequirements,
-        mode: Mode,
-    ) -> anyhow::Result<Rc<Self>> {
-        ensure!(
-            features.has_primary(),
-            "the features of a rule primary declare its side and probability \
-             (`FeatureSetBuilder::primary`)"
-        );
-        let primary = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Primary> {
-            let meta = Meta::of_rule(models, strategy_id, &features, config, requirements, venue)?;
-            let fingerprint = dataset::fingerprint(
-                &features,
-                config.decision,
-                &config.targets,
-                requirements,
-                venue,
-            )?
-            .to_string();
-            Ok(Primary::Rule {
-                stops: Stops::new(&config.targets, config.decision, requirements)?.context(
-                    "a rule primary's meta model learns the barrier, and the targets have none",
-                )?,
-                meta: MetaModels::of(&meta, &fingerprint),
             })
         };
         Self::built(
@@ -569,8 +504,8 @@ impl ModelHandle {
     /// the roller, which subscribes the features' ticks and the traded
     /// instrument's from now, where the warmup ends, a root's on the
     /// contract standing for it; starts the barrier's ATR (the stops',
-    /// trading on a barrier, a rule's or a model's labelled on it, or, in a
-    /// dataset run, the targets', and collects the rows they settle); then
+    /// trading on a model labelled on the barrier, or, in a dataset run,
+    /// the targets', and collects the rows they settle); then
     /// starts the decision cadence, live `Warmup::live_bar_build_delay`
     /// late, and live the retrain timer, if retrained (`schedule::start`).
     ///
@@ -624,50 +559,13 @@ impl ModelHandle {
 
     /// Decides now, for `strategy`: the decision to trade, if any.
     /// Live, first logs the running retrain if it finished, whose model
-    /// the store then lists. A handle whose primary is a rule makes no
-    /// decision here: its strategy decides through `decide_on`.
+    /// the store then lists.
     ///
     /// # Errors
     ///
     /// Returns an error if a model fails to predict, or, in a dataset run,
     /// as `Targets::open` does.
     pub fn decide<S>(&self, strategy: &mut S) -> anyhow::Result<Option<Decision>>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        self.decide_as(strategy, None)
-    }
-
-    /// Decides now on `side`, the side the rule of `strategy`, its primary,
-    /// signals (see `of_rule`): the decision to trade, if the meta
-    /// model takes it; in a dataset run, the decision's targets opened, its
-    /// row carrying the side.
-    ///
-    /// # Errors
-    ///
-    /// As `decide`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the handle's primary is not a rule.
-    pub fn decide_on<S>(
-        &self,
-        strategy: &mut S,
-        side: OrderSide,
-    ) -> anyhow::Result<Option<Decision>>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        self.features
-            .on_side(side, f64::NAN, || self.decide_as(strategy, Some(side)))
-    }
-
-    /// Decides now, on the rule's `side` if the primary is a rule.
-    fn decide_as<S>(
-        &self,
-        strategy: &mut S,
-        side: Option<OrderSide>,
-    ) -> anyhow::Result<Option<Decision>>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
@@ -681,7 +579,7 @@ impl ModelHandle {
         };
         match &self.serving {
             Serving::Trading(trading) => {
-                trading.decide(strategy, Timestamp::from(row.ts_event), &row.features, side)
+                trading.decide(strategy, Timestamp::from(row.ts_event), &row.features)
             }
             Serving::Dataset { targets, .. } => {
                 targets.open(strategy, row)?;
@@ -761,79 +659,54 @@ impl ModelHandle {
 }
 
 impl Trading {
-    /// The decision of `strategy` at `now` on `row`, on the rule's `side`
-    /// if the primary is a rule: a model primary's, of the side whose
+    /// The decision of `strategy` at `now` on `row`: of the side whose
     /// latest model valid then expects a net P&L clearing its margin, the
-    /// larger of two, taken if its meta model takes it; a rule's taken if
-    /// its meta model takes it. Either on the target of its label as the
-    /// decision sets it on the side.
+    /// larger of two, on the target of its label as the decision sets it
+    /// on the side, taken if its meta model takes it.
     fn decide<S>(
         &self,
         strategy: &S,
         now: Timestamp,
         row: &[f64],
-        side: Option<OrderSide>,
     ) -> anyhow::Result<Option<Decision>>
     where
         S: DataActor + DataActorNative,
     {
-        match (&self.primary, side) {
-            (
-                Primary::Model {
-                    sides,
-                    labelled,
-                    meta,
-                },
-                None,
-            ) => {
-                let mut decided = vec![];
-                for SideModels {
-                    side,
-                    margin,
-                    models,
-                } in sides
-                {
-                    let Some((probability, payoff)) =
-                        models.at(now, |model| Ok((model.predict(row)?, model.payoff())))?
-                    else {
-                        continue;
-                    };
-                    let payoff = payoff.context("a primary's model has its payoff")?;
-                    let Some((target, unit)) = labelled.at(strategy, self.instrument_id, *side)?
-                    else {
-                        return Ok(None);
-                    };
-                    let expected = payoff.expected(probability) * unit;
-                    let decision =
-                        self.decision(side.order_side(), target, probability, Some(expected));
-                    decided.push((decision, expected, *margin));
-                }
-                let Some(decision) = payoff::pick(decided) else {
-                    return Ok(None);
-                };
-                match meta {
-                    None => Ok(Some(decision)),
-                    Some(meta) => meta.take(
-                        now,
-                        &meta_row(row, decision.side, decision.probability),
-                        decision,
-                    ),
-                }
-            }
-            (Primary::Rule { stops, meta }, Some(side)) => {
-                let of = match side {
-                    OrderSide::Sell => Side::Short,
-                    _ => Side::Long,
-                };
-                let Some(exits) = stops.at(strategy, of)? else {
-                    return Ok(None);
-                };
-                let target = Target::barrier(exits, stops.limit());
-                meta.take(now, row, self.decision(side, target, f64::NAN, None))
-            }
-            (Primary::Model { .. }, Some(_)) | (Primary::Rule { .. }, None) => {
-                unreachable!("a rule primary decides on a side, a model primary on none")
-            }
+        let Primary {
+            sides,
+            labelled,
+            meta,
+        } = &self.primary;
+        let mut decided = vec![];
+        for SideModels {
+            side,
+            margin,
+            models,
+        } in sides
+        {
+            let Some((probability, payoff)) =
+                models.at(now, |model| Ok((model.predict(row)?, model.payoff())))?
+            else {
+                continue;
+            };
+            let payoff = payoff.context("a primary's model has its payoff")?;
+            let Some((target, unit)) = labelled.at(strategy, self.instrument_id, *side)? else {
+                return Ok(None);
+            };
+            let expected = payoff.expected(probability) * unit;
+            let decision = self.decision(side.order_side(), target, probability, expected);
+            decided.push((decision, expected, *margin));
+        }
+        let Some(decision) = payoff::pick(decided) else {
+            return Ok(None);
+        };
+        match meta {
+            None => Ok(Some(decision)),
+            Some(meta) => meta.take(
+                now,
+                &meta_row(row, decision.side, decision.probability),
+                decision,
+            ),
         }
     }
 
@@ -844,7 +717,7 @@ impl Trading {
         side: OrderSide,
         target: Target,
         probability: f64,
-        expected_pnl: Option<f64>,
+        expected_pnl: f64,
     ) -> Decision {
         Decision {
             instrument_id: self.instrument_id,
@@ -1562,7 +1435,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
                 probability: c(0.6),
-                expected_pnl: Some(2.0 * c(0.6) - 1.0),
+                expected_pnl: 2.0 * c(0.6) - 1.0,
                 reference: Price::from("0.70000"),
                 take_profit: None,
                 stop: None,
@@ -2478,7 +2351,7 @@ mod tests {
                 quantity: Quantity::from(1000),
                 probability: c(0.7),
                 // The primary's, its long of 0.6.
-                expected_pnl: Some(2.0 * c(0.6) - 1.0),
+                expected_pnl: 2.0 * c(0.6) - 1.0,
                 reference: Price::from("0.70000"),
                 take_profit: None,
                 stop: None,
@@ -2617,158 +2490,6 @@ mod tests {
 
         assert_eq!(buy.map(|trade| trade.side), Some(OrderSide::Buy));
         assert_eq!(sell, None);
-    }
-
-    /// The rule primary of `config`: its features declare the side.
-    fn rule_features() -> Rc<FeatureSet> {
-        last_mid(InstrumentId::from(AUD)).primary().build().unwrap()
-    }
-
-    /// The decisions, barrier and retrain of `with_meta`, the trades of a
-    /// rule primary taken by `meta`.
-    fn rule_config(meta: MetaConfig) -> RuleConfig {
-        let config = with_meta(meta.clone());
-        RuleConfig {
-            decision: config.decision,
-            targets: config.targets,
-            retrain: config.retrain,
-            meta,
-        }
-    }
-
-    /// The probe's handle trading in a backtest on the rule primary of
-    /// `config` (`rule_features`), its meta model `meta` under `models`,
-    /// its features warm by a quote at noon of the 22nd.
-    fn rule_handle(models: &Path, config: &RuleConfig, meta: &StoredModel) -> Rc<ModelHandle> {
-        let features = rule_features();
-        ModelStore::of_rule(
-            models,
-            StrategyId::from(STRATEGY),
-            &features,
-            config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
-        .publish(meta)
-        .unwrap();
-        warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
-        ModelHandle::of_rule(
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            &requirements(),
-            Mode::Backtest {
-                models: models.to_path_buf(),
-                venue: venue(),
-            },
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn a_rule_primarys_side_is_traded_if_its_meta_model_takes_it() {
-        let models = tempfile::tempdir().unwrap();
-        let config = rule_config(meta(None));
-        let handle = rule_handle(
-            models.path(),
-            &config,
-            &baseline_of(
-                &rule_features(),
-                (config.decision, &config.targets),
-                &META_NAMES,
-                "2026-10-22T00:00:00Z",
-                7,
-            ),
-        );
-        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-
-        let without_side = handle.decide(&mut probe).unwrap();
-        let sold = handle.decide_on(&mut probe, OrderSide::Sell).unwrap();
-
-        assert_eq!(without_side, None);
-        assert_eq!(
-            sold,
-            Some(Decision {
-                instrument_id: InstrumentId::from(AUD),
-                side: OrderSide::Sell,
-                quantity: Quantity::from(1000),
-                probability: c(0.7),
-                // A rule has no model of its own.
-                expected_pnl: None,
-                // 10 bps of the mid of 0.70000 below and above it.
-                reference: Price::from("0.70000"),
-                take_profit: Some(Price::from("0.69930")),
-                stop: Some(Price::from("0.70070")),
-                time_limit: SignedDuration::from_hours(2),
-            })
-        );
-    }
-
-    /// A meta model of the rule primary of `config` valid from midnight of
-    /// the 22nd, which learned on rows of its features in their order, the
-    /// mid, 0.7, then the rule's side, 1 a buy and -1 a sell, then its
-    /// probability, missing as a rule has none, that the rule's buys win
-    /// and its sells never: fitted by the learner of `config`'s meta on 30
-    /// buys and 30 sells, 30 rows on each side of a split where LightGBM's
-    /// leaves need 20, so that it predicts near 1 on a buy and near 0 on a
-    /// sell, 0.88 and 0.12 calibrated, either side of the threshold.
-    fn learned_rule_meta(config: &RuleConfig) -> StoredModel {
-        let (mut rows, mut labels) = (vec![], vec![]);
-        for side in [1.0, -1.0] {
-            for _ in 0..30 {
-                rows.extend([0.7, side, f64::NAN]);
-                labels.push(side > 0.0);
-            }
-        }
-        learned_of(
-            &rule_features(),
-            (config.decision, &config.targets),
-            &config.meta.learner,
-            (rows, labels),
-        )
-    }
-
-    /// The decision at noon of the 22nd on the rule's `side`, its trade
-    /// taken from 0.6 by the meta model LightGBM learned
-    /// (`learned_rule_meta`).
-    fn learned_rule_meta_decision(side: OrderSide) -> Option<Decision> {
-        let models = tempfile::tempdir().unwrap();
-        let config = rule_config(lightgbm_meta());
-        let handle = rule_handle(models.path(), &config, &learned_rule_meta(&config));
-        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        handle.decide_on(&mut probe, side).unwrap()
-    }
-
-    /// The meta model is given the rule's side after its features: it
-    /// takes a buy, which it learned wins, and refuses a sell, which it
-    /// learned never does.
-    #[test]
-    fn a_rule_primarys_meta_model_decides_on_its_side() {
-        let buy = learned_rule_meta_decision(OrderSide::Buy);
-        let sell = learned_rule_meta_decision(OrderSide::Sell);
-
-        assert_eq!(buy.map(|trade| trade.side), Some(OrderSide::Buy));
-        assert_eq!(sell, None);
-    }
-
-    #[test]
-    fn a_rule_primarys_features_must_declare_its_side() {
-        let models = tempfile::tempdir().unwrap();
-
-        let err = ModelHandle::of_rule(
-            StrategyId::from(STRATEGY),
-            features(),
-            &rule_config(meta(None)),
-            &requirements(),
-            Mode::Backtest {
-                models: models.path().to_path_buf(),
-                venue: venue(),
-            },
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("side"), "{err}");
     }
 
     /// The data commands `probe`'s actor sends to the data engine from

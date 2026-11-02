@@ -5,11 +5,11 @@
 //! must clear to trade a side, and its learner; and, optionally, the meta
 //! model filtering its trades.
 //!
-//! A strategy has at most two levels of models: a primary, its rule
-//! (`RuleConfig`) or a model (`ModelConfig`), and one meta model
-//! (`MetaConfig`) deciding whether to take the primary's trade. The types
-//! hold no third: a meta section has no meta section of its own, and
-//! writing one is refused at load as an unknown field.
+//! A strategy has at most two levels of models: a primary, the side
+//! models of a `ModelConfig`, and one meta model (`MetaConfig`) deciding
+//! whether to take the primary's trade. The types hold no third: a meta
+//! section has no meta section of its own, and writing one is refused at
+//! load as an unknown field.
 
 use jiff::SignedDuration;
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
@@ -79,44 +79,6 @@ pub struct ModelConfig<T = TargetsConfig> {
     /// The meta model deciding whether to take each trade of this one, a
     /// `[model.meta]` table; none takes every trade.
     pub meta: Option<MetaConfig>,
-}
-
-/// The model section of a strategy whose primary is a rule of its own: the
-/// strategy decides on a side when its rule signals
-/// (`ModelHandle::decide_on`), and the meta model decides whether to take
-/// that trade. Such as
-///
-/// ```toml
-/// [model]
-/// decision = "event"
-/// targets = { barrier = { .. } }
-/// retrain = "168h"
-///
-/// [model.meta]
-/// window = "720h"
-/// holdout = "120h"
-/// threshold = 0.55
-/// min_pnl = 1.0
-/// min_trades = 30
-/// learner = { kind = "lightgbm" }
-/// ```
-///
-/// Its targets `T` are as `ModelConfig`'s.
-#[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
-#[serde(deny_unknown_fields)]
-pub struct RuleConfig<T = TargetsConfig> {
-    /// When the strategy decides: its rule is asked then, and a decision is
-    /// made only on the side it signals.
-    pub decision: DecisionRule,
-    /// The targets of each decision; a barrier, which the meta model learns.
-    pub targets: T,
-    /// How often the meta model is retrained, as `ModelConfig::retrain`;
-    /// left out, never.
-    #[serde(default)]
-    #[builder(default, into)]
-    pub retrain: Retrain,
-    /// The meta model.
-    pub meta: MetaConfig,
 }
 
 /// A meta model: on each decision the primary makes a trade of, whether
@@ -230,25 +192,6 @@ impl ModelSection {
     }
 }
 
-impl RuleConfig<TargetsTable> {
-    /// The section, its targets trading `traded` (`TargetsTable::trading`).
-    #[must_use]
-    pub fn trading(self, traded: &TradedInstrument) -> RuleConfig {
-        let Self {
-            decision,
-            targets,
-            retrain,
-            meta,
-        } = self;
-        RuleConfig {
-            decision,
-            targets: targets.trading(traded),
-            retrain,
-            meta,
-        }
-    }
-}
-
 impl ModelConfig {
     /// Checks the section against itself and against the strategy's data
     /// `requirements`.
@@ -269,8 +212,8 @@ impl ModelConfig {
     /// margins naming no side or one not finite, the minimums invalid (see
     /// `validate_minimums`), a meta model gating a primary not labelled on
     /// the barrier, whose trades it learns, the meta model invalid (see
-    /// `MetaConfig::validate`), or the decisions on events or a target not
-    /// shorter than their cadence (see `validate_cadence`).
+    /// `MetaConfig::validate`), or a target not shorter than the decision
+    /// cadence (see `validate_cadence`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         validate_decisions(
@@ -338,23 +281,15 @@ impl ModelConfig {
 }
 
 /// Pushes onto `errors` the violation of a target of `targets` not closing
-/// before the next decision of `rule`, or of no cadence: a model primary
-/// trades the target of its label, and a live account nets a new trade
-/// into one still open, where a dataset run's hedging venue keeps them
-/// apart.
+/// before the next decision of `rule`: the primary trades the target of
+/// its label, and a live account nets a new trade into one still open,
+/// where a dataset run's hedging venue keeps them apart.
 fn validate_cadence(
     rule: DecisionRule,
     targets: &TargetsConfig,
     errors: &mut ConfigErrorCollector,
 ) {
-    let DecisionRule::Every(cadence) = rule else {
-        errors.push(ConfigError::invalid_value(
-            "model.decision",
-            "a model primary trades its target, and decisions on events have no cadence for \
-             it to close within",
-        ));
-        return;
-    };
+    let DecisionRule::Every(cadence) = rule;
     if let Some(barrier) = targets.barrier {
         errors.check(
             barrier.limit < cadence,
@@ -379,31 +314,6 @@ fn validate_cadence(
                 ),
             ),
         );
-    }
-}
-
-impl RuleConfig {
-    /// Checks the section against itself and against the strategy's data
-    /// `requirements`.
-    ///
-    /// # Errors
-    ///
-    /// Returns every violation, as `ModelConfig::validate` does: the
-    /// decision rule or the targets invalid, the retrain interval not
-    /// positive, the barrier's ATR without bars built from what it reads
-    /// or warming over longer than its warmup, or the meta model invalid
-    /// (see `MetaConfig::validate`).
-    pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
-        let mut errors = ConfigErrorCollector::new();
-        validate_decisions(
-            self.decision,
-            &self.targets,
-            self.retrain,
-            requirements,
-            &mut errors,
-        );
-        self.meta.validate(&self.targets, &mut errors);
-        errors.into_result()
     }
 }
 
@@ -757,15 +667,6 @@ mod tests {
         }
     }
 
-    /// Decisions on events have no cadence their trades would close
-    /// within.
-    #[test]
-    fn a_model_primary_deciding_on_events_is_refused() {
-        let toml = section(r#"decision = "event""#);
-
-        assert!(refused(&toml).contains("event"), "{}", refused(&toml));
-    }
-
     /// The window of 48 hours holds the holdout, the calibration as long
     /// before it, and before them a fitted row settled 45 minutes later: 23
     /// hours of holdout leave one, 24 none.
@@ -984,30 +885,45 @@ mod tests {
         assert!(err.contains("unknown field `meta`"), "{err}");
     }
 
-    /// A rule primary on a horizon alone: its meta model has no barrier
-    /// trade to learn, and that is the one violation.
+    /// A primary on a horizon alone: its meta model has no barrier trade
+    /// to learn, refused under `model.meta` beside the primary's horizon
+    /// label.
     #[test]
     fn a_meta_model_without_a_barrier_is_refused() {
-        let toml = format!(
-            r#"
-            decision = "event"
-            targets = {{ horizon = "1h" }}
-            retrain = "24h"
-            {META}"#
-        );
-        let config = toml::from_str::<RuleConfig<TargetsTable>>(&toml)
-            .unwrap()
-            .trading(&gold());
+        let toml = section(r#"targets = { horizon = "30m" }"#)
+            .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+        let config = parse(&format!("{toml}\n{META}")).unwrap();
 
         let err = config.validate(&reading(GOLD)).unwrap_err();
 
+        let shown = format!("{err:#}");
+        let errors = match err {
+            ConfigError::Multiple { errors } => errors,
+            err => vec![err],
+        };
         assert!(
-            matches!(
-                &err,
+            errors.iter().any(|err| matches!(
+                err,
                 ConfigError::InvalidValue { field, reason }
                     if field == "model.meta" && reason.contains("no barrier")
-            ),
-            "{err:#}"
+            )),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_meta_sizing_reads_from_toml() {
+        let config = load(&format!(
+            "{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}"
+        ))
+        .unwrap();
+
+        assert_eq!(
+            config.meta.unwrap().size,
+            Some(Sizing {
+                min: Decimal::new(5, 1),
+                max: Decimal::from(2)
+            })
         );
     }
 
@@ -1074,39 +990,6 @@ mod tests {
 
             assert!(err.contains("model.meta.size"), "{line}: {err}");
         }
-    }
-
-    #[test]
-    fn a_rule_primarys_section_reads_its_meta_from_toml() {
-        let toml = r#"
-            decision = "event"
-            targets = { barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "2h" } }
-            retrain = "24h"
-
-            [meta]
-            window = "36h"
-            holdout = "12h"
-            threshold = 0.55
-            min_pnl = 0.5
-            min_trades = 20
-            learner = { kind = "fake" }
-            size = { min = 0.5, max = 2 }
-        "#;
-
-        let config = toml::from_str::<RuleConfig<TargetsTable>>(toml)
-            .unwrap()
-            .trading(&gold());
-        config.validate(&reading(GOLD)).unwrap();
-
-        assert_eq!(config.decision, DecisionRule::Event);
-        assert_eq!(config.meta.learner, LearnerConfig::Fake {});
-        assert_eq!(
-            config.meta.size,
-            Some(Sizing {
-                min: Decimal::new(5, 1),
-                max: Decimal::from(2)
-            })
-        );
     }
 
     /// From the threshold 0.6 to a probability of 1, 0.5 to 2 times the
