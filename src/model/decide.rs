@@ -1,13 +1,12 @@
 //! When a strategy decides, and what it publishes at each decision.
 //!
-//! A strategy decides on a clock cadence or on an event it chooses
-//! (`DecisionRule`, from its config). A cadence is a Nautilus timer,
-//! `DECISION_TIMER`, which `start` sets from `on_start` on an
-//! epoch-aligned time: Nautilus fires it at that time plus whole intervals,
-//! so decisions sit on the fixed UTC grid of the interval's multiples
-//! whatever the run start, in a backtest as live. The strategy calls
-//! `decide` from `on_time_event` on that timer (`is_decision`), or, on an
-//! event rule, from the handler of its event.
+//! A strategy decides on a clock cadence (`DecisionRule`, from its
+//! config). A cadence is a Nautilus timer, `DECISION_TIMER`, which `start`
+//! sets from `on_start` on an epoch-aligned time: Nautilus fires it at
+//! that time plus whole intervals, so decisions sit on the fixed UTC grid
+//! of the interval's multiples whatever the run start, in a backtest as
+//! live. The strategy calls `decide` from `on_time_event` on that timer
+//! (`is_decision`).
 //!
 //! A live node builds the bars of a composite bar type a delay after their
 //! close (`warmup::live_bar_build_delay`), a backtest at the close. So a
@@ -21,12 +20,12 @@
 //! by the strategy's id (`FeatureRow::data_type`). Cold features give no
 //! decision and publish nothing.
 //!
-//! Nor does a stale decision of a cadence. A decision is fresh if the
-//! features read market data of the traded instrument made (`ts_init`)
-//! after the previous decision of the grid, an interval before, whether
-//! the strategy ran then or not: so the first decision of a run is judged
-//! as any other, and a warmup's data makes it fresh only if made within
-//! that interval. A closed market, a weekend's or a night's, would
+//! Nor does a stale decision. A decision is fresh if the features read
+//! market data of the traded instrument made (`ts_init`) after the
+//! previous decision of the grid, an interval before, whether the
+//! strategy ran then or not: so the first decision of a run is judged as
+//! any other, and a warmup's data makes it fresh only if made within that
+//! interval. A closed market, a weekend's or a night's, would
 //! otherwise decide on its last quote, its targets the spread and the
 //! fees: a stale decision gives no row, no targets and no trade, in a
 //! dataset run as in a backtest or live, and is logged at debug.
@@ -41,7 +40,7 @@
 //! another instrument, which may trade while the traded one is closed, nor
 //! custom data, which may come on a weekend. The node builds no time bar
 //! for a period without data (`warmup::data_engine_config`), so a bar is
-//! data. A decision on an event is fresh: the event is the data.
+//! data.
 
 use std::{any::Any, sync::Arc};
 
@@ -80,9 +79,6 @@ pub enum DecisionRule {
     /// On a clock cadence: at every multiple of the interval since the Unix
     /// epoch, such as `{ every = "15m" }`.
     Every(SignedDuration),
-    /// On an event the strategy chooses, from any of its handlers:
-    /// `"event"`.
-    Event,
 }
 
 /// The features of one decision, published on the message bus.
@@ -103,21 +99,18 @@ impl DecisionRule {
     ///
     /// Returns an error if a cadence's interval is not positive.
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let Self::Every(interval) = self {
-            ensure!(
-                interval.is_positive(),
-                "the decision interval {interval:#} is not positive"
-            );
-        }
+        let Self::Every(interval) = self;
+        ensure!(
+            interval.is_positive(),
+            "the decision interval {interval:#} is not positive"
+        );
         Ok(())
     }
 
     /// The rule as the fingerprint reads it.
     fn fingerprint_part(self) -> String {
-        match self {
-            Self::Every(interval) => format!("every {} ns", interval.as_nanos()),
-            Self::Event => "event".to_string(),
-        }
+        let Self::Every(interval) = self;
+        format!("every {} ns", interval.as_nanos())
     }
 }
 
@@ -125,7 +118,7 @@ impl DecisionRule {
 /// and `DECISION_MARGIN` after their grid times: `delay` is the live
 /// node's bar build delay live, none in a backtest. The timer starts on
 /// the last decision time not after now, so it first fires on the next
-/// one; an event rule sets no timer.
+/// one.
 ///
 /// # Errors
 ///
@@ -136,9 +129,7 @@ pub fn start<A: DataActor + DataActorNative>(
     delay: SignedDuration,
 ) -> anyhow::Result<()> {
     rule.validate()?;
-    let DecisionRule::Every(interval) = rule else {
-        return Ok(());
-    };
+    let DecisionRule::Every(interval) = rule;
     let clock = actor.clock();
     let now = i128::from(clock.timestamp_ns().as_u64());
     let (interval_ns, offset_ns) = (interval.as_nanos(), (delay + DECISION_MARGIN).as_nanos());
@@ -163,11 +154,10 @@ pub fn is_decision(event: &TimeEvent) -> bool {
 /// Decides now, on `rule`, trading `instrument_id`: snapshots `features`
 /// if the decision is fresh and every feature is initialized, and
 /// publishes the row on the message bus, keyed by `strategy`'s id. A
-/// decision of a cadence is fresh if a feature read data of
-/// `instrument_id`, or its last quote or trade in `strategy`'s cache was
-/// made, after the cadence's previous decision (see the module
-/// documentation); a stale one is skipped, logged at debug. A decision on
-/// an event is fresh.
+/// decision is fresh if a feature read data of `instrument_id`, or its
+/// last quote or trade in `strategy`'s cache was made, after the cadence's
+/// previous decision (see the module documentation); a stale one is
+/// skipped, logged at debug.
 ///
 /// # Panics
 ///
@@ -182,22 +172,21 @@ where
     S: Strategy + StrategyNative + DataActor + DataActorNative,
 {
     let now = strategy.clock().timestamp_ns();
-    if let DecisionRule::Every(interval) = rule {
-        let previous = UnixNanos::from(Timestamp::from(now) - interval);
-        let cache = strategy.cache();
-        let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
-        let traded = cache.trade(&instrument_id).map(|trade| trade.ts_init);
-        if features
-            .last_update(instrument_id)
-            .max(quoted)
-            .max(traded)
-            .is_none_or(|last| last <= previous)
-        {
-            log::debug!(
-                "decision at {now} skipped: no data of {instrument_id} since the previous, at {previous}"
-            );
-            return None;
-        }
+    let DecisionRule::Every(interval) = rule;
+    let previous = UnixNanos::from(Timestamp::from(now) - interval);
+    let cache = strategy.cache();
+    let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
+    let traded = cache.trade(&instrument_id).map(|trade| trade.ts_init);
+    if features
+        .last_update(instrument_id)
+        .max(quoted)
+        .max(traded)
+        .is_none_or(|last| last <= previous)
+    {
+        log::debug!(
+            "decision at {now} skipped: no data of {instrument_id} since the previous, at {previous}"
+        );
+        return None;
     }
     let values = features.values()?;
     let strategy_id = strategy

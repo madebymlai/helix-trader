@@ -457,12 +457,11 @@ impl TargetsConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the decisions are on events, with no cadence to
-    /// build bars at, Nautilus builds no bars of the cadence (a step must
-    /// divide the next unit, `BarSpecification::new_checked`, so that bars
-    /// close on the decisions' grid), the strategy reads neither quotes,
-    /// trades nor bars of the instrument, or, on bars alone, the cadence is
-    /// a whole multiple of none of them.
+    /// Returns an error if Nautilus builds no bars of the cadence (a step
+    /// must divide the next unit, `BarSpecification::new_checked`, so that
+    /// bars close on the decisions' grid), the strategy reads neither
+    /// quotes, trades nor bars of the instrument, or, on bars alone, the
+    /// cadence is a whole multiple of none of them.
     pub fn atr_bars(
         &self,
         rule: DecisionRule,
@@ -471,12 +470,7 @@ impl TargetsConfig {
         let Some(config) = self.barrier.and_then(|barrier| barrier.atr_args()) else {
             return Ok(None);
         };
-        let DecisionRule::Every(cadence) = rule else {
-            bail!(
-                "the barrier's ATR is on bars of the decision cadence, and decisions on events \
-                 have none"
-            );
-        };
+        let DecisionRule::Every(cadence) = rule;
         let nanos = cadence.as_nanos();
         let Some((aggregation, step)) = ATR_UNITS
             .into_iter()

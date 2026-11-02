@@ -81,17 +81,10 @@
 //! logic is not in it. The code shared by every set, this module and
 //! Nautilus' indicators, is versioned with the dataset
 //! (`dataset::VERSION`).
-//!
-//! A strategy whose primary is a rule of its own declares the primary's
-//! side and probability as the set's last two values (`primary`): the
-//! model handle gives them at each decision on a side (`on_side`), the
-//! side 1 a buy and -1 a sell, the probability missing (NaN) for a rule;
-//! without a side the set has no values, so the strategy decides on
-//! nothing else.
 
 use std::{
     any::Any,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Debug, Display},
     rc::Rc,
@@ -124,7 +117,7 @@ use crate::{
 };
 
 /// The names of a primary's side and probability, the last values of a
-/// rule primary's set and of a meta model's rows.
+/// meta model's rows.
 pub const PRIMARY_FEATURES: [&str; 2] = ["primary_side", "primary_probability"];
 
 /// The values of a primary's `side` and `probability`, in the order of
@@ -180,9 +173,6 @@ pub struct FeatureSet {
     updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
     warmup: SignedDuration,
     fingerprint: Fingerprint,
-    /// A rule primary's side and probability, while a decision on a side
-    /// is made; none if the set declares no primary.
-    primary: Option<Cell<Option<[f64; 2]>>>,
 }
 
 /// Declares the features of a `FeatureSet`, each with its source, in the
@@ -224,7 +214,6 @@ pub struct FeatureSetBuilder {
     arguments: BTreeMap<&'static str, String>,
     version: u32,
     warmup: SignedDuration,
-    primary: bool,
 }
 
 /// How a declared feature is named (see `FeatureSetBuilder::build`).
@@ -250,7 +239,6 @@ impl FeatureSet {
             arguments: BTreeMap::new(),
             version: 0,
             warmup: SignedDuration::ZERO,
-            primary: false,
         }
     }
 
@@ -263,41 +251,8 @@ impl FeatureSet {
     /// The value of each feature, in the order of the names, if every
     /// feature is initialized.
     #[must_use]
-    /// A rule primary's set has values only on a side (`on_side`).
     pub fn values(&self) -> Option<Vec<f64>> {
-        let mut values: Vec<f64> = self
-            .slots
-            .borrow()
-            .iter()
-            .map(Slot::value)
-            .collect::<Option<_>>()?;
-        if let Some(primary) = &self.primary {
-            values.extend(primary.get()?);
-        }
-        Some(values)
-    }
-
-    /// Whether the set declares a rule primary's side and probability.
-    #[must_use]
-    pub const fn has_primary(&self) -> bool {
-        self.primary.is_some()
-    }
-
-    /// Runs `decide` with the primary's `side` and `probability` as the
-    /// set's last values, then takes them away.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the set declares no primary.
-    pub fn on_side<T>(&self, side: OrderSide, probability: f64, decide: impl FnOnce() -> T) -> T {
-        let primary = self
-            .primary
-            .as_ref()
-            .expect("a set deciding on a side declares the primary");
-        primary.set(Some(primary_values(side, probability)));
-        let decided = decide();
-        primary.set(None);
-        decided
+        self.slots.borrow().iter().map(Slot::value).collect()
     }
 
     /// Whether every feature is initialized.
@@ -768,14 +723,6 @@ impl FeatureSetBuilder {
         )
     }
 
-    /// Declares a rule primary's side and probability, `PRIMARY_FEATURES`,
-    /// after the other features, whatever the order of the calls.
-    #[must_use]
-    pub fn primary(mut self) -> Self {
-        self.primary = true;
-        self
-    }
-
     /// Sets the version of the strategy's feature code, in the
     /// fingerprint: bumped by hand whenever what the features compute
     /// changes, which then rebuilds the strategy's dataset and models. 0
@@ -813,7 +760,7 @@ impl FeatureSetBuilder {
     /// the warmup is negative.
     pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
         ensure!(!self.names.is_empty(), "a feature set needs a feature");
-        let mut names: Vec<String> = self
+        let names: Vec<String> = self
             .names
             .iter()
             .zip(&self.slots)
@@ -825,9 +772,6 @@ impl FeatureSetBuilder {
                 Name::Given(name) => name.clone(),
             })
             .collect();
-        if self.primary {
-            names.extend(PRIMARY_FEATURES.map(String::from));
-        }
         let mut seen = BTreeSet::new();
         if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
             bail!("two features are named {name}");
@@ -862,7 +806,6 @@ impl FeatureSetBuilder {
             updates: RefCell::default(),
             warmup: self.warmup,
             fingerprint,
-            primary: self.primary.then(Cell::default),
         }))
     }
 

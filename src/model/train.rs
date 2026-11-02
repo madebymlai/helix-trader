@@ -56,8 +56,7 @@
 //! meta waits for primary decisions (`Plan::meta_after_sides`). Fitting,
 //! calibrating, judging and publishing are the primary's, in the meta's
 //! store, its rule the primary's trade taken from its threshold
-//! (`MetaConfig::threshold`). A strategy whose primary is its rule trains
-//! its meta model alone.
+//! (`MetaConfig::threshold`).
 //!
 //! A train never errors: what goes wrong is an outcome, the current model
 //! kept with the reason (`Kept`), for each model trained. It succeeds when
@@ -72,7 +71,7 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     calibration::Calibration,
-    config::{ModelConfig, RuleConfig},
+    config::ModelConfig,
     dataset::{Dataset, DatasetRow, DatasetVenue, SchemaMismatch},
     features::FeatureSet,
     holdout::{Earnings, Holdout, Minimums, Refusal, Rule, Trade},
@@ -96,13 +95,12 @@ pub struct Training {
     strategy_id: StrategyId,
     targets: TargetsConfig,
     dataset: Dataset,
-    /// How the rows' trades read in the primary's payoffs; none for a
-    /// strategy whose primary is its rule.
-    realised: Option<Realised>,
+    /// How the rows' trades read in the primary's payoffs.
+    realised: Realised,
     /// What each train does to each model.
     schedule: Schedule,
-    /// Each model: of each side the primary trades, none for a strategy
-    /// whose primary is its rule, and the meta model, if any.
+    /// Each model: of each side the primary trades, and the meta model, if
+    /// any.
     levels: Models<Level>,
     /// How the meta model's rows are made, if there is one.
     meta: Option<Meta>,
@@ -145,8 +143,8 @@ pub(super) struct Example {
 }
 
 /// What a train did: the outcome of each model of the strategy, none for
-/// a model it has not (a side the primary does not trade, or both of a
-/// rule primary's, or the meta of a strategy without one).
+/// a model it has not (a side the primary does not trade, or the meta of
+/// a strategy without one).
 pub type Trained = Models<Outcome>;
 
 /// What a train did to one model.
@@ -253,51 +251,8 @@ impl Training {
                 meta: meta.as_ref().map(Level::of_meta),
             },
             targets: config.targets,
-            realised: Some(realised),
+            realised,
             meta,
-        })
-    }
-
-    /// The training of the meta model of `strategy_id`, whose primary is
-    /// its rule, deciding with `features` (which declare the rule's side
-    /// and probability), on its dataset, for a strategy of `requirements`,
-    /// run on `venue`, in the catalog at `catalog` and its models in
-    /// the store under `models`, as `config` says.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the targets are invalid or have no barrier, the
-    /// features do not declare the primary, or the store cannot be keyed.
-    pub fn of_rule(
-        catalog: &Path,
-        models: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: RuleConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Self> {
-        let meta = Meta::of_rule(models, strategy_id, features, &config, requirements, venue)?;
-        Ok(Self {
-            strategy_id,
-            dataset: Dataset::new(
-                catalog,
-                strategy_id,
-                features,
-                config.decision,
-                config.targets.clone(),
-                requirements,
-                venue,
-            )?,
-            schedule: Schedule::of_rule(&config),
-            targets: config.targets,
-            realised: None,
-            levels: Models {
-                long: None,
-                short: None,
-                meta: Some(Level::of_meta(&meta)),
-            },
-            meta: Some(meta),
         })
     }
 
@@ -339,14 +294,10 @@ impl Training {
         };
         let steps = plan.steps();
         let side = |side: Side| {
-            let (level, step, realised) = (
-                self.levels.side(side)?,
-                steps.side(side)?,
-                self.realised.as_ref()?,
-            );
+            let (level, step) = (self.levels.side(side)?, steps.side(side)?);
             Some(self.step(level, *step, &rows, |rows| {
                 rows.iter()
-                    .map(|row| Example::of_side(row, side, realised))
+                    .map(|row| Example::of_side(row, side, &self.realised))
                     .collect()
             }))
         };
@@ -358,7 +309,7 @@ impl Training {
                 Err(e) => return Some(kept(&e)),
             };
             Some(self.step(level, step, &rows, |rows| {
-                meta.examples(rows, self.realised.as_ref())
+                meta.examples(rows, &self.realised)
             }))
         };
         Models {
@@ -2040,101 +1991,6 @@ mod tests {
                 .valid_froms()
                 .unwrap()
                 .is_empty()
-        );
-    }
-
-    /// The rule's decisions of the 6th, its side among their features:
-    /// fitted, a long winning, a short losing and a short winning (labels
-    /// true, false, true); calibrated on, a short losing at 0.25 and a long
-    /// winning at 0.75; held out, a long losing at 0.3 and a short winning
-    /// at 0.7 (false, true).
-    #[test]
-    fn a_rule_primarys_meta_model_learns_whether_the_rules_side_wins() {
-        let dir = tempfile::tempdir().unwrap();
-        let features = FeatureSet::builder()
-            .quotes(InstrumentId::from(AUD), MID, &tables())
-            .primary()
-            .build()
-            .unwrap();
-        let config = config();
-        let training = Training::of_rule(
-            &catalog(dir.path()),
-            &dir.path().join("models"),
-            StrategyId::from(STRATEGY),
-            &features,
-            RuleConfig {
-                decision: config.decision,
-                targets: config.targets,
-                retrain: config.retrain,
-                meta: meta(24),
-            },
-            &requirements(),
-            &venue(),
-        )
-        .unwrap();
-        let (buy, sell) = (1.0, -1.0);
-        let rows = vec![
-            row(
-                "2026-01-06T06:00:00Z",
-                vec![0.5, buy, f64::NAN],
-                true,
-                hour(),
-            ),
-            row(
-                "2026-01-06T08:00:00Z",
-                vec![0.5, sell, f64::NAN],
-                true,
-                hour(),
-            ),
-            row(
-                "2026-01-06T10:00:00Z",
-                vec![0.5, sell, f64::NAN],
-                false,
-                hour(),
-            ),
-            row(
-                "2026-01-06T13:00:00Z",
-                vec![0.25, sell, f64::NAN],
-                true,
-                hour(),
-            ),
-            row(
-                "2026-01-06T15:00:00Z",
-                vec![0.75, buy, f64::NAN],
-                true,
-                hour(),
-            ),
-            row(
-                "2026-01-06T19:00:00Z",
-                vec![0.3, buy, f64::NAN],
-                false,
-                hour(),
-            ),
-            row(
-                "2026-01-06T20:00:00Z",
-                vec![0.7, sell, f64::NAN],
-                false,
-                hour(),
-            ),
-        ];
-        let t = at("2026-01-07T00:00:00Z");
-
-        let trained = training.train_at(t, |_, _| Ok(rows));
-
-        assert_eq!((&trained.long, &trained.short), (&None, &None));
-        let Some(Outcome::Published {
-            valid_from,
-            holdout,
-        }) = trained.meta
-        else {
-            panic!("{trained:?}");
-        };
-        assert_eq!((valid_from, holdout.auc), (t, Some(1.0)));
-        let stored = training.meta_store().unwrap().read(t).unwrap();
-        let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
-        assert!(
-            (model.predict(&[f64::NAN, buy, f64::NAN]).unwrap() - 2.0 / 3.0).abs() < 1e-12,
-            "{stored:?}"
         );
     }
 
