@@ -3,21 +3,25 @@
 //! the out-of-sample scores it reports after.
 //!
 //! Before the run (`WalkForward::prepare`), the dataset is built over the
-//! span, from the reach of the plan of the first train (`Plan::reach`:
-//! the first row its models read) to the end of the span's last day
+//! span, from where the replay of the plan of the first train starts
+//! (`Plan::replay_from`: the first row a fit reads), or from that train's
+//! time if it fits no model, to the end of the span's last day
 //! (`Dataset::build`), so that the last retrain period has targets to
-//! score; then the models are trained at every train time of the span
+//! score: a backtest whose models are all in the store builds from its
+//! first train time, its start, or, retrained, the last retrain time not
+//! after it. Then the models are trained at every train time of the span
 //! (`Schedule::times`: each retrain time, or, never retrained, the start
 //! alone) whose plan fits a model (`Schedule::plan`), each planned once
 //! the trains before it published. Never retrained, a backtest whose
 //! primary or meta then has no model in use at its start is refused: it
 //! would trade nothing (`Schedule::ensure_trades`). Each build and train
 //! is a child process in a backtest (one Nautilus node per process),
-//! handed in by the caller; a train then finds the days it reads built
-//! and replays none. A model in the store is reused, so a second backtest
-//! of the same span builds and trains nothing. A train that kept a
-//! model's current one published none, so the next backtest trains at
-//! that time again.
+//! handed in by the caller; a train finds the days it reads from there
+//! built, and a later train whose window reaches before them replays the
+//! days missing itself (`Dataset::settled`), as any train does. A model in
+//! the store is reused, so a second backtest of the same span builds and
+//! trains nothing. A train that kept a model's current one published none,
+//! so the next backtest trains at that time again.
 //! The run then trades on the stores as they are: at each decision, the
 //! latest model of each side valid then (`handle`).
 //!
@@ -27,15 +31,16 @@
 //! a model failing its checks refused and the current one kept, as the
 //! handle does, its probabilities calibrated. Every model is out of
 //! sample on its rows: trained at its valid-from on rows settled by then.
-//! Beside each, its baseline: the training mean of the rows the
-//! schedule's plan has the model of each retrain period's start fitted
-//! and calibrated on, those before its holdout, fitted where that model
-//! was (`Step::rows`): retrained, at the period's start; never retrained,
-//! the span one period, at the valid-from of the model in use at the
-//! start, or at the start for a model with none. None for a meta waiting
-//! there. The dataset is built back to the first of those rows. The AUC
-//! and log loss (`score`) of both are given per side, per retrain period
-//! and over the span, and what the model's decisions earned there
+//! Beside each, on the very rows it decided, its own baseline, as its
+//! manifest has it (`store::ModelManifest::baseline`): the training mean
+//! of the labels of the rows that model was fitted and calibrated on, at
+//! its valid-from. A period whose train was refused so scores the earlier
+//! model in use beside that model's baseline, a period of models
+//! published off the schedule each row beside the baseline of the model
+//! that decided it, and a row decided with no model, as a side's never
+//! retrained with none in use at the start, has no baseline either. The
+//! AUC and log loss (`score`) of both are given per side, per retrain
+//! period and over the span, and what the model's decisions earned there
 //! (`holdout::Earnings`), its decision rule taking the trades it would
 //! have taken (`holdout::Rule`: a side's expected net P&L clearing its
 //! margin, a meta's probability its threshold), beside every trade of the
@@ -44,32 +49,28 @@
 
 use std::{collections::BTreeSet, fmt, path::Path};
 
-use anyhow::{bail, ensure};
+use anyhow::ensure;
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::ModelConfig,
-    dataset::{self, Dataset, DatasetRow, DatasetVenue},
+    dataset::{self, Dataset, DatasetVenue},
     features::FeatureSet,
     holdout::{Earnings, Example, Margin, Rule, STRESS, Threshold},
-    learner::Model,
     meta,
     payoff::Realised,
-    schedule::{Models, Schedule, Step},
+    schedule::{Models, Schedule},
     score,
-    store::{MetaLevel, ModelSet, Swap},
+    store::{Baselined, ModelSet, Swap},
     targets::Side,
-    train,
 };
 use crate::strategy::DataRequirements;
 
 /// The retrains and scores of one strategy's backtests.
 #[derive(Debug)]
 pub struct WalkForward {
-    feature_names: Vec<String>,
-    config: ModelConfig,
     /// How the rows' trades read: their labels and payoffs.
     realised: Realised,
     dataset: Dataset,
@@ -91,7 +92,8 @@ pub struct ModelScores {
     pub periods: Vec<Period>,
     /// The model's over the span, its rows with a model.
     pub model: Score,
-    /// The baseline's over the span.
+    /// The baselines' over the span, each row's its model's, on the
+    /// model's rows.
     pub baseline: Score,
     /// What the model's decisions earned over the span.
     pub earnings: Earnings,
@@ -109,7 +111,8 @@ pub struct Period {
     pub models: Vec<Timestamp>,
     /// The model's, on the rows decided with one.
     pub model: Score,
-    /// The baseline's, on every row of the period.
+    /// The baselines', on the same rows: each row's that of the model that
+    /// decided it.
     pub baseline: Score,
     /// What the model's decisions earned, on the rows decided with one.
     pub earnings: Earnings,
@@ -147,7 +150,6 @@ impl WalkForward {
     ) -> anyhow::Result<Self> {
         let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         Ok(Self {
-            feature_names: features.names().to_vec(),
             realised: Realised::new(catalog, &config.targets, config.label)?,
             dataset: Dataset::new(
                 catalog,
@@ -160,19 +162,19 @@ impl WalkForward {
             )?,
             models,
             schedule: Schedule::of_model(&config),
-            config,
         })
     }
 
     /// Prepares a backtest over `[start, end)`: if the dataset lacks a day
-    /// from the reach of the plan of the span's first train time
-    /// (`Plan::reach`) to the span's end, `build` builds it over that span
-    /// (`Dataset::build` of its days); then `train` trains at each train
-    /// time of the span (`Schedule::times`) whose plan fits a model
-    /// (`Schedule::plan`, `Training::train_at`), in time order, each
-    /// planned after the trains before it: a primary model they publish
-    /// gives the meta its rows from then on. A backtest that could then
-    /// trade nothing is refused (`Schedule::ensure_trades`).
+    /// from where the replay of the plan of the span's first train time
+    /// starts (`Plan::replay_from`), or that time if it fits no model, to
+    /// the span's end, `build` builds it over that span (`Dataset::build`
+    /// of its days); then `train` trains at each train time of the span
+    /// (`Schedule::times`) whose plan fits a model (`Schedule::plan`,
+    /// `Training::train_at`), in time order, each planned after the
+    /// trains before it: a primary model they publish gives the meta its
+    /// rows from then on. A backtest that could then trade nothing is
+    /// refused (`Schedule::ensure_trades`).
     ///
     /// # Errors
     ///
@@ -190,7 +192,8 @@ impl WalkForward {
         let from = self
             .schedule
             .plan(times[0], &self.models.valid_froms()?)
-            .reach();
+            .replay_from()
+            .unwrap_or(times[0]);
         let (first, last) = dataset::days(from, end);
         if !self.dataset.missing(first, last)?.is_empty() {
             build(from, end)?;
@@ -210,8 +213,8 @@ impl WalkForward {
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset lacks a day of
-    /// it or of a retrain window, a model fails to predict, a row's stop
-    /// has no worth, or the dataset or a store cannot be read.
+    /// it, a model fails to predict, a row's stop has no worth, or the
+    /// dataset or a store cannot be read.
     pub fn scores(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Scores> {
         let times = self.schedule.times(start, end)?;
         let (first, last) = dataset::days(start, end);
@@ -222,9 +225,6 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
-        let valid_froms = self.models.valid_froms()?;
-        // The plan of the retrain at `at`: each model's baseline's rows.
-        let plan = |at| self.schedule.plan(at, &valid_froms);
         let mut scores = Scores {
             long: None,
             short: None,
@@ -243,7 +243,6 @@ impl WalkForward {
                 &examples,
                 level.swap(),
                 Margin(level.margin()),
-                |at| self.baseline(side, plan(at).steps().side(side).copied()),
             )?;
             match side {
                 Side::Long => scores.long = Some(side_scores),
@@ -263,70 +262,15 @@ impl WalkForward {
                 &examples,
                 level.swap(),
                 Threshold(level.config().threshold),
-                |at| self.meta_baseline(level, plan(at).steps().meta),
             )?);
         }
         Ok(scores)
-    }
-
-    /// The baseline of `side` at a retrain's `step`: the training mean of
-    /// the rows its model is fitted and calibrated on (`Step::rows`,
-    /// `train::split`); none without such a row.
-    fn baseline(&self, side: Side, step: Option<Step>) -> anyhow::Result<Option<Model>> {
-        let Some((from, at)) = step.and_then(Step::rows) else {
-            return Ok(None);
-        };
-        let rows = self.settled(from, at)?;
-        let examples = rows
-            .iter()
-            .map(|row| Example::of_side(row, side, &self.realised))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let holdout = at - self.config.holdout;
-        fit_baseline(
-            self.feature_names.len(),
-            examples,
-            holdout - self.config.holdout,
-            holdout,
-        )
-    }
-
-    /// The baseline of the meta model of `level` at a retrain's `step`, as
-    /// `baseline`: on the rows its model is fitted and calibrated on
-    /// (`meta::examples`); none for a wait.
-    fn meta_baseline(
-        &self,
-        level: &MetaLevel,
-        step: Option<Step>,
-    ) -> anyhow::Result<Option<Model>> {
-        let Some((from, at)) = step.and_then(Step::rows) else {
-            return Ok(None);
-        };
-        let rows = self.settled(from, at)?;
-        let examples = meta::examples(
-            &self.models,
-            &rows.iter().collect::<Vec<_>>(),
-            &self.realised,
-        )?;
-        let holdout = at - level.config().holdout;
-        fit_baseline(
-            level.feature_names().len(),
-            examples,
-            holdout - level.config().holdout,
-            holdout,
-        )
-    }
-
-    /// The rows of `[from, at)` settled at `at`, of days the dataset holds.
-    fn settled(&self, from: Timestamp, at: Timestamp) -> anyhow::Result<Vec<DatasetRow>> {
-        self.dataset.settled(from, at, |_, _| {
-            bail!("the dataset lacks days of the window ending {at}: build it first")
-        })
     }
 }
 
 /// The scores over `[start, end)`, retrained at `times`, of the models
 /// `models` swaps in on `examples`, in time order, deciding by `rule`,
-/// beside the baseline `baseline` fits for each retrain time.
+/// each beside its own baseline on the rows it decided.
 fn score<R: Rule>(
     times: &[Timestamp],
     start: Timestamp,
@@ -334,15 +278,16 @@ fn score<R: Rule>(
     examples: &[Example],
     mut models: Swap<R::Model>,
     rule: R,
-    baseline: impl Fn(Timestamp) -> anyhow::Result<Option<Model>>,
-) -> anyhow::Result<ModelScores> {
+) -> anyhow::Result<ModelScores>
+where
+    R::Model: Baselined,
+{
     let valid_froms = models.store().valid_froms()?;
     let (mut model_rows, mut baseline_rows, mut model_trades) = (vec![], vec![], vec![]);
     let mut periods = vec![];
     for (i, &at) in times.iter().enumerate() {
         let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
-        let baseline = baseline(at)?;
         let (mut period_models, mut by_model, mut by_baseline, mut trades) =
             (BTreeSet::new(), vec![], vec![], vec![]);
         for example in examples
@@ -355,10 +300,8 @@ fn score<R: Rule>(
                 period_models.insert(valid_from);
                 let (probability, taken) = rule.judge(model, example)?;
                 by_model.push((probability, example.label));
+                by_baseline.push((model.baseline(), example.label));
                 trades.push((taken, example.trade));
-            }
-            if let Some(baseline) = &baseline {
-                by_baseline.push((baseline.predict(&example.features)?, example.label));
             }
         }
         periods.push(Period {
@@ -379,20 +322,6 @@ fn score<R: Rule>(
         baseline: Score::of(&baseline_rows),
         earnings: Earnings::of(&model_trades),
     })
-}
-
-/// The training mean of `examples` of `width` features fitted and
-/// calibrated on before the holdout from `holdout`, the calibration from
-/// `calibration` (`train::split`); none without such a row.
-fn fit_baseline(
-    width: usize,
-    examples: Vec<Example>,
-    calibration: Timestamp,
-    holdout: Timestamp,
-) -> anyhow::Result<Option<Model>> {
-    let (fitted, calibrating, _) = train::split(examples, calibration, holdout);
-    let trained: Vec<Example> = fitted.into_iter().chain(calibrating).collect();
-    train::baseline(width, &trained)
 }
 
 impl Score {
@@ -679,8 +608,8 @@ mod tests {
     const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
 
     /// A fake model valid from `valid_from`, of `fingerprint`, calibrated
-    /// by `CALIBRATION`.
-    fn model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
+    /// by `CALIBRATION`, its baseline `baseline`.
+    fn model(valid_from: Timestamp, fingerprint: String, baseline: f64) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.5], vec![true]).unwrap();
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
@@ -694,6 +623,7 @@ mod tests {
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
                 calibration: CALIBRATION,
+                baseline,
                 payoff: Some(Payoff {
                     win: 1.0,
                     loss: 1.0,
@@ -729,13 +659,34 @@ mod tests {
     }
 
     /// Publishes a fake model valid from `valid_from` for each side of a
-    /// walk in `dir` as `config` says.
+    /// walk in `dir` as `config` says, with the baseline a train then fits
+    /// (`trained_baseline`).
     fn publish(dir: &Path, config: &ModelConfig, valid_from: Timestamp) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
         for (side, _) in config.margins.sides() {
+            let baseline = trained_baseline(side, valid_from);
             store(dir, config, side)
-                .publish(&model(valid_from, fingerprint.clone()))
+                .publish(&model(valid_from, fingerprint.clone(), baseline))
                 .unwrap();
+        }
+    }
+
+    /// The baseline of the `side` model a train at `valid_from` fits on
+    /// `rows`, the training mean of the side's labels before its holdout:
+    /// at the 7th the long's two wins in three, 2/3, at the 8th its one in
+    /// three, 1/3, the short's the reverse, winning where the long loses;
+    /// 1/2 at any other time, whose models' baselines no test reads.
+    fn trained_baseline(side: Side, valid_from: Timestamp) -> f64 {
+        let long = if valid_from == at("2026-01-07T00:00:00Z") {
+            2.0 / 3.0
+        } else if valid_from == at("2026-01-08T00:00:00Z") {
+            1.0 / 3.0
+        } else {
+            0.5
+        };
+        match side {
+            Side::Long => long,
+            Side::Short => 1.0 - long,
         }
     }
 
@@ -803,18 +754,21 @@ mod tests {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
     }
 
-    /// Worked by hand, the long's. The 7th, the fake's probabilities its
-    /// feature `p` calibrated, `c(p) = 1 / (1 + e^(2 - 4p))`: the win 0.8
-    /// above the losses 0.3 and 0.6 (AUC 1), log loss `-(ln c(0.8) + ln (1 -
-    /// c(0.3)) + ln (1 - c(0.6))) / 3`; the baseline 2/3 throughout (AUC 0.5),
-    /// `-(ln 2/3 + 2 ln 1/3) / 3`. The 8th, two wins (no AUC), `-(ln c(0.9) +
-    /// ln c(0.2)) / 2`; the baseline 1/3, `-ln 1/3`. The span: of the six
-    /// pairs of a win and a loss, the win above in four; the baseline's
-    /// wins 2/3, 1/3 and 1/3 against its losses at 2/3, a tie each for the
-    /// first: one of six. The short wins where the long loses: on the 7th
-    /// its model ranks every pair the wrong way round, its baseline 1/3.
+    /// Worked by hand, the long's, each model beside its own baseline, the
+    /// training mean its train fitted (`trained_baseline`), on the rows it
+    /// decided. The 7th, the fake's probabilities its feature `p`
+    /// calibrated, `c(p) = 1 / (1 + e^(2 - 4p))`: the win 0.8 above the
+    /// losses 0.3 and 0.6 (AUC 1), log loss `-(ln c(0.8) + ln (1 - c(0.3)) +
+    /// ln (1 - c(0.6))) / 3`; the 7th's model's baseline 2/3 throughout (AUC
+    /// 0.5), `-(ln 2/3 + 2 ln 1/3) / 3`. The 8th, two wins (no AUC), `-(ln
+    /// c(0.9) + ln c(0.2)) / 2`; the 8th's model's baseline 1/3, `-ln 1/3`.
+    /// The span: of the six pairs of a win and a loss, the win above in
+    /// four; the baselines' wins 2/3, 1/3 and 1/3 against their losses at
+    /// 2/3, a tie each for the first: one of six. The short wins where the
+    /// long loses: on the 7th its model ranks every pair the wrong way
+    /// round, its model's baseline 1/3.
     #[test]
-    fn each_period_scores_the_model_in_use_and_the_baseline_fitted_at_its_start() {
+    fn each_period_scores_its_model_beside_that_models_own_baseline_on_the_same_rows() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         prepare(dir.path(), &walk);
@@ -902,7 +856,7 @@ mod tests {
         build(dir.path());
         publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
         store(dir.path(), &config(), Side::Long)
-            .publish(&model(at("2026-01-08T00:00:00Z"), "f".repeat(64)))
+            .publish(&model(at("2026-01-08T00:00:00Z"), "f".repeat(64), 0.5))
             .unwrap();
 
         let scores = walk
@@ -914,8 +868,11 @@ mod tests {
         assert_eq!(periods[1].model.rows, 2);
     }
 
+    /// A baseline is a model's: the 7th's three rows, decided with none,
+    /// have no baseline either, and over the span the baseline has the
+    /// model's two rows of the 8th.
     #[test]
-    fn rows_before_any_model_have_no_model_score_but_the_baselines() {
+    fn rows_before_any_model_have_no_score_of_a_model_nor_of_a_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         build(dir.path());
@@ -929,8 +886,39 @@ mod tests {
         let first = &long.periods[0];
         assert!(first.models.is_empty(), "{first:?}");
         assert_eq!((first.model.rows, first.model.log_loss), (0, None));
-        assert_eq!(first.baseline.rows, 3);
-        assert_eq!(long.model.rows, 2);
+        assert_eq!((first.baseline.rows, first.baseline.log_loss), (0, None));
+        assert_eq!((long.model.rows, long.baseline.rows), (2, 2));
+    }
+
+    /// A long model published off the schedule, valid from 12:00 of the
+    /// 7th, its baseline 1/4: the period of the 7th uses the 7th's model,
+    /// its baseline 2/3, at 04:00 and 08:00, a win and a loss, and the
+    /// later one at 12:00, a loss, each row scored beside the baseline of
+    /// the model that decided it, `-(ln 2/3 + ln 1/3 + ln 3/4) / 3`.
+    #[test]
+    fn a_period_scores_each_row_beside_the_baseline_of_the_model_that_decided_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk(dir.path());
+        build(dir.path());
+        for at in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
+            publish(dir.path(), &config(), at);
+        }
+        let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
+        store(dir.path(), &config(), Side::Long)
+            .publish(&model(at("2026-01-07T12:00:00Z"), fingerprint, 0.25))
+            .unwrap();
+
+        let scores = walk
+            .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
+
+        let first = &scores.long.unwrap().periods[0];
+        assert_eq!(
+            first.models,
+            [at("2026-01-07T00:00:00Z"), at("2026-01-07T12:00:00Z")]
+        );
+        assert_eq!((first.model.rows, first.baseline.rows), (3, 3));
+        close(first.baseline.log_loss, 0.597_253);
     }
 
     #[test]
@@ -1174,7 +1162,7 @@ Short model scores, out of sample, over the span
         publish(dir, &config, at);
         if earlier {
             let fingerprint = dataset(dir, &config).fingerprint().to_string();
-            meta_store(dir).publish(&model(at, fingerprint))?;
+            meta_store(dir).publish(&model(at, fingerprint, 0.5))?;
         }
         Ok(())
     }
@@ -1416,7 +1404,7 @@ Short model scores, out of sample, over the span
                 }
                 if meta {
                     let fingerprint = dataset(dir, &config).fingerprint().to_string();
-                    meta_store_of(dir, &config).publish(&model(at, fingerprint))?;
+                    meta_store_of(dir, &config).publish(&model(at, fingerprint, 0.5))?;
                 }
                 Ok(())
             },
@@ -1430,7 +1418,7 @@ Short model scores, out of sample, over the span
     /// alone, and runs, the sides of the 5th and the meta of the 7th in
     /// use.
     #[test]
-    fn a_backtest_never_retrained_on_an_empty_store_builds_back_to_the_plans_reach_and_has_both_in_use_at_its_start()
+    fn a_backtest_never_retrained_on_an_empty_store_builds_back_to_the_sides_window_and_has_both_in_use_at_its_start()
      {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1521,11 +1509,10 @@ Short model scores, out of sample, over the span
     }
 
     /// Never retrained, each side's model of the 7th is in use at a
-    /// backtest from the 8th: it trains nothing, and builds back to the
-    /// rows those models were fitted on, the 6th's, a window before the
-    /// start's own.
+    /// backtest from the 8th: its plan fits nothing, so it trains nothing
+    /// and builds only the span's day, the scores reading no row before it.
     #[test]
-    fn a_backtest_never_retrained_builds_back_to_the_rows_its_models_in_use_were_fitted_on() {
+    fn a_backtest_never_retrained_with_its_models_in_use_builds_only_its_span() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), never());
         publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
@@ -1540,18 +1527,18 @@ Short model scores, out of sample, over the span
 
         assert_eq!(
             built,
-            [(at("2026-01-06T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
+            [(at("2026-01-08T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
         );
         assert_eq!(trained, []);
     }
 
     /// Never retrained, the long's model of the 7th in use over a backtest
-    /// from the 8th: its baseline is fitted where it was, at the 7th, on
-    /// the rows of the 6th before the holdout from 18:00, two wins in three
-    /// (fitted at the start, on the 7th's, it would be 1/3); scored on the
+    /// from the 8th is scored beside its own baseline, the training mean
+    /// its train fitted at the 7th, on the rows of the 6th before the
+    /// holdout from 18:00, two wins in three (`trained_baseline`); on the
     /// 8th's two wins, `-ln 2/3`.
     #[test]
-    fn a_backtest_never_retrained_scores_a_model_beside_the_baseline_fitted_where_it_was_trained() {
+    fn a_backtest_never_retrained_scores_a_model_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), never());
         publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
@@ -1564,22 +1551,25 @@ Short model scores, out of sample, over the span
         let [period] = &long.periods[..] else {
             panic!("{long:?}");
         };
-        assert_eq!(period.baseline.rows, 2);
+        assert_eq!((period.model.rows, period.baseline.rows), (2, 2));
         close(period.baseline.log_loss, 0.405_465);
     }
 
     /// Never retrained, the long's model of the 7th is in use at a backtest
-    /// from the 8th, the short has none and its train there is refused: the
-    /// short's baseline is fitted at the start, on the rows of the 7th
-    /// before the holdout from 18:00, its wins where the long lost, two in
-    /// three; scored on the 8th's two losses, `-ln 1/3`.
+    /// from the 8th, the short has none and its train there is refused:
+    /// with no model, the short's rows have no baseline either.
     #[test]
-    fn a_backtest_never_retrained_fits_the_baseline_of_a_model_with_none_in_use_at_its_start() {
+    fn a_backtest_never_retrained_has_no_baseline_for_a_side_with_no_model_in_use() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), never());
         let fingerprint = dataset(dir.path(), &never()).fingerprint().to_string();
+        let seventh = at("2026-01-07T00:00:00Z");
         store(dir.path(), &never(), Side::Long)
-            .publish(&model(at("2026-01-07T00:00:00Z"), fingerprint))
+            .publish(&model(
+                seventh,
+                fingerprint,
+                trained_baseline(Side::Long, seventh),
+            ))
             .unwrap();
         let span = ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z");
         let (_, trained) = prepared(dir.path(), &walk, span, None).unwrap();
@@ -1588,17 +1578,18 @@ Short model scores, out of sample, over the span
         let scores = walk.scores(at(span.0), at(span.1)).unwrap();
 
         let short = &scores.short.unwrap().periods[0];
-        assert_eq!(short.baseline.rows, 2);
-        close(short.baseline.log_loss, 1.098_612);
+        assert!(short.models.is_empty(), "{short:?}");
+        assert_eq!((short.model.rows, short.baseline.rows), (0, 0));
+        assert_eq!(short.baseline.log_loss, None);
     }
 
     /// Retrained, the models of the 7th are in use over both periods, the
-    /// train of the 8th refused: the long's baseline of the 8th is fitted
-    /// at the period's start nonetheless, on the rows of the 7th before the
-    /// holdout from 18:00, one win in three (at the model's valid-from it
-    /// would be 2/3); scored on the 8th's two wins, `-ln 1/3`.
+    /// train of the 8th refused: on the 8th the long's model of the 7th is
+    /// scored beside its own baseline, 2/3 (`trained_baseline`), not the
+    /// training mean a train of the 8th would have fitted, 1/3; on the
+    /// 8th's two wins, `-ln 2/3`.
     #[test]
-    fn a_retrained_backtest_fits_each_baseline_at_its_periods_start_an_earlier_model_in_use() {
+    fn a_retrained_backtest_scores_an_earlier_model_in_use_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         build(dir.path());
@@ -1611,7 +1602,7 @@ Short model scores, out of sample, over the span
         let long = scores.long.unwrap();
         let second = &long.periods[1];
         assert_eq!(second.models, [at("2026-01-07T00:00:00Z")]);
-        assert_eq!(second.baseline.rows, 2);
-        close(second.baseline.log_loss, 1.098_612);
+        assert_eq!((second.model.rows, second.baseline.rows), (2, 2));
+        close(second.baseline.log_loss, 0.405_465);
     }
 }

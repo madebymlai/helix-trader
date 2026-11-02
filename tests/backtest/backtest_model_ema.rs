@@ -300,8 +300,8 @@ fn backtest(
 /// 02:00 of the 21st, to the end of the 24th plus the horizon, then
 /// retrains at midnight of each, in children too: without an edge, each
 /// keeps the current model, there being none, and the backtest goes on,
-/// each reason printed with its figures, to a run with no model, no
-/// period scored but by the baseline.
+/// each reason printed with its figures, to a run with no model: no
+/// period is scored, by a model or by a baseline, which is a model's.
 #[test]
 fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
     let catalog = walk(
@@ -326,6 +326,13 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
     }
     assert!(stdout.contains("Orders: 0"), "{stdout}");
     assert!(stdout.contains("Model valid from: none"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("  Baseline rows: "))
+            .all(|line| line == "  Baseline rows: 0"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("published a model"), "{stdout}");
 }
 

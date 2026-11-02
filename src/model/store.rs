@@ -6,10 +6,11 @@
 //! venue settings of its dataset runs, see `dataset::fingerprint`) and training
 //! settings (the learner and its settings, the label, the retrain interval,
 //! the window, the holdout and the minimums its holdout must meet to be
-//! published, `holdout::Minimums`), and side, the long or the short, keyed
-//! by its margin, which decides the trades its holdout is judged on, so a
-//! model is only ever listed beside models of the same features, costs,
-//! training, side and margin. Backtest and live read the same list.
+//! published, `holdout::Minimums`) with the store `VERSION`, and side, the
+//! long or the short, keyed by its margin, which decides the trades its
+//! holdout is judged on, so a model is only ever listed beside models of
+//! the same features, costs, training, side and margin, and of the same
+//! manifest. Backtest and live read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory beside its primary's
 //! sides, under their training settings, keyed by its own (its learner and
@@ -32,10 +33,12 @@
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
 //! target spec, label and side, the learner, the calibration of its
-//! predictions, a side's expected payoff, its holdout (`holdout::Holdout`)
-//! and probe rows with the calibrated predictions the model made on them
-//! when fitted, and the model as its adapter saved it. A loaded model's every prediction is
-//! calibrated (`LoadedModel`), and a side's carries its payoff
+//! predictions, its baseline (the training mean of the labels of the rows
+//! it was fitted and calibrated on), a side's expected payoff, its holdout
+//! (`holdout::Holdout`) and probe rows with the calibrated predictions the
+//! model made on them when fitted, and the model as its adapter saved it.
+//! A loaded model's every prediction is calibrated (`LoadedModel`), it
+//! carries its baseline (`Baselined`), and a side's carries its payoff
 //! (`SideModel`), which gives its expected net P&L: one whose manifest has
 //! none is refused at load. A reloaded model is checked by predicting
 //! the probes, never by its bytes. The file is written beside its name, then
@@ -77,6 +80,14 @@ static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 /// The directory of the meta models within the directory of their primary's
 /// models.
 const META: &str = "meta";
+
+/// The version of what a published model's file holds, its manifest
+/// (`ModelManifest`) and how a model is read from it. Keyed with the
+/// training settings every store of a strategy sits under, the meta's
+/// too (`training_directory`): bumped by hand whenever that changes,
+/// which keys every store anew, so that no model of another manifest is
+/// read and every model is trained again, on the datasets as they are.
+const VERSION: u32 = 1;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -150,6 +161,10 @@ pub struct ModelManifest {
     pub learner: LearnerConfig,
     /// The calibration of the model's predictions.
     pub calibration: Calibration,
+    /// The model's baseline, the constant model its scores are read
+    /// beside: the training mean of the labels of the rows it was fitted
+    /// and calibrated on.
+    pub baseline: f64,
     /// A side model's expected win and loss of a trade of its side, without
     /// which it is refused at load (`SideModel`); none for a meta model.
     pub payoff: Option<Payoff>,
@@ -192,6 +207,7 @@ impl StoredModel {
         let model = LoadedModel {
             model: manifest.learner.load(&self.model)?,
             calibration: manifest.calibration,
+            baseline: manifest.baseline,
         };
         let width = model.model.width();
         ensure!(
@@ -228,19 +244,35 @@ impl StoredModel {
 }
 
 /// A model as a strategy and a score use it: loaded, every prediction
-/// calibrated.
+/// calibrated, with its baseline.
 #[derive(Debug)]
 pub struct LoadedModel {
     model: Model,
     calibration: Calibration,
+    /// The training mean of the labels of the rows it was fitted and
+    /// calibrated on (`ModelManifest::baseline`).
+    baseline: f64,
+}
+
+/// A model as the store loads it, with the baseline of its manifest
+/// (`ModelManifest::baseline`), which its scores are read beside: a
+/// meta's (`LoadedModel`) and a side's (`SideModel`) alike.
+pub(super) trait Baselined {
+    /// The training mean of the labels of the rows the model was fitted
+    /// and calibrated on.
+    fn baseline(&self) -> f64;
 }
 
 impl LoadedModel {
     /// The model `model` fitted, its predictions calibrated by
-    /// `calibration`.
+    /// `calibration`, its baseline `baseline`.
     #[must_use]
-    pub const fn new(model: Model, calibration: Calibration) -> Self {
-        Self { model, calibration }
+    pub const fn new(model: Model, calibration: Calibration, baseline: f64) -> Self {
+        Self {
+            model,
+            calibration,
+            baseline,
+        }
     }
 
     /// The calibrated probability that the label of `row` is true.
@@ -289,6 +321,19 @@ impl SideModel {
     }
 }
 
+impl Baselined for LoadedModel {
+    fn baseline(&self) -> f64 {
+        self.baseline
+    }
+}
+
+/// A side model's baseline is its loaded model's.
+impl Baselined for SideModel {
+    fn baseline(&self) -> f64 {
+        self.model.baseline()
+    }
+}
+
 impl ModelSet {
     /// The models, under `root`, of `strategy_id` deciding with `features`
     /// as `config` says, on targets for a strategy of `requirements`, run
@@ -316,7 +361,7 @@ impl ModelSet {
             requirements,
             venue,
         )?;
-        let training = training_directory(root, strategy_id, fingerprint, config)?;
+        let training = training_directory(root, strategy_id, fingerprint, config, VERSION)?;
         let fingerprint = fingerprint.to_string();
         let sides = config
             .margins
@@ -567,15 +612,17 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
 }
 
 /// The directory, under `root`, of the models of `strategy_id` whose
-/// dataset has `fingerprint`, its side models trained as `config` says:
-/// its dataset's, then the side models' training settings, the learner
-/// and its settings, the label, the retrain interval, the window, the
-/// holdout and the minimums of its holdout.
+/// dataset has `fingerprint`, its side models trained as `config` says,
+/// of the store `version` (`VERSION`): its dataset's, then the side
+/// models' training settings, the learner and its settings, the label,
+/// the retrain interval, the window, the holdout and the minimums of its
+/// holdout, and the version.
 fn training_directory(
     root: &Path,
     strategy_id: StrategyId,
     fingerprint: Fingerprint,
     config: &ModelConfig,
+    version: u32,
 ) -> anyhow::Result<PathBuf> {
     let settings = Fingerprint::default()
         .with(serde_json::to_string(&config.learner)?.as_bytes())
@@ -584,7 +631,8 @@ fn training_directory(
         .with(&config.window.as_nanos().to_le_bytes())
         .with(&config.holdout.as_nanos().to_le_bytes())
         .with(&config.min_pnl.to_le_bytes())
-        .with(&config.min_trades.to_le_bytes());
+        .with(&config.min_trades.to_le_bytes())
+        .with(format!("store version {version}").as_bytes());
     Ok(dataset_directory(root, strategy_id, fingerprint).join(settings.to_string()))
 }
 
@@ -843,7 +891,8 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// A fake model valid from `valid_from`, probed on `rows`.
+    /// A fake model valid from `valid_from`, probed on `rows`, its
+    /// baseline the mean of its training labels, 1/2.
     fn model(valid_from: &str, rows: &[Vec<f64>]) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.2, 0.7], vec![false, true]).unwrap();
         let fitted = LearnerConfig::Fake {}.fit(&set).unwrap();
@@ -858,6 +907,7 @@ mod tests {
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
                 calibration: Calibration { a: -4.0, b: 2.0 },
+                baseline: 0.5,
                 payoff: Some(Payoff {
                     win: 1.5,
                     loss: 1.25,
@@ -1043,6 +1093,35 @@ mod tests {
                 "{other:?}"
             );
         }
+    }
+
+    /// Bumping the store version is another training directory, which
+    /// every store of the strategy sits under, its sides' and its meta's:
+    /// no model of another manifest is read, and every model is trained
+    /// again.
+    #[test]
+    fn bumping_the_store_version_keys_another_store() {
+        let config = config();
+        let fingerprint = dataset::fingerprint(
+            &features(),
+            config.decision,
+            &config.targets,
+            &requirements(),
+            &venue(),
+        )
+        .unwrap();
+        let at = |version| {
+            training_directory(
+                Path::new("models"),
+                StrategyId::from(STRATEGY),
+                fingerprint,
+                &config,
+                version,
+            )
+            .unwrap()
+        };
+
+        assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
     #[test]

@@ -33,17 +33,20 @@
 //! (`calibration::Calibration`) on its predictions on the calibration's
 //! rows settled at the holdout's start, and judged on the holdout
 //! (`holdout::Holdout`): its calibrated probabilities' log loss
-//! against the baseline's, the training mean of the rows before the
-//! holdout (`baseline`), and what its decision rule (`holdout::Rule`)
-//! would have earned on the holdout's trades, the side's trade of each
-//! row for a primary, a side's expected payoff (`payoff::Payoff`, of the
-//! realised values of the rows before the holdout) on the row's unit
-//! clearing its margin, beside taking every trade; its AUC reported. A
+//! against the baseline's, the training mean of the labels of the rows
+//! it was fitted and calibrated on (`baseline`), and what its decision
+//! rule (`holdout::Rule`) would have earned on the holdout's trades, the
+//! side's trade of each row for a primary, a side's expected payoff
+//! (`payoff::Payoff`, of the realised values of the rows before the
+//! holdout) on the row's unit clearing its margin, beside taking every
+//! trade; its AUC reported. A
 //! holdout meeting the minimums (`ModelConfig::min_pnl`,
 //! `ModelConfig::min_trades`, `Holdout::refusal`) publishes the model in
 //! its side's store (`store`), valid from `t'`, with its calibration, its
-//! payoff, its holdout, and its manifest probing it on rows of the
-//! holdout; else the current model is kept.
+//! baseline, which its out-of-sample scores are read beside
+//! (`walk::WalkForward::scores`), its payoff, its holdout, and its
+//! manifest probing it on rows of the holdout; else the current model is
+//! kept.
 //!
 //! With a meta model (`model::meta`), the primary trains first, then the
 //! meta, on the same rows, of the one replay: the meta's window is its
@@ -75,7 +78,7 @@ use super::{
     dataset::{Dataset, DatasetRow, DatasetVenue, SchemaMismatch},
     features::FeatureSet,
     holdout::{Earnings, Example, Holdout, Margin, Minimums, Refusal, Rule, Threshold},
-    learner::{LearnerConfig, Model, TrainingSet},
+    learner::{LearnerConfig, TrainingSet},
     meta,
     payoff::{Payoff, Realised},
     schedule::{Models, Retrain, Schedule, Step},
@@ -290,8 +293,9 @@ impl Training {
 
     /// What a train does to `level`'s model at `step`: its current model
     /// in use; a meta waiting; or a model fitted as of the step's time on
-    /// the `examples` of the replay's `rows` in its rows (`Step::rows`),
-    /// published, or the current model kept with the reason.
+    /// the `examples` of the replay's `rows` in the step's rows, those of
+    /// `[from, at)` settled by `at` (`Step::Fit`), published, or the
+    /// current model kept with the reason.
     fn step(
         &self,
         level: &Level,
@@ -300,7 +304,7 @@ impl Training {
         examples: impl FnOnce(&[&DatasetRow]) -> anyhow::Result<Vec<Example>>,
     ) -> Outcome {
         let (from, at) = match step {
-            Step::Keep { valid_from, .. } => {
+            Step::Keep { valid_from } => {
                 return Outcome::InUse {
                     valid_from,
                     retrain: self.schedule.retrain(),
@@ -354,10 +358,9 @@ impl Training {
         )
         .context("calibrating on the window before the holdout")?;
         let trained: Vec<Example> = fitted.into_iter().chain(calibrating).collect();
-        let baseline = baseline(level.feature_names.len(), &trained)?
-            .context("no row before the holdout to fit the baseline on")?;
+        let baseline = baseline(level.feature_names.len(), &trained)?;
         let saved = model.save()?;
-        let model = LoadedModel::new(model, calibration);
+        let model = LoadedModel::new(model, calibration, baseline);
         // Each held-out row's calibrated probability and whether the level's
         // rule takes its trade, and a side's side and payoff, of the
         // realised values of the rows before the holdout.
@@ -383,10 +386,8 @@ impl Training {
             .zip(&judged)
             .map(|(row, &(probability, _))| (probability, row.label))
             .collect();
-        let baseline = held_out
-            .iter()
-            .map(|row| Ok((baseline.predict(&row.features)?, row.label)))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let by_baseline: Vec<(f64, bool)> =
+            held_out.iter().map(|row| (baseline, row.label)).collect();
         let trades: Vec<_> = held_out
             .iter()
             .zip(&judged)
@@ -396,7 +397,7 @@ impl Training {
             earnings: Earnings::of(&trades),
             log_loss: score::log_loss(&predictions)
                 .context("no row in the holdout to judge the model on")?,
-            baseline_log_loss: score::log_loss(&baseline)
+            baseline_log_loss: score::log_loss(&by_baseline)
                 .context("no row in the holdout to judge the model on")?,
             auc: score::auc(&predictions),
         };
@@ -420,6 +421,7 @@ impl Training {
                 side,
                 learner: level.learner.clone(),
                 calibration,
+                baseline,
                 payoff,
                 holdout,
                 probes,
@@ -486,7 +488,7 @@ fn kept(e: &anyhow::Error) -> Outcome {
 /// holdout's, `holdout`: those before the calibration settled by its
 /// start, fitted on; those from it to the holdout settled by the
 /// holdout's start, calibrated on; and those from the holdout, held out.
-pub(super) fn split(
+fn split(
     examples: Vec<Example>,
     calibration: Timestamp,
     holdout: Timestamp,
@@ -509,15 +511,13 @@ pub(super) fn split(
 
 /// The baseline of a model of `width` features trained on `trained`, the
 /// rows it is fitted and calibrated on: the training mean of their
-/// labels; none without a row.
+/// labels, which the baseline learner fitted on them predicts whatever
+/// the row.
 ///
 /// # Errors
 ///
-/// Returns an error if the rows are not `width` wide.
-pub(super) fn baseline(width: usize, trained: &[Example]) -> anyhow::Result<Option<Model>> {
-    if trained.is_empty() {
-        return Ok(None);
-    }
+/// Returns an error if there is no row, or the rows are not `width` wide.
+fn baseline(width: usize, trained: &[Example]) -> anyhow::Result<f64> {
     let set = TrainingSet::new(
         width,
         trained
@@ -526,7 +526,8 @@ pub(super) fn baseline(width: usize, trained: &[Example]) -> anyhow::Result<Opti
             .collect(),
         trained.iter().map(|row| row.label).collect(),
     )?;
-    Ok(Some(LearnerConfig::Baseline {}.fit(&set)?))
+    let baseline = LearnerConfig::Baseline {}.fit(&set)?;
+    baseline.predict(&trained[0].features)
 }
 
 /// The indices of at most `PROBES` of `len` rows, spread evenly from the
@@ -1264,6 +1265,40 @@ mod tests {
         assert_eq!(manifest.learner, LearnerConfig::Fake {});
     }
 
+    /// `rows` with the long's loss at 10:00 a win and its win at 17:00 a
+    /// loss: the long is fitted on its wins at 08:00 and 10:00 and
+    /// calibrated on its loss at 13:00 and its win at 15:00, three wins in
+    /// four, 3/4; not on the rows outside those (the win at 23:00 of the
+    /// 5th, before the window, the win at 11:30 and the loss at 17:00,
+    /// settled after their part's end), nor on the holdout's win and loss,
+    /// with which the window's rows are five wins in eight, 5/8. Its
+    /// holdout as `rows`'s takes the win at 19:00, its log loss, about
+    /// 0.41, below the baseline's, (ln 4 + ln 4/3) / 2, about 0.84: it
+    /// publishes.
+    #[test]
+    fn a_published_sides_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let t = at("2026-01-07T00:00:00Z");
+        let mut rows = rows();
+        rows[2] = row("2026-01-06T10:00:00Z", vec![0.9], true, hour());
+        rows[6] = row(
+            "2026-01-06T17:00:00Z",
+            vec![0.1],
+            false,
+            SignedDuration::from_mins(90),
+        );
+
+        let trained = training(dir.path(), config()).train_at(t, |_, _| Ok(rows));
+
+        assert!(
+            matches!(trained.long, Some(Outcome::Published { .. })),
+            "{trained:?}"
+        );
+        let long = store(dir.path(), &config(), Side::Long).read(t).unwrap();
+        assert_eq!(long.manifest.baseline, 0.75);
+    }
+
     /// Margins of the long alone: no short model is trained nor stored.
     #[test]
     fn a_long_only_model_trains_no_short() {
@@ -1511,7 +1546,8 @@ mod tests {
 
     /// Publishes in `store` a primary baseline valid from `valid_from`,
     /// predicting `probability` on every row, calibrated by `CALIBRATION`,
-    /// expecting a win and a loss of 1R.
+    /// expecting a win and a loss of 1R, its baseline the mean of its
+    /// training labels.
     fn primary(store: &ModelStore, side: Side, valid_from: &str, probability: f64) {
         let trues = (probability * 10.0).round() as usize;
         let labels = (0..10).map(|i| i < trues).collect();
@@ -1538,6 +1574,7 @@ mod tests {
                     side: Some(side),
                     learner: LearnerConfig::Baseline {},
                     calibration: CALIBRATION,
+                    baseline: trues as f64 / 10.0,
                     payoff: Some(Payoff {
                         win: 1.0,
                         loss: 1.0,
@@ -1619,6 +1656,32 @@ mod tests {
         // before the primary's first model is no row.
         let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
         assert_eq!(model.predict(&[f64::NAN, 1.0, 0.8]).unwrap(), 0.5);
+    }
+
+    /// `meta_rows` with the long's loss at 10:00 a win: the meta, on the
+    /// longs of the primary's models valid from 06:00, is fitted on the
+    /// wins at 08:00 and 10:00 and calibrated on the loss at 13:00 and the
+    /// win at 15:00, three wins in four, 3/4; not on the decision at 05:00,
+    /// before the primary's first model, a win, nor on the holdout's shorts,
+    /// a loss and a win.
+    #[test]
+    fn a_published_metas_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(24));
+        primaries(dir.path(), &with_meta(24));
+        let t = at("2026-01-07T00:00:00Z");
+        let mut rows = meta_rows();
+        rows[2] = row("2026-01-06T10:00:00Z", vec![0.5], true, hour());
+
+        let trained = training.train_at(t, |_, _| Ok(rows));
+
+        assert!(
+            matches!(trained.meta, Some(Outcome::Published { .. })),
+            "{trained:?}"
+        );
+        let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
+        assert_eq!(stored.manifest.baseline, 0.75);
     }
 
     /// A meta example carries the unit of its trade, the worth of the stop
