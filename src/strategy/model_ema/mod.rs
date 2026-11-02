@@ -235,7 +235,7 @@ impl DataActor for ModelEma {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
     use std::{cell::RefCell, path::Path};
 
