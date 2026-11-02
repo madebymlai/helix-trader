@@ -8,8 +8,8 @@
 //! (`backtest_train` trains on one). In the run, every decision of a
 //! period trades on the model published at its start. A second backtest
 //! of the span builds and publishes nothing, and the scores of each period
-//! are its model's, a constant ranking no row above another, as its
-//! baseline, the training mean.
+//! are its model's, a constant ranking no row above another, beside its
+//! own baseline, the training mean its manifest has.
 //! One node per thread: each build, train and run on a thread of its own.
 
 use std::{path::Path, rc::Rc};
@@ -222,12 +222,15 @@ fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
 }
 
 /// The model of each period predicts one probability on every decision of
-/// the period, its calibrated constant, as the baseline fitted at its
-/// start predicts the training mean: neither ranks a row above another
-/// (AUC 0.5), and the model's log loss is that of its constant against the
-/// longs' outcomes of the period, read from the dataset.
+/// the period, its calibrated constant, beside its own baseline, the
+/// training mean of the labels it was fitted on, which its manifest has
+/// (`common::dataset::baseline_of`): `trues` tenths, uncalibrated, 0.3,
+/// 0.4 and 0.5 from the first period on (`prepare`). Neither ranks a row
+/// above another (AUC 0.5), both are scored on the same rows, and each
+/// log loss is that of its constant against the longs' outcomes of the
+/// period, read from the dataset.
 #[test]
-fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
+fn each_period_scores_its_model_beside_that_models_own_baseline() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();
@@ -265,12 +268,15 @@ fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
             .filter(|row| from_ns <= row.ts_event && row.ts_event < to_ns)
             .map(|row| row.targets[pnl] > 0.0)
             .collect();
-        let p = predicts(&store, from);
-        let loss = -gained
-            .iter()
-            .map(|&gained| if gained { p.ln() } else { (1.0 - p).ln() })
-            .sum::<f64>()
-            / gained.len() as f64;
+        // The log loss of a constant `p` on the period's longs.
+        let loss = |p: f64| {
+            -gained
+                .iter()
+                .map(|&gained| if gained { p.ln() } else { (1.0 - p).ln() })
+                .sum::<f64>()
+                / gained.len() as f64
+        };
+        let baseline = (3 + day) as f64 / 10.0;
         assert_eq!(period.models, [from]);
         assert!(!gained.is_empty(), "{period:?}");
         assert_eq!(
@@ -282,9 +288,14 @@ fn each_period_scores_its_model_beside_the_baseline_fitted_at_its_start() {
             (Some(0.5), Some(0.5)),
             "{period:?}"
         );
-        let log_loss = period.model.log_loss.unwrap();
-        assert!((log_loss - loss).abs() < 1e-12, "{log_loss} != {loss}");
+        for (score, p) in [
+            (period.model, predicts(&store, from)),
+            (period.baseline, baseline),
+        ] {
+            let (log_loss, loss) = (score.log_loss.unwrap(), loss(p));
+            assert!((log_loss - loss).abs() < 1e-12, "{log_loss} != {loss}");
+        }
     }
     let rows: usize = long.periods.iter().map(|period| period.model.rows).sum();
-    assert_eq!(long.model.rows, rows);
+    assert_eq!((long.model.rows, long.baseline.rows), (rows, rows));
 }

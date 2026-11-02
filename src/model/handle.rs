@@ -1082,8 +1082,9 @@ mod tests {
 
     /// A baseline long model of `config` valid from `valid_from` predicting
     /// `trues` tenths whatever the row, calibrated by `CALIBRATION`,
-    /// expecting a win and a loss of 1, as the store keeps it for the
-    /// probe's features, probed on one row.
+    /// expecting a win and a loss of 1, its baseline the mean of its
+    /// training labels, as the store keeps it for the probe's features,
+    /// probed on one row.
     fn baseline(valid_from: &str, trues: usize) -> StoredModel {
         baseline_for(&features(), &config(), Side::Long, valid_from, trues)
     }
@@ -1119,6 +1120,7 @@ mod tests {
                 side: Some(side),
                 learner: config.learner,
                 calibration: CALIBRATION,
+                baseline: trues as f64 / 10.0,
                 payoff: Some(Payoff {
                     win: 1.0,
                     loss: 1.0,
@@ -2200,7 +2202,8 @@ mod tests {
     /// A baseline valid from `valid_from` on rows of `feature_names`, of a
     /// strategy deciding with `features` as `config` says (its decisions
     /// and targets), predicting `trues` tenths whatever the row, calibrated
-    /// by `CALIBRATION`, expecting a win and a loss of 1.
+    /// by `CALIBRATION`, expecting a win and a loss of 1, its baseline the
+    /// mean of its training labels.
     fn baseline_of(
         features: &FeatureSet,
         (decision, targets): (DecisionRule, &TargetsConfig),
@@ -2231,6 +2234,7 @@ mod tests {
                 side: None,
                 learner: LearnerConfig::Baseline {},
                 calibration: CALIBRATION,
+                baseline: trues as f64 / 10.0,
                 payoff: Some(Payoff {
                     win: 1.0,
                     loss: 1.0,

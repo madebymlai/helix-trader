@@ -514,7 +514,8 @@ fn stored_baseline(
 /// A baseline of `strategy_id`, of its features `feature_names` under
 /// `fingerprint`, decided as `config` says, of `side` for a primary and
 /// none for a meta, valid from `valid_from`, predicting `trues` tenths
-/// whatever the row, as `baseline_of` says.
+/// whatever the row, as `baseline_of` says, its manifest's baseline the
+/// mean of its training labels, `trues` tenths uncalibrated.
 pub fn baseline_stored(
     strategy_id: StrategyId,
     fingerprint: String,
@@ -544,6 +545,7 @@ pub fn baseline_stored(
             side,
             learner: LearnerConfig::Baseline {},
             calibration: CALIBRATION,
+            baseline: trues as f64 / 10.0,
             payoff: side.map(|_| Payoff {
                 win: 1.0,
                 loss: 1.0,
