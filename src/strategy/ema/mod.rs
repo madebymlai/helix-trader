@@ -337,5 +337,5 @@ impl DataActor for EmaCross {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "strategy-tests"))]
 mod tests;

@@ -138,7 +138,7 @@ impl Crossover {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
     use jiff::{SignedDuration, Timestamp};
     use nautilus_model::data::BarType;

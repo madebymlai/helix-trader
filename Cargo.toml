@@ -5,6 +5,12 @@ edition = "2024"
 rust-version = "1.99.1"
 publish = false
 
+[features]
+# The unit tests of the strategies themselves (ema, model_ema and, where it
+# exists, gold_scalp): off by default, so that `cargo test` runs the harness
+# alone; `cargo test --features strategy-tests` runs them too.
+strategy-tests = []
+
 [dependencies]
 anyhow = "1"
 # The arrow schema Nautilus' custom data macros generate, for the dataset

@@ -55,7 +55,7 @@ pub fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
         .build()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
     use jiff::SignedDuration;
     use nautilus_common::actor::indicators::ActorIndicator;

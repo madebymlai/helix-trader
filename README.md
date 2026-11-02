@@ -28,6 +28,8 @@ Check the config and venue requirements when changing instruments. Before runnin
 cargo test
 ```
 
+`cargo test` runs the harness: the strategies' own unit tests (ema, model_ema and, where it exists, gold_scalp) are behind the `strategy-tests` feature, so `cargo test --features strategy-tests` runs them too. The integration tests that run a strategy, such as the golden rows, run either way, and the strategies' code builds either way. Lint with `cargo clippy --all-targets --all-features`, which covers those tests.
+
 Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, or `NAUTILUS_IC_RUN=1`. Run one live module per process, for example `NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture`. Read the relevant [live](src/live/README.md) and venue documentation first: tests can place orders or rotate tokens.
 
 ## Documentation
