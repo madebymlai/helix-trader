@@ -45,6 +45,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     data::{IcHistory, OkxHistory, catalog_path},
+    model::launcher::RetrainActor,
     rolls::Transition,
     strategy::{
         DataRequirements,
@@ -84,12 +85,13 @@ pub struct Live {
 impl Live {
     /// Sets up the clients of the instruments of `requirements`, OKX's, IC's
     /// then IB's, then runs `strategy` on a live node until SIGINT or
-    /// SIGTERM, its cache sized for `warmup`, the strategy's (see
-    /// `Warmup::cache_config`). The strategy's warmup requests go to the
-    /// data clients. A root's instruments are its contract in front at the
-    /// start and the next one (see `README.md`, "Rolled roots"). The node is
-    /// built, and what the last run left staged promoted (`promote_staged`),
-    /// before it runs.
+    /// SIGTERM, beside `retraining`, the actor of its retrains if it is
+    /// retrained (`RetrainActor`), its cache sized for `warmup`, the
+    /// strategy's (see `Warmup::cache_config`). The strategy's warmup
+    /// requests go to the data clients. A root's instruments are its
+    /// contract in front at the start and the next one (see `README.md`,
+    /// "Rolled roots"). The node is built, and what the last run left
+    /// staged promoted (`promote_staged`), before it runs.
     ///
     /// # Errors
     ///
@@ -113,6 +115,7 @@ impl Live {
         requirements: &DataRequirements,
         warmup: &Warmup,
         strategy: S,
+        retraining: Option<RetrainActor>,
     ) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -181,7 +184,7 @@ impl Live {
             Some(Box::new(cache_database)),
             clients,
         )?;
-        node::run(node, &instrument_ids, strategy).await
+        node::run(node, &instrument_ids, strategy, retraining).await
     }
 }
 

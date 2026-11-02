@@ -61,8 +61,8 @@
 //! ATR then coming from them): `start` subscribes each
 //! on the contract standing for it, a plain instrument once, a root on its
 //! front contract with its roll alert, and the strategy hands the handle
-//! its time events (after `strategy::orders::on_time_event`), the roller
-//! first. At a roll the root's features move to the post contract and
+//! its time events (after `strategy::orders::on_time_event`), for the
+//! roller. At a roll the root's features move to the post contract and
 //! restart (`FeatureSet::roll`), so decisions wait on the strategy's
 //! initialized gate until they refill. The same code runs in a backtest
 //! and a dataset run, on the catalog's contract slices
@@ -90,12 +90,11 @@
 //! dataset run sets there. A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
 //!
-//! Live, the handle also retrains its model (`launcher::Retraining`): the
-//! retrain timer, keyed by the strategy, launches a train at each retrain
-//! time, one at a time, and `decide` first polls the running one, so the
-//! model it publishes is used from the next decision. Never retrained, no
-//! timer is started and no train launched: the handle trades on the store
-//! as it is, a model `train --at` publishes used from the next decision.
+//! The handle does not retrain: live, the retrains of a strategy are a
+//! Nautilus actor of their own beside it (`launcher::RetrainActor`), and
+//! the model a retrain publishes, or `train --at`, is the handle's from its
+//! next decision, which lists the store again. Never retrained, a strategy
+//! has no retrain actor: the handle trades on the store as it is.
 
 use std::{
     cell::RefCell,
@@ -125,9 +124,7 @@ use super::{
     dataset::DatasetVenue,
     decide::{self, DecisionRule},
     features::{FeatureSet, meta_row},
-    launcher::{Launcher, Retraining},
     payoff,
-    schedule::Retrain,
     store::{LoadedModel, MetaLevel, ModelSet, SideModel, Swap},
     targets::{self, BarrierExits, Label, Side, Stops, TargetRow, Targets, TargetsConfig},
 };
@@ -150,17 +147,15 @@ pub enum Mode {
         venue: DatasetVenue,
     },
     /// Trades live on the models of the store under `models` whose targets
-    /// are those of its retrains' dataset runs, on `venue`, deciding
-    /// the live node's bar build delay late, and retrains, if ever, on the
-    /// config's interval through `launcher`, each retrain launched at its
-    /// time, trained at the last time the catalog at `catalog` holds for
-    /// every series the strategy reads, if before it
-    /// (`launcher::Retraining`).
+    /// are those of the dataset runs of its trains, on `venue`, deciding
+    /// the live node's bar build delay late, as a backtest does; apart from
+    /// `Backtest` for its warmup, which requests the history up to now
+    /// (`Warmup::live`), and its roller, which loads each post contract
+    /// before its roll (`Roller::live`). Its retrains, if any, are the
+    /// node's retrain actor's (`launcher::RetrainActor`).
     Live {
         models: PathBuf,
         venue: DatasetVenue,
-        launcher: Launcher,
-        catalog: PathBuf,
     },
     /// Opens each decision's targets, for a dataset run, and collects the
     /// rows they settle in `rows`.
@@ -289,8 +284,6 @@ impl Serving {
 /// The trading side of a handle.
 #[derive(Debug)]
 struct Trading {
-    /// Live, the retrains; none in a backtest.
-    retraining: Option<Retraining>,
     /// The models of each side traded, which pick the side of a trade.
     sides: Vec<SideModels>,
     /// The target of the side models' label, which their trades are on.
@@ -347,10 +340,7 @@ impl ModelHandle {
         requirements: &DataRequirements,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
-        let trading = |models: &Path,
-                       venue: &DatasetVenue,
-                       retraining: Option<Retraining>|
-         -> anyhow::Result<Trading> {
+        let trading = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Trading> {
             let models =
                 ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
             let meta = models.meta().map(MetaModels::of);
@@ -375,7 +365,6 @@ impl ModelHandle {
                 ),
             };
             Ok(Trading {
-                retraining,
                 sides,
                 labelled,
                 meta,
@@ -386,7 +375,7 @@ impl ModelHandle {
         Self::built(
             strategy_id,
             &features,
-            (config.decision, &config.targets, config.retrain),
+            (config.decision, &config.targets),
             requirements,
             mode,
             trading,
@@ -394,17 +383,17 @@ impl ModelHandle {
     }
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
-    /// `targets`, retrained as `retrain` says, for a strategy of
-    /// `requirements`, in `mode`: trading as `trading` builds it on the
-    /// models under the store's root, of the targets of the dataset runs on
-    /// the mode's venue, with the mode's retrains, or opening the targets.
+    /// `targets`, for a strategy of `requirements`, in `mode`: trading as
+    /// `trading` builds it on the models under the store's root, of the
+    /// targets of the dataset runs on the mode's venue, or opening the
+    /// targets.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
-        (rule, targets, retrain): (DecisionRule, &TargetsConfig, Retrain),
+        (rule, targets): (DecisionRule, &TargetsConfig),
         requirements: &DataRequirements,
         mode: Mode,
-        trading: impl FnOnce(&Path, &DatasetVenue, Option<Retraining>) -> anyhow::Result<Trading>,
+        trading: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Trading>,
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
         let traded = targets.instrument_id;
@@ -432,23 +421,8 @@ impl ModelHandle {
         };
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
-            Mode::Backtest { models, venue } => {
-                Serving::Trading(Box::new(trading(&models, &venue, None)?))
-            }
-            Mode::Live {
-                models,
-                venue,
-                launcher,
-                catalog,
-            } => {
-                let retraining = Retraining::new(
-                    strategy_id,
-                    retrain,
-                    catalog,
-                    requirements.clone(),
-                    launcher,
-                );
-                Serving::Trading(Box::new(trading(&models, &venue, Some(retraining))?))
+            Mode::Backtest { models, venue } | Mode::Live { models, venue } => {
+                Serving::Trading(Box::new(trading(&models, &venue)?))
             }
             Mode::Dataset { rows } => Serving::Dataset {
                 targets: Targets::new(targets.clone(), rule, requirements)?,
@@ -479,13 +453,12 @@ impl ModelHandle {
     /// contract standing for it; starts the barrier's ATR (the stops',
     /// trading on a model labelled on the barrier, or, in a dataset run,
     /// the targets', and collects the rows they settle); then
-    /// starts the decision cadence, `warmup::bar_build_delay` late, and live
-    /// the retrain timer, if retrained (`schedule::start`).
+    /// starts the decision cadence, `warmup::bar_build_delay` late.
     ///
     /// # Errors
     ///
     /// Returns an error if the warmup fails to start, or Nautilus refuses
-    /// a roll alert, the cadence's timer or the retrain timer.
+    /// a roll alert or the cadence's timer.
     pub fn start<S>(&self, strategy: &mut S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
@@ -497,12 +470,9 @@ impl ModelHandle {
         self.warmup.start(strategy)?;
         self.roller.start(strategy)?;
         match &self.serving {
-            Serving::Trading(trading) => {
+            Serving::Trading(_) => {
                 if let Some(stops) = self.serving.stops() {
                     stops.start(strategy);
-                }
-                if let Some(retraining) = &trading.retraining {
-                    retraining.start(strategy)?;
                 }
             }
             Serving::Dataset { targets, rows } => {
@@ -531,8 +501,6 @@ impl ModelHandle {
     }
 
     /// Decides now, for `strategy`: the decision to trade, if any.
-    /// Live, first logs the running retrain if it finished, whose model
-    /// the store then lists.
     ///
     /// # Errors
     ///
@@ -542,11 +510,6 @@ impl ModelHandle {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
-        if let Serving::Trading(trading) = &self.serving
-            && let Some(retraining) = &trading.retraining
-        {
-            retraining.poll();
-        }
         let Some(row) = decide::decide(strategy, &self.features, self.rule, self.traded) else {
             return Ok(None);
         };
@@ -561,12 +524,11 @@ impl ModelHandle {
         }
     }
 
-    /// Hands `event` of `strategy` to the roller first: at a roll alert
+    /// Hands `event` of `strategy` to the roller: at a roll alert
     /// it switches the root's subscriptions to the post contract, and the
     /// features reading the root move there and restart (`FeatureSet::roll`),
-    /// the decisions waiting until they are initialized again. Live, any
-    /// other event goes to the retrains, which launch one on their timer's.
-    /// A trade's time alert is the strategy's
+    /// the decisions waiting until they are initialized again; any other
+    /// event is not the handle's. A trade's time alert is the strategy's
     /// (`strategy::orders::on_time_event`).
     ///
     /// # Errors
@@ -578,12 +540,6 @@ impl ModelHandle {
     {
         if let Some(roll) = self.roller.on_time_event(strategy, event)? {
             self.features.roll(strategy, &roll);
-            return Ok(());
-        }
-        if let Serving::Trading(trading) = &self.serving
-            && let Some(retraining) = &trading.retraining
-        {
-            retraining.on_time_event(event);
         }
         Ok(())
     }
@@ -836,7 +792,6 @@ mod tests {
         instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Price},
     };
-    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use nautilus_portfolio::portfolio::Portfolio;
     use nautilus_trading::{
         nautilus_strategy,
@@ -849,9 +804,10 @@ mod tests {
         config::{Margins, Sizing},
         dataset::{self, Commission},
         features::testing::last_mid,
-        holdout::{Earnings, Holdout, Refusal, Trades},
+        holdout::{Earnings, Holdout, Trades},
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
         payoff::Payoff,
+        schedule::Retrain,
         store::{ModelManifest, ModelStore, Probe, StoredModel},
         targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
     };
@@ -1583,7 +1539,7 @@ mod tests {
 
     /// The handle trading live on `config` for a strategy reading the
     /// quotes and the hourly bars of AUD/USD with a warmup of a day.
-    fn hourly_live_handle(config: &ModelConfig, models: &Path, catalog: &Path) -> Rc<ModelHandle> {
+    fn hourly_live_handle(config: &ModelConfig, models: &Path) -> Rc<ModelHandle> {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL")],
             warmup: SignedDuration::from_hours(24),
@@ -1594,11 +1550,7 @@ mod tests {
             features(),
             config,
             &requirements,
-            live(
-                models.to_path_buf(),
-                catalog,
-                Launcher::in_process(|_| unreachable!()),
-            ),
+            live(models.to_path_buf()),
         )
         .unwrap()
     }
@@ -1610,10 +1562,9 @@ mod tests {
     #[test]
     fn a_live_cache_holds_the_warmup_of_the_barriers_atr_on_finer_bars() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let mut config = atr_config();
         config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
-        let handle = hourly_live_handle(&config, models.path(), catalog.path());
+        let handle = hourly_live_handle(&config, models.path());
 
         let cache = handle.warmup().cache_config().unwrap();
 
@@ -1626,8 +1577,7 @@ mod tests {
     #[test]
     fn a_live_cache_without_an_atr_holds_the_warmup_of_the_strategys_bars() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
-        let handle = hourly_live_handle(&barrier_config(10), models.path(), catalog.path());
+        let handle = hourly_live_handle(&barrier_config(10), models.path());
 
         let cache = handle.warmup().cache_config().unwrap();
 
@@ -1827,17 +1777,12 @@ mod tests {
     #[test]
     fn a_backtests_cadence_waits_for_composite_bars_as_a_live_ones_does() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let models = models.path().to_path_buf();
         let backtest = Mode::Backtest {
             models: models.clone(),
             venue: venue(),
         };
-        let live = live(
-            models,
-            catalog.path(),
-            Launcher::in_process(|_| unreachable!()),
-        );
+        let live = live(models);
 
         assert_eq!(
             first_decision(backtest, COMPOSITE),
@@ -1866,7 +1811,6 @@ mod tests {
     #[test]
     fn no_cadence_waits_for_bars_not_composite() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let models = models.path().to_path_buf();
         let modes = [
             (
@@ -1882,14 +1826,7 @@ mod tests {
                     rows: SettledRows::default(),
                 },
             ),
-            (
-                "live",
-                live(
-                    models,
-                    catalog.path(),
-                    Launcher::in_process(|_| unreachable!()),
-                ),
-            ),
+            ("live", live(models)),
         ];
 
         for (name, mode) in modes {
@@ -1910,13 +1847,10 @@ mod tests {
     }
 
     /// The probe's handle trading live, never retrained, on the models
-    /// under `models` and the catalog at `catalog`, through `launcher`,
-    /// for a strategy of `requirements`, started.
+    /// under `models`, for a strategy of `requirements`, started.
     fn never_retrained_live(
         probe: &mut Decider,
         models: &Path,
-        catalog: &Path,
-        launcher: Launcher,
         requirements: &DataRequirements,
     ) -> Rc<ModelHandle> {
         let handle = ModelHandle::new(
@@ -1924,60 +1858,11 @@ mod tests {
             features(),
             &never_retrained(),
             requirements,
-            live(models.to_path_buf(), catalog, launcher),
+            live(models.to_path_buf()),
         )
         .unwrap();
         handle.start(probe).unwrap();
         handle
-    }
-
-    #[test]
-    fn a_live_handle_never_retrained_starts_no_retrain_timer() {
-        let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
-        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-
-        never_retrained_live(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            Launcher::in_process(|_| unreachable!()),
-            &requirements(),
-        );
-
-        let timer = crate::model::schedule::timer(StrategyId::from(STRATEGY));
-        assert_eq!(clock.borrow().next_time_ns(&timer), None);
-    }
-
-    /// Run past three midnights, a daily strategy's retrain times, on a
-    /// catalog holding quotes past them all, a live handle never retrained
-    /// launches no train.
-    #[test]
-    fn a_live_handle_never_retrained_launches_no_train() {
-        let models = tempfile::tempdir().unwrap();
-        let catalog = catalog_ending("2026-10-26T00:00:00Z");
-        let (launched, launches) = std::sync::mpsc::channel();
-        let launcher = Launcher::in_process(move |at| {
-            launched.send(at).unwrap();
-            crate::model::train::Outcome::Published {
-                valid_from: at,
-                holdout: HOLDOUT,
-            }
-            .into()
-        });
-        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-        let handle = never_retrained_live(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            launcher,
-            &requirements(),
-        );
-
-        run_to(&handle, &mut probe, &clock, "2026-10-25T12:00:00Z");
-        drop(handle);
-
-        assert_eq!(launches.recv(), Err(std::sync::mpsc::RecvError));
     }
 
     /// The bar-build delay is the bar types', not retraining's: a live
@@ -1986,64 +1871,32 @@ mod tests {
     #[test]
     fn a_live_handle_never_retrained_waits_for_composite_bars() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let requirements = DataRequirements {
             bar_types: vec![BarType::from(COMPOSITE)],
             ..requirements()
         };
         let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
 
-        never_retrained_live(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            Launcher::in_process(|_| unreachable!()),
-            &requirements,
-        );
+        never_retrained_live(&mut probe, models.path(), &requirements);
 
         let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
         assert_eq!(Timestamp::from(next), at("2026-10-22T12:00:05.010Z"));
     }
 
-    /// Live trading on the models under `models`, retraining through
-    /// `launcher` on the catalog at `catalog`.
-    fn live(models: PathBuf, catalog: &Path, launcher: Launcher) -> Mode {
+    /// Live trading on the models under `models`.
+    fn live(models: PathBuf) -> Mode {
         Mode::Live {
             models,
             venue: venue(),
-            launcher,
-            catalog: catalog.to_path_buf(),
         }
     }
 
-    /// A catalog whose AUD/USD quotes end at `time`, the series the
-    /// strategy reads (`requirements`).
-    fn catalog_ending(time: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let ts = UnixNanos::from(at(time));
-        let quote = QuoteTick::new(
-            InstrumentId::from(AUD),
-            Price::from("0.69990"),
-            Price::from("0.70010"),
-            Quantity::from(1),
-            Quantity::from(1),
-            ts,
-            ts,
-        );
-        ParquetDataCatalog::new(dir.path(), None, None, None, None)
-            .write_to_parquet(&[quote], None, None, None)
-            .unwrap();
-        dir
-    }
-
     /// The probe's handle trading live on the models under `models`,
-    /// retraining through `launcher` on the catalog at `catalog`, started,
-    /// deciding on `features`, warm: a quote came at the time of `probe`.
+    /// started, deciding on `features`, warm: a quote came at the time of
+    /// `probe`.
     fn live_handle(
         probe: &mut Decider,
         models: &Path,
-        catalog: &Path,
-        launcher: Launcher,
         features: Rc<FeatureSet>,
     ) -> Rc<ModelHandle> {
         warm(&features, probe.clock().timestamp_ns());
@@ -2052,7 +1905,7 @@ mod tests {
             features,
             &config(),
             &requirements(),
-            live(models.to_path_buf(), catalog, launcher),
+            live(models.to_path_buf()),
         )
         .unwrap();
         handle.start(probe).unwrap();
@@ -2078,18 +1931,11 @@ mod tests {
     #[test]
     fn a_live_node_trades_from_its_first_decision_on_the_newest_model() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let store = store(models.path());
         store.publish(&baseline("2026-10-21T00:00:00Z", 7)).unwrap();
         store.publish(&baseline("2026-10-22T00:00:00Z", 8)).unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = live_handle(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            Launcher::in_process(|_| unreachable!()),
-            features(),
-        );
+        let handle = live_handle(&mut probe, models.path(), features());
 
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
@@ -2097,105 +1943,28 @@ mod tests {
         );
     }
 
+    /// Live, a model is published while the node runs, by a retrain or by
+    /// `train --at`, valid from 23:00, a retrain's time on a catalog
+    /// ending there: the handle decides at 23:30 on the model valid from
+    /// 10:00, and from its next decision, at 01:00, on the new one, the
+    /// store listed again at each.
     #[test]
-    fn the_retrain_timer_is_the_strategys_on_the_grid() {
+    fn a_model_published_while_live_is_used_from_the_next_decision() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
-        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-        live_handle(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            Launcher::in_process(|_| unreachable!()),
-            features(),
-        );
-
-        let next = clock
-            .borrow()
-            .next_time_ns(&crate::model::schedule::timer(StrategyId::from(STRATEGY)))
-            .unwrap();
-
-        assert_eq!(Timestamp::from(next), at("2026-10-23T00:00:00Z"));
-    }
-
-    #[test]
-    fn a_model_a_live_retrain_publishes_is_used_from_the_next_decision() {
-        let models = tempfile::tempdir().unwrap();
-        let catalog = catalog_ending("2026-10-22T23:00:00Z");
-        store(models.path())
-            .publish(&baseline("2026-10-22T10:00:00Z", 7))
-            .unwrap();
-        let (published, publishing) = std::sync::mpsc::channel();
-        let retrained = store(models.path());
-        let launcher = Launcher::in_process(move |at| {
-            retrained.publish(&baseline(&at.to_string(), 9)).unwrap();
-            published.send(at).unwrap();
-            crate::model::train::Outcome::Published {
-                valid_from: at,
-                holdout: HOLDOUT,
-            }
-            .into()
-        });
+        let store = store(models.path());
+        store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let features = features();
-        let handle = live_handle(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            launcher,
-            Rc::clone(&features),
-        );
+        let handle = live_handle(&mut probe, models.path(), Rc::clone(&features));
         let before = probability(handle.decide(&mut probe).unwrap());
 
-        run_to(&handle, &mut probe, &clock, "2026-10-23T00:00:00Z");
-        let trained_at = publishing.recv().unwrap();
+        store.publish(&baseline("2026-10-22T23:00:00Z", 9)).unwrap();
         advance(&features, &clock, "2026-10-23T01:00:00Z");
 
-        // The catalog ends before the retrain's time: trained at its end.
-        assert_eq!(trained_at, at("2026-10-22T23:00:00Z"));
         assert_eq!(before, Some(c(0.7)));
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
             Some(c(0.9))
-        );
-    }
-
-    #[test]
-    fn a_live_retrain_keeping_the_model_leaves_the_current_one() {
-        let models = tempfile::tempdir().unwrap();
-        let catalog = catalog_ending("2026-10-22T23:00:00Z");
-        store(models.path())
-            .publish(&baseline("2026-10-22T10:00:00Z", 7))
-            .unwrap();
-        let (kept, keeping) = std::sync::mpsc::channel();
-        let launcher = Launcher::in_process(move |at| {
-            kept.send(at).unwrap();
-            crate::model::train::Outcome::Kept(crate::model::train::Kept::Refused {
-                why: Refusal::MinPnl {
-                    pnl: 0.25,
-                    min_pnl: 0.5,
-                },
-                holdout: HOLDOUT,
-            })
-            .into()
-        });
-        let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
-        let features = features();
-        let handle = live_handle(
-            &mut probe,
-            models.path(),
-            catalog.path(),
-            launcher,
-            Rc::clone(&features),
-        );
-
-        run_to(&handle, &mut probe, &clock, "2026-10-23T00:00:00Z");
-        keeping.recv().unwrap();
-        advance(&features, &clock, "2026-10-23T01:00:00Z");
-
-        assert_eq!(
-            probability(handle.decide(&mut probe).unwrap()),
-            Some(c(0.7))
         );
     }
 
@@ -2619,7 +2388,6 @@ mod tests {
     #[test]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
         let features = FeatureSet::builder()
             .trades(InstrumentId::from("GC.GLBX"), GC_2_TRADES, &tables())
@@ -2641,11 +2409,7 @@ mod tests {
             features,
             &config(),
             &requirements,
-            live(
-                models.path().to_path_buf(),
-                catalog.path(),
-                Launcher::in_process(|_| unreachable!()),
-            ),
+            live(models.path().to_path_buf()),
         )
         .unwrap();
         let sent = sent_commands();
@@ -2696,7 +2460,6 @@ mod tests {
         ticks: Vec<TickSeries>,
     ) -> Vec<String> {
         let models = tempfile::tempdir().unwrap();
-        let catalog = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
         let requirements = DataRequirements {
             bar_types,
@@ -2708,11 +2471,7 @@ mod tests {
             features,
             &config(),
             &requirements,
-            live(
-                models.path().to_path_buf(),
-                catalog.path(),
-                Launcher::in_process(|_| unreachable!()),
-            ),
+            live(models.path().to_path_buf()),
         )
         .unwrap();
         let sent = sent_commands();
@@ -2846,11 +2605,7 @@ mod tests {
             features,
             &config(),
             &requirements,
-            live(
-                models.path().to_path_buf(),
-                models.path(),
-                Launcher::in_process(|_| unreachable!()),
-            ),
+            live(models.path().to_path_buf()),
         )
         .unwrap();
         probe.warmup = Some(handle.warmup());

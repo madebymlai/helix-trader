@@ -95,7 +95,7 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
 
     let strategy = EmaCross::live(config).unwrap();
     let err = live
-        .run(&requirements, &strategy.warmup(), strategy)
+        .run(&requirements, &strategy.warmup(), strategy, None)
         .await
         .unwrap_err()
         .to_string();
