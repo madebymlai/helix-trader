@@ -107,10 +107,20 @@ impl DecisionRule {
         Ok(())
     }
 
-    /// The rule as the fingerprint reads it.
-    fn fingerprint_part(self) -> String {
+    /// The rule deciding `delay` after its grid times as the fingerprint
+    /// reads it: the delay only if any, so that a rule deciding on its grid
+    /// reads as it did before the delay was keyed.
+    fn fingerprint_part(self, delay: SignedDuration) -> String {
         let Self::Every(interval) = self;
-        format!("every {} ns", interval.as_nanos())
+        if delay.is_zero() {
+            format!("every {} ns", interval.as_nanos())
+        } else {
+            format!(
+                "every {} ns after {} ns",
+                interval.as_nanos(),
+                delay.as_nanos()
+            )
+        }
     }
 }
 
@@ -203,12 +213,18 @@ where
     Some(row)
 }
 
-/// The fingerprint of `features` and `rule`.
+/// The fingerprint of `features` and `rule`, its decisions `delay` after
+/// their grid times (`start`): the bar build delay, which moves every
+/// decision and so the rows.
 #[must_use]
-pub fn fingerprint(features: &FeatureSet, rule: DecisionRule) -> Fingerprint {
+pub fn fingerprint(
+    features: &FeatureSet,
+    rule: DecisionRule,
+    delay: SignedDuration,
+) -> Fingerprint {
     features
         .fingerprint()
-        .with(rule.fingerprint_part().as_bytes())
+        .with(rule.fingerprint_part(delay).as_bytes())
 }
 
 impl FeatureRow {
