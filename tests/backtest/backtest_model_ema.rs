@@ -238,7 +238,7 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
-    // As a live node starts it (`retrain_args`), with the fixture's costs.
+    // As a live node starts it (`Children::train_args`), with the fixture's costs.
     let args = [
         "train".as_ref(),
         "model_ema".as_ref(),
