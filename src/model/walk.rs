@@ -59,7 +59,7 @@ use super::{
     payoff::Realised,
     schedule::{Models, Schedule, Step},
     score,
-    store::{ModelStore, Swap},
+    store::{MetaLevel, ModelSet, Swap},
     targets::Side,
     train::{self, Example},
 };
@@ -75,9 +75,11 @@ pub struct WalkForward {
     dataset: Dataset,
     /// When the models are trained, and what each train does.
     schedule: Schedule,
-    /// Each side traded, its margin and its store.
-    stores: Vec<(Side, f64, ModelStore)>,
-    /// The meta model, if any: trained with the primary.
+    /// The strategy's models: each side traded, with its margin and its
+    /// store, and the meta level, if any.
+    models: ModelSet,
+    /// How the meta model's rows are made, if there is one: trained with
+    /// the primary.
     meta: Option<Meta>,
 }
 
@@ -146,22 +148,7 @@ impl WalkForward {
         requirements: &DataRequirements,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
-        let stores = config
-            .margins
-            .sides()
-            .map(|(side, margin)| {
-                let store = ModelStore::new(
-                    models,
-                    strategy_id,
-                    features,
-                    &config,
-                    requirements,
-                    venue,
-                    side,
-                )?;
-                Ok((side, margin, store))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         Ok(Self {
             feature_names: features.names().to_vec(),
             realised: Realised::new(catalog, &config.targets, config.label)?,
@@ -174,8 +161,8 @@ impl WalkForward {
                 requirements,
                 venue,
             )?,
-            stores,
-            meta: Meta::of_model(models, strategy_id, features, &config, requirements, venue)?,
+            models,
+            meta: Meta::of(&config)?,
             schedule: Schedule::of_model(&config),
             config,
         })
@@ -204,17 +191,21 @@ impl WalkForward {
         mut train: impl FnMut(Timestamp) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let times = self.schedule.times(start, end)?;
-        let from = self.schedule.plan(times[0], &self.valid_froms()?).reach();
+        let from = self
+            .schedule
+            .plan(times[0], &self.models.valid_froms()?)
+            .reach();
         let (first, last) = dataset::days(from, end);
         if !self.dataset.missing(first, last)?.is_empty() {
             build(from, end)?;
         }
         for at in times {
-            if self.schedule.plan(at, &self.valid_froms()?).fits() {
+            if self.schedule.plan(at, &self.models.valid_froms()?).fits() {
                 train(at)?;
             }
         }
-        self.schedule.ensure_trades(start, &self.valid_froms()?)
+        self.schedule
+            .ensure_trades(start, &self.models.valid_froms()?)
     }
 
     /// The scores of a backtest over `[start, end)`, prepared (`prepare`):
@@ -235,8 +226,7 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
-        let fingerprint = self.dataset.fingerprint().to_string();
-        let valid_froms = self.valid_froms()?;
+        let valid_froms = self.models.valid_froms()?;
         // The plan of the retrain at `at`: each model's baseline's rows.
         let plan = |at| self.schedule.plan(at, &valid_froms);
         let mut scores = Scores {
@@ -244,68 +234,43 @@ impl WalkForward {
             short: None,
             meta: None,
         };
-        for (side, margin, store) in &self.stores {
+        for level in self.models.sides() {
+            let side = level.side();
             let examples = rows
                 .iter()
-                .map(|row| Example::of_side(row, *side, &self.realised))
+                .map(|row| Example::of_side(row, side, &self.realised))
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let models = Swap::new(
-                store.clone(),
-                self.feature_names.clone(),
-                fingerprint.clone(),
-            );
             let side_scores = score(
                 &times,
                 start,
                 end,
                 &examples,
-                models,
-                Rule::Margin(*margin),
-                |at| self.baseline(*side, plan(at).steps().side(*side).copied()),
+                level.swap(),
+                Rule::Margin(level.margin()),
+                |at| self.baseline(side, plan(at).steps().side(side).copied()),
             )?;
             match side {
                 Side::Long => scores.long = Some(side_scores),
                 Side::Short => scores.short = Some(side_scores),
             }
         }
-        if let Some(meta) = &self.meta {
-            let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), &self.realised)?;
-            let models = Swap::new(
-                meta.store().clone(),
-                meta.feature_names().to_vec(),
-                fingerprint,
-            );
+        if let (Some(meta), Some(level)) = (&self.meta, self.models.meta()) {
+            let examples = meta.examples(
+                &self.models,
+                &rows.iter().collect::<Vec<_>>(),
+                &self.realised,
+            )?;
             scores.meta = Some(score(
                 &times,
                 start,
                 end,
                 &examples,
-                models,
-                Rule::Threshold(meta.config().threshold),
-                |at| self.meta_baseline(meta, plan(at).steps().meta),
+                level.swap(),
+                Rule::Threshold(level.config().threshold),
+                |at| self.meta_baseline(meta, level, plan(at).steps().meta),
             )?);
         }
         Ok(scores)
-    }
-
-    /// The valid-froms of the stores of each model.
-    fn valid_froms(&self) -> anyhow::Result<Models<Vec<Timestamp>>> {
-        let side = |side| {
-            self.stores
-                .iter()
-                .find(|(traded, _, _)| *traded == side)
-                .map(|(_, _, store)| store.valid_froms())
-                .transpose()
-        };
-        Ok(Models {
-            long: side(Side::Long)?,
-            short: side(Side::Short)?,
-            meta: self
-                .meta
-                .as_ref()
-                .map(|meta| meta.store().valid_froms())
-                .transpose()?,
-        })
     }
 
     /// The baseline of `side` at a retrain's `step`: the training mean of
@@ -335,19 +300,29 @@ impl WalkForward {
         )
     }
 
-    /// The baseline of `meta` at a retrain's `step`, as `baseline`: on the
-    /// rows its model is fitted and calibrated on; none for a wait.
-    fn meta_baseline(&self, meta: &Meta, step: Option<Step>) -> anyhow::Result<Option<Model>> {
+    /// The baseline of the meta model of `level`, its rows made by `meta`,
+    /// at a retrain's `step`, as `baseline`: on the rows its model is
+    /// fitted and calibrated on; none for a wait.
+    fn meta_baseline(
+        &self,
+        meta: &Meta,
+        level: &MetaLevel,
+        step: Option<Step>,
+    ) -> anyhow::Result<Option<Model>> {
         let Some((from, at)) = step.and_then(Step::rows) else {
             return Ok(None);
         };
         let rows = self.settled(from, at)?;
-        let examples = meta.examples(&rows.iter().collect::<Vec<_>>(), &self.realised)?;
-        let holdout = at - meta.config().holdout;
+        let examples = meta.examples(
+            &self.models,
+            &rows.iter().collect::<Vec<_>>(),
+            &self.realised,
+        )?;
+        let holdout = at - level.config().holdout;
         fit_baseline(
-            meta.feature_names().len(),
+            level.feature_names().len(),
             examples,
-            holdout - meta.config().holdout,
+            holdout - level.config().holdout,
             holdout,
         )
     }
@@ -552,7 +527,7 @@ mod tests {
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         schedule::Retrain,
-        store::{ModelManifest, StoredModel},
+        store::{ModelManifest, ModelStore, StoredModel},
         targets::{Barrier, Distance, Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
     };
 
@@ -746,18 +721,22 @@ mod tests {
         }
     }
 
-    /// The store of the `side` models of a walk in `dir` as `config` says.
-    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-        ModelStore::new(
+    /// The models of a walk in `dir` as `config` says.
+    fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
+        ModelSet::new(
             &dir.join("models"),
             StrategyId::from(STRATEGY),
             &features(),
             config,
             &requirements(),
             &venue(),
-            side,
         )
         .unwrap()
+    }
+
+    /// The store of the `side` models of a walk in `dir` as `config` says.
+    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+        models(dir, config).side(side).unwrap().store().clone()
     }
 
     /// Publishes a fake model valid from `valid_from` for each side of a
@@ -1191,18 +1170,7 @@ Short model scores, out of sample, over the span
 
     /// The store of the meta models of a walk in `dir` as `config` says.
     fn meta_store_of(dir: &Path, config: &ModelConfig) -> ModelStore {
-        Meta::of_model(
-            &dir.join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
-        .unwrap()
-        .store()
-        .clone()
+        models(dir, config).meta().unwrap().store().clone()
     }
 
     /// A train of `meta_walk(dir)` at `at`, publishing as

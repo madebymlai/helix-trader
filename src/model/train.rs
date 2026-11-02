@@ -80,7 +80,7 @@ use super::{
     payoff::{Payoff, Realised},
     schedule::{Models, Retrain, Schedule, Step},
     score,
-    store::{LoadedModel, ModelManifest, ModelStore, Probe, StoredModel},
+    store::{LoadedModel, MetaLevel, ModelManifest, ModelSet, ModelStore, Probe, StoredModel},
     targets::{Label, Side, TargetRow, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
@@ -99,6 +99,9 @@ pub struct Training {
     realised: Realised,
     /// What each train does to each model.
     schedule: Schedule,
+    /// The strategy's models: the stores the plan reads, and the side
+    /// models the meta's rows are made from.
+    models: ModelSet,
     /// Each model: of each side the primary trades, and the meta model, if
     /// any.
     levels: Models<Level>,
@@ -206,33 +209,25 @@ impl Training {
         venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
         let realised = Realised::new(catalog, &config.targets, config.label)?;
+        let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         let side = |side| {
-            config
-                .margins
-                .of(side)
-                .map(|margin| {
-                    Ok::<_, anyhow::Error>(Level {
-                        feature_names: features.names().to_vec(),
-                        label: config.label,
-                        side: Some(side),
-                        holdout: config.holdout,
-                        rule: Rule::Margin(margin),
-                        minimums: config.minimums(),
-                        learner: config.learner.clone(),
-                        store: ModelStore::new(
-                            models,
-                            strategy_id,
-                            features,
-                            &config,
-                            requirements,
-                            venue,
-                            side,
-                        )?,
-                    })
-                })
-                .transpose()
+            models.side(side).map(|traded| Level {
+                feature_names: features.names().to_vec(),
+                label: config.label,
+                side: Some(side),
+                holdout: config.holdout,
+                rule: Rule::Margin(traded.margin()),
+                minimums: config.minimums(),
+                learner: config.learner.clone(),
+                store: traded.store().clone(),
+            })
         };
-        let meta = Meta::of_model(models, strategy_id, features, &config, requirements, venue)?;
+        let levels = Models {
+            long: side(Side::Long),
+            short: side(Side::Short),
+            meta: models.meta().map(Level::of_meta),
+        };
+        let meta = Meta::of(&config)?;
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -245,28 +240,12 @@ impl Training {
                 venue,
             )?,
             schedule: Schedule::of_model(&config),
-            levels: Models {
-                long: side(Side::Long)?,
-                short: side(Side::Short)?,
-                meta: meta.as_ref().map(Level::of_meta),
-            },
+            models,
+            levels,
             targets: config.targets,
             realised,
             meta,
         })
-    }
-
-    /// The store the primary's `side` models are published in, if it
-    /// trades that side.
-    #[must_use]
-    pub fn store(&self, side: Side) -> Option<&ModelStore> {
-        self.levels.side(side).map(|level| &level.store)
-    }
-
-    /// The store the meta model is published in, if there is one.
-    #[must_use]
-    pub fn meta_store(&self) -> Option<&ModelStore> {
-        self.levels.meta.as_ref().map(|level| &level.store)
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
@@ -284,7 +263,7 @@ impl Training {
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
     ) -> Trained {
-        let plan = match self.valid_froms() {
+        let plan = match self.models.valid_froms() {
             Ok(valid_froms) => self.schedule.plan(at, &valid_froms),
             Err(e) => return self.levels.as_ref().map(|_| kept(&e)),
         };
@@ -304,12 +283,12 @@ impl Training {
         let (long, short) = (side(Side::Long), side(Side::Short));
         let meta = || {
             let (level, meta) = (self.levels.meta.as_ref()?, self.meta.as_ref()?);
-            let step = match self.valid_froms() {
+            let step = match self.models.valid_froms() {
                 Ok(valid_froms) => plan.meta_after_sides(&valid_froms)?,
                 Err(e) => return Some(kept(&e)),
             };
             Some(self.step(level, step, &rows, |rows| {
-                meta.examples(rows, &self.realised)
+                meta.examples(&self.models, rows, &self.realised)
             }))
         };
         Models {
@@ -317,13 +296,6 @@ impl Training {
             short,
             meta: meta(),
         }
-    }
-
-    /// The valid-froms of the store of each model.
-    fn valid_froms(&self) -> anyhow::Result<Models<Vec<Timestamp>>> {
-        self.levels
-            .as_ref()
-            .try_map(|level| level.store.valid_froms())
     }
 
     /// What a train does to `level`'s model at `step`: its current model
@@ -462,7 +434,7 @@ impl Training {
 impl Level {
     /// The level of `meta`: it learns whether the barrier on the primary's
     /// side wins, taking the primary's trade from its threshold.
-    fn of_meta(meta: &Meta) -> Self {
+    fn of_meta(meta: &MetaLevel) -> Self {
         let config = meta.config();
         Self {
             feature_names: meta.feature_names().to_vec(),
@@ -790,6 +762,32 @@ mod tests {
         .unwrap()
     }
 
+    /// The models of a training in `dir` as `config` says, as `training`
+    /// keys them.
+    fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
+        ModelSet::new(
+            &dir.join("models"),
+            StrategyId::from(STRATEGY),
+            &features(),
+            config,
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+    }
+
+    /// The store of the `side` models of a training in `dir` as `config`
+    /// says.
+    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+        models(dir, config).side(side).unwrap().store().clone()
+    }
+
+    /// The store of the meta models of a training in `dir` as `config`
+    /// says.
+    fn meta_store(dir: &Path, config: &ModelConfig) -> ModelStore {
+        models(dir, config).meta().unwrap().store().clone()
+    }
+
     fn at(time: &str) -> Timestamp {
         time.parse().unwrap()
     }
@@ -917,7 +915,7 @@ mod tests {
                 "{trained:?}"
             );
         }
-        let long = training.store(Side::Long).unwrap().read(t).unwrap();
+        let long = store(dir.path(), &config(), Side::Long).read(t).unwrap();
         let fake = LearnerConfig::Fake {}.load(&long.model).unwrap();
         // The fake predicts the mean of its training labels where the first
         // feature is missing.
@@ -939,7 +937,7 @@ mod tests {
         close(payoff.win, 1.5);
         close(payoff.loss, 0.75);
         assert_eq!(long.manifest.side, Some(Side::Long));
-        let short = training.store(Side::Short).unwrap().read(t).unwrap();
+        let short = store(dir.path(), &config(), Side::Short).read(t).unwrap();
         assert_eq!(short.manifest.side, Some(Side::Short));
         assert!(
             short.manifest.calibration.apply(0.25) > short.manifest.calibration.apply(0.75),
@@ -1079,9 +1077,7 @@ mod tests {
         close_to(holdout.earnings.taken.expectancy, 4.0 / 3.0);
         close_to(holdout.earnings.every.expectancy, 0.5);
         assert!(
-            training(refused.path(), long_only())
-                .store(Side::Long)
-                .unwrap()
+            store(refused.path(), &long_only(), Side::Long)
                 .valid_froms()
                 .unwrap()
                 .is_empty()
@@ -1167,7 +1163,7 @@ mod tests {
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
         primary(
-            training.store(Side::Long).unwrap(),
+            &store(dir.path(), &config(), Side::Long),
             Side::Long,
             "2026-01-07T00:00:00Z",
             0.8,
@@ -1186,7 +1182,7 @@ mod tests {
             matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
             "{trained:?}"
         );
-        let long = training.store(Side::Long).unwrap().read(t).unwrap();
+        let long = store(dir.path(), &config(), Side::Long).read(t).unwrap();
         assert_eq!(long.manifest.learner, LearnerConfig::Baseline {});
     }
 
@@ -1199,7 +1195,7 @@ mod tests {
         let t = at("2026-01-07T00:00:00Z");
         for side in Side::BOTH {
             primary(
-                training.store(side).unwrap(),
+                &store(dir.path(), &config(), side),
                 side,
                 "2026-01-07T00:00:00Z",
                 0.5,
@@ -1245,7 +1241,7 @@ mod tests {
         let t = at("2026-01-07T00:00:00Z");
         let sixth = at("2026-01-06T00:00:00Z");
         primary(
-            training.store(Side::Long).unwrap(),
+            &store(dir.path(), &never(), Side::Long),
             Side::Long,
             "2026-01-06T00:00:00Z",
             0.8,
@@ -1265,7 +1261,9 @@ mod tests {
             "{trained:?}"
         );
         assert_eq!(
-            training.store(Side::Long).unwrap().valid_froms().unwrap(),
+            store(dir.path(), &never(), Side::Long)
+                .valid_froms()
+                .unwrap(),
             [sixth]
         );
     }
@@ -1278,9 +1276,7 @@ mod tests {
 
         training.train_at(t, |_, _| Ok(rows()));
 
-        let manifest = training
-            .store(Side::Long)
-            .unwrap()
+        let manifest = store(dir.path(), &config(), Side::Long)
             .read(t)
             .unwrap()
             .manifest;
@@ -1315,7 +1311,7 @@ mod tests {
             },
             ..config()
         };
-        let training = training(dir.path(), long_only);
+        let training = training(dir.path(), long_only.clone());
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
@@ -1324,7 +1320,7 @@ mod tests {
             "{trained:?}"
         );
         assert_eq!((trained.short, trained.meta), (None, None));
-        assert!(training.store(Side::Short).is_none());
+        assert!(models(dir.path(), &long_only).side(Side::Short).is_none());
     }
 
     /// The holdout's long wins at 0.8 and loses at 0.3, as its short does:
@@ -1357,9 +1353,7 @@ mod tests {
         );
         close(baseline, 2_f64.ln());
         assert!(
-            training
-                .store(Side::Short)
-                .unwrap()
+            store(dir.path(), &config(), Side::Short)
                 .valid_froms()
                 .unwrap()
                 .is_empty()
@@ -1386,9 +1380,7 @@ mod tests {
             assert!(why.contains("does not cover"), "{why}");
         }
         assert!(
-            training
-                .store(Side::Long)
-                .unwrap()
+            store(dir.path(), &config(), Side::Long)
                 .valid_froms()
                 .unwrap()
                 .is_empty()
@@ -1614,20 +1606,21 @@ mod tests {
         ]
     }
 
-    /// The primary's models: from 06:00 a long, from 17:00 a short, and
-    /// from 21:00, after every row, a long again, which no row may use.
-    fn primaries(training: &Training) {
+    /// The primary's models of a training in `dir` as `config` says: from
+    /// 06:00 a long, from 17:00 a short, and from 21:00, after every row, a
+    /// long again, which no row may use.
+    fn primaries(dir: &Path, config: &ModelConfig) {
         let (long, short) = (
-            training.store(Side::Long).unwrap(),
-            training.store(Side::Short).unwrap(),
+            store(dir, config, Side::Long),
+            store(dir, config, Side::Short),
         );
         for (valid_from, long_probability) in [
             ("2026-01-06T06:00:00Z", 0.8),
             ("2026-01-06T17:00:00Z", 0.2),
             ("2026-01-06T21:00:00Z", 0.9),
         ] {
-            primary(long, Side::Long, valid_from, long_probability);
-            primary(short, Side::Short, valid_from, 1.0 - long_probability);
+            primary(&long, Side::Long, valid_from, long_probability);
+            primary(&short, Side::Short, valid_from, 1.0 - long_probability);
         }
     }
 
@@ -1635,7 +1628,7 @@ mod tests {
     fn a_meta_model_learns_the_primarys_side_from_its_out_of_sample_decisions() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
-        primaries(&training);
+        primaries(dir.path(), &with_meta(24));
         let t = at("2026-01-07T00:00:00Z");
 
         let trained = training.train_at(t, |_, _| Ok(meta_rows()));
@@ -1648,7 +1641,7 @@ mod tests {
             panic!("{trained:?}");
         };
         assert_eq!((valid_from, holdout.auc), (t, Some(1.0)));
-        let stored = training.meta_store().unwrap().read(t).unwrap();
+        let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
         assert_eq!(
             stored.manifest.feature_names,
             ["mid_0", "primary_side", "primary_probability"]
@@ -1678,12 +1671,12 @@ mod tests {
             },
             ..with_meta(24)
         };
-        let training = training(dir.path(), long_only);
+        let training = training(dir.path(), long_only.clone());
         for (valid_from, probability) in
             [("2026-01-06T06:00:00Z", 0.8), ("2026-01-06T17:00:00Z", 0.6)]
         {
             primary(
-                training.store(Side::Long).unwrap(),
+                &store(dir.path(), &long_only, Side::Long),
                 Side::Long,
                 valid_from,
                 probability,
@@ -1700,7 +1693,7 @@ mod tests {
             matches!(trained.meta, Some(Outcome::Published { .. })),
             "{trained:?}"
         );
-        let stored = training.meta_store().unwrap().read(t).unwrap();
+        let stored = meta_store(dir.path(), &long_only).read(t).unwrap();
         let long = CALIBRATION.apply(0.6);
         let probes: Vec<&Vec<f64>> = stored.manifest.probes.iter().map(|p| &p.row).collect();
         assert_eq!(probes, [&vec![0.3, 1.0, long], &vec![0.7, 1.0, long]]);
@@ -1712,10 +1705,10 @@ mod tests {
     fn a_train_with_a_meta_model_replays_once_from_the_longer_windows_first_day() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
-        primaries(&training);
+        primaries(dir.path(), &with_meta(36));
         for side in Side::BOTH {
             primary(
-                training.store(side).unwrap(),
+                &store(dir.path(), &with_meta(36), side),
                 side,
                 "2026-01-05T00:00:00Z",
                 0.5,
@@ -1741,7 +1734,7 @@ mod tests {
     fn a_train_replays_no_day_before_the_primarys_first_model() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
-        primaries(&training);
+        primaries(dir.path(), &with_meta(36));
         let mut replays = vec![];
 
         training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
@@ -1767,9 +1760,7 @@ mod tests {
 
         assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
         assert!(
-            training
-                .meta_store()
-                .unwrap()
+            meta_store(dir.path(), &with_meta(24))
                 .valid_froms()
                 .unwrap()
                 .is_empty()
@@ -1783,14 +1774,12 @@ mod tests {
     #[test]
     fn never_retrained_a_meta_whose_primary_is_in_use_is_fitted_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let training = training(
-            dir.path(),
-            ModelConfig {
-                retrain: Retrain::Never,
-                ..with_meta(24)
-            },
-        );
-        primaries(&training);
+        let config = ModelConfig {
+            retrain: Retrain::Never,
+            ..with_meta(24)
+        };
+        let training = training(dir.path(), config.clone());
+        primaries(dir.path(), &config);
         let t = at("2026-01-07T00:00:00Z");
         let last = at("2026-01-06T21:00:00Z");
 
@@ -1809,7 +1798,7 @@ mod tests {
             "{trained:?}"
         );
         for side in Side::BOTH {
-            let valid_froms = training.store(side).unwrap().valid_froms().unwrap();
+            let valid_froms = store(dir.path(), &config, side).valid_froms().unwrap();
             assert_eq!(valid_froms.last(), Some(&last), "{side:?}");
         }
     }
@@ -1845,12 +1834,13 @@ mod tests {
     }
 
     /// The train at the 8th of `config` in `dir`, on an empty store,
-    /// replaying `rows` and the decisions of the 7th: the training, what
-    /// it did, and the spans it replayed.
+    /// replaying `rows` and the decisions of the 7th: the training's
+    /// models, what it did, and the spans it replayed.
     fn two_time(
         dir: &Path,
         config: ModelConfig,
-    ) -> (Training, Trained, Vec<(Timestamp, Timestamp)>) {
+    ) -> (ModelSet, Trained, Vec<(Timestamp, Timestamp)>) {
+        let models = models(dir, &config);
         let training = training(dir, config);
         let mut replays = vec![];
         let trained = training.train_at(at("2026-01-08T00:00:00Z"), |from, to| {
@@ -1860,7 +1850,7 @@ mod tests {
                 .chain(decisions_of_the_seventh())
                 .collect())
         });
-        (training, trained, replays)
+        (models, trained, replays)
     }
 
     /// Never retrained, on an empty store, the train of the 8th fits the
@@ -1872,7 +1862,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
 
-        let (training, trained, _) = two_time(dir.path(), never_with_meta());
+        let (models, trained, _) = two_time(dir.path(), never_with_meta());
 
         for (outcome, valid_from) in [
             (&trained.long, seventh),
@@ -1890,12 +1880,12 @@ mod tests {
         }
         for side in Side::BOTH {
             assert_eq!(
-                training.store(side).unwrap().valid_froms().unwrap(),
+                models.side(side).unwrap().store().valid_froms().unwrap(),
                 [seventh]
             );
         }
         assert_eq!(
-            training.meta_store().unwrap().valid_froms().unwrap(),
+            models.meta().unwrap().store().valid_froms().unwrap(),
             [eighth]
         );
     }
@@ -1906,11 +1896,12 @@ mod tests {
     #[test]
     fn a_two_time_trains_sides_are_judged_on_rows_settled_by_their_time() {
         let dir = tempfile::tempdir().unwrap();
-        let (training, _, _) = two_time(dir.path(), never_with_meta());
+        let (models, _, _) = two_time(dir.path(), never_with_meta());
 
-        let long = training
-            .store(Side::Long)
+        let long = models
+            .side(Side::Long)
             .unwrap()
+            .store()
             .read(at("2026-01-07T00:00:00Z"))
             .unwrap();
 
@@ -1925,11 +1916,12 @@ mod tests {
     #[test]
     fn a_two_time_trains_meta_learns_from_the_sides_decisions_over_its_window() {
         let dir = tempfile::tempdir().unwrap();
-        let (training, _, _) = two_time(dir.path(), never_with_meta());
+        let (models, _, _) = two_time(dir.path(), never_with_meta());
 
-        let meta = training
-            .meta_store()
+        let meta = models
+            .meta()
             .unwrap()
+            .store()
             .read(at("2026-01-08T00:00:00Z"))
             .unwrap();
 
@@ -1969,7 +1961,7 @@ mod tests {
             ..never_with_meta()
         };
 
-        let (training, trained, _) = two_time(dir.path(), two);
+        let (models, trained, _) = two_time(dir.path(), two);
 
         for outcome in [&trained.long, &trained.short] {
             assert!(
@@ -1985,9 +1977,10 @@ mod tests {
             "{trained}"
         );
         assert!(
-            training
-                .meta_store()
+            models
+                .meta()
                 .unwrap()
+                .store()
                 .valid_froms()
                 .unwrap()
                 .is_empty()

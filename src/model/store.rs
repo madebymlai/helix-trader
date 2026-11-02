@@ -17,6 +17,14 @@
 //! margins, which make its rows. A meta model is only ever listed beside
 //! meta models of the same primary.
 //!
+//! A strategy's stores are built together, as its model set (`ModelSet`),
+//! and only there: the fingerprint is computed once and keys them all. The
+//! model set holds each side the margins trade, with its margin and its
+//! store, and the meta level, if any, with its config, its feature names
+//! and its store; it hands out the swap of each, checked against the
+//! level's feature names and the fingerprint, and lists when each model
+//! was published.
+//!
 //! `Swap` is how the models are used: at each decision, in time order,
 //! the latest valid then, checked before use, a model failing a check
 //! refused and the current one kept.
@@ -48,12 +56,11 @@ use super::{
     calibration::Calibration,
     config::{Margins, MetaConfig, ModelConfig},
     dataset::{self, DatasetVenue},
-    decide::DecisionRule,
-    features::{FeatureSet, Fingerprint},
+    features::{FeatureSet, Fingerprint, meta_names},
     holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
     payoff::Payoff,
-    schedule::Retrain,
+    schedule::{Models, Retrain},
     targets::{Label, Side, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
@@ -69,10 +76,46 @@ static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 /// models.
 const META: &str = "meta";
 
-/// The models of one strategy, fingerprint and training settings.
+/// The models of one strategy, fingerprint and training settings, as its
+/// model set builds them (`ModelSet`).
 #[derive(Debug, Clone)]
 pub struct ModelStore {
     directory: PathBuf,
+}
+
+/// A strategy's models: the store of each side its margins trade and of
+/// its meta model, if it has one, all keyed by the one fingerprint of its
+/// dataset, and the swaps that use them.
+#[derive(Debug, Clone)]
+pub struct ModelSet {
+    /// Each side traded, the long first.
+    sides: Vec<SideLevel>,
+    meta: Option<MetaLevel>,
+}
+
+/// A side of a model set: the side, its margin and its models.
+#[derive(Debug, Clone)]
+pub struct SideLevel {
+    side: Side,
+    margin: f64,
+    models: CheckedStore,
+}
+
+/// The meta level of a model set: the meta model's config and its models.
+#[derive(Debug, Clone)]
+pub struct MetaLevel {
+    config: MetaConfig,
+    models: CheckedStore,
+}
+
+/// A level's store, and what a model of it is checked against when it is
+/// swapped in: the names of the level's features, in order, and the
+/// fingerprint of the strategy's dataset.
+#[derive(Debug, Clone)]
+struct CheckedStore {
+    store: ModelStore,
+    feature_names: Vec<String>,
+    fingerprint: String,
 }
 
 /// A published model and its manifest.
@@ -205,18 +248,18 @@ impl LoadedModel {
     }
 }
 
-impl ModelStore {
-    /// The store, under `root`, of the `side` models of `strategy_id`
-    /// deciding with `features` as `config` says, on targets for a strategy
-    /// of `requirements`, run on `venue`, and trained as `config`
-    /// says: `long/` or `short/` in the directory of its training settings,
-    /// keyed by the side's margin, which decides the trades its holdout
-    /// is judged on.
+impl ModelSet {
+    /// The models, under `root`, of `strategy_id` deciding with `features`
+    /// as `config` says, on targets for a strategy of `requirements`, run
+    /// on `venue`, and trained as `config` says: the store of each side its
+    /// margins trade, and of its meta model if `config` has a meta section,
+    /// in the directory of its dataset's fingerprint and its training
+    /// settings.
     ///
     /// # Errors
     ///
-    /// Returns an error if the margins do not trade `side`, the learner
-    /// cannot be written as JSON, or as `dataset::fingerprint` does.
+    /// Returns an error if a learner cannot be written as JSON, or as
+    /// `dataset::fingerprint` does.
     pub fn new(
         root: &Path,
         strategy_id: StrategyId,
@@ -224,50 +267,182 @@ impl ModelStore {
         config: &ModelConfig,
         requirements: &DataRequirements,
         venue: &DatasetVenue,
-        side: Side,
     ) -> anyhow::Result<Self> {
-        let margin = config
+        let fingerprint = dataset::fingerprint(
+            features,
+            config.decision,
+            &config.targets,
+            requirements,
+            venue,
+        )?;
+        let training = training_directory(root, strategy_id, fingerprint, config)?;
+        let fingerprint = fingerprint.to_string();
+        let sides = config
             .margins
-            .of(side)
-            .with_context(|| format!("the margins trade no {}", side.name()))?;
-        Ok(Self {
-            directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
-                .join(side.name())
-                .join(
-                    Fingerprint::default()
-                        .with(&margin.to_le_bytes())
-                        .to_string(),
-                ),
-        })
+            .sides()
+            .map(|(side, margin)| SideLevel {
+                side,
+                margin,
+                models: CheckedStore {
+                    store: ModelStore::new(&training, side, margin),
+                    feature_names: features.names().to_vec(),
+                    fingerprint: fingerprint.clone(),
+                },
+            })
+            .collect();
+        let meta = config
+            .meta
+            .as_ref()
+            .map(|meta| {
+                Ok::<_, anyhow::Error>(MetaLevel {
+                    config: meta.clone(),
+                    models: CheckedStore {
+                        store: ModelStore::meta(&training, meta, config.margins)?,
+                        feature_names: meta_names(features.names()),
+                        fingerprint: fingerprint.clone(),
+                    },
+                })
+            })
+            .transpose()?;
+        Ok(Self { sides, meta })
     }
 
-    /// The store, under `root`, of the meta model `meta` of the model
-    /// primary of `strategy_id` deciding with `features` as `config` says,
-    /// on targets for a strategy of `requirements`, run on `venue`:
-    /// beside the primary's sides, under `meta/` and the meta's training
+    /// Each side the margins trade, the long first.
+    pub fn sides(&self) -> impl Iterator<Item = &SideLevel> {
+        self.sides.iter()
+    }
+
+    /// The side `side`, if the margins trade it.
+    #[must_use]
+    pub fn side(&self, side: Side) -> Option<&SideLevel> {
+        self.sides.iter().find(|level| level.side == side)
+    }
+
+    /// The meta level, if the config has a meta section.
+    #[must_use]
+    pub const fn meta(&self) -> Option<&MetaLevel> {
+        self.meta.as_ref()
+    }
+
+    /// The valid-froms of the store of each model: of each side traded,
+    /// and of the meta model, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a store cannot be read, the long's first.
+    pub fn valid_froms(&self) -> anyhow::Result<Models<Vec<Timestamp>>> {
+        let side = |side| {
+            self.side(side)
+                .map(|level| level.models.store.valid_froms())
+                .transpose()
+        };
+        Ok(Models {
+            long: side(Side::Long)?,
+            short: side(Side::Short)?,
+            meta: self
+                .meta
+                .as_ref()
+                .map(|meta| meta.models.store.valid_froms())
+                .transpose()?,
+        })
+    }
+}
+
+impl SideLevel {
+    #[must_use]
+    pub const fn side(&self) -> Side {
+        self.side
+    }
+
+    /// The expected net P&L from which the side is traded
+    /// (`ModelConfig::margins`).
+    #[must_use]
+    pub const fn margin(&self) -> f64 {
+        self.margin
+    }
+
+    /// The store the side's models are published in.
+    #[must_use]
+    pub const fn store(&self) -> &ModelStore {
+        &self.models.store
+    }
+
+    /// The side's models as a strategy swaps them in, checked against the
+    /// side models' feature names and the fingerprint; none in use yet.
+    #[must_use]
+    pub fn swap(&self) -> Swap {
+        self.models.swap()
+    }
+}
+
+impl MetaLevel {
+    #[must_use]
+    pub const fn config(&self) -> &MetaConfig {
+        &self.config
+    }
+
+    /// The names of the meta's features, in the order of its rows
+    /// (`features::meta_names`).
+    #[must_use]
+    pub fn feature_names(&self) -> &[String] {
+        &self.models.feature_names
+    }
+
+    /// The store the meta's models are published in.
+    #[must_use]
+    pub const fn store(&self) -> &ModelStore {
+        &self.models.store
+    }
+
+    /// The meta's models as a strategy swaps them in, checked against the
+    /// meta's feature names and the fingerprint; none in use yet.
+    #[must_use]
+    pub fn swap(&self) -> Swap {
+        self.models.swap()
+    }
+}
+
+impl CheckedStore {
+    /// The store's models as a strategy swaps them in, checked against its
+    /// feature names and fingerprint; none in use yet.
+    fn swap(&self) -> Swap {
+        Swap::new(
+            self.store.clone(),
+            self.feature_names.clone(),
+            self.fingerprint.clone(),
+        )
+    }
+}
+
+impl ModelStore {
+    /// The store of the `side` models in `training`, the directory of
+    /// their training settings: `long/` or `short/`, keyed by the side's
+    /// `margin`, which decides the trades its holdout is judged on.
+    fn new(training: &Path, side: Side, margin: f64) -> Self {
+        Self {
+            directory: training.join(side.name()).join(
+                Fingerprint::default()
+                    .with(&margin.to_le_bytes())
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The store of the meta model `meta` in `training`, the directory of
+    /// the training settings of its primary's sides, which trade
+    /// `margins`: beside the sides, under `meta/` and the meta's training
     /// settings, the primary's margins among them (they make the meta's
     /// rows).
     ///
     /// # Errors
     ///
-    /// Returns an error if a learner cannot be written as JSON, or as
-    /// `dataset::fingerprint` does.
-    pub fn meta(
-        root: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: &ModelConfig,
-        meta: &MetaConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Self> {
-        let Margins { long, short } = config.margins;
+    /// Returns an error if the meta's learner cannot be written as JSON.
+    fn meta(training: &Path, meta: &MetaConfig, margins: Margins) -> anyhow::Result<Self> {
+        let Margins { long, short } = margins;
         let settings =
             meta_settings(meta)?.with(format!("long {long:?} short {short:?}").as_bytes());
         Ok(Self {
-            directory: primary_directory(root, strategy_id, features, config, requirements, venue)?
-                .join(META)
-                .join(settings.to_string()),
+            directory: training.join(META).join(settings.to_string()),
         })
     }
 
@@ -339,37 +514,24 @@ impl ModelStore {
     }
 }
 
-/// The directory, under `root`, of the stores of `strategy_id` deciding
-/// with `features` on `rule`, of `targets` for a strategy of `requirements`,
-/// run on `venue`: its id and its dataset's fingerprint.
-fn dataset_directory(
-    root: &Path,
-    strategy_id: StrategyId,
-    features: &FeatureSet,
-    rule: DecisionRule,
-    targets: &TargetsConfig,
-    requirements: &DataRequirements,
-    venue: &DatasetVenue,
-) -> anyhow::Result<PathBuf> {
-    let fingerprint = dataset::fingerprint(features, rule, targets, requirements, venue)?;
-    Ok(root
-        .join(strategy_id.as_str())
-        .join(fingerprint.to_string()))
+/// The directory, under `root`, of the stores of `strategy_id` whose
+/// dataset has `fingerprint` (`dataset::fingerprint`): its id, then the
+/// fingerprint.
+fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerprint) -> PathBuf {
+    root.join(strategy_id.as_str())
+        .join(fingerprint.to_string())
 }
 
-/// The directory, under `root`, of the models of the model primary of
-/// `strategy_id` deciding with `features` as `config` says, on targets for
-/// a strategy of `requirements`, run on `venue`: its dataset's, then
-/// its training settings, the learner and its settings, the label, the
-/// retrain interval, the window, the holdout and the minimums of its
-/// holdout.
-fn primary_directory(
+/// The directory, under `root`, of the models of `strategy_id` whose
+/// dataset has `fingerprint`, its side models trained as `config` says:
+/// its dataset's, then the side models' training settings, the learner
+/// and its settings, the label, the retrain interval, the window, the
+/// holdout and the minimums of its holdout.
+fn training_directory(
     root: &Path,
     strategy_id: StrategyId,
-    features: &FeatureSet,
+    fingerprint: Fingerprint,
     config: &ModelConfig,
-    requirements: &DataRequirements,
-    venue: &DatasetVenue,
 ) -> anyhow::Result<PathBuf> {
     let settings = Fingerprint::default()
         .with(serde_json::to_string(&config.learner)?.as_bytes())
@@ -379,16 +541,7 @@ fn primary_directory(
         .with(&config.holdout.as_nanos().to_le_bytes())
         .with(&config.min_pnl.to_le_bytes())
         .with(&config.min_trades.to_le_bytes());
-    Ok(dataset_directory(
-        root,
-        strategy_id,
-        features,
-        config.decision,
-        &config.targets,
-        requirements,
-        venue,
-    )?
-    .join(settings.to_string()))
+    Ok(dataset_directory(root, strategy_id, fingerprint).join(settings.to_string()))
 }
 
 /// The retrain `retrain` as the training settings a store is keyed by
@@ -421,7 +574,8 @@ fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
 /// in time order: at each, the latest valid then, checked against the
 /// strategy before use (`StoredModel::load`). One failing a check is
 /// refused, logged as an error, and the current one kept; it is not read
-/// again.
+/// again. A model set's levels hand it out (`SideLevel::swap`,
+/// `MetaLevel::swap`).
 #[derive(Debug)]
 pub struct Swap {
     store: ModelStore,
@@ -438,8 +592,7 @@ pub struct Swap {
 impl Swap {
     /// Swaps in the models of `store` for a strategy of `feature_names`
     /// and `fingerprint`; none in use yet.
-    #[must_use]
-    pub const fn new(store: ModelStore, feature_names: Vec<String>, fingerprint: String) -> Self {
+    const fn new(store: ModelStore, feature_names: Vec<String>, fingerprint: String) -> Self {
         Self {
             store,
             feature_names,
@@ -582,6 +735,19 @@ mod tests {
         side_store(root, config, venue, Side::Long)
     }
 
+    /// The models under `root` of `config`, run on `venue`.
+    fn models(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelSet {
+        ModelSet::new(
+            root,
+            StrategyId::from(STRATEGY),
+            &features(),
+            config,
+            &requirements(),
+            venue,
+        )
+        .unwrap()
+    }
+
     /// The store of the `side` models of `config`, run on `venue`.
     fn side_store(
         root: &Path,
@@ -589,16 +755,11 @@ mod tests {
         venue: &DatasetVenue,
         side: Side,
     ) -> ModelStore {
-        ModelStore::new(
-            root,
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            venue,
-            side,
-        )
-        .unwrap()
+        models(root, config, venue)
+            .side(side)
+            .unwrap()
+            .store()
+            .clone()
     }
 
     /// What the strategy reads: the quotes of gold.
@@ -851,16 +1012,15 @@ mod tests {
 
     /// The store of the meta model `meta` of `config`.
     fn meta_store(root: &Path, config: &ModelConfig, meta: &MetaConfig) -> ModelStore {
-        ModelStore::meta(
-            root,
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            meta,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        let config = ModelConfig {
+            meta: Some(meta.clone()),
+            ..config.clone()
+        };
+        models(root, &config, &venue())
+            .meta()
+            .unwrap()
+            .store()
+            .clone()
     }
 
     /// A meta model published under one threshold and minimums may fall

@@ -122,10 +122,31 @@ pub const PRIMARY_FEATURES: [&str; 2] = ["primary_side", "primary_probability"];
 
 /// The values of a primary's `side` and `probability`, in the order of
 /// `PRIMARY_FEATURES`: the side 1 a buy, -1 a sell.
-#[must_use]
-pub fn primary_values(side: OrderSide, probability: f64) -> [f64; 2] {
+fn primary_values(side: OrderSide, probability: f64) -> [f64; 2] {
     let side = if side == OrderSide::Buy { 1.0 } else { -1.0 };
     [side, probability]
+}
+
+/// The names of a meta model's features, of its primary's `names`: those,
+/// then the primary's side and probability (`PRIMARY_FEATURES`).
+#[must_use]
+pub fn meta_names(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .cloned()
+        .chain(PRIMARY_FEATURES.map(String::from))
+        .collect()
+}
+
+/// A meta model's row: the primary's `features`, then its `side` and
+/// `probability`, in the order of `meta_names`.
+#[must_use]
+pub fn meta_row(features: &[f64], side: OrderSide, probability: f64) -> Vec<f64> {
+    features
+        .iter()
+        .copied()
+        .chain(primary_values(side, probability))
+        .collect()
 }
 
 /// A feature: a Nautilus indicator exposing its current value.

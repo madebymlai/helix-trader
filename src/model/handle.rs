@@ -122,14 +122,13 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
     config::{MetaConfig, ModelConfig},
-    dataset::{self, DatasetVenue},
+    dataset::DatasetVenue,
     decide::{self, DecisionRule},
-    features::FeatureSet,
+    features::{FeatureSet, meta_row},
     launcher::{Launcher, Retraining},
-    meta::{Meta, meta_row},
     payoff,
     schedule::Retrain,
-    store::{LoadedModel, ModelStore, Swap},
+    store::{LoadedModel, MetaLevel, ModelSet, Swap},
     targets::{self, BarrierExits, Label, Side, Stops, TargetRow, Targets, TargetsConfig},
 };
 use crate::{
@@ -344,8 +343,7 @@ impl ModelHandle {
     /// # Errors
     ///
     /// Returns an error if the decision rule is invalid, a store cannot be
-    /// keyed, the meta model has no barrier to learn or, in a dataset run,
-    /// the targets are invalid.
+    /// keyed or, in a dataset run, the targets are invalid.
     pub fn new(
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
@@ -354,36 +352,17 @@ impl ModelHandle {
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
         let primary = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Primary> {
-            let fingerprint = dataset::fingerprint(
-                &features,
-                config.decision,
-                &config.targets,
-                requirements,
-                venue,
-            )?
-            .to_string();
-            let meta = Meta::of_model(models, strategy_id, &features, config, requirements, venue)?
-                .map(|meta| MetaModels::of(&meta, &fingerprint));
-            let sides = config
-                .margins
+            let models =
+                ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
+            let meta = models.meta().map(MetaModels::of);
+            let sides = models
                 .sides()
-                .map(|(side, margin)| {
-                    let store = ModelStore::new(
-                        models,
-                        strategy_id,
-                        &features,
-                        config,
-                        requirements,
-                        venue,
-                        side,
-                    )?;
-                    Ok(SideModels {
-                        side,
-                        margin,
-                        models: Models::new(store, features.names().to_vec(), fingerprint.clone()),
-                    })
+                .map(|level| SideModels {
+                    side: level.side(),
+                    margin: level.margin(),
+                    models: Models(RefCell::new(level.swap())),
                 })
-                .collect::<anyhow::Result<_>>()?;
+                .collect();
             let labelled = match config.label {
                 Label::Barrier => Labelled::Barrier(
                     Stops::new(&config.targets, config.decision, requirements)?
@@ -770,12 +749,6 @@ impl Labelled {
 }
 
 impl Models {
-    /// The models of `store`, checked against `feature_names` and
-    /// `fingerprint`.
-    fn new(store: ModelStore, feature_names: Vec<String>, fingerprint: String) -> Self {
-        Self(RefCell::new(Swap::new(store, feature_names, fingerprint)))
-    }
-
     /// What `read` reads of the latest model valid at `now`, swapped in;
     /// none without a model. A store that cannot be listed keeps the
     /// current model.
@@ -796,14 +769,10 @@ impl Models {
 }
 
 impl MetaModels {
-    /// The models of `meta`, of a strategy of `fingerprint`.
-    fn of(meta: &Meta, fingerprint: &str) -> Self {
+    /// The models of the meta level `meta`, and its config.
+    fn of(meta: &MetaLevel) -> Self {
         Self {
-            models: Models::new(
-                meta.store().clone(),
-                meta.feature_names().to_vec(),
-                fingerprint.to_string(),
-            ),
+            models: Models(RefCell::new(meta.swap())),
             config: meta.config().clone(),
         }
     }
@@ -880,12 +849,12 @@ mod tests {
     use crate::model::{
         calibration::Calibration,
         config::{Margins, Sizing},
-        dataset::Commission,
+        dataset::{self, Commission},
         features::testing::last_mid,
         holdout::{Earnings, Holdout, Refusal, Trades},
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
         payoff::Payoff,
-        store::{ModelManifest, Probe, StoredModel},
+        store::{ModelManifest, ModelStore, Probe, StoredModel},
         targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
     };
     use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
@@ -1053,6 +1022,19 @@ mod tests {
         side_store(models, &features(), &config(), Side::Long)
     }
 
+    /// The models of `features` and `config` under `models`.
+    fn model_set(models: &Path, features: &FeatureSet, config: &ModelConfig) -> ModelSet {
+        ModelSet::new(
+            models,
+            StrategyId::from(STRATEGY),
+            features,
+            config,
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+    }
+
     /// The store of the `side` models of `features` and `config` under
     /// `models`.
     fn side_store(
@@ -1061,16 +1043,11 @@ mod tests {
         config: &ModelConfig,
         side: Side,
     ) -> ModelStore {
-        ModelStore::new(
-            models,
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            &requirements(),
-            &venue(),
-            side,
-        )
-        .unwrap()
+        model_set(models, features, config)
+            .side(side)
+            .unwrap()
+            .store()
+            .clone()
     }
 
     /// The calibration of every model of the tests, `c(p) = 1 / (1 +
@@ -2318,37 +2295,20 @@ mod tests {
         meta: Option<&StoredModel>,
     ) -> Rc<ModelHandle> {
         let features = features();
-        ModelStore::new(
-            models,
-            StrategyId::from(STRATEGY),
-            &features,
-            config,
-            &requirements(),
-            &venue(),
-            side,
-        )
-        .unwrap()
-        .publish(&baseline_of(
-            &features,
-            (config.decision, &config.targets),
-            &["mid"],
-            "2026-10-22T00:00:00Z",
-            trues,
-        ))
-        .unwrap();
-        if let Some(meta) = meta {
-            ModelStore::meta(
-                models,
-                StrategyId::from(STRATEGY),
-                &features,
-                config,
-                config.meta.as_ref().unwrap(),
-                &requirements(),
-                &venue(),
-            )
+        let set = model_set(models, &features, config);
+        set.side(side)
             .unwrap()
-            .publish(meta)
+            .store()
+            .publish(&baseline_of(
+                &features,
+                (config.decision, &config.targets),
+                &["mid"],
+                "2026-10-22T00:00:00Z",
+                trues,
+            ))
             .unwrap();
+        if let Some(meta) = meta {
+            set.meta().unwrap().store().publish(meta).unwrap();
         }
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(

@@ -14,151 +14,72 @@
 //!
 //! The primary's rows are its dataset's, each decided by the models of
 //! each side in use at it as a strategy would have used them
-//! (`store::Swap`): the latest valid then, trained on rows settled by its
-//! valid-from, so every decision is out of sample; the worth of each
-//! side's stop is the row's own (`payoff::Realised::unit`). A row before
-//! the primary's first model has no decision: the meta's rows start
-//! there at the earliest, and with no primary model before a train the
-//! meta waits (`schedule::Schedule::plan`). Never retrained, with neither
-//! in use, one train fits the primary as of the meta's window before it
-//! and the meta at it, on that primary's decisions over the window: the
-//! meta filters the very primary it learned. A row the primary makes no
-//! trade of is no row of the meta; a long-only primary gives it buys
-//! alone.
+//! (`store::Swap`), of the strategy's model set (`store::ModelSet`) as its
+//! stores are when the rows are made: the latest valid then, trained on
+//! rows settled by its valid-from, so every decision is out of sample; the
+//! worth of each side's stop is the row's own (`payoff::Realised::unit`).
+//! A row before the primary's first model has no decision: the meta's
+//! rows start there at the earliest, and with no primary model before a
+//! train the meta waits (`schedule::Schedule::plan`). Never retrained,
+//! with neither in use, one train fits the primary as of the meta's window
+//! before it and the meta at it, on that primary's decisions over the
+//! window: the meta filters the very primary it learned. A row the primary
+//! makes no trade of is no row of the meta; a long-only primary gives it
+//! buys alone.
 //!
 //! Two levels at most: a meta section has no meta of its own (`config`).
 
-use std::path::Path;
-
 use anyhow::Context;
 use jiff::Timestamp;
-use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
+use nautilus_model::enums::OrderSide;
 
 use super::{
-    config::{MetaConfig, ModelConfig},
-    dataset::{self, DatasetRow, DatasetVenue},
-    features::{FeatureSet, PRIMARY_FEATURES, primary_values},
+    config::ModelConfig,
+    dataset::DatasetRow,
+    features::meta_row,
     holdout::Trade,
     payoff::{self, Realised},
-    store::{ModelStore, Swap},
+    store::ModelSet,
     targets::{Label, Side, TargetsConfig},
     train::Example,
 };
-use crate::strategy::DataRequirements;
 
-/// A strategy's meta model: how its rows are made from the primary's, and
-/// its store.
+/// How a strategy's meta model makes its rows of the primary's: where the
+/// trades it learns are among a row's targets. Its config, feature names
+/// and store are its model set's meta level (`store::MetaLevel`).
 #[derive(Debug)]
 pub struct Meta {
-    config: MetaConfig,
-    primary: Primary,
-    /// The names of the meta's features, the primary's side and
-    /// probability last.
-    feature_names: Vec<String>,
     /// Where the barrier's P&L and commission of a long and of a short are
     /// among a row's target values.
     trades: [(usize, usize); 2],
-    store: ModelStore,
-}
-
-/// The primary of a meta model: a model, whose sides' models are swapped
-/// in as the strategy does.
-#[derive(Debug)]
-struct Primary {
-    /// Each side traded, its margin and its store.
-    sides: Vec<(Side, f64, ModelStore)>,
-    feature_names: Vec<String>,
-    fingerprint: String,
 }
 
 impl Meta {
-    /// The meta model of `config`, the model of `strategy_id` deciding
-    /// with `features` on targets for a strategy of `requirements`,
-    /// run on `venue`, its models in the store under `models`; none if
-    /// `config` has no meta section.
+    /// How the meta model of `config` makes its rows; none if `config` has
+    /// no meta section.
     ///
     /// # Errors
     ///
-    /// Returns an error if the targets have no barrier, or a store cannot
-    /// be keyed.
-    pub fn of_model(
-        models: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: &ModelConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some(meta) = &config.meta else {
-            return Ok(None);
-        };
-        let sides = config
-            .margins
-            .sides()
-            .map(|(side, margin)| {
-                let store = ModelStore::new(
-                    models,
-                    strategy_id,
-                    features,
-                    config,
-                    requirements,
-                    venue,
-                    side,
-                )?;
-                Ok((side, margin, store))
+    /// Returns an error if the targets have no barrier.
+    pub fn of(config: &ModelConfig) -> anyhow::Result<Option<Self>> {
+        config
+            .meta
+            .as_ref()
+            .map(|_| {
+                Ok(Self {
+                    trades: trades(&config.targets)?,
+                })
             })
-            .collect::<anyhow::Result<_>>()?;
-        Ok(Some(Self {
-            config: meta.clone(),
-            feature_names: meta_names(features.names()),
-            trades: trades(&config.targets)?,
-            primary: Primary {
-                sides,
-                feature_names: features.names().to_vec(),
-                fingerprint: dataset::fingerprint(
-                    features,
-                    config.decision,
-                    &config.targets,
-                    requirements,
-                    venue,
-                )?
-                .to_string(),
-            },
-            store: ModelStore::meta(
-                models,
-                strategy_id,
-                features,
-                config,
-                meta,
-                requirements,
-                venue,
-            )?,
-        }))
-    }
-
-    #[must_use]
-    pub const fn config(&self) -> &MetaConfig {
-        &self.config
-    }
-
-    /// The names of the meta's features, in the order of its rows.
-    #[must_use]
-    pub fn feature_names(&self) -> &[String] {
-        &self.feature_names
-    }
-
-    /// The store of the meta's models.
-    #[must_use]
-    pub const fn store(&self) -> &ModelStore {
-        &self.store
+            .transpose()
     }
 
     /// The meta's examples of the primary's dataset `rows`, in time order:
     /// each row the primary makes a trade of, its features with the
     /// primary's side and probability, its label whether the barrier's
     /// trade on that side won. The primary's decision on a row is that of
-    /// its sides' models in use then, none before the first, the rows'
-    /// trades read by `realised`.
+    /// the models of each side of `models` in use then, as its stores list
+    /// them now, none before the first, the rows' trades read by
+    /// `realised`.
     ///
     /// # Errors
     ///
@@ -166,20 +87,15 @@ impl Meta {
     /// to predict, or a row's stop has no worth.
     pub(super) fn examples(
         &self,
+        models: &ModelSet,
         rows: &[&DatasetRow],
         realised: &Realised,
     ) -> anyhow::Result<Vec<Example>> {
-        let Primary {
-            sides,
-            feature_names,
-            fingerprint,
-        } = &self.primary;
-        let mut swaps = sides
-            .iter()
-            .map(|(side, margin, store)| {
-                let valid_froms = store.valid_froms()?;
-                let swap = Swap::new(store.clone(), feature_names.clone(), fingerprint.clone());
-                Ok((*side, *margin, valid_froms, swap))
+        let mut swaps = models
+            .sides()
+            .map(|level| {
+                let valid_froms = level.store().valid_froms()?;
+                Ok((level.side(), level.margin(), valid_froms, level.swap()))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let mut examples = vec![];
@@ -218,26 +134,6 @@ impl Meta {
         };
         Example::of(row, trade.pnl > 0.0, trade)
     }
-}
-
-/// A meta model's row: the primary's `features`, then its `side` and
-/// `probability`.
-#[must_use]
-pub fn meta_row(features: &[f64], side: OrderSide, probability: f64) -> Vec<f64> {
-    features
-        .iter()
-        .copied()
-        .chain(primary_values(side, probability))
-        .collect()
-}
-
-/// The names of a meta model's features, of a model primary's `names`.
-fn meta_names(names: &[String]) -> Vec<String> {
-    names
-        .iter()
-        .cloned()
-        .chain(PRIMARY_FEATURES.map(String::from))
-        .collect()
 }
 
 /// Where the barrier's P&L and commission of a long and of a short are
