@@ -128,7 +128,7 @@ use super::{
     launcher::{Launcher, Retraining},
     payoff,
     schedule::Retrain,
-    store::{LoadedModel, MetaLevel, ModelSet, Swap},
+    store::{LoadedModel, MetaLevel, ModelSet, SideModel, Swap},
     targets::{self, BarrierExits, Label, Side, Stops, TargetRow, Targets, TargetsConfig},
 };
 use crate::{
@@ -279,7 +279,7 @@ impl Serving {
         let Serving::Trading(trading) = self else {
             return None;
         };
-        match &trading.primary.labelled {
+        match &trading.labelled {
             Labelled::Barrier(stops) => Some(stops),
             Labelled::Horizon(_) => None,
         }
@@ -291,23 +291,19 @@ impl Serving {
 struct Trading {
     /// Live, the retrains; none in a backtest.
     retraining: Option<Retraining>,
-    primary: Primary,
+    /// The models of each side traded, which pick the side of a trade.
+    sides: Vec<SideModels>,
+    /// The target of the side models' label, which their trades are on.
+    labelled: Labelled,
+    /// The meta model taking the side models' trades, if any.
+    meta: Option<MetaModels>,
     /// The targets' instrument.
     instrument_id: InstrumentId,
     /// The targets' size.
     quantity: Quantity,
 }
 
-/// What picks the side of a trade: a model of each side traded, the
-/// target of its label, and the meta model taking its trades, if any.
-#[derive(Debug)]
-struct Primary {
-    sides: Vec<SideModels>,
-    labelled: Labelled,
-    meta: Option<MetaModels>,
-}
-
-/// The target the primary's trades are on, its label's.
+/// The target the side models' trades are on, their label's.
 #[derive(Debug)]
 enum Labelled {
     /// The barrier's exits as the decision sets them; the worth of its
@@ -322,17 +318,17 @@ enum Labelled {
 struct SideModels {
     side: Side,
     margin: f64,
-    models: Models,
+    models: Models<SideModel>,
 }
 
 /// The models of one level of the store, swapped in decision by decision.
 #[derive(Debug)]
-struct Models(RefCell<Swap>);
+struct Models<M>(RefCell<Swap<M>>);
 
 /// A meta model's models, and its config.
 #[derive(Debug)]
 struct MetaModels {
-    models: Models,
+    models: Models<LoadedModel>,
     config: MetaConfig,
 }
 
@@ -351,7 +347,10 @@ impl ModelHandle {
         requirements: &DataRequirements,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
-        let primary = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Primary> {
+        let trading = |models: &Path,
+                       venue: &DatasetVenue,
+                       retraining: Option<Retraining>|
+         -> anyhow::Result<Trading> {
             let models =
                 ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
             let meta = models.meta().map(MetaModels::of);
@@ -375,10 +374,13 @@ impl ModelHandle {
                         .context("the label is the horizon, and the targets have none")?,
                 ),
             };
-            Ok(Primary {
+            Ok(Trading {
+                retraining,
                 sides,
                 labelled,
                 meta,
+                instrument_id: config.targets.instrument_id,
+                quantity: config.targets.quantity,
             })
         };
         Self::built(
@@ -387,22 +389,22 @@ impl ModelHandle {
             (config.decision, &config.targets, config.retrain),
             requirements,
             mode,
-            primary,
+            trading,
         )
     }
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
     /// `targets`, retrained as `retrain` says, for a strategy of
-    /// `requirements`, in `mode`: trading on the models `primary` reads
-    /// under the store's root, of the targets of the dataset runs on the
-    /// mode's venue, or opening the targets.
+    /// `requirements`, in `mode`: trading as `trading` builds it on the
+    /// models under the store's root, of the targets of the dataset runs on
+    /// the mode's venue, with the mode's retrains, or opening the targets.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
         (rule, targets, retrain): (DecisionRule, &TargetsConfig, Retrain),
         requirements: &DataRequirements,
         mode: Mode,
-        primary: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Primary>,
+        trading: impl FnOnce(&Path, &DatasetVenue, Option<Retraining>) -> anyhow::Result<Trading>,
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
         let traded = targets.instrument_id;
@@ -430,29 +432,24 @@ impl ModelHandle {
         };
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
-            Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
-                retraining: None,
-                primary: primary(&models, &venue)?,
-                instrument_id: traded,
-                quantity: targets.quantity,
-            })),
+            Mode::Backtest { models, venue } => {
+                Serving::Trading(Box::new(trading(&models, &venue, None)?))
+            }
             Mode::Live {
                 models,
                 venue,
                 launcher,
                 catalog,
-            } => Serving::Trading(Box::new(Trading {
-                retraining: Some(Retraining::new(
+            } => {
+                let retraining = Retraining::new(
                     strategy_id,
                     retrain,
                     catalog,
                     requirements.clone(),
                     launcher,
-                )),
-                primary: primary(&models, &venue)?,
-                instrument_id: traded,
-                quantity: targets.quantity,
-            })),
+                );
+                Serving::Trading(Box::new(trading(&models, &venue, Some(retraining))?))
+            }
             Mode::Dataset { rows } => Serving::Dataset {
                 targets: Targets::new(targets.clone(), rule, requirements)?,
                 rows,
@@ -648,35 +645,36 @@ impl Trading {
     where
         S: DataActor + DataActorNative,
     {
-        let Primary {
-            sides,
-            labelled,
-            meta,
-        } = &self.primary;
         let mut decided = vec![];
         for SideModels {
             side,
             margin,
             models,
-        } in sides
+        } in &self.sides
         {
-            let Some((probability, payoff)) =
-                models.at(now, |model| Ok((model.predict(row)?, model.payoff())))?
+            // None without a model of the side; else its target,
+            // probability and expected net P&L, none without the target's
+            // unit yet.
+            let Some(valued) = models.at(now, |model| {
+                let probability = model.predict(row)?;
+                let target = self.labelled.at(strategy, self.instrument_id, *side)?;
+                Ok(target.map(|(target, unit)| {
+                    (target, probability, model.expected_pnl(probability, unit))
+                }))
+            })?
             else {
                 continue;
             };
-            let payoff = payoff.context("a primary's model has its payoff")?;
-            let Some((target, unit)) = labelled.at(strategy, self.instrument_id, *side)? else {
+            let Some((target, probability, expected)) = valued else {
                 return Ok(None);
             };
-            let expected = payoff.expected(probability) * unit;
             let decision = self.decision(side.order_side(), target, probability, expected);
             decided.push((decision, expected, *margin));
         }
         let Some(decision) = payoff::pick(decided) else {
             return Ok(None);
         };
-        match meta {
+        match &self.meta {
             None => Ok(Some(decision)),
             Some(meta) => meta.take(
                 now,
@@ -748,14 +746,14 @@ impl Labelled {
     }
 }
 
-impl Models {
+impl<M> Models<M> {
     /// What `read` reads of the latest model valid at `now`, swapped in;
     /// none without a model. A store that cannot be listed keeps the
     /// current model.
     fn at<T>(
         &self,
         now: Timestamp,
-        read: impl FnOnce(&LoadedModel) -> anyhow::Result<T>,
+        read: impl FnOnce(&M) -> anyhow::Result<T>,
     ) -> anyhow::Result<Option<T>> {
         let mut swap = self.0.borrow_mut();
         let valid_froms = swap.store().valid_froms().unwrap_or_else(|e| {
@@ -1786,6 +1784,16 @@ mod tests {
     fn a_model_not_predicting_its_probes_is_refused_and_the_current_kept() {
         let mut refused = baseline("2026-10-22T12:00:00Z", 9);
         refused.manifest.probes[0].prediction = c(0.9) + f64::EPSILON;
+
+        kept_over(refused);
+    }
+
+    /// A side model trades by its payoff: one whose manifest has none is
+    /// refused as it loads.
+    #[test]
+    fn a_side_model_without_a_payoff_is_refused_and_the_current_kept() {
+        let mut refused = baseline("2026-10-22T12:00:00Z", 9);
+        refused.manifest.payoff = None;
 
         kept_over(refused);
     }

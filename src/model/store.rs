@@ -35,7 +35,9 @@
 //! predictions, a side's expected payoff, its holdout (`holdout::Holdout`)
 //! and probe rows with the calibrated predictions the model made on them
 //! when fitted, and the model as its adapter saved it. A loaded model's every prediction is
-//! calibrated (`LoadedModel`). A reloaded model is checked by predicting
+//! calibrated (`LoadedModel`), and a side's carries its payoff
+//! (`SideModel`), which gives its expected net P&L: one whose manifest has
+//! none is refused at load. A reloaded model is checked by predicting
 //! the probes, never by its bytes. The file is written beside its name, then
 //! renamed onto it, so a reader sees a whole model or none. A missing
 //! feature, NaN, has no JSON number: a probe row writes NaN and the
@@ -148,8 +150,8 @@ pub struct ModelManifest {
     pub learner: LearnerConfig,
     /// The calibration of the model's predictions.
     pub calibration: Calibration,
-    /// A primary's expected win and loss of a trade of its side; none for
-    /// a meta model.
+    /// A side model's expected win and loss of a trade of its side, without
+    /// which it is refused at load (`SideModel`); none for a meta model.
     pub payoff: Option<Payoff>,
     /// The model's holdout, as its publication read it.
     pub holdout: Holdout,
@@ -190,7 +192,6 @@ impl StoredModel {
         let model = LoadedModel {
             model: manifest.learner.load(&self.model)?,
             calibration: manifest.calibration,
-            payoff: manifest.payoff,
         };
         let width = model.model.width();
         ensure!(
@@ -209,27 +210,37 @@ impl StoredModel {
         }
         Ok(model)
     }
+
+    /// The side model, loaded and checked as `load` does, with the
+    /// expected payoff of its manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error as `load` does, or if its manifest has no payoff.
+    fn load_side(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<SideModel> {
+        let model = self.load(feature_names, fingerprint)?;
+        let payoff = self
+            .manifest
+            .payoff
+            .context("its manifest has no payoff, which a side model trades by")?;
+        Ok(SideModel::new(model, payoff))
+    }
 }
 
 /// A model as a strategy and a score use it: loaded, every prediction
-/// calibrated, and a primary's expected payoff.
+/// calibrated.
 #[derive(Debug)]
 pub struct LoadedModel {
     model: Model,
     calibration: Calibration,
-    payoff: Option<Payoff>,
 }
 
 impl LoadedModel {
     /// The model `model` fitted, its predictions calibrated by
-    /// `calibration`, a primary's of `payoff`.
+    /// `calibration`.
     #[must_use]
-    pub const fn new(model: Model, calibration: Calibration, payoff: Option<Payoff>) -> Self {
-        Self {
-            model,
-            calibration,
-            payoff,
-        }
+    pub const fn new(model: Model, calibration: Calibration) -> Self {
+        Self { model, calibration }
     }
 
     /// The calibrated probability that the label of `row` is true.
@@ -240,11 +251,41 @@ impl LoadedModel {
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         Ok(self.calibration.apply(self.model.predict(row)?))
     }
+}
 
-    /// A primary's expected win and loss of a trade of its side.
+/// A side's model as a strategy and a score use it: loaded, every
+/// prediction calibrated, and the expected win and loss of a trade of its
+/// side, which it is traded by.
+#[derive(Debug)]
+pub struct SideModel {
+    model: LoadedModel,
+    payoff: Payoff,
+}
+
+impl SideModel {
+    /// The model `model` of a side, expecting `payoff` of a trade of it.
     #[must_use]
-    pub const fn payoff(&self) -> Option<Payoff> {
-        self.payoff
+    pub const fn new(model: LoadedModel, payoff: Payoff) -> Self {
+        Self { model, payoff }
+    }
+
+    /// The calibrated probability that the side's trade of `row` gains.
+    ///
+    /// # Errors
+    ///
+    /// As `LoadedModel::predict`.
+    pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
+        self.model.predict(row)
+    }
+
+    /// The expected net P&L of a trade of the side won with `probability`,
+    /// in money, its payoff's unit worth `unit` (on a barrier the worth of
+    /// the trade's stop, the payoff being in R; one on a horizon): the
+    /// payoff's expectation at the probability (`Payoff::expected`) times
+    /// the unit.
+    #[must_use]
+    pub fn expected_pnl(&self, probability: f64, unit: f64) -> f64 {
+        self.payoff.expected(probability) * unit
     }
 }
 
@@ -368,10 +409,11 @@ impl SideLevel {
     }
 
     /// The side's models as a strategy swaps them in, checked against the
-    /// side models' feature names and the fingerprint; none in use yet.
+    /// side models' feature names and the fingerprint, each with its
+    /// payoff (`StoredModel::load_side`); none in use yet.
     #[must_use]
-    pub fn swap(&self) -> Swap {
-        self.models.swap()
+    pub fn swap(&self) -> Swap<SideModel> {
+        self.models.swap(StoredModel::load_side)
     }
 }
 
@@ -397,19 +439,21 @@ impl MetaLevel {
     /// The meta's models as a strategy swaps them in, checked against the
     /// meta's feature names and the fingerprint; none in use yet.
     #[must_use]
-    pub fn swap(&self) -> Swap {
-        self.models.swap()
+    pub fn swap(&self) -> Swap<LoadedModel> {
+        self.models.swap(StoredModel::load)
     }
 }
 
 impl CheckedStore {
-    /// The store's models as a strategy swaps them in, checked against its
-    /// feature names and fingerprint; none in use yet.
-    fn swap(&self) -> Swap {
+    /// The store's models as a strategy swaps them in, each loaded and
+    /// checked against its feature names and fingerprint by `load`; none
+    /// in use yet.
+    fn swap<M>(&self, load: Load<M>) -> Swap<M> {
         Swap::new(
             self.store.clone(),
             self.feature_names.clone(),
             self.fingerprint.clone(),
+            load,
         )
     }
 }
@@ -570,33 +614,48 @@ fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
         .with(&meta.min_trades.to_le_bytes()))
 }
 
+/// How a level's model is loaded from its file and checked against a
+/// strategy of feature names and a fingerprint, as a model `M`: a side's
+/// with its payoff (`StoredModel::load_side`), a meta's as it is
+/// (`StoredModel::load`).
+type Load<M> = fn(&StoredModel, &[String], &str) -> anyhow::Result<M>;
+
 /// The models of a store as a strategy swaps them in, decision by decision
-/// in time order: at each, the latest valid then, checked against the
-/// strategy before use (`StoredModel::load`). One failing a check is
+/// in time order: at each, the latest valid then, loaded as an `M` and
+/// checked against the strategy before use. One failing a check is
 /// refused, logged as an error, and the current one kept; it is not read
 /// again. A model set's levels hand it out (`SideLevel::swap`,
 /// `MetaLevel::swap`).
 #[derive(Debug)]
-pub struct Swap {
+pub struct Swap<M> {
     store: ModelStore,
     /// The feature names a model must carry, in order.
     feature_names: Vec<String>,
     /// The fingerprint a model must carry.
     fingerprint: String,
+    /// How a model is loaded and checked.
+    load: Load<M>,
     /// The model in use, and its valid-from.
-    current: Option<(Timestamp, LoadedModel)>,
+    current: Option<(Timestamp, M)>,
     /// The valid-from of the last model read, in use or refused.
     read: Option<Timestamp>,
 }
 
-impl Swap {
+impl<M> Swap<M> {
     /// Swaps in the models of `store` for a strategy of `feature_names`
-    /// and `fingerprint`; none in use yet.
-    const fn new(store: ModelStore, feature_names: Vec<String>, fingerprint: String) -> Self {
+    /// and `fingerprint`, each loaded and checked by `load`; none in use
+    /// yet.
+    const fn new(
+        store: ModelStore,
+        feature_names: Vec<String>,
+        fingerprint: String,
+        load: Load<M>,
+    ) -> Self {
         Self {
             store,
             feature_names,
             fingerprint,
+            load,
             current: None,
             read: None,
         }
@@ -610,18 +669,14 @@ impl Swap {
     /// The model in use at `now`, and its valid-from, among the models
     /// valid from `valid_froms`, the store's list in order: the latest
     /// valid then, swapped in if not read yet, unless it fails its checks.
-    pub fn at(
-        &mut self,
-        now: Timestamp,
-        valid_froms: &[Timestamp],
-    ) -> Option<(Timestamp, &LoadedModel)> {
+    pub fn at(&mut self, now: Timestamp, valid_froms: &[Timestamp]) -> Option<(Timestamp, &M)> {
         let latest = valid_froms.iter().rfind(|&&time| time <= now).copied();
         if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
             self.read = Some(latest);
             match self
                 .store
                 .read(latest)
-                .and_then(|stored| stored.load(&self.feature_names, &self.fingerprint))
+                .and_then(|stored| (self.load)(&stored, &self.feature_names, &self.fingerprint))
             {
                 Ok(model) => {
                     log::info!("the model valid from {latest} in use from {now}");
@@ -1191,13 +1246,25 @@ mod tests {
             (prediction - 1.0 / (1.0 + 1.0_f64.exp())).abs() < 1e-12,
             "{prediction}"
         );
-        assert_eq!(
-            loaded.payoff(),
-            Some(Payoff {
-                win: 1.5,
-                loss: 1.25
-            })
-        );
+    }
+
+    /// A side model expects its payoff's net P&L times the unit: loaded
+    /// with its manifest's payoff, a win of 1.5 and a loss of 1.25, on
+    /// stops worth 2 it expects (0.6 x 1.5 - 0.4 x 1.25) x 2 = 0.8 of a
+    /// trade won with 0.6, 3 of one sure to win, and -2.5 of one sure to
+    /// lose.
+    #[test]
+    fn a_side_model_expects_its_payoffs_net_pnl_times_the_unit() {
+        let stored = model("2026-10-22T00:00:00Z", &[]);
+
+        let side = stored
+            .load_side(&stored.manifest.feature_names, &stored.manifest.fingerprint)
+            .unwrap();
+
+        for (probability, expected) in [(0.6, 0.8), (1.0, 3.0), (0.0, -2.5)] {
+            let pnl = side.expected_pnl(probability, 2.0);
+            assert!((pnl - expected).abs() < 1e-12, "{probability}: {pnl}");
+        }
     }
 
     /// A model learned targets net of its dataset run's commission: one of

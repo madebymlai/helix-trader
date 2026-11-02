@@ -74,13 +74,15 @@ use super::{
     config::ModelConfig,
     dataset::{Dataset, DatasetRow, DatasetVenue, SchemaMismatch},
     features::FeatureSet,
-    holdout::{Earnings, Holdout, Minimums, Refusal, Rule, Trade},
+    holdout::{Earnings, Example, Holdout, Margin, Minimums, Refusal, Rule, Threshold},
     learner::{LearnerConfig, Model, TrainingSet},
-    meta::Meta,
+    meta,
     payoff::{Payoff, Realised},
     schedule::{Models, Retrain, Schedule, Step},
     score,
-    store::{LoadedModel, MetaLevel, ModelManifest, ModelSet, ModelStore, Probe, StoredModel},
+    store::{
+        LoadedModel, MetaLevel, ModelManifest, ModelSet, ModelStore, Probe, SideModel, StoredModel,
+    },
     targets::{Label, Side, TargetRow, TargetsConfig},
 };
 use crate::strategy::DataRequirements;
@@ -105,8 +107,6 @@ pub struct Training {
     /// Each model: of each side the primary trades, and the meta model, if
     /// any.
     levels: Models<Level>,
-    /// How the meta model's rows are made, if there is one.
-    meta: Option<Meta>,
 }
 
 /// How the models of one level, a primary's side or a meta, are fitted,
@@ -117,32 +117,22 @@ struct Level {
     feature_names: Vec<String>,
     /// The target it learns, as its manifest says.
     label: Label,
-    /// The side of the target a primary's model learns; none for a meta.
-    side: Option<Side>,
+    /// What its models are, and which trades of the holdout they take.
+    kind: Kind,
     holdout: SignedDuration,
-    /// Which trades of the holdout its model takes.
-    rule: Rule,
     /// The least its holdout is published with.
     minimums: Minimums,
     learner: LearnerConfig,
     store: ModelStore,
 }
 
-/// A row as a model is fitted and judged on it: its features and its
-/// label, the trade the label is of, a primary's unit of its side's
-/// payoff, the decision's time and when its targets settled.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct Example {
-    pub features: Vec<f64>,
-    pub label: bool,
-    /// The trade whose gain the label is: a primary's side's, a meta's
-    /// primary's.
-    pub trade: Trade,
-    /// A primary's unit of its side's payoff in the row
-    /// (`Realised::unit`); none for a meta's row.
-    pub unit: Option<f64>,
-    pub ts_event: UnixNanos,
-    pub settled_at: UnixNanos,
+/// What a level's models are: a side's, learning the side of the target,
+/// published with its payoff and taking the side's trades from its
+/// margin; or a meta's, taking the primary's trades from its threshold.
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    Side { side: Side, rule: Margin },
+    Meta { rule: Threshold },
 }
 
 /// What a train did: the outcome of each model of the strategy, none for
@@ -197,8 +187,8 @@ impl Training {
     /// # Errors
     ///
     /// Returns an error if the targets are invalid, the label names a
-    /// target they lack, a barrier's instrument is not in the catalog, the
-    /// meta model has no barrier to learn, or a store cannot be keyed.
+    /// target they lack, a barrier's instrument is not in the catalog, or a
+    /// store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -214,9 +204,11 @@ impl Training {
             models.side(side).map(|traded| Level {
                 feature_names: features.names().to_vec(),
                 label: config.label,
-                side: Some(side),
+                kind: Kind::Side {
+                    side,
+                    rule: Margin(traded.margin()),
+                },
                 holdout: config.holdout,
-                rule: Rule::Margin(traded.margin()),
                 minimums: config.minimums(),
                 learner: config.learner.clone(),
                 store: traded.store().clone(),
@@ -227,7 +219,6 @@ impl Training {
             short: side(Side::Short),
             meta: models.meta().map(Level::of_meta),
         };
-        let meta = Meta::of(&config)?;
         Ok(Self {
             strategy_id,
             dataset: Dataset::new(
@@ -244,7 +235,6 @@ impl Training {
             levels,
             targets: config.targets,
             realised,
-            meta,
         })
     }
 
@@ -282,13 +272,13 @@ impl Training {
         };
         let (long, short) = (side(Side::Long), side(Side::Short));
         let meta = || {
-            let (level, meta) = (self.levels.meta.as_ref()?, self.meta.as_ref()?);
+            let level = self.levels.meta.as_ref()?;
             let step = match self.models.valid_froms() {
                 Ok(valid_froms) => plan.meta_after_sides(&valid_froms)?,
                 Err(e) => return Some(kept(&e)),
             };
             Some(self.step(level, step, &rows, |rows| {
-                meta.examples(&self.models, rows, &self.realised)
+                meta::examples(&self.models, rows, &self.realised)
             }))
         };
         Models {
@@ -364,32 +354,44 @@ impl Training {
         )
         .context("calibrating on the window before the holdout")?;
         let trained: Vec<Example> = fitted.into_iter().chain(calibrating).collect();
-        let payoff = level
-            .side
-            .map(|_| {
-                let realised: Vec<f64> = trained.iter().filter_map(Example::realised).collect();
-                Payoff::of(&realised)
-            })
-            .transpose()?;
         let baseline = baseline(level.feature_names.len(), &trained)?
             .context("no row before the holdout to fit the baseline on")?;
         let saved = model.save()?;
-        let model = LoadedModel::new(model, calibration, payoff);
-        let predictions = held_out
+        let model = LoadedModel::new(model, calibration);
+        // Each held-out row's calibrated probability and whether the level's
+        // rule takes its trade, and a side's side and payoff, of the
+        // realised values of the rows before the holdout.
+        let (judged, side, payoff) = match level.kind {
+            Kind::Side { side, rule } => {
+                let realised: Vec<f64> = trained.iter().map(Example::realised).collect();
+                let payoff = Payoff::of(&realised)?;
+                let model = SideModel::new(model, payoff);
+                let judged = held_out.iter().map(|row| rule.judge(&model, row));
+                (
+                    judged.collect::<anyhow::Result<Vec<_>>>()?,
+                    Some(side),
+                    Some(payoff),
+                )
+            }
+            Kind::Meta { rule } => {
+                let judged = held_out.iter().map(|row| rule.judge(&model, row));
+                (judged.collect::<anyhow::Result<Vec<_>>>()?, None, None)
+            }
+        };
+        let predictions: Vec<(f64, bool)> = held_out
             .iter()
-            .map(|row| Ok((model.predict(&row.features)?, row.label)))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .zip(&judged)
+            .map(|(row, &(probability, _))| (probability, row.label))
+            .collect();
         let baseline = held_out
             .iter()
             .map(|row| Ok((baseline.predict(&row.features)?, row.label)))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let trades = held_out
+        let trades: Vec<_> = held_out
             .iter()
-            .zip(&predictions)
-            .map(|(row, &(probability, _))| {
-                Ok((level.rule.takes(&model, probability, row)?, row.trade))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .zip(&judged)
+            .map(|(row, &(_, taken))| (taken, row.trade))
+            .collect();
         let holdout = Holdout {
             earnings: Earnings::of(&trades),
             log_loss: score::log_loss(&predictions)
@@ -415,7 +417,7 @@ impl Training {
                 feature_names: level.feature_names.clone(),
                 targets: self.targets.clone(),
                 label: level.label,
-                side: level.side,
+                side,
                 learner: level.learner.clone(),
                 calibration,
                 payoff,
@@ -439,52 +441,14 @@ impl Level {
         Self {
             feature_names: meta.feature_names().to_vec(),
             label: Label::Barrier,
-            side: None,
+            kind: Kind::Meta {
+                rule: Threshold(config.threshold),
+            },
             holdout: config.holdout,
-            rule: Rule::Threshold(config.threshold),
             minimums: config.minimums(),
             learner: config.learner.clone(),
             store: meta.store().clone(),
         }
-    }
-}
-
-impl Example {
-    /// The example of `row`, of `label`, the trade `trade`'s gain, with no
-    /// unit.
-    pub(super) fn of(row: &DatasetRow, label: bool, trade: Trade) -> Self {
-        Self {
-            features: row.features.clone(),
-            label,
-            trade,
-            unit: None,
-            ts_event: row.ts_event,
-            settled_at: row.settled_at,
-        }
-    }
-
-    /// The example of `row` for a primary's `side`, its trades read by
-    /// `realised`: whether the side's trade gained, the trade, and its
-    /// payoff's unit.
-    ///
-    /// # Errors
-    ///
-    /// As `Realised::unit`.
-    pub(super) fn of_side(
-        row: &DatasetRow,
-        side: Side,
-        realised: &Realised,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            unit: Some(realised.unit(row, side)?),
-            ..Self::of(row, realised.gained(row, side), realised.trade(row, side))
-        })
-    }
-
-    /// A primary's realised value of its trade: its net P&L over its unit;
-    /// none for a meta's row.
-    fn realised(&self) -> Option<f64> {
-        self.unit.map(|unit| self.trade.pnl / unit)
     }
 }
 
@@ -1655,6 +1619,57 @@ mod tests {
         // before the primary's first model is no row.
         let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
         assert_eq!(model.predict(&[f64::NAN, 1.0, 0.8]).unwrap(), 0.5);
+    }
+
+    /// A meta example carries the unit of its trade, the worth of the stop
+    /// of the side the primary picked: on `meta_rows` with each short's
+    /// stop 4 away, the long's 2, worth 4 and 2 USD on one AUD/USD, the
+    /// four buys of the models valid from 06:00 carry 2 and the two sells
+    /// of those valid from 17:00 carry 4, the short still expecting less
+    /// than its margin in the morning and more in the evening.
+    #[test]
+    fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_meta(24);
+        primaries(dir.path(), &config);
+        let realised = Realised::new(&catalog(dir.path()), &config.targets, config.label).unwrap();
+        let rows: Vec<DatasetRow> = meta_rows()
+            .into_iter()
+            .map(|mut row| {
+                let short = &mut row.barrier.as_mut().unwrap().short;
+                short.distances.as_mut().unwrap().stop = Decimal::from(4);
+                DatasetRow {
+                    features: row.decision.features.clone(),
+                    targets: row.values(),
+                    settled_at: row.settled_at,
+                    ts_event: row.decision.ts_event,
+                    ts_init: row.decision.ts_init,
+                }
+            })
+            .collect();
+
+        let examples = meta::examples(
+            &models(dir.path(), &config),
+            &rows.iter().collect::<Vec<_>>(),
+            &realised,
+        )
+        .unwrap();
+
+        let sides_and_units: Vec<(f64, f64)> = examples
+            .iter()
+            .map(|example| (example.features[1], example.unit))
+            .collect();
+        assert_eq!(
+            sides_and_units,
+            [
+                (1.0, 2.0),
+                (1.0, 2.0),
+                (1.0, 2.0),
+                (1.0, 2.0),
+                (-1.0, 4.0),
+                (-1.0, 4.0)
+            ]
+        );
     }
 
     /// Margins of the long alone: the short's models are never asked, and

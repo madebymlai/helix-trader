@@ -1,9 +1,10 @@
 //! A retrained model's holdout as its publication reads it: what its
 //! decisions would have earned there, not how well it ranks the rows.
 //!
-//! A model's decision rule (`Rule`) takes some of the trades of its rows:
-//! a primary's side, those whose expected net P&L clears its margin
-//! (`payoff`); a meta model, the primary's trades from its threshold.
+//! A model's decision rule (`Rule`) takes some of the trades of its rows
+//! (`Example`): a side model's (`Margin`), those whose expected net P&L
+//! (`store::SideModel::expected_pnl`) clears its margin (`payoff::pick`);
+//! a meta model's (`Threshold`), the primary's trades from its threshold.
 //! What they earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
 //! of their net P&Ls (`calculate_from_realized_pnls`), as the backtest
 //! report reads them, beside the same of every trade of the rows, which a
@@ -23,14 +24,19 @@
 
 use std::fmt;
 
-use anyhow::Context;
 use nautilus_analysis::{
     statistic::PortfolioStatistic,
     statistics::{expectancy::Expectancy, win_rate::WinRate},
 };
+use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{payoff, store::LoadedModel, train::Example};
+use super::{
+    dataset::DatasetRow,
+    payoff::{self, Realised},
+    store::{LoadedModel, SideModel},
+    targets::Side,
+};
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -41,6 +47,22 @@ pub const STRESS: f64 = 1.5;
 pub struct Trade {
     pub pnl: f64,
     pub commission: f64,
+}
+
+/// A row as a model is fitted and judged on it: its features and its
+/// label, the trade the label is of and the unit of that trade's payoff,
+/// the decision's time and when its targets settled.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Example {
+    pub features: Vec<f64>,
+    pub label: bool,
+    /// The trade whose gain the label is: a side model's side's, a meta's
+    /// primary's chosen side's.
+    pub trade: Trade,
+    /// The unit of the trade's payoff in the row (`Realised::unit`).
+    pub unit: f64,
+    pub ts_event: UnixNanos,
+    pub settled_at: UnixNanos,
 }
 
 /// What trades earned: their count, and Nautilus' `Expectancy` and
@@ -101,17 +123,31 @@ pub enum Refusal {
     Every { pnl: f64, every: f64 },
 }
 
-/// A model's decision rule on a row: whether it takes the row's trade.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Rule {
-    /// A primary's side: its trade taken when the expected net P&L of the
-    /// model's probability, on the row's unit, clears the margin
-    /// (`payoff::pick`), as the handle trades it.
-    Margin(f64),
-    /// A meta model: the primary's trade taken from the threshold, as the
-    /// handle takes it.
-    Threshold(f64),
+/// A model's decision rule on a row: whether it takes the row's trade,
+/// judging a model of its level.
+pub(super) trait Rule: Copy {
+    /// The models the rule judges.
+    type Model;
+
+    /// The calibrated probability `model` predicts on `example`, and
+    /// whether the rule takes the example's trade.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model fails to predict.
+    fn judge(self, model: &Self::Model, example: &Example) -> anyhow::Result<(f64, bool)>;
 }
+
+/// A side model's decision rule: its side's trade taken when the side
+/// model's expected net P&L at its probability, on the row's unit, clears
+/// the margin (`payoff::pick`), as the handle trades it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Margin(pub f64);
+
+/// A meta model's decision rule: the primary's trade taken from the
+/// threshold, as the handle takes it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Threshold(pub f64);
 
 impl Trade {
     /// Its net P&L had the commission been `factor` times what it was.
@@ -186,31 +222,54 @@ impl Holdout {
     }
 }
 
-impl Rule {
-    /// Whether the rule takes the trade of `example`, on which `model`
-    /// predicts `probability`.
+impl Example {
+    /// The example of `row` on `side`'s trade, the rows' trades read by
+    /// `realised`: whether the trade gained, the trade, and its payoff's
+    /// unit.
     ///
     /// # Errors
     ///
-    /// Returns an error if a primary's model has no payoff.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a primary's example has no unit.
-    pub(super) fn takes(
-        self,
-        model: &LoadedModel,
-        probability: f64,
-        example: &Example,
-    ) -> anyhow::Result<bool> {
-        Ok(match self {
-            Self::Margin(margin) => {
-                let payoff = model.payoff().context("a primary's model has its payoff")?;
-                let unit = example.unit.expect("a primary's example has its unit");
-                payoff::pick([((), payoff.expected(probability) * unit, margin)]).is_some()
-            }
-            Self::Threshold(threshold) => probability >= threshold,
+    /// As `Realised::unit`.
+    pub(super) fn of_side(
+        row: &DatasetRow,
+        side: Side,
+        realised: &Realised,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            features: row.features.clone(),
+            label: realised.gained(row, side),
+            trade: realised.trade(row, side),
+            unit: realised.unit(row, side)?,
+            ts_event: row.ts_event,
+            settled_at: row.settled_at,
         })
+    }
+
+    /// The realised value of its trade: its net P&L over its unit.
+    pub(super) fn realised(&self) -> f64 {
+        self.trade.pnl / self.unit
+    }
+}
+
+impl Rule for Margin {
+    type Model = SideModel;
+
+    fn judge(self, model: &SideModel, example: &Example) -> anyhow::Result<(f64, bool)> {
+        let probability = model.predict(&example.features)?;
+        let expected = model.expected_pnl(probability, example.unit);
+        Ok((
+            probability,
+            payoff::pick([((), expected, self.0)]).is_some(),
+        ))
+    }
+}
+
+impl Rule for Threshold {
+    type Model = LoadedModel;
+
+    fn judge(self, model: &LoadedModel, example: &Example) -> anyhow::Result<(f64, bool)> {
+        let probability = model.predict(&example.features)?;
+        Ok((probability, probability >= self.0))
     }
 }
 

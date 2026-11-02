@@ -53,15 +53,15 @@ use super::{
     config::ModelConfig,
     dataset::{self, Dataset, DatasetRow, DatasetVenue},
     features::FeatureSet,
-    holdout::{Earnings, Rule, STRESS},
+    holdout::{Earnings, Example, Margin, Rule, STRESS, Threshold},
     learner::Model,
-    meta::Meta,
+    meta,
     payoff::Realised,
     schedule::{Models, Schedule, Step},
     score,
     store::{MetaLevel, ModelSet, Swap},
     targets::Side,
-    train::{self, Example},
+    train,
 };
 use crate::strategy::DataRequirements;
 
@@ -78,9 +78,6 @@ pub struct WalkForward {
     /// The strategy's models: each side traded, with its margin and its
     /// store, and the meta level, if any.
     models: ModelSet,
-    /// How the meta model's rows are made, if there is one: trained with
-    /// the primary.
-    meta: Option<Meta>,
 }
 
 /// The out-of-sample scores of a backtest: of each model, the meta's on
@@ -162,7 +159,6 @@ impl WalkForward {
                 venue,
             )?,
             models,
-            meta: Meta::of(&config)?,
             schedule: Schedule::of_model(&config),
             config,
         })
@@ -246,7 +242,7 @@ impl WalkForward {
                 end,
                 &examples,
                 level.swap(),
-                Rule::Margin(level.margin()),
+                Margin(level.margin()),
                 |at| self.baseline(side, plan(at).steps().side(side).copied()),
             )?;
             match side {
@@ -254,8 +250,8 @@ impl WalkForward {
                 Side::Short => scores.short = Some(side_scores),
             }
         }
-        if let (Some(meta), Some(level)) = (&self.meta, self.models.meta()) {
-            let examples = meta.examples(
+        if let Some(level) = self.models.meta() {
+            let examples = meta::examples(
                 &self.models,
                 &rows.iter().collect::<Vec<_>>(),
                 &self.realised,
@@ -266,8 +262,8 @@ impl WalkForward {
                 end,
                 &examples,
                 level.swap(),
-                Rule::Threshold(level.config().threshold),
-                |at| self.meta_baseline(meta, level, plan(at).steps().meta),
+                Threshold(level.config().threshold),
+                |at| self.meta_baseline(level, plan(at).steps().meta),
             )?);
         }
         Ok(scores)
@@ -283,14 +279,8 @@ impl WalkForward {
         let rows = self.settled(from, at)?;
         let examples = rows
             .iter()
-            .map(|row| {
-                Example::of(
-                    row,
-                    self.realised.gained(row, side),
-                    self.realised.trade(row, side),
-                )
-            })
-            .collect();
+            .map(|row| Example::of_side(row, side, &self.realised))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let holdout = at - self.config.holdout;
         fit_baseline(
             self.feature_names.len(),
@@ -300,12 +290,11 @@ impl WalkForward {
         )
     }
 
-    /// The baseline of the meta model of `level`, its rows made by `meta`,
-    /// at a retrain's `step`, as `baseline`: on the rows its model is
-    /// fitted and calibrated on; none for a wait.
+    /// The baseline of the meta model of `level` at a retrain's `step`, as
+    /// `baseline`: on the rows its model is fitted and calibrated on
+    /// (`meta::examples`); none for a wait.
     fn meta_baseline(
         &self,
-        meta: &Meta,
         level: &MetaLevel,
         step: Option<Step>,
     ) -> anyhow::Result<Option<Model>> {
@@ -313,7 +302,7 @@ impl WalkForward {
             return Ok(None);
         };
         let rows = self.settled(from, at)?;
-        let examples = meta.examples(
+        let examples = meta::examples(
             &self.models,
             &rows.iter().collect::<Vec<_>>(),
             &self.realised,
@@ -338,13 +327,13 @@ impl WalkForward {
 /// The scores over `[start, end)`, retrained at `times`, of the models
 /// `models` swaps in on `examples`, in time order, deciding by `rule`,
 /// beside the baseline `baseline` fits for each retrain time.
-fn score(
+fn score<R: Rule>(
     times: &[Timestamp],
     start: Timestamp,
     end: Timestamp,
     examples: &[Example],
-    mut models: Swap,
-    rule: Rule,
+    mut models: Swap<R::Model>,
+    rule: R,
     baseline: impl Fn(Timestamp) -> anyhow::Result<Option<Model>>,
 ) -> anyhow::Result<ModelScores> {
     let valid_froms = models.store().valid_froms()?;
@@ -364,9 +353,9 @@ fn score(
                 models.at(Timestamp::from(example.ts_event), &valid_froms)
             {
                 period_models.insert(valid_from);
-                let probability = model.predict(&example.features)?;
+                let (probability, taken) = rule.judge(model, example)?;
                 by_model.push((probability, example.label));
-                trades.push((rule.takes(model, probability, example)?, example.trade));
+                trades.push((taken, example.trade));
             }
             if let Some(baseline) = &baseline {
                 by_baseline.push((baseline.predict(&example.features)?, example.label));
