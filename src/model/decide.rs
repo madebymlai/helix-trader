@@ -8,12 +8,12 @@
 //! live. The strategy calls `decide` from `on_time_event` on that timer
 //! (`is_decision`).
 //!
-//! A live node builds the bars of a composite bar type a delay after their
-//! close (`warmup::live_bar_build_delay`), a backtest at the close. So a
-//! live strategy starts its cadence with that delay, a backtest with none,
-//! and every decision fires `DECISION_MARGIN` later still, past the timer
+//! A node builds the bars of a composite bar type a delay after their
+//! close (`warmup::bar_build_delay`), a backtest and a dataset run as late
+//! as a live node. So a strategy starts its cadence with that delay, and
+//! every decision fires `DECISION_MARGIN` later still, past the timer
 //! building the bar: each decision then sees the bar closed at its grid
-//! time in both.
+//! time, in a backtest as live.
 //!
 //! `decide` snapshots the features, if every one is initialized, and
 //! publishes them on the message bus as a `FeatureRow`, custom data keyed
@@ -63,7 +63,7 @@ use super::features::{FeatureSet, Fingerprint};
 /// The name of the timer of a clock cadence.
 pub const DECISION_TIMER: &str = "DECISION";
 
-/// How long after its grid time (and the live node's bar build delay) a
+/// How long after its grid time (and the node's bar build delay) a
 /// decision fires: past the data engine's timer building the bar that
 /// closes then, which fires on the same time. Nautilus runs a backtest's
 /// timers of one time in the order of their names, a live node's as their
@@ -115,10 +115,9 @@ impl DecisionRule {
 }
 
 /// Starts the clock cadence of `rule` on `actor`, its decisions `delay`
-/// and `DECISION_MARGIN` after their grid times: `delay` is the live
-/// node's bar build delay live, none in a backtest. The timer starts on
-/// the last decision time not after now, so it first fires on the next
-/// one.
+/// and `DECISION_MARGIN` after their grid times: `delay` is the node's bar
+/// build delay (`warmup::bar_build_delay`). The timer starts on the last
+/// decision time not after now, so it first fires on the next one.
 ///
 /// # Errors
 ///

@@ -71,12 +71,14 @@ const DATASET_PURGE_MINS: u32 = 1;
 /// slice of `[start, end]`, the window the engine runs, `start` before
 /// `end`. No catalog is registered in the engine: it serves no request,
 /// and the strategy warms up on the replay. The cache is Nautilus'
-/// default, the data engine builds no bar for an hour without quotes
-/// (`warmup::data_engine_config`). The data is streamed `CHUNK_SIZE`
-/// points at a time, unless the run replays custom data, which
-/// `BacktestDataConfig` refuses: then the custom series are left out
-/// (see `custom_data`) and the data is loaded at once. Build and run errors are raised, not only logged; the engine
-/// outlives the run (see `run`).
+/// default, the data engine builds no bar for an hour without quotes and
+/// builds time bars as late after their close as a live node does, by the
+/// backtest's bar types (`warmup::data_engine_config`). The data is
+/// streamed `CHUNK_SIZE` points at a time, unless the run replays custom
+/// data, which `BacktestDataConfig` refuses: then the custom series are
+/// left out (see `custom_data`) and the data is loaded at once. Build and
+/// run errors are raised, not only logged; the engine outlives the run
+/// (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     config(backtest, None)
 }
@@ -122,7 +124,7 @@ fn config(
         .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let engine_config = BacktestEngineConfig::builder()
-        .data_engine(warmup::data_engine_config())
+        .data_engine(warmup::data_engine_config(&backtest.bar_types))
         .maybe_exec_engine(exec_engine)
         .logging(backtest.logging.clone())
         .build();
@@ -468,6 +470,29 @@ mod tests {
             ["SXR8.IBIS-1-MINUTE-LAST-EXTERNAL"]
         );
         assert_eq!(data.instrument_id(), None);
+    }
+
+    /// 5 s after their close, as a live node builds them, in a trading run
+    /// as in a dataset run.
+    #[test]
+    fn a_run_on_a_composite_bar_type_builds_its_bars_as_late_as_a_live_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            bar_types: vec![BarType::from(
+                "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..backtest(dir.path())
+        };
+        let delay = |config: BacktestRunConfig| {
+            config
+                .engine()
+                .data_engine
+                .as_ref()
+                .unwrap()
+                .time_bars_build_delay
+        };
+        assert_eq!(delay(run_config(&backtest).unwrap()), 5_000_000);
+        assert_eq!(delay(dataset_run_config(&backtest).unwrap()), 5_000_000);
     }
 
     /// The temp dir's catalog, by a path relative to the working directory:

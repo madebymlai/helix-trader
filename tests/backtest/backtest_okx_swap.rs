@@ -28,6 +28,10 @@ const INSTRUMENT_ID: &str = "BTC-USDT-SWAP.OKX";
 const MINUTE_BARS: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
 const HOUR_BARS: &str = "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 
+/// How long after its close the node builds an hour bar of minute bars,
+/// and stamps it: 5 s, as a live node waits for the last minute.
+const BUILT_AFTER: SignedDuration = SignedDuration::from_secs(5);
+
 /// `hh:mm` UTC on Wednesday 7 January 2026.
 fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
@@ -96,13 +100,14 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
 }
 
 /// The hour bar closing at `close`, worked out here: the minutes opening
-/// in `[close − 1 h, close)`, or from `from` if later.
+/// in `[close − 1 h, close)`, or from `from` if later, stamped
+/// `BUILT_AFTER` its close.
 fn hour_bar(close: Timestamp, from: Timestamp) -> Ohlc {
     let minutes = minute_bars(from.max(close - SignedDuration::from_hours(1)), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
     let low = minutes.iter().map(|bar| bar.low).min().unwrap();
     let (first, last) = (minutes[0], minutes[minutes.len() - 1]);
-    (close, first.open, high, low, last.close)
+    (close + BUILT_AFTER, first.open, high, low, last.close)
 }
 
 /// A catalog in `dir` of the instrument and its minute bars opening from
@@ -120,13 +125,13 @@ fn catalog(dir: &Path) {
         .unwrap();
 }
 
-/// A run on the hour bars from 09:00 to 11:00 at OKX's taker fee, 0.05%.
+/// A run on the hour bars from 08:30 to 11:01 at OKX's taker fee, 0.05%.
 fn backtest(dir: &Path) -> Backtest {
     Backtest {
         catalog: dir.to_path_buf(),
         bar_types: vec![BarType::from(HOUR_BARS)],
-        start: at("09:00"),
-        end: at("11:00"),
+        start: at("08:30"),
+        end: at("11:01"),
         ticks: vec![],
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USDT"),
@@ -144,15 +149,18 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
 
     backtest(dir.path()).run(recorder).unwrap();
 
-    // The run starts at 09:00: the first bar replayed is the minute opening
-    // 08:59, stamped (`ts_init`) at its close, 09:00, so the hour bar
-    // closing 09:00 holds it alone. Each hour bar holds the minutes opening in its
-    // hour: 10:00 has 09:00 to 09:59, not the minute opening at 10:00.
+    // The run starts at 08:30: the first bar replayed is the minute opening
+    // 08:29, stamped (`ts_init`) at its close, 08:30, so the hour bar
+    // closing 09:00 holds the minutes opening from 08:29. Each hour bar
+    // holds the minutes opening in its hour, built 5 s after its close:
+    // 09:00 has the minute opening 08:59, 10:00 has 09:00 to 09:59, not the
+    // minute opening at 10:00, and 11:00, built before the run's end, has
+    // 10:00 to 10:59.
     let replay: Vec<_> = record.borrow().bars.iter().map(ohlc).collect();
     assert_eq!(
         replay,
         [
-            hour_bar(at("09:00"), at("08:59")),
+            hour_bar(at("09:00"), at("08:29")),
             hour_bar(at("10:00"), at("09:00")),
             hour_bar(at("11:00"), at("10:00")),
         ]

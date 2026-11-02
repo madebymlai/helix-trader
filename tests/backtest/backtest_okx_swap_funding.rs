@@ -130,12 +130,12 @@ fn catalog(dir: &Path, bars_to: &str, funding_to: &str) {
         .unwrap();
 }
 
-/// A run on the hour bars from 07:00 to `end`, no commission.
+/// A run on the hour bars from 06:30 to `end`, no commission.
 fn backtest(dir: &Path, end: &str) -> Backtest {
     Backtest {
         catalog: dir.to_path_buf(),
         bar_types: vec![BarType::from(HOUR_BARS)],
-        start: at("07:00"),
+        start: at("06:30"),
         end: at(end),
         ticks: vec![],
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
@@ -158,12 +158,13 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
     let outcome = backtest(dir.path(), "17:00").run(recorder).unwrap();
 
     let record = record.borrow();
+    // The first hour bar closes at 07:00 and is built 5 s after, as live.
     assert_eq!(
         record.fills,
         [(
             OrderSide::Buy,
             Price::from("100000.0"),
-            UnixNanos::from(at("07:00"))
+            UnixNanos::from(at("07:00") + SignedDuration::from_secs(5))
         )]
     );
     // 0.02 BTC long: at 08:00, worth 2,000 USDT, it pays 0.01% (0.2); at
