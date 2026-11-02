@@ -96,7 +96,7 @@ use super::{
     features::{FeatureSet, Fingerprint},
     targets::{self, TargetRow, TargetsConfig},
 };
-use crate::strategy::DataRequirements;
+use crate::strategy::{DataRequirements, warmup};
 
 /// The version of the code that makes every strategy's rows: the
 /// decisions (`decide`), the targets (`targets`), the shared feature code
@@ -584,8 +584,10 @@ impl DatasetRow {
 
 /// The fingerprint of a dataset of `features` deciding on `rule`, of
 /// `targets` for a strategy of `requirements`, run on `venue`: the
-/// decisions' (`decide::fingerprint`) extended by the targets'
-/// (`targets::fingerprint`), the venue's settings and the dataset `VERSION`.
+/// decisions' (`decide::fingerprint`), deciding the bar build delay of the
+/// requirements' bar types after the grid (`warmup::bar_build_delay`),
+/// extended by the targets' (`targets::fingerprint`), the venue's settings
+/// and the dataset `VERSION`.
 ///
 /// # Errors
 ///
@@ -609,8 +611,9 @@ fn versioned_fingerprint(
     requirements: &DataRequirements,
     venue: &DatasetVenue,
 ) -> anyhow::Result<Fingerprint> {
+    let delay = warmup::bar_build_delay(&requirements.bar_types);
     Ok(targets::fingerprint(
-        decide::fingerprint(features, rule),
+        decide::fingerprint(features, rule, delay),
         targets,
         rule,
         requirements,
@@ -1157,6 +1160,33 @@ mod tests {
             fingerprint(&features(1), rule, &targets(), &requirements(), &venue()).unwrap();
 
         assert_ne!(current, at(VERSION + 1));
+    }
+
+    /// A strategy reading a composite bar type decides 5 s after its grid
+    /// (`warmup::bar_build_delay`), so its rows are another dataset than
+    /// those of the same strategy with the delay ignored: the one reading
+    /// gold's quotes alone, its requirements keying nothing else, the
+    /// targets having no ATR.
+    #[test]
+    fn a_strategy_on_composite_bars_is_keyed_by_its_build_delay() {
+        let of = |requirements: &DataRequirements| {
+            fingerprint(
+                &features(1),
+                DecisionRule::Every(SignedDuration::from_hours(1)),
+                &targets(),
+                requirements,
+                &venue(),
+            )
+            .unwrap()
+        };
+        let composite = DataRequirements {
+            bar_types: vec![nautilus_model::data::BarType::from(
+                "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )],
+            ..requirements()
+        };
+
+        assert_ne!(of(&composite), of(&requirements()));
     }
 
     /// Nautilus' risk engine denies an order its account cannot margin, so

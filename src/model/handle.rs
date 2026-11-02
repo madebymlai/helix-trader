@@ -69,9 +69,10 @@
 //! (`DataRequirements::slices`), and live, where the roller loads each
 //! post contract before its roll (`Roller::live`).
 //!
-//! A live node builds composite bars `Warmup::live_bar_build_delay` after
-//! their close, so a live handle starts the cadence with that delay, a
-//! backtest's and a dataset run's with none (see `decide`).
+//! A node builds composite bars `warmup::bar_build_delay` after their
+//! close, a backtest and a dataset run as late as a live node, so the
+//! handle starts the cadence with that delay whatever its mode (see
+//! `decide`).
 //!
 //! The handle builds the strategy's warmup (`strategy::warmup::Warmup`)
 //! from its requirements and mode, reading the features' tick series
@@ -136,7 +137,7 @@ use crate::{
     strategy::{
         DataRequirements,
         orders::{Exits, Trade},
-        warmup::{BookIndicator, CustomDataIndicator, Warmup},
+        warmup::{self, BookIndicator, CustomDataIndicator, Warmup},
     },
 };
 
@@ -249,9 +250,8 @@ pub struct ModelHandle {
     features: Rc<FeatureSet>,
     rule: DecisionRule,
     /// How long after its grid times the cadence decides, before its
-    /// margin: live, the node's bar build delay
-    /// (`Warmup::live_bar_build_delay`); none in a backtest or a dataset
-    /// run.
+    /// margin: the node's bar build delay of the strategy's bar types
+    /// (`warmup::bar_build_delay`), in every mode.
     delay: SignedDuration,
     /// The instrument traded, whose data makes a decision fresh.
     traded: InstrumentId,
@@ -449,10 +449,7 @@ impl ModelHandle {
             Mode::Live { .. } => Roller::live(ticks),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(ticks),
         };
-        let delay = match mode {
-            Mode::Live { .. } => warmup.live_bar_build_delay(),
-            Mode::Backtest { .. } | Mode::Dataset { .. } => SignedDuration::ZERO,
-        };
+        let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
             Mode::Backtest { models, venue } => Serving::Trading(Box::new(Trading {
                 retraining: None,
@@ -506,8 +503,8 @@ impl ModelHandle {
     /// contract standing for it; starts the barrier's ATR (the stops',
     /// trading on a model labelled on the barrier, or, in a dataset run,
     /// the targets', and collects the rows they settle); then
-    /// starts the decision cadence, live `Warmup::live_bar_build_delay`
-    /// late, and live the retrain timer, if retrained (`schedule::start`).
+    /// starts the decision cadence, `warmup::bar_build_delay` late, and live
+    /// the retrain timer, if retrained (`schedule::start`).
     ///
     /// # Errors
     ///
@@ -1816,55 +1813,14 @@ mod tests {
         kept_over(refused);
     }
 
-    #[test]
-    fn a_live_cadence_waits_for_composite_bars_a_backtests_does_not() {
-        let models = tempfile::tempdir().unwrap();
-        let requirements = DataRequirements {
-            bar_types: vec![BarType::from(
-                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-            )],
-            ..requirements()
-        };
-        let next = |mode: Mode| {
-            let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-            let handle = ModelHandle::new(
-                StrategyId::from(STRATEGY),
-                features(),
-                &config(),
-                &requirements,
-                mode,
-            )
-            .unwrap();
-            handle.start(&mut probe).unwrap();
-            let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
-            Timestamp::from(next)
-        };
+    /// Hour bars built from minute bars, a composite bar type.
+    const COMPOSITE: &str = "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 
-        let models = models.path().to_path_buf();
-        assert_eq!(
-            next(Mode::Backtest {
-                models: models.clone(),
-                venue: venue(),
-            }),
-            at("2026-10-22T12:00:00.010Z")
-        );
-        let catalog = tempfile::tempdir().unwrap();
-        assert_eq!(
-            next(live(
-                models,
-                catalog.path(),
-                Launcher::in_process(|_| unreachable!())
-            )),
-            at("2026-10-22T12:00:05.010Z")
-        );
-    }
-
-    #[test]
-    fn a_dataset_runs_cadence_does_not_wait_for_composite_bars() {
+    /// When the cadence of the handle in `mode` of a strategy reading
+    /// `bar_type`, started at 11:30, first decides.
+    fn first_decision(mode: Mode, bar_type: &str) -> Timestamp {
         let requirements = DataRequirements {
-            bar_types: vec![BarType::from(
-                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-            )],
+            bar_types: vec![BarType::from(bar_type)],
             ..requirements()
         };
         let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
@@ -1873,16 +1829,89 @@ mod tests {
             features(),
             &config(),
             &requirements,
-            Mode::Dataset {
-                rows: SettledRows::default(),
-            },
+            mode,
         )
         .unwrap();
-
         handle.start(&mut probe).unwrap();
-
         let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
-        assert_eq!(Timestamp::from(next), at("2026-10-22T12:00:00.010Z"));
+        Timestamp::from(next)
+    }
+
+    #[test]
+    fn a_backtests_cadence_waits_for_composite_bars_as_a_live_ones_does() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
+        let models = models.path().to_path_buf();
+        let backtest = Mode::Backtest {
+            models: models.clone(),
+            venue: venue(),
+        };
+        let live = live(
+            models,
+            catalog.path(),
+            Launcher::in_process(|_| unreachable!()),
+        );
+
+        assert_eq!(
+            first_decision(backtest, COMPOSITE),
+            at("2026-10-22T12:00:05.010Z")
+        );
+        assert_eq!(
+            first_decision(live, COMPOSITE),
+            at("2026-10-22T12:00:05.010Z")
+        );
+    }
+
+    #[test]
+    fn a_dataset_runs_cadence_waits_for_composite_bars() {
+        let dataset = Mode::Dataset {
+            rows: SettledRows::default(),
+        };
+
+        assert_eq!(
+            first_decision(dataset, COMPOSITE),
+            at("2026-10-22T12:00:05.010Z")
+        );
+    }
+
+    /// The minute bars the composite bars are built from, read as they
+    /// are, are not composite.
+    #[test]
+    fn no_cadence_waits_for_bars_not_composite() {
+        let models = tempfile::tempdir().unwrap();
+        let catalog = tempfile::tempdir().unwrap();
+        let models = models.path().to_path_buf();
+        let modes = [
+            (
+                "backtest",
+                Mode::Backtest {
+                    models: models.clone(),
+                    venue: venue(),
+                },
+            ),
+            (
+                "dataset",
+                Mode::Dataset {
+                    rows: SettledRows::default(),
+                },
+            ),
+            (
+                "live",
+                live(
+                    models,
+                    catalog.path(),
+                    Launcher::in_process(|_| unreachable!()),
+                ),
+            ),
+        ];
+
+        for (name, mode) in modes {
+            assert_eq!(
+                first_decision(mode, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
+                at("2026-10-22T12:00:00.010Z"),
+                "{name}"
+            );
+        }
     }
 
     /// `config`, never retrained.
@@ -1964,17 +1993,15 @@ mod tests {
         assert_eq!(launches.recv(), Err(std::sync::mpsc::RecvError));
     }
 
-    /// The bar-build delay is live mode's, not retraining's: a live handle
-    /// never retrained decides on composite bars as late as a retrained
-    /// one.
+    /// The bar-build delay is the bar types', not retraining's: a live
+    /// handle never retrained decides on composite bars as late as a
+    /// retrained one.
     #[test]
     fn a_live_handle_never_retrained_waits_for_composite_bars() {
         let models = tempfile::tempdir().unwrap();
         let catalog = tempfile::tempdir().unwrap();
         let requirements = DataRequirements {
-            bar_types: vec![BarType::from(
-                "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-            )],
+            bar_types: vec![BarType::from(COMPOSITE)],
             ..requirements()
         };
         let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));

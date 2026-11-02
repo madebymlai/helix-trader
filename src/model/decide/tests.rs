@@ -350,12 +350,39 @@ fn the_fingerprint_changes_with_the_rule() {
     let features = features();
 
     assert_eq!(
-        fingerprint(&features, every(15)),
-        fingerprint(&features, every(15))
+        fingerprint(&features, every(15), SignedDuration::ZERO),
+        fingerprint(&features, every(15), SignedDuration::ZERO)
     );
     assert_ne!(
-        fingerprint(&features, every(15)),
-        fingerprint(&features, every(30))
+        fingerprint(&features, every(15), SignedDuration::ZERO),
+        fingerprint(&features, every(30), SignedDuration::ZERO)
     );
-    assert_ne!(fingerprint(&features, every(15)), features.fingerprint());
+    assert_ne!(
+        fingerprint(&features, every(15), SignedDuration::ZERO),
+        features.fingerprint()
+    );
+}
+
+/// A cadence decides its build delay after the grid (`start`): another
+/// delay, 5 s for composite bars or none, is another fingerprint.
+#[test]
+fn the_fingerprint_changes_with_the_build_delay() {
+    let features = features();
+    let delayed = |secs| fingerprint(&features, every(15), SignedDuration::from_secs(secs));
+
+    assert_ne!(delayed(5), delayed(0));
+    assert_ne!(delayed(5), delayed(6));
+}
+
+/// Without a build delay the rule's part is as it was before the delay
+/// was keyed, so the datasets and stores of strategies reading no
+/// composite bars keep their fingerprints.
+#[test]
+fn a_fingerprint_without_a_build_delay_keeps_the_rules_part_as_it_was() {
+    let features = features();
+
+    assert_eq!(
+        fingerprint(&features, every(15), SignedDuration::ZERO),
+        features.fingerprint().with(b"every 900000000000 ns")
+    );
 }

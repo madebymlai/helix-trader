@@ -29,7 +29,7 @@ A futures root's bars must be internal LAST bars built from its trades; orders m
 
 Internal BID, ASK and MID bars are built from quotes, LAST bars from trades. A bar stamped at close contains ticks in `(open, close]`; quote-bar volume sums quoted sizes, not trades. LAST bars carry no spread. Composite bars aggregate source bars, so their high and low reflect those source intervals. Backtest and live disable empty time bars: a period without a tick or source bar produces no bar rather than a stale flat bar.
 
-A configured session accepts a bar only when its whole span lies within the local day's open and close in the configured IANA time zone. Outside bars neither update indicators nor trigger orders, including during warmup. Omit the session for 24/7 trading; `00:00`–`23:59` excludes the bar closing at midnight. Sessions are rejected with composite bars: live composite bars are built and stamped five seconds after close to allow source bars to arrive, unlike backtest bars. Quote-built bars have no such delay.
+A configured session accepts a bar only when its whole span lies within the local day's open and close in the configured IANA time zone. Outside bars neither update indicators nor trigger orders, including during warmup. Omit the session for 24/7 trading; `00:00`–`23:59` excludes the bar closing at midnight. Sessions are rejected with composite bars: composite bars are built and stamped five seconds after close to allow source bars to arrive live, in a backtest and a dataset run as live. Quote-built bars have no such delay, unless the strategy also reads composite bars: the delay is the data engine's, for every time bar it builds.
 
 ## Orders and positions
 

@@ -58,7 +58,9 @@
 //! last close, which a session on the time of day alone would trade on. So
 //! the node running the strategy takes its data engine config from
 //! `data_engine_config` (backtest) or `live_data_engine_config` (live),
-//! which turn `time_bars_build_with_no_updates` off.
+//! which turn `time_bars_build_with_no_updates` off. Both build time bars
+//! `bar_build_delay` after their close, the delay of the strategy's bar
+//! types.
 //!
 //! Bars on a futures root (`GC.GLBX`) are Nautilus' continuous bars, built
 //! from the trades of the contract standing for the root and adjusted
@@ -409,13 +411,6 @@ impl Warmup {
     /// As `cache_config`.
     pub fn cache_config(&self) -> anyhow::Result<CacheConfig> {
         cache_config(&self.built(), self.length)
-    }
-
-    /// How long after a bar's close a live node builds the strategy's
-    /// bars (see `live_bar_build_delay`).
-    #[must_use]
-    pub fn live_bar_build_delay(&self) -> SignedDuration {
-        live_bar_build_delay(&self.bar_types)
     }
 
     /// The bar types a live warmup builds: the strategy's, then the
@@ -828,17 +823,20 @@ pub fn cache_config(bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Re
 /// Whether the data engine builds a bar for a period without any quote.
 const BUILD_BARS_WITHOUT_QUOTES: bool = false;
 
-/// The data engine config of a backtest running a strategy: Nautilus'
-/// default, without bars for periods without quotes.
+/// The data engine config of a backtest or a dataset run of a strategy
+/// on `bar_types`: Nautilus' default, without bars for periods without
+/// quotes, and building time bars `bar_build_delay` after their close
+/// (`time_bars_build_delay`), as a live node does.
 #[must_use]
-pub fn data_engine_config() -> DataEngineConfig {
+pub fn data_engine_config(bar_types: &[BarType]) -> DataEngineConfig {
     DataEngineConfig {
         time_bars_build_with_no_updates: BUILD_BARS_WITHOUT_QUOTES,
+        time_bars_build_delay: build_delay_micros(bar_types),
         ..DataEngineConfig::default()
     }
 }
 
-/// How long, in microseconds, a live node waits after a bar's close before
+/// How long, in microseconds, a node waits after a bar's close before
 /// building a bar of source bars: a venue sends a source bar once it has
 /// closed, so its last source bar arrives after the bar's close (OKX's
 /// confirmed 1-minute candles: 0.3 to 1.5 s, measured 2026-10-22; IB's
@@ -847,30 +845,38 @@ const SOURCE_BAR_DELAY_MICROS: i64 = 5_000_000;
 
 /// The data engine config of a live node running a strategy on
 /// `bar_types`: Nautilus' default, without bars for periods without
-/// quotes, and building time bars `live_bar_build_delay` after their close
+/// quotes, and building time bars `bar_build_delay` after their close
 /// (`time_bars_build_delay`).
 #[must_use]
 pub fn live_data_engine_config(bar_types: &[BarType]) -> LiveDataEngineConfig {
-    let delay = live_bar_build_delay(bar_types).unsigned_abs().as_micros();
     LiveDataEngineConfig {
         time_bars_build_with_no_updates: BUILD_BARS_WITHOUT_QUOTES,
-        time_bars_build_delay: u64::try_from(delay).expect("a delay of seconds"),
+        time_bars_build_delay: build_delay_micros(bar_types),
         ..LiveDataEngineConfig::default()
     }
 }
 
-/// How long after a bar's close a live node running a strategy on
-/// `bar_types` builds its time bars: `SOURCE_BAR_DELAY_MICROS` if any bar
-/// type is composite, so that the last source bar is in, else none. A
-/// backtest builds every bar at its close, the source bars being in the
-/// catalog already.
+/// How long after a bar's close a node running a strategy on `bar_types`
+/// builds its time bars, a backtest and a dataset run as a live node:
+/// `SOURCE_BAR_DELAY_MICROS` if any bar type is composite, so that the
+/// last source bar is in, else none. A backtest's source bars are in the
+/// catalog by the close already; it builds its bars as late all the same,
+/// so that its bars, stamped when built, and its decisions fall where a
+/// live node's do.
 #[must_use]
-pub fn live_bar_build_delay(bar_types: &[BarType]) -> SignedDuration {
+pub fn bar_build_delay(bar_types: &[BarType]) -> SignedDuration {
     if bar_types.iter().any(BarType::is_composite) {
         SignedDuration::from_micros(SOURCE_BAR_DELAY_MICROS)
     } else {
         SignedDuration::ZERO
     }
+}
+
+/// `bar_build_delay` of `bar_types` in microseconds, as Nautilus' data
+/// engine configs take it (`time_bars_build_delay`).
+fn build_delay_micros(bar_types: &[BarType]) -> u64 {
+    let delay = bar_build_delay(bar_types).unsigned_abs().as_micros();
+    u64::try_from(delay).expect("a delay of seconds")
 }
 
 /// The most bars a warmup of `warmup` builds of `bar_type`: one per bar
@@ -1505,44 +1511,55 @@ mod tests {
     }
 
     #[test]
-    fn live_bars_built_from_quotes_close_on_time() {
+    fn bars_built_from_quotes_close_on_time_in_a_backtest_as_live() {
         let bar_types = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
-        let config = live_data_engine_config(&bar_types);
-        assert_eq!(config.time_bars_build_delay, 0);
-        assert!(!config.time_bars_build_with_no_updates);
+        let backtest = data_engine_config(&bar_types);
+        let live = live_data_engine_config(&bar_types);
+        assert_eq!(
+            (backtest.time_bars_build_delay, live.time_bars_build_delay),
+            (0, 0)
+        );
+        assert!(!backtest.time_bars_build_with_no_updates);
+        assert!(!live.time_bars_build_with_no_updates);
     }
 
     #[test]
-    fn live_bars_built_from_source_bars_wait_for_the_last_one() {
+    fn bars_built_from_source_bars_wait_for_the_last_one_in_a_backtest_as_live() {
         let bar_types = [BarType::from(
             "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
         )];
-        let config = live_data_engine_config(&bar_types);
-        assert_eq!(config.time_bars_build_delay, 5_000_000);
-        assert!(!config.time_bars_build_with_no_updates);
+        let backtest = data_engine_config(&bar_types);
+        let live = live_data_engine_config(&bar_types);
+        assert_eq!(
+            (backtest.time_bars_build_delay, live.time_bars_build_delay),
+            (5_000_000, 5_000_000)
+        );
+        assert!(!backtest.time_bars_build_with_no_updates);
+        assert!(!live.time_bars_build_with_no_updates);
     }
 
-    /// The delay a live decision waits for is the one the node builds its
-    /// bars with.
+    /// The delay a decision waits for is the one a backtest, a dataset run
+    /// and a live node build its bars with.
     #[test]
-    fn the_live_bar_build_delay_is_the_live_nodes() {
-        let composite = reading(&[
-            "SXR8.IBIS-1-HOUR-MID-INTERNAL",
-            "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-        ]);
-        let quotes = reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]);
-        let nodes = |requirements: &DataRequirements| {
-            let micros = live_data_engine_config(&requirements.bar_types).time_bars_build_delay;
-            SignedDuration::from_micros(i64::try_from(micros).unwrap())
-        };
-
-        assert_eq!(
-            Warmup::live(&composite).live_bar_build_delay(),
-            nodes(&composite)
-        );
-        assert_eq!(
-            Warmup::live(&quotes).live_bar_build_delay(),
-            nodes(&quotes)
-        );
+    fn the_bar_build_delay_is_every_nodes() {
+        for bar_types in [
+            vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+            ],
+            vec![BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")],
+        ] {
+            let delay = u64::try_from(bar_build_delay(&bar_types).as_micros()).unwrap();
+            assert_eq!(
+                data_engine_config(&bar_types).time_bars_build_delay,
+                delay,
+                "{bar_types:?}"
+            );
+            assert_eq!(
+                live_data_engine_config(&bar_types).time_bars_build_delay,
+                delay,
+                "{bar_types:?}"
+            );
+        }
     }
 }
