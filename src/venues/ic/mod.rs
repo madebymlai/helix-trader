@@ -387,7 +387,6 @@ mod tests {
     }
 
     const XAUUSD: &str = "XAUUSD.ICMARKETS";
-    const EURUSD: &str = "EURUSD.ICMARKETS";
 
     #[test]
     fn a_series_other_than_the_quotes_of_an_ic_instrument_is_refused() {
@@ -421,38 +420,5 @@ mod tests {
             let err = quoted(&[(data_type, XAUUSD.to_owned())]).unwrap_err();
             assert!(err.to_string().contains(&named), "{err}");
         }
-    }
-
-    /// End to end on IC's cTrader demo, gated as `tests/live/ic_demo.rs` is
-    /// (`NAUTILUS_IC_RUN=1` from the shell; demo only; no order): a forced
-    /// renewal of the access token on a running session, which goes on
-    /// receiving quotes and answering requests; then a fresh session
-    /// authenticates from the token file without renewing (see
-    /// `ctrader::demo`). It ROTATES the account's real token pair: the file
-    /// keeps the new one, `.env`'s is spent. Run it with:
-    ///
-    /// ```sh
-    /// NAUTILUS_IC_RUN=1 cargo test --lib the_demo_session_renews -- --nocapture
-    /// ```
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
-        if std::env::var("NAUTILUS_IC_RUN").is_ok_and(|v| v == "1") {
-            dotenvy::dotenv().ok();
-        } else {
-            println!("skipped; set NAUTILUS_IC_RUN=1 to run it on IC's cTrader demo");
-            return;
-        }
-        assert_eq!(
-            std::env::var("IC_ENVIRONMENT").as_deref(),
-            Ok("demo"),
-            "the IC end to end test runs on the demo only: set IC_ENVIRONMENT=demo"
-        );
-        let ids = [InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)];
-
-        ctrader::demo::session_renews_its_token_and_keeps_receiving_quotes(
-            &connection().unwrap(),
-            &ids,
-        )
-        .await;
     }
 }

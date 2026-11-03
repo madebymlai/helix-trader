@@ -119,7 +119,7 @@ pub(super) enum HandlerCommand {
     /// No more spot events of a symbol.
     UnsubscribeSpots(i64),
     /// Renews the access token now, as on schedule.
-    #[cfg(any(test, feature = "demo-test"))]
+    #[cfg(any(test, feature = "test-support"))]
     RenewToken,
     Disconnect,
 }
@@ -309,7 +309,7 @@ impl CTraderWsHandler {
                     Some(HandlerCommand::UnsubscribeSpots(symbol_id)) => {
                         self.change_spots(symbol_id, false).await;
                     }
-                    #[cfg(any(test, feature = "demo-test"))]
+                    #[cfg(any(test, feature = "test-support"))]
                     Some(HandlerCommand::RenewToken) => {
                         if matches!(self.session, Session::Ready) {
                             self.renew().await;

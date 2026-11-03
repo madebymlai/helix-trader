@@ -534,10 +534,45 @@ impl CTraderSession {
         Ok(self.client.unsubscribe_spots(symbol_id)?)
     }
 
-    /// Renews the access token now, as on schedule.
-    #[cfg(any(test, feature = "demo-test"))]
-    pub(crate) fn renew_token(&self) {
+    /// Renews the access token now, as on schedule: the token file holds
+    /// the new pair once cTrader answers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn renew_token(&self) {
         self.client.renew_token();
+    }
+
+    /// Connects as `connect` does and subscribes to the spot events of
+    /// `instrument_ids`, which come as cTrader sends them.
+    ///
+    /// # Errors
+    ///
+    /// As `connect`, and as `instruments` for `instrument_ids`.
+    #[cfg(feature = "test-support")]
+    pub async fn connect_with_spots(
+        connection: &CTraderConnection,
+        instrument_ids: &[InstrumentId],
+    ) -> anyhow::Result<(Self, SpotEvents)> {
+        Self::connect_with_spots_to(connection.environment.url(), connection, instrument_ids).await
+    }
+
+    /// As `connect_with_spots`, to `url`.
+    #[cfg(any(test, feature = "test-support"))]
+    async fn connect_with_spots_to(
+        url: &str,
+        connection: &CTraderConnection,
+        instrument_ids: &[InstrumentId],
+    ) -> anyhow::Result<(Self, SpotEvents)> {
+        let (session, spots) = Self::connect_to(
+            url,
+            connection.venue,
+            connection.credential.clone(),
+            HEARTBEAT_INTERVAL,
+        )
+        .await?;
+        for symbol in session.symbols(instrument_ids).await? {
+            session.subscribe_spots(symbol.symbol_id)?;
+        }
+        Ok((session, spots))
     }
 
     /// Asks the session to close, as `disconnect` does, without waiting:
@@ -573,6 +608,7 @@ pub(crate) struct CTraderSymbol {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
+    use jiff::SignedDuration;
     use nautilus_common::{
         cache::Cache,
         clock::{Clock, VirtualClock},
@@ -595,12 +631,16 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::{
-        messages::{Payload, ProtoMessage},
+        messages::{
+            Payload, ProtoMessage, ProtoOaRefreshTokenReq, ProtoOaSpotEvent,
+            ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
+        },
         ticks::Tick,
         *,
     };
     use crate::testing::{
-        self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
+        self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
+        SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
         TRADER_RES, VENUE, accept_auth, replay, reply, tick_answer,
     };
 
@@ -840,6 +880,103 @@ mod tests {
         assert_eq!(err.to_string(), "EUR/USD.IDEALPRO is not on ACMEFX");
         assert_eq!(requests(&received), []);
         session.disconnect().await;
+    }
+
+    /// As `fixtures_peer`, answering a spot subscription with the captured
+    /// answer, then each symbol's captured first spot event.
+    fn spots_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
+        if request.payload_type != ProtoOaSubscribeSpotsReq::TYPE {
+            return fixtures_peer(connection, request);
+        }
+        let asked = ProtoOaSubscribeSpotsReq::decode(request.payload.as_deref().unwrap()).unwrap();
+        let mut actions = vec![replay::<ProtoOaSubscribeSpotsRes>(
+            request,
+            SUBSCRIBE_SPOTS_RES,
+        )];
+        actions.extend(asked.symbol_id.iter().map(|&symbol_id| {
+            let captured = match symbol_id {
+                41 => SPOT_EVENT_XAUUSD_FIRST,
+                1 => SPOT_EVENT_EURUSD_FIRST,
+                other => panic!("no spot event of symbol {other} captured"),
+            };
+            Action::Send(
+                ProtoMessage {
+                    payload_type: ProtoOaSpotEvent::TYPE,
+                    payload: Some(captured.to_vec()),
+                    client_msg_id: None,
+                }
+                .encode_to_vec(),
+            )
+        }));
+        actions
+    }
+
+    #[tokio::test]
+    async fn a_session_connected_with_spots_gets_its_instruments_spot_events_as_sent() {
+        let (url, _) = testing::start(spots_peer);
+        let (connection, _tokens) = testing::connection();
+        let ids = [
+            InstrumentId::from("XAUUSD.ACMEFX"),
+            InstrumentId::from("EURUSD.ACMEFX"),
+        ];
+
+        let (session, mut spots) = CTraderSession::connect_with_spots_to(&url, &connection, &ids)
+            .await
+            .unwrap();
+
+        let mut stamped = Vec::new();
+        for _ in &ids {
+            let spot = tokio::time::timeout(std::time::Duration::from_secs(10), spots.recv())
+                .await
+                .expect("no spot event in time")
+                .unwrap();
+            stamped.push((spot.symbol_id, spot.timestamp));
+        }
+        stamped.sort_unstable();
+        // The symbol ids and times of `testdata/spot_event_*_first.txtpb`.
+        assert_eq!(
+            stamped,
+            [(1, Some(1_793_017_476_361)), (41, Some(1_793_017_475_790))]
+        );
+        session.disconnect().await;
+    }
+
+    /// The renewal goes out on `renew_token`; `disconnect` awaits its
+    /// answer and saves the pair.
+    #[tokio::test]
+    async fn a_forced_renewal_leaves_the_renewed_pair_in_the_token_file() {
+        let (url, _) = testing::start(|connection, request| {
+            if request.payload_type == ProtoOaRefreshTokenReq::TYPE {
+                return vec![testing::renewal_answer(request)];
+            }
+            fixtures_peer(connection, request)
+        });
+        let (credential, _tokens) = testing::credential();
+        let (session, _) = CTraderSession::connect_to(
+            &url,
+            Venue::new(VENUE),
+            credential.clone(),
+            HEARTBEAT_INTERVAL,
+        )
+        .await
+        .unwrap();
+        let before = credential.stored_tokens().unwrap();
+
+        let asked_at = Timestamp::now();
+        session.renew_token();
+        session.disconnect().await;
+        let answered_by = Timestamp::now();
+
+        let renewed = credential.stored_tokens().unwrap();
+        assert_eq!(before.access_token.expose_secret(), testing::ACCESS_TOKEN);
+        assert_eq!(renewed.access_token.expose_secret(), "renewedAccess1");
+        assert_eq!(renewed.refresh_token.expose_secret(), "renewedRefresh1");
+        let lifetime = SignedDuration::from_secs(testing::EXPIRES_IN);
+        let expires_at = renewed.expires_at.unwrap();
+        assert!(
+            asked_at + lifetime <= expires_at && expires_at <= answered_by + lifetime,
+            "{expires_at}"
+        );
     }
 
     /// What Nautilus' risk engine makes of a market buy of 1 oz of gold,

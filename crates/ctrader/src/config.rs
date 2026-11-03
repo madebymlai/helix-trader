@@ -108,6 +108,18 @@ impl CTraderCredential {
         };
         TokenStore::new(self.token_file.clone(), seed, self.names)
     }
+
+    /// The pair the token file holds now: the credential's, until a
+    /// session renews it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no token file, or it cannot be read
+    /// or parsed; never a token.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stored_tokens(&self) -> anyhow::Result<TokenPair> {
+        self.tokens().read()
+    }
 }
 
 /// Where and as whom to connect: the broker's venue, the environment and

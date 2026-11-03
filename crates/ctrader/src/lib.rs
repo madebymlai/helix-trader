@@ -29,12 +29,13 @@ pub use self::{
     factories::{CTraderDataClientFactory, CTraderExecutionClientFactory},
     session::CTraderSession,
 };
+// The types of the hooks of a caller's test on a real server.
+#[cfg(feature = "test-support")]
+pub use self::{common::token::TokenPair, websocket::SpotEvents};
 
 mod common;
 mod config;
 mod data;
-#[cfg(feature = "demo-test")]
-pub mod demo;
 mod execution;
 mod factories;
 mod session;

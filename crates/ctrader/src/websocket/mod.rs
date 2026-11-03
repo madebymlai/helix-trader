@@ -125,7 +125,7 @@ fn spot_symbol(topic: &str) -> i64 {
 }
 
 /// The spot events of the symbols subscribed, as cTrader sends them.
-pub(super) type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
+pub type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
 
 /// The trade events of the account, as cTrader sends them.
 pub(crate) type TradeEvents = mpsc::UnboundedReceiver<TradeEvent>;
@@ -380,7 +380,7 @@ impl CTraderWebSocketClient {
 
     /// Renews the access token now, as on schedule, if the session is
     /// ready.
-    #[cfg(any(test, feature = "demo-test"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn renew_token(&self) {
         let _ = self.cmd_tx.send(HandlerCommand::RenewToken);
     }

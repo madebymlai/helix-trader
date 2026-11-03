@@ -43,10 +43,10 @@ pub(crate) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
 /// An access token, the refresh token that renews it, and when the access
 /// token expires (unknown for a pair seeded from the credential).
 #[derive(Debug, Clone)]
-pub(crate) struct TokenPair {
-    pub(crate) access_token: SecretString,
-    pub(crate) refresh_token: SecretString,
-    pub(crate) expires_at: Option<Timestamp>,
+pub struct TokenPair {
+    pub access_token: SecretString,
+    pub refresh_token: SecretString,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl TokenPair {
@@ -72,7 +72,8 @@ impl TokenPair {
     }
 
     /// Whether it is this pair's access token that `other` holds.
-    pub(crate) fn same_access_token(&self, other: &Self) -> bool {
+    #[must_use]
+    pub fn same_access_token(&self, other: &Self) -> bool {
         self.access_token.expose_secret() == other.access_token.expose_secret()
     }
 

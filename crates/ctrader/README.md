@@ -38,4 +38,4 @@ The tests run against a mock cTrader peer replaying payloads captured from a bro
 cargo test -p ctrader
 ```
 
-The end-to-end test of a session's token renewal on a real demo (`demo`, behind the `demo-test` feature) needs a broker's credential: its caller holds and gates it, as [IC Markets](../../src/venues/ic/README.md#tests) does. It **rotates the real token pair**.
+The end-to-end test of a session's token renewal on a real demo needs a broker's credential, so its caller holds and gates it, as this repository's caller does ([its tests](../../src/venues/ic/README.md#tests)); it **rotates the real token pair**. The `test-support` feature exposes the hooks it needs, as Nautilus' crates expose theirs: a forced renewal (`CTraderSession::renew_token`), a session's spot events as cTrader sends them (`CTraderSession::connect_with_spots`) and the pair the token file holds (`CTraderCredential::stored_tokens`).
