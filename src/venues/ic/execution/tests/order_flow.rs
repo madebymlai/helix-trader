@@ -326,7 +326,9 @@ fn kinds(events: &[OrderEventAny]) -> Vec<(String, &'static str)> {
                 OrderEventAny::Canceled(_) => "canceled",
                 OrderEventAny::Rejected(_) => "rejected",
                 OrderEventAny::ModifyRejected(_) => "modify rejected",
+                OrderEventAny::ModifyDenied(_) => "modify denied",
                 OrderEventAny::CancelRejected(_) => "cancel rejected",
+                OrderEventAny::CancelDenied(_) => "cancel denied",
                 OrderEventAny::Denied(_) => "denied",
                 _ => "other",
             };
@@ -1409,7 +1411,7 @@ async fn a_query_of_a_bracket_leg_whose_cancel_was_refused_after_a_restart_concl
     reconciled_pending_bracket(&node);
     node.cancel("PROBE-2-SL");
     let events = node.order_events(1).await;
-    assert_eq!(kinds(&events), [row("PROBE-2-SL", "cancel rejected")]);
+    assert_eq!(kinds(&events), [row("PROBE-2-SL", "cancel denied")]);
 
     node.query("PROBE-2-SL");
 
