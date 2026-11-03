@@ -1,4 +1,4 @@
-# Captured from ACMEFX's cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # the first XAUUSD (41) spot event after the subscription: both sides, the
 # last session close and the time (Unix ms).
 # Scrubbed: ctidTraderAccountId replaced by the fake 1000001.

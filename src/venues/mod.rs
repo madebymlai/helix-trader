@@ -35,7 +35,7 @@ pub enum HistorySource {
 /// The broker of an instrument on the live node: its data and execution
 /// clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveBroker {
+pub(crate) enum LiveBroker {
     /// OKX's clients.
     Okx,
     /// IC Markets' cTrader clients, on a hedging account.
@@ -55,7 +55,7 @@ impl HistorySource {
 impl LiveBroker {
     /// The live broker of `id`: its venue's row (see `row`).
     #[must_use]
-    pub fn of(id: InstrumentId) -> Self {
+    pub(crate) fn of(id: InstrumentId) -> Self {
         row(id.venue).1
     }
 }
