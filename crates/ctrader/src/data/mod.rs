@@ -1,7 +1,7 @@
-//! IC's data client for the live node: Nautilus' `DataClient` on a cTrader
+//! The data client for the live node: Nautilus' `DataClient` on a cTrader
 //! session.
 //!
-//! On connect it authenticates, loads its instruments (as `IcHistory`
+//! On connect it authenticates, loads its instruments (as `CTraderSession`
 //! does) and sends them to the node. Quote subscriptions become spot
 //! subscriptions, their spot events quotes (see `spots`); the session
 //! sends them again after a reconnect. Quote requests are answered from
@@ -42,9 +42,8 @@ use nautilus_model::{
 
 use self::spots::SpotQuotes;
 use super::{
-    common::parse::IC_VENUE,
-    config::{IcConnection, IcCredential},
-    session::{IcHistory, IcSymbol},
+    config::{CTraderConnection, CTraderCredential},
+    session::{CTraderSession, CTraderSymbol},
     websocket::HEARTBEAT_INTERVAL,
 };
 
@@ -54,13 +53,14 @@ mod spots;
 const TASK_GRACE: Duration = Duration::from_secs(1);
 const TASK_FORCE: Duration = Duration::from_secs(2);
 
-/// IC's data client: quotes live and historical of the instruments it
-/// loads, on venue `ICMARKETS`.
+/// The data client: quotes live and historical of the instruments it
+/// loads, on the venue of its connection.
 #[derive(Debug)]
-pub(super) struct IcDataClient {
+pub(super) struct CTraderDataClient {
     client_id: ClientId,
     url: String,
-    credential: IcCredential,
+    venue: Venue,
+    credential: CTraderCredential,
     instrument_ids: Vec<InstrumentId>,
     session: Option<Session>,
     session_tasks: TaskGroup,
@@ -72,14 +72,14 @@ pub(super) struct IcDataClient {
 /// A connected session and what it loaded.
 #[derive(Debug)]
 struct Session {
-    history: Arc<IcHistory>,
-    symbols: HashMap<InstrumentId, IcSymbol>,
+    ctrader: Arc<CTraderSession>,
+    symbols: HashMap<InstrumentId, CTraderSymbol>,
     quotes: Arc<Mutex<SpotQuotes>>,
 }
 
-impl IcDataClient {
+impl CTraderDataClient {
     /// A client on the environment of `connection` loading
-    /// `instrument_ids`, IC ids, at connect; not connected.
+    /// `instrument_ids`, ids on its venue, at connect; not connected.
     ///
     /// # Panics
     ///
@@ -88,13 +88,14 @@ impl IcDataClient {
     #[must_use]
     pub(super) fn new(
         client_id: ClientId,
-        connection: &IcConnection,
+        connection: &CTraderConnection,
         instrument_ids: Vec<InstrumentId>,
     ) -> Self {
         let url = connection.environment.url().to_owned();
         Self::with_endpoint(
             client_id,
             url,
+            connection.venue,
             connection.credential.clone(),
             instrument_ids,
             get_atomic_clock_realtime(),
@@ -104,13 +105,15 @@ impl IcDataClient {
     fn with_endpoint(
         client_id: ClientId,
         url: String,
-        credential: IcCredential,
+        venue: Venue,
+        credential: CTraderCredential,
         instrument_ids: Vec<InstrumentId>,
         clock: &'static AtomicTime,
     ) -> Self {
         Self {
             client_id,
             url,
+            venue,
             credential,
             instrument_ids,
             session: None,
@@ -130,10 +133,15 @@ impl IcDataClient {
     /// Connects, loads the instruments and sends them to the node, then
     /// starts turning spot events into quotes.
     async fn open_session(&self) -> anyhow::Result<Session> {
-        let (history, mut spots) =
-            IcHistory::connect_to(&self.url, self.credential.clone(), HEARTBEAT_INTERVAL).await?;
+        let (session, mut spots) = CTraderSession::connect_to(
+            &self.url,
+            self.venue,
+            self.credential.clone(),
+            HEARTBEAT_INTERVAL,
+        )
+        .await?;
         let loaded = async {
-            let symbols = history.symbols(&self.instrument_ids).await?;
+            let symbols = session.symbols(&self.instrument_ids).await?;
             let instruments: Vec<_> = symbols
                 .iter()
                 .map(|s| (s.instrument.clone(), s.symbol_id))
@@ -144,7 +152,7 @@ impl IcDataClient {
         let (symbols, quotes) = match loaded {
             Ok(loaded) => loaded,
             Err(e) => {
-                history.disconnect().await;
+                session.disconnect().await;
                 return Err(e);
             }
         };
@@ -157,7 +165,7 @@ impl IcDataClient {
         let quotes = Arc::new(Mutex::new(quotes));
         let stream = Arc::clone(&quotes);
         let sender = self.data_sender.clone();
-        let clock = self.clock;
+        let (clock, venue) = (self.clock, self.venue);
         let cancelled = self.session_tasks.cancellation_token();
         self.session_tasks.spawn(async move {
             loop {
@@ -173,12 +181,12 @@ impl IcDataClient {
                 match quotes.spot(&spot, clock.get_time_ns()) {
                     Ok(Some(quote)) => send(&sender, DataEvent::Data(Data::Quote(quote))),
                     Ok(None) => {}
-                    Err(e) => log::warn!("IC spot event skipped: {e:#}"),
+                    Err(e) => log::warn!("{venue} spot event skipped: {e:#}"),
                 }
             }
         })?;
         Ok(Session {
-            history: Arc::new(history),
+            ctrader: Arc::new(session),
             symbols: symbols
                 .into_iter()
                 .map(|s| (s.instrument.id(), s))
@@ -214,7 +222,7 @@ impl IcDataClient {
         self.session_tasks.begin_shutdown();
         self.command_tasks.begin_shutdown();
         if let Some(session) = &self.session {
-            session.history.begin_shutdown();
+            session.ctrader.begin_shutdown();
         }
     }
 
@@ -228,24 +236,24 @@ impl IcDataClient {
         );
         if let Some(open) = self.session.take() {
             // The tasks are done, so this is the last handle.
-            if let Ok(history) = Arc::try_unwrap(open.history) {
-                history.disconnect().await;
+            if let Ok(session) = Arc::try_unwrap(open.ctrader) {
+                session.disconnect().await;
             }
         }
-        session.map_err(|e| anyhow::anyhow!("stopping the IC spot task: {e}"))?;
-        command.map_err(|e| anyhow::anyhow!("stopping the IC request tasks: {e}"))?;
+        session.map_err(|e| anyhow::anyhow!("stopping the {} spot task: {e}", self.venue))?;
+        command.map_err(|e| anyhow::anyhow!("stopping the {} request tasks: {e}", self.venue))?;
         Ok(())
     }
 }
 
 #[async_trait(?Send)]
-impl DataClient for IcDataClient {
+impl DataClient for CTraderDataClient {
     fn client_id(&self) -> ClientId {
         self.client_id
     }
 
     fn venue(&self) -> Option<Venue> {
-        Some(Venue::new(IC_VENUE))
+        Some(self.venue)
     }
 
     fn start(&mut self) -> anyhow::Result<()> {
@@ -288,10 +296,10 @@ impl DataClient for IcDataClient {
             self.teardown().await?;
             self.session_tasks
                 .start_generation()
-                .map_err(|e| anyhow::anyhow!("reopening the IC spot task: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("reopening the {} spot task: {e}", self.venue))?;
             self.command_tasks
                 .start_generation()
-                .map_err(|e| anyhow::anyhow!("reopening the IC request tasks: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("reopening the {} request tasks: {e}", self.venue))?;
         }
         self.session = Some(self.open_session().await?);
         log::info!("Connected {}", self.client_id);
@@ -309,7 +317,7 @@ impl DataClient for IcDataClient {
         let session = self.session()?;
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             let symbol_id = lock(&session.quotes).subscribe(id)?;
-            session.history.subscribe_spots(symbol_id)
+            session.ctrader.subscribe_spots(symbol_id)
         })
     }
 
@@ -317,7 +325,7 @@ impl DataClient for IcDataClient {
         let session = self.session()?;
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             let symbol_id = lock(&session.quotes).unsubscribe(id)?;
-            session.history.unsubscribe_spots(symbol_id)
+            session.ctrader.unsubscribe_spots(symbol_id)
         })
     }
 
@@ -335,7 +343,7 @@ impl DataClient for IcDataClient {
         let symbol = session
             .symbols
             .get(&id)
-            .with_context(|| format!("{id} is not an instrument the IC data client loaded"))?;
+            .with_context(|| format!("{id} is not an instrument the data client loaded"))?;
         let response = InstrumentResponse::new(
             request.request_id,
             request.client_id.unwrap_or(self.client_id),
@@ -373,7 +381,7 @@ impl DataClient for IcDataClient {
             .symbols
             .get(&id)
             .cloned()
-            .with_context(|| format!("{id} is not an instrument the IC data client loaded"))?;
+            .with_context(|| format!("{id} is not an instrument the data client loaded"))?;
         let start = request
             .start
             .with_context(|| format!("a request of the quotes of {id} needs a start"))?;
@@ -381,16 +389,16 @@ impl DataClient for IcDataClient {
             .end
             .unwrap_or_else(|| Timestamp::from(self.clock.get_time_ns()));
         lock(&session.quotes).hold(id)?;
-        let history = Arc::clone(&session.history);
+        let ctrader = Arc::clone(&session.ctrader);
         let quotes = Arc::clone(&session.quotes);
         let sender = self.data_sender.clone();
         let client_id = request.client_id.unwrap_or(self.client_id);
         let clock = self.clock;
-        self.spawn_command("IC quotes request", async move {
-            let (mut ticks, failure) = match history.quote_ticks(&symbol, start, end).await {
+        self.spawn_command("quotes request", async move {
+            let (mut ticks, failure) = match ctrader.quote_ticks(&symbol, start, end).await {
                 Ok(fetched) => (fetched.quotes, fetched.failure),
                 Err(e) => {
-                    log::warn!("IC quotes of {id} not fetched: {e:#}");
+                    log::warn!("the quotes of {id} not fetched: {e:#}");
                     (Vec::new(), Some(e))
                 }
             };
@@ -436,7 +444,7 @@ fn lock(quotes: &Mutex<SpotQuotes>) -> MutexGuard<'_, SpotQuotes> {
 /// Sends `event` to the node; a closed channel means the node is stopping.
 fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
     if let Err(e) = sender.send(event) {
-        log::warn!("IC data event not sent: {e}");
+        log::warn!("data event not sent: {e}");
     }
 }
 
@@ -465,7 +473,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::venues::ic::{
+    use crate::{
         common::messages::{
             Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes,
             ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
@@ -476,15 +484,15 @@ mod tests {
         },
         session::ticks::Tick,
         testing::{
-            self, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
+            self, ASSET_LIST_RES, Action, CLIENT, Received, SPOT_EVENT_EURUSD_FIRST,
             SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            TRADER_RES, UNSUBSCRIBE_SPOTS_RES, accept_auth, dynamic_leverage_answer, replay, reply,
-            tick_answer,
+            TRADER_RES, UNSUBSCRIBE_SPOTS_RES, VENUE, accept_auth, dynamic_leverage_answer, replay,
+            reply, tick_answer,
         },
     };
 
-    const XAUUSD: &str = "XAUUSD.ICMARKETS";
-    const EURUSD: &str = "EURUSD.ICMARKETS";
+    const XAUUSD: &str = "XAUUSD.ACMEFX";
+    const EURUSD: &str = "EURUSD.ACMEFX";
 
     /// cTrader's XAUUSD and EURUSD symbol ids on the server the fixtures
     /// come from.
@@ -564,7 +572,7 @@ mod tests {
     /// directory.
     async fn connected(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
-    ) -> (IcDataClient, Events, Received, tempfile::TempDir) {
+    ) -> (CTraderDataClient, Events, Received, tempfile::TempDir) {
         connected_at(script, get_atomic_clock_realtime()).await
     }
 
@@ -572,14 +580,15 @@ mod tests {
     async fn connected_at(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
         clock: &'static AtomicTime,
-    ) -> (IcDataClient, Events, Received, tempfile::TempDir) {
+    ) -> (CTraderDataClient, Events, Received, tempfile::TempDir) {
         let (url, received) = testing::start(script);
         let (tx, events) = mpsc::unbounded_channel();
         replace_data_event_sender(tx);
         let (credential, tokens) = testing::credential();
-        let mut client = IcDataClient::with_endpoint(
-            ClientId::from("ICMARKETS"),
+        let mut client = CTraderDataClient::with_endpoint(
+            ClientId::from(CLIENT),
             url,
+            Venue::new(VENUE),
             credential,
             vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
             clock,
@@ -639,7 +648,7 @@ mod tests {
         SubscribeQuotes::new(
             InstrumentId::from(id),
             None,
-            Some(Venue::new(IC_VENUE)),
+            Some(Venue::new(VENUE)),
             UUID4::new(),
             UnixNanos::default(),
             None,
@@ -659,7 +668,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connecting_sends_the_instruments_to_the_node_on_icmarkets() {
+    async fn connecting_sends_the_instruments_to_the_node_on_the_venue() {
         let (mut client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
 
         let mut ids = Vec::new();
@@ -675,7 +684,8 @@ mod tests {
             [InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)]
         );
         assert!(client.is_connected());
-        assert_eq!(client.venue(), Some(Venue::new("ICMARKETS")));
+        assert_eq!(client.venue(), Some(Venue::new(VENUE)));
+        assert_eq!(client.client_id(), ClientId::from(CLIENT));
         client.disconnect().await.unwrap();
         assert!(client.is_disconnected());
     }
@@ -718,7 +728,7 @@ mod tests {
             .unsubscribe_quotes(&UnsubscribeQuotes::new(
                 InstrumentId::from(XAUUSD),
                 None,
-                Some(Venue::new(IC_VENUE)),
+                Some(Venue::new(VENUE)),
                 UUID4::new(),
                 UnixNanos::default(),
                 None,
@@ -895,7 +905,7 @@ mod tests {
     /// A data engine, its clock at `now`, with a writable catalog in `dir`
     /// and `client` registered, routed by its venue, on a message bus of
     /// this thread.
-    fn engine_with(client: IcDataClient, dir: &std::path::Path, now: &str) -> DataEngine {
+    fn engine_with(client: CTraderDataClient, dir: &std::path::Path, now: &str) -> DataEngine {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
             .register_message_bus();
         let mut clock = VirtualClock::new();
@@ -907,8 +917,8 @@ mod tests {
         );
         let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
         engine.register_catalog(Box::new(catalog), None);
-        let client_id = ClientId::from("ICMARKETS");
-        let venue = Venue::new(IC_VENUE);
+        let client_id = ClientId::from(CLIENT);
+        let venue = Venue::new(VENUE);
         engine.register_client(
             DataClientAdapter::new(client_id, Some(venue), false, false, Box::new(client)),
             Some(venue),
@@ -951,7 +961,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_answer_written_back_serves_a_later_request_which_asks_ic_for_the_gap_only() {
+    async fn an_answer_written_back_serves_a_later_request_which_asks_the_broker_for_the_gap_only()
+    {
         let s = at("2026-10-01T00:00:00Z").as_millisecond();
         let (minute, hour) = (60_000, 3_600_000);
         let bids = vec![
@@ -970,7 +981,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
 
-        // An empty catalog: IC answers the whole window, written back.
+        // An empty catalog: the broker answers the whole window, written
+        // back.
         let first = write_back_request(
             &mut engine,
             &mut events,
@@ -997,7 +1009,8 @@ mod tests {
                 quote(s + hour, "4000.30", "4000.60"),
             ]
         );
-        // The catalog's quotes of [00:30, 01:00], then IC's after 01:00.
+        // The catalog's quotes of [00:30, 01:00], then the broker's after
+        // 01:00.
         assert_eq!(
             prices(&second),
             [
@@ -1007,7 +1020,7 @@ mod tests {
                 quote(s + hour + 30 * minute + 1_000, "4000.40", "4000.70"),
             ]
         );
-        // Both answers of IC written back, each once.
+        // Both answers of the broker written back, each once.
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let stored = catalog
             .quote_ticks(Some(vec![XAUUSD.to_string()]), None, None)
@@ -1054,7 +1067,7 @@ mod tests {
         let envelope = next_envelope(&mut events).await;
         engine.response_envelope(envelope.clone());
         // Asked again: the stored definition is older than the window, so
-        // IC is asked again, and its answer not written twice.
+        // The broker is asked again, and its answer not written twice.
         ask(&mut engine);
         engine.response_envelope(next_envelope(&mut events).await);
 
@@ -1170,15 +1183,16 @@ mod tests {
         let (tx, _events) = mpsc::unbounded_channel();
         replace_data_event_sender(tx);
         let (credential, _dir) = testing::credential();
-        let mut client = IcDataClient::with_endpoint(
-            ClientId::from("ICMARKETS"),
+        let mut client = CTraderDataClient::with_endpoint(
+            ClientId::from(CLIENT),
             url,
+            Venue::new(VENUE),
             credential.clone(),
             vec![InstrumentId::from(XAUUSD)],
             get_atomic_clock_realtime(),
         );
         client.connect().await.unwrap();
-        client.session().unwrap().history.renew_token();
+        client.session().unwrap().ctrader.renew_token();
         testing::wait_until(&received, |frames| {
             frames
                 .iter()
@@ -1216,10 +1230,10 @@ mod tests {
         let (mut client, _events, _, _tokens) = connected(peer(vec![], vec![])).await;
 
         let err = client
-            .subscribe_quotes(subscribe("GBPUSD.ICMARKETS"))
+            .subscribe_quotes(subscribe("GBPUSD.ACMEFX"))
             .unwrap_err();
 
-        assert!(format!("{err:#}").contains("GBPUSD.ICMARKETS"), "{err:#}");
+        assert!(format!("{err:#}").contains("GBPUSD.ACMEFX"), "{err:#}");
         client.disconnect().await.unwrap();
     }
 }

@@ -19,20 +19,17 @@
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
+use ctrader::{CTraderExecutionClientFactory, CTraderSession};
 use helix_trader::{
-    catalog::{NodeClient, NodeFill, missing},
+    catalog::{NodeFill, missing},
     strategy::{DataRequirements, TickSeries},
-    venues::ic::{
-        self, IcConnection, IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig,
-        IcExecutionClientFactory, IcHistory,
-    },
+    venues::ic,
 };
 use jiff::Timestamp;
 use nautilus_common::{
     cache::Cache, clock::VirtualClock, factories::ExecutionClientFactory,
     live::runner::replace_exec_event_sender, messages::ExecutionEvent,
 };
-use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     accounts::AccountAny,
     data::{NautilusDataType, QuoteTick},
@@ -77,10 +74,12 @@ async fn the_demo_account_loads_gold_and_euro_dollar_as_currency_pairs() {
         InstrumentId::from("XAUUSD.ICMARKETS"),
         InstrumentId::from("EURUSD.ICMARKETS"),
     ];
-    let history = IcHistory::connect().await.unwrap();
+    let session = CTraderSession::connect(&ic::connection().unwrap())
+        .await
+        .unwrap();
 
-    let instruments = history.instruments(&ids).await;
-    history.disconnect().await;
+    let instruments = session.instruments(&ids).await;
+    session.disconnect().await;
 
     let instruments = instruments.unwrap();
     let [
@@ -134,16 +133,8 @@ pub(crate) async fn fill_quotes_through_node(
     };
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing(&catalog, &requirements.slices(start, end))?;
-    let client = NodeClient {
-        factory: Box::new(IcDataClientFactory),
-        config: Box::new(IcDataClientConfig {
-            connection: IcConnection::from_env()?,
-            instrument_ids: vec![instrument_id],
-        }),
-        routing: RoutingConfig::default(),
-    };
     let mut node = NodeFill::new();
-    node.add(client, &requests, ic::period);
+    node.add(ic::node_client(vec![instrument_id])?, &requests, ic::period);
     node.run(dir).await
 }
 
@@ -224,17 +215,18 @@ async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() 
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
     let cache = Rc::new(RefCell::new(Cache::default()));
-    let config = IcExecutionClientConfig {
-        connection: IcConnection::from_env().unwrap(),
-        instrument_ids: vec![
+    let config = ic::execution_config(
+        ic::connection().unwrap(),
+        vec![
             InstrumentId::from("XAUUSD.ICMARKETS"),
             InstrumentId::from("EURUSD.ICMARKETS"),
         ],
-    };
-    let mut client = IcExecutionClientFactory
+    );
+    let factory = CTraderExecutionClientFactory::new(&config);
+    let mut client = factory
         .create(
             TraderId::from("HELIX-001"),
-            "ICMARKETS",
+            factory.name(),
             &config,
             cache.clone().into(),
             Rc::new(RefCell::new(VirtualClock::new())),

@@ -38,7 +38,7 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use super::orders::{Leg, protection_id};
-use crate::venues::ic::common::messages::{
+use crate::common::messages::{
     ProtoOaDeal, ProtoOaDealStatus, ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod,
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
 };
@@ -58,7 +58,9 @@ impl Reports<'_> {
     fn instrument(&self, symbol_id: i64, what: &str) -> Option<&InstrumentAny> {
         let instrument = self.instruments.get(&symbol_id);
         if instrument.is_none() {
-            log::debug!("IC {what} of symbol {symbol_id} skipped: not an instrument of the run");
+            log::debug!(
+                "cTrader {what} of symbol {symbol_id} skipped: not an instrument of the run"
+            );
         }
         instrument
     }
@@ -76,7 +78,7 @@ impl Reports<'_> {
         let Some(instrument) = self.open_instrument(position) else {
             return Ok(None);
         };
-        let what = || format!("IC position {}", position.position_id);
+        let what = || format!("cTrader position {}", position.position_id);
         let side = match side(trade.trade_side()) {
             OrderSide::Buy => PositionSide::Long,
             _ => PositionSide::Short,
@@ -114,7 +116,7 @@ impl Reports<'_> {
         let Some(instrument) = self.open_instrument(position) else {
             return Ok(Vec::new());
         };
-        let what = || format!("IC position {}", position.position_id);
+        let what = || format!("cTrader position {}", position.position_id);
         let closing = match side(trade.trade_side()) {
             OrderSide::Buy => OrderSide::Sell,
             _ => OrderSide::Buy,
@@ -184,7 +186,7 @@ impl Reports<'_> {
         let Some(instrument) = self.instrument(trade.symbol_id, "protection") else {
             return Ok(None);
         };
-        let what = || format!("IC protection order {}", order.order_id);
+        let what = || format!("cTrader protection order {}", order.order_id);
         let quantity = quantity(instrument, trade.volume).with_context(what)?;
         let filled = if status == OrderStatus::Filled {
             quantity
@@ -253,7 +255,7 @@ impl Reports<'_> {
     fn open_instrument(&self, position: &ProtoOaPosition) -> Option<&InstrumentAny> {
         if position.position_status() != ProtoOaPositionStatus::PositionStatusOpen {
             log::debug!(
-                "IC position {} skipped: {}",
+                "cTrader position {} skipped: {}",
                 position.position_id,
                 position.position_status().as_str_name()
             );
@@ -262,9 +264,10 @@ impl Reports<'_> {
         self.instrument(position.trade_data.symbol_id, "position")
     }
 
-    /// The report of `order`, which IC holds nowhere: its request never
-    /// reached IC, so it is rejected for `reason`. Its venue order id is
-    /// its own, else its client order id, IC having given it none.
+    /// The report of `order`, which the broker holds nowhere: its request
+    /// never reached the broker, so it is rejected for `reason`. Its venue
+    /// order id is its own, else its client order id, the broker having
+    /// given it none.
     pub(super) fn absent(&self, order: &OrderAny, reason: &str) -> OrderStatusReport {
         let venue = order
             .venue_order_id()
@@ -300,7 +303,7 @@ impl Reports<'_> {
         let Some(instrument) = self.instrument(trade.symbol_id, "order") else {
             return Ok(None);
         };
-        let what = || format!("IC order {}", order.order_id);
+        let what = || format!("cTrader order {}", order.order_id);
         let quantity = quantity(instrument, trade.volume).with_context(what)?;
         let filled = match order.executed_volume.filter(|v| *v > 0) {
             Some(volume) => self::quantity(instrument, volume).with_context(what)?,
@@ -403,7 +406,7 @@ impl Reports<'_> {
         let Some(instrument) = self.instrument(deal.symbol_id, "deal") else {
             return Ok(None);
         };
-        let what = || format!("IC deal {}", deal.deal_id);
+        let what = || format!("cTrader deal {}", deal.deal_id);
         let execution = deal
             .execution_price
             .context("a filled deal without an execution price")

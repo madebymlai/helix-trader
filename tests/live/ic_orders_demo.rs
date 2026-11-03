@@ -38,10 +38,11 @@ use std::{
     time::Duration,
 };
 
+use ctrader::CTraderExecutionClientFactory;
 use helix_trader::{
     live::Live,
     strategy::{DataRequirements, warmup::Warmup},
-    venues::ic::{IcConnection, IcExecutionClientConfig, IcExecutionClientFactory},
+    venues::ic,
 };
 use jiff::SignedDuration;
 use nautilus_common::{
@@ -364,14 +365,12 @@ async fn open_at_ic() -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
     let cache = Rc::new(RefCell::new(Cache::default()));
-    let config = IcExecutionClientConfig {
-        connection: IcConnection::from_env().unwrap(),
-        instrument_ids: vec![InstrumentId::from(XAUUSD)],
-    };
-    let mut client = IcExecutionClientFactory
+    let config = ic::execution_config(ic::connection().unwrap(), vec![InstrumentId::from(XAUUSD)]);
+    let factory = CTraderExecutionClientFactory::new(&config);
+    let mut client = factory
         .create(
             TraderId::from(TRADER),
-            "ICMARKETS",
+            factory.name(),
             &config,
             cache.clone().into(),
             Rc::new(RefCell::new(VirtualClock::new())),

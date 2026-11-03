@@ -65,13 +65,13 @@ use nautilus_network::{
 use tokio::sync::{mpsc, oneshot};
 use ustr::Ustr;
 
-use self::handler::{HandlerCommand, IcWsHandler, LOCK_RETRY};
+use self::handler::{CTraderWsHandler, HandlerCommand, LOCK_RETRY};
 use super::{
     common::messages::{
-        IcError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent,
+        CTraderError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent,
         is_historical, open,
     },
-    config::IcCredential,
+    config::CTraderCredential,
 };
 
 /// cTrader's heartbeat interval.
@@ -150,17 +150,17 @@ pub(crate) enum TradeMessage {
     Execution(ProtoOaExecutionEvent),
     /// An order the server refused.
     OrderError(ProtoOaOrderErrorEvent),
-    /// cTrader's error answer to a trade request (`IcError::Venue`).
-    Refused(IcError),
+    /// cTrader's error answer to a trade request (`CTraderError::Venue`).
+    Refused(CTraderError),
 }
 
 /// Whether a trade request was sent: `Ok` once its frame is written, an
 /// error if it never was (the session failed, the connection closed, or
 /// the frame could not be written).
-pub(crate) type TradeSent = oneshot::Receiver<Result<(), IcError>>;
+pub(crate) type TradeSent = oneshot::Receiver<Result<(), CTraderError>>;
 
 /// An authenticated cTrader session on one account.
-pub(super) struct IcWebSocketClient {
+pub(super) struct CTraderWebSocketClient {
     cmd_tx: mpsc::UnboundedSender<HandlerCommand>,
     /// The handler task, explicitly singular: `disconnect` joins it.
     handler: TaskSlot<()>,
@@ -172,19 +172,19 @@ pub(super) struct IcWebSocketClient {
     historical: RateLimiter<Ustr, MonotonicClock>,
 }
 
-impl std::fmt::Debug for IcWebSocketClient {
+impl std::fmt::Debug for CTraderWebSocketClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IcWebSocketClient")
+        f.debug_struct("CTraderWebSocketClient")
             .field("confirmed_spots", &self.subscriptions.len())
             .finish_non_exhaustive()
     }
 }
 
-impl IcWebSocketClient {
+impl CTraderWebSocketClient {
     /// Connects to `url`, then authenticates the application and the
-    /// account of `credential` with the token file's pair (seeded from
-    /// `.env` the first time, renewed first if due), sending the heartbeat
-    /// every `heartbeat`; with the spot events of the symbols
+    /// account of `credential` with the token file's pair (seeded from the
+    /// credential the first time, renewed first if due), sending the
+    /// heartbeat every `heartbeat`; with the spot events of the symbols
     /// `subscribe_spots` subscribes.
     ///
     /// # Errors
@@ -195,12 +195,12 @@ impl IcWebSocketClient {
     /// or does not answer within `AUTH_TIMEOUT`.
     pub(super) async fn connect(
         url: &str,
-        credential: IcCredential,
+        credential: CTraderCredential,
         heartbeat: Duration,
     ) -> anyhow::Result<(Self, SpotEvents)> {
         // While another session renews the pair, its new one is awaited.
         let tokens = loop {
-            if let Some(tokens) = credential.tokens.try_load()? {
+            if let Some(tokens) = credential.tokens().try_load()? {
                 break tokens;
             }
             time::sleep(LOCK_RETRY).await;
@@ -240,7 +240,7 @@ impl IcWebSocketClient {
             .ok()
             .context("the cTrader handler is gone")?;
         let (spot_tx, spot_rx) = mpsc::unbounded_channel();
-        let handler = IcWsHandler::new(
+        let handler = CTraderWsHandler::new(
             credential,
             tokens,
             auth.clone(),
@@ -284,7 +284,7 @@ impl IcWebSocketClient {
     pub(super) async fn request<Req: Payload, Res: Payload>(
         &self,
         request: &Req,
-    ) -> Result<Res, IcError> {
+    ) -> Result<Res, CTraderError> {
         let answered = async {
             if is_historical(Req::TYPE) {
                 self.historical_slot().await;
@@ -296,12 +296,12 @@ impl IcWebSocketClient {
                     payload: request.encode_to_vec(),
                     reply,
                 })
-                .map_err(|_| IcError::ConnectionLost)?;
-            response.await.map_err(|_| IcError::ConnectionLost)?
+                .map_err(|_| CTraderError::ConnectionLost)?;
+            response.await.map_err(|_| CTraderError::ConnectionLost)?
         };
         let envelope = time::timeout(REQUEST_TIMEOUT, answered)
             .await
-            .map_err(|_| IcError::Timeout)??;
+            .map_err(|_| CTraderError::Timeout)??;
         open(&envelope)
     }
 
@@ -327,10 +327,10 @@ impl IcWebSocketClient {
     /// # Errors
     ///
     /// Returns an error if the connection is closed.
-    pub(super) fn subscribe_spots(&self, symbol_id: i64) -> Result<(), IcError> {
+    pub(super) fn subscribe_spots(&self, symbol_id: i64) -> Result<(), CTraderError> {
         self.cmd_tx
             .send(HandlerCommand::SubscribeSpots(symbol_id))
-            .map_err(|_| IcError::ConnectionLost)
+            .map_err(|_| CTraderError::ConnectionLost)
     }
 
     /// Ends the spot subscription of `symbol_id`, if any. cTrader may
@@ -339,10 +339,10 @@ impl IcWebSocketClient {
     /// # Errors
     ///
     /// Returns an error if the connection is closed.
-    pub(super) fn unsubscribe_spots(&self, symbol_id: i64) -> Result<(), IcError> {
+    pub(super) fn unsubscribe_spots(&self, symbol_id: i64) -> Result<(), CTraderError> {
         self.cmd_tx
             .send(HandlerCommand::UnsubscribeSpots(symbol_id))
-            .map_err(|_| IcError::ConnectionLost)
+            .map_err(|_| CTraderError::ConnectionLost)
     }
 
     /// Sends `request`, a trade request, under `client_msg_id`, once the
@@ -359,7 +359,7 @@ impl IcWebSocketClient {
         if let Err(mpsc::error::SendError(HandlerCommand::Trade { sent, .. })) =
             self.cmd_tx.send(command)
         {
-            let _ = sent.send(Err(IcError::ConnectionLost));
+            let _ = sent.send(Err(CTraderError::ConnectionLost));
         }
         sending
     }
@@ -370,17 +370,17 @@ impl IcWebSocketClient {
     /// # Errors
     ///
     /// Returns an error if the connection is closed.
-    pub(super) fn trade_events(&self) -> Result<TradeEvents, IcError> {
+    pub(super) fn trade_events(&self) -> Result<TradeEvents, CTraderError> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.cmd_tx
             .send(HandlerCommand::TradeEvents(tx))
-            .map_err(|_| IcError::ConnectionLost)?;
+            .map_err(|_| CTraderError::ConnectionLost)?;
         Ok(rx)
     }
 
     /// Renews the access token now, as on schedule, if the session is
     /// ready.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "demo-test"))]
     pub(super) fn renew_token(&self) {
         let _ = self.cmd_tx.send(HandlerCommand::RenewToken);
     }
@@ -418,7 +418,7 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::venues::ic::{
+    use crate::{
         common::messages::{
             ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq, ProtoOaClientDisconnectEvent,
@@ -442,10 +442,10 @@ mod tests {
     /// A session whose spot events nobody reads.
     async fn connect(
         url: &str,
-        credential: IcCredential,
+        credential: CTraderCredential,
         heartbeat: Duration,
-    ) -> anyhow::Result<IcWebSocketClient> {
-        let (client, _) = IcWebSocketClient::connect(url, credential, heartbeat).await?;
+    ) -> anyhow::Result<CTraderWebSocketClient> {
+        let (client, _) = CTraderWebSocketClient::connect(url, credential, heartbeat).await?;
         Ok(client)
     }
 
@@ -621,7 +621,13 @@ mod tests {
             ),
             "{err}"
         );
-        assert!(err.contains("Playground"), "{err}");
+        assert!(
+            err.contains(
+                "Playground of the app on openapi.ctrader.com and set ACME_ACCESS_TOKEN and \
+                 ACME_REFRESH_TOKEN in acme.env (see the ACME guide)"
+            ),
+            "{err}"
+        );
         for secret in [
             ACCESS_TOKEN,
             REFRESH_TOKEN,
@@ -652,8 +658,8 @@ mod tests {
 
         assert!(
             format!("{err:#}").contains(
-                "the application authentication (CH_CLIENT_AUTH_FAILURE): check IC_CLIENT_ID \
-                 and IC_CLIENT_SECRET"
+                "the application authentication (CH_CLIENT_AUTH_FAILURE): check ACME_CLIENT_ID \
+                 and ACME_CLIENT_SECRET"
             ),
             "{err:#}"
         );
@@ -684,7 +690,8 @@ mod tests {
         let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
 
         assert!(
-            format!("{err:#}").contains("cTrader authenticated another account than IC_ACCOUNT_ID"),
+            format!("{err:#}")
+                .contains("cTrader authenticated another account than ACME_ACCOUNT_ID"),
             "{err:#}"
         );
     }
@@ -769,9 +776,9 @@ mod tests {
 
     /// How long seven requests asked at once take, at least, held to
     /// cTrader's 5 historical requests a second: six gaps, each wider than
-    /// 200 ms (one every 200 ms was refused on the demo, `ic/README.md`,
-    /// "Rate"), so above 1.2 s, with a margin for the round trips at that
-    /// pace.
+    /// 200 ms (one every 200 ms was refused on the demo, see
+    /// `HISTORICAL_PERIOD`), so above 1.2 s, with a margin for the round
+    /// trips at that pace.
     const SEVEN_HISTORICAL: Duration = Duration::from_millis(1250);
 
     /// cTrader allows 5 historical requests a second per connection: seven
@@ -797,7 +804,10 @@ mod tests {
 
         let elapsed = start.elapsed();
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
-        assert!(elapsed >= SEVEN_HISTORICAL, "7 tick requests in {elapsed:?}");
+        assert!(
+            elapsed >= SEVEN_HISTORICAL,
+            "7 tick requests in {elapsed:?}"
+        );
         client.disconnect().await;
     }
 
@@ -820,7 +830,10 @@ mod tests {
 
         let elapsed = start.elapsed();
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
-        assert!(elapsed < SEVEN_HISTORICAL, "7 symbol requests in {elapsed:?}");
+        assert!(
+            elapsed < SEVEN_HISTORICAL,
+            "7 symbol requests in {elapsed:?}"
+        );
         client.disconnect().await;
     }
 
@@ -867,7 +880,7 @@ mod tests {
     /// trade request asked meanwhile reaches cTrader before it.
     #[tokio::test]
     async fn a_trade_request_does_not_wait_behind_a_tick_request_held_at_the_limit() {
-        use crate::venues::ic::common::messages::ProtoOaNewOrderReq;
+        use crate::common::messages::ProtoOaNewOrderReq;
         let (url, received) = testing::start(|_, request| {
             if let Some(actions) = accept_auth(request) {
                 return actions;
@@ -919,9 +932,7 @@ mod tests {
                 reason: Some("Server maintenance".to_owned()),
                 ..Default::default()
             };
-            vec![Action::Send(crate::venues::ic::common::messages::frame(
-                &event, None,
-            ))]
+            vec![Action::Send(crate::common::messages::frame(&event, None))]
         })
     }
 
@@ -938,7 +949,7 @@ mod tests {
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(2))
             .await;
 
-        assert_eq!(in_flight, Err(IcError::ConnectionLost));
+        assert_eq!(in_flight, Err(CTraderError::ConnectionLost));
         assert_eq!(next, Ok(symbols(&[2])));
         assert_eq!(
             payload_types(&received, 1),
@@ -956,7 +967,7 @@ mod tests {
     /// request's, as on the demo (2026-10-26).
     #[tokio::test]
     async fn a_trade_request_goes_under_its_id_and_its_answers_come_as_trade_events() {
-        use crate::venues::ic::common::messages::{
+        use crate::common::messages::{
             ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaNewOrderReq, ProtoOaOrderErrorEvent,
         };
         let accepted = ProtoOaExecutionEvent {
@@ -974,7 +985,7 @@ mod tests {
             accept_auth(request).unwrap_or_else(|| {
                 vec![
                     reply(request, &answer),
-                    Action::Send(crate::venues::ic::common::messages::frame(&other, None)),
+                    Action::Send(crate::common::messages::frame(&other, None)),
                 ]
             })
         });
@@ -1034,7 +1045,7 @@ mod tests {
 
         let sent = client
             .trade(
-                &crate::venues::ic::common::messages::ProtoOaCancelOrderReq::default(),
+                &crate::common::messages::ProtoOaCancelOrderReq::default(),
                 "X:O-1".to_owned(),
             )
             .await;
@@ -1043,8 +1054,7 @@ mod tests {
         testing::wait_until(&received, |frames| {
             frames.iter().any(|(c, f)| {
                 *c == 1
-                    && f.payload_type
-                        == crate::venues::ic::common::messages::ProtoOaCancelOrderReq::TYPE
+                    && f.payload_type == crate::common::messages::ProtoOaCancelOrderReq::TYPE
                     && f.client_msg_id.as_deref() == Some("X:O-1")
             })
         })
@@ -1059,7 +1069,7 @@ mod tests {
     async fn a_trade_request_during_a_reconnect_goes_out_once_authenticated_again() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        use crate::venues::ic::common::messages::ProtoOaNewOrderReq;
+        use crate::common::messages::ProtoOaNewOrderReq;
         let reconnecting = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&reconnecting);
         let (url, received) = testing::start_delayed(
@@ -1105,7 +1115,7 @@ mod tests {
             (lost.await, sent)
         };
 
-        assert_eq!(lost, Err(IcError::ConnectionLost));
+        assert_eq!(lost, Err(CTraderError::ConnectionLost));
         assert_eq!(sent, Ok(Ok(())));
         testing::wait_until(&received, |frames| {
             frames
@@ -1153,10 +1163,7 @@ mod tests {
                 let asked: ProtoOaSubscribeSpotsReq = decode(request);
                 let mut actions = vec![reply(request, &answered(asked.ctid_trader_account_id))];
                 actions.extend(asked.symbol_id.iter().map(|&id| {
-                    Action::Send(crate::venues::ic::common::messages::frame(
-                        &spot_event(id),
-                        None,
-                    ))
+                    Action::Send(crate::common::messages::frame(&spot_event(id), None))
                 }));
                 actions
             }
@@ -1194,7 +1201,7 @@ mod tests {
     async fn a_spot_subscription_asks_for_timestamps_and_its_spot_events_come_through() {
         let (url, received) = testing::start(spots_peer);
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -1213,7 +1220,7 @@ mod tests {
     async fn a_symbol_subscribed_twice_is_asked_for_once() {
         let (url, received) = testing::start(spots_peer);
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -1254,7 +1261,7 @@ mod tests {
             actions
         });
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -1288,7 +1295,7 @@ mod tests {
     async fn after_a_reconnect_the_spot_subscriptions_are_sent_again() {
         let (url, received) = testing::start(closing_peer(ProtoOaSubscribeSpotsReq::TYPE));
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
 
@@ -1314,7 +1321,7 @@ mod tests {
     async fn an_unsubscribed_symbol_is_not_subscribed_again_after_a_reconnect() {
         let (url, received) = testing::start(closing_peer(ProtoOaUnsubscribeSpotsReq::TYPE));
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
         client.subscribe_spots(41).unwrap();
@@ -1446,7 +1453,7 @@ mod tests {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = credential_expiring(None);
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
         let before = Timestamp::now();
 
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
@@ -1516,7 +1523,7 @@ mod tests {
                 && renewed.lock().unwrap().renewals() == 1;
             if let Some(request) = held.lock().unwrap().take_if(|_| reauthenticated) {
                 actions.extend(symbols_peer(connection, &request));
-                actions.push(Action::Send(crate::venues::ic::common::messages::frame(
+                actions.push(Action::Send(crate::common::messages::frame(
                     &spot_event(41),
                     None,
                 )));
@@ -1524,16 +1531,15 @@ mod tests {
             actions
         });
         let (credential, _dir) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
         client.subscribe_spots(41).unwrap();
         next_spot(&mut spots).await;
         let request = symbol_request(3);
 
-        let (in_flight, ()) = tokio::join!(
-            client.request::<_, ProtoOaSymbolByIdRes>(&request),
-            async {
+        let (in_flight, ()) =
+            tokio::join!(client.request::<_, ProtoOaSymbolByIdRes>(&request), async {
                 testing::wait_until(&received, |frames| {
                     frames
                         .iter()
@@ -1541,8 +1547,7 @@ mod tests {
                 })
                 .await;
                 client.renew_token();
-            },
-        );
+            },);
 
         assert_eq!(in_flight, Ok(symbols(&[3])));
         assert_eq!(next_spot(&mut spots).await, spot_event(41));
@@ -1563,7 +1568,7 @@ mod tests {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = credential_expiring(due_after(Duration::from_secs(1)));
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         testing::wait_until(&received, |_| {
@@ -1586,7 +1591,7 @@ mod tests {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = testing::credential();
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         venue.lock().unwrap().expire();
 
@@ -1641,7 +1646,7 @@ mod tests {
         let venue = TokenVenue::refusing();
         let (url, _) = testing::start(venue_peer(&venue));
         let (credential, _dir) = credential_expiring(None);
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
 
         let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
 
@@ -1650,7 +1655,13 @@ mod tests {
             err.contains("cTrader refused to renew the access token (CH_ACCESS_TOKEN_INVALID)"),
             "{err}"
         );
-        assert!(err.contains("Playground"), "{err}");
+        assert!(
+            err.contains(
+                "Playground of the app on openapi.ctrader.com and set ACME_ACCESS_TOKEN and \
+                 ACME_REFRESH_TOKEN in acme.env (see the ACME guide)"
+            ),
+            "{err}"
+        );
         assert!(
             !err.contains(ACCESS_TOKEN) && !err.contains(REFRESH_TOKEN),
             "{err}"
@@ -1682,7 +1693,7 @@ mod tests {
         let (one_url, one) = testing::start(slow_renewal(slow, venue_peer(&venue)));
         let (other_url, other) = testing::start(slow_renewal(slow, venue_peer(&venue)));
         let (credential, _dir) = credential_expiring(None);
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
 
         let (one_client, other_client) = tokio::join!(
             connect(&one_url, credential.clone(), SLOW_HEARTBEAT),
@@ -1787,7 +1798,7 @@ mod tests {
             ctid_trader_account_id: ACCOUNT_ID,
             ..Default::default()
         };
-        Action::Send(crate::venues::ic::common::messages::frame(&event, None))
+        Action::Send(crate::common::messages::frame(&event, None))
     }
 
     /// Synthetic: the renewal's answer as OpenApiMessages.proto defines it.
@@ -1828,7 +1839,7 @@ mod tests {
             vec![account_dropped(), reply(request, &renewal_answer())]
         }));
         let (credential, _dir) = testing::credential();
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         client.renew_token();
@@ -1847,13 +1858,13 @@ mod tests {
     #[tokio::test]
     async fn a_renewal_answer_without_its_client_msg_id_is_saved_and_used() {
         let (url, received) = testing::start(renewing_peer(|_| {
-            vec![Action::Send(crate::venues::ic::common::messages::frame(
+            vec![Action::Send(crate::common::messages::frame(
                 &renewal_answer(),
                 None,
             ))]
         }));
         let (credential, _dir) = testing::credential();
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
         client.renew_token();
@@ -1870,7 +1881,7 @@ mod tests {
             vec![reply(request, &renewal_answer())]
         }));
         let (credential, _dir) = testing::credential();
-        let tokens = credential.tokens.clone();
+        let tokens = credential.tokens();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
         client.renew_token();
         testing::wait_until(&received, |frames| {
@@ -1922,7 +1933,7 @@ mod tests {
         let (url, received) =
             testing::start(slow_renewal(Duration::from_millis(300), venue_peer(&venue)));
         let (credential, _dir) = testing::credential();
-        let (client, mut spots) = IcWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
             .await
             .unwrap();
         client.subscribe_spots(41).unwrap();

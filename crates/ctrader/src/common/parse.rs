@@ -1,9 +1,10 @@
-//! IC's symbols as Nautilus instruments, and their identity.
+//! The broker's symbols as Nautilus instruments, and their identity.
 //!
-//! An IC symbol is `XAUUSD.ICMARKETS`: the symbol name cTrader lists
-//! (`ProtoOALightSymbol.symbolName`) on venue `ICMARKETS`. cTrader's
-//! `symbolId` differs between servers, so it is looked up by name on each
-//! connection, never stored.
+//! A symbol's instrument is `XAUUSD.<venue>`: the symbol name cTrader
+//! lists (`ProtoOALightSymbol.symbolName`) on the broker's venue, as
+//! configured (`CTraderConnection::venue`). cTrader's `symbolId` differs
+//! between servers, so it is looked up by name on each connection, never
+//! stored.
 //!
 //! A symbol whose base and quote assets are both currencies Nautilus knows
 //! (forex, and metals such as XAU) becomes a `CurrencyPair`:
@@ -14,8 +15,9 @@
 //!   unit, so `stepVolume` / 100 is the size increment (and its decimals
 //!   the size precision), `minVolume`, `maxVolume` and `lotSize` / 100 the
 //!   minimum, maximum and lot (XAUUSD: 100 oz a lot);
-//! - margins IC's own (`margin`): initial and maintenance 1 / the leverage
-//!   IC applies to the symbol on the account, the lower of the account's
+//! - margins the broker's own (`margin`): initial and maintenance 1 / the
+//!   leverage the broker applies to the symbol on the account, the lower of
+//!   the account's
 //!   (`ProtoOATrader.leverageInCents`) and the symbol's first dynamic
 //!   leverage tier (`ProtoOASymbol.leverageId`), as Nautilus' AX adapter
 //!   takes its venue's margin rates (`adapters/architect_ax/src/http/parse.rs`);
@@ -25,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     identifiers::{InstrumentId, Symbol, Venue},
@@ -35,54 +37,55 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use super::messages::{ProtoOaAsset, ProtoOaDynamicLeverage, ProtoOaLightSymbol, ProtoOaSymbol};
-use crate::venues::HistorySource;
 
-/// The venue of IC's instruments.
-pub(crate) const IC_VENUE: &str = "ICMARKETS";
-
-/// The cTrader symbol name of `id`, an IC instrument: its symbol.
+/// The cTrader symbol name of `id`, an instrument of the broker: its
+/// symbol.
 pub(crate) fn symbol_name(id: InstrumentId) -> &'static str {
     id.symbol.inner().as_str()
 }
 
-/// The instrument id of the cTrader symbol `name`.
-pub(crate) fn instrument_id(name: &str) -> anyhow::Result<InstrumentId> {
+/// The instrument id of the cTrader symbol `name` on `venue`.
+pub(crate) fn instrument_id(name: &str, venue: Venue) -> anyhow::Result<InstrumentId> {
     let symbol = Symbol::new_checked(name)
         .with_context(|| format!("the cTrader symbol name {name:?} is no Nautilus symbol"))?;
-    Ok(InstrumentId::new(symbol, Venue::new(IC_VENUE)))
+    Ok(InstrumentId::new(symbol, venue))
 }
 
-/// The margin rate of the symbol `name` on the account, initial and
-/// maintenance alike: 1 / the leverage IC applies to it, the lower of the
-/// account's, `account_leverage` (`ProtoOATrader.leverageInCents`), and
-/// the symbol's dynamic leverage, `symbol_leverage` (its `leverageId`'s),
-/// if it has one (cTrader's help, "Dynamic leverage": "the account leverage
-/// acts as an upper limit"). Both are in cents of a ratio: 3000 is 1:30.
+/// The margin rate of the symbol `name` on the account at the broker of
+/// `venue`, initial and maintenance alike: 1 / the leverage the broker
+/// applies to it, the lower of the account's, `account_leverage`
+/// (`ProtoOATrader.leverageInCents`), and the symbol's dynamic leverage,
+/// `symbol_leverage` (its `leverageId`'s), if it has one (cTrader's help,
+/// "Dynamic leverage": "the account leverage acts as an upper limit").
+/// Both are in cents of a ratio: 3000 is 1:30.
 ///
 /// The symbol's leverage is its first tier's, which covers the smallest
 /// positions. A position whose USD value passes that tier gets the next
-/// tiers' lower leverage on the excess at IC, so IC's margin is then above
-/// this rate's; IC's demo symbols have one tier, which covers every size.
-/// cTrader states no maintenance or stop-out rate of a symbol (the stop-out
-/// level is the broker's, on the account's margin level), so maintenance
-/// is the initial rate.
+/// tiers' lower leverage on the excess, so the broker's margin is then
+/// above this rate's. cTrader states no maintenance or stop-out rate of a
+/// symbol (the stop-out level is the broker's, on the account's margin
+/// level), so maintenance is the initial rate.
 pub(crate) fn margin(
     name: &str,
+    venue: Venue,
     account_leverage: Option<u32>,
     symbol_leverage: Option<&ProtoOaDynamicLeverage>,
 ) -> anyhow::Result<Decimal> {
     let account = account_leverage
         .filter(|cents| *cents > 0)
-        .with_context(|| format!("{name}: IC states no leverage of the account"))?;
+        .with_context(|| format!("{name}: {venue} states no leverage of the account"))?;
     let applied = match symbol_leverage {
         None => i64::from(account),
         Some(leverage) => {
             let tier = leverage.tiers.first().with_context(|| {
-                format!("{name}: IC's leverage {} has no tier", leverage.leverage_id)
+                format!(
+                    "{name}: {venue} leverage {} has no tier",
+                    leverage.leverage_id
+                )
             })?;
             ensure!(
                 tier.leverage > 0,
-                "{name}: IC's leverage {} is not positive",
+                "{name}: {venue} leverage {} is not positive",
                 leverage.leverage_id
             );
             i64::from(account).min(i64::from(tier.leverage))
@@ -91,12 +94,13 @@ pub(crate) fn margin(
     Ok(Decimal::ONE_HUNDRED / Decimal::from(applied))
 }
 
-/// The `CurrencyPair` of the symbol listed as `light`, with the details
-/// `symbol`, at the margin rate `margin` (see `margin`); `assets` name the
-/// asset ids.
+/// The `CurrencyPair` on `venue` of the symbol listed as `light`, with the
+/// details `symbol`, at the margin rate `margin` (see `margin`); `assets`
+/// name the asset ids.
 pub(crate) fn currency_pair(
     light: &ProtoOaLightSymbol,
     symbol: &ProtoOaSymbol,
+    venue: Venue,
     assets: &HashMap<i64, ProtoOaAsset>,
     margin: Decimal,
     ts_init: UnixNanos,
@@ -158,7 +162,7 @@ pub(crate) fn currency_pair(
     let size_increment =
         quantity(Some(step), "stepVolume")?.with_context(|| format!("{name}: no stepVolume"))?;
 
-    let id = instrument_id(name)?;
+    let id = instrument_id(name, venue)?;
     CurrencyPair::builder()
         .instrument_id(id)
         .raw_symbol(id.symbol)
@@ -189,12 +193,9 @@ pub(crate) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAss
     assets.into_iter().map(|a| (a.asset_id, a)).collect()
 }
 
-/// Fails unless `id` is an IC instrument, one whose history IC serves
-/// (`HistorySource`).
-pub(crate) fn ensure_ic(id: InstrumentId) -> anyhow::Result<()> {
-    if HistorySource::of(id) != HistorySource::Ic {
-        bail!("{id} is not on {IC_VENUE}");
-    }
+/// Fails unless `id` is on `venue`, an instrument of the broker.
+pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
+    ensure!(id.venue == venue, "{id} is not on {venue}");
     Ok(())
 }
 
@@ -203,7 +204,7 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::venues::ic::{
+    use crate::{
         common::messages::{
             ProtoOaAssetListRes, ProtoOaDynamicLeverageTier, ProtoOaExpectedMarginRes,
             ProtoOaGetDynamicLeverageByIdRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes,
@@ -211,9 +212,13 @@ mod tests {
         },
         testing::{
             ASSET_LIST_RES, DYNAMIC_LEVERAGE_EURUSD_RES, DYNAMIC_LEVERAGE_XAUUSD_RES,
-            EXPECTED_MARGIN_EURUSD_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES, TRADER_RES,
+            EXPECTED_MARGIN_EURUSD_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES, TRADER_RES, VENUE,
         },
     };
+
+    fn venue() -> Venue {
+        Venue::new(VENUE)
+    }
 
     /// The captured symbols, assets and details (see `testdata/`).
     struct Fixtures {
@@ -246,6 +251,7 @@ mod tests {
         currency_pair(
             light,
             &fixtures.details[&light.symbol_id],
+            venue(),
             &fixtures.assets,
             d("0.05"),
             UnixNanos::from(7),
@@ -272,7 +278,13 @@ mod tests {
 
     #[test]
     fn gold_on_the_demo_takes_the_account_s_1_30_under_its_own_1_200() {
-        let margin = margin("XAUUSD", account_leverage(), Some(&gold_leverage())).unwrap();
+        let margin = margin(
+            "XAUUSD",
+            venue(),
+            account_leverage(),
+            Some(&gold_leverage()),
+        )
+        .unwrap();
 
         assert_eq!(margin, Decimal::ONE / Decimal::from(30));
     }
@@ -283,7 +295,7 @@ mod tests {
         let mut leverage = gold_leverage();
         leverage.tiers[0].leverage = 2_000;
 
-        let margin = margin("XAUUSD", account_leverage(), Some(&leverage)).unwrap();
+        let margin = margin("XAUUSD", venue(), account_leverage(), Some(&leverage)).unwrap();
 
         assert_eq!(margin, d("0.05"));
     }
@@ -297,7 +309,7 @@ mod tests {
             leverage: 2_000,
         });
 
-        let margin = margin("XAUUSD", Some(50_000), Some(&leverage)).unwrap();
+        let margin = margin("XAUUSD", venue(), Some(50_000), Some(&leverage)).unwrap();
 
         assert_eq!(margin, d("0.005"));
     }
@@ -305,7 +317,7 @@ mod tests {
     /// Synthetic: a symbol without a dynamic leverage.
     #[test]
     fn a_symbol_without_a_leverage_of_its_own_takes_the_account_s() {
-        let margin = margin("XAUUSD", Some(2_000), None).unwrap();
+        let margin = margin("XAUUSD", venue(), Some(2_000), None).unwrap();
 
         assert_eq!(margin, d("0.05"));
     }
@@ -317,34 +329,38 @@ mod tests {
         let mut leverage = gold_leverage();
         leverage.tiers.clear();
 
-        let err = margin("XAUUSD", account_leverage(), Some(&leverage)).unwrap_err();
-        assert!(err.to_string().contains("XAUUSD"), "{err}");
-        let err = margin("XAUUSD", None, Some(&gold_leverage())).unwrap_err();
-        assert!(err.to_string().contains("XAUUSD"), "{err}");
+        let err = margin("XAUUSD", venue(), account_leverage(), Some(&leverage)).unwrap_err();
+        assert_eq!(err.to_string(), "XAUUSD: ACMEFX leverage 52543 has no tier");
+        let err = margin("XAUUSD", venue(), None, Some(&gold_leverage())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "XAUUSD: ACMEFX states no leverage of the account"
+        );
     }
 
-    /// IC's own estimate on the demo: 1,000 EUR of EURUSD locks 33.33 EUR.
+    /// The broker's own estimate on the demo: 1,000 EUR of EURUSD locks
+    /// 33.33 EUR.
     #[test]
-    fn the_margin_of_1000_euros_is_ic_s_estimate() {
+    fn the_margin_of_1000_euros_is_the_broker_s_estimate() {
         let leverage = ProtoOaGetDynamicLeverageByIdRes::decode(DYNAMIC_LEVERAGE_EURUSD_RES)
             .unwrap()
             .leverage;
         let estimate = ProtoOaExpectedMarginRes::decode(EXPECTED_MARGIN_EURUSD_RES).unwrap();
-        let ic = Decimal::new(
+        let broker = Decimal::new(
             estimate.margin[0].buy_margin,
             estimate.money_digits.unwrap(),
         );
 
-        let margin = margin("EURUSD", account_leverage(), Some(&leverage)).unwrap();
+        let margin = margin("EURUSD", venue(), account_leverage(), Some(&leverage)).unwrap();
 
-        assert_eq!((Decimal::from(1000) * margin).round_dp(2), ic);
+        assert_eq!((Decimal::from(1000) * margin).round_dp(2), broker);
     }
 
     #[test]
     fn xauusd_is_gold_in_ounces_quoted_in_dollars() {
         let xau = pair(&fixtures(), "XAUUSD").unwrap();
 
-        assert_eq!(xau.id, InstrumentId::from("XAUUSD.ICMARKETS"));
+        assert_eq!(xau.id, InstrumentId::from("XAUUSD.ACMEFX"));
         assert_eq!(xau.raw_symbol, Symbol::new("XAUUSD"));
         assert_eq!(xau.base_currency, Currency::from("XAU"));
         assert_eq!(xau.quote_currency, Currency::from("USD"));
@@ -368,7 +384,7 @@ mod tests {
     fn eurusd_is_in_euros_by_the_thousand() {
         let eur = pair(&fixtures(), "EURUSD").unwrap();
 
-        assert_eq!(eur.id, InstrumentId::from("EURUSD.ICMARKETS"));
+        assert_eq!(eur.id, InstrumentId::from("EURUSD.ACMEFX"));
         assert_eq!(eur.base_currency, Currency::from("EUR"));
         assert_eq!(eur.quote_currency, Currency::from("USD"));
         assert_eq!(eur.price_precision, 5);
@@ -447,9 +463,16 @@ mod tests {
         let eur = &fixtures.light["EURUSD"];
         let xau = &fixtures.details[&fixtures.light["XAUUSD"].symbol_id];
 
-        let err = currency_pair(eur, xau, &fixtures.assets, d("0.05"), UnixNanos::default())
-            .unwrap_err()
-            .to_string();
+        let err = currency_pair(
+            eur,
+            xau,
+            venue(),
+            &fixtures.assets,
+            d("0.05"),
+            UnixNanos::default(),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(
             err.starts_with("EURUSD: the details are of symbol"),
@@ -458,12 +481,20 @@ mod tests {
     }
 
     #[test]
-    fn a_symbol_name_and_its_instrument_id_round_trip() {
+    fn a_symbol_name_and_its_instrument_id_on_the_venue_round_trip() {
         for name in ["XAUUSD", "EURUSD"] {
-            let id = instrument_id(name).unwrap();
+            let id = instrument_id(name, venue()).unwrap();
 
-            assert_eq!(HistorySource::of(id), HistorySource::Ic);
+            assert_eq!(id, InstrumentId::from(format!("{name}.ACMEFX").as_str()));
+            ensure_on(id, venue()).unwrap();
             assert_eq!(symbol_name(id), name);
         }
+    }
+
+    #[test]
+    fn an_id_on_another_venue_is_refused_naming_the_venue() {
+        let err = ensure_on(InstrumentId::from("XAUUSD.ELSEWHERE"), venue()).unwrap_err();
+
+        assert_eq!(err.to_string(), "XAUUSD.ELSEWHERE is not on ACMEFX");
     }
 }

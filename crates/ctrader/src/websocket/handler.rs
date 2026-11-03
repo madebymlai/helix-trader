@@ -55,18 +55,18 @@ use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroize;
 
 use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
-use crate::venues::ic::{
+use crate::{
     common::messages::{
-        IcError, Payload, ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
-        ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent, ProtoOaAccountsTokenInvalidatedEvent,
-        ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaClientDisconnectEvent,
-        ProtoOaErrorRes, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq,
-        ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
-        ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame,
-        open, payload_name, secret_frame,
+        CTraderError, Payload, ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage,
+        ProtoOaAccountAuthReq, ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent,
+        ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
+        ProtoOaClientDisconnectEvent, ProtoOaErrorRes, ProtoOaExecutionEvent,
+        ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent,
+        ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq,
+        ProtoOaUnsubscribeSpotsRes, frame, open, payload_name, secret_frame,
     },
-    common::token::{TokenLock, TokenPair},
-    config::IcCredential,
+    common::token::{TokenLock, TokenPair, TokenStore},
+    config::{CTraderCredential, CTraderSettingNames},
 };
 
 /// How often a session tries the token file's lock while another session
@@ -76,17 +76,22 @@ pub(super) const LOCK_RETRY: Duration = Duration::from_millis(100);
 /// cTrader's error codes of an access token it does not take.
 const TOKEN_REFUSED: [&str; 2] = ["CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"];
 
-/// Where to get a new pair once cTrader refuses to renew it.
-const PLAYGROUND: &str = "generate a new token pair in the Playground of the app on \
-                          openapi.ctrader.com and set IC_ACCESS_TOKEN and IC_REFRESH_TOKEN in \
-                          .env (see src/venues/ic/README.md, \"Credentials\")";
+/// Where to get a new pair once cTrader refuses to renew it, and where it
+/// goes, in the settings `names` names.
+fn playground(names: &CTraderSettingNames) -> String {
+    format!(
+        "generate a new token pair in the Playground of the app on openapi.ctrader.com and \
+         set {} and {} in {} (see {})",
+        names.access_token, names.refresh_token, names.source, names.guide
+    )
+}
 
 /// Where a response goes: the caller awaiting it.
-pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, IcError>>;
+pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 
 /// Where a trade request's sending goes: `Ok` once its frame is written,
 /// an error if it never was.
-pub(super) type Sent = oneshot::Sender<Result<(), IcError>>;
+pub(super) type Sent = oneshot::Sender<Result<(), CTraderError>>;
 
 /// Commands from the outer client to the handler.
 pub(super) enum HandlerCommand {
@@ -114,7 +119,7 @@ pub(super) enum HandlerCommand {
     /// No more spot events of a symbol.
     UnsubscribeSpots(i64),
     /// Renews the access token now, as on schedule.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "demo-test"))]
     RenewToken,
     Disconnect,
 }
@@ -128,7 +133,7 @@ enum Session {
     /// A renewal waits for the token file's lock, which another session
     /// holds.
     TokenLock,
-    /// The renewal request is out (see `IcWsHandler::renewal`).
+    /// The renewal request is out (see `CTraderWsHandler::renewal`).
     Renewal,
     /// The account auth request with this `clientMsgId` is out.
     AccountAuth(String),
@@ -176,7 +181,7 @@ enum Awaiting {
 
 impl Awaiting {
     /// Tells the caller the request failed: it was never sent.
-    fn fail(self, error: IcError) {
+    fn fail(self, error: CTraderError) {
         match self {
             Self::Caller(reply) => {
                 let _ = reply.send(Err(error));
@@ -188,9 +193,11 @@ impl Awaiting {
     }
 }
 
-pub(super) struct IcWsHandler {
+pub(super) struct CTraderWsHandler {
     client: Option<WebSocketClient>,
-    credential: IcCredential,
+    credential: CTraderCredential,
+    /// The credential's token file.
+    token_file: TokenStore,
     /// The token pair the account authenticates with.
     tokens: TokenPair,
     /// The renewal awaiting its answer: kept whatever happens to the
@@ -232,13 +239,13 @@ pub(super) struct IcWsHandler {
     spot_changes: BTreeMap<i64, bool>,
 }
 
-impl IcWsHandler {
+impl CTraderWsHandler {
     #[expect(
         clippy::too_many_arguments,
         reason = "the handler owns the session's channels, credential and shared state"
     )]
     pub(super) fn new(
-        credential: IcCredential,
+        credential: CTraderCredential,
         tokens: TokenPair,
         auth: AuthTracker,
         subscriptions: SubscriptionState,
@@ -249,6 +256,7 @@ impl IcWsHandler {
     ) -> Self {
         Self {
             client: None,
+            token_file: credential.tokens(),
             credential,
             tokens,
             renewal: None,
@@ -301,7 +309,7 @@ impl IcWsHandler {
                     Some(HandlerCommand::UnsubscribeSpots(symbol_id)) => {
                         self.change_spots(symbol_id, false).await;
                     }
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "demo-test"))]
                     Some(HandlerCommand::RenewToken) => {
                         if matches!(self.session, Session::Ready) {
                             self.renew().await;
@@ -346,7 +354,8 @@ impl IcWsHandler {
         if self.renewal.take().is_some() {
             log::error!(
                 "the cTrader access token renewal got no answer ({why}): its new pair is lost \
-                 if cTrader made it; if the next run is refused, {PLAYGROUND}"
+                 if cTrader made it; if the next run is refused, {}",
+                playground(&self.credential.names)
             );
         }
     }
@@ -357,9 +366,9 @@ impl IcWsHandler {
             // Fails the authentication, which the transport tracks.
             client.disconnect().await;
         }
-        self.fail_pending(&IcError::ConnectionLost);
+        self.fail_pending(&CTraderError::ConnectionLost);
         for queued in self.queued.drain(..) {
-            queued.awaiting.fail(IcError::ConnectionLost);
+            queued.awaiting.fail(CTraderError::ConnectionLost);
         }
     }
 
@@ -371,15 +380,15 @@ impl IcWsHandler {
     /// Sends one frame. No frame content is logged: auth frames hold the
     /// secret and the token. The transport takes the frame; its copies are
     /// out of the adapter's reach.
-    async fn send(&self, frame: Vec<u8>) -> Result<(), IcError> {
+    async fn send(&self, frame: Vec<u8>) -> Result<(), CTraderError> {
         let client = self
             .client
             .as_ref()
-            .ok_or_else(|| IcError::Transport("no connection".to_owned()))?;
+            .ok_or_else(|| CTraderError::Transport("no connection".to_owned()))?;
         client
             .send_bytes(frame, None)
             .await
-            .map_err(|e| IcError::Transport(e.to_string()))
+            .map_err(|e| CTraderError::Transport(e.to_string()))
     }
 
     /// cTrader's keepalive: a `ProtoHeartbeatEvent` frame, every 10 s
@@ -442,7 +451,7 @@ impl IcWsHandler {
     /// another session renewed; whether it did. The session keeps its
     /// pair if the file cannot be read.
     fn adopt_stored(&mut self) -> bool {
-        match self.credential.tokens.read() {
+        match self.token_file.read() {
             Ok(stored) if !stored.same_access_token(&self.tokens) => {
                 log::info!("cTrader token pair renewed by another session: taken from the file");
                 self.tokens = stored;
@@ -461,7 +470,7 @@ impl IcWsHandler {
     /// the lock, tries again every `LOCK_RETRY`.
     async fn renew(&mut self) {
         self.auth.invalidate();
-        let lock = match self.credential.tokens.try_lock() {
+        let lock = match self.token_file.try_lock() {
             Ok(Some(lock)) => lock,
             Ok(None) => {
                 self.session = Session::TokenLock;
@@ -520,7 +529,7 @@ impl IcWsHandler {
             Ok(renewed) => renewed,
             Err(e) => {
                 drop(lock);
-                self.fail_session(renewal_failure(&e));
+                self.fail_session(renewal_failure(&e, &self.credential.names));
                 return;
             }
         };
@@ -536,13 +545,14 @@ impl IcWsHandler {
                 tokens
                     .expires_at
                     .map_or_else(String::new, |t| t.to_string()),
-                self.credential.tokens.path().display()
+                self.token_file.path().display()
             ),
             // The old pair is spent: this session goes on with the new one,
             // which no later run will find.
             Err(e) => log::error!(
                 "cTrader access token renewed but not saved ({e:#}): this session goes on \
-                 with it; once it ends, {PLAYGROUND}"
+                 with it; once it ends, {}",
+                playground(&self.credential.names)
             ),
         }
         drop(lock);
@@ -577,7 +587,8 @@ impl IcWsHandler {
             // The renewal stays out: a late answer is still saved.
             Session::Renewal => self.fail_session(format!(
                 "cTrader did not answer the access token renewal within {AUTH_TIMEOUT:?}: if \
-                 the next run is refused, {PLAYGROUND}"
+                 the next run is refused, {}",
+                playground(&self.credential.names)
             )),
             Session::Unconnected
             | Session::ApplicationAuth(_)
@@ -646,9 +657,9 @@ impl IcWsHandler {
     fn fail_session(&mut self, reason: String) {
         log::error!("cTrader session failed: {reason}");
         self.auth.fail(reason.clone());
-        self.fail_pending(&IcError::Session(reason.clone()));
+        self.fail_pending(&CTraderError::Session(reason.clone()));
         for queued in self.queued.drain(..) {
-            queued.awaiting.fail(IcError::Session(reason.clone()));
+            queued.awaiting.fail(CTraderError::Session(reason.clone()));
         }
         self.wake = None;
         self.session = Session::Failed(reason);
@@ -658,7 +669,7 @@ impl IcWsHandler {
     /// requests are dropped: the next connection sends them again. So are
     /// the trade requests out: their outcome is unknown, which
     /// reconciliation resolves.
-    fn fail_pending(&mut self, error: &IcError) {
+    fn fail_pending(&mut self, error: &CTraderError) {
         for (_, pending) in self.pending.drain() {
             if let Pending::Caller(reply) = pending {
                 let _ = reply.send(Err(error.clone()));
@@ -744,7 +755,7 @@ impl IcWsHandler {
         match &self.session {
             Session::Ready if !self.connection_dropped() => self.dispatch(request).await,
             Session::Failed(reason) => {
-                request.awaiting.fail(IcError::Session(reason.clone()));
+                request.awaiting.fail(CTraderError::Session(reason.clone()));
             }
             // The transport reconnects: the request waits for the new session.
             Session::Ready
@@ -811,7 +822,7 @@ impl IcWsHandler {
     async fn reconnected(&mut self) {
         log::warn!("cTrader reconnected: authenticating again");
         self.abandon_renewal("the connection was replaced");
-        self.fail_pending(&IcError::ConnectionLost);
+        self.fail_pending(&CTraderError::ConnectionLost);
         drop(self.auth.begin());
         self.authenticate().await;
     }
@@ -829,7 +840,9 @@ impl IcWsHandler {
             Session::ApplicationAuth(auth_id) if id == Some(auth_id.as_str()) => {
                 match open::<ProtoOaApplicationAuthRes>(&envelope) {
                     Ok(_) => self.application_ready().await,
-                    Err(e) => self.fail_session(auth_failure("application", &e)),
+                    Err(e) => {
+                        self.fail_session(auth_failure("application", &e, &self.credential.names));
+                    }
                 }
                 return;
             }
@@ -838,14 +851,17 @@ impl IcWsHandler {
                     Ok(res) if res.ctid_trader_account_id == self.credential.account_id.get() => {
                         self.ready().await;
                     }
-                    Ok(_) => self.fail_session(
-                        "cTrader authenticated another account than IC_ACCOUNT_ID".to_owned(),
-                    ),
+                    Ok(_) => self.fail_session(format!(
+                        "cTrader authenticated another account than {}",
+                        self.credential.names.account_id
+                    )),
                     Err(e) if is_token_refused(&e) && !self.renewed => {
                         log::warn!("cTrader refused the access token: renewing it");
                         self.renew().await;
                     }
-                    Err(e) => self.fail_session(auth_failure("account", &e)),
+                    Err(e) => {
+                        self.fail_session(auth_failure("account", &e, &self.credential.names));
+                    }
                 }
                 return;
             }
@@ -875,18 +891,18 @@ impl IcWsHandler {
                 open::<ProtoOaOrderErrorEvent>(envelope).map(TradeMessage::OrderError)
             }
             t if t == ProtoOaErrorRes::TYPE => open::<ProtoOaErrorRes>(envelope).map(|e| {
-                TradeMessage::Refused(IcError::Venue {
+                TradeMessage::Refused(CTraderError::Venue {
                     code: e.error_code,
                     description: e.description,
                 })
             }),
             t if t == ProtoErrorRes::TYPE => open::<ProtoErrorRes>(envelope).map(|e| {
-                TradeMessage::Refused(IcError::Venue {
+                TradeMessage::Refused(CTraderError::Venue {
                     code: e.error_code,
                     description: e.description,
                 })
             }),
-            other => Err(IcError::Protocol(format!(
+            other => Err(CTraderError::Protocol(format!(
                 "unexpected {}",
                 payload_name(other)
             ))),
@@ -1046,42 +1062,47 @@ async fn sleep_until(at: Option<Instant>) {
 }
 
 /// Whether `error` is cTrader refusing the access token.
-fn is_token_refused(error: &IcError) -> bool {
-    matches!(error, IcError::Venue { code, .. } if TOKEN_REFUSED.contains(&code.as_str()))
+fn is_token_refused(error: &CTraderError) -> bool {
+    matches!(error, CTraderError::Venue { code, .. } if TOKEN_REFUSED.contains(&code.as_str()))
 }
 
-/// The error of a refused renewal: the code only, as for an auth.
-fn renewal_failure(error: &IcError) -> String {
+/// The error of a refused renewal: the code only, as for an auth; what to
+/// do in the settings `names` names.
+fn renewal_failure(error: &CTraderError, names: &CTraderSettingNames) -> String {
     match error {
-        IcError::Venue { code, .. } => {
-            format!("cTrader refused to renew the access token ({code}): {PLAYGROUND}")
-        }
+        CTraderError::Venue { code, .. } => format!(
+            "cTrader refused to renew the access token ({code}): {}",
+            playground(names)
+        ),
         other => format!("renewing the access token: {other}"),
     }
 }
 
-/// The error of a refused authentication, with what to check. Only the
-/// code: the description is not shown, so nothing cTrader echoes from the
-/// request can reach a log.
-fn auth_failure(stage: &str, error: &IcError) -> String {
-    let IcError::Venue { code, .. } = error else {
+/// The error of a refused authentication, with what to check, in the
+/// settings `names` names. Only the code: the description is not shown,
+/// so nothing cTrader echoes from the request can reach a log.
+fn auth_failure(stage: &str, error: &CTraderError, names: &CTraderSettingNames) -> String {
+    let CTraderError::Venue { code, .. } = error else {
         return format!("the {stage} authentication failed: {error}");
     };
     let hint = match code.as_str() {
         "CH_CLIENT_AUTH_FAILURE" | "CH_OA_CLIENT_NOT_FOUND" => {
-            "check IC_CLIENT_ID and IC_CLIENT_SECRET"
+            format!("check {} and {}", names.client_id, names.client_secret)
         }
         "CH_ACCESS_TOKEN_INVALID" | "OA_AUTH_TOKEN_EXPIRED" => {
             return format!(
                 "cTrader refused the {stage} authentication ({code}) even with a renewed \
-                 access token: {PLAYGROUND}"
+                 access token: {}",
+                playground(names)
             );
         }
         "CH_CTID_TRADER_ACCOUNT_NOT_FOUND" | "ACCOUNT_NOT_AUTHORIZED" | "RET_NO_SUCH_LOGIN" => {
-            "check IC_ACCOUNT_ID, and IC_ENVIRONMENT: an account authenticates only on its own \
-             environment"
+            format!(
+                "check {}, and {}: an account authenticates only on its own environment",
+                names.account_id, names.environment
+            )
         }
-        _ => "see src/venues/ic/README.md, \"Credentials\"",
+        _ => format!("see {}", names.guide),
     };
     format!("cTrader refused the {stage} authentication ({code}): {hint}")
 }

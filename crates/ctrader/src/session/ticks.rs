@@ -16,11 +16,11 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use crate::venues::ic::common::messages::ProtoOaTickData;
+use crate::{TICK_REQUEST_SPAN, common::messages::ProtoOaTickData};
 
-/// The longest window one tick request may span (Spotware's docs: one
-/// week).
-pub(super) const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// The longest window one tick request may span, in milliseconds (see
+/// `TICK_REQUEST_SPAN`).
+pub(super) const WEEK_MS: i64 = TICK_REQUEST_SPAN.as_millis() as i64;
 
 /// The decimals of cTrader's integer prices: a tick of 412847000 is
 /// 4128.47000.
@@ -349,7 +349,7 @@ impl QuoteMerge {
 /// volume of the bar it builds, a `Quantity` that panics past
 /// 18,446,744,073. The size bounds both: orders up to it fill whole at the
 /// quote, and a bar may hold up to 18,446,744,073 / size quotes (see
-/// `ic/README.md`, "Quote size").
+/// `README.md`, "Tick history").
 fn quote_size(instrument: &InstrumentAny) -> anyhow::Result<Quantity> {
     let precision = instrument.size_precision();
     let nominal = Quantity::new_checked(QUOTE_SIZE, precision)?;
@@ -378,7 +378,7 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::venues::ic::{
+    use crate::{
         common::messages::ProtoOaGetTickDataRes,
         testing::{TICK_DATA_ASK_RES, TICK_DATA_BID_RES, venue_page},
     };
@@ -552,7 +552,7 @@ mod tests {
     /// EUR/USD-like, 5 decimals, sizes in whole units.
     fn instrument() -> InstrumentAny {
         let mut pair: CurrencyPair = audusd_sim();
-        pair.id = InstrumentId::from("EURUSD.ICMARKETS");
+        pair.id = InstrumentId::from("EURUSD.ACMEFX");
         InstrumentAny::CurrencyPair(pair)
     }
 
@@ -708,7 +708,7 @@ mod tests {
         let bid = side(None, &[tick(1, 116_000)]);
         let ask = side(None, &[tick(1, 116_010)]);
         let mut pair: CurrencyPair = audusd_sim();
-        // XAUUSD's at IC: 10,000 oz.
+        // XAUUSD's on the demo: 10,000 oz.
         pair.max_quantity = Some(Quantity::from(10_000));
 
         let merged = merge(&InstrumentAny::CurrencyPair(pair), &bid, &ask).unwrap();
@@ -726,7 +726,7 @@ mod tests {
             side(None, &ticks)
         };
         let mut xau: CurrencyPair = audusd_sim();
-        xau.id = InstrumentId::from("XAUUSD.ICMARKETS");
+        xau.id = InstrumentId::from("XAUUSD.ACMEFX");
         xau.price_precision = 2;
         xau.price_increment = Price::from("0.01");
 

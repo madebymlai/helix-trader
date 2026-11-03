@@ -1,8 +1,9 @@
-//! The cTrader session on IC's account, which history, the data client's
-//! live quotes and the execution client share: the instruments of IC's
-//! forex and metals and their tick history, merged into quotes (`ticks`),
-//! the spot subscriptions, and the account, its open positions, orders
-//! and deals, and its trade requests, over the connection (`websocket`).
+//! The cTrader session on the broker's account, which history, the data
+//! client's live quotes and the execution client share: the instruments of
+//! the broker's forex and metals and their tick history, merged into quotes
+//! (`ticks`), the spot subscriptions, and the account, its open positions,
+//! orders and deals, and its trade requests, over the connection
+//! (`websocket`).
 
 use std::collections::HashMap;
 
@@ -11,14 +12,14 @@ use jiff::Timestamp;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_model::{
     data::QuoteTick,
-    identifiers::InstrumentId,
+    identifiers::{InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
 };
 
 use self::ticks::{SideTicks, Tick};
 use super::{
     common::{
-        account::IcAccount,
+        account::CTraderAccount,
         messages::{
             self, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
             ProtoOaDealListRes, ProtoOaDynamicLeverage, ProtoOaGetDynamicLeverageByIdReq,
@@ -30,68 +31,70 @@ use super::{
         },
         parse,
     },
-    config::{IcAccountId, IcConnection, IcCredential},
-    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents, TradeEvents, TradeSent},
+    config::{CTraderAccountId, CTraderConnection, CTraderCredential, CTraderSettingNames},
+    websocket::{CTraderWebSocketClient, HEARTBEAT_INTERVAL, SpotEvents, TradeEvents, TradeSent},
 };
 
 pub(crate) mod ticks;
 
-/// A cTrader session on IC's account: history, the spot subscriptions of
-/// the data client, and the account, open positions and deals of the
-/// execution client.
+/// A cTrader session on the broker's account: history, the spot
+/// subscriptions of the data client, and the account, open positions and
+/// deals of the execution client.
 #[derive(Debug)]
-pub struct IcHistory {
-    client: IcWebSocketClient,
-    account_id: IcAccountId,
+pub struct CTraderSession {
+    client: CTraderWebSocketClient,
+    venue: Venue,
+    account_id: CTraderAccountId,
+    names: CTraderSettingNames,
 }
 
-impl IcHistory {
-    /// Connects to the environment `IC_ENVIRONMENT` names and
-    /// authenticates the credential `IC_CLIENT_ID`, `IC_CLIENT_SECRET` and
-    /// `IC_ACCOUNT_ID` from the environment (or `.env`), with the token
-    /// file's pair (`IC_ACCESS_TOKEN` and `IC_REFRESH_TOKEN` seed it), renewed
-    /// when due; none is ever printed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the environment or a credential variable is
-    /// missing or invalid (before connecting), if cTrader cannot be
-    /// reached, or if it refuses the credential (naming its error code).
-    pub async fn connect() -> anyhow::Result<Self> {
-        Self::connect_as(&IcConnection::from_env()?).await
-    }
-
-    /// Connects as `connection` says and authenticates its credential.
+impl CTraderSession {
+    /// Connects to the environment of `connection` and authenticates its
+    /// credential, with the token file's pair (the credential's pair seeds
+    /// it), renewed when due; none is ever printed.
     ///
     /// # Errors
     ///
     /// Returns an error if cTrader cannot be reached, or if it refuses the
     /// credential (naming its error code).
-    pub async fn connect_as(connection: &IcConnection) -> anyhow::Result<Self> {
-        let environment = connection.environment;
-        let (history, _) = Self::connect_to(
+    pub async fn connect(connection: &CTraderConnection) -> anyhow::Result<Self> {
+        let (venue, environment) = (connection.venue, connection.environment);
+        let (session, _) = Self::connect_to(
             environment.url(),
+            venue,
             connection.credential.clone(),
             HEARTBEAT_INTERVAL,
         )
         .await?;
-        log::info!("connected to IC's cTrader {environment:?} server");
-        Ok(history)
+        log::info!("connected to {venue} on cTrader's {environment:?} server");
+        Ok(session)
     }
 
-    /// Connects to `url` as `credential`, with the spot events of the
-    /// symbols `subscribe_spots` subscribes.
+    /// Connects to `url` as `credential`, at the broker of `venue`, with
+    /// the spot events of the symbols `subscribe_spots` subscribes.
     pub(crate) async fn connect_to(
         url: &str,
-        credential: IcCredential,
+        venue: Venue,
+        credential: CTraderCredential,
         heartbeat: std::time::Duration,
     ) -> anyhow::Result<(Self, SpotEvents)> {
-        let account_id = credential.account_id;
-        let (client, spots) = IcWebSocketClient::connect(url, credential, heartbeat).await?;
-        Ok((Self { client, account_id }, spots))
+        let (account_id, names) = (credential.account_id, credential.names);
+        let (client, spots) = CTraderWebSocketClient::connect(url, credential, heartbeat).await?;
+        let session = Self {
+            client,
+            venue,
+            account_id,
+            names,
+        };
+        Ok((session, spots))
     }
 
-    /// Checks the account: hedging and `IC_ACCOUNT_ID`'s (see `account`).
+    /// The venue of the broker's instruments.
+    pub(crate) fn venue(&self) -> Venue {
+        self.venue
+    }
+
+    /// Checks the account: hedging and the credential's (see `account`).
     ///
     /// # Errors
     ///
@@ -102,9 +105,9 @@ impl IcHistory {
     }
 
     /// The account, from the trader and the assets, checked (see
-    /// `IcAccount::check`).
-    pub(crate) async fn account(&self) -> anyhow::Result<IcAccount> {
-        let account = self.account_id.get();
+    /// `CTraderAccount::check`).
+    pub(crate) async fn account(&self) -> anyhow::Result<CTraderAccount> {
+        let (venue, account) = (self.venue, self.account_id.get());
         let (trader, assets) = tokio::try_join!(
             async {
                 self.client
@@ -113,7 +116,7 @@ impl IcHistory {
                         ..Default::default()
                     })
                     .await
-                    .context("requesting IC's account")
+                    .with_context(|| format!("requesting the {venue} account"))
             },
             async {
                 self.client
@@ -122,12 +125,14 @@ impl IcHistory {
                         ..Default::default()
                     })
                     .await
-                    .context("requesting IC's assets")
+                    .with_context(|| format!("requesting the {venue} assets"))
             },
         )?;
-        IcAccount::check(
+        CTraderAccount::check(
             &trader.trader,
+            venue,
             self.account_id,
+            &self.names,
             &parse::assets_by_id(assets.asset),
         )
     }
@@ -142,7 +147,7 @@ impl IcHistory {
                 ..Default::default()
             })
             .await
-            .context("requesting IC's open positions and orders")
+            .with_context(|| format!("requesting the {} open positions and orders", self.venue))
     }
 
     /// The deals over `[from_ms, to_ms]`, each once, oldest first; none
@@ -173,13 +178,16 @@ impl IcHistory {
                     ..Default::default()
                 })
                 .await
-                .with_context(|| format!("requesting IC's deals over [{from}, {to}] ms"))?;
+                .with_context(|| {
+                    format!("requesting the {} deals over [{from}, {to}] ms", self.venue)
+                })?;
             if page.has_more {
                 // The halves overlap by a millisecond: whether cTrader's
                 // bounds are inclusive or not, no deal falls between them.
                 ensure!(
                     to - from > 2,
-                    "IC holds more deals over [{from}, {to}] ms than one answer carries"
+                    "{} holds more deals over [{from}, {to}] ms than one answer carries",
+                    self.venue
                 );
                 let middle = from + (to - from) / 2;
                 windows.push((from, middle + 1));
@@ -204,7 +212,8 @@ impl IcHistory {
         self.client.trade(&request, client_msg_id)
     }
 
-    /// The account's trade events from now on (see `IcWebSocketClient::trade_events`).
+    /// The account's trade events from now on (see
+    /// `CTraderWebSocketClient::trade_events`).
     ///
     /// # Errors
     ///
@@ -222,7 +231,7 @@ impl IcHistory {
     pub(crate) async fn order_details(
         &self,
         order_id: i64,
-    ) -> Result<ProtoOaOrderDetailsRes, messages::IcError> {
+    ) -> Result<ProtoOaOrderDetailsRes, messages::CTraderError> {
         self.client
             .request(&ProtoOaOrderDetailsReq {
                 ctid_trader_account_id: self.account_id.get(),
@@ -260,11 +269,17 @@ impl IcHistory {
                     ..Default::default()
                 })
                 .await
-                .with_context(|| format!("requesting IC's orders over [{from}, {to}] ms"))?;
+                .with_context(|| {
+                    format!(
+                        "requesting the {} orders over [{from}, {to}] ms",
+                        self.venue
+                    )
+                })?;
             if page.has_more {
                 ensure!(
                     to - from > 2,
-                    "IC holds more orders over [{from}, {to}] ms than one answer carries"
+                    "{} holds more orders over [{from}, {to}] ms than one answer carries",
+                    self.venue
                 );
                 let middle = from + (to - from) / 2;
                 windows.push((from, middle + 1));
@@ -279,24 +294,25 @@ impl IcHistory {
 
     /// The instruments of `ids`, from cTrader's current definitions: the
     /// assets, the symbol list (each id's symbol name to its `symbolId` on
-    /// this server), the details of those symbols, and the leverage IC
-    /// applies to each, from the account's and the symbol's dynamic
+    /// this server), the details of those symbols, and the leverage the
+    /// broker applies to each, from the account's and the symbol's dynamic
     /// leverage, which sets its margins (see `parse`).
     ///
     /// # Errors
     ///
-    /// Returns an error if an id is not IC's (before any request), if a
-    /// request fails, if IC lists no symbol of that name, or if a symbol is
-    /// no currency pair.
+    /// Returns an error if an id is not on the session's venue (before any
+    /// request), if a request fails, if the broker lists no symbol of that
+    /// name, or if a symbol is no currency pair.
     pub async fn instruments(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<InstrumentAny>> {
         let symbols = self.symbols(ids).await?;
         Ok(symbols.into_iter().map(|s| s.instrument).collect())
     }
 
     /// The symbols of `ids`, as `instruments`.
-    pub(crate) async fn symbols(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<IcSymbol>> {
+    pub(crate) async fn symbols(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<CTraderSymbol>> {
+        let venue = self.venue;
         for &id in ids {
-            parse::ensure_ic(id)?;
+            parse::ensure_on(id, venue)?;
         }
         let account = self.account_id.get();
         let assets: ProtoOaAssetListRes = self
@@ -306,7 +322,7 @@ impl IcHistory {
                 ..Default::default()
             })
             .await
-            .context("requesting IC's assets")?;
+            .with_context(|| format!("requesting the {venue} assets"))?;
         let list: ProtoOaSymbolsListRes = self
             .client
             .request(&ProtoOaSymbolsListReq {
@@ -314,7 +330,7 @@ impl IcHistory {
                 ..Default::default()
             })
             .await
-            .context("requesting IC's symbols")?;
+            .with_context(|| format!("requesting the {venue} symbols"))?;
         let listed: HashMap<&str, _> = list
             .symbol
             .iter()
@@ -328,11 +344,9 @@ impl IcHistory {
                     .copied()
                     .with_context(|| {
                         format!(
-                            "IC lists no symbol {}: an IC id is the symbol's name in cTrader \
-                         on {}, such as XAUUSD.{}",
-                            parse::symbol_name(id),
-                            parse::IC_VENUE,
-                            parse::IC_VENUE
+                            "{venue} lists no symbol {}: an instrument id on {venue} is the \
+                             symbol's name in cTrader, such as XAUUSD.{venue}",
+                            parse::symbol_name(id)
                         )
                     })
             })
@@ -345,7 +359,7 @@ impl IcHistory {
                 ..Default::default()
             })
             .await
-            .context("requesting the details of IC's symbols")?;
+            .with_context(|| format!("requesting the details of the {venue} symbols"))?;
         let details: HashMap<i64, _> = details.symbol.iter().map(|s| (s.symbol_id, s)).collect();
         let account_leverage = self
             .client
@@ -354,7 +368,7 @@ impl IcHistory {
                 ..Default::default()
             })
             .await
-            .context("requesting IC's account")?
+            .with_context(|| format!("requesting the {venue} account"))?
             .trader
             .leverage_in_cents;
         let mut leverages: HashMap<i64, ProtoOaDynamicLeverage> = HashMap::new();
@@ -373,7 +387,7 @@ impl IcHistory {
                     ..Default::default()
                 })
                 .await
-                .with_context(|| format!("requesting IC's leverage {leverage_id}"))?;
+                .with_context(|| format!("requesting the {venue} leverage {leverage_id}"))?;
             leverages.insert(leverage_id, answer.leverage);
         }
         let assets = parse::assets_by_id(assets.asset);
@@ -384,11 +398,11 @@ impl IcHistory {
                 let name = light.symbol_name.as_deref().unwrap_or_default();
                 let symbol = details
                     .get(&light.symbol_id)
-                    .with_context(|| format!("IC returned no details of {name}"))?;
+                    .with_context(|| format!("{venue} returned no details of {name}"))?;
                 let symbol_leverage = symbol.leverage_id.and_then(|id| leverages.get(&id));
-                let margin = parse::margin(name, account_leverage, symbol_leverage)?;
-                let pair = parse::currency_pair(light, symbol, &assets, margin, ts_init)?;
-                Ok(IcSymbol {
+                let margin = parse::margin(name, venue, account_leverage, symbol_leverage)?;
+                let pair = parse::currency_pair(light, symbol, venue, &assets, margin, ts_init)?;
+                Ok(CTraderSymbol {
                     instrument: InstrumentAny::CurrencyPair(pair),
                     symbol_id: light.symbol_id,
                 })
@@ -407,7 +421,7 @@ impl IcHistory {
     /// Returns an error if the window is out of range, or as `ticks::merge`.
     pub(crate) async fn quote_ticks(
         &self,
-        symbol: &IcSymbol,
+        symbol: &CTraderSymbol,
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<FetchedQuotes> {
@@ -450,7 +464,7 @@ impl IcHistory {
     /// tick before them, and the failure that cut them short, if any.
     async fn side_ticks(
         &self,
-        symbol: &IcSymbol,
+        symbol: &CTraderSymbol,
         side: ProtoOaQuoteType,
         from_ms: i64,
         to_ms: i64,
@@ -483,7 +497,7 @@ impl IcHistory {
     /// `[from_ms, to_ms)`, newest first, and whether there are more.
     async fn tick_page(
         &self,
-        symbol: &IcSymbol,
+        symbol: &CTraderSymbol,
         side: ProtoOaQuoteType,
         from_ms: i64,
         to_ms: i64,
@@ -510,7 +524,7 @@ impl IcHistory {
     }
 
     /// Subscribes to the spot events of `symbol_id` for the rest of the
-    /// session (see `IcWebSocketClient::subscribe_spots`).
+    /// session (see `CTraderWebSocketClient::subscribe_spots`).
     pub(crate) fn subscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
         Ok(self.client.subscribe_spots(symbol_id)?)
     }
@@ -521,7 +535,7 @@ impl IcHistory {
     }
 
     /// Renews the access token now, as on schedule.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "demo-test"))]
     pub(crate) fn renew_token(&self) {
         self.client.renew_token();
     }
@@ -539,17 +553,18 @@ impl IcHistory {
     }
 }
 
-/// The quotes `IcHistory::quote_ticks` got over a window, and the failure
-/// that cut them short, if any: then they start later than the window.
+/// The quotes `CTraderSession::quote_ticks` got over a window, and the
+/// failure that cut them short, if any: then they start later than the
+/// window.
 #[derive(Debug, Default)]
 pub(crate) struct FetchedQuotes {
     pub(crate) quotes: Vec<QuoteTick>,
     pub(crate) failure: Option<anyhow::Error>,
 }
 
-/// An IC instrument and its cTrader `symbolId` on this server.
+/// An instrument of the broker and its cTrader `symbolId` on this server.
 #[derive(Debug, Clone)]
-pub(crate) struct IcSymbol {
+pub(crate) struct CTraderSymbol {
     pub(crate) instrument: InstrumentAny,
     pub(crate) symbol_id: i64,
 }
@@ -584,9 +599,9 @@ mod tests {
         ticks::Tick,
         *,
     };
-    use crate::venues::ic::testing::{
+    use crate::testing::{
         self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-        TRADER_RES, accept_auth, replay, reply, tick_answer,
+        TRADER_RES, VENUE, accept_auth, replay, reply, tick_answer,
     };
 
     /// A cTrader serving the captured assets, symbols and details.
@@ -637,19 +652,20 @@ mod tests {
         vec![response]
     }
 
-    async fn connected() -> (IcHistory, Received) {
+    async fn connected() -> (CTraderSession, Received) {
         connected_to(fixtures_peer).await
     }
 
     async fn connected_to(
         peer: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
-    ) -> (IcHistory, Received) {
+    ) -> (CTraderSession, Received) {
         let (url, received) = testing::start(peer);
         let (credential, _tokens) = testing::credential();
-        let (history, _) = IcHistory::connect_to(&url, credential, HEARTBEAT_INTERVAL)
-            .await
-            .unwrap();
-        (history, received)
+        let (session, _) =
+            CTraderSession::connect_to(&url, Venue::new(VENUE), credential, HEARTBEAT_INTERVAL)
+                .await
+                .unwrap();
+        (session, received)
     }
 
     /// The payload types received after the two auth requests.
@@ -665,13 +681,13 @@ mod tests {
 
     #[tokio::test]
     async fn instruments_come_from_the_assets_the_symbol_list_and_the_details() {
-        let (history, received) = connected().await;
+        let (session, received) = connected().await;
         let ids = [
-            InstrumentId::from("XAUUSD.ICMARKETS"),
-            InstrumentId::from("EURUSD.ICMARKETS"),
+            InstrumentId::from("XAUUSD.ACMEFX"),
+            InstrumentId::from("EURUSD.ACMEFX"),
         ];
 
-        let instruments = history.instruments(&ids).await.unwrap();
+        let instruments = session.instruments(&ids).await.unwrap();
 
         let [
             InstrumentAny::CurrencyPair(xau),
@@ -706,20 +722,20 @@ mod tests {
             .collect();
         leverages.sort_unstable();
         assert_eq!(leverages, [(ACCOUNT_ID, 52_531), (ACCOUNT_ID, 52_543)]);
-        history.disconnect().await;
+        session.disconnect().await;
     }
 
     /// The demo's leverages: the account 1:30, gold 1:200 and EUR/USD
-    /// 1:1000; IC applies the account's to both.
+    /// 1:1000; the broker applies the account's to both.
     #[tokio::test]
-    async fn instruments_carry_ic_s_margin_at_the_account_s_leverage() {
-        let (history, _) = connected().await;
+    async fn instruments_carry_the_broker_s_margin_at_the_account_s_leverage() {
+        let (session, _) = connected().await;
         let ids = [
-            InstrumentId::from("XAUUSD.ICMARKETS"),
-            InstrumentId::from("EURUSD.ICMARKETS"),
+            InstrumentId::from("XAUUSD.ACMEFX"),
+            InstrumentId::from("EURUSD.ACMEFX"),
         ];
 
-        let instruments = history.instruments(&ids).await.unwrap();
+        let instruments = session.instruments(&ids).await.unwrap();
 
         let [gold, euro_dollar] = instruments.as_slice() else {
             panic!("{instruments:?}");
@@ -729,7 +745,7 @@ mod tests {
             assert_eq!(instrument.margin_init(), at_1_30);
             assert_eq!(instrument.margin_maint(), at_1_30);
         }
-        history.disconnect().await;
+        session.disconnect().await;
     }
 
     /// A cTrader serving the fixtures and `trader` as the account.
@@ -751,9 +767,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_captured_hedged_account_passes_the_check() {
-        let (history, received) = connected_to(trader_peer(captured_trader())).await;
+        let (session, received) = connected_to(trader_peer(captured_trader())).await;
 
-        history.check_account().await.unwrap();
+        session.check_account().await.unwrap();
 
         let asked = requests(&received)
             .into_iter()
@@ -761,7 +777,7 @@ mod tests {
             .unwrap();
         let asked = ProtoOaTraderReq::decode(asked.payload.as_deref().unwrap()).unwrap();
         assert_eq!(asked.ctid_trader_account_id, ACCOUNT_ID);
-        history.disconnect().await;
+        session.disconnect().await;
     }
 
     /// Synthetic: the captured trader made a netting account.
@@ -771,12 +787,12 @@ mod tests {
         trader
             .trader
             .set_account_type(messages::ProtoOaAccountType::Netted);
-        let (history, _) = connected_to(trader_peer(trader)).await;
+        let (session, _) = connected_to(trader_peer(trader)).await;
 
-        let err = history.check_account().await.unwrap_err().to_string();
+        let err = session.check_account().await.unwrap_err().to_string();
 
         assert!(err.contains("NETTED, not HEDGED"), "{err}");
-        history.disconnect().await;
+        session.disconnect().await;
     }
 
     /// Synthetic: the captured trader of another account.
@@ -784,94 +800,55 @@ mod tests {
     async fn the_trader_of_another_account_is_refused() {
         let mut trader = captured_trader();
         trader.trader.ctid_trader_account_id = ACCOUNT_ID + 1;
-        let (history, _) = connected_to(trader_peer(trader)).await;
+        let (session, _) = connected_to(trader_peer(trader)).await;
 
-        let err = history.check_account().await.unwrap_err().to_string();
+        let err = session.check_account().await.unwrap_err().to_string();
 
-        assert!(err.contains("another account than IC_ACCOUNT_ID"), "{err}");
-        history.disconnect().await;
+        assert!(
+            err.contains("another account than ACME_ACCOUNT_ID"),
+            "{err}"
+        );
+        session.disconnect().await;
     }
 
     #[tokio::test]
-    async fn a_symbol_ic_does_not_list_is_named() {
-        let (history, _) = connected().await;
+    async fn a_symbol_the_broker_does_not_list_is_named() {
+        let (session, _) = connected().await;
 
-        let err = history
-            .instruments(&[InstrumentId::from("GBPUSD.ICMARKETS")])
+        let err = session
+            .instruments(&[InstrumentId::from("GBPUSD.ACMEFX")])
             .await
             .unwrap_err();
 
         assert_eq!(
             err.to_string(),
-            "IC lists no symbol GBPUSD: an IC id is the symbol's name in cTrader on ICMARKETS, \
-             such as XAUUSD.ICMARKETS"
+            "ACMEFX lists no symbol GBPUSD: an instrument id on ACMEFX is the symbol's name in \
+             cTrader, such as XAUUSD.ACMEFX"
         );
-        history.disconnect().await;
+        session.disconnect().await;
     }
 
     #[tokio::test]
     async fn an_id_of_another_venue_is_refused_before_any_request() {
-        let (history, received) = connected().await;
+        let (session, received) = connected().await;
 
-        let err = history
+        let err = session
             .instruments(&[InstrumentId::from("EUR/USD.IDEALPRO")])
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), "EUR/USD.IDEALPRO is not on ICMARKETS");
+        assert_eq!(err.to_string(), "EUR/USD.IDEALPRO is not on ACMEFX");
         assert_eq!(requests(&received), []);
-        history.disconnect().await;
-    }
-
-    /// The log records of the IC adapter at info and above, for the demo
-    /// test to show: none holds a token.
-    struct Captured(std::sync::Mutex<Vec<String>>);
-
-    impl log::Log for Captured {
-        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-            metadata.level() <= log::Level::Info && metadata.target().contains("::ic")
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            if self.enabled(record.metadata()) {
-                let line = format!("{} {}", record.level(), record.args());
-                self.0.lock().unwrap().push(line);
-            }
-        }
-
-        fn flush(&self) {}
-    }
-
-    static CAPTURED: Captured = Captured(std::sync::Mutex::new(Vec::new()));
-
-    /// Prints the records captured when dropped, the test failing or not.
-    struct ShowLogs;
-
-    impl Drop for ShowLogs {
-        fn drop(&mut self) {
-            for line in CAPTURED.0.lock().unwrap().iter() {
-                println!("log: {line}");
-            }
-        }
-    }
-
-    async fn next_spot(
-        spots: &mut SpotEvents,
-        timeout: std::time::Duration,
-    ) -> messages::ProtoOaSpotEvent {
-        tokio::time::timeout(timeout, spots.recv())
-            .await
-            .expect("no spot event in time")
-            .expect("the spot events ended")
+        session.disconnect().await;
     }
 
     /// What Nautilus' risk engine makes of a market buy of 1 oz of gold,
     /// `xau` here, on a margin account of 1,000 EUR, at the demo's first
     /// captured spots (`testdata/spot_event_*_first`): XAUUSD 4017.96 /
     /// 4018.01, EURUSD 1.11964 / 1.11965 (the account is in EUR, gold in
-    /// USD). The order's value, about 3,590 EUR, is above the balance; IC's
-    /// margin at 1:30, about 120 EUR, is below it. The order events the
-    /// engine sends back, and whether it passed the order on.
+    /// USD). The order's value, about 3,590 EUR, is above the balance; the
+    /// broker's margin at 1:30, about 120 EUR, is below it. The order events
+    /// the engine sends back, and whether it passed the order on.
     fn risk_check_of_one_ounce(
         xau: CurrencyPair,
         eur: InstrumentAny,
@@ -908,7 +885,7 @@ mod tests {
             .unwrap();
         cache.add_instrument(eur).unwrap();
         let account = AccountState::new(
-            AccountId::from("ICMARKETS-DEMO"),
+            AccountId::from("ACMEFX-DEMO"),
             AccountType::Margin,
             vec![AccountBalance::new(
                 Money::from("1000 EUR"),
@@ -958,15 +935,15 @@ mod tests {
     /// XAUUSD and EURUSD as the live clients load them from the captured
     /// details and leverages.
     async fn gold_and_euro_dollar() -> (CurrencyPair, InstrumentAny) {
-        let (history, _) = connected().await;
-        let mut instruments = history
+        let (session, _) = connected().await;
+        let mut instruments = session
             .instruments(&[
-                InstrumentId::from("XAUUSD.ICMARKETS"),
-                InstrumentId::from("EURUSD.ICMARKETS"),
+                InstrumentId::from("XAUUSD.ACMEFX"),
+                InstrumentId::from("EURUSD.ACMEFX"),
             ])
             .await
             .unwrap();
-        history.disconnect().await;
+        session.disconnect().await;
         let eur = instruments.pop().unwrap();
         let Some(InstrumentAny::CurrencyPair(xau)) = instruments.pop() else {
             panic!("no gold")
@@ -975,7 +952,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ounce_of_gold_worth_more_than_the_balance_passes_on_ic_s_margin() {
+    async fn an_ounce_of_gold_worth_more_than_the_balance_passes_on_the_broker_s_margin() {
         let (xau, eur) = gold_and_euro_dollar().await;
 
         let (events, sent) = risk_check_of_one_ounce(xau, eur);
@@ -984,8 +961,8 @@ mod tests {
         assert_eq!(sent, 1);
     }
 
-    /// The same order on gold carrying margins of 1, as before IC's margin:
-    /// denied, so the check above turns on the margin.
+    /// The same order on gold carrying margins of 1, as before the broker's
+    /// margin: denied, so the check above turns on the margin.
     #[tokio::test]
     async fn an_ounce_of_gold_at_margins_of_one_is_denied() {
         let (mut xau, eur) = gold_and_euro_dollar().await;
@@ -1004,107 +981,5 @@ mod tests {
             "{denied:?}"
         );
         assert_eq!(sent, 0);
-    }
-
-    /// End to end on IC's cTrader demo, gated as `tests/live/ic_demo.rs` is
-    /// (`NAUTILUS_IC_RUN=1` from the shell; demo only; no order): a forced
-    /// renewal of the access token on a running session, which goes on
-    /// receiving quotes and answering requests; then a fresh session
-    /// authenticates from the token file without renewing. It ROTATES the
-    /// account's real token pair: the file keeps the new one, `.env`'s is
-    /// spent. Run it with:
-    ///
-    /// ```sh
-    /// NAUTILUS_IC_RUN=1 cargo test --lib the_demo_session_renews -- --nocapture
-    /// ```
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
-        use std::{os::unix::fs::PermissionsExt, time::Duration};
-
-        if std::env::var("NAUTILUS_IC_RUN").is_ok_and(|v| v == "1") {
-            dotenvy::dotenv().ok();
-        } else {
-            println!("skipped; set NAUTILUS_IC_RUN=1 to run it on IC's cTrader demo");
-            return;
-        }
-        assert_eq!(
-            std::env::var("IC_ENVIRONMENT").as_deref(),
-            Ok("demo"),
-            "the IC end to end test runs on the demo only: set IC_ENVIRONMENT=demo"
-        );
-        let _ = log::set_logger(&CAPTURED);
-        log::set_max_level(log::LevelFilter::Info);
-        let _logs = ShowLogs;
-        let connection = IcConnection::from_env().unwrap();
-        let tokens = connection.credential.tokens.clone();
-        let url = connection.environment.url();
-        let (history, mut spots) =
-            IcHistory::connect_to(url, connection.credential.clone(), HEARTBEAT_INTERVAL)
-                .await
-                .unwrap();
-        let ids = [
-            InstrumentId::from("XAUUSD.ICMARKETS"),
-            InstrumentId::from("EURUSD.ICMARKETS"),
-        ];
-        for symbol in history.symbols(&ids).await.unwrap() {
-            history.client.subscribe_spots(symbol.symbol_id).unwrap();
-        }
-        next_spot(&mut spots, Duration::from_secs(30)).await;
-        let before = tokens.read().unwrap();
-
-        history.client.renew_token();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        while tokens.read().unwrap().same_access_token(&before) {
-            assert!(tokio::time::Instant::now() < deadline, "no renewal in 30 s");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let renewed_at = Timestamp::now();
-        let after = loop {
-            let spot = next_spot(&mut spots, Duration::from_secs(60)).await;
-            let at = Timestamp::from_millisecond(spot.timestamp.unwrap_or_default()).unwrap();
-            if at > renewed_at {
-                break at;
-            }
-        };
-        let instruments = history.instruments(&ids).await;
-        history.disconnect().await;
-
-        let renewed = tokens.read().unwrap();
-        let mode = std::fs::metadata(tokens.path())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        let left = renewed.expires_at.unwrap().duration_since(Timestamp::now());
-        println!(
-            "renewed at {renewed_at}, a spot at {after}; token file {} mode {mode:o}, the \
-             access token valid until {:?} ({:.1} days)",
-            tokens.path().display(),
-            renewed.expires_at,
-            left.as_secs_f64() / 86_400.0
-        );
-        assert_eq!(instruments.unwrap().len(), 2);
-        assert_eq!(mode, 0o600);
-        assert!(!renewed.access_token.expose_secret().is_empty());
-        assert!(!renewed.refresh_token.expose_secret().is_empty());
-        assert!(
-            renewed.refresh_token.expose_secret() != before.refresh_token.expose_secret(),
-            "the refresh token was not replaced"
-        );
-        assert!(
-            jiff::SignedDuration::from_hours(24 * 20) < left
-                && left < jiff::SignedDuration::from_hours(24 * 40),
-            "{left:?}"
-        );
-
-        // A fresh session, as the next run: from the file, no renewal.
-        let fresh = IcHistory::connect_as(&IcConnection::from_env().unwrap())
-            .await
-            .unwrap();
-        let account = fresh.check_account().await;
-        fresh.disconnect().await;
-
-        account.unwrap();
-        assert!(tokens.read().unwrap().same_access_token(&renewed));
     }
 }
