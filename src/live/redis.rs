@@ -3,7 +3,7 @@
 //! `CacheDatabaseFactory` from `nautilus_infrastructure`), loads them at the
 //! next start and reconciles them with the venues.
 //!
-//! Redis runs in Docker the way the IB Gateway does (`data::IbGateway`):
+//! Redis runs in Docker the way the IB Gateway does (`venues::ib`):
 //! one named container shared by every live process, started or reused,
 //! restarted always, its port on the loopback only. Its data is Redis'
 //! append-only file on a named volume, so it outlives the container. The

@@ -12,7 +12,7 @@ The adapter supports market, limit and stop-market orders and supported brackets
 
 ## Data, warmup and risk
 
-IC serves quotes, not external or composite bars; use bars built internally from its quotes. The client holds live quotes while a history request is answered and releases them after the response, excluding duplicates. This avoids the live-before-warmup race described for [IB](../ib/README.md). Failed history requests report the failure and are not written back. A market closed throughout a short warmup can produce an empty response and a cold strategy.
+IC serves quotes, not external or composite bars; use bars built internally from its quotes. The client holds live quotes while a history request is answered and releases them after the response, excluding duplicates. This avoids the live-before-warmup race described for [IB](../../venues/ib/README.md). Failed history requests report the failure and are not written back. A market closed throughout a short warmup can produce an empty response and a cold strategy.
 
 Quote sizes are synthetic liquidity, not available market depth; see [IC data](../../data/ic/README.md) before relying on fills or backtests. For a EUR account trading USD-quoted instruments, subscribe to `EURUSD.ICMARKETS` quotes as well: Nautilus needs the USD/EUR conversion rate for margin validation and denies orders without it.
 

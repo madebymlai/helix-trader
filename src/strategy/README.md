@@ -35,7 +35,7 @@ A configured session accepts a bar only when its whole span lies within the loca
 
 `Trade::send` rounds quantity to the instrument's size and rejects a zero result. Both price exits produce a bracket, neither produces a market entry, and a single exit is rejected. The time limit starts at send, not fill. Forward time events to `orders::on_time_event` and call `orders::arm_open_trades` on start so cached open trades regain their alerts after a restart. The alert cancels open orders and closes any remaining position; a partial exit does not end the remaining trade.
 
-Leave `oms_type` unset so positions follow the venue. On a netting venue overlapping trades share a position and one trade's time exit closes the whole position, including the other trades' share. On a hedging venue each trade has its own position. The EMA is an example and permits overlap. Its bracket legs are reduce-only; the IB execution client denies them, so the EMA cannot trade live on IB. See [live IB](../live/ib/README.md) and [backtest](../backtest/README.md) for execution limitations.
+Leave `oms_type` unset so positions follow the venue. On a netting venue overlapping trades share a position and one trade's time exit closes the whole position, including the other trades' share. On a hedging venue each trade has its own position. The EMA is an example and permits overlap. Its bracket legs are reduce-only; the IB execution client denies them, so the EMA cannot trade live on IB. See [IB](../venues/ib/README.md#trading-and-warmup) and [backtest](../backtest/README.md) for execution limitations.
 
 ## Warmup
 

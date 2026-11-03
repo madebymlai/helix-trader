@@ -30,10 +30,11 @@ use crate::common;
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::{IbAccount, IbHistory, fill_catalog},
+    data::fill_catalog,
     live::Live,
     rolls::ContinuousBars,
     strategy::{DataRequirements, catalog_series, warmup},
+    venues::ib::{IbAccount, IbHistory},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{

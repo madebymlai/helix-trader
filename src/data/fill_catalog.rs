@@ -2,16 +2,16 @@
 //! instruments and the series their strategy's bars are built from.
 //!
 //! Source-agnostic, no node: the data comes from a fetch function the
-//! caller passes, backed by an adapter's historical client (`ib/`, `okx/`). A
-//! series is a Nautilus data type and its catalog identifier (see
-//! `strategy::catalog_series`): the quotes of an instrument, keyed by its
-//! id, or the bars of a bar type, keyed by the bar type. Per series it
-//! resumes after its stored range (`query_first_timestamp`,
-//! `query_last_timestamp`), checks the response, sorts it by `ts_init` and
-//! writes it with `write_instruments` and `write_data_enum` on a
-//! `ParquetDataCatalog` (`nautilus_persistence`), which stores each series
-//! under its data type and identifier. Nautilus does not persist requested
-//! data on its own.
+//! caller passes, backed by an adapter's historical client (`venues::ib`,
+//! `venues::okx`). A series is a Nautilus data type and its catalog
+//! identifier (see `strategy::catalog_series`): the quotes of an
+//! instrument, keyed by its id, or the bars of a bar type, keyed by the bar
+//! type. Per series it resumes after its stored range
+//! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
+//! sorts it by `ts_init` and writes it with `write_instruments` and
+//! `write_data_enum` on a `ParquetDataCatalog` (`nautilus_persistence`),
+//! which stores each series under its data type and identifier. Nautilus
+//! does not persist requested data on its own.
 //!
 //! Temporary, with IB's and OKX's fills that use it: IB's and OKX's data
 //! clients answer without a `DataResponseEnvelope`, so Nautilus writes

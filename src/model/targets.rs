@@ -18,7 +18,7 @@
 //! orders still open and closes its position if still open, tagged as a
 //! time close (`orders::is_time_close`). Nautilus' IB execution client denies the
 //! reduce-only orders a bracket's legs and `close_position` are (see
-//! `live/ib/README.md`): a model strategy cannot trade live on IB.
+//! `venues/ib/README.md`): a model strategy cannot trade live on IB.
 //!
 //! The exits are `take_profit` and `stop` away from the decision's price
 //! (`reference`): the mid of the instrument's last quote, else its last

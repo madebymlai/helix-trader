@@ -18,11 +18,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::strategy::gold_scalp::GoldScalp;
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{
-        DatabentoHistory, IbHistory, IcConnection, IcHistory, NodeClient, NodeFill, OkxHistory,
-        REQUEST_TIMEOUT, missing,
-    },
-    live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live, Recording},
+    data::{IcConnection, IcHistory, NodeClient, NodeFill, REQUEST_TIMEOUT, missing},
+    live::{IcDataClientConfig, IcDataClientFactory, Live, Recording},
     model::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
@@ -35,6 +32,12 @@ use helix_trader::{
         ema::{EmaCross, EmaParams},
         model_ema::ModelEma,
     },
+    venues::{
+        HistorySource,
+        databento::DatabentoHistory,
+        ib::{IbAccount, IbHistory},
+        okx::OkxHistory,
+    },
 };
 use jiff::{Timestamp, civil::Date};
 use nautilus_common::logging::{
@@ -43,11 +46,7 @@ use nautilus_common::logging::{
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::{
-    enums::OmsType,
-    identifiers::{InstrumentId, TraderId},
-    types::Money,
-};
+use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -517,30 +516,32 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    // The source of an instrument is its venue's: OKX's archive for OKX,
-    // Databento for GLBX, IC's cTrader for IC, IB for every other venue.
-    let (okx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
-        .instrument_ids()
-        .into_iter()
-        .partition(|&id| OkxHistory::serves(id));
-    let (glbx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = others
-        .into_iter()
-        .partition(|&id| DatabentoHistory::serves(id));
-    let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
-        others.into_iter().partition(|&id| IcHistory::serves(id));
+    // The source of an instrument is its venue's (`HistorySource`): OKX's
+    // archive for OKX, Databento for GLBX, IC's cTrader for IC, IB for
+    // every other venue.
+    let (mut okx_ids, mut databento_ids, mut ic_ids, mut ib_ids) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for id in requirements.instrument_ids() {
+        match HistorySource::of(id) {
+            HistorySource::Okx => okx_ids.push(id),
+            HistorySource::Databento => databento_ids.push(id),
+            HistorySource::Ic => ic_ids.push(id),
+            HistorySource::Ib => ib_ids.push(id),
+        }
+    }
     // Every source takes the series slices of its instruments: a rolled
     // root's series contract by contract, each over its slice.
     let slices = requirements.slices(start, end);
-    let slices_of = |serves: fn(InstrumentId) -> bool| -> Vec<SeriesSlice> {
+    let slices_of = |source: HistorySource| -> Vec<SeriesSlice> {
         slices
             .iter()
-            .filter(|slice| serves(slice.slice.instrument_id))
+            .filter(|slice| HistorySource::of(slice.slice.instrument_id) == source)
             .cloned()
             .collect()
     };
     let mut node = NodeFill::new();
-    if !glbx_ids.is_empty() {
-        let requests = missing(&catalog, &slices_of(DatabentoHistory::serves))?;
+    if !databento_ids.is_empty() {
+        let requests = missing(&catalog, &slices_of(HistorySource::Databento))?;
         if !requests.is_empty() {
             let api_key =
                 std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
@@ -552,7 +553,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     if !ic_ids.is_empty() {
         let instrument_ids =
             IcHistory::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
-        let requests = missing(&catalog, &slices_of(IcHistory::serves))?;
+        let requests = missing(&catalog, &slices_of(HistorySource::Ic))?;
         if !requests.is_empty() {
             let client = NodeClient {
                 factory: Box::new(IcDataClientFactory),
@@ -569,7 +570,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     // the node.
     if !okx_ids.is_empty() {
         OkxHistory::new()?
-            .fill(&mut catalog, &slices_of(OkxHistory::serves))
+            .fill(&mut catalog, &slices_of(HistorySource::Okx))
             .await?;
     }
     node.run(catalog_dir, REQUEST_TIMEOUT).await?;
@@ -577,15 +578,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     // the node.
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
-        ib.fill(&mut catalog, &slices_of(is_ib)).await?;
+        ib.fill(&mut catalog, &slices_of(HistorySource::Ib)).await?;
     }
     Ok(())
-}
-
-/// Whether `id` is IB's: on a venue no other source serves. Temporary
-/// until nautilus_trader#5472 is fixed: IB then fills through the node.
-fn is_ib(id: InstrumentId) -> bool {
-    !OkxHistory::serves(id) && !DatabentoHistory::serves(id) && !IcHistory::serves(id)
 }
 
 /// Builds the strategy from its config, runs it over the window of the

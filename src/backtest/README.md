@@ -16,7 +16,7 @@ The default fill model adds no slippage. External LAST bars, including IB minute
 
 On quotes, buys fill at the ask and sells at the bid of the last quote. Resting orders are checked only on available quotes, so a crossing between quotes can be missed. A gap can leave a stale quote in use; without an earlier quote an order is rejected. Quote sizes may be nominal rather than observed depth, and liquidity is not consumed across orders. Tick quotes give more detail than minute bars but do not remove these limitations.
 
-Fixed commission is charged on an order's first fill; a rate is charged on every fill. Neither combines a rate with a minimum, so choose the approximation carefully for IB orders. Stored OKX funding is settled on open positions; absent funding is not checked or settled. The simulated settlement price and timing can differ from OKX, including orders placed at a funding boundary. See [OKX data](../data/okx/README.md) for availability.
+Fixed commission is charged on an order's first fill; a rate is charged on every fill. Neither combines a rate with a minimum, so choose the approximation carefully for IB orders. Stored OKX funding is settled on open positions; absent funding is not checked or settled. The simulated settlement price and timing can differ from OKX, including orders placed at a funding boundary. See [OKX funding](../venues/okx/README.md#funding-and-margins) for availability.
 
 ## Leverage and venues
 

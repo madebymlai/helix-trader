@@ -1,6 +1,8 @@
-//! OKX history: the instruments of OKX swaps and X-Perps, their 1-minute
-//! candles and their funding, filled into the catalog one archive month, or
-//! day, at a time, then, for funding, from OKX's API.
+//! OKX: its history, the instruments of OKX swaps and X-Perps, their
+//! 1-minute candles and their funding, filled into the catalog one archive
+//! month, or day, at a time, then, for funding, from OKX's API, and the
+//! live node's clients (see `live`), both keying an instrument by its
+//! contract (`Contract`). See `README.md`.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
 //! `OKXRawHttpClient` (that of its `OKXHttpClient`) and
@@ -20,7 +22,7 @@
 //! The fill (`OkxHistory::fill`) is temporary: OKX's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
 //! back. Once nautilus_trader#5473 is fixed, OKX fills through the node as
-//! Databento and IC do (see `node_fill`).
+//! Databento and IC do (see `data::NodeFill`).
 
 use std::{collections::HashMap, io::Cursor, time::Duration};
 
@@ -51,10 +53,12 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use super::fill_catalog;
-use crate::strategy::SeriesSlice;
+use super::HistorySource;
+use crate::{data::fill_catalog, strategy::SeriesSlice};
 
 mod archive;
+mod live;
+pub(crate) use live::clients;
 
 /// OKX's archive of history files (public, no key).
 const ARCHIVE_API: &str = "https://www.okx.com/api/v5/public/market-data-history";
@@ -112,12 +116,6 @@ impl OkxHistory {
             .build()
             .context("building the OKX archive client")?;
         Ok(Self { client, archive })
-    }
-
-    /// Whether `id` is OKX's, so its history comes from here.
-    #[must_use]
-    pub fn serves(id: InstrumentId) -> bool {
-        id.venue == *OKX_VENUE
     }
 
     /// Fills `catalog` with `slices` (`DataRequirements::slices`, as the
@@ -367,7 +365,7 @@ fn candle_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Re
     ensure!(
         bar_type.spec() == minute
             && bar_type.aggregation_source() == AggregationSource::External
-            && OkxHistory::serves(bar_type.instrument_id()),
+            && HistorySource::of(bar_type.instrument_id()) == HistorySource::Okx,
         served()
     );
     Ok(bar_type)
@@ -658,19 +656,23 @@ fn instrument_from(raw: &OKXInstrument, ts_init: UnixNanos) -> anyhow::Result<In
 /// (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API and archive, and
 /// in the live clients' configs, by its instrument type and family.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Contract {
+struct Contract {
     id: InstrumentId,
     /// `Swap` or `Futures`, from the symbol (the adapter's
     /// `okx_instrument_type_from_symbol`).
-    pub(crate) inst_type: OKXInstrumentType,
+    inst_type: OKXInstrumentType,
     /// The symbol without its last part: `BTC-USDT`, `BTC-USD_UM_XPERP`.
-    pub(crate) family: &'static str,
+    family: &'static str,
 }
 
 impl Contract {
     /// The contract of `id`; an error if it is not an OKX swap or future.
-    pub(crate) fn of(id: InstrumentId) -> anyhow::Result<Self> {
-        ensure!(OkxHistory::serves(id), "{id} is not on {}", *OKX_VENUE);
+    fn of(id: InstrumentId) -> anyhow::Result<Self> {
+        ensure!(
+            HistorySource::of(id) == HistorySource::Okx,
+            "{id} is not on {}",
+            *OKX_VENUE
+        );
         let symbol = id.symbol.inner().as_str();
         let inst_type = okx_instrument_type_from_symbol(symbol);
         ensure!(
@@ -934,7 +936,7 @@ pub(super) mod tests {
     }
 
     /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21.
-    pub(in crate::data::okx) fn btc_instrument() -> InstrumentAny {
+    pub(in crate::venues::okx) fn btc_instrument() -> InstrumentAny {
         instrument_from(&raw_instrument(), UnixNanos::default()).unwrap()
     }
 
@@ -946,7 +948,7 @@ pub(super) mod tests {
 
     /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on
     /// 2026-10-22.
-    pub(in crate::data::okx) fn xperp_instrument() -> InstrumentAny {
+    pub(in crate::venues::okx) fn xperp_instrument() -> InstrumentAny {
         instrument_from(&raw_xperp(), UnixNanos::default()).unwrap()
     }
 
@@ -982,14 +984,6 @@ pub(super) mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("X-Perp"), "{err}");
-    }
-
-    #[test]
-    fn okx_serves_the_instruments_of_its_venue_only() {
-        assert!(OkxHistory::serves(btc()));
-        for id in ["ESZ6.CME", "SXR8.IBIS", "BTC-USDT-SWAP.BINANCE"] {
-            assert!(!OkxHistory::serves(InstrumentId::from(id)), "{id}");
-        }
     }
 
     #[test]

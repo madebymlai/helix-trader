@@ -30,9 +30,9 @@ use std::{
 };
 
 use helix_trader::{
-    data::{IbAccount, IbHistory},
     live::Live,
     strategy::ema::{EmaCross, EmaCrossConfig},
+    venues::ib::{IbAccount, IbHistory},
 };
 use jiff::Timestamp;
 use nautilus_common::logging::logger::LoggerConfig;

@@ -216,7 +216,7 @@ mod tests {
     use zip::{CompressionMethod, write::SimpleFileOptions};
 
     use super::*;
-    use crate::data::okx::tests::{btc_instrument, xperp_instrument};
+    use crate::venues::okx::tests::{btc_instrument, xperp_instrument};
 
     const SWAP_DAY: &[u8] =
         include_bytes!("testdata/BTC-USDT-SWAP-candlesticks-2026-10-19-sample.zip");

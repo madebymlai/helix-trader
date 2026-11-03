@@ -1,24 +1,18 @@
 //! Market data: the traded instruments, the series their strategy bars are
 //! built from (the source bars of a composite bar type, or quotes) and the
-//! funding of OKX swaps and X-Perps, in the Nautilus catalog.
+//! funding of OKX swaps and X-Perps, in the Nautilus catalog, from the
+//! history source of each instrument's venue (see `venues`).
 //!
 //! Build step 1. Backtest reads what this module writes. The instruments
 //! come from the strategy's data requirements.
 
-mod databento;
-pub use databento::DatabentoHistory;
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
-mod ib;
-pub use ib::{IbAccount, IbHistory};
-pub(crate) use ib::{IbGateway, data_client_config};
+pub(crate) use fill_catalog::fill_slices;
 pub(crate) mod ic;
+pub use ic::{IcConnection, IcHistory};
 mod node_fill;
 pub use node_fill::{FillData, FillRequest, NodeClient, NodeFill, REQUEST_TIMEOUT, missing};
-mod okx;
-pub use ic::{IcConnection, IcHistory};
-pub(crate) use okx::Contract as OkxContract;
-pub use okx::OkxHistory;
 
 use std::path::Path;
 

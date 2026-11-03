@@ -44,8 +44,8 @@ use nautilus_okx::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use super::node::Clients;
-use crate::data::OkxContract;
+use super::Contract;
+use crate::live::node::Clients;
 
 /// The variable naming the OKX environment of the run, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";
@@ -62,7 +62,7 @@ const REQUEST_TIMEOUT_SECS: u64 = 60;
 /// The OKX data and execution client configs of a node trading OKX swaps
 /// or X-Perps.
 #[derive(Debug, Clone)]
-pub(super) struct OkxClients {
+pub(crate) struct OkxClients {
     pub(super) data: OKXDataClientConfig,
     pub(super) exec: OKXExecutionClientConfig,
 }
@@ -79,7 +79,7 @@ pub(super) struct OkxClients {
 /// before any request), if OKX cannot be reached or
 /// refuses the key, if the account is not in net position mode, or if an
 /// instrument's leverage is not `leverage` (or OKX does not list it).
-pub(super) async fn clients(
+pub(crate) async fn clients(
     instrument_ids: &[InstrumentId],
     leverage: Decimal,
 ) -> anyhow::Result<OkxClients> {
@@ -109,7 +109,7 @@ fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
 }
 
 /// The client configs of `instrument_ids`, OKX swaps or X-Perps: their
-/// instrument types and families are loaded (see `OkxContract`), on
+/// instrument types and families are loaded (see `Contract`), on
 /// `environment` and `REGION`, orders in `MARGIN_MODE`; no credential, so
 /// the adapter reads them from the environment.
 fn configs(
@@ -119,7 +119,7 @@ fn configs(
     let mut instrument_types = Vec::new();
     let mut families = Vec::new();
     for &id in instrument_ids {
-        let contract = OkxContract::of(id)?;
+        let contract = Contract::of(id)?;
         if !instrument_types.contains(&contract.inst_type) {
             instrument_types.push(contract.inst_type);
         }
@@ -150,7 +150,7 @@ fn configs(
 impl OkxClients {
     /// The factories and configs, for the node. OKX is one venue, so
     /// Nautilus routes it to these clients without a route of ours.
-    pub(super) fn into_node_clients(self) -> Clients {
+    pub(crate) fn into_node_clients(self) -> Clients {
         let data_config: Box<dyn ClientConfig> = Box::new(self.data);
         let exec_config: Box<dyn ClientConfig> = Box::new(self.exec);
         let data_factory: Box<dyn DataClientFactory> = Box::new(OKXDataClientFactory::new());

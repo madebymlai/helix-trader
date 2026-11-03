@@ -107,12 +107,6 @@ impl IcHistory {
         Ok((Self { client, account_id }, spots))
     }
 
-    /// Whether `id` is IC's, so its history comes from here.
-    #[must_use]
-    pub fn serves(id: InstrumentId) -> bool {
-        parse::is_ic(id)
-    }
-
     /// The instruments of `series`, each the quotes of an IC instrument:
     /// those IC's data client loads to fill them through the node.
     ///

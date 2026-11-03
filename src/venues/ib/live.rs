@@ -3,9 +3,8 @@
 //! Provides the Nautilus client factories and configs from
 //! `nautilus_interactive_brokers`: `InteractiveBrokersDataClientFactory`,
 //! `InteractiveBrokersExecutionClientFactory` and their configs, on the
-//! gateway of the account's trading mode (`data::IbGateway`); the account
-//! id goes in the execution config. Another broker is another file next
-//! to this one (`okx/`).
+//! gateway of the account's trading mode (`IbGateway`); the account id
+//! goes in the execution config.
 
 use anyhow::ensure;
 use nautilus_interactive_brokers::{
@@ -18,13 +17,13 @@ use nautilus_interactive_brokers::{
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::identifiers::InstrumentId;
 
-use super::node::Clients;
-use crate::data::{IbAccount, IbGateway, data_client_config};
+use super::{IbAccount, IbGateway, data_client_config};
+use crate::live::node::Clients;
 
 /// The IB data and execution client configs of a node trading `account`
 /// on `instrument_ids` through `gateway`, both on one connection.
 #[derive(Debug, Clone)]
-pub(super) struct IbClients {
+pub(crate) struct IbClients {
     pub(super) data: InteractiveBrokersDataClientConfig,
     pub(super) exec: InteractiveBrokersExecutionClientConfig,
 }
@@ -38,7 +37,7 @@ pub(super) struct IbClients {
 /// Returns an error if the client id is a multiple of 1000 (IB reserves
 /// those for the execution client), checked before any gateway starts, or
 /// if the gateway does not start and log in.
-pub(super) async fn clients(
+pub(crate) async fn clients(
     account: &IbAccount,
     client_id: i32,
     instrument_ids: &[InstrumentId],
@@ -54,7 +53,7 @@ pub(super) async fn clients(
 /// The client configs for `account` on `gateway`, loading `instrument_ids`
 /// at startup.
 ///
-/// The data client is the history's (`data::data_client_config`: the full
+/// The data client is the history's (`data_client_config`: the full
 /// session, the symbology and venues of the catalog's instruments), so its
 /// 1-minute bars, requested for the warmup and subscribed to live, are
 /// those `fill-catalog` stores. Quotes a strategy subscribes to come tick
@@ -86,7 +85,7 @@ fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[Instrumen
 impl IbClients {
     /// The factories and configs, for the node: the default route for
     /// data and orders, since IB spans many venues.
-    pub(super) fn into_node_clients(self) -> Clients {
+    pub(crate) fn into_node_clients(self) -> Clients {
         Clients {
             data_factory: Box::new(InteractiveBrokersDataClientFactory::new()),
             data_config: Box::new(self.data),

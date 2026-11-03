@@ -9,3 +9,4 @@ pub mod live;
 pub mod model;
 pub mod rolls;
 pub mod strategy;
+pub mod venues;

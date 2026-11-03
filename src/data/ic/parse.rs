@@ -35,14 +35,10 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use super::messages::{ProtoOaAsset, ProtoOaDynamicLeverage, ProtoOaLightSymbol, ProtoOaSymbol};
+use crate::venues::HistorySource;
 
 /// The venue of IC's instruments.
 pub(crate) const IC_VENUE: &str = "ICMARKETS";
-
-/// Whether `id` is on IC's venue.
-pub(super) fn is_ic(id: InstrumentId) -> bool {
-    id.venue == Venue::new(IC_VENUE)
-}
 
 /// The cTrader symbol name of `id`, an IC instrument: its symbol.
 pub(super) fn symbol_name(id: InstrumentId) -> &'static str {
@@ -193,9 +189,10 @@ pub(super) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAss
     assets.into_iter().map(|a| (a.asset_id, a)).collect()
 }
 
-/// Fails unless `id` is an IC instrument.
+/// Fails unless `id` is an IC instrument, one whose history IC serves
+/// (`HistorySource`).
 pub(super) fn ensure_ic(id: InstrumentId) -> anyhow::Result<()> {
-    if !is_ic(id) {
+    if HistorySource::of(id) != HistorySource::Ic {
         bail!("{id} is not on {IC_VENUE}");
     }
     Ok(())
@@ -465,7 +462,7 @@ mod tests {
         for name in ["XAUUSD", "EURUSD"] {
             let id = instrument_id(name).unwrap();
 
-            assert!(is_ic(id));
+            assert_eq!(HistorySource::of(id), HistorySource::Ic);
             assert_eq!(symbol_name(id), name);
         }
     }
