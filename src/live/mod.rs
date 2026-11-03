@@ -1,12 +1,13 @@
 //! Runs the strategy on a Nautilus live node.
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
-//! those of the instruments' venues: OKX's for OKX instruments (`okx/`),
-//! IC's for IC instruments (`ic/`, a hedging account), IB's for the others
-//! (`ib/`), several if the instruments span several. Each venue's data
-//! client serves the warmup of its instruments up to now: OKX's candles
-//! (see `okx/`), IC's quotes from cTrader's tick history (see `ic/`), IB's
-//! 1-minute bars (see `ib/`). The node registers the catalog fill-catalog
+//! those of the instruments' live brokers (`venues::LiveBroker`): OKX's
+//! for OKX instruments (`venues::okx`), IC's for IC instruments (`ic/`, a
+//! hedging account), IB's for the others (`venues::ib`), several if the
+//! instruments span several. Each broker's data client serves the warmup
+//! of its instruments up to now: OKX's candles (see `venues::okx`), IC's
+//! quotes from cTrader's tick history (see `ic/`), IB's 1-minute bars (see
+//! `venues::ib`). The node registers the catalog fill-catalog
 //! fills and backtests read: the warmup comes from it first, from the
 //! venues for what it lacks, and IC's answers are written back to it (see
 //! `strategy::warmup`). A futures root's instruments are its contract in
@@ -15,10 +16,8 @@
 //! before switching to it (see `rolls::Roller::live`), so the node rolls
 //! without a restart; bars on a root are refused.
 
-mod ib;
 mod ic;
 pub mod node;
-mod okx;
 mod recording;
 mod redis;
 
@@ -26,8 +25,6 @@ pub use ic::{
     IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
 };
 pub use recording::Recording;
-
-pub use crate::data::IbAccount;
 
 use std::{fmt::Debug, path::PathBuf};
 
@@ -44,12 +41,17 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    data::{IcHistory, OkxHistory, catalog_path},
+    data::catalog_path,
     model::launcher::RetrainActor,
     rolls::Transition,
     strategy::{
         DataRequirements,
         warmup::{self, Warmup},
+    },
+    venues::{
+        LiveBroker,
+        ib::{self, IbAccount},
+        okx,
     },
 };
 
@@ -139,11 +141,14 @@ impl Live {
             file_config,
         )?;
         init_tracing()?;
-        let (okx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = instrument_ids
-            .iter()
-            .partition(|&&id| OkxHistory::serves(id));
-        let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
-            others.into_iter().partition(|&id| IcHistory::serves(id));
+        let (mut okx_ids, mut ic_ids, mut ib_ids) = (Vec::new(), Vec::new(), Vec::new());
+        for &id in &instrument_ids {
+            match LiveBroker::of(id) {
+                LiveBroker::Okx => okx_ids.push(id),
+                LiveBroker::Ic => ic_ids.push(id),
+                LiveBroker::Ib => ib_ids.push(id),
+            }
+        }
         // Read before anything connects.
         let ic = if ic_ids.is_empty() {
             None

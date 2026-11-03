@@ -56,10 +56,10 @@ impl fmt::Display for IbAccount {
 
 /// A logged-in IB Gateway and the client id this process connects with.
 #[derive(Debug, Clone)]
-pub(crate) struct IbGateway {
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) client_id: i32,
+pub(super) struct IbGateway {
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) client_id: i32,
 }
 
 impl IbGateway {
@@ -68,7 +68,7 @@ impl IbGateway {
     /// # Errors
     ///
     /// See `start`.
-    pub(crate) async fn of_account(account: &IbAccount, client_id: i32) -> anyhow::Result<Self> {
+    pub(super) async fn of_account(account: &IbAccount, client_id: i32) -> anyhow::Result<Self> {
         Self::start(account.trading_mode(), client_id).await
     }
 
@@ -77,7 +77,7 @@ impl IbGateway {
     /// # Errors
     ///
     /// See `start`.
-    pub(crate) async fn paper(client_id: i32) -> anyhow::Result<Self> {
+    pub(super) async fn paper(client_id: i32) -> anyhow::Result<Self> {
         Self::start(TradingMode::Paper, client_id).await
     }
 

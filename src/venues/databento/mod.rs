@@ -1,7 +1,7 @@
 //! Databento history of `GLBX` instruments (CME Globex, `GLBX.MDP3`),
-//! filled through the node (see `node_fill`) by Nautilus' Databento data
-//! client (`DatabentoDataClient`), whose answers the data engine writes
-//! back to the catalog: definitions, MBP-10 as `OrderBookDepth`
+//! filled through the node (see `data::NodeFill`) by Nautilus' Databento
+//! data client (`DatabentoDataClient`), whose answers the data engine
+//! writes back to the catalog: definitions, MBP-10 as `OrderBookDepth`
 //! snapshots, trades as `TradeTick`s, quotes, each contract under its own
 //! id. What stays here is what Nautilus' client does not do: Databento's
 //! cost quotes and the dataset's end, checked before the node starts
@@ -19,16 +19,17 @@ use nautilus_databento::{
     factories::DatabentoDataClientFactory, symbology::infer_symbology_type,
 };
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::identifiers::{InstrumentId, Venue};
+use nautilus_model::identifiers::Venue;
 
-use super::node_fill::{FillData, FillRequest, NodeClient};
+use super::HistorySource;
+use crate::data::{FillData, FillRequest, NodeClient};
 
 /// Nautilus' map of Databento publishers to venues, copied from
 /// `crates/adapters/databento/publishers.json` at the pinned commit: the
 /// client reads it from a path.
 const PUBLISHERS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/src/data/databento/publishers.json"
+    "/src/venues/databento/publishers.json"
 );
 
 /// The Databento dataset of `GLBX` instruments.
@@ -68,13 +69,6 @@ impl DatabentoHistory {
         Ok(Self { metadata, config })
     }
 
-    /// Whether `id` is on `GLBX`, the venue Nautilus gives CME Globex
-    /// records (`publishers.json`), so its history comes from here.
-    #[must_use]
-    pub fn serves(id: InstrumentId) -> bool {
-        id.venue == Venue::GLBX()
-    }
-
     /// The window one request of any series holds at most (see
     /// `NodeFill::add`): a UTC day.
     #[must_use]
@@ -82,7 +76,7 @@ impl DatabentoHistory {
         DAY
     }
 
-    /// Checks `requests`, of `GLBX` instruments (see `node_fill::missing`),
+    /// Checks `requests`, of `GLBX` instruments (see `data::missing`),
     /// against the dataset's end, then logs Databento's quote for each and
     /// their total, before any data is asked for.
     ///
@@ -94,7 +88,7 @@ impl DatabentoHistory {
     pub async fn quote(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
         for request in requests {
             ensure!(
-                Self::serves(request.instrument_id),
+                HistorySource::of(request.instrument_id) == HistorySource::Databento,
                 "Databento serves GLBX instruments here, not {}",
                 request.instrument_id
             );
@@ -192,14 +186,14 @@ mod tests {
     use nautilus_model::{
         data::{NautilusDataType, TradeTick},
         enums::AggressorSide,
-        identifiers::TradeId,
+        identifiers::{InstrumentId, TradeId},
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
     use super::*;
     use crate::{
-        data::node_fill::missing,
+        data::missing,
         strategy::{DataRequirements, TickSeries},
     };
 
@@ -211,15 +205,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         (dir, catalog)
-    }
-
-    #[test]
-    fn serves_glbx_instruments_only() {
-        assert!(DatabentoHistory::serves(InstrumentId::from("GC.v.0.GLBX")));
-        assert!(!DatabentoHistory::serves(InstrumentId::from("GCZ6.XCEC")));
-        assert!(!DatabentoHistory::serves(InstrumentId::from(
-            "BTC-USDT-SWAP.OKX"
-        )));
     }
 
     #[test]

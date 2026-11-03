@@ -1,19 +1,19 @@
-//! Interactive Brokers connection and history: the account, the gateway
-//! (see `gateway`), the data client config, and instruments and bars for
-//! `fill_catalog`, which asks for series of any data type: IB serves its
-//! 1-MINUTE TRADES bars only (see `IbHistory::data`).
+//! Interactive Brokers: the account, the gateway (see `gateway`) and the
+//! data client config its history and its live clients share, instruments
+//! and bars for `fill_catalog`, which asks for series of any data type: IB
+//! serves its 1-MINUTE TRADES bars only (see `IbHistory::data`), and the
+//! live node's clients (see `live`). See `README.md`.
 //!
 //! IB's fill (`IbHistory::fill`) is temporary: IB's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
 //! back. Once nautilus_trader#5472 is fixed, IB fills through the node as
-//! Databento and IC do (see `node_fill`), and `fill` and `data` go.
+//! Databento and IC do (see `data::NodeFill`), and `fill` and `data` go.
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
 //! connects to IB Gateway or TWS, returns `Vec<InstrumentAny>` from
 //! `request_instruments` and `Vec<Bar>` from `request_bars`. The bars are
-//! stored as IB gives them. Another source is another file next to this
-//! one.
+//! stored as IB gives them.
 
 use std::str::FromStr;
 
@@ -33,12 +33,13 @@ use nautilus_model::{
 
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
-use super::fill_catalog::fill_slices;
-use crate::strategy::SeriesSlice;
+use crate::{data::fill_slices, strategy::SeriesSlice};
 
 mod gateway;
 pub use gateway::IbAccount;
-pub(crate) use gateway::IbGateway;
+use gateway::IbGateway;
+mod live;
+pub(crate) use live::clients;
 
 /// A connection to IB for history: instruments and bars, no node.
 pub struct IbHistory {
@@ -307,7 +308,7 @@ async fn walk_back(
 /// like `ESM4.CME`). Never sets
 /// `convert_exchange_to_mic_venue`: it makes the venue of a CME contract
 /// change between processes.
-pub(crate) fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
+fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
     InteractiveBrokersDataClientConfig {
         host: gateway.host,
         port: gateway.port,
