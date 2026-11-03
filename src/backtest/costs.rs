@@ -1,22 +1,16 @@
 //! Trading costs of the simulated venue.
 //!
-//! Builds the Nautilus `FeeModelAny` and `FillModelAny`
-//! (`nautilus_execution`) that `BacktestVenueConfig` takes: a commission
-//! either fixed per order (`FixedFeeModel`) or a rate on the trade value
-//! (`MakerTakerFeeModel`), and fills at the market with no slippage of
-//! their own (`DefaultFillModel`): at the quote, so the spread is the cost,
-//! or, on bars, at the bar's prices.
+//! Builds the Nautilus `FeeModelAny` (`nautilus_execution`) that
+//! `BacktestVenueConfig` takes: a commission either fixed per order
+//! (`FixedFeeModel`) or a rate on the trade value (`MakerTakerFeeModel`).
+//! The venue sets no fill model, so Nautilus fills on its default
+//! (`DefaultFillModel`), at the market with no slippage of its own: at the
+//! quote, so the spread is the cost, or, on bars, at the bar's prices.
 
 use anyhow::ensure;
-use nautilus_execution::models::{
-    fee::{FeeModelAny, FixedFeeModel, MakerTakerFeeModel},
-    fill::{DefaultFillModel, FillModelAny},
-};
+use nautilus_execution::models::fee::{FeeModelAny, FixedFeeModel, MakerTakerFeeModel};
 use nautilus_model::types::Money;
 use rust_decimal::Decimal;
-
-/// Seed of the fill model, fixed so that runs are reproducible.
-const FILL_SEED: u64 = 42;
 
 /// `commission` charged once per order, on its first fill.
 ///
@@ -43,17 +37,6 @@ pub fn commission_rate(rate: Decimal) -> anyhow::Result<FeeModelAny> {
         "commission rate {rate} must not be negative"
     );
     Ok(FeeModelAny::MakerTaker(MakerTakerFeeModel::new(rate, rate)))
-}
-
-/// Market orders fill at the quote (a buy at the ask, a sell at the bid),
-/// or on bars at the last price, with no slippage; limit orders always
-/// fill when touched.
-pub(super) fn fill_model() -> anyhow::Result<FillModelAny> {
-    Ok(FillModelAny::Default(DefaultFillModel::new(
-        1.0,
-        0.0,
-        Some(FILL_SEED),
-    )?))
 }
 
 #[cfg(test)]
