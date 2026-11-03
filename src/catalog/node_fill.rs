@@ -1,6 +1,6 @@
 //! Fills the catalog through a Nautilus node: the sources whose data client
-//! answers a request with a completed `DataResponseEnvelope` (Databento's,
-//! IC's), which the data engine writes back to the catalog (`update_catalog`).
+//! answers a request with a completed `DataResponseEnvelope`, which the
+//! data engine writes back to the catalog (`update_catalog`).
 //!
 //! `missing` turns series slices (`strategy::SeriesSlice`) into what the
 //! catalog lacks of them, by Nautilus' own count
@@ -43,7 +43,7 @@ use nautilus_live::{
     config::{LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::{
-    data::NautilusDataType,
+    data::{BarType, NautilusDataType},
     identifiers::{InstrumentId, TraderId},
     instruments::Instrument,
 };
@@ -72,43 +72,54 @@ pub enum FillData {
     Depth,
     /// `OrderBookDelta`s (`request_book_deltas`).
     Deltas,
+    /// The `Bar`s of a bar type (`request_bars`).
+    Bars(BarType),
+    /// `FundingRateUpdate`s (`request_funding_rates`).
+    Funding,
 }
 
 impl FillData {
-    /// The series of `data_type`; an error for a data type no node source
-    /// serves here (bars, funding, custom data).
-    fn of(data_type: &NautilusDataType) -> anyhow::Result<Self> {
+    /// The series of `data_type` keyed by `identifier`, as the catalog
+    /// keys it (see `strategy::catalog_series`): the bar type of bars, the
+    /// instrument id of anything else; an error for custom data, which no
+    /// node source serves here.
+    fn of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Self> {
         Ok(match data_type {
             NautilusDataType::QuoteTick => Self::Quotes,
             NautilusDataType::TradeTick => Self::Trades,
             NautilusDataType::OrderBookDepth => Self::Depth,
             NautilusDataType::OrderBookDelta => Self::Deltas,
+            NautilusDataType::Bar => Self::Bars(identifier.parse()?),
+            NautilusDataType::FundingRateUpdate => Self::Funding,
             other => bail!("no source filled through the node serves {other}"),
         })
     }
 
-    /// The Nautilus data type of a series; none for the instrument.
-    #[must_use]
-    pub fn data_type(self) -> Option<NautilusDataType> {
+    /// The instrument whose series of this kind `identifier` keys.
+    fn instrument_of(self, identifier: &str) -> String {
         match self {
-            Self::Instrument => None,
-            Self::Quotes => Some(NautilusDataType::QuoteTick),
-            Self::Trades => Some(NautilusDataType::TradeTick),
-            Self::Depth => Some(NautilusDataType::OrderBookDepth),
-            Self::Deltas => Some(NautilusDataType::OrderBookDelta),
+            Self::Bars(bar_type) => bar_type.instrument_id().to_string(),
+            _ => identifier.to_string(),
         }
     }
 }
 
 impl fmt::Display for FillData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Instrument => "definition",
-            Self::Quotes => "quotes",
-            Self::Trades => "trades",
-            Self::Depth => "book depths",
-            Self::Deltas => "book deltas",
-        })
+        match self {
+            Self::Instrument => f.write_str("definition"),
+            Self::Quotes => f.write_str("quotes"),
+            Self::Trades => f.write_str("trades"),
+            Self::Depth => f.write_str("book depths"),
+            Self::Deltas => f.write_str("book deltas"),
+            Self::Bars(bar_type) => write!(
+                f,
+                "{}-{} bars",
+                bar_type.spec(),
+                bar_type.aggregation_source()
+            ),
+            Self::Funding => f.write_str("funding rates"),
+        }
     }
 }
 
@@ -163,8 +174,9 @@ impl FillRequest {
 ///
 /// # Errors
 ///
-/// Returns an error if a series is not the quotes, trades, book depths or
-/// book deltas of its slice's contract, or if the catalog cannot be read.
+/// Returns an error if a series is not the quotes, trades, book depths,
+/// book deltas, bars or funding of its slice's contract, or if the catalog
+/// cannot be read.
 pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -176,10 +188,10 @@ pub fn missing(
     } in slices
     {
         let id = slice.instrument_id;
-        let data =
-            FillData::of(data_type).with_context(|| format!("the {data_type} of {identifier}"))?;
+        let data = FillData::of(data_type, identifier)
+            .with_context(|| format!("the {data_type} of {identifier}"))?;
         ensure!(
-            *identifier == id.to_string(),
+            data.instrument_of(identifier) == id.to_string(),
             "the {data} of {identifier} on a slice of {id}"
         );
         let (from, to) = (nanos(slice.from), nanos(slice.to));
@@ -284,10 +296,9 @@ impl NodeFill {
     /// # Errors
     ///
     /// Returns an error if the node fails to build or run; naming the
-    /// request, if one fails or its client answers with a failure; if the
-    /// node stops before every request is answered; or if a window answered
-    /// with data is not covered in the catalog after the run (see
-    /// `check_coverage`). What was written before stays.
+    /// request, if one fails, its client answers with a failure or its
+    /// answer is not written back; or if the node stops before every
+    /// request is answered. What was written before stays.
     pub async fn run(self, catalog_dir: &Path) -> anyhow::Result<()> {
         let Self { clients, requests } = self;
         if requests.is_empty() {
@@ -344,63 +355,17 @@ impl NodeFill {
         }
         ensure!(
             done,
-            "the node stopped with {} of {total} requests answered",
-            answered.len()
+            "the node stopped with {answered} of {total} requests answered"
         );
-        check_coverage(
-            &ParquetDataCatalog::new(catalog_dir, None, None, None, None),
-            &answered,
-        )
+        Ok(())
     }
 }
 
-/// Checks that each request of `answered` that came back with data is
-/// covered in `catalog`: Nautilus only logs a failed write-back
-/// (`update_catalog_from_response`), so the requester sees a success.
-/// Temporary: delete once nautilus_trader#5474 (a write-back failure
-/// reported to the requester) is fixed.
-///
-/// # Errors
-///
-/// Returns an error naming the first such request the catalog does not
-/// cover, and what it lacks.
-fn check_coverage(
-    catalog: &ParquetDataCatalog,
-    answered: &[(FillRequest, usize)],
-) -> anyhow::Result<()> {
-    for &(request, rows) in answered {
-        let Some(data_type) = request.data.data_type() else {
-            continue;
-        };
-        if rows == 0 {
-            continue;
-        }
-        let missing = catalog
-            .get_missing_intervals_for_request(
-                nanos(request.from),
-                nanos(request.to),
-                &data_type.into(),
-                Some(&request.instrument_id.to_string()),
-            )
-            .with_context(|| format!("reading the coverage of {request}"))?;
-        ensure!(
-            missing.is_empty(),
-            "{request} came back with {rows} rows, but the catalog lacks {:?} of it: \
-             Nautilus' write-back failed (see its log)",
-            missing
-                .iter()
-                .map(|&(from, to)| (at(from), at(to)))
-                .collect::<Vec<_>>()
-        );
-    }
-    Ok(())
-}
-
-/// How the actor's requests ended: those answered, with their rows, the
-/// first failure, and whether every request was answered.
+/// How the actor's requests ended: how many were answered, the first
+/// failure, and whether every request was answered.
 #[derive(Debug, Default)]
 struct Outcome {
-    answered: Vec<(FillRequest, usize)>,
+    answered: usize,
     failure: Option<String>,
     done: bool,
 }
@@ -466,6 +431,10 @@ impl FillActor {
             FillData::Deltas => {
                 self.request_book_deltas(instrument_id, from, to, None, None, params)
             }
+            FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, None, params),
+            FillData::Funding => {
+                self.request_funding_rates(instrument_id, from, to, None, None, params)
+            }
         }
     }
 
@@ -506,10 +475,12 @@ impl DataActor for FillActor {
             Some(DataResponse::Trades(answer)) => answer.data.len(),
             Some(DataResponse::BookDepth(answer)) => answer.data.len(),
             Some(DataResponse::BookDeltas(answer)) => answer.data.len(),
+            Some(DataResponse::Bars(answer)) => answer.data.len(),
+            Some(DataResponse::FundingRates(answer)) => answer.data.len(),
             _ => 0,
         };
         log::info!("{request}: {rows} rows");
-        self.outcome.borrow_mut().answered.push((request, rows));
+        self.outcome.borrow_mut().answered += 1;
         self.next();
         Ok(())
     }
@@ -519,7 +490,7 @@ nautilus_actor!(FillActor);
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
-        data::TradeTick,
+        data::{Bar, BarType, TradeTick},
         enums::AggressorSide,
         identifiers::TradeId,
         types::{Price, Quantity},
@@ -810,23 +781,128 @@ mod tests {
         );
     }
 
+    const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
+
+    fn bars_slice(bar_type: &str, id: &str, from: &str, to: &str) -> SeriesSlice {
+        SeriesSlice {
+            series: (NautilusDataType::Bar, bar_type.to_string()),
+            slice: Slice {
+                instrument_id: InstrumentId::from(id),
+                from: ts(from),
+                to: ts(to),
+            },
+        }
+    }
+
     #[test]
-    fn bars_are_refused_naming_the_series() {
+    fn bars_are_asked_as_their_bar_type_over_their_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let bars = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
-        let slices = [SeriesSlice {
-            series: (NautilusDataType::Bar, bars.to_string()),
-            slice: Slice {
-                instrument_id: InstrumentId::from("GCZ26.GLBX"),
-                from: ts("2026-10-20T00:00:00Z"),
-                to: ts("2026-10-21T00:00:00Z"),
-            },
-        }];
+        let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
+        let slices = [bars_slice(BARS, "GCZ26.GLBX", from, to)];
 
-        let err = missing(&catalog, &slices).unwrap_err();
+        let asked = missing(&catalog, &slices).unwrap();
 
-        assert!(format!("{err:#}").contains(bars), "{err:#}");
+        assert_eq!(
+            asked,
+            [
+                request(FillData::Instrument, "GCZ26.GLBX", from, to),
+                request(FillData::Bars(BarType::from(BARS)), "GCZ26.GLBX", from, to),
+            ]
+        );
+    }
+
+    #[test]
+    fn stored_bars_lack_only_what_is_outside_their_bar_type_s_stored_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let price = Price::from("4000.0");
+        let close = ts("2026-10-21T10:00:00Z");
+        let bar = Bar::new(
+            BarType::from(BARS),
+            price,
+            price,
+            price,
+            price,
+            Quantity::from(1),
+            (close - SignedDuration::from_mins(1)).into(),
+            close.into(),
+        );
+        catalog
+            .write_to_parquet(
+                &[bar],
+                Some(ts("2026-10-21T00:00:00Z").into()),
+                Some(ts("2026-10-21T23:59:59.999999999Z").into()),
+                None,
+            )
+            .unwrap();
+        let slices = [bars_slice(
+            BARS,
+            "GCZ26.GLBX",
+            "2026-10-20T00:00:00Z",
+            "2026-10-22T00:00:00Z",
+        )];
+
+        let asked = missing(&catalog, &slices).unwrap();
+
+        let bars = FillData::Bars(BarType::from(BARS));
+        assert_eq!(
+            asked[1..],
+            [
+                request(
+                    bars,
+                    "GCZ26.GLBX",
+                    "2026-10-20T00:00:00Z",
+                    "2026-10-20T23:59:59.999999999Z"
+                ),
+                request(
+                    bars,
+                    "GCZ26.GLBX",
+                    "2026-10-22T00:00:00Z",
+                    "2026-10-22T00:00:00Z"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn bars_on_a_slice_of_another_contract_are_refused_naming_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let slices = [bars_slice(
+            BARS,
+            "GCQ26.GLBX",
+            "2026-10-20T00:00:00Z",
+            "2026-10-21T00:00:00Z",
+        )];
+
+        let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
+
+        assert!(err.contains(BARS), "{err}");
+        assert!(err.contains("GCQ26.GLBX"), "{err}");
+    }
+
+    #[test]
+    fn funding_is_asked_over_its_slice_after_the_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
+        let slices = [slice(
+            NautilusDataType::FundingRateUpdate,
+            "BTC-USDT-SWAP.OKX",
+            from,
+            to,
+        )];
+
+        let asked = missing(&catalog, &slices).unwrap();
+
+        assert_eq!(
+            asked,
+            [
+                request(FillData::Instrument, "BTC-USDT-SWAP.OKX", from, to),
+                request(FillData::Funding, "BTC-USDT-SWAP.OKX", from, to),
+            ]
+        );
     }
 
     #[test]
