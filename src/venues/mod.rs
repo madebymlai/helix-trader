@@ -200,6 +200,23 @@ mod tests {
         assert_eq!(venues.ib.client_id, 1);
     }
 
+    /// Read from the arguments' definition: setting the variable would race
+    /// the other tests, and the developer's environment may have it. Not
+    /// required: a run on OKX alone has no IB account.
+    #[test]
+    fn the_live_account_falls_back_on_nautilus_ib_account_id() {
+        let live = LiveVenueArgs::augment_args(Command::new("live"));
+        let account = live
+            .get_arguments()
+            .find(|arg| arg.get_id() == "account")
+            .unwrap();
+        assert_eq!(
+            account.get_env(),
+            Some(std::ffi::OsStr::new("NAUTILUS_IB_ACCOUNT_ID"))
+        );
+        assert!(!account.is_required_set());
+    }
+
     #[test]
     fn fill_catalog_is_ib_client_10_unless_told_otherwise() {
         let venues: HistoryVenueArgs = parsed(&[]).unwrap();

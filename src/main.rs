@@ -1137,7 +1137,7 @@ mod tests {
     /// Its IB account and client id are the venues' (`LiveVenueArgs`).
     #[test]
     fn parses_live_with_its_strategy_config_and_catalog() {
-        let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
+        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
         assert_eq!(args.strategy, Strategy::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
         assert_eq!(args.catalog, PathBuf::from("catalog"));
@@ -1158,25 +1158,6 @@ mod tests {
         let args =
             parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("/data/staging"));
-    }
-
-    /// Read from the arguments' definition: setting the variable would race
-    /// the other tests, and the developer's environment may have it. Not
-    /// required: a run on OKX alone has no IB account.
-    #[test]
-    fn the_live_account_falls_back_on_nautilus_ib_account_id() {
-        use clap::CommandFactory;
-        let cli = Cli::command();
-        let live = cli.find_subcommand("live").unwrap();
-        let account = live
-            .get_arguments()
-            .find(|arg| arg.get_id() == "account")
-            .unwrap();
-        assert_eq!(
-            account.get_env(),
-            Some(std::ffi::OsStr::new("NAUTILUS_IB_ACCOUNT_ID"))
-        );
-        assert!(!account.is_required_set());
     }
 
     #[test]
