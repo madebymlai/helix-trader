@@ -67,7 +67,6 @@ const TUE: &str = "2025-10-21T00:00:00Z";
 const WED: &str = "2025-10-22T00:00:00Z";
 
 const DAY: SignedDuration = SignedDuration::from_hours(24);
-const TIMEOUT: SignedDuration = SignedDuration::from_secs(10);
 
 fn ts(s: &str) -> Timestamp {
     s.parse().unwrap()
@@ -152,8 +151,6 @@ enum Answer {
     FailureEnvelope,
     /// The request refused (`Err`).
     Refused,
-    /// No answer.
-    Silent,
     /// Trades of GCQ6 to a request of GCZ6's: rows the engine cannot
     /// write back.
     OtherContract,
@@ -268,7 +265,6 @@ impl FakeClient {
                 envelope(response).with_failure("venue cut the history".to_string()),
             ),
             Answer::Refused => anyhow::bail!("venue refused the request"),
-            Answer::Silent => return Ok(()),
         };
         done.fetch_sub(1, Ordering::SeqCst);
         self.sender.send(event)?;
@@ -441,15 +437,13 @@ fn reading(data: NautilusDataType) -> DataRequirements {
 
 /// fill-catalog's fill through the node of the series `requirements` reads
 /// over `[start, end]` into the catalog in `dir`: what the catalog lacks,
-/// asked of the fake `venue` in windows of `period`, each request given
-/// `timeout`.
+/// asked of the fake `venue` in windows of `period`.
 fn fill(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
     requirements: &DataRequirements,
     (start, end): (Timestamp, Timestamp),
     period: SignedDuration,
-    timeout: SignedDuration,
 ) -> anyhow::Result<()> {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing(&catalog, &requirements.slices(start, end))?;
@@ -470,7 +464,7 @@ fn fill(
         .enable_all()
         .build()
         .unwrap()
-        .block_on(node.run(dir, timeout))
+        .block_on(node.run(dir))
 }
 
 fn depth_intervals(dir: &Path) -> Vec<(u64, u64)> {
@@ -513,28 +507,11 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
         &book_of,
         (ts(FRI), end_before(TUE)),
         DAY,
-        TIMEOUT,
     )
     .unwrap();
-    fill(
-        dir.path(),
-        &venue,
-        &book_of,
-        (ts(FRI), ts(WED)),
-        DAY,
-        TIMEOUT,
-    )
-    .unwrap();
+    fill(dir.path(), &venue, &book_of, (ts(FRI), ts(WED)), DAY).unwrap();
     let asked_twice = venue.borrow().asked.len();
-    fill(
-        dir.path(),
-        &venue,
-        &book_of,
-        (ts(FRI), ts(WED)),
-        DAY,
-        TIMEOUT,
-    )
-    .unwrap();
+    fill(dir.path(), &venue, &book_of, (ts(FRI), ts(WED)), DAY).unwrap();
 
     // The definition over the window, then a day a request, each with the
     // definition's price precision; the weekend asked once, answered
@@ -604,7 +581,6 @@ fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
             &book_of,
             (ts(FRI), end_before(TUE)),
             DAY,
-            TIMEOUT,
         )
         .unwrap();
     }
@@ -641,7 +617,6 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
         &reading(NautilusDataType::OrderBookDepth),
         morning,
         three_hours,
-        TIMEOUT,
     )
     .unwrap();
 
@@ -681,7 +656,6 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
             &reading(NautilusDataType::OrderBookDepth),
             (ts(FRI), end_before(SUN)),
             DAY,
-            TIMEOUT,
         )
         .unwrap_err()
         .to_string();
@@ -697,30 +671,6 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
 }
 
 #[test]
-fn a_client_that_never_answers_fails_the_fill_after_the_timeout() {
-    let dir = tempfile::tempdir().unwrap();
-    let venue = FakeVenue::new(Answer::Silent);
-    let started = std::time::Instant::now();
-
-    let err = fill(
-        dir.path(),
-        &venue,
-        &reading(NautilusDataType::OrderBookDepth),
-        (ts(FRI), end_before(SAT)),
-        DAY,
-        SignedDuration::from_secs(1),
-    )
-    .unwrap_err()
-    .to_string();
-
-    assert!(err.contains("book depths of GCZ6.GLBX"), "{err}");
-    assert!(err.contains("no answer within 1s"), "{err}");
-    // Loose enough for the node's build on a loaded machine; a deadline
-    // read in minutes still fails it.
-    assert!(started.elapsed() < std::time::Duration::from_secs(60));
-}
-
-#[test]
 fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::OtherContract);
@@ -731,7 +681,6 @@ fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
         &reading(NautilusDataType::TradeTick),
         (ts(FRI), end_before(SAT)),
         DAY,
-        TIMEOUT,
     )
     .unwrap_err()
     .to_string();
@@ -754,7 +703,6 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
         &reading(NautilusDataType::OrderBookDelta),
         (ts(MON), end_before(WED)),
         DAY,
-        TIMEOUT,
     )
     .unwrap();
 

@@ -20,7 +20,7 @@ use helix_trader::{
     backtest::{self, Backtest},
     data::{
         DatabentoHistory, IbHistory, IcConnection, IcHistory, NodeClient, NodeFill, OkxHistory,
-        REQUEST_TIMEOUT, missing,
+        missing,
     },
     live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live, Recording},
     model::{
@@ -572,7 +572,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             .fill(&mut catalog, &slices_of(OkxHistory::serves))
             .await?;
     }
-    node.run(catalog_dir, REQUEST_TIMEOUT).await?;
+    node.run(catalog_dir).await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
     // the node.
     if !ib_ids.is_empty() {
