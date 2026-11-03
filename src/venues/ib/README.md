@@ -32,7 +32,7 @@ IB is netting. **IB's execution adapter rejects reduce-only orders:** bracket ex
 
 Live bars use full-session IB minute TRADES bars, matching history. Market orders can be priced from cached LAST bars; MID bars alone do not supply that price. Warmup ends at the request time, excluding the partial minute; the live subscription starts there. The data client does not write its historical answer back to the catalog.
 
-A live bar arriving before a warmup response can panic the node ([upstream issue](https://github.com/nautechsystems/nautilus_trader/issues/5393)). Keep IB warmups short enough to complete before the next minute bar; long warmups are especially risky. A warmup of a day or more may silently miss bars because IB counts days as sessions when segmenting requests; this live case remains unverified. See [history](#history) for history limitations.
+A warmup of a day or more may silently miss bars because IB counts days as sessions when segmenting requests; this live case remains unverified. See [history](#history) for history limitations.
 
 ## Tests
 

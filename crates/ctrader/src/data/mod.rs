@@ -367,8 +367,7 @@ impl DataClient for CTraderDataClient {
     /// completed response envelope: the data engine writes it back to the
     /// catalog if asked (`update_catalog`). A failure cutting the history
     /// short is the envelope's failure reason, the quotes fetched before it
-    /// kept. The live quotes of the instrument wait for the response (see
-    /// `spots`).
+    /// kept.
     ///
     /// # Errors
     ///
@@ -388,9 +387,7 @@ impl DataClient for CTraderDataClient {
         let end = request
             .end
             .unwrap_or_else(|| Timestamp::from(self.clock.get_time_ns()));
-        lock(&session.quotes).hold(id)?;
         let ctrader = Arc::clone(&session.ctrader);
-        let quotes = Arc::clone(&session.quotes);
         let sender = self.data_sender.clone();
         let client_id = request.client_id.unwrap_or(self.client_id);
         let clock = self.clock;
@@ -406,7 +403,6 @@ impl DataClient for CTraderDataClient {
                 let excess = ticks.len().saturating_sub(limit.get());
                 ticks.drain(..excess);
             }
-            let answered = ticks.last().map(|q| q.ts_event);
             let response = QuotesResponse::new(
                 request.request_id,
                 client_id,
@@ -422,13 +418,7 @@ impl DataClient for CTraderDataClient {
                 Some(e) => envelope.with_failure(format!("{e:#}")),
                 None => envelope,
             };
-            // Under the lock, so no live quote of the instrument goes
-            // between the response and the quotes it held.
-            let mut live = lock(&quotes);
             send(&sender, DataEvent::ResponseEnvelope(envelope));
-            for quote in live.release(id, answered) {
-                send(&sender, DataEvent::Data(Data::Quote(quote)));
-            }
             Ok(())
         });
         Ok(())
@@ -1086,54 +1076,6 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id(), InstrumentId::from(XAUUSD));
         assert_eq!(stored[0].price_precision(), 2);
-    }
-
-    /// The peer sends a live spot while the request's ticks are fetched.
-    #[tokio::test]
-    async fn live_quotes_arriving_during_a_request_come_after_its_response() {
-        let (_, bids, asks) = window_ticks();
-        let mut answer = peer(bids, asks);
-        let mut subscribed = false;
-        let mut spot_sent = false;
-        let script = move |connection, request: &ProtoMessage| {
-            let mut actions = Vec::new();
-            if request.payload_type == ProtoOaSubscribeSpotsReq::TYPE {
-                // The subscription's own spot comes during the request.
-                subscribed = true;
-                return vec![replay::<ProtoOaSubscribeSpotsRes>(
-                    request,
-                    SUBSCRIBE_SPOTS_RES,
-                )];
-            }
-            if request.payload_type == ProtoOaGetTickDataReq::TYPE && subscribed && !spot_sent {
-                spot_sent = true;
-                actions.push(first_spot(XAUUSD_SYMBOL_ID));
-            }
-            actions.extend(answer(connection, request));
-            actions
-        };
-        let (mut client, mut events, received, _tokens) = connected(script).await;
-        skip_instruments(&mut events).await;
-        client.subscribe_quotes(subscribe(XAUUSD)).unwrap();
-        testing::wait_until(&received, |frames| {
-            frames
-                .iter()
-                .any(|(_, f)| f.payload_type == ProtoOaSubscribeSpotsReq::TYPE)
-        })
-        .await;
-
-        client
-            .request_quotes(request(
-                Some(at("2026-10-01T00:00:00Z")),
-                at("2026-10-01T01:00:00Z"),
-                None,
-            ))
-            .unwrap();
-
-        next_quotes_response(&mut events).await;
-        let live = next_quote(&mut events).await;
-        assert_eq!(live.ts_event, UnixNanos::new(1_793_017_475_790_000_000));
-        client.disconnect().await.unwrap();
     }
 
     #[tokio::test]

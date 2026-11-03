@@ -14,7 +14,7 @@ The latest pair belongs to the user state file at `$XDG_STATE_HOME/helix-trader/
 
 Instrument margins are IC's: the lower of the account's leverage and the symbol's first dynamic-leverage tier (on the demo account, 1:30 under gold's 1:200 and EUR/USD's 1:1000). IC's demo symbols have one tier, which covers every size. Both catalog and live instruments use these margins; IC backtests use leverage 1. A catalog created before those margins were populated requires a fresh fill into a new directory. The demo account's commission is IC's Raw charge, 30 USD per million per side, charged in the account's currency (checked by `tests/live/ic_orders_demo.rs`): a backtest's `--commission-rate 0.00003`.
 
-For a EUR account trading USD-quoted instruments, subscribe to `EURUSD.ICMARKETS` quotes as well: Nautilus needs the USD/EUR conversion rate for margin validation and denies orders without it. The data client holds live quotes while a history request is answered, which avoids the live-before-warmup race described for [IB](../ib/README.md).
+For a EUR account trading USD-quoted instruments, subscribe to `EURUSD.ICMARKETS` quotes as well: Nautilus needs the USD/EUR conversion rate for margin validation and denies orders without it.
 
 ## Tests
 

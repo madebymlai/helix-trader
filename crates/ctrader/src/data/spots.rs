@@ -8,11 +8,6 @@
 //! (`README.md`, "Live quotes"), so live quotes are the
 //! quotes a fill stores. Each quote is stamped `ts_event` = the spot's time
 //! and `ts_init` = its receipt.
-//!
-//! While a quote request of an instrument is answered, its live quotes are
-//! held, then sent after the response, those the response already holds
-//! dropped: the node gets its warmup before any live quote (see
-//! `README.md`, "Live quotes").
 
 use std::collections::HashMap;
 
@@ -41,10 +36,6 @@ pub(super) struct SpotQuotes {
 struct Stream {
     merge: QuoteMerge,
     subscribed: bool,
-    /// Its quote requests being answered.
-    requests: usize,
-    /// The live quotes made while a request was answered.
-    held: Vec<QuoteTick>,
 }
 
 impl SpotQuotes {
@@ -62,8 +53,6 @@ impl SpotQuotes {
             let stream = Stream {
                 merge: QuoteMerge::new(instrument)?,
                 subscribed: false,
-                requests: 0,
-                held: Vec::new(),
             };
             streams.insert(*symbol_id, stream);
             symbol_ids.insert(instrument.id(), *symbol_id);
@@ -109,9 +98,8 @@ impl SpotQuotes {
     }
 
     /// Takes in `spot`, received at `ts_init`, and returns the quote to
-    /// send now: none for an instrument not subscribed, while a request
-    /// holds its quotes, before both sides are known, or for a crossed
-    /// quote.
+    /// send now: none for an instrument not subscribed, before both sides
+    /// are known, or for a crossed quote.
     ///
     /// # Errors
     ///
@@ -137,45 +125,7 @@ impl SpotQuotes {
         if !stream.subscribed {
             return Ok(None);
         }
-        if stream.requests > 0 {
-            stream.held.push(quote);
-            return Ok(None);
-        }
         Ok(Some(quote))
-    }
-
-    /// Holds the live quotes of `id` while a quote request of it is
-    /// answered.
-    ///
-    /// # Errors
-    ///
-    /// As `symbol_id`.
-    pub(super) fn hold(&mut self, id: InstrumentId) -> anyhow::Result<()> {
-        let symbol_id = self.symbol_id(id)?;
-        self.stream(symbol_id).requests += 1;
-        Ok(())
-    }
-
-    /// Ends a hold of `id` once its request is answered, the last quote of
-    /// the response stamped `answered` (`None` for none, or a failed
-    /// request), and returns the quotes held, if no other request holds
-    /// them, without those stamped at or before `answered`.
-    pub(super) fn release(
-        &mut self,
-        id: InstrumentId,
-        answered: Option<UnixNanos>,
-    ) -> Vec<QuoteTick> {
-        let Ok(symbol_id) = self.symbol_id(id) else {
-            return Vec::new();
-        };
-        let stream = self.stream(symbol_id);
-        stream.requests = stream.requests.saturating_sub(1);
-        if stream.requests > 0 {
-            return Vec::new();
-        }
-        let mut held = std::mem::take(&mut stream.held);
-        held.retain(|q| answered.is_none_or(|last| q.ts_event > last));
-        held
     }
 
     fn stream(&mut self, symbol_id: i64) -> &mut Stream {
@@ -315,42 +265,6 @@ mod tests {
             prices(&again),
             quote(1_793_017_480_320, "1.11965", "1.11965")
         );
-    }
-
-    #[test]
-    fn quotes_held_by_a_request_come_after_it_without_those_it_answered() {
-        let mut quotes = subscribed();
-        quotes.hold(id()).unwrap();
-
-        let first = quotes
-            .spot(&spot(SPOT_EVENT_EURUSD_FIRST), RECEIVED)
-            .unwrap();
-        let second = quotes.spot(&spot(SPOT_EVENT_EURUSD_BID), RECEIVED).unwrap();
-        // The response's last quote is the first spot's.
-        let answered = UnixNanos::new(1_793_017_476_361_000_000);
-        let released = quotes.release(id(), Some(answered));
-
-        assert_eq!((first, second), (None, None));
-        let released: Vec<_> = released.iter().map(prices).collect();
-        assert_eq!(released, [quote(1_793_017_480_320, "1.11965", "1.11965")]);
-        let after = quotes.spot(&spot(SPOT_EVENT_EURUSD_BID), RECEIVED).unwrap();
-        assert!(after.is_some());
-    }
-
-    #[test]
-    fn quotes_stay_held_until_the_last_request_is_answered() {
-        let mut quotes = subscribed();
-        quotes.hold(id()).unwrap();
-        quotes.hold(id()).unwrap();
-        quotes
-            .spot(&spot(SPOT_EVENT_EURUSD_FIRST), RECEIVED)
-            .unwrap();
-
-        let after_one = quotes.release(id(), None);
-        let after_both = quotes.release(id(), None);
-
-        assert_eq!(after_one, []);
-        assert_eq!(after_both.len(), 1);
     }
 
     /// Synthetic: a spot of a symbol the session did not load.
