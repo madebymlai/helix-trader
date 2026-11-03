@@ -14,16 +14,16 @@ use prost::Message as _;
 use tempfile::TempDir;
 use tungstenite::Message;
 
-use super::config::{IcAccountId, IcCredential};
-use super::messages::{
+use super::common::messages::{
     Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
     ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetDynamicLeverageByIdRes,
     ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes,
     ProtoOaTickData, frame,
 };
-use super::ticks::Tick;
-use super::token::{TokenPair, TokenStore};
+use super::common::token::{TokenPair, TokenStore};
+use super::config::{IcAccountId, IcCredential};
+use super::session::ticks::Tick;
 
 /// The fake account the tests authenticate: the `ctidTraderAccountId` the
 /// captured responses were scrubbed to.

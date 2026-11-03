@@ -38,7 +38,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, report::Outcome};
 use crate::{
-    data::catalog_path,
+    catalog::catalog_path,
     strategy::{SeriesSlice, warmup},
 };
 

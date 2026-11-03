@@ -30,7 +30,7 @@ use crate::common;
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::fill_catalog,
+    catalog::fill_catalog,
     live::Live,
     rolls::ContinuousBars,
     strategy::{DataRequirements, catalog_series, warmup},

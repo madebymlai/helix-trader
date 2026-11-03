@@ -20,11 +20,12 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::{IcConnection, IcHistory, NodeClient, NodeFill, missing},
-    live::{
-        IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
-    },
+    catalog::{NodeClient, NodeFill, missing},
     strategy::{DataRequirements, TickSeries},
+    venues::ic::{
+        self, IcConnection, IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig,
+        IcExecutionClientFactory, IcHistory,
+    },
 };
 use jiff::Timestamp;
 use nautilus_common::{
@@ -142,7 +143,7 @@ pub(crate) async fn fill_quotes_through_node(
         routing: RoutingConfig::default(),
     };
     let mut node = NodeFill::new();
-    node.add(client, &requests, IcHistory::period);
+    node.add(client, &requests, ic::period);
     node.run(dir).await
 }
 

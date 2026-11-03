@@ -78,7 +78,7 @@ pub struct Backtest {
 }
 
 /// The venues whose accounts hold each trade as a position of its own:
-/// IC Markets, whose cTrader account is hedging (`live/ic`).
+/// IC Markets, whose cTrader account is hedging (`venues::ic`).
 const HEDGING_VENUES: &[&str] = &["ICMARKETS"];
 
 /// How the accounts of `venue` keep positions, as the live execution

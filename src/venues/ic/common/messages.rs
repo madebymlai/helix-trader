@@ -135,7 +135,7 @@ trade_request! {
 /// historical requests (5 a second per connection): the tick requests, and
 /// the deal and order lists, history too (Spotware's docs name no list of
 /// either kind, so they are held to the lower limit).
-pub(super) fn is_historical(payload_type: u32) -> bool {
+pub(crate) fn is_historical(payload_type: u32) -> bool {
     [
         ProtoOaGetTickDataReq::TYPE,
         ProtoOaDealListReq::TYPE,
@@ -146,7 +146,7 @@ pub(super) fn is_historical(payload_type: u32) -> bool {
 
 /// The name of a payload type, as the `.proto` files spell it, or its
 /// number if no enum knows it.
-pub(super) fn payload_name(payload_type: u32) -> String {
+pub(crate) fn payload_name(payload_type: u32) -> String {
     let known = i32::try_from(payload_type).ok().and_then(|n| {
         ProtoOaPayloadType::try_from(n)
             .map(|t| t.as_str_name())
@@ -157,7 +157,7 @@ pub(super) fn payload_name(payload_type: u32) -> String {
 }
 
 /// The frame of `message`, tagged `client_msg_id` when it is a request.
-pub(super) fn frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> Vec<u8> {
+pub(crate) fn frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> Vec<u8> {
     ProtoMessage {
         payload_type: M::TYPE,
         payload: Some(message.encode_to_vec()),
@@ -169,7 +169,7 @@ pub(super) fn frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> V
 /// As `frame`, for a message holding secret material: the encoded copy
 /// of the message is wiped once the frame holds it. The frame itself goes
 /// to the transport, out of the adapter's reach.
-pub(super) fn secret_frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> Vec<u8> {
+pub(crate) fn secret_frame<M: Payload>(message: &M, client_msg_id: Option<String>) -> Vec<u8> {
     let mut envelope = ProtoMessage {
         payload_type: M::TYPE,
         payload: Some(message.encode_to_vec()),
@@ -181,7 +181,7 @@ pub(super) fn secret_frame<M: Payload>(message: &M, client_msg_id: Option<String
 }
 
 /// The message `envelope` holds: an `M`, or the error cTrader answered.
-pub(super) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, IcError> {
+pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, IcError> {
     let payload = envelope.payload.as_deref().unwrap_or_default();
     let malformed = |e: prost::DecodeError| {
         IcError::Protocol(format!(
@@ -260,7 +260,7 @@ impl std::error::Error for IcError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::ic::testing::SYMBOL_BY_ID_UNKNOWN;
+    use crate::venues::ic::testing::SYMBOL_BY_ID_UNKNOWN;
 
     fn envelope<M: Payload>(message: &M) -> ProtoMessage {
         ProtoMessage::decode(frame(message, Some("7".to_owned())).as_slice()).unwrap()

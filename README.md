@@ -10,7 +10,7 @@ A systematic trading system in Rust built on [NautilusTrader](https://github.com
 
 The build requires Rust (minimum in [Cargo.toml](Cargo.toml)), clang, cmake, mold and protoc; the linker is set in [.cargo/config.toml](.cargo/config.toml). IB Gateway and the live cache also require Docker or Podman.
 
-The maintained example uses IC Markets. Follow the [IC data setup](src/data/ic/README.md) and create `.env` from [.env.example](.env.example) before filling its catalog.
+The maintained example uses IC Markets. Follow the [IC Markets setup](src/venues/ic/README.md) and create `.env` from [.env.example](.env.example) before filling its catalog.
 
 ```sh
 cargo build --release
@@ -35,7 +35,7 @@ Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, or
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md): design and process constraints.
-- [Data](src/data/README.md): catalog filling and venue history.
+- [Catalog](src/catalog/README.md): catalog filling; each venue's history and live clients are documented in its module under `src/venues`.
 - [Strategy](src/strategy/README.md): strategy authoring and configuration.
 - [Model](src/model/README.md): model strategy internals.
 - [Backtest](src/backtest/README.md): replay, costs and limitations.

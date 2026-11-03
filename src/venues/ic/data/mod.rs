@@ -40,13 +40,15 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
-use super::spots::SpotQuotes;
-use crate::data::ic::{
-    IcHistory, IcSymbol,
+use self::spots::SpotQuotes;
+use super::{
+    common::parse::IC_VENUE,
     config::{IcConnection, IcCredential},
-    parse::IC_VENUE,
+    session::{IcHistory, IcSymbol},
     websocket::HEARTBEAT_INTERVAL,
 };
+
+mod spots;
 
 /// How long tasks get to finish at a disconnect, then to abort.
 const TASK_GRACE: Duration = Duration::from_secs(1);
@@ -463,8 +465,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::data::ic::{
-        messages::{
+    use crate::venues::ic::{
+        common::messages::{
             Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes,
             ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
             ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
@@ -472,13 +474,13 @@ mod tests {
             ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq,
             ProtoOaUnsubscribeSpotsRes,
         },
+        session::ticks::Tick,
         testing::{
             self, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
             SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
             TRADER_RES, UNSUBSCRIBE_SPOTS_RES, accept_auth, dynamic_leverage_answer, replay, reply,
             tick_answer,
         },
-        ticks::Tick,
     };
 
     const XAUUSD: &str = "XAUUSD.ICMARKETS";

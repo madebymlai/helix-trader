@@ -1,6 +1,6 @@
 # Running live
 
-`helix-trader live` runs one strategy on a Nautilus live node, including for paper accounts. Run only one live module per process: Nautilus owns process-wide state and logging. Start with a paper account and review the venue restrictions before enabling orders: [IB](../venues/ib/README.md), [IC Markets](ic/README.md), [OKX](../venues/okx/README.md). General strategy configuration and warmup are in [strategy](../strategy/README.md); model internals are in [model](../model/README.md).
+`helix-trader live` runs one strategy on a Nautilus live node, including for paper accounts. Run only one live module per process: Nautilus owns process-wide state and logging. Start with a paper account and review the venue restrictions before enabling orders: [IB](../venues/ib/README.md), [IC Markets](../venues/ic/README.md), [OKX](../venues/okx/README.md). General strategy configuration and warmup are in [strategy](../strategy/README.md); model internals are in [model](../model/README.md).
 
 ```sh
 helix-trader live ema --config ema.toml
@@ -43,7 +43,7 @@ The node streams market data to `--staging` outside the catalog, promotes it dai
 
 Each trader's persistent instance ID is stored in staging. After a crash, restart with the same trader and staging directory: recovery seals complete batches and promotes them **before warmup**, so warmup write-back cannot overlap unrecovered data. An empty identity file fails startup rather than orphaning the old run. The last unflushed second can be lost. A staged interval overlapping catalog data fails promotion and remains staged; resolve the overlap before restarting. In particular, interval promotion can split OKX rows with the same timestamp across files, causing an overlap and a subsequent startup failure.
 
-Catalog coverage is not proof of complete market data: promotion leaves small interval gaps, downtime leaves gaps, and a disconnect within one file may look covered. Warmup asks the venue for missing coverage, and certified IC responses can be written back; IB and OKX warmup responses are not written back. Backtests and retrains read stored rows through gaps, not a guarantee of completeness. See [data](../data/README.md) for catalog operations.
+Catalog coverage is not proof of complete market data: promotion leaves small interval gaps, downtime leaves gaps, and a disconnect within one file may look covered. Warmup asks the venue for missing coverage, and certified IC responses can be written back; IB and OKX warmup responses are not written back. Backtests and retrains read stored rows through gaps, not a guarantee of completeness. See [catalog](../catalog/README.md) for catalog operations.
 
 ## Retraining
 

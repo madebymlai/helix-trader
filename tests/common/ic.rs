@@ -7,7 +7,7 @@
 
 use helix_trader::{
     backtest::{Backtest, commission_rate, venue_oms_type},
-    data::fill_catalog,
+    catalog::fill_catalog,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
@@ -34,12 +34,12 @@ pub fn at(time: &str) -> Timestamp {
 }
 
 /// IC's margin of XAUUSD on the demo account: 1 / 30, the account's 1:30
-/// under the symbol's 1:200 (`src/data/ic/README.md`, "Margins").
+/// under the symbol's 1:200 (`src/venues/ic/README.md`, "Margins").
 pub fn margin() -> Decimal {
     Decimal::ONE / Decimal::from(30)
 }
 
-/// XAUUSD as IC defines it (`src/data/ic/README.md`, "Currency pairs").
+/// XAUUSD as IC defines it (`src/venues/ic/README.md`, "Currency pairs").
 pub fn instrument() -> InstrumentAny {
     InstrumentAny::CurrencyPair(
         CurrencyPair::builder()

@@ -5,6 +5,7 @@ Helix Trader is one Rust crate built on NautilusTrader. Nautilus owns data, simu
 ## Design rules
 
 - Check Nautilus for a feature before implementing it here. Strategies use the plain Nautilus API, without a wrapper layer.
+- Venue code lives in `src/venues`, one module per venue holding its history and its live clients. One routing table, at the root of `src/venues`, says which history source fills an instrument and which broker trades it live. The catalog fill machinery (`src/catalog`) and the live runner (`src/live`) name no venue: they ask the venues module.
 - One process runs one strategy, which decides its own trades. The strategy configuration defines instruments and cadence for catalog filling, backtesting and live operation.
 - The same strategy type and Nautilus engine run in backtest, paper and live. See [strategy authoring](../src/strategy/README.md) and [backtesting](../src/backtest/README.md) for the differences in operation.
 - Model strategies read published files rather than training in the trading process. Backtest and live use the same model store; live retrains in a child process. A strategy never retrained trains each model once and, live, has no retrain actor, so launches no train (`a_strategy_never_retrained_has_no_retrain_actor_and_a_retrained_one_has_one`); whether a strategy retrains is the schedule's alone (`model::schedule::Retrain`), so training, the backtest, its scores and live share one answer. See [model internals](../src/model/README.md) and [live operations](../src/live/README.md).

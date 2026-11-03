@@ -60,8 +60,8 @@ use super::{
     orders::{Leg, Protection, Tag, parse_protection_id, protection_id},
     reports::{self, Reports},
 };
-use crate::data::ic::{
-    messages::{
+use crate::venues::ic::{
+    common::messages::{
         ProtoOaDeal, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaOrder, ProtoOaOrderStatus,
         ProtoOaOrderType,
     },

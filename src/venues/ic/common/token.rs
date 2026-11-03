@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 /// How long before the access token expires a session renews it.
-pub(super) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
+pub(crate) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
 
 /// The token file under the user's state directory.
 const RELATIVE_PATH: &str = "helix-trader/ic-token.json";
@@ -46,16 +46,16 @@ const RELATIVE_PATH: &str = "helix-trader/ic-token.json";
 /// An access token, the refresh token that renews it, and when the access
 /// token expires (unknown for a pair seeded from `.env`).
 #[derive(Debug, Clone)]
-pub(super) struct TokenPair {
-    pub(super) access_token: SecretString,
-    pub(super) refresh_token: SecretString,
-    pub(super) expires_at: Option<Timestamp>,
+pub(crate) struct TokenPair {
+    pub(crate) access_token: SecretString,
+    pub(crate) refresh_token: SecretString,
+    pub(crate) expires_at: Option<Timestamp>,
 }
 
 impl TokenPair {
     /// The pair a renewal at `now` returned, its access token valid for
     /// `expires_in` seconds.
-    pub(super) fn renewed(
+    pub(crate) fn renewed(
         access_token: SecretString,
         refresh_token: SecretString,
         expires_in: i64,
@@ -70,12 +70,12 @@ impl TokenPair {
 
     /// When to renew it: `RENEW_BEFORE` its expiry, or at once when the
     /// expiry is unknown.
-    pub(super) fn renew_at(&self) -> Option<Timestamp> {
+    pub(crate) fn renew_at(&self) -> Option<Timestamp> {
         self.expires_at.map(|at| at - RENEW_BEFORE)
     }
 
     /// Whether it is this pair's access token that `other` holds.
-    pub(super) fn same_access_token(&self, other: &Self) -> bool {
+    pub(crate) fn same_access_token(&self, other: &Self) -> bool {
         self.access_token.expose_secret() == other.access_token.expose_secret()
     }
 
@@ -97,7 +97,7 @@ impl TokenPair {
 
 /// The token file, and the pair from `.env` that seeds it.
 #[derive(Debug, Clone)]
-pub(super) struct TokenStore {
+pub(crate) struct TokenStore {
     path: PathBuf,
     seed: TokenPair,
 }
@@ -121,7 +121,7 @@ impl Drop for Stored {
 
 impl TokenStore {
     /// The store at `path`, seeded with `seed`, the pair from `.env`.
-    pub(super) fn new(path: PathBuf, seed: TokenPair) -> Self {
+    pub(crate) fn new(path: PathBuf, seed: TokenPair) -> Self {
         Self { path, seed }
     }
 
@@ -133,7 +133,7 @@ impl TokenStore {
     /// # Errors
     ///
     /// Returns an error if neither is set to an absolute path.
-    pub(super) fn path_from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
+    pub(crate) fn path_from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
         let absolute = |name| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
         if let Some(state) = absolute("XDG_STATE_HOME") {
             return Ok(state.join(RELATIVE_PATH));
@@ -146,7 +146,7 @@ impl TokenStore {
         }
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
@@ -159,7 +159,7 @@ impl TokenStore {
     ///
     /// Returns an error if the file cannot be read, parsed or written;
     /// never a token.
-    pub(super) fn try_load(&self) -> anyhow::Result<Option<TokenPair>> {
+    pub(crate) fn try_load(&self) -> anyhow::Result<Option<TokenPair>> {
         let Some(lock) = self.try_lock()? else {
             return Ok(None);
         };
@@ -179,7 +179,7 @@ impl TokenStore {
     ///
     /// Returns an error if there is no file, or it cannot be read or
     /// parsed; never a token.
-    pub(super) fn read(&self) -> anyhow::Result<TokenPair> {
+    pub(crate) fn read(&self) -> anyhow::Result<TokenPair> {
         match self.stored()? {
             Some(stored) => Ok(pair_of(&stored)),
             None => bail!("IC's token file {} is gone", self.path.display()),
@@ -191,7 +191,7 @@ impl TokenStore {
     /// # Errors
     ///
     /// Returns an error if the lock file cannot be opened or locked.
-    pub(super) fn try_lock(&self) -> anyhow::Result<Option<TokenLock>> {
+    pub(crate) fn try_lock(&self) -> anyhow::Result<Option<TokenLock>> {
         let directory = self
             .path
             .parent()
@@ -255,7 +255,7 @@ fn pair_of(stored: &Stored) -> TokenPair {
 
 /// The renewal lock on the token file, held until dropped.
 #[derive(Debug)]
-pub(super) struct TokenLock {
+pub(crate) struct TokenLock {
     _file: File,
     path: PathBuf,
     seed: String,
@@ -267,7 +267,7 @@ impl TokenLock {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written; never a token.
-    pub(super) fn save(&self, pair: &TokenPair) -> anyhow::Result<()> {
+    pub(crate) fn save(&self, pair: &TokenPair) -> anyhow::Result<()> {
         let directory = self
             .path
             .parent()

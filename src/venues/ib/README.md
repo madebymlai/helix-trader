@@ -1,6 +1,6 @@
 # Interactive Brokers
 
-IB serves every venue without a row of its own in the [routing table](../mod.rs), history and live, and trades GLBX's instruments live. See [data](../../data/README.md) for shared fill semantics and [live](../../live/README.md) for node startup, routing, Redis and recovery.
+IB serves every venue without a row of its own in the [routing table](../mod.rs), history and live, and trades GLBX's instruments live. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for node startup, routing, Redis and recovery.
 
 ## History
 
@@ -12,7 +12,7 @@ The requested end must be at least one minute before now, checked before startin
 
 The history client walks backwards with overlapping explicit-duration requests. IB's start-based segmentation can leave silent gaps because its day durations count trading sessions rather than 24-hour days (nautilus_trader#5384). Expired futures are resolved using explicit contracts with `includeExpired`; availability is limited and varies, so verify depth for the instrument. IB can return flat zero-volume bars after expiry. Its continuous future is not a substitute for per-contract history: its roll and adjustment differ and it is not directly tradable.
 
-IB's simplified IDs use the contract exchange as venue. Configure MIC mappings explicitly when matching another source; automatic exchange-to-MIC conversion can be nondeterministic where an exchange has multiple MICs. See [instrument identity](../../data/README.md).
+IB's simplified IDs use the contract exchange as venue. Configure MIC mappings explicitly when matching another source; automatic exchange-to-MIC conversion can be nondeterministic where an exchange has multiple MICs. See [instrument identity](../../catalog/README.md).
 
 ## Account and gateway
 

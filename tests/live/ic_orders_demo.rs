@@ -39,9 +39,9 @@ use std::{
 };
 
 use helix_trader::{
-    data::IcConnection,
-    live::{IcExecutionClientConfig, IcExecutionClientFactory, Live},
+    live::Live,
     strategy::{DataRequirements, warmup::Warmup},
+    venues::ic::{IcConnection, IcExecutionClientConfig, IcExecutionClientFactory},
 };
 use jiff::SignedDuration;
 use nautilus_common::{

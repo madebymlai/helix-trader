@@ -54,9 +54,9 @@ use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroize;
 
-use super::super::{
-    config::IcCredential,
-    messages::{
+use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
+use crate::venues::ic::{
+    common::messages::{
         IcError, Payload, ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
         ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent, ProtoOaAccountsTokenInvalidatedEvent,
         ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes, ProtoOaClientDisconnectEvent,
@@ -65,9 +65,9 @@ use super::super::{
         ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame,
         open, payload_name, secret_frame,
     },
-    token::{TokenLock, TokenPair},
+    common::token::{TokenLock, TokenPair},
+    config::IcCredential,
 };
-use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
 
 /// How often a session tries the token file's lock while another session
 /// holds it.
@@ -79,7 +79,7 @@ const TOKEN_REFUSED: [&str; 2] = ["CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPI
 /// Where to get a new pair once cTrader refuses to renew it.
 const PLAYGROUND: &str = "generate a new token pair in the Playground of the app on \
                           openapi.ctrader.com and set IC_ACCESS_TOKEN and IC_REFRESH_TOKEN in \
-                          .env (see src/data/ic/README.md, \"Credentials\")";
+                          .env (see src/venues/ic/README.md, \"Credentials\")";
 
 /// Where a response goes: the caller awaiting it.
 pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, IcError>>;
@@ -1081,7 +1081,7 @@ fn auth_failure(stage: &str, error: &IcError) -> String {
             "check IC_ACCOUNT_ID, and IC_ENVIRONMENT: an account authenticates only on its own \
              environment"
         }
-        _ => "see src/data/ic/README.md, \"Credentials\"",
+        _ => "see src/venues/ic/README.md, \"Credentials\"",
     };
     format!("cTrader refused the {stage} authentication ({code}): {hint}")
 }

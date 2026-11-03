@@ -67,11 +67,11 @@ use ustr::Ustr;
 
 use self::handler::{HandlerCommand, IcWsHandler, LOCK_RETRY};
 use super::{
-    config::IcCredential,
-    messages::{
+    common::messages::{
         IcError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent,
         is_historical, open,
     },
+    config::IcCredential,
 };
 
 /// cTrader's heartbeat interval.
@@ -418,8 +418,8 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::data::ic::{
-        messages::{
+    use crate::venues::ic::{
+        common::messages::{
             ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq, ProtoOaClientDisconnectEvent,
             ProtoOaErrorRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType,
@@ -428,13 +428,13 @@ mod tests {
             ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaUnsubscribeSpotsReq,
             ProtoOaUnsubscribeSpotsRes,
         },
+        common::token::{RENEW_BEFORE, TokenStore},
         testing::{
             self, ACCESS_TOKEN, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED,
             Action, EXPIRES_IN, REFRESH_TOKEN, Received, SYMBOL_BY_ID_UNKNOWN, SharedVenue,
             TokenVenue, accept_auth, credential_expiring, renewed_access, replay, reply,
             token_peer,
         },
-        token::{RENEW_BEFORE, TokenStore},
     };
 
     const SLOW_HEARTBEAT: Duration = Duration::from_secs(3600);
@@ -867,7 +867,7 @@ mod tests {
     /// trade request asked meanwhile reaches cTrader before it.
     #[tokio::test]
     async fn a_trade_request_does_not_wait_behind_a_tick_request_held_at_the_limit() {
-        use crate::data::ic::messages::ProtoOaNewOrderReq;
+        use crate::venues::ic::common::messages::ProtoOaNewOrderReq;
         let (url, received) = testing::start(|_, request| {
             if let Some(actions) = accept_auth(request) {
                 return actions;
@@ -919,7 +919,9 @@ mod tests {
                 reason: Some("Server maintenance".to_owned()),
                 ..Default::default()
             };
-            vec![Action::Send(crate::data::ic::messages::frame(&event, None))]
+            vec![Action::Send(crate::venues::ic::common::messages::frame(
+                &event, None,
+            ))]
         })
     }
 
@@ -954,7 +956,7 @@ mod tests {
     /// request's, as on the demo (2026-10-26).
     #[tokio::test]
     async fn a_trade_request_goes_under_its_id_and_its_answers_come_as_trade_events() {
-        use crate::data::ic::messages::{
+        use crate::venues::ic::common::messages::{
             ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaNewOrderReq, ProtoOaOrderErrorEvent,
         };
         let accepted = ProtoOaExecutionEvent {
@@ -972,7 +974,7 @@ mod tests {
             accept_auth(request).unwrap_or_else(|| {
                 vec![
                     reply(request, &answer),
-                    Action::Send(crate::data::ic::messages::frame(&other, None)),
+                    Action::Send(crate::venues::ic::common::messages::frame(&other, None)),
                 ]
             })
         });
@@ -1032,7 +1034,7 @@ mod tests {
 
         let sent = client
             .trade(
-                &crate::data::ic::messages::ProtoOaCancelOrderReq::default(),
+                &crate::venues::ic::common::messages::ProtoOaCancelOrderReq::default(),
                 "X:O-1".to_owned(),
             )
             .await;
@@ -1041,7 +1043,8 @@ mod tests {
         testing::wait_until(&received, |frames| {
             frames.iter().any(|(c, f)| {
                 *c == 1
-                    && f.payload_type == crate::data::ic::messages::ProtoOaCancelOrderReq::TYPE
+                    && f.payload_type
+                        == crate::venues::ic::common::messages::ProtoOaCancelOrderReq::TYPE
                     && f.client_msg_id.as_deref() == Some("X:O-1")
             })
         })
@@ -1056,7 +1059,7 @@ mod tests {
     async fn a_trade_request_during_a_reconnect_goes_out_once_authenticated_again() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        use crate::data::ic::messages::ProtoOaNewOrderReq;
+        use crate::venues::ic::common::messages::ProtoOaNewOrderReq;
         let reconnecting = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&reconnecting);
         let (url, received) = testing::start_delayed(
@@ -1150,7 +1153,10 @@ mod tests {
                 let asked: ProtoOaSubscribeSpotsReq = decode(request);
                 let mut actions = vec![reply(request, &answered(asked.ctid_trader_account_id))];
                 actions.extend(asked.symbol_id.iter().map(|&id| {
-                    Action::Send(crate::data::ic::messages::frame(&spot_event(id), None))
+                    Action::Send(crate::venues::ic::common::messages::frame(
+                        &spot_event(id),
+                        None,
+                    ))
                 }));
                 actions
             }
@@ -1510,7 +1516,7 @@ mod tests {
                 && renewed.lock().unwrap().renewals() == 1;
             if let Some(request) = held.lock().unwrap().take_if(|_| reauthenticated) {
                 actions.extend(symbols_peer(connection, &request));
-                actions.push(Action::Send(crate::data::ic::messages::frame(
+                actions.push(Action::Send(crate::venues::ic::common::messages::frame(
                     &spot_event(41),
                     None,
                 )));
@@ -1781,7 +1787,7 @@ mod tests {
             ctid_trader_account_id: ACCOUNT_ID,
             ..Default::default()
         };
-        Action::Send(crate::data::ic::messages::frame(&event, None))
+        Action::Send(crate::venues::ic::common::messages::frame(&event, None))
     }
 
     /// Synthetic: the renewal's answer as OpenApiMessages.proto defines it.
@@ -1841,7 +1847,7 @@ mod tests {
     #[tokio::test]
     async fn a_renewal_answer_without_its_client_msg_id_is_saved_and_used() {
         let (url, received) = testing::start(renewing_peer(|_| {
-            vec![Action::Send(crate::data::ic::messages::frame(
+            vec![Action::Send(crate::venues::ic::common::messages::frame(
                 &renewal_answer(),
                 None,
             ))]
