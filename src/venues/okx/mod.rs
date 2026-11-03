@@ -43,9 +43,12 @@ use nautilus_network::{http::HttpClient, ratelimiter::quota::Quota};
 use nautilus_okx::{
     common::{
         consts::OKX_VENUE,
-        enums::{OKXEnvironment, OKXInstrumentType},
+        enums::OKXInstrumentType,
         models::OKXInstrument,
-        parse::{is_xperp_rule_type, okx_instrument_type_from_symbol, parse_instrument_any},
+        parse::{
+            extract_inst_family, is_xperp_rule_type, okx_instrument_type_from_symbol,
+            parse_instrument_any,
+        },
     },
     http::{client::OKXHttpClient, query::GetInstrumentsParams},
 };
@@ -100,14 +103,18 @@ pub struct OkxHistory {
 }
 
 impl OkxHistory {
-    /// The clients of OKX's public REST API and of its archive.
+    /// The clients of OKX's public REST API, the adapter's default (no
+    /// key), and of its archive.
     ///
     /// # Errors
     ///
-    /// Returns an error if a client cannot be built.
+    /// Returns an error if the archive client cannot be built.
+    ///
+    /// # Panics
+    ///
+    /// Panics, in Nautilus, if the adapter cannot build its default client.
     pub fn new() -> anyhow::Result<Self> {
-        let client = OKXHttpClient::new(None, 60, 3, 1000, 10_000, OKXEnvironment::Live, None)
-            .context("building the OKX HTTP client")?;
+        let client = OKXHttpClient::default();
         let quota = Quota::with_period(ARCHIVE_REQUEST_PERIOD)
             .context("the archive request period is zero")?;
         let archive = HttpClient::builder()
@@ -661,7 +668,8 @@ struct Contract {
     /// `Swap` or `Futures`, from the symbol (the adapter's
     /// `okx_instrument_type_from_symbol`).
     inst_type: OKXInstrumentType,
-    /// The symbol without its last part: `BTC-USDT`, `BTC-USD_UM_XPERP`.
+    /// `BTC-USDT`, `BTC-USD_UM_XPERP`, from the symbol (the adapter's
+    /// `extract_inst_family`).
     family: &'static str,
 }
 
@@ -683,13 +691,12 @@ impl Contract {
             "{id} is not an OKX swap (BTC-USDT-SWAP.OKX) or X-Perp \
              (BTC-USD_UM_XPERP-310404.OKX)"
         );
-        let (family, _) = symbol
-            .rsplit_once('-')
+        let family = extract_inst_family(symbol)
             .with_context(|| format!("{id} has no instrument family"))?;
         Ok(Self {
             id,
             inst_type,
-            family,
+            family: family.as_str(),
         })
     }
 
@@ -922,6 +929,7 @@ pub(super) mod tests {
     use jiff::civil::date;
 
     use nautilus_model::data::{Bar, FundingRateUpdate};
+    use nautilus_okx::common::enums::OKXEnvironment;
 
     use super::{
         ArchiveModule::{Candles, Funding},

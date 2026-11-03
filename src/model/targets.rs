@@ -206,15 +206,15 @@ pub const DEFAULT_ATR: AtrArgs = AtrArgs {
     value_floor: None,
 };
 
-/// The units of the ATR's bars, longest first, each its length: those of
-/// a fixed length, which a cadence, or the source bars of a composite bar
-/// type, is a whole number of.
-const ATR_UNITS: [(BarAggregation, SignedDuration); 5] = [
-    (BarAggregation::Day, SignedDuration::from_hours(24)),
-    (BarAggregation::Hour, SignedDuration::from_hours(1)),
-    (BarAggregation::Minute, SignedDuration::from_mins(1)),
-    (BarAggregation::Second, SignedDuration::from_secs(1)),
-    (BarAggregation::Millisecond, SignedDuration::from_millis(1)),
+/// The units of the ATR's bars, longest first: those of a fixed length,
+/// which a cadence, or the source bars of a composite bar type, is a whole
+/// number of. A unit's length is Nautilus' (`BarSpecification::timedelta`).
+const ATR_UNITS: [BarAggregation; 5] = [
+    BarAggregation::Day,
+    BarAggregation::Hour,
+    BarAggregation::Minute,
+    BarAggregation::Second,
+    BarAggregation::Millisecond,
 ];
 
 /// The average true range a barrier runs: `config`, on bars of
@@ -474,8 +474,12 @@ impl TargetsConfig {
         let nanos = cadence.as_nanos();
         let Some((aggregation, step)) = ATR_UNITS
             .into_iter()
-            .find(|(_, unit)| nanos % unit.as_nanos() == 0)
-            .map(|(aggregation, unit)| (aggregation, nanos / unit.as_nanos()))
+            .map(|aggregation| {
+                let unit = BarSpecification::new(1, aggregation, PriceType::Last).timedelta();
+                (aggregation, unit.as_nanos())
+            })
+            .find(|(_, unit)| nanos % unit == 0)
+            .map(|(aggregation, unit)| (aggregation, nanos / unit))
         else {
             bail!(
                 "the barrier's ATR has no bars of the decision cadence {cadence:#}, not whole \
@@ -716,8 +720,7 @@ fn longest_dividing(sources: &[BarType], cadence: SignedDuration) -> Option<BarT
     let length = |source: &BarType| {
         let spec = source.spec();
         ATR_UNITS
-            .iter()
-            .any(|(aggregation, _)| *aggregation == spec.aggregation)
+            .contains(&spec.aggregation)
             .then(|| spec.timedelta())
     };
     sources

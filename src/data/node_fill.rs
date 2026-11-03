@@ -11,10 +11,14 @@
 //! windows of the source's period, and `run` builds a live node with those clients and the catalog, and an
 //! actor asking for one window at a time with `update_catalog`. The data
 //! engine serves what the catalog holds, asks the client for the rest and
-//! writes the answer back over the window asked for. The actor records the
-//! first failure (a failed request, a failure envelope, no answer within
-//! the timeout) and stops the node; `run` returns it. See `README.md`,
-//! "The node fill".
+//! writes the answer back over the window asked for. The actor waits for
+//! Nautilus' answer to each request (`on_data_response`) with no deadline
+//! of its own, as Nautilus' requests have none: each client the fill asks
+//! answers every request, a failed one with the failure in its response
+//! envelope, and one that never answered would hold the run until it is
+//! interrupted. The actor records the first failure (a failed request, a
+//! failure envelope) and stops the node; `run` returns it. See
+//! `README.md`, "Fill paths".
 
 use std::{
     cell::RefCell,
@@ -32,7 +36,6 @@ use nautilus_common::{
     factories::{ClientConfig, DataClientFactory},
     messages::data::{DataResponse, DataResponseEnvelope},
     nautilus_actor,
-    timer::TimeEvent,
 };
 use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_live::{
@@ -52,17 +55,8 @@ use serde_json::json;
 use super::catalog_path;
 use crate::strategy::SeriesSlice;
 
-/// How long `run` waits for the answer to one request at most, by the wall
-/// clock: Nautilus' requests have no timeout, so a client that never
-/// answers would hold the run forever. A week of IC's gold ticks takes
-/// about 40 s, three hours of Databento's MBP-10 about a million rows.
-pub const REQUEST_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
-
 /// The book depth of an `OrderBookDepth` request: MBP-10's.
 const DEPTH: usize = 10;
-
-/// The name of the actor's timer of the request in flight.
-const DEADLINE: &str = "fill-request-deadline";
 
 /// What a fill asks a source for: an instrument's definition, or one of
 /// its series.
@@ -290,12 +284,11 @@ impl NodeFill {
     /// # Errors
     ///
     /// Returns an error if the node fails to build or run; naming the
-    /// request, if one fails, its client answers with a failure, or no
-    /// answer comes within `timeout`; if the node stops before every
-    /// request is answered; or if a window answered with data is not
-    /// covered in the catalog after the run (see `check_coverage`). What was
-    /// written before stays.
-    pub async fn run(self, catalog_dir: &Path, timeout: SignedDuration) -> anyhow::Result<()> {
+    /// request, if one fails or its client answers with a failure; if the
+    /// node stops before every request is answered; or if a window answered
+    /// with data is not covered in the catalog after the run (see
+    /// `check_coverage`). What was written before stays.
+    pub async fn run(self, catalog_dir: &Path) -> anyhow::Result<()> {
         let Self { clients, requests } = self;
         if requests.is_empty() {
             log::info!("The catalog holds every window asked for: no node");
@@ -336,7 +329,6 @@ impl NodeFill {
             requests: requests.into(),
             pending: None,
             precisions: HashMap::new(),
-            timeout,
             outcome: Rc::clone(&outcome),
         })?;
         let ran = node.run().await;
@@ -424,13 +416,11 @@ struct FillActor {
     pending: Option<(UUID4, FillRequest)>,
     /// The price precision of each instrument whose definition came back.
     precisions: HashMap<InstrumentId, u8>,
-    timeout: SignedDuration,
     outcome: Rc<RefCell<Outcome>>,
 }
 
 impl FillActor {
-    /// Asks for the next request, with its deadline, or, all answered,
-    /// stops the node.
+    /// Asks for the next request or, all answered, stops the node.
     fn next(&mut self) {
         let Some(request) = self.requests.pop_front() else {
             self.outcome.borrow_mut().done = true;
@@ -438,13 +428,7 @@ impl FillActor {
             return;
         };
         log::info!("Asking for {request}");
-        let deadline = self.clock().utc_now() + self.timeout;
-        let issued = self.issue(request).and_then(|id| {
-            self.clock()
-                .set_time_alert(DEADLINE, deadline, None, None)?;
-            Ok(id)
-        });
-        match issued {
+        match self.issue(request) {
             Ok(id) => self.pending = Some((id, request)),
             Err(e) => self.fail(format!("asking for {request}: {e:#}")),
         }
@@ -508,7 +492,6 @@ impl DataActor for FillActor {
             return Ok(());
         }
         self.pending = None;
-        self.clock().cancel_timer(DEADLINE);
         if let Some(reason) = response.failure_reason() {
             self.fail(format!("{request} failed: {reason}"));
             return Ok(());
@@ -528,15 +511,6 @@ impl DataActor for FillActor {
         log::info!("{request}: {rows} rows");
         self.outcome.borrow_mut().answered.push((request, rows));
         self.next();
-        Ok(())
-    }
-
-    fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
-        if event.name.as_str() == DEADLINE
-            && let Some((_, request)) = self.pending
-        {
-            self.fail(format!("{request}: no answer within {:#}", self.timeout));
-        }
         Ok(())
     }
 }

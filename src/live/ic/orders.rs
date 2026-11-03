@@ -27,6 +27,7 @@
 
 use std::{fmt, str::FromStr};
 
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::{OrderSide, OrderType, PositionSide, TimeInForce, TriggerType},
     events::OrderDeniedReason,
@@ -327,11 +328,15 @@ fn time_in_force(order: &OrderAny) -> Result<(ProtoOaTimeInForce, Option<i64>), 
             let expiry = order
                 .expire_time()
                 .ok_or(OrderDeniedReason::MissingExpireTime)?;
-            let ms = i64::try_from(expiry.as_u64() / 1_000_000).unwrap_or(i64::MAX);
-            (ProtoOaTimeInForce::GoodTillDate, Some(ms))
+            (ProtoOaTimeInForce::GoodTillDate, Some(millis(expiry)))
         }
         other => return Err(OrderDeniedReason::UnsupportedTimeInForce(other)),
     })
+}
+
+/// `time` in whole milliseconds, cTrader's signed Unix time.
+pub(super) fn millis(time: UnixNanos) -> i64 {
+    i64::try_from(time.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

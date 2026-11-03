@@ -36,7 +36,7 @@ use nautilus_model::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
-use super::{Backtest, costs, report::Outcome};
+use super::{Backtest, report::Outcome};
 use crate::{
     data::catalog_path,
     strategy::{SeriesSlice, warmup},
@@ -142,8 +142,11 @@ fn config(
 }
 
 /// The simulated `venue` of `backtest`: a margin account keeping positions
-/// as `backtest.venue_oms` says, with the run's balance, leverage, fee
-/// model and fill model, filling on the top of the book.
+/// as `backtest.venue_oms` says, with the run's balance, leverage and fee
+/// model, filling on the top of the book on Nautilus' default fill model:
+/// a market order fills at the quote (a buy at the ask, a sell at the
+/// bid), or on bars at the last price, with no slippage, and a limit order
+/// whenever touched.
 fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVenueConfig> {
     Ok(BacktestVenueConfig::builder()
         .name(venue.as_str())
@@ -153,7 +156,6 @@ fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVen
         .starting_balances(vec![backtest.balance.to_string()])
         .default_leverage(backtest.leverage)
         .fee_model(backtest.fee_model.clone())
-        .fill_model(costs::fill_model()?)
         .build()?)
 }
 
@@ -322,6 +324,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+    use crate::backtest::costs;
 
     /// A backtest on the catalog `catalog`.
     fn backtest(catalog: &Path) -> Backtest {

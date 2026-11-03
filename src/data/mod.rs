@@ -12,7 +12,7 @@ pub(crate) use fill_catalog::fill_slices;
 pub(crate) mod ic;
 pub use ic::{IcConnection, IcHistory};
 mod node_fill;
-pub use node_fill::{FillData, FillRequest, NodeClient, NodeFill, REQUEST_TIMEOUT, missing};
+pub use node_fill::{FillData, FillRequest, NodeClient, NodeFill, missing};
 
 use std::path::Path;
 

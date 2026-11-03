@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::strategy::gold_scalp::GoldScalp;
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IcConnection, IcHistory, NodeClient, NodeFill, REQUEST_TIMEOUT, missing},
+    data::{IcConnection, IcHistory, NodeClient, NodeFill, missing},
     live::{IcDataClientConfig, IcDataClientFactory, Live, Recording},
     model::{
         ModelStrategy, dataset,
@@ -573,7 +573,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             .fill(&mut catalog, &slices_of(HistorySource::Okx))
             .await?;
     }
-    node.run(catalog_dir, REQUEST_TIMEOUT).await?;
+    node.run(catalog_dir).await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
     // the node.
     if !ib_ids.is_empty() {

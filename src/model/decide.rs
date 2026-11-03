@@ -44,7 +44,7 @@
 
 use std::{any::Any, sync::Arc};
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -131,7 +131,8 @@ impl DecisionRule {
 ///
 /// # Errors
 ///
-/// Returns an error if the rule is invalid or Nautilus refuses the timer.
+/// Returns an error if the rule is invalid, the clock is not yet `delay`
+/// and `DECISION_MARGIN` past the epoch, or Nautilus refuses the timer.
 pub fn start<A: DataActor + DataActorNative>(
     actor: &A,
     rule: DecisionRule,
@@ -140,13 +141,21 @@ pub fn start<A: DataActor + DataActorNative>(
     rule.validate()?;
     let DecisionRule::Every(interval) = rule;
     let clock = actor.clock();
-    let now = i128::from(clock.timestamp_ns().as_u64());
-    let (interval_ns, offset_ns) = (interval.as_nanos(), (delay + DECISION_MARGIN).as_nanos());
-    let start = (now - offset_ns).div_euclid(interval_ns) * interval_ns + offset_ns;
+    let now = clock.timestamp_ns();
+    let offset = delay + DECISION_MARGIN;
+    let (interval_ns, offset_ns) = (
+        DurationNanos::try_from(interval)?,
+        DurationNanos::try_from(offset)?,
+    );
+    let start = now
+        .checked_sub(offset_ns)
+        .with_context(|| format!("the clock, at {now} ns, is not yet {offset:#} past the epoch"))?
+        .floor(interval_ns)
+        + offset_ns;
     clock.set_timer_ns(
         DECISION_TIMER,
-        DurationNanos::try_from(interval)?,
-        Some(UnixNanos::from(u64::try_from(start)?)),
+        interval_ns,
+        Some(start),
         None,
         None,
         Some(true),

@@ -167,9 +167,10 @@ const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
 /// The config of the live node: `trader_id` and its kept `instance_id`,
 /// `logging`, `cache`, `data_engine`, the one `catalog`, `streaming` into
-/// it, and the execution engine's reconciliation and checks, after loading
-/// the cache from its database (`load_cache`, Nautilus' default), and its
-/// purges (`PURGE_INTERVAL_MINS`).
+/// it, and the execution engine's checks of open orders and positions and
+/// its purges (`PURGE_INTERVAL_MINS`); it loads the cache from its database
+/// (`load_cache`) and reconciles at start-up (`reconciliation`) by Nautilus'
+/// defaults.
 fn config(
     trader_id: TraderId,
     instance_id: UUID4,
@@ -189,7 +190,6 @@ fn config(
         cache: Some(cache),
         data_engine,
         exec_engine: LiveExecutionEngineConfig {
-            reconciliation: true,
             open_check_interval_secs: Some(10.0),
             position_check_interval_secs: Some(30.0),
             purge_closed_orders_interval_mins: Some(PURGE_INTERVAL_MINS),

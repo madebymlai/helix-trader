@@ -21,7 +21,8 @@ use anyhow::{Context, ensure};
 use ibapi::contracts::{Contract, Symbol};
 use jiff::Timestamp;
 use nautilus_interactive_brokers::{
-    common::symbology::Symbology, config::InteractiveBrokersDataClientConfig,
+    common::{futures::parse_futures_symbol, symbology::Symbology},
+    config::InteractiveBrokersDataClientConfig,
     historical::HistoricalInteractiveBrokersClient,
 };
 use nautilus_model::{
@@ -333,19 +334,10 @@ fn missing_ids(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> Vec<Inst
 /// leaves empty.
 fn expired_future_contract(symbology: Symbology, id: InstrumentId) -> Option<Contract> {
     let mut contract = symbology.contract(id, None).ok()?;
-    let root = future_root(&contract.local_symbol)?;
+    let root = parse_futures_symbol(&contract.local_symbol)?.root;
     contract.symbol = Symbol(root.to_string());
     contract.include_expired = true;
     Some(contract)
-}
-
-/// The root of a future's local symbol: `ES` of `ESU5`, `ESU25` or
-/// `ESU2025` (the year forms the adapter accepts).
-fn future_root(local_symbol: &str) -> Option<&str> {
-    let without_year = local_symbol.trim_end_matches(|c: char| c.is_ascii_digit());
-    let year_len = local_symbol.len() - without_year.len();
-    let root = without_year.strip_suffix(|c: char| "FGHJKMNQUVXZ".contains(c))?;
-    (matches!(year_len, 1 | 2 | 4) && !root.is_empty()).then_some(root)
 }
 
 /// Fails naming every id of `requested` missing from `loaded`.
@@ -660,17 +652,5 @@ mod tests {
         );
         // A stock whose symbol reads like a future.
         assert!(expired_future_contract(symbology(), InstrumentId::from("ABCZ5.SMART")).is_none());
-    }
-
-    #[test]
-    fn the_root_of_a_future_drops_month_code_and_year() {
-        assert_eq!(future_root("ESU5"), Some("ES"));
-        assert_eq!(future_root("ESU25"), Some("ES"));
-        assert_eq!(future_root("ZNH6"), Some("ZN"));
-        assert_eq!(future_root("ESU2025"), Some("ES"));
-        assert_eq!(future_root("ESU123"), None);
-        assert_eq!(future_root("ES"), None);
-        assert_eq!(future_root("U5"), None);
-        assert_eq!(future_root("ESA5"), None);
     }
 }
