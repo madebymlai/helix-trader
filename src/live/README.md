@@ -1,6 +1,6 @@
 # Running live
 
-`helix-trader live` runs one strategy on a Nautilus live node, including for paper accounts. Run only one live module per process: Nautilus owns process-wide state and logging. Start with a paper account and review the venue restrictions before enabling orders: [IB](ib/README.md), [IC Markets](ic/README.md), [OKX](okx/README.md). General strategy configuration and warmup are in [strategy](../strategy/README.md); model internals are in [model](../model/README.md).
+`helix-trader live` runs one strategy on a Nautilus live node, including for paper accounts. Run only one live module per process: Nautilus owns process-wide state and logging. Start with a paper account and review the venue restrictions before enabling orders: [IB](../venues/ib/README.md), [IC Markets](../venues/ic/README.md), [OKX](../venues/okx/README.md). General strategy configuration and warmup are in [strategy](../strategy/README.md); model internals are in [model](../model/README.md).
 
 ```sh
 helix-trader live ema --config ema.toml
@@ -12,7 +12,7 @@ See `helix-trader live --help` and the maintained config for options. The comman
 
 The node recovers its staging identity, validates venue configuration and accounts, prepares clients and starts Redis, then builds the node and promotes recovered staging data before strategy warmup. It registers the retrain actor of a strategy retrained (see [Retraining](#retraining)), then the strategy, and claims external orders for its instruments, then loads the cache, connects and reconciles before starting the trader. Reconciliation failure aborts startup; periodic open-order and position checks continue while running. A strategy claims the whole book for its instruments; two claims on one instrument conflict.
 
-OKX and IC instruments route to their own clients; IB is the default for other venues. Positions follow the execution client's account mode: IB and OKX net, IC hedges. See the venue docs for account checks and order restrictions.
+The instrument venue selects the broker, in the [routing table](../venues/mod.rs): OKX and IC instruments route to their own clients; IB is the default for other venues. Positions follow the execution client's account mode: IB and OKX net, IC hedges. See the venue docs for account checks and order restrictions.
 
 For a futures root, the live node loads the current and next contracts at startup and requests future contracts ahead of each roll. Live root bars are refused: the post-roll price is not yet known and backward-adjusting existing bars would change a running strategy's frame. Read contract bars or root ticks instead. GLBX has no live client yet; IB uses CME for these futures. See [rolls](../rolls/README.md) for the calendar and transitions.
 
@@ -43,7 +43,7 @@ The node streams market data to `--staging` outside the catalog, promotes it dai
 
 Each trader's persistent instance ID is stored in staging. After a crash, restart with the same trader and staging directory: recovery seals complete batches and promotes them **before warmup**, so warmup write-back cannot overlap unrecovered data. An empty identity file fails startup rather than orphaning the old run. The last unflushed second can be lost. A staged interval overlapping catalog data fails promotion and remains staged; resolve the overlap before restarting. In particular, interval promotion can split OKX rows with the same timestamp across files, causing an overlap and a subsequent startup failure.
 
-Catalog coverage is not proof of complete market data: promotion leaves small interval gaps, downtime leaves gaps, and a disconnect within one file may look covered. Warmup asks the venue for missing coverage, and certified IC responses can be written back; IB and OKX warmup responses are not written back. Backtests and retrains read stored rows through gaps, not a guarantee of completeness. See [data](../data/README.md) for catalog operations.
+Catalog coverage is not proof of complete market data: promotion leaves small interval gaps, downtime leaves gaps, and a disconnect within one file may look covered. Warmup asks the venue for missing coverage, and certified IC responses can be written back; IB and OKX warmup responses are not written back. Backtests and retrains read stored rows through gaps, not a guarantee of completeness. See [catalog](../catalog/README.md) for catalog operations.
 
 ## Retraining
 

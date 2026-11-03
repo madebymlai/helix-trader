@@ -30,9 +30,9 @@ use std::{
 };
 
 use helix_trader::{
-    data::{IbAccount, IbHistory},
     live::Live,
     strategy::ema::{EmaCross, EmaCrossConfig},
+    venues::ib::{IbAccount, IbHistory},
 };
 use jiff::Timestamp;
 use nautilus_common::logging::logger::LoggerConfig;
@@ -140,8 +140,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-043"),
-        account: Some(account),
-        client_id: 43,
+        venues: crate::venues(&["--account", &account.to_string(), "--client-id", "43"]),
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),

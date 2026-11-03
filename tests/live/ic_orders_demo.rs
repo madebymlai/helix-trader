@@ -38,10 +38,11 @@ use std::{
     time::Duration,
 };
 
+use ctrader::CTraderExecutionClientFactory;
 use helix_trader::{
-    data::IcConnection,
-    live::{IcExecutionClientConfig, IcExecutionClientFactory, Live},
+    live::Live,
     strategy::{DataRequirements, warmup::Warmup},
+    venues::ic,
 };
 use jiff::SignedDuration;
 use nautilus_common::{
@@ -258,8 +259,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
-        account: None,
-        client_id: 1,
+        venues: crate::venues(&[]),
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
@@ -364,14 +364,12 @@ async fn open_at_ic() -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
     let cache = Rc::new(RefCell::new(Cache::default()));
-    let config = IcExecutionClientConfig {
-        connection: IcConnection::from_env().unwrap(),
-        instrument_ids: vec![InstrumentId::from(XAUUSD)],
-    };
-    let mut client = IcExecutionClientFactory
+    let config = ic::execution_config(ic::connection().unwrap(), vec![InstrumentId::from(XAUUSD)]);
+    let factory = CTraderExecutionClientFactory::new(&config);
+    let mut client = factory
         .create(
             TraderId::from(TRADER),
-            "ICMARKETS",
+            factory.name(),
             &config,
             cache.clone().into(),
             Rc::new(RefCell::new(VirtualClock::new())),

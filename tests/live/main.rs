@@ -21,7 +21,8 @@
 
 use std::{path::Path, sync::OnceLock};
 
-use helix_trader::live::Recording;
+use clap::{Args, Command, FromArgMatches};
+use helix_trader::{live::Recording, venues::LiveVenueArgs};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -32,6 +33,7 @@ mod ib_restart;
 mod ic_demo;
 mod ic_live_demo;
 mod ic_orders_demo;
+mod ic_token_demo;
 mod okx_demo;
 mod streaming;
 
@@ -51,6 +53,16 @@ fn claim_process(module: &'static str) {
         "{owner} runs in this process: run one live module at a time, \
          `cargo test --test live <module>::`"
     );
+}
+
+/// The venues' settings of a venue test's node from `flags`, the live
+/// command's venue flags, parsed as `live` parses them: the IB account
+/// falls back on `NAUTILUS_IB_ACCOUNT_ID`.
+fn venues(flags: &[&str]) -> LiveVenueArgs {
+    let matches = LiveVenueArgs::augment_args(Command::new("live"))
+        .try_get_matches_from(["live"].into_iter().chain(flags.iter().copied()))
+        .unwrap();
+    LiveVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
 /// The recording of a venue test's node: staged in `staging`, a directory

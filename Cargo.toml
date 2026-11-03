@@ -1,9 +1,58 @@
 [package]
 name = "helix-trader"
 version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[workspace]
+members = ["crates/ctrader"]
+# Plain `cargo test` and `cargo clippy` at the root cover both crates.
+default-members = [".", "crates/ctrader"]
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.99.1"
-publish = false
+
+# The Nautilus pin, one for the workspace, so that both crates build
+# against one copy of Nautilus' types; and the versions both crates use.
+# Each crate names the features it needs.
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+ctrader = { path = "crates/ctrader" }
+jiff = { version = "0.2", features = ["serde"] }
+log = "0.4"
+nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+# Keep Nautilus' 64-bit prices, as for nautilus-okx.
+nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
+nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
+nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+# Keep Nautilus' 64-bit prices: the crate's default turns on 128-bit prices
+# (high-precision) for the whole build.
+nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
+nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+rust_decimal = "1"
+serde = { version = "1", features = ["derive"] }
+# Floats read back to the bit: the probes of a stored model.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ustr = "1"
 
 [features]
 # The unit tests of the strategies themselves (ema, model_ema and, where it
@@ -12,87 +61,76 @@ publish = false
 strategy-tests = []
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 # The arrow schema Nautilus' custom data macros generate, for the dataset
 # rows and the custom data of the backtest tests.
 arrow = { version = "59.3", default-features = false }
-# The `DataClient` trait of the IC data client.
-async-trait = "0.1"
 # The version and features of Nautilus' IB gateway.
 bollard = { version = "0.21.1", default-features = false, features = ["http", "pipe"] }
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
+# The cTrader Open API adapter, which IC Markets' venue module wires in.
+ctrader.workspace = true
 # The version of nautilus-databento, for the cost quotes its client does not make.
 databento = "=0.63.0"
 dotenvy = "0.15"
-jiff = { version = "0.2", features = ["serde"] }
+jiff.workspace = true
 # LightGBM, built from its C++ sources (needs cmake and clang) without OpenMP:
 # one thread, so training is deterministic. Cargo.lock gives its bindgen
 # prettyplease 0.3: added beside bon's prettyplease 0.2, Cargo reused 0.2,
 # whose syn 2 does not build with bindgen's syn 3.
 lightgbm3 = "1.0.11"
-log = "0.4"
-nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["streaming"] }
-nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["indicators", "live", "tracing-bridge"] }
-nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-# Keep Nautilus' 64-bit prices, as for nautilus-okx; `live` for its data client, which
-# fill-catalog's node asks for history.
-nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false, features = ["live"] }
-nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["streaming"] }
+log.workspace = true
+nautilus-analysis.workspace = true
+nautilus-backtest = { workspace = true, features = ["streaming"] }
+nautilus-common = { workspace = true, features = ["indicators", "live", "tracing-bridge"] }
+nautilus-core.workspace = true
+nautilus-data.workspace = true
+# `live` for its data client, which fill-catalog's node asks for history.
+nautilus-databento = { workspace = true, features = ["live"] }
+nautilus-execution.workspace = true
+nautilus-indicators.workspace = true
+nautilus-infrastructure.workspace = true
+nautilus-live = { workspace = true, features = ["streaming"] }
 ibapi = "=5.0.0"
-nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false, features = ["execution", "gateway"] }
-nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-# Keep Nautilus' 64-bit prices: the crate's default turns on 128-bit prices
-# (high-precision) for the whole build.
-nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
-nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-interactive-brokers = { workspace = true, features = ["execution", "gateway"] }
+nautilus-model.workspace = true
+nautilus-network.workspace = true
+nautilus-okx.workspace = true
+nautilus-persistence.workspace = true
 # Nautilus' custom data registry and arrow encoding, to store the dataset rows
 # in the catalog.
-nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["arrow"] }
-nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-serialization = { workspace = true, features = ["arrow"] }
+nautilus-trading.workspace = true
 # PerpetualBooster: the 3.0 release candidate, the only version that builds
 # on stable Rust.
 perpetual = "=3.0.0-rc.2"
-prost = "0.14"
-rust_decimal = "1"
-serde = { version = "1", features = ["derive"] }
-# Floats read back to the bit: the probes of a stored model.
-serde_json = { version = "1", features = ["float_roundtrip"] }
-# The fingerprint of the IC token pair that seeded the token file.
-sha2 = "0.11"
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
 toml = "1"
-# The rate-limit keys of Nautilus' WebSocketClient.
-ustr = "1"
-zeroize = "1"
+ustr.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
-[build-dependencies]
-prost-build = { version = "0.14", default-features = false }
-
 [dev-dependencies]
-futures = "0.3"
+# The `DataClient` trait of the test venues' data clients.
+async-trait.workspace = true
+# The hooks of the IC demo test of the cTrader session's token renewal
+# (`tests/live/ic_token_demo.rs`).
+ctrader = { workspace = true, features = ["test-support"] }
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"] }
-nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", features = ["test-support"] }
-# Nautilus' risk engine and the portfolio it takes, for the IC margin check
-# and to register a strategy in a unit test.
-nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-tokio = { version = "1", features = ["test-util"] }
-# The mock cTrader peer of the IC adapter's tests.
-tungstenite = "0.30"
+nautilus-model = { workspace = true, features = ["test-support"] }
+# Nautilus' portfolio, to register a strategy in a unit test.
+nautilus-portfolio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
-# Line tables only for this crate, enough for file:line in backtraces, and no
-# debug info for dependencies: Nautilus and DataFusion's full debug info made
+# Line tables only for the workspace's crates, enough for file:line in
+# backtraces, and no debug info for dependencies: Nautilus and DataFusion's full debug info made
 # each test binary about 1.8 GB.
 [profile.dev]
 debug = "line-tables-only"

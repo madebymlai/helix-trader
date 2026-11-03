@@ -18,11 +18,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::strategy::gold_scalp::GoldScalp;
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{
-        DatabentoHistory, IbHistory, IcConnection, IcHistory, NodeClient, NodeFill, OkxHistory,
-        missing,
-    },
-    live::{IbAccount, IcDataClientConfig, IcDataClientFactory, Live, Recording},
+    catalog::{NodeFill, missing},
+    live::{Live, Recording},
     model::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
@@ -35,6 +32,10 @@ use helix_trader::{
         ema::{EmaCross, EmaParams},
         model_ema::ModelEma,
     },
+    venues::{
+        HistorySource, HistoryVenueArgs, LiveVenueArgs, databento::DatabentoHistory, ic,
+        okx::OkxHistory,
+    },
 };
 use jiff::{Timestamp, civil::Date};
 use nautilus_common::logging::{
@@ -42,12 +43,7 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
-use nautilus_live::config::RoutingConfig;
-use nautilus_model::{
-    enums::OmsType,
-    identifiers::{InstrumentId, TraderId},
-    types::Money,
-};
+use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -116,10 +112,9 @@ impl RunArgs {
 struct FillCatalogArgs {
     #[command(flatten)]
     run: RunArgs,
-    /// IB client id of this process; not the adapter default 1, so a live
-    /// node with the default id can run at the same time.
-    #[arg(long, default_value_t = 10)]
-    client_id: i32,
+    /// The venues' flags of a fill, each venue's own.
+    #[command(flatten)]
+    venues: HistoryVenueArgs,
 }
 
 #[derive(Debug, Args)]
@@ -267,13 +262,9 @@ struct LiveArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The IB account traded, for example DU1234567 (paper); needed only
-    /// for IB instruments.
-    #[arg(long, env = "NAUTILUS_IB_ACCOUNT_ID")]
-    account: Option<IbAccount>,
-    /// IB client id of the node, the adapter default.
-    #[arg(long, default_value_t = 1)]
-    client_id: i32,
+    /// The venues' flags of a live node, each venue's own.
+    #[command(flatten)]
+    venues: LiveVenueArgs,
     /// The leverage the run expects, as in a backtest. OKX applies the
     /// account's, set by hand per instrument: the start refuses an OKX
     /// instrument at another one.
@@ -490,7 +481,7 @@ async fn main() -> anyhow::Result<()> {
 /// from and its ticks (see `DataRequirements::catalog_series`), each on a
 /// contract over its slice (`DataRequirements::slices`), every source given
 /// its slices: GLBX's and IC's fill through a Nautilus node (see
-/// `data::NodeFill`), by Databento's data client for GLBX instruments (the
+/// `catalog::NodeFill`), by Databento's data client for GLBX instruments (the
 /// series declared, Databento's cost of every request quoted first, before
 /// the node starts) and IC's for IC instruments; OKX's archive fills OKX
 /// instruments (their 1-minute candles) and IB (connected only if needed)
@@ -517,30 +508,32 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    // The source of an instrument is its venue's: OKX's archive for OKX,
-    // Databento for GLBX, IC's cTrader for IC, IB for every other venue.
-    let (okx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = requirements
-        .instrument_ids()
-        .into_iter()
-        .partition(|&id| OkxHistory::serves(id));
-    let (glbx_ids, others): (Vec<InstrumentId>, Vec<InstrumentId>) = others
-        .into_iter()
-        .partition(|&id| DatabentoHistory::serves(id));
-    let (ic_ids, ib_ids): (Vec<InstrumentId>, Vec<InstrumentId>) =
-        others.into_iter().partition(|&id| IcHistory::serves(id));
+    // The source of an instrument is its venue's (`HistorySource`): OKX's
+    // archive for OKX, Databento for GLBX, IC's cTrader for IC, IB for
+    // every other venue.
+    let (mut okx_ids, mut databento_ids, mut ic_ids, mut ib_ids) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for id in requirements.instrument_ids() {
+        match HistorySource::of(id) {
+            HistorySource::Okx => okx_ids.push(id),
+            HistorySource::Databento => databento_ids.push(id),
+            HistorySource::Ic => ic_ids.push(id),
+            HistorySource::Ib => ib_ids.push(id),
+        }
+    }
     // Every source takes the series slices of its instruments: a rolled
     // root's series contract by contract, each over its slice.
     let slices = requirements.slices(start, end);
-    let slices_of = |serves: fn(InstrumentId) -> bool| -> Vec<SeriesSlice> {
+    let slices_of = |source: HistorySource| -> Vec<SeriesSlice> {
         slices
             .iter()
-            .filter(|slice| serves(slice.slice.instrument_id))
+            .filter(|slice| HistorySource::of(slice.slice.instrument_id) == source)
             .cloned()
             .collect()
     };
     let mut node = NodeFill::new();
-    if !glbx_ids.is_empty() {
-        let requests = missing(&catalog, &slices_of(DatabentoHistory::serves))?;
+    if !databento_ids.is_empty() {
+        let requests = missing(&catalog, &slices_of(HistorySource::Databento))?;
         if !requests.is_empty() {
             let api_key =
                 std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
@@ -550,42 +543,27 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         }
     }
     if !ic_ids.is_empty() {
-        let instrument_ids =
-            IcHistory::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
-        let requests = missing(&catalog, &slices_of(IcHistory::serves))?;
+        let instrument_ids = ic::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
+        let requests = missing(&catalog, &slices_of(HistorySource::Ic))?;
         if !requests.is_empty() {
-            let client = NodeClient {
-                factory: Box::new(IcDataClientFactory),
-                config: Box::new(IcDataClientConfig {
-                    connection: IcConnection::from_env()?,
-                    instrument_ids,
-                }),
-                routing: RoutingConfig::default(),
-            };
-            node.add(client, &requests, IcHistory::period);
+            node.add(ic::node_client(instrument_ids)?, &requests, ic::period);
         }
     }
     // Temporary until nautilus_trader#5473 is fixed: OKX then fills through
     // the node.
     if !okx_ids.is_empty() {
         OkxHistory::new()?
-            .fill(&mut catalog, &slices_of(OkxHistory::serves))
+            .fill(&mut catalog, &slices_of(HistorySource::Okx))
             .await?;
     }
     node.run(catalog_dir).await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
     // the node.
     if !ib_ids.is_empty() {
-        let ib = IbHistory::connect(args.client_id, end, Timestamp::now()).await?;
-        ib.fill(&mut catalog, &slices_of(is_ib)).await?;
+        let ib = args.venues.connect_ib(end, Timestamp::now()).await?;
+        ib.fill(&mut catalog, &slices_of(HistorySource::Ib)).await?;
     }
     Ok(())
-}
-
-/// Whether `id` is IB's: on a venue no other source serves. Temporary
-/// until nautilus_trader#5472 is fixed: IB then fills through the node.
-fn is_ib(id: InstrumentId) -> bool {
-    !OkxHistory::serves(id) && !DatabentoHistory::serves(id) && !IcHistory::serves(id)
 }
 
 /// Builds the strategy from its config, runs it over the window of the
@@ -802,8 +780,7 @@ impl Children {
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
-        account: args.account.clone(),
-        client_id: args.client_id,
+        venues: args.venues.clone(),
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
         catalog: args.catalog.clone(),
@@ -1025,8 +1002,9 @@ mod tests {
         argv
     }
 
+    /// Its IB client id is the venues' (`HistoryVenueArgs`).
     #[test]
-    fn parses_fill_catalog_with_its_client_id() {
+    fn parses_fill_catalog_over_a_window_of_the_catalog() {
         let args = parse(&REQUIRED).unwrap();
         assert_eq!(args.run.strategy, Strategy::Ema);
         assert_eq!(args.run.config, PathBuf::from("ema.toml"));
@@ -1039,7 +1017,24 @@ mod tests {
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
-        assert_eq!(args.client_id, 10);
+    }
+
+    /// Fill-catalog takes IB's client id, not live's account or leverage.
+    #[test]
+    fn fill_catalog_takes_the_ib_client_id_but_not_lives_account_or_leverage() {
+        let mut argv = REQUIRED.to_vec();
+        argv.extend(["--client-id", "12"]);
+        assert!(parse(&argv).is_ok());
+        for flag in [["--account", "DU1234567"], ["--leverage", "2"]] {
+            let mut argv = REQUIRED.to_vec();
+            argv.extend(flag);
+            let err = parse(&argv).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1139,15 +1134,21 @@ mod tests {
         assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
     }
 
+    /// Its IB account and client id are the venues' (`LiveVenueArgs`).
     #[test]
-    fn parses_live_with_the_adapter_client_id() {
-        let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
+    fn parses_live_with_its_strategy_config_and_catalog() {
+        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
         assert_eq!(args.strategy, Strategy::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
-        assert_eq!(args.account, Some("DU1234567".parse().unwrap()));
-        assert_eq!(args.client_id, 1);
-        assert_eq!(args.leverage, Decimal::ONE);
         assert_eq!(args.catalog, PathBuf::from("catalog"));
+    }
+
+    #[test]
+    fn live_is_unleveraged_unless_given_a_leverage() {
+        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+        assert_eq!(args.leverage, Decimal::ONE);
+        let args = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap();
+        assert_eq!(args.leverage, Decimal::TEN);
     }
 
     #[test]
@@ -1157,25 +1158,6 @@ mod tests {
         let args =
             parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("/data/staging"));
-    }
-
-    /// Read from the arguments' definition: setting the variable would race
-    /// the other tests, and the developer's environment may have it. Not
-    /// required: a run on OKX alone has no IB account.
-    #[test]
-    fn the_live_account_falls_back_on_nautilus_ib_account_id() {
-        use clap::CommandFactory;
-        let cli = Cli::command();
-        let live = cli.find_subcommand("live").unwrap();
-        let account = live
-            .get_arguments()
-            .find(|arg| arg.get_id() == "account")
-            .unwrap();
-        assert_eq!(
-            account.get_env(),
-            Some(std::ffi::OsStr::new("NAUTILUS_IB_ACCOUNT_ID"))
-        );
-        assert!(!account.is_required_set());
     }
 
     #[test]

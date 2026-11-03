@@ -1,0 +1,54 @@
+[package]
+name = "ctrader"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# The hooks of a caller's end-to-end test of a session's token renewal on a
+# real cTrader server, as Nautilus' crates expose theirs: a forced renewal
+# (`CTraderSession::renew_token`), a session's raw spot events
+# (`CTraderSession::connect_with_spots`, `SpotEvents`) and the pair its
+# token file holds (`CTraderCredential::stored_tokens`, `TokenPair`).
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+# The `DataClient` and `ExecutionClient` traits of the clients.
+async-trait.workspace = true
+jiff.workspace = true
+log.workspace = true
+nautilus-common = { workspace = true, features = ["live"] }
+nautilus-core.workspace = true
+nautilus-live.workspace = true
+nautilus-model.workspace = true
+nautilus-network.workspace = true
+prost = "0.14"
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The fingerprint of the token pair that seeded the token file.
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+# The rate-limit keys of Nautilus' WebSocketClient.
+ustr.workspace = true
+zeroize = "1"
+
+[build-dependencies]
+prost-build = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+futures = "0.3"
+# Nautilus' data engine and catalog (`streaming`), for the data client's
+# write-back.
+nautilus-data = { workspace = true, features = ["streaming"] }
+nautilus-model = { workspace = true, features = ["test-support"] }
+nautilus-persistence.workspace = true
+# Nautilus' risk engine and the portfolio it takes, for the margin check.
+nautilus-portfolio.workspace = true
+nautilus-risk.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+# The mock cTrader peer of the tests.
+tungstenite = "0.30"
