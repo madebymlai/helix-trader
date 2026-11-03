@@ -1,4 +1,5 @@
-//! Interactive Brokers clients for the live node.
+//! Interactive Brokers clients for the live node, and the live command's
+//! IB flags (`IbLiveArgs`).
 //!
 //! Provides the Nautilus client factories and configs from
 //! `nautilus_interactive_brokers`: `InteractiveBrokersDataClientFactory`,
@@ -7,6 +8,7 @@
 //! goes in the execution config.
 
 use anyhow::ensure;
+use clap::Args;
 use nautilus_interactive_brokers::{
     config::{
         InteractiveBrokersDataClientConfig, InteractiveBrokersExecutionClientConfig,
@@ -19,6 +21,19 @@ use nautilus_model::identifiers::InstrumentId;
 
 use super::{IbAccount, IbGateway, data_client_config};
 use crate::live::node::Clients;
+
+/// IB's settings of a live node, the live command's flags: the account
+/// traded and the client id of the node's IB clients (see `clients`).
+#[derive(Debug, Clone, Args)]
+pub(crate) struct IbLiveArgs {
+    /// The IB account traded, for example DU1234567 (paper); needed only
+    /// for IB instruments.
+    #[arg(long, env = "NAUTILUS_IB_ACCOUNT_ID")]
+    pub(in crate::venues) account: Option<IbAccount>,
+    /// IB client id of the node, the adapter default.
+    #[arg(long, default_value_t = 1)]
+    pub(in crate::venues) client_id: i32,
+}
 
 /// The IB data and execution client configs of a node trading `account`
 /// on `instrument_ids` through `gateway`, both on one connection.

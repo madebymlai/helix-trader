@@ -85,9 +85,7 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-001"),
-        account: None,
-        client_id: 1,
-        leverage,
+        venues: crate::venues(&["--leverage", &leverage.to_string()]),
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),

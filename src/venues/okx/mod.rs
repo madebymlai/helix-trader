@@ -2,7 +2,8 @@
 //! 1-minute candles and their funding, filled into the catalog one archive
 //! month, or day, at a time, then, for funding, from OKX's API, and the
 //! live node's clients (see `live`), both keying an instrument by its
-//! contract (`Contract`). See `README.md`.
+//! contract (`Contract`), and their leverage, the live command's flag
+//! (`live::OkxLiveArgs`). See `README.md`.
 //!
 //! Instruments come from OKX's public REST API through the adapter's
 //! `OKXRawHttpClient` (that of its `OKXHttpClient`) and
@@ -61,7 +62,7 @@ use crate::{catalog::fill_catalog, strategy::SeriesSlice};
 
 mod archive;
 mod live;
-pub(crate) use live::clients;
+pub(crate) use live::{OkxLiveArgs, clients};
 
 /// OKX's archive of history files (public, no key).
 const ARCHIVE_API: &str = "https://www.okx.com/api/v5/public/market-data-history";

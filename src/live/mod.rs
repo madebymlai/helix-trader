@@ -31,7 +31,6 @@ use nautilus_common::{
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-use rust_decimal::Decimal;
 
 use crate::{
     catalog::catalog_path,
@@ -41,27 +40,21 @@ use crate::{
         DataRequirements,
         warmup::{self, Warmup},
     },
-    venues::{self, ib::IbAccount},
+    venues::{self, LiveVenueArgs},
 };
 
-/// One live run: the strategy trades its IB instruments in `account`
-/// through IB with `client_id`, and its OKX instruments on the OKX
-/// environment `OKX_ENVIRONMENT` names at `leverage`, and its IC
-/// instruments on the IC environment `IC_ENVIRONMENT` names, a hedging
-/// account; on bars the node builds, warmed up from the venues.
+/// One live run: the strategy trades each instrument on its live broker,
+/// with the venues' settings `venues`; on bars the node builds, warmed up
+/// from the venues.
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The node's trader. The node's cache in Redis is the trader's, so a
     /// restart under the same trader loads what the last run left.
     pub trader_id: TraderId,
-    /// The IB account traded; needed only if the strategy trades IB
-    /// instruments.
-    pub account: Option<IbAccount>,
-    /// The IB client id of the node's IB clients.
-    pub client_id: i32,
-    /// The leverage the run expects. OKX applies the account's leverage,
-    /// set by hand: the start refuses an OKX instrument at another one.
-    pub leverage: Decimal,
+    /// The venues' settings of the run, the live command's venue flags,
+    /// handed to the venues module with the instruments (see
+    /// `venues::live_clients`).
+    pub venues: LiveVenueArgs,
     /// The Nautilus logger, installed for the start and kept by the node.
     pub logging: LoggerConfig,
     /// The catalog directory, fill-catalog's and the backtests': it serves
@@ -126,14 +119,7 @@ impl Live {
             file_config,
         )?;
         init_tracing()?;
-        let clients = venues::live_clients(
-            requirements,
-            &instrument_ids,
-            self.account.as_ref(),
-            self.client_id,
-            self.leverage,
-        )
-        .await?;
+        let clients = venues::live_clients(requirements, &instrument_ids, &self.venues).await?;
         let cache_database = redis::start().await?;
         // Built first, which promotes what the last run left staged: the
         // warmup reads the catalog with it there.
