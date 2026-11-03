@@ -16,7 +16,7 @@ The direct writer resumes each series 1 ns after its stored end, even if the req
 
 ## Instrument identity
 
-The source, catalog, strategy and live broker must agree on instrument IDs. IB and Databento use different default venues for the same contract; matching them requires explicit venue configuration. Changing source or venue requires matching config IDs and a refilled catalog. Dated futures symbols omit the decade, so the same ID can represent contracts ten years apart; a run's cache cannot hold both definitions. Use separate catalogs per decade or accept that rewriting symbols breaks the live-broker match.
+The source, catalog, strategy and live broker must agree on instrument IDs. IB and Databento use different default venues for the same contract; matching them requires explicit venue configuration. Changing source or venue requires matching config IDs and a refilled catalog.
 
 ## Tests
 
