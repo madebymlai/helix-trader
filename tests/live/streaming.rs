@@ -876,10 +876,9 @@ impl DataClient for Stub {
         let loaded = get_atomic_clock_realtime().get_time_ns();
         definition.ts_event = loaded;
         definition.ts_init = loaded;
-        self.sender
-            .send(DataEvent::Instrument(InstrumentAny::CurrencyPair(
-                definition,
-            )))?;
+        self.sender.send(DataEvent::Data(
+            InstrumentAny::CurrencyPair(definition).into(),
+        ))?;
         let sender = self.sender.clone();
         let first_seq = self.first_seq;
         self.feed = Some(tokio::spawn(async move {

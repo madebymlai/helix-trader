@@ -16,7 +16,7 @@ Synthetic quote size is 100,000 units or the instrument's maximum order size if 
 
 ## Live quotes
 
-The data client's live quotes are the spot events, merged by the rule of the tick history: on a demo the spot events of a minute were the ticks the history serves for it. It serves quotes, not external or composite bars; bars are built internally from its quotes. It holds live quotes while a history request is answered and releases them after the response, excluding duplicates. Failed history requests report the failure and are not written back. A market closed throughout a short warmup can produce an empty response and a cold strategy.
+The data client's live quotes are the spot events, merged by the rule of the tick history: on a demo the spot events of a minute were the ticks the history serves for it. It serves quotes, not external or composite bars; bars are built internally from its quotes. Failed history requests report the failure and are not written back. A market closed throughout a short warmup can produce an empty response and a cold strategy.
 
 ## Instruments and account
 

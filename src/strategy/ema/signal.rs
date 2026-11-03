@@ -145,7 +145,7 @@ mod tests {
 
     use super::*;
 
-    /// The shortest crossover, 1 against 2 bars, on ESM4. The fast EMA is
+    /// The shortest crossover, 1 against 2 bars, on ESM24. The fast EMA is
     /// the close; the slow one starts as the average of its first two
     /// closes and then moves two thirds of the way to each new close. A
     /// close above the slow EMA of the bars before it is long.
@@ -154,7 +154,7 @@ mod tests {
             r#"
             [data]
             series = [
-                { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+                { data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
             ]
             warmup = "24h"
             session = { time_zone = "Europe/Berlin", open = "09:00", close = "17:30" }
@@ -164,7 +164,7 @@ mod tests {
             slow = { period = 2 }
 
             [trade]
-            instruments = [{ instrument_id = "ESM4.CME", trade_size = "3" }]
+            instruments = [{ instrument_id = "ESM24.CME", trade_size = "3" }]
             "#,
         )
         .unwrap()
@@ -185,7 +185,7 @@ mod tests {
     }
 
     fn bar(close: &str, ts: Timestamp) -> Bar {
-        bar_on("ESM4.CME", close, ts)
+        bar_on("ESM24.CME", close, ts)
     }
 
     /// Hourly bars inside the session on 2026-01-07: the first closes at
@@ -227,7 +227,7 @@ mod tests {
         let signal = Signal::new(&config());
         feed(&signal, &["101"], inside);
         feed(&signal, &["100"], outside);
-        let other = bar_on("ESH4.CME", "90", inside(1));
+        let other = bar_on("ESH24.CME", "90", inside(1));
         ActorIndicator::handle_bar(&signal, &other).unwrap();
         assert!(!ActorIndicator::initialized(&signal).unwrap());
 
@@ -298,12 +298,12 @@ mod tests {
 
     #[test]
     fn bars_of_an_instrument_not_traded_neither_move_the_emas_nor_cross() {
-        // ESH4 turning long and short in between leaves ESM4 short at 100
+        // ESH24 turning long and short in between leaves ESM24 short at 100
         // then long at 102.
         let signal = Signal::new(&config());
         feed(&signal, &["101", "100"], inside);
         for (n, close) in [(2, "90"), (3, "120")] {
-            let other = bar_on("ESH4.CME", close, inside(n));
+            let other = bar_on("ESH24.CME", close, inside(n));
             signal.update(&other);
             assert_eq!(signal.cross(&other), None);
         }

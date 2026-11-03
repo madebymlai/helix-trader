@@ -1,5 +1,5 @@
 //! CME gold rolled: the root GC.GLBX, which the roll calendar rolls from
-//! August's contract (GCQ6.GLBX) to December's (GCZ6.GLBX) at 00:00 UTC on
+//! August's contract (GCQ26.GLBX) to December's (GCZ26.GLBX) at 00:00 UTC on
 //! Wednesday 29 July 2026 (two weekdays before Friday 31 July, the last
 //! weekday before August), and a catalog storing both contracts as
 //! fill-catalog stores them, each under its own id with its own definition,
@@ -23,9 +23,9 @@ use super::ts;
 
 pub const ROOT: &str = "GC.GLBX";
 /// The front contract up to the roll.
-pub const PRE: &str = "GCQ6.GLBX";
+pub const PRE: &str = "GCQ26.GLBX";
 /// The front contract from the roll on.
-pub const POST: &str = "GCZ6.GLBX";
+pub const POST: &str = "GCZ26.GLBX";
 
 /// `hh:mm:ss.fffffffff` UTC on Tuesday 28 July 2026.
 pub fn tuesday(time: &str) -> Timestamp {

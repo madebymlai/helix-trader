@@ -44,7 +44,7 @@ use nautilus_okx::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use super::Contract;
+use super::selection;
 use crate::live::node::Clients;
 
 /// The variable naming the OKX environment of the run, `demo` or `live`.
@@ -109,25 +109,14 @@ fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
 }
 
 /// The client configs of `instrument_ids`, OKX swaps or X-Perps: their
-/// instrument types and families are loaded (see `Contract`), on
+/// instrument types and families are loaded (see `selection`), on
 /// `environment` and `REGION`, orders in `MARGIN_MODE`; no credential, so
 /// the adapter reads them from the environment.
 fn configs(
     instrument_ids: &[InstrumentId],
     environment: OKXEnvironment,
 ) -> anyhow::Result<OkxClients> {
-    let mut instrument_types = Vec::new();
-    let mut families = Vec::new();
-    for &id in instrument_ids {
-        let contract = Contract::of(id)?;
-        if !instrument_types.contains(&contract.inst_type) {
-            instrument_types.push(contract.inst_type);
-        }
-        let family = contract.family.to_string();
-        if !families.contains(&family) {
-            families.push(family);
-        }
-    }
+    let (instrument_types, families) = selection(instrument_ids)?;
     Ok(OkxClients {
         data: OKXDataClientConfig {
             instrument_types: instrument_types.clone(),

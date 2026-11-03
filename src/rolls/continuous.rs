@@ -202,12 +202,12 @@ mod tests {
         // 29 July) and not on its eve; December's not on the day of the
         // roll.
         let pre = [
-            trade("GCQ6.GLBX", "2026-07-24T10:00Z", "3980.00"),
-            trade("GCQ6.GLBX", "2026-07-27T10:00Z", "3985.00"),
+            trade("GCQ26.GLBX", "2026-07-24T10:00Z", "3980.00"),
+            trade("GCQ26.GLBX", "2026-07-27T10:00Z", "3985.00"),
         ];
         let post = [
-            trade("GCZ6.GLBX", "2026-08-03T10:00Z", "4040.00"),
-            trade("GCZ6.GLBX", "2026-08-04T10:00Z", "4045.00"),
+            trade("GCZ26.GLBX", "2026-08-03T10:00Z", "4040.00"),
+            trade("GCZ26.GLBX", "2026-08-04T10:00Z", "4045.00"),
         ];
         catalog.write_to_parquet(&pre, None, None, None).unwrap();
         catalog.write_to_parquet(&post, None, None, None).unwrap();
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn bars_on_a_plain_instrument_read_nothing() {
-        let continuous = read("GCZ6.GLBX-1-MINUTE-LAST-INTERNAL").unwrap();
+        let continuous = read("GCZ26.GLBX-1-MINUTE-LAST-INTERNAL").unwrap();
         assert_eq!(continuous, ContinuousBars::default());
     }
 
@@ -258,6 +258,6 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("no roll of GC.GLBX"), "{err}");
-        assert!(err.contains("GCZ6.GLBX"), "{err}");
+        assert!(err.contains("GCZ26.GLBX"), "{err}");
     }
 }

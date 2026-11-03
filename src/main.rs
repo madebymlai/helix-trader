@@ -34,7 +34,7 @@ use helix_trader::{
     },
     venues::{
         HistorySource, HistoryVenueArgs, LiveVenueArgs, databento::DatabentoHistory, ic,
-        okx::OkxHistory,
+        okx::{self, OkxHistory},
     },
 };
 use jiff::{Timestamp, civil::Date};
@@ -56,8 +56,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fills the Nautilus catalog with the strategy's history from OKX's
-    /// archive (OKX instruments), Databento (GLBX instruments), IC Markets'
+    /// Fills the Nautilus catalog with the strategy's history from OKX
+    /// (OKX instruments), Databento (GLBX instruments), IC Markets'
     /// cTrader (IC instruments) or
     /// Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
@@ -480,23 +480,24 @@ async fn main() -> anyhow::Result<()> {
 /// instruments and the series the strategy reads, those its bars are built
 /// from and its ticks (see `DataRequirements::catalog_series`), each on a
 /// contract over its slice (`DataRequirements::slices`), every source given
-/// its slices: GLBX's and IC's fill through a Nautilus node (see
+/// its slices: GLBX's, IC's and OKX's fill through a Nautilus node (see
 /// `catalog::NodeFill`), by Databento's data client for GLBX instruments (the
-/// series declared, Databento's cost of every request quoted first, before
-/// the node starts) and IC's for IC instruments; OKX's archive fills OKX
-/// instruments (their 1-minute candles) and IB (connected only if needed)
-/// the others, without a node until their clients answer with response
-/// envelopes. OKX, IC and IB refuse a series they do not serve.
+/// series declared, checked against the dataset's end before the node
+/// starts), IC's for IC instruments and OKX's for OKX instruments (their
+/// series and funding, their definitions written before the node starts);
+/// IB (connected only if needed) fills the others, without a node until its
+/// client answers with response envelopes. IC and IB refuse a series they
+/// do not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = data_requirements(args.run.strategy, &args.run.config)?;
-    // OKX's and IB's fills run no node, so no node installs Nautilus'
-    // logger for them: install it here, as a node would (the fill's node
-    // keeps it), so the `log` output of this crate and Nautilus, and the
-    // adapters' `tracing` warnings (why a contract did not resolve), reach
-    // the console. Configured by NAUTILUS_LOG and RUST_LOG. Temporary until
-    // nautilus_trader#5472 and #5473 are fixed: IB and OKX then fill
-    // through the node, which installs the logger.
+    // IB's fill runs no node, so no node installs Nautilus' logger for it:
+    // install it here, as a node would (the fill's node keeps it), so the
+    // `log` output of this crate and Nautilus, and the adapters' `tracing`
+    // warnings (why a contract did not resolve), reach the console.
+    // Configured by NAUTILUS_LOG and RUST_LOG. Temporary until
+    // nautilus_trader#5472 is fixed: IB then fills through the node, which
+    // installs the logger.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
@@ -508,9 +509,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    // The source of an instrument is its venue's (`HistorySource`): OKX's
-    // archive for OKX, Databento for GLBX, IC's cTrader for IC, IB for
-    // every other venue.
+    // The source of an instrument is its venue's (`HistorySource`): OKX for
+    // OKX, Databento for GLBX, IC's cTrader for IC, IB for every other
+    // venue.
     let (mut okx_ids, mut databento_ids, mut ic_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
@@ -538,7 +539,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             let api_key =
                 std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
             let databento = DatabentoHistory::new(&api_key)?;
-            databento.quote(&requests).await?;
+            databento.check(&requests).await?;
             node.add(databento.node_client(), &requests, DatabentoHistory::period);
         }
     }
@@ -549,12 +550,15 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             node.add(ic::node_client(instrument_ids)?, &requests, ic::period);
         }
     }
-    // Temporary until nautilus_trader#5473 is fixed: OKX then fills through
-    // the node.
     if !okx_ids.is_empty() {
-        OkxHistory::new()?
-            .fill(&mut catalog, &slices_of(HistorySource::Okx))
+        let slices = slices_of(HistorySource::Okx);
+        OkxHistory::default()
+            .write_definitions(&mut catalog, &slices)
             .await?;
+        let requests = okx::requests(&catalog, &slices)?;
+        if !requests.is_empty() {
+            node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
+        }
     }
     node.run(catalog_dir).await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
@@ -1185,7 +1189,7 @@ mod tests {
             warmup = "720h"
 
             [trade]
-            instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
+            instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
             "#,
         )
         .unwrap();

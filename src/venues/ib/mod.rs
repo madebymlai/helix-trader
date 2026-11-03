@@ -319,7 +319,7 @@ async fn walk_back(
 /// bar of a day is partial (13:30-14:00 UTC for ES) but the adapter stamps
 /// every bar at open + bar size, so that bar would be stamped half an hour
 /// after its close. Adapter defaults otherwise: `Simplified` symbology (ids
-/// like `ESM4.CME`). Never sets
+/// like `ESM24.CME`). Never sets
 /// `convert_exchange_to_mic_venue`: it makes the venue of a CME contract
 /// change between processes.
 fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
@@ -412,12 +412,12 @@ mod tests {
         Timestamp::from(UnixNanos::from(h * HOUR_NS))
     }
 
-    /// A 1-HOUR bar of ESM4 closing at hour `h`.
+    /// A 1-HOUR bar of ESM24 closing at hour `h`.
     fn hourly(h: u64) -> Bar {
         use nautilus_model::types::{Price, Quantity};
         let p = Price::from("5000.00");
         let ts = UnixNanos::from(h * HOUR_NS);
-        let bt = bar_type("ESM4.CME-1-HOUR-LAST-EXTERNAL");
+        let bt = bar_type("ESM24.CME-1-HOUR-LAST-EXTERNAL");
         Bar::new(bt, p, p, p, p, Quantity::from(1), ts, ts)
     }
 
@@ -559,7 +559,7 @@ mod tests {
     fn ib_serves_its_own_one_minute_trades_bars() {
         for identifier in [
             "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
-            "ESZ6.CME-1-MINUTE-LAST-EXTERNAL",
+            "ESZ26.CME-1-MINUTE-LAST-EXTERNAL",
         ] {
             let served = served_bar_type(&NautilusDataType::Bar, identifier).unwrap();
             assert_eq!(served, bar_type(identifier));
@@ -625,14 +625,14 @@ mod tests {
     #[test]
     fn names_the_requested_ids_ib_did_not_return() {
         let requested = [
-            InstrumentId::from("ESH4.CME"),
+            InstrumentId::from("ESH24.CME"),
             InstrumentId::from("ESZ21.GLBX"),
-            InstrumentId::from("ESM4.CME"),
+            InstrumentId::from("ESM24.CME"),
         ];
         let err = ensure_all_loaded(&requested, &[es()])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("ESH4.CME, ESM4.CME"), "{err}");
+        assert!(err.contains("ESH24.CME, ESM24.CME"), "{err}");
         assert!(!err.contains("ESZ21.GLBX"), "{err}");
     }
 
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn an_expired_future_is_asked_for_as_an_explicit_contract() {
         let contract =
-            expired_future_contract(symbology(), InstrumentId::from("ESU5.CME")).unwrap();
+            expired_future_contract(symbology(), InstrumentId::from("ESU25.CME")).unwrap();
         assert_eq!(contract.symbol.to_string(), "ES");
         assert_eq!(contract.local_symbol, "ESU5");
         assert!(contract.include_expired);

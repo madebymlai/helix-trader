@@ -327,7 +327,9 @@ fn kinds(events: &[OrderEventAny]) -> Vec<(String, &'static str)> {
                 OrderEventAny::Canceled(_) => "canceled",
                 OrderEventAny::Rejected(_) => "rejected",
                 OrderEventAny::ModifyRejected(_) => "modify rejected",
+                OrderEventAny::ModifyDenied(_) => "modify denied",
                 OrderEventAny::CancelRejected(_) => "cancel rejected",
+                OrderEventAny::CancelDenied(_) => "cancel denied",
                 OrderEventAny::Denied(_) => "denied",
                 _ => "other",
             };
@@ -445,7 +447,7 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
 }
 
 #[tokio::test]
-async fn a_modify_of_an_order_the_broker_has_not_accepted_is_rejected_naming_the_venue() {
+async fn a_modify_of_an_order_the_broker_has_not_accepted_is_denied_naming_the_venue() {
     let mut node = Node::start(|_| vec![]).await;
     let limit = order(OrderType::Limit, "PROBE-2", OrderSide::Buy, 1)
         .price(Price::from("3822.73"))
@@ -456,14 +458,14 @@ async fn a_modify_of_an_order_the_broker_has_not_accepted_is_rejected_naming_the
     node.modify("PROBE-2", Some(Price::from("3821.73")), None);
 
     let events = node.order_events(1).await;
-    let OrderEventAny::ModifyRejected(rejected) = &events[0] else {
-        panic!("not a modify rejection: {events:?}");
+    let OrderEventAny::ModifyDenied(denied) = &events[0] else {
+        panic!("not a modify denial: {events:?}");
     };
-    assert_eq!(rejected.client_order_id, ClientOrderId::from("PROBE-2"));
+    assert_eq!(denied.client_order_id, ClientOrderId::from("PROBE-2"));
     assert!(
-        rejected.reason.as_str().contains(VENUE),
+        denied.reason.as_str().contains(VENUE),
         "the reason does not name {VENUE}: {}",
-        rejected.reason
+        denied.reason
     );
     node.client.disconnect().await.unwrap();
 }
@@ -1435,7 +1437,7 @@ async fn a_query_of_a_bracket_leg_whose_cancel_was_refused_after_a_restart_concl
     reconciled_pending_bracket(&node);
     node.cancel("PROBE-2-SL");
     let events = node.order_events(1).await;
-    assert_eq!(kinds(&events), [row("PROBE-2-SL", "cancel rejected")]);
+    assert_eq!(kinds(&events), [row("PROBE-2-SL", "cancel denied")]);
 
     node.query("PROBE-2-SL");
 

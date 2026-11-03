@@ -1,5 +1,5 @@
-//! Bars on a rolled root (`common::rolls`: GC.GLBX, rolling from GCQ6.GLBX
-//! to GCZ6.GLBX at 00:00 UTC on 29 July 2026): Nautilus' continuous bars,
+//! Bars on a rolled root (`common::rolls`: GC.GLBX, rolling from GCQ26.GLBX
+//! to GCZ26.GLBX at 00:00 UTC on 29 July 2026): Nautilus' continuous bars,
 //! fed the transition table with its roll prices read from the catalog,
 //! August's last trade of its slice (3992.00, 1 ns before the roll) and
 //! December's first (4041.00, at the roll), a spread of 49.00. 30-minute
@@ -70,7 +70,7 @@ fn run(backtest: &Backtest, mode: ContinuousFutureAdjustmentType) -> Got {
 fn a_contract_is_plain_and_has_no_params() {
     let catalog = rolls::catalog();
     let mut backtest = backtest(&catalog);
-    backtest.bar_types = vec![BarType::from("GCZ6.GLBX-30-MINUTE-LAST-INTERNAL")];
+    backtest.bar_types = vec![BarType::from("GCZ26.GLBX-30-MINUTE-LAST-INTERNAL")];
 
     let continuous = backtest
         .continuous_bars(ContinuousFutureAdjustmentType::BackwardSpread)

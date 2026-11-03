@@ -26,7 +26,7 @@
 # October (V) is skipped: GC.v.0 never fronts it.
 [[product]]
 root = "GC.GLBX"
-contract = "GC{month}{y}"
+contract = "GC{month}{yy}"
 months = ["G", "J", "M", "Q", "Z"]
 roll = "last-business-day-before-delivery-month"
 days_before = 2

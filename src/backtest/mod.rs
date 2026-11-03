@@ -438,7 +438,7 @@ mod tests {
         );
     }
 
-    /// GC.GLBX rolls from GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July
+    /// GC.GLBX rolls from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July
     /// 2026; its bars are built from the trades of each contract.
     #[test]
     fn the_trades_of_a_contract_read_beside_the_bars_of_its_root_are_replayed_once() {
@@ -447,7 +447,7 @@ mod tests {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![TickSeries {
                 data: NautilusDataType::TradeTick,
-                instrument_id: InstrumentId::from("GCQ6.GLBX"),
+                instrument_id: InstrumentId::from("GCQ26.GLBX"),
             }],
             start: "2026-07-20T00:00:00Z".parse().unwrap(),
             end: "2026-08-10T00:00:00Z".parse().unwrap(),
@@ -466,15 +466,15 @@ mod tests {
         assert_eq!(
             backtest.series().unwrap(),
             [
-                trades("GCQ6.GLBX", from, backtest.end),
-                trades("GCZ6.GLBX", roll, backtest.end),
+                trades("GCQ26.GLBX", from, backtest.end),
+                trades("GCZ26.GLBX", roll, backtest.end),
             ]
         );
     }
 
     /// GC.GLBX's bars over July and August 2026, a book of August's
     /// contract stored, and its book read as ticks: GC.GLBX rolls from
-    /// GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July 2026.
+    /// GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026.
     #[test]
     fn the_book_of_a_contract_read_beside_the_bars_of_its_root_is_replayed_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -482,7 +482,7 @@ mod tests {
         let ts = UnixNanos::from(1_785_000_000_000_000_000);
         let mut depth = stub_depth10();
         (depth.instrument_id, depth.ts_event, depth.ts_init) =
-            (InstrumentId::from("GCQ6.GLBX"), ts, ts);
+            (InstrumentId::from("GCQ26.GLBX"), ts, ts);
         catalog
             .write_to_parquet(&[depth], None, None, None)
             .unwrap();
@@ -490,7 +490,7 @@ mod tests {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![TickSeries {
                 data: NautilusDataType::OrderBookDepth,
-                instrument_id: InstrumentId::from("GCQ6.GLBX"),
+                instrument_id: InstrumentId::from("GCQ26.GLBX"),
             }],
             start: "2026-07-20T00:00:00Z".parse().unwrap(),
             end: "2026-08-10T00:00:00Z".parse().unwrap(),
@@ -500,9 +500,9 @@ mod tests {
         assert_eq!(
             backtest.series().unwrap(),
             [SeriesSlice {
-                series: (NautilusDataType::OrderBookDepth, "GCQ6.GLBX".to_string()),
+                series: (NautilusDataType::OrderBookDepth, "GCQ26.GLBX".to_string()),
                 slice: Slice {
-                    instrument_id: InstrumentId::from("GCQ6.GLBX"),
+                    instrument_id: InstrumentId::from("GCQ26.GLBX"),
                     from: backtest.start,
                     to: backtest.end,
                 },

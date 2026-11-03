@@ -23,28 +23,28 @@ async-trait = "0.1"
 ctrader = { path = "crates/ctrader" }
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
-nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
 # Keep Nautilus' 64-bit prices, as for nautilus-okx.
-nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
-nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
-nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d", default-features = false }
+nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d", default-features = false }
+nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
 # Keep Nautilus' 64-bit prices: the crate's default turns on 128-bit prices
 # (high-precision) for the whole build.
-nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be", default-features = false }
-nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
-nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "04f766b4d434d67fc8672026fefa25135bdc01be" }
+nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d", default-features = false }
+nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 # Floats read back to the bit: the probes of a stored model.
@@ -69,10 +69,9 @@ arrow = { version = "59.3", default-features = false }
 bollard = { version = "0.21.1", default-features = false, features = ["http", "pipe"] }
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
-csv = "1"
 # The cTrader Open API adapter, which IC Markets' venue module wires in.
 ctrader.workspace = true
-# The version of nautilus-databento, for the cost quotes its client does not make.
+# The version of nautilus-databento, for the dataset's end.
 databento = "=0.63.0"
 dotenvy = "0.15"
 jiff.workspace = true
@@ -114,7 +113,6 @@ tempfile.workspace = true
 tokio.workspace = true
 toml = "1"
 ustr.workspace = true
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 # The `DataClient` trait of the test venues' data clients.

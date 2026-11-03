@@ -4,17 +4,11 @@ OKX serves `OKX` instruments, history and live (see the [routing table](../mod.r
 
 ## History
 
-`fill-catalog` uses public OKX endpoints, without a key, for swap and X-Perp definitions, external 1-minute LAST candles and funding. Other series and dated futures are refused. It fills funding before candles, so a funding failure does not add new bars.
-
-### Archive and timestamps
-
-Archive months and days are defined in UTC+8, not UTC. The fill uses monthly files until the first unavailable month, then daily files; publication lags the period. A missing first day is an error; a later unpublished day stops the fill and is retried on the next run. The initial archive period can start before the requested start. Windows are based on candle closes and are contiguous across periods.
-
-OKX candle `ts_event` is the open; `ts_init` is the close, one minute later, so replay cannot see a completed bar at its open. Unconfirmed archive candles are rejected. Swap archives contain their own rows; X-Perp chain files also contain other contracts, which are filtered out.
+`fill-catalog` fills swaps and X-Perps through the node with Nautilus' OKX data client, on public endpoints without a key: the strategy's source series and each instrument's funding, over what the catalog lacks, funding before the other series of an instrument. Bars are requested a UTC day at a time. The data engine writes back only the windows the client reports complete; the fill counts a window answered without that report, writes nothing for it, and asks for it again on the next run. A series the client does not serve fails the fill. Definitions do not come back through the node: they are read from OKX's public API and written before the node starts. Dated futures are refused.
 
 ### Funding and margins
 
-Swap funding comes from monthly archives, followed by the public funding API. X-Perp funding comes from the API only. The API has limited history (previous observations suggest about three months, not a guarantee), so an older X-Perp start can yield less history than requested. A resume whose stored end is older than the API can reach fails rather than silently leaving a gap; no funding on a first fill also fails. Updates without a preceding interval cannot settle and are not stored. Check funding depth for the full backtest window; see [backtest](../../backtest/README.md).
+Funding is requested two weeks at a time from OKX's funding history, which keeps about three months (an observation, not a guarantee); older funding is absent from the catalog. The first update of each request has no preceding interval, so a backtest does not settle it. Check funding depth for the full backtest window; see [backtest](../../backtest/README.md).
 
 Both instrument margin rates are set to 1: account leverage is chosen separately for the backtest. OKX liquidation and maintenance rules are not simulated by that choice.
 
@@ -37,13 +31,13 @@ Demo and live can list different contracts, so select an instrument present in t
 
 ## Warmup and limits
 
-OKX composite bars warm up from catalog minute candles and then REST candles; live minute candles arrive through WebSocket. The adapter does not write its warmup response back to the catalog and does not serve quote history, so quote-built bars cannot warm up from OKX.
+OKX composite bars warm up from catalog minute candles and then REST candles; live minute candles arrive through WebSocket. The data engine writes the REST candles back to the catalog when the client reports their window complete. The adapter does not serve quote history, so quote-built bars cannot warm up from OKX.
 
-A live candle arriving before the warmup response can panic the node ([upstream issue](https://github.com/nautechsystems/nautilus_trader/issues/5393)); longer warmups increase this risk. The adapter silently stops after 500 pages of 100 minute candles, cutting warmups beyond roughly 833 hours short. X-Perp candle behavior has been observed on demo; X-Perp orders have not been verified there.
+A warmup needing more than 500 pages of 100 minute candles beyond the catalog, roughly 833 hours, fails its request: the warmup is logged incomplete and keeps the candles fetched. X-Perp candle behavior has been observed on demo; X-Perp orders have not been verified there.
 
 ## Tests
 
-Offline archive, funding, fill and client tests are in `src/venues/okx`. The account-check test in `tests/live/okx_demo.rs` requires `NAUTILUS_OKX_RUN=1` in the shell and reads the demo account without placing orders. Other venue tests may place real orders; inspect their gates and account before running. Run live-node tests in separate processes.
+Offline definition, request and client tests are in `src/venues/okx`; the node fill of bars and funding is tested in `tests/node_fill`. The account-check test in `tests/live/okx_demo.rs` requires `NAUTILUS_OKX_RUN=1` in the shell and reads the demo account without placing orders. Other venue tests may place real orders; inspect their gates and account before running. Run live-node tests in separate processes.
 
 ```sh
 NAUTILUS_OKX_RUN=1 cargo test --test live okx_demo:: -- --nocapture

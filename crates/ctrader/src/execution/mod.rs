@@ -15,8 +15,9 @@
 //! whole, or adds to it. A modification amends a pending order, or moves a
 //! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
 //! one left out, the other as last asked); a cancel cancels a pending
-//! order, or removes a protection. A request the session never sent is
-//! rejected; one sent but unanswered stays in flight
+//! order, or removes a protection. A new order or a close the session
+//! never sent is rejected, a modify or cancel denied; one sent but
+//! unanswered stays in flight
 //! (`retain_unresolved_submissions`) until its events, a query or
 //! reconciliation resolve it; a query finding no such order at the broker
 //! rejects it.
@@ -64,7 +65,7 @@ use nautilus_model::{
 };
 
 use self::{
-    dispatch::{Dispatch, Output, Role, Want},
+    dispatch::{Command, Denial, Dispatch, Output, Role, Want},
     orders::{Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
@@ -423,14 +424,28 @@ impl CTraderExecutionClient {
         Ok(())
     }
 
-    /// Sends `request` under `tag`; if the session never sends it, the
-    /// order's command is refused (see `Dispatch::refuse`).
-    fn send<Req: TradeRequest>(&self, session: &Session, request: Req, tag: Tag) {
+    /// Sends `request` under `tag`, for `commands`, each order's modify or
+    /// cancel it carries with its command's id (none for a new order or a
+    /// close); if the session never sends it, the commands are refused (see
+    /// `Dispatch::unsent`).
+    fn send<Req: TradeRequest>(
+        &self,
+        session: &Session,
+        request: Req,
+        tag: Tag,
+        commands: Vec<(ClientOrderId, UUID4)>,
+    ) {
         let sent = session.ctrader.trade(request, tag.to_string());
-        self.refuse_unsent(session, tag, sent);
+        self.refuse_unsent(session, tag, commands, sent);
     }
 
-    fn refuse_unsent(&self, session: &Session, tag: Tag, sent: TradeSent) {
+    fn refuse_unsent(
+        &self,
+        session: &Session,
+        tag: Tag,
+        commands: Vec<(ClientOrderId, UUID4)>,
+        sent: TradeSent,
+    ) {
         let dispatch = Arc::clone(&session.dispatch);
         let emitter = self.emitter.clone();
         let (clock, venue) = (self.clock, self.core.venue);
@@ -450,16 +465,20 @@ impl CTraderExecutionClient {
             let outputs = dispatch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .refuse(tag, &refused, clock.get_time_ns());
+                .unsent(tag, &commands, &refused, clock.get_time_ns());
             emit(&emitter, outputs);
             Ok(())
         });
     }
 
-    /// Refuses `tag` at once: its request was never sent.
-    fn refuse_now(&self, session: &Session, tag: Tag, reason: &str) {
+    /// Refuses `tag`, the request of the command `command_id` of the order
+    /// `tag` names, at once: it was never sent.
+    fn refuse_now(&self, session: &Session, tag: Tag, command_id: UUID4, reason: &str) {
         log::warn!("{tag} not sent: {reason}");
-        let outputs = session.dispatch().refuse(tag, reason, self.now());
+        let commands = [(tag.client_order_id(), command_id)];
+        let outputs = session
+            .dispatch()
+            .unsent(tag, &commands, reason, self.now());
         emit(&self.emitter, outputs);
     }
 
@@ -498,8 +517,8 @@ impl CTraderExecutionClient {
         self.emitter.emit_order_submitted(order);
         let id = order.client_order_id();
         match placement {
-            Placement::New(request) => self.send(session, request, Tag::New(id)),
-            Placement::Close(request) => self.send(session, request, Tag::Close(id)),
+            Placement::New(request) => self.send(session, request, Tag::New(id), Vec::new()),
+            Placement::Close(request) => self.send(session, request, Tag::Close(id), Vec::new()),
         }
         Ok(())
     }
@@ -656,6 +675,7 @@ impl CTraderExecutionClient {
     /// Modifies the order of `cmd`, or refuses it with the reason.
     fn modify(&self, session: &Session, cmd: &ModifyOrder) -> Result<(), String> {
         let id = cmd.client_order_id;
+        let commands = || vec![(id, cmd.command_id)];
         let order = self
             .cached_order(&id)
             .ok_or_else(|| format!("{id} is not in the cache"))?;
@@ -678,7 +698,7 @@ impl CTraderExecutionClient {
                 .ok_or("no price to move to")?;
             session.dispatch().want(id, Want::Move(price));
             let request = self.amend_protections(session, position);
-            self.send(session, request, Tag::Protect(id));
+            self.send(session, request, Tag::Protect(id), commands());
             return Ok(());
         }
         let tracked_role = session.dispatch().tracked(id).map(|t| t.role);
@@ -706,7 +726,7 @@ impl CTraderExecutionClient {
                 protection,
             )
             .map_err(|e| e.to_string())?;
-            self.send(session, request, Tag::Protect(id));
+            self.send(session, request, Tag::Protect(id), commands());
             return Ok(());
         }
         let venue = pending_venue_id(&order)?;
@@ -720,16 +740,17 @@ impl CTraderExecutionClient {
             protection,
         )
         .map_err(|e| e.to_string())?;
-        self.send(session, request, Tag::Amend(id));
+        self.send(session, request, Tag::Amend(id), commands());
         Ok(())
     }
 
-    /// Cancels the orders `ids`: a pending order by its id, protections by
-    /// one amendment of their position each, a pending entry's by its
-    /// amendment. Refuses those it cannot cancel.
-    fn cancel(&self, session: &Session, ids: &[ClientOrderId]) {
-        let mut protections: HashMap<i64, Vec<ClientOrderId>> = HashMap::new();
-        for &id in ids {
+    /// Cancels the orders of `cancels`, each with its command's id: a
+    /// pending order by its id, protections by one amendment of their
+    /// position each, a pending entry's by its amendment. Refuses those it
+    /// cannot cancel.
+    fn cancel(&self, session: &Session, cancels: &[(ClientOrderId, UUID4)]) {
+        let mut protections: HashMap<i64, Vec<(ClientOrderId, UUID4)>> = HashMap::new();
+        for &(id, command_id) in cancels {
             let outcome = (|| {
                 let order = self
                     .cached_order(&id)
@@ -737,7 +758,10 @@ impl CTraderExecutionClient {
                 session.dispatch().adopt(&order);
                 if let Some((position, _)) = order.venue_order_id().and_then(parse_protection_id) {
                     session.dispatch().want(id, Want::Remove);
-                    protections.entry(position).or_default().push(id);
+                    protections
+                        .entry(position)
+                        .or_default()
+                        .push((id, command_id));
                     return Ok(());
                 }
                 // Bound first: the dispatch's lock must not outlive it.
@@ -758,7 +782,7 @@ impl CTraderExecutionClient {
                         protection,
                     )
                     .map_err(|e| e.to_string())?;
-                    self.send(session, request, Tag::Unprotect(id));
+                    self.send(session, request, Tag::Unprotect(id), vec![(id, command_id)]);
                     return Ok(());
                 }
                 let venue = pending_venue_id(&order)?;
@@ -766,16 +790,16 @@ impl CTraderExecutionClient {
                     order_id: venue,
                     ..Default::default()
                 };
-                self.send(session, request, Tag::Cancel(id));
+                self.send(session, request, Tag::Cancel(id), vec![(id, command_id)]);
                 Ok::<_, String>(())
             })();
             if let Err(reason) = outcome {
-                self.refuse_now(session, Tag::Cancel(id), &reason);
+                self.refuse_now(session, Tag::Cancel(id), command_id, &reason);
             }
         }
         for (position, legs) in protections {
             let request = self.amend_protections(session, position);
-            self.send(session, request, Tag::Unprotect(legs[0]));
+            self.send(session, request, Tag::Unprotect(legs[0].0), legs);
         }
     }
 
@@ -873,6 +897,31 @@ fn emit(emitter: &ExecutionEventEmitter, outputs: Vec<Output>) {
         match output {
             Output::Event(event) => emitter.send_order_event(event),
             Output::Report(report) => emitter.send_execution_report(report),
+            Output::Denied(Denial {
+                command,
+                strategy_id,
+                instrument_id,
+                client_order_id,
+                venue_order_id,
+                reason,
+                ts_event,
+                command_id,
+            }) => {
+                let emit_denied = match command {
+                    Command::Modify => ExecutionEventEmitter::emit_order_modify_denied_event,
+                    Command::Cancel => ExecutionEventEmitter::emit_order_cancel_denied_event,
+                };
+                emit_denied(
+                    emitter,
+                    strategy_id,
+                    instrument_id,
+                    client_order_id,
+                    venue_order_id,
+                    &reason,
+                    ts_event,
+                    Some(command_id),
+                );
+            }
         }
     }
 }
@@ -1062,13 +1111,14 @@ impl ExecutionClient for CTraderExecutionClient {
         let session = self.session()?;
         if let Err(reason) = self.modify(session, &cmd) {
             log::warn!("modify of {} not sent: {reason}", cmd.client_order_id);
-            self.emitter.emit_order_modify_rejected_event(
+            self.emitter.emit_order_modify_denied_event(
                 cmd.strategy_id,
                 cmd.instrument_id,
                 cmd.client_order_id,
                 cmd.venue_order_id,
                 &reason,
                 self.now(),
+                Some(cmd.command_id),
             );
         }
         Ok(())
@@ -1076,13 +1126,13 @@ impl ExecutionClient for CTraderExecutionClient {
 
     fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
         let session = self.session()?;
-        self.cancel(session, &[cmd.client_order_id]);
+        self.cancel(session, &[(cmd.client_order_id, cmd.command_id)]);
         Ok(())
     }
 
     fn cancel_all_orders(&self, cmd: CancelAllOrders) -> anyhow::Result<()> {
         let session = self.session()?;
-        let ids: Vec<ClientOrderId> = self
+        let cancels: Vec<(ClientOrderId, UUID4)> = self
             .core
             .cache()
             .orders_open(
@@ -1093,16 +1143,20 @@ impl ExecutionClient for CTraderExecutionClient {
                 cmd.order_side,
             )
             .iter()
-            .map(|order| order.client_order_id())
+            .map(|order| (order.client_order_id(), cmd.command_id))
             .collect();
-        self.cancel(session, &ids);
+        self.cancel(session, &cancels);
         Ok(())
     }
 
     fn batch_cancel_orders(&self, cmd: BatchCancelOrders) -> anyhow::Result<()> {
         let session = self.session()?;
-        let ids: Vec<ClientOrderId> = cmd.cancels.iter().map(|c| c.client_order_id).collect();
-        self.cancel(session, &ids);
+        let cancels: Vec<(ClientOrderId, UUID4)> = cmd
+            .cancels
+            .iter()
+            .map(|c| (c.client_order_id, c.command_id))
+            .collect();
+        self.cancel(session, &cancels);
         Ok(())
     }
 

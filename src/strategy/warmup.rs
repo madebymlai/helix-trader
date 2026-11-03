@@ -1132,9 +1132,9 @@ mod tests {
 
     /// A live start requests the history of the ticks the strategy reads
     /// too, a root's on the contract standing for it then: GC rolls into
-    /// GCZ6 on 2026-07-29 and out of it on 2026-11-26 (`rolls/README.md`),
-    /// so on 2026-08-10 the root's trades and depth are GCZ6's, requested
-    /// once beside GCZ6's own trades. IC's gold quotes, which build the
+    /// GCZ26 on 2026-07-29 and out of it on 2026-11-26 (`rolls/README.md`),
+    /// so on 2026-08-10 the root's trades and depth are GCZ26's, requested
+    /// once beside GCZ26's own trades. IC's gold quotes, which build the
     /// strategy's bars, are requested once, building them; the ticks no
     /// bar is built from build none.
     #[test]
@@ -1145,7 +1145,7 @@ mod tests {
                 tick(NautilusDataType::TradeTick, "GC.GLBX"),
                 tick(NautilusDataType::OrderBookDepth, "GC.GLBX"),
                 tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
-                tick(NautilusDataType::TradeTick, "GCZ6.GLBX"),
+                tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
                 tick(NautilusDataType::OrderBookDelta, "GC.GLBX"),
             ]);
         let (mut probe, commands) = registered();
@@ -1160,15 +1160,15 @@ mod tests {
                     vec![bars],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::TradeTick, "GCZ6.GLBX")),
+                    Source::Ticks(tick(NautilusDataType::TradeTick, "GCZ26.GLBX")),
                     vec![],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::OrderBookDepth, "GCZ6.GLBX")),
+                    Source::Ticks(tick(NautilusDataType::OrderBookDepth, "GCZ26.GLBX")),
                     vec![],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ6.GLBX")),
+                    Source::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX")),
                     vec![],
                 ),
             ]
@@ -1192,10 +1192,10 @@ mod tests {
         }
     }
 
-    /// A delta of GCZ6 with `sequence` and `flags`.
+    /// A delta of GCZ26 with `sequence` and `flags`.
     fn delta(sequence: u64, flags: u8) -> OrderBookDelta {
         OrderBookDelta::new(
-            InstrumentId::from("GCZ6.GLBX"),
+            InstrumentId::from("GCZ26.GLBX"),
             BookAction::Add,
             BookOrder::new(
                 OrderSide::Buy,
@@ -1271,10 +1271,10 @@ mod tests {
     /// series building every bar type of it.
     #[test]
     fn each_bar_type_warms_up_on_what_its_price_type_builds_it_from() {
-        let hour_last = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL");
-        let minute_last = BarType::from("ESM4.CME-1-MINUTE-LAST-INTERNAL");
-        let hour_mid = BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL");
-        let composite = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
+        let hour_last = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL");
+        let minute_last = BarType::from("ESM24.CME-1-MINUTE-LAST-INTERNAL");
+        let hour_mid = BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL");
+        let composite = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
         let ticks = |data, instrument_id: &str| {
             Source::Ticks(TickSeries {
                 data,
@@ -1282,10 +1282,10 @@ mod tests {
             })
         };
         let warmup = Warmup::live(&reading(&[
-            "ESM4.CME-1-HOUR-LAST-INTERNAL",
-            "ESM4.CME-1-HOUR-MID-INTERNAL",
-            "ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-            "ESM4.CME-1-MINUTE-LAST-INTERNAL",
+            "ESM24.CME-1-HOUR-LAST-INTERNAL",
+            "ESM24.CME-1-HOUR-MID-INTERNAL",
+            "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            "ESM24.CME-1-MINUTE-LAST-INTERNAL",
         ]));
         let (mut probe, commands) = registered();
 
@@ -1295,15 +1295,15 @@ mod tests {
             requested(&commands),
             vec![
                 (
-                    ticks(NautilusDataType::TradeTick, "ESM4.CME"),
+                    ticks(NautilusDataType::TradeTick, "ESM24.CME"),
                     vec![hour_last, minute_last]
                 ),
                 (
-                    ticks(NautilusDataType::QuoteTick, "ESM4.CME"),
+                    ticks(NautilusDataType::QuoteTick, "ESM24.CME"),
                     vec![hour_mid]
                 ),
                 (
-                    Source::Bars(BarType::from("ESM4.CME-1-MINUTE-LAST-EXTERNAL")),
+                    Source::Bars(BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL")),
                     vec![composite]
                 ),
             ]
@@ -1315,14 +1315,14 @@ mod tests {
     /// a quotes response the MID bars, so neither feeds the other's twice.
     #[test]
     fn a_response_hands_over_the_bars_built_from_its_series_alone() {
-        let hour_last = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL");
-        let hour_mid = BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL");
-        let composite = BarType::from("ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
+        let hour_last = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL");
+        let hour_mid = BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL");
+        let composite = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
         let recorder = Rc::new(Recorder::default());
         let warmup = Warmup::live(&reading(&[
-            "ESM4.CME-1-HOUR-LAST-INTERNAL",
-            "ESM4.CME-1-HOUR-MID-INTERNAL",
-            "ESM4.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            "ESM24.CME-1-HOUR-LAST-INTERNAL",
+            "ESM24.CME-1-HOUR-MID-INTERNAL",
+            "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
         ]))
         .feeding(Rc::clone(&recorder) as SharedActorIndicator);
         let (probe, _) = registered();
@@ -1333,7 +1333,7 @@ mod tests {
             };
             probe.cache_rc().borrow_mut().add_bar(bar).unwrap();
         }
-        let instrument_id = InstrumentId::from("ESM4.CME");
+        let instrument_id = InstrumentId::from("ESM24.CME");
         let trade = TradeTick {
             instrument_id,
             ..TradeTick::default()
@@ -1343,7 +1343,7 @@ mod tests {
             ..QuoteTick::default()
         };
         let minute = Bar {
-            bar_type: BarType::from("ESM4.CME-1-MINUTE-LAST-EXTERNAL"),
+            bar_type: BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL"),
             ..Bar::default()
         };
 
@@ -1374,7 +1374,7 @@ mod tests {
             .register_message_bus();
         nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
         let at = |time: &str| -> Timestamp { format!("2026-08-10T{time}Z").parse().unwrap() };
-        let data_type = DataType::new("Imbalance", None, Some("GCZ6.GLBX".to_string()));
+        let data_type = DataType::new("Imbalance", None, Some("GCZ26.GLBX".to_string()));
         let points: Vec<CustomData> = [("13:00:00", 0.5), ("13:45:00", -0.25), ("14:15:00", 0.75)]
             .map(|(time, value)| {
                 let ts = UnixNanos::from(at(time));

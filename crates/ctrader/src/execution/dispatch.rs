@@ -29,7 +29,8 @@
 //!   a bracket entry; rejects the modification of an amendment; rejects the
 //!   cancel of a cancellation, of each protection of the position for a
 //!   removal of protections. The reason is cTrader's code and
-//!   description.
+//!   description. A request never sent is rejected if a new order or a
+//!   close; a modify or cancel never sent is denied, by its command.
 //! - **Protections asked**: a move or removal of a protection is recorded
 //!   (`want`) until cTrader's protection shows it done, or it is refused:
 //!   an amendment, which sets both protections, carries the other's.
@@ -49,7 +50,9 @@ use nautilus_model::{
         OrderAccepted, OrderCancelRejected, OrderCanceled, OrderEventAny, OrderExpired,
         OrderFilled, OrderModifyRejected, OrderRejected, OrderUpdated,
     },
-    identifiers::{AccountId, ClientOrderId, TradeId, TraderId, VenueOrderId},
+    identifiers::{
+        AccountId, ClientOrderId, InstrumentId, StrategyId, TradeId, TraderId, VenueOrderId,
+    },
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     types::{Currency, Price, Quantity},
@@ -80,6 +83,28 @@ const DEALS_REMEMBERED: usize = 10_000;
 pub(super) enum Output {
     Event(OrderEventAny),
     Report(ExecutionReport),
+    Denied(Denial),
+}
+
+/// A modify or cancel of an order refused before it was sent: Nautilus'
+/// `OrderModifyDenied` or `OrderCancelDenied`, caused by `command_id`.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Denial {
+    pub(super) command: Command,
+    pub(super) strategy_id: StrategyId,
+    pub(super) instrument_id: InstrumentId,
+    pub(super) client_order_id: ClientOrderId,
+    pub(super) venue_order_id: Option<VenueOrderId>,
+    pub(super) reason: Ustr,
+    pub(super) ts_event: UnixNanos,
+    pub(super) command_id: UUID4,
+}
+
+/// The kind of command a denial refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Command {
+    Modify,
+    Cancel,
 }
 
 /// An order this client sent: its identity (Nautilus' `OrderIdentity`),
@@ -331,12 +356,50 @@ impl Dispatch {
         }
     }
 
-    /// The outputs of the request `tag` refused for `reason`, or never
-    /// sent: a new order or a close rejected (a bracket entry's legs with
-    /// it), an amendment's modification rejected, a cancellation's cancel
-    /// rejected (a removal of protections: the cancel of each protection of
-    /// the position being removed). The changes of protections it asked
-    /// are forgotten.
+    /// The outputs of the request `tag` the session never sent, for
+    /// `commands`, each order's modify or cancel the request carries with
+    /// its command's id: a new order or a close rejected as `refuse` does;
+    /// a modify (an amendment) or a cancel (a cancellation, a removal of
+    /// protections) denied for each order still open, its wanted change
+    /// forgotten.
+    pub(super) fn unsent(
+        &mut self,
+        tag: Tag,
+        commands: &[(ClientOrderId, UUID4)],
+        reason: &str,
+        ts: UnixNanos,
+    ) -> Vec<Output> {
+        let command = match tag {
+            Tag::New(_) | Tag::Close(_) => return self.refuse(tag, reason, ts),
+            Tag::Amend(_) | Tag::Protect(_) => Command::Modify,
+            Tag::Cancel(_) | Tag::Unprotect(_) => Command::Cancel,
+        };
+        let reason = Ustr::from(reason);
+        commands
+            .iter()
+            .filter_map(|&(id, command_id)| {
+                let tracked = self.orders.get_mut(&id).filter(|t| !t.closed)?;
+                tracked.want = None;
+                Some(Output::Denied(Denial {
+                    command,
+                    strategy_id: tracked.identity.strategy_id,
+                    instrument_id: tracked.identity.instrument_id,
+                    client_order_id: id,
+                    venue_order_id: tracked.venue_order_id,
+                    reason,
+                    ts_event: ts,
+                    command_id,
+                }))
+            })
+            .collect()
+    }
+
+    /// The outputs of the request `tag` the broker refused for `reason`: a
+    /// new order or a close rejected (a bracket entry's legs with it), an
+    /// amendment's modification rejected, a cancellation's cancel rejected
+    /// (a removal of protections: the cancel of each protection of the
+    /// position being removed). The changes of protections it asked are
+    /// forgotten.
     pub(super) fn refuse(&mut self, tag: Tag, reason: &str, ts: UnixNanos) -> Vec<Output> {
         let id = tag.client_order_id();
         let Some(tracked) = self.orders.get(&id).filter(|t| !t.closed).cloned() else {

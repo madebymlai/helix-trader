@@ -2346,7 +2346,7 @@ mod tests {
     fn gcz6_trade(time: &str, price: &str) -> TradeTick {
         let ts = UnixNanos::from(at(time));
         TradeTick::new(
-            InstrumentId::from("GCZ6.GLBX"),
+            InstrumentId::from("GCZ26.GLBX"),
             Price::from(price),
             Quantity::from(1),
             AggressorSide::Buy,
@@ -2376,14 +2376,14 @@ mod tests {
     }
 
     /// Live on 2026-08-10 at 14:30, a feature on the trades of the root
-    /// GC, an average of two, reads GCZ6, the contract standing for
-    /// it (GC rolls into GCZ6 on 2026-07-29, `rolls/README.md`): the start
-    /// requests GCZ6's trades over the hour of warmup, ending now, then
+    /// GC, an average of two, reads GCZ26, the contract standing for
+    /// it (GC rolls into GCZ26 on 2026-07-29, `rolls/README.md`): the start
+    /// requests GCZ26's trades over the hour of warmup, ending now, then
     /// subscribes to them from now, so the live stream starts where the
-    /// warmup ends, and loads GCG7, the post contract of the next roll;
+    /// warmup ends, and loads GCG27, the post contract of the next roll;
     /// the traded AUD/USD's quotes, which no feature reads, are subscribed
     /// with no warmup. The response's two trades, which Nautilus hands to
-    /// the indicators registered for GCZ6's trades, make the strategy's
+    /// the indicators registered for GCZ26's trades, make the strategy's
     /// indicators initialized: the first decision after the warmup is warm.
     #[test]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
@@ -2419,7 +2419,7 @@ mod tests {
         probe.handle_trades_response(&TradesResponse::new(
             UUID4::new(),
             ClientId::from("GLBX"),
-            InstrumentId::from("GCZ6.GLBX"),
+            InstrumentId::from("GCZ26.GLBX"),
             vec![
                 gcz6_trade("2026-08-10T14:00:00Z", "4000.0"),
                 gcz6_trade("2026-08-10T14:29:00Z", "4002.0"),
@@ -2434,9 +2434,9 @@ mod tests {
         assert_sent(
             &sent,
             &[
-                "request trades [GCZ6.GLBX] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
-                "subscribe trades [GCZ6.GLBX] from Some(2026-08-10T14:30:00Z)",
-                "request instrument [GCG7.GLBX]",
+                "request trades [GCZ26.GLBX] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+                "subscribe trades [GCZ26.GLBX] from Some(2026-08-10T14:30:00Z)",
+                "request instrument [GCG27.GLBX]",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
             ],
         );
@@ -2666,11 +2666,11 @@ mod tests {
     }
 
     /// Live on 2026-08-10 at 14:30, a feature on the imbalances of the
-    /// root GC reads GCZ6's, the contract standing for it (GC rolls into
-    /// GCZ6 on 2026-07-29, `rolls/README.md`): the start requests GCZ6's
+    /// root GC reads GCZ26's, the contract standing for it (GC rolls into
+    /// GCZ26 on 2026-07-29, `rolls/README.md`): the start requests GCZ26's
     /// over the hour of warmup from the catalog, subscribes to them, not
-    /// to the root's, and loads GCG7, the post contract of the next roll.
-    /// The answer's imbalance of GCZ6 makes the feature hold it.
+    /// to the root's, and loads GCG27, the post contract of the next roll.
+    /// The answer's imbalance of GCZ26 makes the feature hold it.
     #[test]
     fn a_live_start_warms_a_custom_feature_on_a_root_on_its_front_contract() {
         let features = last_imbalance("GC.GLBX");
@@ -2680,16 +2680,16 @@ mod tests {
         );
 
         probe.handle_data_response(&catalog_answer(
-            "GCZ6.GLBX",
-            vec![imbalance("GCZ6.GLBX", "2026-08-10T14:10:00Z", 0.75)],
+            "GCZ26.GLBX",
+            vec![imbalance("GCZ26.GLBX", "2026-08-10T14:10:00Z", 0.75)],
         ));
 
         assert_sent(
             &sent,
             &[
-                "request data Imbalance of Some(\"GCZ6.GLBX\") from CATALOG \
+                "request data Imbalance of Some(\"GCZ26.GLBX\") from CATALOG \
                  Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
-                "request instrument [GCG7.GLBX]",
+                "request instrument [GCG27.GLBX]",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
             ],
         );
@@ -2699,7 +2699,7 @@ mod tests {
         );
         assert_eq!(
             (
-                imbalance_subscribers("GCZ6.GLBX"),
+                imbalance_subscribers("GCZ26.GLBX"),
                 imbalance_subscribers("GC.GLBX")
             ),
             (1, 0)
@@ -2708,11 +2708,11 @@ mod tests {
     }
 
     /// A feature on the imbalances of the root GC, in a backtest from
-    /// 2026-11-25 at 23:00, reads GCZ6's, the contract standing for it,
-    /// not GCG7's. GC rolls into GCG7 at 00:00 UTC on 2026-11-26: the
+    /// 2026-11-25 at 23:00, reads GCZ26's, the contract standing for it,
+    /// not GCG27's. GC rolls into GCG27 at 00:00 UTC on 2026-11-26: the
     /// roll's alert, handed to the handle, moves the subscription to
-    /// GCG7's and resets the feature, cold through GCZ6's imbalances after
-    /// it, and the feature reads GCG7's from then.
+    /// GCG27's and resets the feature, cold through GCZ26's imbalances after
+    /// it, and the feature reads GCG27's from then.
     #[test]
     fn a_custom_feature_on_a_root_reads_each_contract_in_turn_reset_at_the_roll() {
         let models = tempfile::tempdir().unwrap();
@@ -2740,12 +2740,12 @@ mod tests {
             features.values()
         };
 
-        let pre = read(imbalance("GCZ6.GLBX", "2026-11-25T23:10:00Z", 0.25));
-        let post_before_the_roll = read(imbalance("GCG7.GLBX", "2026-11-25T23:20:00Z", 0.75));
+        let pre = read(imbalance("GCZ26.GLBX", "2026-11-25T23:10:00Z", 0.25));
+        let post_before_the_roll = read(imbalance("GCG27.GLBX", "2026-11-25T23:20:00Z", 0.75));
         run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
         let rolled = features.values();
-        let pre_after_the_roll = read(imbalance("GCZ6.GLBX", "2026-11-26T00:40:00Z", -0.25));
-        let post = read(imbalance("GCG7.GLBX", "2026-11-26T00:50:00Z", -0.75));
+        let pre_after_the_roll = read(imbalance("GCZ26.GLBX", "2026-11-26T00:40:00Z", -0.25));
+        let post = read(imbalance("GCG27.GLBX", "2026-11-26T00:50:00Z", -0.75));
 
         assert_eq!(pre, Some(vec![0.25]));
         assert_eq!(post_before_the_roll, Some(vec![0.25]));
@@ -2754,8 +2754,8 @@ mod tests {
         assert_eq!(post, Some(vec![-0.75]));
         assert_eq!(
             (
-                imbalance_subscribers("GCZ6.GLBX"),
-                imbalance_subscribers("GCG7.GLBX")
+                imbalance_subscribers("GCZ26.GLBX"),
+                imbalance_subscribers("GCG27.GLBX")
             ),
             (0, 1)
         );

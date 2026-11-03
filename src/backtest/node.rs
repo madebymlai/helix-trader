@@ -33,7 +33,9 @@ use nautilus_model::{
     enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
 };
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, report::Outcome};
@@ -112,7 +114,7 @@ fn config(
     // A root's contracts are on its venue.
     let venues: BTreeSet<Venue> = backtest.declared().iter().map(|id| id.venue).collect();
     ensure!(!venues.is_empty(), "no instruments");
-    let catalog = catalog_path(&backtest.catalog)?;
+    let catalog = DataCatalogConfig::new(catalog_path(&backtest.catalog)?, None, None);
     let venues = venues
         .into_iter()
         .map(|venue| venue_config(backtest, venue))
@@ -164,13 +166,16 @@ fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVen
 /// its instrument id, as the catalog keys them. The node replays the slice
 /// within the run, so a contract of a root is replayed only while it
 /// stands for the root.
-fn data_config(catalog: &str, series: SeriesSlice) -> anyhow::Result<BacktestDataConfig> {
+fn data_config(
+    catalog: &DataCatalogConfig,
+    series: SeriesSlice,
+) -> anyhow::Result<BacktestDataConfig> {
     let SeriesSlice {
         series: (data_type, identifier),
         slice,
     } = series;
     let builder = BacktestDataConfig::builder()
-        .catalog_path(catalog.to_string())
+        .catalog(catalog.clone())
         .data_type(data_type.clone())
         .start_time(UnixNanos::from(slice.from))
         .end_time(UnixNanos::from(slice.to))
@@ -430,7 +435,7 @@ mod tests {
             .iter()
             .map(|data| {
                 assert_eq!(data.data_type(), &NautilusDataType::QuoteTick);
-                assert_eq!(data.catalog_path(), catalog.to_str().unwrap());
+                assert_eq!(data.catalog().path(), catalog.to_str().unwrap());
                 data.instrument_id().unwrap().to_string()
             })
             .collect()
@@ -515,7 +520,7 @@ mod tests {
         let config = run_config(&backtest).unwrap();
         let absolute = cwd.join(&relative);
         let absolute = absolute.to_str().unwrap();
-        assert_eq!(config.data()[0].catalog_path(), absolute);
+        assert_eq!(config.data()[0].catalog().path(), absolute);
     }
 
     /// Its data comes from the data configs alone: no catalog serves a
