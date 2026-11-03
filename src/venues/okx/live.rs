@@ -1,5 +1,4 @@
-//! OKX clients for the live node, and the live command's OKX flag
-//! (`OkxLiveArgs`).
+//! OKX clients for the live node.
 //!
 //! Provides the Nautilus client factories and configs from `nautilus_okx`:
 //! `OKXDataClientFactory`, `OKXExecutionClientFactory` and their configs,
@@ -27,7 +26,6 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, ensure};
-use clap::Args;
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_live::config::RoutingConfig;
@@ -48,17 +46,6 @@ use serde::Deserialize;
 
 use super::Contract;
 use crate::live::node::Clients;
-
-/// OKX's settings of a live node, the live command's flags: the leverage
-/// each OKX instrument's must equal (see `clients`).
-#[derive(Debug, Clone, Args)]
-pub(crate) struct OkxLiveArgs {
-    /// The leverage the run expects, as in a backtest. OKX applies the
-    /// account's, set by hand per instrument: the start refuses an OKX
-    /// instrument at another one.
-    #[arg(long, default_value = "1")]
-    pub(in crate::venues) leverage: Decimal,
-}
 
 /// The variable naming the OKX environment of the run, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";

@@ -262,10 +262,14 @@ struct LiveArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The venues' flags of a live node, each venue's own; their leverage
-    /// is the retrains' too.
+    /// The venues' flags of a live node, each venue's own.
     #[command(flatten)]
     venues: LiveVenueArgs,
+    /// The leverage the run expects, as in a backtest. OKX applies the
+    /// account's, set by hand per instrument: the start refuses an OKX
+    /// instrument at another one.
+    #[arg(long, default_value = "1")]
+    leverage: Decimal,
     /// The node's trader: its cache in Redis is the trader's, which each run
     /// loads. Live processes running at once each need their own.
     #[arg(long, default_value = "HELIX-001", value_parser = parse_trader_id)]
@@ -682,7 +686,7 @@ impl Children {
             config: args.config.clone(),
             catalog: args.catalog.clone(),
             models: args.models.clone(),
-            venue: args.retrain.venue(args.venues.leverage())?,
+            venue: args.retrain.venue(args.leverage)?,
         })
     }
 
@@ -777,6 +781,7 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
         venues: args.venues.clone(),
+        leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
         catalog: args.catalog.clone(),
         recording: args.recording(),
@@ -1014,8 +1019,7 @@ mod tests {
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
     }
 
-    /// Of the venues' flags, fill-catalog takes IB's client id alone, not
-    /// live's account or leverage.
+    /// Fill-catalog takes IB's client id, not live's account or leverage.
     #[test]
     fn fill_catalog_takes_the_ib_client_id_but_not_lives_account_or_leverage() {
         let mut argv = REQUIRED.to_vec();
@@ -1130,14 +1134,21 @@ mod tests {
         assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
     }
 
-    /// Its IB account and client id and its leverage are the venues'
-    /// (`LiveVenueArgs`).
+    /// Its IB account and client id are the venues' (`LiveVenueArgs`).
     #[test]
     fn parses_live_with_its_strategy_config_and_catalog() {
         let args = parse_live(&["ema", "--config", "ema.toml", "--account", "DU1234567"]).unwrap();
         assert_eq!(args.strategy, Strategy::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
         assert_eq!(args.catalog, PathBuf::from("catalog"));
+    }
+
+    #[test]
+    fn live_is_unleveraged_unless_given_a_leverage() {
+        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+        assert_eq!(args.leverage, Decimal::ONE);
+        let args = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap();
+        assert_eq!(args.leverage, Decimal::TEN);
     }
 
     #[test]

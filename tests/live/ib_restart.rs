@@ -119,6 +119,7 @@ async fn phase() {
             "--client-id",
             &CLIENT_ID.to_string(),
         ]),
+        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),

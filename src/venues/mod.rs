@@ -81,23 +81,12 @@ fn row(venue: Venue) -> (HistorySource, LiveBroker) {
 }
 
 /// The venues' settings of a live node, the live command's flags, each
-/// venue's declared in its module: IB's account and client id, OKX's
-/// leverage. The live runner holds them and hands them to `live_clients`.
+/// venue's declared in its module: IB's account and client id. The live
+/// runner holds them and hands them to `live_clients`.
 #[derive(Debug, Clone, Args)]
 pub struct LiveVenueArgs {
     #[command(flatten)]
     ib: ib::IbLiveArgs,
-    #[command(flatten)]
-    okx: okx::OkxLiveArgs,
-}
-
-impl LiveVenueArgs {
-    /// The leverage the run expects (`--leverage`): OKX's instruments must
-    /// have it, and the run's retrains take it as a backtest does.
-    #[must_use]
-    pub fn leverage(&self) -> Decimal {
-        self.okx.leverage
-    }
 }
 
 /// The venues' settings of a catalog fill, fill-catalog's flags, each
@@ -125,8 +114,8 @@ impl HistoryVenueArgs {
 /// broker (`LiveBroker`), for the instruments `requirements` reads: OKX's,
 /// IC's then IB's. IC's bar types are checked and IC's environment and
 /// credential read before anything connects; OKX's clients are set up at
-/// the leverage of `venues`, IB's trading its IB account with its client
-/// id.
+/// `leverage`, the run's, IB's trading the IB account of `venues` with its
+/// client id.
 ///
 /// # Errors
 ///
@@ -142,6 +131,7 @@ pub(crate) async fn live_clients(
     requirements: &DataRequirements,
     instrument_ids: &[InstrumentId],
     venues: &LiveVenueArgs,
+    leverage: Decimal,
 ) -> anyhow::Result<Vec<Clients>> {
     let (mut okx_ids, mut ic_ids, mut ib_ids) = (Vec::new(), Vec::new(), Vec::new());
     for &id in instrument_ids {
@@ -162,7 +152,7 @@ pub(crate) async fn live_clients(
     };
     let mut clients = Vec::new();
     if !okx_ids.is_empty() {
-        let okx = okx::clients(&okx_ids, venues.okx.leverage).await?;
+        let okx = okx::clients(&okx_ids, leverage).await?;
         clients.push(okx.into_node_clients());
     }
     if let Some(ic) = ic {
@@ -195,28 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn live_takes_the_ib_account_and_client_id_and_the_okx_leverage() {
-        let venues: LiveVenueArgs = parsed(&[
-            "--account",
-            "DU1234567",
-            "--client-id",
-            "7",
-            "--leverage",
-            "10",
-        ])
-        .unwrap();
+    fn live_takes_the_ib_account_and_client_id() {
+        let venues: LiveVenueArgs =
+            parsed(&["--account", "DU1234567", "--client-id", "7"]).unwrap();
         assert_eq!(venues.ib.account, Some("DU1234567".parse().unwrap()));
         assert_eq!(venues.ib.client_id, 7);
-        assert_eq!(venues.leverage(), Decimal::TEN);
     }
 
     /// The account given, since the developer's environment may set
     /// `NAUTILUS_IB_ACCOUNT_ID`, which the flag falls back on.
     #[test]
-    fn live_is_the_adapters_default_ib_client_unleveraged_unless_told_otherwise() {
+    fn live_is_the_adapters_default_ib_client_unless_told_otherwise() {
         let venues: LiveVenueArgs = parsed(&["--account", "DU1234567"]).unwrap();
         assert_eq!(venues.ib.client_id, 1);
-        assert_eq!(venues.leverage(), Decimal::ONE);
     }
 
     #[test]
@@ -236,17 +217,19 @@ mod tests {
                 account: None,
                 client_id: 1,
             },
-            okx: okx::OkxLiveArgs {
-                leverage: Decimal::ONE,
-            },
         };
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![],
             warmup: SignedDuration::ZERO,
         };
-        let Err(err) =
-            live_clients(&requirements, &[InstrumentId::from("SXR8.IBIS")], &venues).await
+        let Err(err) = live_clients(
+            &requirements,
+            &[InstrumentId::from("SXR8.IBIS")],
+            &venues,
+            Decimal::ONE,
+        )
+        .await
         else {
             panic!("set up IB's clients without an account");
         };
