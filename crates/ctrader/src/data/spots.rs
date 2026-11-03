@@ -5,14 +5,14 @@
 //! change (`subscribeToSpotTimestamp`); the first one after a subscription
 //! carries both. On the demo the spot events of a minute were the ticks
 //! history serves for it, side for side and millisecond for millisecond
-//! (`ic/README.md`, "Live quotes: spot events"), so live quotes are the
+//! (`README.md`, "Live quotes"), so live quotes are the
 //! quotes a fill stores. Each quote is stamped `ts_event` = the spot's time
 //! and `ts_init` = its receipt.
 //!
 //! While a quote request of an instrument is answered, its live quotes are
 //! held, then sent after the response, those the response already holds
 //! dropped: the node gets its warmup before any live quote (see
-//! `ic/README.md`, "Warmup: quote requests").
+//! `README.md`, "Live quotes").
 
 use std::collections::HashMap;
 
@@ -24,7 +24,7 @@ use nautilus_model::{
     instruments::{Instrument, InstrumentAny},
 };
 
-use crate::venues::ic::{
+use crate::{
     common::messages::ProtoOaSpotEvent,
     session::ticks::{Merged, QuoteMerge},
 };
@@ -83,7 +83,7 @@ impl SpotQuotes {
         self.symbol_ids
             .get(&id)
             .copied()
-            .with_context(|| format!("{id} is not an instrument the IC data client loaded"))
+            .with_context(|| format!("{id} is not an instrument the data client loaded"))
     }
 
     /// Sends the live quotes of `id` from now on; returns its `symbolId`.
@@ -194,20 +194,18 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::venues::ic::testing::{
-        SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST,
-    };
+    use crate::testing::{SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST};
 
     /// EUR/USD-like, 5 decimals, maximum order 1,000,000; cTrader's
     /// EURUSD symbol on the server the fixtures come from.
     fn eurusd() -> (InstrumentAny, i64) {
         let mut pair: CurrencyPair = audusd_sim();
-        pair.id = InstrumentId::from("EURUSD.ICMARKETS");
+        pair.id = InstrumentId::from("EURUSD.ACMEFX");
         (InstrumentAny::CurrencyPair(pair), 1)
     }
 
     fn id() -> InstrumentId {
-        InstrumentId::from("EURUSD.ICMARKETS")
+        InstrumentId::from("EURUSD.ACMEFX")
     }
 
     fn spot(bytes: &[u8]) -> ProtoOaSpotEvent {
@@ -372,9 +370,9 @@ mod tests {
         let mut quotes = subscribed();
 
         let err = quotes
-            .subscribe(InstrumentId::from("GBPUSD.ICMARKETS"))
+            .subscribe(InstrumentId::from("GBPUSD.ACMEFX"))
             .unwrap_err();
 
-        assert!(err.to_string().contains("GBPUSD.ICMARKETS"), "{err}");
+        assert!(err.to_string().contains("GBPUSD.ACMEFX"), "{err}");
     }
 }

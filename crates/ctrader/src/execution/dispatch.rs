@@ -63,7 +63,7 @@ use super::{
     orders::{Leg, Protection, Tag, parse_protection_id, protection_id},
     reports::{self, Reports},
 };
-use crate::venues::ic::{
+use crate::{
     common::messages::{
         ProtoOaDeal, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaOrder, ProtoOaOrderStatus,
         ProtoOaOrderType,
@@ -121,17 +121,18 @@ pub(super) struct Tracked {
     pub(super) accepted: bool,
     pub(super) closed: bool,
     pub(super) role: Role,
-    /// The latest change of this protection asked of IC and not yet seen
-    /// done, if any.
+    /// The latest change of this protection asked of the broker and not yet
+    /// seen done, if any.
     pub(super) want: Option<Want>,
     /// Whether its own request (a new order or a close) may still wait in
     /// the session's queue.
     pub(super) queued: bool,
 }
 
-/// A change of a protection (a bracket's leg, or a position's stop loss
-/// or take profit) asked of IC: until IC shows it done, each amendment of
-/// the other protection carries it, since an amendment sets both.
+/// A change of a protection (a bracket's leg, or a position's stop loss or
+/// take profit) asked of the broker: until the broker shows it done, each
+/// amendment of the other protection carries it, since an amendment sets
+/// both.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Want {
     /// Moved to this price.
@@ -141,8 +142,8 @@ pub(super) enum Want {
 }
 
 impl Want {
-    /// Whether IC holding the protection at `price` (none: removed) shows
-    /// this change done.
+    /// Whether the broker holding the protection at `price` (none: removed)
+    /// shows this change done.
     fn done(self, price: Option<Price>) -> bool {
         match self {
             Self::Move(wanted) => price == Some(wanted),
@@ -228,8 +229,8 @@ impl Dispatch {
         }
     }
 
-    /// Notes that the request `tag` left the session's queue: IC holds a
-    /// new order or a close from then on, if it got it.
+    /// Notes that the request `tag` left the session's queue: the broker
+    /// holds a new order or a close from then on, if it got it.
     pub(super) fn sent(&mut self, tag: Tag) {
         if let Tag::New(id) | Tag::Close(id) = tag
             && let Some(tracked) = self.orders.get_mut(&id)
@@ -238,13 +239,13 @@ impl Dispatch {
         }
     }
 
-    /// The orders rejected once IC holds no order `id` over its window, a
-    /// query found: `id`, and a bracket entry's open legs, now closed.
-    /// `None`, nothing concluded, while its request may still wait in the
-    /// session's queue (IC cannot hold it yet), for a bracket's leg (IC
-    /// holds it on its entry or position, never as an order of its own), or
-    /// for an order closed. An order not tracked was not sent by this
-    /// session: nothing of it waits.
+    /// The orders rejected once the broker holds no order `id` over its
+    /// window, a query found: `id`, and a bracket entry's open legs, now
+    /// closed. `None`, nothing concluded, while its request may still wait
+    /// in the session's queue (the broker cannot hold it yet), for a
+    /// bracket's leg (the broker holds it on its entry or position, never
+    /// as an order of its own), or for an order closed. An order not
+    /// tracked was not sent by this session: nothing of it waits.
     pub(super) fn absent(&mut self, id: ClientOrderId) -> Option<Vec<ClientOrderId>> {
         let Some(tracked) = self.orders.get(&id) else {
             return Some(vec![id]);
@@ -315,8 +316,8 @@ impl Dispatch {
         }
     }
 
-    /// Forgets the changes of the protections of `position` that IC now
-    /// holds at `(stop loss, take profit)`.
+    /// Forgets the changes of the protections of `position` that the broker
+    /// now holds at `(stop loss, take profit)`.
     fn settle(&mut self, position: i64, (stop_loss, take_profit): (Option<Price>, Option<Price>)) {
         for tracked in self.orders.values_mut() {
             let Some((of, leg)) = tracked.venue_order_id.and_then(parse_protection_id) else {
@@ -349,7 +350,7 @@ impl Dispatch {
         match id.map(str::parse::<Tag>) {
             Some(Ok(tag)) => self.refuse(tag, reason, ts),
             _ => {
-                log::warn!("IC refused a request not of this client ({id:?}): {reason}");
+                log::warn!("cTrader refused a request not of this client ({id:?}): {reason}");
                 Vec::new()
             }
         }
@@ -393,8 +394,8 @@ impl Dispatch {
             .collect()
     }
 
-    /// The outputs of the request `tag` IC refused for `reason`: a new
-    /// order or a close rejected (a bracket entry's legs with it), an
+    /// The outputs of the request `tag` the broker refused for `reason`: a
+    /// new order or a close rejected (a bracket entry's legs with it), an
     /// amendment's modification rejected, a cancellation's cancel rejected
     /// (a removal of protections: the cancel of each protection of the
     /// position being removed). The changes of protections it asked are
@@ -402,7 +403,7 @@ impl Dispatch {
     pub(super) fn refuse(&mut self, tag: Tag, reason: &str, ts: UnixNanos) -> Vec<Output> {
         let id = tag.client_order_id();
         let Some(tracked) = self.orders.get(&id).filter(|t| !t.closed).cloned() else {
-            log::debug!("IC refused {tag} of an order no longer open: {reason}");
+            log::debug!("cTrader refused {tag} of an order no longer open: {reason}");
             return Vec::new();
         };
         let reason = Ustr::from(reason);
@@ -508,7 +509,7 @@ impl Dispatch {
     fn execution(&mut self, event: &ProtoOaExecutionEvent, ts_init: UnixNanos) -> Vec<Output> {
         let Some(order) = &event.order else {
             log::debug!(
-                "IC {} event without an order",
+                "cTrader {} event without an order",
                 event.execution_type().as_str_name()
             );
             return Vec::new();
@@ -523,7 +524,7 @@ impl Dispatch {
         };
         outputs.unwrap_or_else(|e| {
             log::error!(
-                "IC {} of order {} left to reconciliation: {e:#}",
+                "cTrader {} of order {} left to reconciliation: {e:#}",
                 event.execution_type().as_str_name(),
                 order.order_id
             );
@@ -622,7 +623,7 @@ impl Dispatch {
                     .unwrap_or("ORDER_CANCEL_REJECTED");
                 out.extend(self.refuse(Tag::Cancel(id), code, ts));
             }
-            other => log::debug!("IC {} of {id} ignored", other.as_str_name()),
+            other => log::debug!("cTrader {} of {id} ignored", other.as_str_name()),
         }
         Ok(out)
     }
@@ -658,7 +659,7 @@ impl Dispatch {
         ts_init: UnixNanos,
     ) -> anyhow::Result<Output> {
         let instrument = self.instrument(deal.symbol_id)?;
-        let what = || format!("IC deal {}", deal.deal_id);
+        let what = || format!("cTrader deal {}", deal.deal_id);
         let price = deal
             .execution_price
             .context("a filled deal without an execution price")
@@ -997,7 +998,7 @@ impl Dispatch {
             }
             other => {
                 log::debug!(
-                    "IC {} of the protection of {position} ignored",
+                    "cTrader {} of the protection of {position} ignored",
                     other.as_str_name()
                 );
                 Ok(Vec::new())
@@ -1168,7 +1169,7 @@ mod tests {
     fn dispatch() -> Dispatch {
         Dispatch::new(
             TraderId::from("HELIX-001"),
-            AccountId::from("ICMARKETS-DEMO"),
+            AccountId::from("ACMEFX-DEMO"),
             Currency::from("EUR"),
             HashMap::new(),
         )
@@ -1177,7 +1178,7 @@ mod tests {
     fn order(id: &str, kind: OrderType) -> OrderAny {
         let mut builder = OrderTestBuilder::new(kind);
         builder
-            .instrument_id(InstrumentId::from("XAUUSD.ICMARKETS"))
+            .instrument_id(InstrumentId::from("XAUUSD.ACMEFX"))
             .client_order_id(ClientOrderId::from(id))
             .side(OrderSide::Buy)
             .quantity(Quantity::from(1));

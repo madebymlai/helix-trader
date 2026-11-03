@@ -36,6 +36,7 @@ Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, or
 
 - [Architecture](docs/ARCHITECTURE.md): design and process constraints.
 - [Catalog](src/catalog/README.md): catalog filling; each venue's history and live clients are documented in its module under `src/venues`.
+- [cTrader](crates/ctrader/README.md): the cTrader Open API adapter, a crate of the workspace, which IC Markets runs on.
 - [Strategy](src/strategy/README.md): strategy authoring and configuration.
 - [Model](src/model/README.md): model strategy internals.
 - [Backtest](src/backtest/README.md): replay, costs and limitations.

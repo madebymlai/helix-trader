@@ -39,7 +39,7 @@ pub(crate) use proto::{
 };
 
 // The tests build synthetic positions, deals and leverage tiers from these,
-// and read IC's margin estimate.
+// and read the broker's margin estimate.
 #[cfg(test)]
 pub(crate) use proto::{
     ProtoOaClosePositionDetail, ProtoOaDynamicLeverageTier, ProtoOaExpectedMarginRes,
@@ -181,10 +181,10 @@ pub(crate) fn secret_frame<M: Payload>(message: &M, client_msg_id: Option<String
 }
 
 /// The message `envelope` holds: an `M`, or the error cTrader answered.
-pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, IcError> {
+pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, CTraderError> {
     let payload = envelope.payload.as_deref().unwrap_or_default();
     let malformed = |e: prost::DecodeError| {
-        IcError::Protocol(format!(
+        CTraderError::Protocol(format!(
             "malformed {}: {e}",
             payload_name(envelope.payload_type)
         ))
@@ -193,19 +193,19 @@ pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, IcError> {
         t if t == M::TYPE => M::decode(payload).map_err(malformed),
         t if t == ProtoOaErrorRes::TYPE => {
             let error = ProtoOaErrorRes::decode(payload).map_err(malformed)?;
-            Err(IcError::Venue {
+            Err(CTraderError::Venue {
                 code: error.error_code,
                 description: error.description,
             })
         }
         t if t == ProtoErrorRes::TYPE => {
             let error = ProtoErrorRes::decode(payload).map_err(malformed)?;
-            Err(IcError::Venue {
+            Err(CTraderError::Venue {
                 code: error.error_code,
                 description: error.description,
             })
         }
-        other => Err(IcError::Protocol(format!(
+        other => Err(CTraderError::Protocol(format!(
             "expected {}, got {}",
             payload_name(M::TYPE),
             payload_name(other)
@@ -215,7 +215,7 @@ pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, IcError> {
 
 /// Why a request to cTrader failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IcError {
+pub(crate) enum CTraderError {
     /// cTrader answered with an error: its code (a `ProtoOAErrorCode` or
     /// `ProtoErrorCode` name) and description.
     Venue {
@@ -235,7 +235,7 @@ pub(crate) enum IcError {
     Protocol(String),
 }
 
-impl fmt::Display for IcError {
+impl fmt::Display for CTraderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Venue {
@@ -255,12 +255,12 @@ impl fmt::Display for IcError {
     }
 }
 
-impl std::error::Error for IcError {}
+impl std::error::Error for CTraderError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::venues::ic::testing::SYMBOL_BY_ID_UNKNOWN;
+    use crate::testing::SYMBOL_BY_ID_UNKNOWN;
 
     fn envelope<M: Payload>(message: &M) -> ProtoMessage {
         ProtoMessage::decode(frame(message, Some("7".to_owned())).as_slice()).unwrap()
@@ -308,7 +308,7 @@ mod tests {
 
         assert_eq!(
             opened,
-            Err(IcError::Venue {
+            Err(CTraderError::Venue {
                 code: "SYMBOL_NOT_FOUND".to_owned(),
                 description: Some("No symbols with requested ID".to_owned()),
             })
@@ -326,7 +326,7 @@ mod tests {
 
         assert_eq!(
             opened,
-            Err(IcError::Venue {
+            Err(CTraderError::Venue {
                 code: "BLOCKED_PAYLOAD_TYPE".to_owned(),
                 description: None,
             })
@@ -339,7 +339,7 @@ mod tests {
 
         assert_eq!(
             opened,
-            Err(IcError::Protocol(
+            Err(CTraderError::Protocol(
                 "expected PROTO_OA_ASSET_LIST_RES, got PROTO_OA_SYMBOLS_LIST_RES".to_owned()
             ))
         );
@@ -357,7 +357,7 @@ mod tests {
         let opened = open::<ProtoOaAssetListRes>(&envelope);
 
         assert!(
-            matches!(&opened, Err(IcError::Protocol(e)) if e.starts_with("malformed PROTO_OA_ASSET_LIST_RES")),
+            matches!(&opened, Err(CTraderError::Protocol(e)) if e.starts_with("malformed PROTO_OA_ASSET_LIST_RES")),
             "{opened:?}"
         );
     }

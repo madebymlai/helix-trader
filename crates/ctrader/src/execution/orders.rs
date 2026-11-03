@@ -38,7 +38,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use crate::venues::ic::common::messages::{
+use crate::common::messages::{
     ProtoOaClosePositionReq, ProtoOaNewOrderReq, ProtoOaOrderTriggerMethod, ProtoOaOrderType,
     ProtoOaTimeInForce, ProtoOaTradeSide,
 };
@@ -211,9 +211,10 @@ pub(super) fn placement(
         }
     } else if order.is_reduce_only() {
         return Err(OrderDeniedReason::ValidationFailed {
-            detail: "a reduce-only order on IC's hedging account names the position it reduces \
+            detail:
+                "a reduce-only order on a cTrader hedging account names the position it reduces \
                      (close_position): without one it would open a position"
-                .to_owned(),
+                    .to_owned(),
         });
     }
     let mut request = ProtoOaNewOrderReq {
@@ -350,7 +351,7 @@ mod tests {
     use super::*;
 
     fn gold() -> InstrumentId {
-        InstrumentId::from("XAUUSD.ICMARKETS")
+        InstrumentId::from("XAUUSD.ACMEFX")
     }
 
     fn new_order(placement: Placement) -> ProtoOaNewOrderReq {

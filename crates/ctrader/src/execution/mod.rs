@@ -1,8 +1,8 @@
-//! IC's execution client for the live node: Nautilus' `ExecutionClient`
-//! on a cTrader session.
+//! The execution client for the live node: Nautilus' `ExecutionClient` on
+//! a cTrader session.
 //!
-//! On connect it authenticates, checks the account (hedging,
-//! `IC_ACCOUNT_ID`'s, see `common::account`), loads its instruments,
+//! On connect it authenticates, checks the account (hedging, the
+//! credential's, see `common::account`), loads its instruments,
 //! listens to the account's trade events (see `dispatch`), and publishes
 //! the account state: the balance, and the margin the open positions use.
 //! It reports connected once the node's cache holds the account. The venue
@@ -19,8 +19,8 @@
 //! never sent is rejected, a modify or cancel denied; one sent but
 //! unanswered stays in flight
 //! (`retain_unresolved_submissions`) until its events, a query or
-//! reconciliation resolve it; a query finding no such order at IC rejects
-//! it.
+//! reconciliation resolve it; a query finding no such order at the broker
+//! rejects it.
 //!
 //! Reconciliation reads the reconcile request (open positions, their stop
 //! loss and take profit, pending orders), the deal list (fills), and for a
@@ -71,15 +71,14 @@ use self::{
 };
 use super::{
     common::{
-        account::IcAccount,
+        account::CTraderAccount,
         messages::{
             ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
             ProtoOaReconcileRes, TradeRequest,
         },
-        parse::IC_VENUE,
     },
-    config::{IcConnection, IcCredential},
-    session::IcHistory,
+    config::{CTraderConnection, CTraderCredential},
+    session::CTraderSession,
     websocket::{HEARTBEAT_INTERVAL, TradeSent},
 };
 
@@ -98,16 +97,18 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 /// list: the venue's clock and the node's may differ.
 const QUERY_MARGIN_MS: i64 = 60_000;
 
-/// Why an order IC holds nowhere is rejected.
-const ABSENT: &str = "IC holds no such order: its request never reached IC";
+/// Why an order the broker of `venue` holds nowhere is rejected.
+fn absence(venue: Venue) -> String {
+    format!("{venue} holds no such order: its request never reached {venue}")
+}
 
-/// IC's execution client: orders, the account state and reconciliation
-/// reports of the account, on venue `ICMARKETS`.
+/// The execution client: orders, the account state and reconciliation
+/// reports of the account, on the venue of its connection.
 #[derive(Debug)]
-pub(super) struct IcExecutionClient {
+pub(super) struct CTraderExecutionClient {
     core: ExecutionClientCore,
     url: String,
-    credential: IcCredential,
+    credential: CTraderCredential,
     instrument_ids: Vec<InstrumentId>,
     emitter: ExecutionEventEmitter,
     clock: &'static AtomicTime,
@@ -120,10 +121,10 @@ pub(super) struct IcExecutionClient {
 /// the account it checked, and the orders it tracks.
 #[derive(Debug)]
 struct Session {
-    history: Arc<IcHistory>,
+    ctrader: Arc<CTraderSession>,
     instruments: HashMap<i64, InstrumentAny>,
     symbols: HashMap<InstrumentId, i64>,
-    account: IcAccount,
+    account: CTraderAccount,
     dispatch: Arc<Mutex<Dispatch>>,
 }
 
@@ -133,14 +134,15 @@ impl Session {
     }
 }
 
-impl IcExecutionClient {
+impl CTraderExecutionClient {
     /// A client of `core`'s identity on the environment of `connection`,
-    /// loading `instrument_ids`, IC ids, at connect; not connected. `core`
-    /// is hedging, on venue `ICMARKETS`, a margin account.
+    /// loading `instrument_ids`, ids on its venue, at connect; not
+    /// connected. `core` is hedging, on the connection's venue, a margin
+    /// account.
     #[must_use]
     pub(super) fn new(
         core: ExecutionClientCore,
-        connection: &IcConnection,
+        connection: &CTraderConnection,
         instrument_ids: Vec<InstrumentId>,
     ) -> Self {
         let url = connection.environment.url().to_owned();
@@ -156,7 +158,7 @@ impl IcExecutionClient {
     fn with_endpoint(
         core: ExecutionClientCore,
         url: String,
-        credential: IcCredential,
+        credential: CTraderCredential,
         instrument_ids: Vec<InstrumentId>,
         clock: &'static AtomicTime,
     ) -> Self {
@@ -195,13 +197,18 @@ impl IcExecutionClient {
     /// dispatching the trade events and reads the account state; the
     /// session closes again on a failure.
     async fn open_session(&self) -> anyhow::Result<(Session, AccountState)> {
-        let (history, _spots) =
-            IcHistory::connect_to(&self.url, self.credential.clone(), HEARTBEAT_INTERVAL).await?;
+        let (session, _spots) = CTraderSession::connect_to(
+            &self.url,
+            self.core.venue,
+            self.credential.clone(),
+            HEARTBEAT_INTERVAL,
+        )
+        .await?;
         let opened = async {
-            let trades = history.trade_events()?;
-            let account = history.account().await?;
-            let symbols = history.symbols(&self.instrument_ids).await?;
-            let open = history.reconcile().await?;
+            let trades = session.trade_events()?;
+            let account = session.account().await?;
+            let symbols = session.symbols(&self.instrument_ids).await?;
+            let open = session.reconcile().await?;
             let (balances, margins) = account.state(&open.position)?;
             Ok::<_, anyhow::Error>((trades, account, symbols, balances, margins))
         }
@@ -209,7 +216,7 @@ impl IcExecutionClient {
         let (mut trades, account, symbols, balances, margins) = match opened {
             Ok(opened) => opened,
             Err(e) => {
-                history.disconnect().await;
+                session.disconnect().await;
                 return Err(e);
             }
         };
@@ -246,7 +253,7 @@ impl IcExecutionClient {
             }
         })?;
         let session = Session {
-            history: Arc::new(history),
+            ctrader: Arc::new(session),
             symbols: instruments.iter().map(|(id, i)| (i.id(), *id)).collect(),
             instruments,
             account,
@@ -259,7 +266,7 @@ impl IcExecutionClient {
     /// account, its base currency the deposit currency.
     fn account_state(
         &self,
-        account: &IcAccount,
+        account: &CTraderAccount,
         balances: Vec<AccountBalance>,
         margins: Vec<MarginBalance>,
         reported: bool,
@@ -343,7 +350,7 @@ impl IcExecutionClient {
         to: UnixNanos,
     ) -> anyhow::Result<Vec<FillReport>> {
         let deals = session
-            .history
+            .ctrader
             .deals(orders::millis(from), orders::millis(to))
             .await?;
         let reports = self.reports(session, ts_init);
@@ -393,7 +400,7 @@ impl IcExecutionClient {
         self.session_tasks.begin_shutdown();
         self.command_tasks.begin_shutdown();
         if let Some(session) = &self.session {
-            session.history.begin_shutdown();
+            session.ctrader.begin_shutdown();
         }
     }
 
@@ -407,12 +414,13 @@ impl IcExecutionClient {
         );
         if let Some(open) = self.session.take() {
             // The tasks are done, so this is the last handle.
-            if let Ok(history) = Arc::try_unwrap(open.history) {
-                history.disconnect().await;
+            if let Ok(session) = Arc::try_unwrap(open.ctrader) {
+                session.disconnect().await;
             }
         }
-        session.map_err(|e| anyhow::anyhow!("stopping the IC trade event task: {e}"))?;
-        command.map_err(|e| anyhow::anyhow!("stopping the IC command tasks: {e}"))?;
+        let venue = self.core.venue;
+        session.map_err(|e| anyhow::anyhow!("stopping the {venue} trade event task: {e}"))?;
+        command.map_err(|e| anyhow::anyhow!("stopping the {venue} command tasks: {e}"))?;
         Ok(())
     }
 
@@ -427,7 +435,7 @@ impl IcExecutionClient {
         tag: Tag,
         commands: Vec<(ClientOrderId, UUID4)>,
     ) {
-        let sent = session.history.trade(request, tag.to_string());
+        let sent = session.ctrader.trade(request, tag.to_string());
         self.refuse_unsent(session, tag, commands, sent);
     }
 
@@ -440,8 +448,8 @@ impl IcExecutionClient {
     ) {
         let dispatch = Arc::clone(&session.dispatch);
         let emitter = self.emitter.clone();
-        let clock = self.clock;
-        self.spawn_command("IC trade request", async move {
+        let (clock, venue) = (self.clock, self.core.venue);
+        self.spawn_command("trade request", async move {
             let refused = match sent.await {
                 Ok(Ok(())) => {
                     dispatch
@@ -450,8 +458,8 @@ impl IcExecutionClient {
                         .sent(tag);
                     return Ok(());
                 }
-                Ok(Err(e)) => format!("not sent to IC: {e}"),
-                Err(_) => "not sent to IC: the session closed".to_owned(),
+                Ok(Err(e)) => format!("not sent to {venue}: {e}"),
+                Err(_) => format!("not sent to {venue}: the session closed"),
             };
             log::warn!("{tag} {refused}");
             let outputs = dispatch
@@ -533,7 +541,7 @@ impl IcExecutionClient {
             .filter(|o| o.contingency_type() == Some(ContingencyType::Oto))
             .collect::<Vec<_>>()[..]
         else {
-            return Err(unsupported("IC takes a bracket of one entry"));
+            return Err(unsupported("cTrader takes a bracket of one entry"));
         };
         let mut protection = Protection::default();
         let (mut stop_loss, mut take_profit) = (None, None);
@@ -555,7 +563,7 @@ impl IcExecutionClient {
                 }
                 _ => {
                     return Err(unsupported(
-                        "IC protects an entry with one stop market stop loss and one limit \
+                        "cTrader protects an entry with one stop market stop loss and one limit \
                          take profit, for its quantity, on the other side",
                     ));
                 }
@@ -796,10 +804,10 @@ impl IcExecutionClient {
     }
 
     /// The order `id` (venue order id `venue`, sent at the earliest at
-    /// `since`) as IC holds it, open or not, with its fills: by its venue
-    /// order id, else among the orders IC updated since then.
+    /// `since`) as the broker holds it, open or not, with its fills: by its
+    /// venue order id, else among the orders the broker updated since then.
     async fn find_order(
-        history: &IcHistory,
+        ctrader: &CTraderSession,
         reports: &Reports<'_>,
         id: ClientOrderId,
         venue: Option<VenueOrderId>,
@@ -810,7 +818,7 @@ impl IcExecutionClient {
             Some(order_id) => Some(order_id),
             None => {
                 let close = Tag::Close(id).to_string();
-                let orders = history
+                let orders = ctrader
                     .orders(
                         orders::millis(since) - QUERY_MARGIN_MS,
                         orders::millis(now) + QUERY_MARGIN_MS,
@@ -825,10 +833,10 @@ impl IcExecutionClient {
         let Some(order_id) = order_id else {
             return Ok(Held::Nothing);
         };
-        let details = history
+        let details = ctrader
             .order_details(order_id)
             .await
-            .with_context(|| format!("requesting IC's order {order_id}"))?;
+            .with_context(|| format!("requesting {} order {order_id}", ctrader.venue()))?;
         let Some(mut status) = reports.order(&details.order)? else {
             return Ok(Held::Unreported);
         };
@@ -841,12 +849,12 @@ impl IcExecutionClient {
     }
 }
 
-/// What IC holds of an order a query looks for.
+/// What the broker holds of an order a query looks for.
 #[expect(clippy::large_enum_variant, reason = "one per query, consumed at once")]
 enum Held {
-    /// The order as IC holds it, with its fills.
+    /// The order as the broker holds it, with its fills.
     Order(OrderStatusReport, Vec<FillReport>),
-    /// No order of its id among those IC updated over its window.
+    /// No order of its id among those the broker updated over its window.
     Nothing,
     /// An order the run does not report: of a symbol it did not load.
     Unreported,
@@ -874,7 +882,12 @@ fn pending_venue_id(order: &OrderAny) -> Result<i64, String> {
     order
         .venue_order_id()
         .and_then(|v| v.as_str().parse().ok())
-        .ok_or_else(|| format!("{} is not yet accepted by IC", order.client_order_id()))
+        .ok_or_else(|| {
+            format!(
+                "{} is not yet accepted by the venue",
+                order.client_order_id()
+            )
+        })
 }
 
 /// Sends `outputs` to the node.
@@ -913,7 +926,7 @@ fn emit(emitter: &ExecutionEventEmitter, outputs: Vec<Output>) {
 }
 
 #[async_trait(?Send)]
-impl ExecutionClient for IcExecutionClient {
+impl ExecutionClient for CTraderExecutionClient {
     fn is_connected(&self) -> bool {
         self.core.is_connected()
     }
@@ -927,7 +940,7 @@ impl ExecutionClient for IcExecutionClient {
     }
 
     fn venue(&self) -> Venue {
-        Venue::new(IC_VENUE)
+        self.core.venue
     }
 
     fn oms_type(&self) -> OmsType {
@@ -939,7 +952,8 @@ impl ExecutionClient for IcExecutionClient {
     }
 
     /// An order sent without an answer (a disconnect) stays in flight
-    /// until IC's events, a query or reconciliation tell its outcome.
+    /// until the broker's events, a query or reconciliation tell its
+    /// outcome.
     fn retain_unresolved_submissions(&self) -> bool {
         true
     }
@@ -997,7 +1011,7 @@ impl ExecutionClient for IcExecutionClient {
         }
         log::info!("Connecting {}", self.core.client_id);
         // The node logs a failed connect without its reason: log it here.
-        let client_id = self.core.client_id;
+        let (client_id, venue) = (self.core.client_id, self.core.venue);
         let failed = |e: anyhow::Error| {
             log::error!("{client_id} failed to connect: {e:#}");
             e
@@ -1005,12 +1019,14 @@ impl ExecutionClient for IcExecutionClient {
         if self.session.is_some() || !self.session_tasks.is_open() || !self.command_tasks.is_open()
         {
             self.teardown().await.map_err(failed)?;
-            self.session_tasks
-                .start_generation()
-                .map_err(|e| failed(anyhow::anyhow!("reopening the IC trade event task: {e}")))?;
+            self.session_tasks.start_generation().map_err(|e| {
+                failed(anyhow::anyhow!(
+                    "reopening the {venue} trade event task: {e}"
+                ))
+            })?;
             self.command_tasks
                 .start_generation()
-                .map_err(|e| failed(anyhow::anyhow!("reopening the IC command tasks: {e}")))?;
+                .map_err(|e| failed(anyhow::anyhow!("reopening the {venue} command tasks: {e}")))?;
         }
         let (session, state) = self.open_session().await.map_err(failed)?;
         self.session = Some(session);
@@ -1143,14 +1159,15 @@ impl ExecutionClient for IcExecutionClient {
         Ok(())
     }
 
-    /// Sends the report of the order of `cmd` as IC holds it, open or not,
-    /// with its fills. If IC's order list over its window holds none, its
-    /// request never reached IC: it is reported rejected, with an entry's
-    /// legs, unless the request may still wait in the session's queue (see
-    /// `Dispatch::absent`). A protection (`-SL`, `-TP`) is not queried: the
-    /// open-order check reads it. Nor is a bracket's leg, tracked or not:
-    /// IC holds it on its entry or position, never as an order of its own,
-    /// so its absence from the order list concludes nothing.
+    /// Sends the report of the order of `cmd` as the broker holds it, open
+    /// or not, with its fills. If the broker's order list over its window
+    /// holds none, its request never reached the broker: it is reported
+    /// rejected, with an entry's legs, unless the request may still wait in
+    /// the session's queue (see `Dispatch::absent`). A protection (`-SL`,
+    /// `-TP`) is not queried: the open-order check reads it. Nor is a
+    /// bracket's leg, tracked or not: cTrader holds it on its entry or
+    /// position, never as an order of its own, so its absence from the
+    /// order list concludes nothing.
     fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let session = self.session()?;
         let id = cmd.client_order_id;
@@ -1159,7 +1176,7 @@ impl ExecutionClient for IcExecutionClient {
             .as_ref()
             .is_some_and(|o| o.parent_order_id().is_some())
         {
-            log::debug!("{id} is a bracket's leg: IC holds it on its entry or position");
+            log::debug!("{id} is a bracket's leg: cTrader holds it on its entry or position");
             return Ok(());
         }
         let venue = cmd
@@ -1182,13 +1199,13 @@ impl ExecutionClient for IcExecutionClient {
             .map(|o| (o.client_order_id(), o))
             .collect();
         let dispatch = Arc::clone(&session.dispatch);
-        let history = Arc::clone(&session.history);
-        let account_id = self.core.account_id;
+        let ctrader = Arc::clone(&session.ctrader);
+        let (account_id, broker) = (self.core.account_id, self.core.venue);
         let instruments = session.instruments.clone();
         let currency = session.account.currency;
         let emitter = self.emitter.clone();
         let clock = self.clock;
-        self.spawn_command("IC order query", async move {
+        self.spawn_command("order query", async move {
             let now = clock.get_time_ns();
             let reports = Reports {
                 account_id,
@@ -1196,7 +1213,7 @@ impl ExecutionClient for IcExecutionClient {
                 currency,
                 ts_init: now,
             };
-            match Self::find_order(&history, &reports, id, venue, since, now).await? {
+            match Self::find_order(&ctrader, &reports, id, venue, since, now).await? {
                 Held::Order(status, fills) => emitter.send_order_with_fills(status, fills),
                 Held::Nothing => {
                     let absent = dispatch
@@ -1204,16 +1221,17 @@ impl ExecutionClient for IcExecutionClient {
                         .unwrap_or_else(PoisonError::into_inner)
                         .absent(id);
                     let Some(ids) = absent else {
-                        log::info!("IC holds no order {id} since {since} yet: not concluded");
+                        log::info!("{broker} holds no order {id} since {since} yet: not concluded");
                         return Ok(());
                     };
-                    log::warn!("IC holds no order {id} since {since}: rejected");
-                    for absent in ids.iter().filter_map(|id| orders.get(id)) {
-                        emitter.send_order_status_report(reports.absent(absent, ABSENT));
+                    log::warn!("{broker} holds no order {id} since {since}: rejected");
+                    let reason = absence(broker);
+                    for order in ids.iter().filter_map(|id| orders.get(id)) {
+                        emitter.send_order_status_report(reports.absent(order, &reason));
                     }
                 }
                 Held::Unreported => {
-                    log::warn!("IC's order {id} is of a symbol the run did not load");
+                    log::warn!("{broker} order {id} is of a symbol the run did not load");
                 }
             }
             Ok(())
@@ -1222,15 +1240,15 @@ impl ExecutionClient for IcExecutionClient {
     }
 
     /// The order of the query: open, from the reconcile request; else, by
-    /// its venue order id or among the orders IC updated since the cached
-    /// order was created, from its details. `None` once IC answered it
-    /// holds no such order.
+    /// its venue order id or among the orders the broker updated since the
+    /// cached order was created, from its details. `None` once the broker
+    /// answered it holds no such order.
     async fn generate_order_status_report(
         &self,
         cmd: &GenerateOrderStatusReport,
     ) -> anyhow::Result<Option<OrderStatusReport>> {
         let session = self.session()?;
-        let open = session.history.reconcile().await?;
+        let open = session.ctrader.reconcile().await?;
         let reports = self.reports(session, self.now());
         let found = Self::order_reports(&reports, &open)?.into_iter().find(|r| {
             cmd.venue_order_id == Some(r.venue_order_id)
@@ -1250,7 +1268,7 @@ impl ExecutionClient for IcExecutionClient {
             .venue_order_id
             .filter(|v| parse_protection_id(*v).is_none());
         let found =
-            Self::find_order(&session.history, &reports, id, venue, since, self.now()).await?;
+            Self::find_order(&session.ctrader, &reports, id, venue, since, self.now()).await?;
         Ok(match found {
             Held::Order(status, _) => Some(status),
             Held::Nothing | Held::Unreported => None,
@@ -1264,10 +1282,15 @@ impl ExecutionClient for IcExecutionClient {
         cmd: &GenerateOrderStatusReports,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
         let session = self.session()?;
-        let open = session.history.reconcile().await?;
+        let open = session.ctrader.reconcile().await?;
         let mut orders = Self::order_reports(&self.reports(session, cmd.ts_init), &open)?;
         orders.retain(|r| cmd.instrument_id.is_none_or(|id| r.instrument_id == id));
-        log_receipt(orders.len(), "OrderStatusReport", cmd.log_receipt_level);
+        log_receipt(
+            orders.len(),
+            "OrderStatusReport",
+            self.core.venue,
+            cmd.log_receipt_level,
+        );
         Ok(orders)
     }
 
@@ -1285,7 +1308,12 @@ impl ExecutionClient for IcExecutionClient {
             cmd.instrument_id.is_none_or(|id| f.instrument_id == id)
                 && cmd.venue_order_id.is_none_or(|id| f.venue_order_id == id)
         });
-        log_receipt(fills.len(), "FillReport", cmd.log_receipt_level);
+        log_receipt(
+            fills.len(),
+            "FillReport",
+            self.core.venue,
+            cmd.log_receipt_level,
+        );
         Ok(fills)
     }
 
@@ -1296,12 +1324,13 @@ impl ExecutionClient for IcExecutionClient {
         cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
         let session = self.session()?;
-        let open = session.history.reconcile().await?;
+        let open = session.ctrader.reconcile().await?;
         let mut positions = Self::position_reports(&self.reports(session, cmd.ts_init), &open)?;
         positions.retain(|r| cmd.instrument_id.is_none_or(|id| r.instrument_id == id));
         log_receipt(
             positions.len(),
             "PositionStatusReport",
+            self.core.venue,
             cmd.log_receipt_level,
         );
         Ok(positions)
@@ -1309,10 +1338,10 @@ impl ExecutionClient for IcExecutionClient {
 
     /// The open positions and orders of one reconcile request, and the
     /// fills of the deals since the earliest of: `lookback_mins` ago, the
-    /// opening of a position open at IC, the opening of a position the
-    /// node's cache holds open. A position's deals go in only when they add
-    /// up to it (see `reports::explained`); the report window says whether
-    /// all did.
+    /// opening of a position open at the broker, the opening of a position
+    /// the node's cache holds open. A position's deals go in only when they
+    /// add up to it (see `reports::explained`); the report window says
+    /// whether all did.
     async fn generate_mass_status(
         &self,
         lookback_mins: Option<u64>,
@@ -1320,7 +1349,7 @@ impl ExecutionClient for IcExecutionClient {
         let ts_init = self.now();
         let cached_open = self.earliest_cached_open();
         let session = self.session()?;
-        let open = session.history.reconcile().await?;
+        let open = session.ctrader.reconcile().await?;
         let reports = self.reports(session, ts_init);
         let orders = Self::order_reports(&reports, &open)?;
         let positions = Self::position_reports(&reports, &open)?;
@@ -1343,13 +1372,15 @@ impl ExecutionClient for IcExecutionClient {
         // One cutoff for the request and the report window: cTrader's, in ms.
         let start = start.floor(DurationNanos::from_millis(1));
         let deals = session
-            .history
+            .ctrader
             .deals(orders::millis(start), orders::millis(ts_init))
             .await?;
         let (kept, unexplained) = explained(&deals, &open_volumes(&open.position));
         if !unexplained.is_empty() {
             log::warn!(
-                "IC deals of positions {unexplained:?} left out: their history starts before {start}"
+                "{} deals of positions {unexplained:?} left out: their history starts before \
+                 {start}",
+                self.core.venue
             );
         }
         let mut fills = Vec::new();
@@ -1365,7 +1396,8 @@ impl ExecutionClient for IcExecutionClient {
             None,
         );
         log::info!(
-            "IC mass status: {} positions, {} open orders, {} fills since {start}",
+            "{} mass status: {} positions, {} open orders, {} fills since {start}",
+            self.core.venue,
             positions.len(),
             orders.len(),
             fills.len()
@@ -1378,9 +1410,9 @@ impl ExecutionClient for IcExecutionClient {
     }
 }
 
-fn log_receipt(count: usize, kind: &str, level: LogLevel) {
+fn log_receipt(count: usize, kind: &str, venue: Venue, level: LogLevel) {
     if let Some(level) = map_log_level_to_filter(level).to_level() {
-        log::log!(level, "Received {count} {kind}s from IC");
+        log::log!(level, "Received {count} {kind}s from {venue}");
     }
 }
 
@@ -1401,7 +1433,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::venues::ic::{
+    use crate::{
         common::messages::{
             Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountType, ProtoOaAssetListReq, ProtoOaAssetListRes,
@@ -1413,14 +1445,14 @@ mod tests {
             ProtoOaTradeData, ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
         },
         testing::{
-            self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, ASSET_LIST_RES, Action,
+            self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, ASSET_LIST_RES, Action, CLIENT,
             DEAL_LIST_RES_EMPTY, RECONCILE_RES_EMPTY, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            TRADER_RES, accept_auth, replay, reply, token_refused,
+            TRADER_RES, VENUE, accept_auth, replay, reply, token_refused,
         },
     };
 
-    const XAUUSD: &str = "XAUUSD.ICMARKETS";
-    const EURUSD: &str = "EURUSD.ICMARKETS";
+    const XAUUSD: &str = "XAUUSD.ACMEFX";
+    const EURUSD: &str = "EURUSD.ACMEFX";
 
     /// cTrader's symbol ids on the server the fixtures come from.
     const XAUUSD_SYMBOL_ID: i64 = 41;
@@ -1491,7 +1523,7 @@ mod tests {
                 t if t == ProtoOaSymbolByIdReq::TYPE => {
                     replay::<ProtoOaSymbolByIdRes>(request, SYMBOL_BY_ID_RES)
                 }
-                t if t == crate::venues::ic::common::messages::ProtoOaGetDynamicLeverageByIdReq::TYPE => {
+                t if t == crate::common::messages::ProtoOaGetDynamicLeverageByIdReq::TYPE => {
                     testing::dynamic_leverage_answer(request)
                 }
                 t if t == ProtoOaTraderReq::TYPE => match &venue.trader {
@@ -1555,7 +1587,7 @@ mod tests {
     fn started(
         venue: Script,
     ) -> (
-        IcExecutionClient,
+        CTraderExecutionClient,
         Rc<RefCell<Cache>>,
         Events,
         Received,
@@ -1569,7 +1601,7 @@ mod tests {
         venue: Script,
         clock: &'static AtomicTime,
     ) -> (
-        IcExecutionClient,
+        CTraderExecutionClient,
         Rc<RefCell<Cache>>,
         Events,
         Received,
@@ -1581,16 +1613,16 @@ mod tests {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let core = ExecutionClientCore::new(
             TraderId::from("HELIX-001"),
-            ClientId::from("ICMARKETS"),
-            Venue::new(IC_VENUE),
+            ClientId::from(CLIENT),
+            Venue::new(VENUE),
             OmsType::Hedging,
-            AccountId::from("ICMARKETS-DEMO"),
+            AccountId::from("ACMEFX-DEMO"),
             AccountType::Margin,
             None,
             cache.clone(),
         );
         let (credential, tokens) = testing::credential();
-        let mut client = IcExecutionClient::with_endpoint(
+        let mut client = CTraderExecutionClient::with_endpoint(
             core,
             url,
             credential,
@@ -1621,7 +1653,7 @@ mod tests {
     /// Connects `client`, the node registering its account; returns the
     /// account state.
     async fn connect(
-        client: &mut IcExecutionClient,
+        client: &mut CTraderExecutionClient,
         events: &mut Events,
         cache: &Rc<RefCell<Cache>>,
     ) -> AccountState {
@@ -1780,7 +1812,7 @@ mod tests {
 
         // As captured: balance 100000000 at moneyDigits 2, in EUR (asset 5).
         let eur = Currency::from("EUR");
-        assert_eq!(state.account_id, AccountId::from("ICMARKETS-DEMO"));
+        assert_eq!(state.account_id, AccountId::from("ACMEFX-DEMO"));
         assert_eq!(state.account_type, AccountType::Margin);
         assert_eq!(state.base_currency, Some(eur));
         assert!(state.is_reported);
@@ -1851,7 +1883,7 @@ mod tests {
         let err = client.connect().await.unwrap_err().to_string();
 
         assert!(
-            err.contains("the IC account is NETTED, not HEDGED"),
+            err.contains("the ACMEFX account is NETTED, not HEDGED"),
             "{err}"
         );
         assert!(!client.is_connected());
@@ -1889,7 +1921,10 @@ mod tests {
 
         let err = format!("{:#}", client.connect().await.unwrap_err());
 
-        assert!(err.contains("another account than IC_ACCOUNT_ID"), "{err}");
+        assert!(
+            err.contains("another account than ACME_ACCOUNT_ID"),
+            "{err}"
+        );
         assert!(!client.is_connected());
     }
 
@@ -1959,7 +1994,7 @@ mod tests {
             ]
         );
         assert_eq!(reports.len(), 1, "US500 is out of the run: {reports:?}");
-        assert_eq!(mass_status.account_id, AccountId::from("ICMARKETS-DEMO"));
+        assert_eq!(mass_status.account_id, AccountId::from("ACMEFX-DEMO"));
     }
 
     #[tokio::test]
@@ -2138,7 +2173,7 @@ mod tests {
             None,
             None,
             Some(opened),
-            Some(AccountId::from("ICMARKETS-DEMO")),
+            Some(AccountId::from("ACMEFX-DEMO")),
         ) else {
             panic!("not a fill");
         };

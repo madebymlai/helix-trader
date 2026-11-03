@@ -3,24 +3,22 @@
 //! cTrader's access token lasts about 30 days; the refresh token renews it
 //! (`ProtoOARefreshTokenReq`), and each renewal replaces both, the old
 //! pair invalidated (help.ctrader.com/open-api, "App and account
-//! authentication"). So the latest pair lives in a token file outside the
-//! repository, readable by the user only (mode 0600, its directory 0700),
-//! where every session finds it: `$XDG_STATE_HOME/helix-trader/ic-token.json`,
-//! by default `~/.local/state/helix-trader/ic-token.json` (the XDG base
-//! directory convention for user state).
+//! authentication"). So the latest pair lives in a token file, readable by
+//! the user only (mode 0600, its directory 0700), where every session
+//! finds it, at the place the credential names (`token_file`).
 //!
-//! The first pair comes from `IC_ACCESS_TOKEN` and `IC_REFRESH_TOKEN` in
-//! `.env`, which seed the file once; `.env` is never written. The file
-//! keeps a SHA-256 fingerprint of the pair that seeded it: when `.env`
+//! The first pair comes from the credential, which seeds the file once;
+//! wherever the caller read it from is never written. The file keeps a
+//! SHA-256 fingerprint of the pair that seeded it: when the credential
 //! holds another pair (a new one from the Playground), it seeds the file
 //! again.
 //!
-//! Sessions of several processes (a fill and a live node) share the file.
-//! A renewal holds an advisory lock (`flock`, on `ic-token.json.lock`, a
-//! file never replaced) from before its request until the new pair is
-//! written, so two sessions never spend the same refresh token; the file
-//! is replaced atomically (a temporary file renamed over it), so a reader
-//! sees a whole pair, the latest writer's.
+//! Sessions of several processes (a fill and a live node) share the file. A
+//! renewal holds an advisory lock (`flock`, on the token file's name with
+//! `.lock` appended, a file never replaced) from before its request until
+//! the new pair is written, so two sessions never spend the same refresh
+//! token; the file is replaced atomically (a temporary file renamed over
+//! it), so a reader sees a whole pair, the latest writer's.
 
 use std::{
     fmt::Write as _,
@@ -37,14 +35,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+use crate::config::CTraderSettingNames;
+
 /// How long before the access token expires a session renews it.
 pub(crate) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
 
-/// The token file under the user's state directory.
-const RELATIVE_PATH: &str = "helix-trader/ic-token.json";
-
 /// An access token, the refresh token that renews it, and when the access
-/// token expires (unknown for a pair seeded from `.env`).
+/// token expires (unknown for a pair seeded from the credential).
 #[derive(Debug, Clone)]
 pub(crate) struct TokenPair {
     pub(crate) access_token: SecretString,
@@ -95,17 +92,19 @@ impl TokenPair {
     }
 }
 
-/// The token file, and the pair from `.env` that seeds it.
+/// The token file, the credential's pair that seeds it, and what errors
+/// call the settings of that pair.
 #[derive(Debug, Clone)]
 pub(crate) struct TokenStore {
     path: PathBuf,
     seed: TokenPair,
+    names: CTraderSettingNames,
 }
 
 /// The file's content.
 #[derive(Serialize, Deserialize)]
 struct Stored {
-    /// The fingerprint of the `.env` pair that seeded the file.
+    /// The fingerprint of the credential's pair that seeded the file.
     seed: String,
     access_token: String,
     refresh_token: String,
@@ -120,40 +119,20 @@ impl Drop for Stored {
 }
 
 impl TokenStore {
-    /// The store at `path`, seeded with `seed`, the pair from `.env`.
-    pub(crate) fn new(path: PathBuf, seed: TokenPair) -> Self {
-        Self { path, seed }
-    }
-
-    /// The token file's path under the user's state directory: under
-    /// `XDG_STATE_HOME` if set to an absolute path (the XDG base directory
-    /// specification ignores a relative one), else under
-    /// `$HOME/.local/state`, through `var`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if neither is set to an absolute path.
-    pub(crate) fn path_from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
-        let absolute = |name| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
-        if let Some(state) = absolute("XDG_STATE_HOME") {
-            return Ok(state.join(RELATIVE_PATH));
-        }
-        match absolute("HOME") {
-            Some(home) => Ok(home.join(".local/state").join(RELATIVE_PATH)),
-            None => bail!(
-                "no place for IC's token file: set HOME, or XDG_STATE_HOME, to an absolute path"
-            ),
-        }
+    /// The store at `path`, seeded with `seed`, the credential's pair,
+    /// whose settings `names` names.
+    pub(crate) fn new(path: PathBuf, seed: TokenPair, names: CTraderSettingNames) -> Self {
+        Self { path, seed, names }
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    /// The latest pair: the file's, or the `.env` pair, written to the
-    /// file first, when there is no file or `.env` holds another pair than
-    /// the one that seeded it; `None` while another session renews (it
-    /// holds the lock).
+    /// The latest pair: the file's, or the seed, written to the file
+    /// first, when there is no file or the seed is another pair than the
+    /// one that seeded it; `None` while another session renews (it holds
+    /// the lock).
     ///
     /// # Errors
     ///
@@ -182,7 +161,7 @@ impl TokenStore {
     pub(crate) fn read(&self) -> anyhow::Result<TokenPair> {
         match self.stored()? {
             Some(stored) => Ok(pair_of(&stored)),
-            None => bail!("IC's token file {} is gone", self.path.display()),
+            None => bail!("the token file {} is gone", self.path.display()),
         }
     }
 
@@ -235,11 +214,13 @@ impl TokenStore {
         // serde's message may quote the content: only where it failed.
         parsed.map(Some).map_err(|e| {
             anyhow::anyhow!(
-                "{} is not an IC token file (line {}, column {}): delete it to seed it again \
-                 from IC_ACCESS_TOKEN and IC_REFRESH_TOKEN",
+                "{} is not a token file (line {}, column {}): delete it to seed it again from \
+                 {} and {}",
                 self.path.display(),
                 e.line(),
-                e.column()
+                e.column(),
+                self.names.access_token,
+                self.names.refresh_token
             )
         })
     }
@@ -295,18 +276,16 @@ impl TokenLock {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        },
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
     };
 
     use nautilus_core::string::secret::REDACTED;
 
     use super::*;
+    use crate::testing::NAMES;
 
     fn pair(access: &str, refresh: &str, expires_at: Option<&str>) -> TokenPair {
         TokenPair {
@@ -321,7 +300,7 @@ mod tests {
     }
 
     fn store_in(dir: &Path, seed: TokenPair) -> TokenStore {
-        TokenStore::new(dir.join("state").join(RELATIVE_PATH), seed)
+        TokenStore::new(dir.join("state").join("broker/token.json"), seed, NAMES)
     }
 
     /// The tokens and expiry of `pair`, to compare pairs.
@@ -487,8 +466,12 @@ mod tests {
 
         let err = format!("{:#}", store.read().unwrap_err());
 
-        assert!(err.contains("is not an IC token file"), "{err}");
+        assert!(err.contains("is not a token file"), "{err}");
         assert!(err.contains(&store.path().display().to_string()), "{err}");
+        assert!(
+            err.contains("seed it again from ACME_ACCESS_TOKEN and ACME_REFRESH_TOKEN"),
+            "{err}"
+        );
         assert!(!err.contains("leakedValue"), "{err}");
     }
 
@@ -519,46 +502,5 @@ mod tests {
         assert!(!debug.contains("envAccessToken"), "{debug}");
         assert!(!debug.contains("envRefreshToken"), "{debug}");
         assert!(debug.contains(REDACTED), "{debug}");
-    }
-
-    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect();
-        move |name| map.get(name).cloned()
-    }
-
-    #[test]
-    fn the_file_is_under_the_xdg_state_home() {
-        let path = TokenStore::path_from_vars(vars(&[
-            ("XDG_STATE_HOME", "/home/u/state"),
-            ("HOME", "/home/u"),
-        ]))
-        .unwrap();
-
-        assert_eq!(path, Path::new("/home/u/state/helix-trader/ic-token.json"));
-    }
-
-    #[test]
-    fn without_an_absolute_xdg_state_home_the_file_is_under_local_state() {
-        for pairs in [
-            vec![("HOME", "/home/u")],
-            vec![("XDG_STATE_HOME", "state"), ("HOME", "/home/u")],
-        ] {
-            let path = TokenStore::path_from_vars(vars(&pairs)).unwrap();
-
-            assert_eq!(
-                path,
-                Path::new("/home/u/.local/state/helix-trader/ic-token.json")
-            );
-        }
-    }
-
-    #[test]
-    fn without_a_home_there_is_no_token_file() {
-        let err = TokenStore::path_from_vars(vars(&[])).unwrap_err();
-
-        assert!(err.to_string().contains("set HOME"), "{err}");
     }
 }

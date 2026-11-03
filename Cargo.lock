@@ -1007,6 +1007,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "jiff",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-data",
+ "nautilus-live",
+ "nautilus-model",
+ "nautilus-network",
+ "nautilus-persistence",
+ "nautilus-portfolio",
+ "nautilus-risk",
+ "prost",
+ "prost-build",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tungstenite",
+ "ustr",
+ "zeroize",
+]
+
+[[package]]
 name = "curve25519-dalek"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2311,9 +2342,9 @@ dependencies = [
  "bon",
  "clap",
  "csv",
+ "ctrader",
  "databento",
  "dotenvy",
- "futures",
  "ibapi",
  "jiff",
  "lightgbm3",
@@ -2334,12 +2365,9 @@ dependencies = [
  "nautilus-okx",
  "nautilus-persistence",
  "nautilus-portfolio",
- "nautilus-risk",
  "nautilus-serialization",
  "nautilus-trading",
  "perpetual",
- "prost",
- "prost-build",
  "redis",
  "rust_decimal",
  "serde",
@@ -2348,9 +2376,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "tungstenite",
  "ustr",
- "zeroize",
  "zip",
 ]
 

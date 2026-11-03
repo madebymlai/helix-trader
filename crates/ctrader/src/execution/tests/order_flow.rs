@@ -1,4 +1,4 @@
-//! The order flow of `IcExecutionClient` against the mock peer, on the
+//! The order flow of `CTraderExecutionClient` against the mock peer, on the
 //! trade events captured on the demo (`testdata/execution_*`,
 //! `order_error_*`): the peer answers each trade request with them, as the
 //! demo answered the same request, mutated where a test says so. The
@@ -16,7 +16,7 @@ use nautilus_model::{
 };
 
 use super::*;
-use crate::venues::ic::{
+use crate::{
     common::messages::{
         ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq,
         ProtoOaClosePositionReq, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaNewOrderReq,
@@ -56,11 +56,12 @@ fn execution(bytes: &[u8]) -> ProtoOaExecutionEvent {
     decoded(bytes)
 }
 
-/// Synthetic: a deal IC made after the captured ones.
+/// Synthetic: a deal the broker made after the captured ones.
 const LATER_DEAL: i64 = 953_555_999;
 
-/// The captured fill `bytes` under a deal IC made later, `LATER_DEAL`:
-/// evidence of an order already filled, which the client reports.
+/// The captured fill `bytes` under a deal the broker made later,
+/// `LATER_DEAL`: evidence of an order already filled, which the client
+/// reports.
 fn later_deal(bytes: &[u8]) -> ProtoOaExecutionEvent {
     let mut execution = execution(bytes);
     if let Some(deal) = execution.deal.as_mut() {
@@ -79,7 +80,7 @@ const STRATEGY: &str = "S-001";
 /// A client connected to a peer answering trade requests as `trades`, and
 /// the node's side of it.
 struct Node {
-    client: IcExecutionClient,
+    client: CTraderExecutionClient,
     cache: Rc<RefCell<Cache>>,
     events: Events,
     received: Received,
@@ -131,7 +132,7 @@ impl Node {
             .submit_order(SubmitOrder::from_order(
                 order,
                 TraderId::from("HELIX-001"),
-                Some(ClientId::from("ICMARKETS")),
+                Some(ClientId::from(CLIENT)),
                 position,
                 UUID4::new(),
                 self.client.now(),
@@ -151,7 +152,7 @@ impl Node {
         self.client
             .submit_order_list(SubmitOrderList::new(
                 TraderId::from("HELIX-001"),
-                Some(ClientId::from("ICMARKETS")),
+                Some(ClientId::from(CLIENT)),
                 StrategyId::from(STRATEGY),
                 list,
                 orders.iter().map(|o| o.init_event().clone()).collect(),
@@ -174,7 +175,7 @@ impl Node {
         self.client
             .modify_order(ModifyOrder::new(
                 TraderId::from("HELIX-001"),
-                Some(ClientId::from("ICMARKETS")),
+                Some(ClientId::from(CLIENT)),
                 order.strategy_id(),
                 order.instrument_id(),
                 order.client_order_id(),
@@ -199,7 +200,7 @@ impl Node {
         self.client
             .cancel_order(CancelOrder::new(
                 TraderId::from("HELIX-001"),
-                Some(ClientId::from("ICMARKETS")),
+                Some(ClientId::from(CLIENT)),
                 order.strategy_id(),
                 order.instrument_id(),
                 order.client_order_id(),
@@ -243,8 +244,8 @@ impl Node {
     }
 
     /// Asserts the next execution event is the report of the fill of
-    /// `LATER_DEAL` (see `later_deal`), the last event IC sent: nothing
-    /// came before it.
+    /// `LATER_DEAL` (see `later_deal`), the last event the broker sent:
+    /// nothing came before it.
     async fn later_deal_next(&mut self) {
         let event = self.next().await;
         let ExecutionEvent::Report(ExecutionReport::OrderWithFills(_, fills)) = &event else {
@@ -273,7 +274,7 @@ impl Node {
             None,
             None,
             None,
-            Some(AccountId::from("ICMARKETS-DEMO")),
+            Some(AccountId::from("ACMEFX-DEMO")),
         ) else {
             panic!("not a fill");
         };
@@ -446,7 +447,7 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
 }
 
 #[tokio::test]
-async fn an_order_ic_refuses_is_rejected_with_ics_reason() {
+async fn an_order_the_broker_refuses_is_rejected_with_its_reason() {
     let mut node = Node::start(|request| {
         vec![event(
             &decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_BAD_VOLUME),
@@ -469,7 +470,7 @@ async fn an_order_ic_refuses_is_rejected_with_ics_reason() {
 }
 
 #[tokio::test]
-async fn a_cancel_ic_refuses_is_rejected_and_the_order_stays_open() {
+async fn a_cancel_the_broker_refuses_is_rejected_and_the_order_stays_open() {
     let mut node = Node::start(|request| match request.payload_type {
         t if t == ProtoOaNewOrderReq::TYPE => {
             vec![answer(request, &execution(EXECUTION_LIMIT_ACCEPTED))]
@@ -499,7 +500,7 @@ async fn a_cancel_ic_refuses_is_rejected_and_the_order_stays_open() {
         rejected.reason.as_str(),
         "ORDER_NOT_FOUND: Order not found with id 1031776354"
     );
-    // Still open: IC's answer to a modification of it updates it.
+    // Still open: the broker's answer to a modification of it updates it.
     node.modify("PROBE-2", Some(Price::from("3821.73")), None);
     let updated = node.order_events(1).await;
     assert_eq!(kinds(&updated), [row("PROBE-2", "updated")]);
@@ -571,7 +572,7 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
     node.client
         .query_order(QueryOrder::new(
             TraderId::from("HELIX-001"),
-            Some(ClientId::from("ICMARKETS")),
+            Some(ClientId::from(CLIENT)),
             StrategyId::from(STRATEGY),
             InstrumentId::from(XAUUSD),
             ClientOrderId::from("PROBE-1"),
@@ -644,8 +645,8 @@ fn bracket_on(
     [entry_order, stop, limit]
 }
 
-/// The captured bracket entry PROBE-1 accepted and filled, its
-/// protections accepted on the position; IC moves them as the demo did.
+/// The captured bracket entry PROBE-1 accepted and filled, its protections
+/// accepted on the position; the broker moves them as the demo did.
 fn bracket_entry(request: &ProtoMessage) -> Vec<Action> {
     match request.payload_type {
         t if t == ProtoOaNewOrderReq::TYPE => vec![
@@ -698,7 +699,7 @@ async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds()
 /// The demo's answer moved the take profit too (to 4062.78): the legs
 /// follow it.
 #[tokio::test]
-async fn moving_a_positions_stop_loss_sends_both_prices_and_the_legs_follow_ics_answer() {
+async fn moving_a_positions_stop_loss_sends_both_prices_and_the_legs_follow_the_answer() {
     let mut node = Node::start(bracket_entry).await;
     let [entry, stop_loss, take_profit] = bracket("PROBE-1", "3992.78", "4052.78");
     node.submit_list(&[&entry, &stop_loss, &take_profit]);
@@ -843,7 +844,7 @@ fn closed(bytes: &[u8], left: i64) -> ProtoOaExecutionEvent {
     if let Some(position) = execution.position.as_mut().filter(|_| left > 0) {
         position.trade_data.volume = left;
         position.set_position_status(
-            crate::venues::ic::common::messages::ProtoOaPositionStatus::PositionStatusOpen,
+            crate::common::messages::ProtoOaPositionStatus::PositionStatusOpen,
         );
     }
     execution
@@ -919,7 +920,7 @@ async fn a_partial_close_closes_part_of_the_position_by_its_id() {
 }
 
 #[tokio::test]
-async fn a_close_of_a_position_ic_no_longer_holds_is_rejected_with_ics_reason() {
+async fn a_close_of_a_position_the_broker_no_longer_holds_is_rejected_with_its_reason() {
     let mut node = Node::start(|request| {
         vec![event(
             &decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_POSITION_NOT_FOUND),
@@ -1010,7 +1011,7 @@ fn reconciled_stop_loss(node: &Node, id: &str, venue: &str) {
         .trigger_price(Price::from("3992.78"))
         .reduce_only(true)
         .build();
-    let account = AccountId::from("ICMARKETS-DEMO");
+    let account = AccountId::from("ACMEFX-DEMO");
     node.add(&[&order]);
     for event in [
         TestOrderEventStubs::submitted(&order, account),
@@ -1021,7 +1022,7 @@ fn reconciled_stop_loss(node: &Node, id: &str, venue: &str) {
     }
 }
 
-/// IC refuses every trade request: the position is gone.
+/// The broker refuses every trade request: the position is gone.
 fn refusing(request: &ProtoMessage) -> Vec<Action> {
     vec![event(
         &decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_POSITION_NOT_FOUND),
@@ -1065,7 +1066,7 @@ async fn a_refused_cancel_of_a_protection_from_before_a_restart_is_rejected() {
 }
 
 /// A bracket's entry filled and its protections accepted on position
-/// 690004734 (stop loss 3992.78, take profit 4052.78); IC answers no
+/// 690004734 (stop loss 3992.78, take profit 4052.78); the broker answers no
 /// amendment of them.
 async fn protected_position() -> Node {
     let mut node = Node::start(|request| match request.payload_type {
@@ -1082,7 +1083,7 @@ async fn protected_position() -> Node {
     node
 }
 
-/// The `n` amendments of protections IC received.
+/// The `n` amendments of protections the broker received.
 async fn protection_amendments(node: &Node, n: usize) -> Vec<ProtoOaAmendPositionSltpReq> {
     testing::wait_until(&node.received, |frames| {
         frames
@@ -1123,7 +1124,7 @@ async fn a_move_after_an_unanswered_move_keeps_the_first_move() {
 
 /// While the entry is pending its protections live on it: the captured
 /// limit entry PROBE-2, its stop loss at 3802.73 and take profit at
-/// 3842.73. IC answers no amendment.
+/// 3842.73. The broker answers no amendment.
 #[tokio::test]
 async fn a_move_after_an_unanswered_cancel_on_a_pending_entry_keeps_the_cancelled_leg_gone() {
     let mut node = Node::start(|request| match request.payload_type {
@@ -1158,7 +1159,7 @@ async fn a_move_after_an_unanswered_cancel_on_a_pending_entry_keeps_the_cancelle
 }
 
 /// Both protections of a position cancelled together go in one
-/// amendment; IC refuses it.
+/// amendment; the broker refuses it.
 #[tokio::test]
 async fn a_refused_cancel_of_both_protections_rejects_the_cancel_of_each() {
     let mut node = Node::start(|request| match request.payload_type {
@@ -1176,7 +1177,7 @@ async fn a_refused_cancel_of_both_protections_rejects_the_cancel_of_each() {
     node.client
         .cancel_all_orders(CancelAllOrders::new(
             TraderId::from("HELIX-001"),
-            Some(ClientId::from("ICMARKETS")),
+            Some(ClientId::from(CLIENT)),
             StrategyId::from(STRATEGY),
             InstrumentId::from(XAUUSD),
             None,
@@ -1202,10 +1203,10 @@ async fn a_refused_cancel_of_both_protections_rejects_the_cancel_of_each() {
 }
 
 /// The peer never answers the order, and its order list over the order's
-/// window holds none: the request never reached IC, so the query reports
-/// the order rejected.
+/// window holds none: the request never reached the broker, so the query
+/// reports the order rejected.
 #[tokio::test]
-async fn an_unanswered_order_ic_holds_nowhere_is_reported_rejected_by_a_query() {
+async fn an_unanswered_order_the_broker_holds_nowhere_is_reported_rejected_by_a_query() {
     let mut node = Node::start(|request| match request.payload_type {
         t if t == ProtoOaOrderListReq::TYPE => vec![reply(
             request,
@@ -1225,7 +1226,7 @@ async fn an_unanswered_order_ic_holds_nowhere_is_reported_rejected_by_a_query() 
     node.client
         .query_order(QueryOrder::new(
             TraderId::from("HELIX-001"),
-            Some(ClientId::from("ICMARKETS")),
+            Some(ClientId::from(CLIENT)),
             StrategyId::from(STRATEGY),
             InstrumentId::from(XAUUSD),
             ClientOrderId::from("PROBE-1"),
@@ -1252,14 +1253,15 @@ async fn an_unanswered_order_ic_holds_nowhere_is_reported_rejected_by_a_query() 
 }
 
 /// A bracket left in the cache by a restart while its limit entry PROBE-2
-/// is pending at IC (venue order id 1031776354): the entry accepted, its
-/// legs submitted with no venue order id, none sent by this session.
+/// is pending at the broker (venue order id 1031776354): the entry
+/// accepted, its legs submitted with no venue order id, none sent by this
+/// session.
 fn reconciled_pending_bracket(node: &Node) {
     let mut limit = order(OrderType::Limit, "PROBE-2", OrderSide::Buy, 1);
     limit.price(Price::from("3822.73"));
     let bracket = bracket_on(limit, "PROBE-2", "3802.73", "3842.73");
     node.add(&bracket.iter().collect::<Vec<_>>());
-    let account = AccountId::from("ICMARKETS-DEMO");
+    let account = AccountId::from("ACMEFX-DEMO");
     for mut order in bracket {
         let mut events = vec![TestOrderEventStubs::submitted(&order, account)];
         if order.parent_order_id().is_none() {
@@ -1276,8 +1278,8 @@ fn reconciled_pending_bracket(node: &Node) {
     }
 }
 
-/// IC's order list holds nothing: no order of a bracket leg's id, as IC
-/// never holds a leg as an order of its own.
+/// The broker's order list holds nothing: no order of a bracket leg's id,
+/// as the broker never holds a leg as an order of its own.
 fn listing_nothing(request: &ProtoMessage) -> Vec<Action> {
     match request.payload_type {
         t if t == ProtoOaOrderListReq::TYPE => vec![reply(
@@ -1297,7 +1299,7 @@ impl Node {
         self.client
             .query_order(QueryOrder::new(
                 TraderId::from("HELIX-001"),
-                Some(ClientId::from("ICMARKETS")),
+                Some(ClientId::from(CLIENT)),
                 StrategyId::from(STRATEGY),
                 InstrumentId::from(XAUUSD),
                 ClientOrderId::from(id),
@@ -1311,9 +1313,9 @@ impl Node {
     }
 
     /// Asserts the queries before concluded nothing: a query now, of
-    /// `UNSENT-1`, an order of the cache this session never sent, which
-    /// IC's order list does not hold, reports it rejected, and that report
-    /// is the next event.
+    /// `UNSENT-1`, an order of the cache this session never sent, which The
+    /// broker's order list does not hold, reports it rejected, and that
+    /// report is the next event.
     async fn assert_nothing_concluded(&mut self) {
         self.add(&[&market("UNSENT-1", OrderSide::Buy, 1)]);
         self.query("UNSENT-1");
@@ -1353,8 +1355,8 @@ async fn an_order_this_session_never_sent_is_concluded_absent() {
     node.client.disconnect().await.unwrap();
 }
 
-/// The bracket's entry sent, IC answering nothing, its order list holding
-/// none.
+/// The bracket's entry sent, the broker answering nothing, its order list
+/// holding none.
 #[tokio::test]
 async fn an_absent_entry_is_concluded_once_with_its_legs() {
     let mut node = Node::start(listing_nothing).await;
@@ -1397,7 +1399,7 @@ async fn a_query_of_a_bracket_leg_from_before_a_restart_concludes_nothing() {
     node.query("PROBE-2-SL");
 
     node.assert_nothing_concluded().await;
-    // Nor was IC asked: the only order list it got is of UNSENT-1.
+    // Nor was the broker asked: the only order list it got is of UNSENT-1.
     assert_eq!(node.requests::<ProtoOaOrderListReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }
@@ -1416,7 +1418,7 @@ async fn a_query_of_a_bracket_leg_whose_cancel_was_refused_after_a_restart_concl
     node.query("PROBE-2-SL");
 
     node.assert_nothing_concluded().await;
-    // Nor was IC asked: the only order list it got is of UNSENT-1.
+    // Nor was the broker asked: the only order list it got is of UNSENT-1.
     assert_eq!(node.requests::<ProtoOaOrderListReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }

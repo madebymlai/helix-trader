@@ -21,83 +21,106 @@ use super::common::messages::{
     ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes,
     ProtoOaTickData, frame,
 };
-use super::common::token::{TokenPair, TokenStore};
-use super::config::{IcAccountId, IcCredential};
+use super::common::token::TokenPair;
+use nautilus_model::identifiers::Venue;
+
+use super::config::{
+    CTraderAccountId, CTraderConnection, CTraderCredential, CTraderEnvironment, CTraderSettingNames,
+};
 use super::session::ticks::Tick;
+
+/// The made-up broker the tests configure: its venue and the name of its
+/// clients, so that a broker's name left in the adapter fails a test.
+pub(crate) const VENUE: &str = "ACMEFX";
+pub(crate) const CLIENT: &str = "ACME-CTRADER";
+
+/// What the made-up broker's caller calls its settings.
+pub(crate) const NAMES: CTraderSettingNames = CTraderSettingNames {
+    environment: "ACME_ENVIRONMENT",
+    client_id: "ACME_CLIENT_ID",
+    client_secret: "ACME_CLIENT_SECRET",
+    access_token: "ACME_ACCESS_TOKEN",
+    refresh_token: "ACME_REFRESH_TOKEN",
+    account_id: "ACME_ACCOUNT_ID",
+    source: "acme.env",
+    guide: "the ACME guide",
+};
 
 /// The fake account the tests authenticate: the `ctidTraderAccountId` the
 /// captured responses were scrubbed to.
 pub(crate) const ACCOUNT_ID: i64 = 1_000_001;
 
-// Responses captured from IC's cTrader demo, scrubbed: the payloads, as
-// served (see the `.txtpb` beside each in `testdata/`).
-pub(crate) const APPLICATION_AUTH_RES: &[u8] = include_bytes!("testdata/application_auth_res.bin");
+// Responses captured from a broker's cTrader demo, scrubbed: the
+// payloads, as served (see the `.txtpb` beside each in `testdata/`).
+pub(crate) const APPLICATION_AUTH_RES: &[u8] =
+    include_bytes!("../testdata/application_auth_res.bin");
 pub(crate) const APPLICATION_AUTH_REFUSED: &[u8] =
-    include_bytes!("testdata/application_auth_refused.bin");
-pub(crate) const ACCOUNT_AUTH_RES: &[u8] = include_bytes!("testdata/account_auth_res.bin");
+    include_bytes!("../testdata/application_auth_refused.bin");
+pub(crate) const ACCOUNT_AUTH_RES: &[u8] = include_bytes!("../testdata/account_auth_res.bin");
 pub(crate) const ACCOUNT_AUTH_TOKEN_INVALID: &[u8] =
-    include_bytes!("testdata/account_auth_token_invalid.bin");
-pub(crate) const ASSET_LIST_RES: &[u8] = include_bytes!("testdata/asset_list_res.bin");
-pub(crate) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("testdata/symbols_list_res.bin");
-pub(crate) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("testdata/symbol_by_id_res.bin");
+    include_bytes!("../testdata/account_auth_token_invalid.bin");
+pub(crate) const ASSET_LIST_RES: &[u8] = include_bytes!("../testdata/asset_list_res.bin");
+pub(crate) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("../testdata/symbols_list_res.bin");
+pub(crate) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("../testdata/symbol_by_id_res.bin");
 pub(crate) const DYNAMIC_LEVERAGE_XAUUSD_RES: &[u8] =
-    include_bytes!("testdata/dynamic_leverage_xauusd_res.bin");
+    include_bytes!("../testdata/dynamic_leverage_xauusd_res.bin");
 pub(crate) const DYNAMIC_LEVERAGE_EURUSD_RES: &[u8] =
-    include_bytes!("testdata/dynamic_leverage_eurusd_res.bin");
+    include_bytes!("../testdata/dynamic_leverage_eurusd_res.bin");
 pub(crate) const EXPECTED_MARGIN_EURUSD_RES: &[u8] =
-    include_bytes!("testdata/expected_margin_eurusd_res.bin");
-pub(crate) const SYMBOL_BY_ID_UNKNOWN: &[u8] = include_bytes!("testdata/symbol_by_id_unknown.bin");
-pub(crate) const TICK_DATA_BID_RES: &[u8] = include_bytes!("testdata/tick_data_bid_res.bin");
-pub(crate) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("testdata/tick_data_ask_res.bin");
-pub(crate) const SUBSCRIBE_SPOTS_RES: &[u8] = include_bytes!("testdata/subscribe_spots_res.bin");
+    include_bytes!("../testdata/expected_margin_eurusd_res.bin");
+pub(crate) const SYMBOL_BY_ID_UNKNOWN: &[u8] =
+    include_bytes!("../testdata/symbol_by_id_unknown.bin");
+pub(crate) const TICK_DATA_BID_RES: &[u8] = include_bytes!("../testdata/tick_data_bid_res.bin");
+pub(crate) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("../testdata/tick_data_ask_res.bin");
+pub(crate) const SUBSCRIBE_SPOTS_RES: &[u8] = include_bytes!("../testdata/subscribe_spots_res.bin");
 pub(crate) const UNSUBSCRIBE_SPOTS_RES: &[u8] =
-    include_bytes!("testdata/unsubscribe_spots_res.bin");
+    include_bytes!("../testdata/unsubscribe_spots_res.bin");
 pub(crate) const SPOT_EVENT_EURUSD_FIRST: &[u8] =
-    include_bytes!("testdata/spot_event_eurusd_first.bin");
+    include_bytes!("../testdata/spot_event_eurusd_first.bin");
 pub(crate) const SPOT_EVENT_EURUSD_BID: &[u8] =
-    include_bytes!("testdata/spot_event_eurusd_bid.bin");
+    include_bytes!("../testdata/spot_event_eurusd_bid.bin");
 pub(crate) const SPOT_EVENT_EURUSD_ASK: &[u8] =
-    include_bytes!("testdata/spot_event_eurusd_ask.bin");
+    include_bytes!("../testdata/spot_event_eurusd_ask.bin");
 pub(crate) const SPOT_EVENT_XAUUSD_FIRST: &[u8] =
-    include_bytes!("testdata/spot_event_xauusd_first.bin");
-pub(crate) const TRADER_RES: &[u8] = include_bytes!("testdata/trader_res.bin");
-pub(crate) const RECONCILE_RES_EMPTY: &[u8] = include_bytes!("testdata/reconcile_res_empty.bin");
-pub(crate) const DEAL_LIST_RES_EMPTY: &[u8] = include_bytes!("testdata/deal_list_res_empty.bin");
+    include_bytes!("../testdata/spot_event_xauusd_first.bin");
+pub(crate) const TRADER_RES: &[u8] = include_bytes!("../testdata/trader_res.bin");
+pub(crate) const RECONCILE_RES_EMPTY: &[u8] = include_bytes!("../testdata/reconcile_res_empty.bin");
+pub(crate) const DEAL_LIST_RES_EMPTY: &[u8] = include_bytes!("../testdata/deal_list_res_empty.bin");
 
 // Trade events captured on the demo with 1 oz orders of XAUUSD (see
 // each `.txtpb`).
 pub(crate) const EXECUTION_MARKET_ACCEPTED: &[u8] =
-    include_bytes!("testdata/execution_market_accepted.bin");
+    include_bytes!("../testdata/execution_market_accepted.bin");
 pub(crate) const EXECUTION_MARKET_FILLED: &[u8] =
-    include_bytes!("testdata/execution_market_filled.bin");
+    include_bytes!("../testdata/execution_market_filled.bin");
 pub(crate) const EXECUTION_PROTECTION_ACCEPTED: &[u8] =
-    include_bytes!("testdata/execution_protection_accepted.bin");
+    include_bytes!("../testdata/execution_protection_accepted.bin");
 pub(crate) const EXECUTION_PROTECTION_REPLACED: &[u8] =
-    include_bytes!("testdata/execution_protection_replaced.bin");
+    include_bytes!("../testdata/execution_protection_replaced.bin");
 pub(crate) const EXECUTION_CLOSE_ACCEPTED: &[u8] =
-    include_bytes!("testdata/execution_close_accepted.bin");
+    include_bytes!("../testdata/execution_close_accepted.bin");
 pub(crate) const EXECUTION_CLOSE_FILLED: &[u8] =
-    include_bytes!("testdata/execution_close_filled.bin");
+    include_bytes!("../testdata/execution_close_filled.bin");
 pub(crate) const EXECUTION_PROTECTION_CANCELLED: &[u8] =
-    include_bytes!("testdata/execution_protection_cancelled.bin");
+    include_bytes!("../testdata/execution_protection_cancelled.bin");
 pub(crate) const EXECUTION_LIMIT_ACCEPTED: &[u8] =
-    include_bytes!("testdata/execution_limit_accepted.bin");
+    include_bytes!("../testdata/execution_limit_accepted.bin");
 pub(crate) const EXECUTION_LIMIT_REPLACED: &[u8] =
-    include_bytes!("testdata/execution_limit_replaced.bin");
+    include_bytes!("../testdata/execution_limit_replaced.bin");
 pub(crate) const EXECUTION_LIMIT_CANCELLED: &[u8] =
-    include_bytes!("testdata/execution_limit_cancelled.bin");
+    include_bytes!("../testdata/execution_limit_cancelled.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ENTRY_FILLED: &[u8] =
-    include_bytes!("testdata/execution_stop_loss_entry_filled.bin");
+    include_bytes!("../testdata/execution_stop_loss_entry_filled.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ACCEPTED: &[u8] =
-    include_bytes!("testdata/execution_stop_loss_accepted.bin");
+    include_bytes!("../testdata/execution_stop_loss_accepted.bin");
 pub(crate) const EXECUTION_STOP_LOSS_FILLED: &[u8] =
-    include_bytes!("testdata/execution_stop_loss_filled.bin");
+    include_bytes!("../testdata/execution_stop_loss_filled.bin");
 pub(crate) const ORDER_ERROR_BAD_VOLUME: &[u8] =
-    include_bytes!("testdata/order_error_bad_volume.bin");
+    include_bytes!("../testdata/order_error_bad_volume.bin");
 pub(crate) const ORDER_ERROR_ORDER_NOT_FOUND: &[u8] =
-    include_bytes!("testdata/order_error_order_not_found.bin");
+    include_bytes!("../testdata/order_error_order_not_found.bin");
 pub(crate) const ORDER_ERROR_POSITION_NOT_FOUND: &[u8] =
-    include_bytes!("testdata/order_error_position_not_found.bin");
+    include_bytes!("../testdata/order_error_position_not_found.bin");
 
 /// What the peer does after a frame.
 pub(crate) enum Action {
@@ -248,43 +271,52 @@ pub(crate) async fn wait_until(
     }
 }
 
-/// The made-up token pair of `credential`, as `.env` would hold it.
+/// The made-up token pair that seeds the token file of `credential`.
 pub(crate) const ACCESS_TOKEN: &str = "accessTokenValue";
 pub(crate) const REFRESH_TOKEN: &str = "refreshTokenValue";
 
 /// A credential of made-up values, for account `ACCOUNT_ID`, its token
 /// file in the directory returned, holding the pair of `ACCESS_TOKEN`
 /// and `REFRESH_TOKEN`, valid for 30 days.
-pub(crate) fn credential() -> (IcCredential, TempDir) {
+pub(crate) fn credential() -> (CTraderCredential, TempDir) {
     credential_expiring(Some(Timestamp::now() + SignedDuration::from_hours(30 * 24)))
 }
 
-/// As `credential`, the access token expiring at `expires_at` (`None`:
-/// unknown, as when `.env` seeded it).
-pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (IcCredential, TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let seed = TokenPair {
-        access_token: SecretString::from(ACCESS_TOKEN),
-        refresh_token: SecretString::from(REFRESH_TOKEN),
-        expires_at: None,
+/// A demo connection of the made-up broker, on `VENUE`, with `credential`.
+pub(crate) fn connection() -> (CTraderConnection, TempDir) {
+    let (credential, tokens) = credential();
+    let connection = CTraderConnection {
+        venue: Venue::new(VENUE),
+        environment: CTraderEnvironment::Demo,
+        credential,
     };
-    let tokens = TokenStore::new(dir.path().join("ic-token.json"), seed.clone());
-    tokens.try_load().unwrap().unwrap();
-    let stored = TokenPair { expires_at, ..seed };
-    tokens.try_lock().unwrap().unwrap().save(&stored).unwrap();
-    let credential = IcCredential {
+    (connection, tokens)
+}
+
+/// As `credential`, the access token expiring at `expires_at` (`None`:
+/// unknown, as when the credential seeded it).
+pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (CTraderCredential, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let credential = CTraderCredential {
         client_id: SecretString::from("12345_clientIdValue"),
         client_secret: SecretString::from("clientSecretValue"),
-        account_id: IcAccountId::new(ACCOUNT_ID),
-        tokens,
+        account_id: CTraderAccountId::new(ACCOUNT_ID),
+        access_token: SecretString::from(ACCESS_TOKEN),
+        refresh_token: SecretString::from(REFRESH_TOKEN),
+        token_file: dir.path().join("token.json"),
+        names: NAMES,
     };
+    let tokens = credential.tokens();
+    let seed = tokens.try_load().unwrap().unwrap();
+    let stored = TokenPair { expires_at, ..seed };
+    tokens.try_lock().unwrap().unwrap().save(&stored).unwrap();
     (credential, dir)
 }
 
 /// The access token the token file of `credential` holds.
-pub(crate) fn stored_access_token(credential: &IcCredential) -> String {
+pub(crate) fn stored_access_token(credential: &CTraderCredential) -> String {
     credential
-        .tokens
+        .tokens()
         .read()
         .unwrap()
         .access_token
@@ -483,7 +515,7 @@ pub(crate) fn token_peer(
 /// cTrader's answer to a tick request over `[from, to)` on a side whose
 /// ticks are `ticks`, oldest first: the newest `page_size` ticks of the
 /// window, newest first, and whether the window holds more (as measured
-/// on the demo, see `ic/README.md`, "Tick history").
+/// on the demo, see `README.md`, "Tick history").
 pub(crate) fn venue_page(
     ticks: &[Tick],
     from: i64,
