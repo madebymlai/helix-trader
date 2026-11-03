@@ -22,7 +22,7 @@ use crate::{live::node::Clients, strategy::DataRequirements};
 /// The source of an instrument's history in the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistorySource {
-    /// OKX's archive and public API.
+    /// OKX's public API, through Nautilus' OKX data client.
     Okx,
     /// IC Markets' cTrader tick history.
     Ic,

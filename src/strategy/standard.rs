@@ -1450,9 +1450,8 @@ mod tests {
             );
         }
 
-        /// Trading OKX on hourly bars built from its 1-minute candles, the
-        /// one series its archive serves (`venues::okx`): fill-catalog
-        /// fetches those candles alone, no quotes.
+        /// Trading OKX on hourly bars built from its 1-minute candles:
+        /// fill-catalog fetches those candles alone, no quotes.
         #[test]
         fn an_okx_strategy_on_composite_bars_requires_its_candles_alone() {
             let toml = TOML

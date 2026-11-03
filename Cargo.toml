@@ -69,7 +69,6 @@ arrow = { version = "59.3", default-features = false }
 bollard = { version = "0.21.1", default-features = false, features = ["http", "pipe"] }
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
-csv = "1"
 # The cTrader Open API adapter, which IC Markets' venue module wires in.
 ctrader.workspace = true
 # The version of nautilus-databento, for the dataset's end.
@@ -114,7 +113,6 @@ tempfile.workspace = true
 tokio.workspace = true
 toml = "1"
 ustr.workspace = true
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 # The `DataClient` trait of the test venues' data clients.

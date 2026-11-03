@@ -2,8 +2,7 @@
 //! instruments and the series their strategy's bars are built from.
 //!
 //! Source-agnostic, no node: the data comes from a fetch function the
-//! caller passes, backed by an adapter's historical client (`venues::ib`,
-//! `venues::okx`). A series is a Nautilus data type and its catalog
+//! caller passes, backed by an adapter's historical client (`venues::ib`). A series is a Nautilus data type and its catalog
 //! identifier (see `strategy::catalog_series`): the quotes of an
 //! instrument, keyed by its id, or the bars of a bar type, keyed by the bar
 //! type. Per series it resumes after its stored range
@@ -13,11 +12,10 @@
 //! which stores each series under its data type and identifier. Nautilus
 //! does not persist requested data on its own.
 //!
-//! Temporary, with IB's and OKX's fills that use it: IB's and OKX's data
-//! clients answer without a `DataResponseEnvelope`, so Nautilus writes
-//! none of their answers back. Once nautilus_trader#5472 (IB) and #5473
-//! (OKX) are fixed, they fill through the node as Databento and IC do (see
-//! `node_fill`), and this file goes.
+//! Temporary, with IB's fill that uses it: IB's data client answers
+//! without a `DataResponseEnvelope`, so Nautilus writes none of its
+//! answers back. Once nautilus_trader#5472 is fixed, IB fills through the
+//! node (see `node_fill`), and this file goes.
 
 use std::collections::HashSet;
 
