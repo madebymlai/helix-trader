@@ -24,7 +24,8 @@ use std::{
 
 use helix_trader::{
     catalog::{FillData, NodeClient, NodeFill, missing},
-    strategy::{DataRequirements, TickSeries},
+    rolls::Slice,
+    strategy::{DataRequirements, SeriesSlice, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -36,8 +37,9 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            BookDeltasResponse, BookDepthResponse, DataRequestFailed, DataResponseEnvelope,
-            InstrumentResponse, RequestBookDeltas, RequestBookDepth, RequestInstrument,
+            BarsResponse, BookDeltasResponse, BookDepthResponse, DataRequestFailed,
+            DataResponseEnvelope, FundingRatesResponse, InstrumentResponse, RequestBars,
+            RequestBookDeltas, RequestBookDepth, RequestFundingRates, RequestInstrument,
             RequestTrades, TradesResponse,
         },
     },
@@ -46,7 +48,8 @@ use nautilus_core::{Params, UnixNanos, datetime::datetime_to_unix_nanos};
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{
-        BookOrder, NautilusDataType, OrderBookDelta, OrderBookDepth, TradeTick, stubs::stub_depth10,
+        Bar, BarType, BookOrder, FundingRateUpdate, NautilusDataType, OrderBookDelta,
+        OrderBookDepth, TradeTick, stubs::stub_depth10,
     },
     enums::{AggressorSide, BookAction, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, TradeId, Venue},
@@ -421,6 +424,59 @@ impl DataClient for FakeClient {
             response,
         )
     }
+
+    /// One bar, closing on Friday at 10:00, if the window holds it.
+    fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
+        let (start, end) = window(request.start, request.end);
+        let bar_type = request.single_bar_type()?;
+        let rows: Vec<Bar> = [bar("2025-10-17T10:00:00Z")]
+            .into_iter()
+            .filter(|b| (start..=end).contains(&b.ts_init.as_u64()))
+            .collect();
+        let response = DataResponse::Bars(BarsResponse::new(
+            request.request_id,
+            self.id,
+            bar_type,
+            rows,
+            Some(UnixNanos::from(start)),
+            Some(UnixNanos::from(end)),
+            UnixNanos::from(end),
+            request.params.clone(),
+        ));
+        self.answer(
+            FillData::Bars(bar_type),
+            request.request_id,
+            (start, end),
+            request.params.as_ref(),
+            response,
+        )
+    }
+
+    /// One funding rate, on Friday at 08:00, if the window holds it.
+    fn request_funding_rates(&self, request: RequestFundingRates) -> anyhow::Result<()> {
+        let (start, end) = window(request.start, request.end);
+        let rows: Vec<FundingRateUpdate> = [funding("2025-10-17T08:00:00Z")]
+            .into_iter()
+            .filter(|f| (start..=end).contains(&f.ts_init.as_u64()))
+            .collect();
+        let response = DataResponse::FundingRates(FundingRatesResponse::new(
+            request.request_id,
+            self.id,
+            request.single_instrument_id()?,
+            rows,
+            Some(UnixNanos::from(start)),
+            Some(UnixNanos::from(end)),
+            UnixNanos::from(end),
+            request.params.clone(),
+        ));
+        self.answer(
+            FillData::Funding,
+            request.request_id,
+            (start, end),
+            request.params.as_ref(),
+            response,
+        )
+    }
 }
 
 /// The requirements reading `data` of GCZ26.
@@ -445,8 +501,20 @@ fn fill(
     (start, end): (Timestamp, Timestamp),
     period: SignedDuration,
 ) -> anyhow::Result<()> {
+    fill_slices(dir, venue, &requirements.slices(start, end), period)
+}
+
+/// fill-catalog's fill through the node of `slices` into the catalog in
+/// `dir`: what the catalog lacks, asked of the fake `venue` in windows of
+/// `period`.
+fn fill_slices(
+    dir: &Path,
+    venue: &Rc<RefCell<FakeVenue>>,
+    slices: &[SeriesSlice],
+    period: SignedDuration,
+) -> anyhow::Result<()> {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let requests = missing(&catalog, &requirements.slices(start, end))?;
+    let requests = missing(&catalog, slices)?;
     let mut node = NodeFill::new();
     node.add(
         NodeClient {
@@ -720,4 +788,94 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
         .order_book_deltas(Some(vec![GCZ26.to_string()]), None, None)
         .unwrap();
     assert_eq!(stored, [delta("2025-10-20T10:00:00Z")]);
+}
+
+const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
+
+/// GCZ26's minute bar closing at `close`, stamped at its open.
+fn bar(close: &str) -> Bar {
+    let price = Price::from("4000.00");
+    Bar::new(
+        BarType::from(BARS),
+        price,
+        price,
+        price,
+        price,
+        Quantity::from(1),
+        (ts(close) - SignedDuration::from_mins(1)).into(),
+        ts(close).into(),
+    )
+}
+
+/// GCZ26's funding at `at`, eight hours after the one before.
+fn funding(at: &str) -> FundingRateUpdate {
+    FundingRateUpdate::new(
+        InstrumentId::from(GCZ26),
+        "0.0001".parse().unwrap(),
+        Some(480),
+        None,
+        ts(at).into(),
+        ts(at).into(),
+    )
+}
+
+/// The slice of GCZ26's `series` over `[from, to]`.
+fn series_slice(series: (NautilusDataType, &str), from: Timestamp, to: Timestamp) -> SeriesSlice {
+    SeriesSlice {
+        series: (series.0, series.1.to_string()),
+        slice: Slice {
+            instrument_id: InstrumentId::from(GCZ26),
+            from,
+            to,
+        },
+    }
+}
+
+#[test]
+fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Data);
+    let (from, to) = (ts(FRI), end_before(SUN));
+    let slices = [
+        series_slice((NautilusDataType::FundingRateUpdate, GCZ26), from, to),
+        series_slice((NautilusDataType::Bar, BARS), from, to),
+    ];
+
+    fill_slices(dir.path(), &venue, &slices, DAY).unwrap();
+
+    let bars = FillData::Bars(BarType::from(BARS));
+    let precision = Some(2);
+    assert_eq!(
+        venue.borrow().asked,
+        [
+            (FillData::Instrument, ns(FRI), before(SUN), None),
+            (FillData::Funding, ns(FRI), before(SAT), precision),
+            (FillData::Funding, ns(SAT), before(SUN), precision),
+            (bars, ns(FRI), before(SAT), precision),
+            (bars, ns(SAT), before(SUN), precision),
+        ]
+    );
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let stored_bars = catalog
+        .bars(Some(vec![BARS.to_string()]), None, None)
+        .unwrap();
+    assert_eq!(stored_bars, [bar("2025-10-17T10:00:00Z")]);
+    let stored_funding = catalog
+        .funding_rates(Some(vec![GCZ26.to_string()]), None, None)
+        .unwrap();
+    assert_eq!(stored_funding, [funding("2025-10-17T08:00:00Z")]);
+    for (data_type, identifier) in [
+        (NautilusDataType::Bar, BARS),
+        (NautilusDataType::FundingRateUpdate, GCZ26),
+    ] {
+        let lacking = catalog
+            .get_missing_intervals_for_request(
+                ns(FRI),
+                before(SUN),
+                &data_type.clone().into(),
+                Some(identifier),
+            )
+            .unwrap();
+        assert_eq!(lacking, [], "{data_type}");
+    }
 }
