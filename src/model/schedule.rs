@@ -472,16 +472,14 @@ fn times(every: SignedDuration, from: Timestamp, to: Timestamp) -> anyhow::Resul
 ///
 /// # Errors
 ///
-/// Returns an error if `every` is not positive, or the time is before the
-/// epoch.
+/// Returns an error if `every` is not positive, or longer than Nautilus'
+/// nanosecond durations.
 pub fn last_grid_time(now: UnixNanos, every: SignedDuration) -> anyhow::Result<UnixNanos> {
     anyhow::ensure!(
         every.is_positive(),
         "the retrain interval {every:#} is not positive"
     );
-    let every = every.as_nanos();
-    let start = i128::from(now.as_u64()).div_euclid(every) * every;
-    Ok(UnixNanos::from(u64::try_from(start)?))
+    Ok(now.floor(DurationNanos::try_from(every)?))
 }
 
 #[cfg(test)]
