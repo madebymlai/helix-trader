@@ -1,5 +1,6 @@
 //! What connects to IC's cTrader: the environment, required, and the
-//! credential, both read from the environment (or `.env`) once.
+//! credential, both read from the environment (or `.env`) once; and the
+//! configs of the data and execution clients, which connect with them.
 //!
 //! The app's client id and secret come from Spotware's Open API portal;
 //! the first token pair (access and refresh token), and the account it
@@ -9,13 +10,14 @@
 //! client id and the account id credential identity: none of them appears
 //! in `Debug`, errors or logs.
 
-use std::fmt;
+use std::{any::Any, fmt};
 
 use anyhow::{Context, bail};
+use nautilus_common::factories::ClientConfig;
 use nautilus_core::string::secret::{REDACTED, SecretString};
-use nautilus_model::identifiers::AccountId;
+use nautilus_model::identifiers::{AccountId, InstrumentId};
 
-use super::token::{TokenPair, TokenStore};
+use super::common::token::{TokenPair, TokenStore};
 
 /// The variable naming the environment, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "IC_ENVIRONMENT";
@@ -60,7 +62,7 @@ impl IcEnvironment {
 /// The trader's account on cTrader (`ctidTraderAccountId`), which
 /// requests name; credential identity, so redacted in `Debug`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct IcAccountId(i64);
+pub(crate) struct IcAccountId(i64);
 
 impl IcAccountId {
     pub(super) const fn new(id: i64) -> Self {
@@ -117,7 +119,7 @@ impl IcCredential {
             .collect();
         if !missing.is_empty() {
             bail!(
-                "the IC credential is incomplete: set {} in .env (see src/data/ic/README.md, \
+                "the IC credential is incomplete: set {} in .env (see src/venues/ic/README.md, \
                  \"Credentials\")",
                 missing.join(", ")
             );
@@ -191,6 +193,34 @@ impl IcConnection {
             IcEnvironment::Live => "LIVE",
         };
         AccountId::new(format!("ICMARKETS-{environment}"))
+    }
+}
+
+/// The config of IC's data client: where it connects, as whom, and the
+/// instruments it loads.
+#[derive(Debug, Clone)]
+pub struct IcDataClientConfig {
+    pub connection: IcConnection,
+    pub instrument_ids: Vec<InstrumentId>,
+}
+
+impl ClientConfig for IcDataClientConfig {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// The config of IC's execution client: where it connects, as whom, and
+/// the instruments whose reports it reads.
+#[derive(Debug, Clone)]
+pub struct IcExecutionClientConfig {
+    pub connection: IcConnection,
+    pub instrument_ids: Vec<InstrumentId>,
+}
+
+impl ClientConfig for IcExecutionClientConfig {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

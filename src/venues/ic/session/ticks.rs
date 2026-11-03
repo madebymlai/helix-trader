@@ -16,7 +16,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use super::messages::ProtoOaTickData;
+use crate::venues::ic::common::messages::ProtoOaTickData;
 
 /// The longest window one tick request may span (Spotware's docs: one
 /// week).
@@ -378,8 +378,8 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::data::ic::{
-        messages::ProtoOaGetTickDataRes,
+    use crate::venues::ic::{
+        common::messages::ProtoOaGetTickDataRes,
         testing::{TICK_DATA_ASK_RES, TICK_DATA_BID_RES, venue_page},
     };
 

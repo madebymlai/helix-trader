@@ -41,12 +41,12 @@ use crate::venues::HistorySource;
 pub(crate) const IC_VENUE: &str = "ICMARKETS";
 
 /// The cTrader symbol name of `id`, an IC instrument: its symbol.
-pub(super) fn symbol_name(id: InstrumentId) -> &'static str {
+pub(crate) fn symbol_name(id: InstrumentId) -> &'static str {
     id.symbol.inner().as_str()
 }
 
 /// The instrument id of the cTrader symbol `name`.
-pub(super) fn instrument_id(name: &str) -> anyhow::Result<InstrumentId> {
+pub(crate) fn instrument_id(name: &str) -> anyhow::Result<InstrumentId> {
     let symbol = Symbol::new_checked(name)
         .with_context(|| format!("the cTrader symbol name {name:?} is no Nautilus symbol"))?;
     Ok(InstrumentId::new(symbol, Venue::new(IC_VENUE)))
@@ -66,7 +66,7 @@ pub(super) fn instrument_id(name: &str) -> anyhow::Result<InstrumentId> {
 /// cTrader states no maintenance or stop-out rate of a symbol (the stop-out
 /// level is the broker's, on the account's margin level), so maintenance
 /// is the initial rate.
-pub(super) fn margin(
+pub(crate) fn margin(
     name: &str,
     account_leverage: Option<u32>,
     symbol_leverage: Option<&ProtoOaDynamicLeverage>,
@@ -94,7 +94,7 @@ pub(super) fn margin(
 /// The `CurrencyPair` of the symbol listed as `light`, with the details
 /// `symbol`, at the margin rate `margin` (see `margin`); `assets` name the
 /// asset ids.
-pub(super) fn currency_pair(
+pub(crate) fn currency_pair(
     light: &ProtoOaLightSymbol,
     symbol: &ProtoOaSymbol,
     assets: &HashMap<i64, ProtoOaAsset>,
@@ -185,13 +185,13 @@ fn units(cents: i64) -> Decimal {
 }
 
 /// The names of `assets`, by id.
-pub(super) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAsset> {
+pub(crate) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAsset> {
     assets.into_iter().map(|a| (a.asset_id, a)).collect()
 }
 
 /// Fails unless `id` is an IC instrument, one whose history IC serves
 /// (`HistorySource`).
-pub(super) fn ensure_ic(id: InstrumentId) -> anyhow::Result<()> {
+pub(crate) fn ensure_ic(id: InstrumentId) -> anyhow::Result<()> {
     if HistorySource::of(id) != HistorySource::Ic {
         bail!("{id} is not on {IC_VENUE}");
     }
@@ -203,8 +203,8 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::data::ic::{
-        messages::{
+    use crate::venues::ic::{
+        common::messages::{
             ProtoOaAssetListRes, ProtoOaDynamicLeverageTier, ProtoOaExpectedMarginRes,
             ProtoOaGetDynamicLeverageByIdRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes,
             ProtoOaTraderRes,

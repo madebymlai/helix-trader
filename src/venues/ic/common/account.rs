@@ -13,10 +13,8 @@ use anyhow::{Context, ensure};
 use nautilus_model::types::{AccountBalance, Currency, MarginBalance, Money};
 use rust_decimal::Decimal;
 
-use super::{
-    config::IcAccountId,
-    messages::{ProtoOaAccountType, ProtoOaAsset, ProtoOaPosition, ProtoOaTrader},
-};
+use super::messages::{ProtoOaAccountType, ProtoOaAsset, ProtoOaPosition, ProtoOaTrader};
+use crate::venues::ic::config::IcAccountId;
 
 /// The account, checked: hedging, the configured one, in a currency
 /// Nautilus knows.
@@ -25,7 +23,7 @@ pub(crate) struct IcAccount {
     /// The deposit currency, the account's base currency.
     pub(crate) currency: Currency,
     /// The balance: deposits and realized PnL, without open positions.
-    pub(super) balance: Decimal,
+    pub(crate) balance: Decimal,
 }
 
 impl IcAccount {
@@ -36,7 +34,7 @@ impl IcAccount {
     ///
     /// Returns an error if the trader is another account, the account is
     /// not hedging, or its deposit asset is no currency Nautilus knows.
-    pub(super) fn check(
+    pub(crate) fn check(
         trader: &ProtoOaTrader,
         account_id: IcAccountId,
         assets: &HashMap<i64, ProtoOaAsset>,

@@ -2,7 +2,7 @@
 //! on a cTrader session.
 //!
 //! On connect it authenticates, checks the account (hedging,
-//! `IC_ACCOUNT_ID`'s, see `data/ic/account.rs`), loads its instruments,
+//! `IC_ACCOUNT_ID`'s, see `common::account`), loads its instruments,
 //! listens to the account's trade events (see `dispatch`), and publishes
 //! the account state: the balance, and the margin the open positions use.
 //! It reports connected once the node's cache holds the account. The venue
@@ -63,22 +63,28 @@ use nautilus_model::{
     types::{AccountBalance, MarginBalance, Price},
 };
 
-use super::{
+use self::{
     dispatch::{Dispatch, Output, Role, Want},
-    orders::{self, Leg, Placement, Protection, Tag, parse_protection_id},
+    orders::{Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
-use crate::data::ic::{
-    IcHistory,
-    account::IcAccount,
-    config::{IcConnection, IcCredential},
-    messages::{
-        ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
-        ProtoOaReconcileRes, TradeRequest,
+use super::{
+    common::{
+        account::IcAccount,
+        messages::{
+            ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
+            ProtoOaReconcileRes, TradeRequest,
+        },
+        parse::IC_VENUE,
     },
-    parse::IC_VENUE,
+    config::{IcConnection, IcCredential},
+    session::IcHistory,
     websocket::{HEARTBEAT_INTERVAL, TradeSent},
 };
+
+mod dispatch;
+mod orders;
+mod reports;
 
 /// How long connect waits for the node's cache to hold the account.
 const ACCOUNT_REGISTERED_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1341,8 +1347,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::data::ic::{
-        messages::{
+    use crate::venues::ic::{
+        common::messages::{
             Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountType, ProtoOaAssetListReq, ProtoOaAssetListRes,
             ProtoOaClosePositionDetail, ProtoOaDeal, ProtoOaDealListReq, ProtoOaDealListRes,
@@ -1431,7 +1437,7 @@ mod tests {
                 t if t == ProtoOaSymbolByIdReq::TYPE => {
                     replay::<ProtoOaSymbolByIdRes>(request, SYMBOL_BY_ID_RES)
                 }
-                t if t == crate::data::ic::messages::ProtoOaGetDynamicLeverageByIdReq::TYPE => {
+                t if t == crate::venues::ic::common::messages::ProtoOaGetDynamicLeverageByIdReq::TYPE => {
                     testing::dynamic_leverage_answer(request)
                 }
                 t if t == ProtoOaTraderReq::TYPE => match &venue.trader {

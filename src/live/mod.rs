@@ -1,29 +1,22 @@
 //! Runs the strategy on a Nautilus live node.
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
-//! those of the instruments' live brokers (`venues::LiveBroker`): OKX's
-//! for OKX instruments (`venues::okx`), IC's for IC instruments (`ic/`, a
-//! hedging account), IB's for the others (`venues::ib`), several if the
-//! instruments span several. Each broker's data client serves the warmup
-//! of its instruments up to now: OKX's candles (see `venues::okx`), IC's
-//! quotes from cTrader's tick history (see `ic/`), IB's 1-minute bars (see
-//! `venues::ib`). The node registers the catalog fill-catalog
-//! fills and backtests read: the warmup comes from it first, from the
-//! venues for what it lacks, and IC's answers are written back to it (see
-//! `strategy::warmup`). A futures root's instruments are its contract in
+//! those of the instruments' live brokers, several if the instruments span
+//! several, which the venues module sets up (`venues::live_clients`). Each
+//! broker's data client serves the warmup of its instruments up to now.
+//! The node registers the catalog fill-catalog fills and backtests read:
+//! the warmup comes from it first, from the venues for what it lacks, and
+//! the answers of the clients that certify them are written back to it
+//! (see `strategy::warmup`). A futures root's instruments are its contract in
 //! front at the start and the one it rolls into next (see
 //! `rolls::Transition::after`); the strategy's roller loads each later one
 //! before switching to it (see `rolls::Roller::live`), so the node rolls
 //! without a restart; bars on a root are refused.
 
-mod ic;
 pub mod node;
 mod recording;
 mod redis;
 
-pub use ic::{
-    IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
-};
 pub use recording::Recording;
 
 use std::{fmt::Debug, path::PathBuf};
@@ -41,18 +34,14 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    data::catalog_path,
+    catalog::catalog_path,
     model::launcher::RetrainActor,
     rolls::Transition,
     strategy::{
         DataRequirements,
         warmup::{self, Warmup},
     },
-    venues::{
-        LiveBroker,
-        ib::{self, IbAccount},
-        okx,
-    },
+    venues::{self, ib::IbAccount},
 };
 
 /// One live run: the strategy trades its IB instruments in `account`
@@ -85,9 +74,9 @@ pub struct Live {
 }
 
 impl Live {
-    /// Sets up the clients of the instruments of `requirements`, OKX's, IC's
-    /// then IB's, then runs `strategy` on a live node until SIGINT or
-    /// SIGTERM, beside `retraining`, the actor of its retrains if it is
+    /// Sets up the clients of the instruments of `requirements` (see
+    /// `venues::live_clients`), then runs `strategy` on a live node until
+    /// SIGINT or SIGTERM, beside `retraining`, the actor of its retrains if it is
     /// retrained (`RetrainActor`), its cache sized for `warmup`, the
     /// strategy's (see `Warmup::cache_config`). The strategy's warmup
     /// requests go to the data clients. A root's instruments are its
@@ -103,14 +92,10 @@ impl Live {
     /// cannot be created or its path is not UTF-8, if the staging directory is inside the
     /// catalog, the trader's instance id cannot be kept (see `Recording`),
     /// if what the last run left staged cannot be promoted
-    /// (`promote_staged`), if an IC bar type is not built from quotes or
-    /// IC's environment or credential is missing (see `ic::clients`,
-    /// checked before anything connects), if OKX's clients cannot be set up or the OKX account does not suit the
-    /// run (see `okx::clients`), if IC is unreachable or its account is not
-    /// hedging or not `IC_ACCOUNT_ID`'s (see `ic::IcClients::check_account`),
-    /// if the strategy trades IB instruments and no account is given, if
-    /// IB's clients cannot be set up (see `ib::clients`), if Redis cannot
-    /// be started (see `redis::start`), or if the node fails (see
+    /// (`promote_staged`), if the clients cannot be set up (see
+    /// `venues::live_clients`, a venue's environment read before anything
+    /// connects), if Redis cannot be started (see `redis::start`), or if
+    /// the node fails (see
     /// `node::build`, `node::run`).
     pub async fn run<S>(
         &self,
@@ -141,40 +126,14 @@ impl Live {
             file_config,
         )?;
         init_tracing()?;
-        let (mut okx_ids, mut ic_ids, mut ib_ids) = (Vec::new(), Vec::new(), Vec::new());
-        for &id in &instrument_ids {
-            match LiveBroker::of(id) {
-                LiveBroker::Okx => okx_ids.push(id),
-                LiveBroker::Ic => ic_ids.push(id),
-                LiveBroker::Ib => ib_ids.push(id),
-            }
-        }
-        // Read before anything connects.
-        let ic = if ic_ids.is_empty() {
-            None
-        } else {
-            Some(ic::clients(
-                &requirements.of_instruments(&ic_ids).bar_types,
-                |name| std::env::var(name).ok(),
-            )?)
-        };
-        let mut clients = Vec::new();
-        if !okx_ids.is_empty() {
-            let okx = okx::clients(&okx_ids, self.leverage).await?;
-            clients.push(okx.into_node_clients());
-        }
-        if let Some(ic) = ic {
-            ic.check_account().await?;
-            clients.push(ic.into_node_clients());
-        }
-        if !ib_ids.is_empty() {
-            let account = self.account.as_ref().context(
-                "the strategy trades IB instruments: give the IB account \
-                 (--account or NAUTILUS_IB_ACCOUNT_ID)",
-            )?;
-            let ib = ib::clients(account, self.client_id, &ib_ids).await?;
-            clients.push(ib.into_node_clients());
-        }
+        let clients = venues::live_clients(
+            requirements,
+            &instrument_ids,
+            self.account.as_ref(),
+            self.client_id,
+            self.leverage,
+        )
+        .await?;
         let cache_database = redis::start().await?;
         // Built first, which promotes what the last run left staged: the
         // warmup reads the catalog with it there.

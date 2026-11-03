@@ -16,7 +16,7 @@ use crate::common::{
     ts,
 };
 use helix_trader::{
-    data::fill_catalog,
+    catalog::fill_catalog,
     model::{
         config::ModelConfig,
         features::FeatureSet,

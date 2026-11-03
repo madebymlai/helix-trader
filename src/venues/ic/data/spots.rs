@@ -1,5 +1,5 @@
 //! Live quotes: cTrader's spot events merged into quotes by the rule of the
-//! tick history (`ticks::QuoteMerge` in `data/ic`).
+//! tick history (`session::ticks::QuoteMerge`).
 //!
 //! A spot event carries a side only when it changed, and the time of the
 //! change (`subscribeToSpotTimestamp`); the first one after a subscription
@@ -24,9 +24,9 @@ use nautilus_model::{
     instruments::{Instrument, InstrumentAny},
 };
 
-use crate::data::ic::{
-    messages::ProtoOaSpotEvent,
-    ticks::{Merged, QuoteMerge},
+use crate::venues::ic::{
+    common::messages::ProtoOaSpotEvent,
+    session::ticks::{Merged, QuoteMerge},
 };
 
 /// The live quotes of the instruments of a session, by cTrader symbol.
@@ -194,7 +194,7 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::data::ic::testing::{
+    use crate::venues::ic::testing::{
         SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST,
     };
 

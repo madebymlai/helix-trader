@@ -1,6 +1,6 @@
 # OKX
 
-OKX serves `OKX` instruments, history and live (see the [routing table](../mod.rs)). See [data](../../data/README.md) for shared fill semantics and [live](../../live/README.md) for startup, routing, recording and recovery.
+OKX serves `OKX` instruments, history and live (see the [routing table](../mod.rs)). See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for startup, routing, recording and recovery.
 
 ## History
 

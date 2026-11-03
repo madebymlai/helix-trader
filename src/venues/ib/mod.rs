@@ -7,7 +7,7 @@
 //! IB's fill (`IbHistory::fill`) is temporary: IB's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
 //! back. Once nautilus_trader#5472 is fixed, IB fills through the node as
-//! Databento and IC do (see `data::NodeFill`), and `fill` and `data` go.
+//! Databento and IC do (see `catalog::NodeFill`), and `fill` and `data` go.
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
@@ -34,7 +34,7 @@ use nautilus_model::{
 
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
-use crate::{data::fill_slices, strategy::SeriesSlice};
+use crate::{catalog::fill_slices, strategy::SeriesSlice};
 
 mod gateway;
 pub use gateway::IbAccount;

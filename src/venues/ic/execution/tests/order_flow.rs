@@ -1,5 +1,5 @@
 //! The order flow of `IcExecutionClient` against the mock peer, on the
-//! trade events captured on the demo (`data/ic/testdata/execution_*`,
+//! trade events captured on the demo (`testdata/execution_*`,
 //! `order_error_*`): the peer answers each trade request with them, as the
 //! demo answered the same request, mutated where a test says so. The
 //! node's side is played here: orders go into the cache before they are
@@ -16,8 +16,8 @@ use nautilus_model::{
 };
 
 use super::*;
-use crate::data::ic::{
-    messages::{
+use crate::venues::ic::{
+    common::messages::{
         ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq,
         ProtoOaClosePositionReq, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaNewOrderReq,
         ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderErrorEvent,
@@ -841,7 +841,7 @@ fn closed(bytes: &[u8], left: i64) -> ProtoOaExecutionEvent {
     if let Some(position) = execution.position.as_mut().filter(|_| left > 0) {
         position.trade_data.volume = left;
         position.set_position_status(
-            crate::data::ic::messages::ProtoOaPositionStatus::PositionStatusOpen,
+            crate::venues::ic::common::messages::ProtoOaPositionStatus::PositionStatusOpen,
         );
     }
     execution

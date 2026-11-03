@@ -1,7 +1,7 @@
 //! Compiles Spotware's cTrader Open API messages into Rust types (prost),
-//! for the IC Markets adapter (`src/data/ic/`).
+//! for the IC Markets adapter (`src/venues/ic/`).
 //!
-//! The four `.proto` files in `src/data/ic/proto/` are Spotware's, copied
+//! The four `.proto` files in `src/venues/ic/proto/` are Spotware's, copied
 //! unchanged from github.com/spotware/openapi-proto-messages at commit
 //! 3fd8bddfbe0cfc2ecfda079623dc4e498af11e66 (2025-11-13), MIT-licensed
 //! (`LICENSE` there). They declare no package, so the types land in one
@@ -12,7 +12,7 @@
 
 use std::{io::Result, path::Path};
 
-const PROTO_DIR: &str = "src/data/ic/proto";
+const PROTO_DIR: &str = "src/venues/ic/proto";
 
 const GOLD_SCALP_DIR: &str = "src/strategy/gold_scalp";
 

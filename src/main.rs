@@ -18,8 +18,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::strategy::gold_scalp::GoldScalp;
 use helix_trader::{
     backtest::{self, Backtest},
-    data::{IcConnection, IcHistory, NodeClient, NodeFill, missing},
-    live::{IcDataClientConfig, IcDataClientFactory, Live, Recording},
+    catalog::{NodeFill, missing},
+    live::{Live, Recording},
     model::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
@@ -36,6 +36,7 @@ use helix_trader::{
         HistorySource,
         databento::DatabentoHistory,
         ib::{IbAccount, IbHistory},
+        ic,
         okx::OkxHistory,
     },
 };
@@ -45,7 +46,6 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
-use nautilus_live::config::RoutingConfig;
 use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
@@ -489,7 +489,7 @@ async fn main() -> anyhow::Result<()> {
 /// from and its ticks (see `DataRequirements::catalog_series`), each on a
 /// contract over its slice (`DataRequirements::slices`), every source given
 /// its slices: GLBX's and IC's fill through a Nautilus node (see
-/// `data::NodeFill`), by Databento's data client for GLBX instruments (the
+/// `catalog::NodeFill`), by Databento's data client for GLBX instruments (the
 /// series declared, Databento's cost of every request quoted first, before
 /// the node starts) and IC's for IC instruments; OKX's archive fills OKX
 /// instruments (their 1-minute candles) and IB (connected only if needed)
@@ -551,19 +551,10 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         }
     }
     if !ic_ids.is_empty() {
-        let instrument_ids =
-            IcHistory::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
+        let instrument_ids = ic::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
         let requests = missing(&catalog, &slices_of(HistorySource::Ic))?;
         if !requests.is_empty() {
-            let client = NodeClient {
-                factory: Box::new(IcDataClientFactory),
-                config: Box::new(IcDataClientConfig {
-                    connection: IcConnection::from_env()?,
-                    instrument_ids,
-                }),
-                routing: RoutingConfig::default(),
-            };
-            node.add(client, &requests, IcHistory::period);
+            node.add(ic::node_client(instrument_ids)?, &requests, ic::period);
         }
     }
     // Temporary until nautilus_trader#5473 is fixed: OKX then fills through

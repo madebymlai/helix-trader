@@ -1,163 +1,123 @@
-//! IC Markets clients for the live node.
+//! IC Markets, over Spotware's cTrader Open API: the instruments of IC's
+//! forex and metals and their quotes, from cTrader's tick history, for the
+//! catalog, which fill-catalog fills through the node by IC's data client
+//! (see `catalog::NodeFill`), and the live node's clients on a hedging
+//! account. IC's instruments are on venue `ICMARKETS` (`XAUUSD.ICMARKETS`).
+//! See `README.md`.
 //!
-//! Provides the data client (`data`, its live quotes in `spots`), the
-//! execution client (`execution`, its reconciliation reports in `reports`)
-//! and their factories and configs, on the cTrader session of `data/ic`
-//! (`IcHistory`), on the environment `IC_ENVIRONMENT` names, `demo` or
-//! `live`, required, with the credential from `IC_*`, both read before
-//! anything connects. The data
-//! client loads the run's instruments at connect; the execution client
-//! checks the account (hedging, the configured one), publishes its state,
-//! reconciles it, and trades (`orders` the requests, `dispatch` the trade
-//! events).
+//! Nautilus has no cTrader adapter, so the submodules are one, laid out as
+//! Nautilus' adapters are (`docs/developer_guide/adapters.md`) and private
+//! to this module: `common` (Spotware's protobuf messages from the
+//! vendored `proto/`, the parsing of symbols into instruments, the account
+//! check, the token pair and its token file), `config` (the environment,
+//! the credential and the client configs), `websocket` (the connection: an
+//! outer client and its handler task), `session` (`IcHistory`, the cTrader
+//! session history and both clients share: the tick history merged into
+//! quotes, the spot subscriptions, the trade requests), `data` (the data
+//! client, its live quotes from the spot events), `execution` (the
+//! execution client: the trade requests of orders, the dispatch of trade
+//! events, the reconciliation reports) and `factories`.
+//!
+//! This module itself holds IC's couplings to helix: which instruments a
+//! fill's IC data client loads, from the strategy's catalog series
+//! (`quoted`), the client (`node_client`) and the period of its requests
+//! (`period`), and the live node's clients (`clients`), on the environment
+//! `IC_ENVIRONMENT` names, `demo` or `live`, required, with the credential
+//! from `IC_*`, both read before anything connects.
 
-use std::{any::Any, cell::RefCell, rc::Rc};
+use std::str::FromStr;
 
-use anyhow::Context;
-use nautilus_common::{
-    cache::CacheView,
-    clients::{DataClient, ExecutionClient},
-    clock::Clock,
-    factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
-};
-use nautilus_live::{ExecutionClientCore, config::RoutingConfig};
+use anyhow::{Context, ensure};
+use jiff::SignedDuration;
+use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
-    data::BarType,
-    enums::{AccountType, OmsType},
-    identifiers::{ClientId, InstrumentId, TraderId, Venue},
+    data::{BarType, NautilusDataType},
+    identifiers::InstrumentId,
 };
 
-use self::{data::IcDataClient, execution::IcExecutionClient};
-use super::node::Clients;
+use self::common::parse;
+pub(crate) use self::common::parse::IC_VENUE;
+pub use self::{
+    config::{IcConnection, IcDataClientConfig, IcExecutionClientConfig},
+    factories::{IcDataClientFactory, IcExecutionClientFactory},
+    session::IcHistory,
+};
 use crate::{
-    data::{IcConnection, IcHistory, ic::quotes_of},
+    catalog::{FillData, NodeClient},
+    live::node::Clients,
     strategy::catalog_series,
 };
 
+mod common;
+mod config;
 mod data;
-mod dispatch;
 mod execution;
-mod orders;
-mod reports;
-mod spots;
+mod factories;
+mod session;
+#[cfg(test)]
+mod testing;
+mod websocket;
 
-/// The name of IC's clients, and so their `ClientId`.
-const NAME: &str = "ICMARKETS";
-
-/// The config of IC's data client: where it connects, as whom, and the
-/// instruments it loads.
-#[derive(Debug, Clone)]
-pub struct IcDataClientConfig {
-    pub connection: IcConnection,
-    pub instrument_ids: Vec<InstrumentId>,
+/// The instruments of `series`, each the quotes of an IC instrument:
+/// those IC's data client loads to fill them through the node.
+///
+/// # Errors
+///
+/// Returns an error naming the first series that is not the quotes of
+/// an IC instrument: IC serves nothing else.
+pub fn quoted(series: &[(NautilusDataType, String)]) -> anyhow::Result<Vec<InstrumentId>> {
+    series
+        .iter()
+        .map(|(data_type, identifier)| quotes_of(data_type, identifier))
+        .collect()
 }
 
-impl ClientConfig for IcDataClientConfig {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+/// The IC instrument whose quotes the series of `data_type` and
+/// `identifier` is; an error for any other series.
+fn quotes_of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<InstrumentId> {
+    ensure!(
+        *data_type == NautilusDataType::QuoteTick,
+        "IC serves quotes only, not the {data_type} of {identifier}"
+    );
+    let id = InstrumentId::from_str(identifier)
+        .with_context(|| format!("{identifier} is no instrument id"))?;
+    parse::ensure_ic(id)?;
+    Ok(id)
 }
 
-/// Creates `IcDataClient`s from an `IcDataClientConfig`.
-#[derive(Debug, Default)]
-pub struct IcDataClientFactory;
-
-impl DataClientFactory for IcDataClientFactory {
-    fn create(
-        &self,
-        name: &str,
-        config: &dyn ClientConfig,
-        _cache: CacheView,
-        _clock: Rc<RefCell<dyn Clock>>,
-    ) -> anyhow::Result<Box<dyn DataClient>> {
-        let config = config
-            .as_any()
-            .downcast_ref::<IcDataClientConfig>()
-            .with_context(|| {
-                format!("IcDataClientFactory takes an IcDataClientConfig, not {config:?}")
-            })?;
-        Ok(Box::new(IcDataClient::new(
-            ClientId::from(name),
-            &config.connection,
-            config.instrument_ids.clone(),
-        )))
-    }
-
-    fn name(&self) -> &str {
-        NAME
-    }
-
-    fn config_type(&self) -> &str {
-        "IcDataClientConfig"
-    }
+/// IC's data client for a fill through the node (see `NodeFill::add`),
+/// loading `instrument_ids` (see `quoted`), on the connection of the
+/// environment (`IcConnection::from_env`). It names its venue, so
+/// Nautilus routes IC's requests to it without a route of ours.
+///
+/// # Errors
+///
+/// As `IcConnection::from_env`.
+pub fn node_client(instrument_ids: Vec<InstrumentId>) -> anyhow::Result<NodeClient> {
+    Ok(NodeClient {
+        factory: Box::new(IcDataClientFactory),
+        config: Box::new(IcDataClientConfig {
+            connection: IcConnection::from_env()?,
+            instrument_ids,
+        }),
+        routing: RoutingConfig::default(),
+    })
 }
 
-/// The config of IC's execution client: where it connects, as whom, and
-/// the instruments whose reports it reads.
-#[derive(Debug, Clone)]
-pub struct IcExecutionClientConfig {
-    pub connection: IcConnection,
-    pub instrument_ids: Vec<InstrumentId>,
-}
-
-impl ClientConfig for IcExecutionClientConfig {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-/// Creates `IcExecutionClient`s from an `IcExecutionClientConfig`: a
-/// hedging venue (each cTrader position one Nautilus position), a margin
-/// account named after the environment (`IcConnection::account_id`).
-#[derive(Debug, Default)]
-pub struct IcExecutionClientFactory;
-
-impl ExecutionClientFactory for IcExecutionClientFactory {
-    fn create(
-        &self,
-        trader_id: TraderId,
-        name: &str,
-        config: &dyn ClientConfig,
-        cache: CacheView,
-        _clock: Rc<RefCell<dyn Clock>>,
-    ) -> anyhow::Result<Box<dyn ExecutionClient>> {
-        let config = config
-            .as_any()
-            .downcast_ref::<IcExecutionClientConfig>()
-            .with_context(|| {
-                format!("IcExecutionClientFactory takes an IcExecutionClientConfig, not {config:?}")
-            })?;
-        let core = ExecutionClientCore::new(
-            trader_id,
-            ClientId::from(name),
-            Venue::new(NAME),
-            OmsType::Hedging,
-            config.connection.account_id(),
-            AccountType::Margin,
-            None,
-            cache,
-        );
-        Ok(Box::new(IcExecutionClient::new(
-            core,
-            &config.connection,
-            config.instrument_ids.clone(),
-        )))
-    }
-
-    fn name(&self) -> &str {
-        NAME
-    }
-
-    fn config_type(&self) -> &str {
-        "IcExecutionClientConfig"
-    }
+/// The window one request holds at most in a fill through the node
+/// (see `NodeFill::add`): a week, the most one tick request spans,
+/// about 0.7 M BID and 0.7 M ASK ticks of XAUUSD (`README.md`, "Tick
+/// history").
+#[must_use]
+pub fn period(_data: FillData) -> SignedDuration {
+    SignedDuration::from_hours(7 * 24)
 }
 
 /// The IC client configs of a node trading IC instruments.
 #[derive(Debug, Clone)]
-pub(super) struct IcClients {
-    pub(super) data: IcDataClientConfig,
-    pub(super) exec: IcExecutionClientConfig,
+pub(crate) struct IcClients {
+    data: IcDataClientConfig,
+    exec: IcExecutionClientConfig,
 }
 
 /// The client configs of the IC instruments `bar_types` are built from,
@@ -169,14 +129,11 @@ pub(super) struct IcClients {
 /// Returns an error if a bar type is not built from the quotes of an IC
 /// instrument (see `strategy::catalog_series`), if `IC_ENVIRONMENT` is not
 /// `demo` or `live`, or if a credential variable is missing or invalid.
-pub(super) fn clients(
+pub(crate) fn clients(
     bar_types: &[BarType],
     var: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<IcClients> {
-    let instrument_ids = catalog_series(bar_types)
-        .iter()
-        .map(|(data_type, identifier)| quotes_of(data_type, identifier))
-        .collect::<anyhow::Result<Vec<InstrumentId>>>()?;
+    let instrument_ids = quoted(&catalog_series(bar_types))?;
     let connection = IcConnection::from_vars(var)?;
     Ok(IcClients {
         data: IcDataClientConfig {
@@ -201,7 +158,7 @@ impl IcClients {
     /// Returns an error if cTrader cannot be reached or refuses the
     /// credential, or if the account does not suit (see
     /// `IcHistory::check_account`).
-    pub(super) async fn check_account(&self) -> anyhow::Result<()> {
+    pub(crate) async fn check_account(&self) -> anyhow::Result<()> {
         let ic = IcHistory::connect_as(&self.data.connection).await?;
         let checked = ic.check_account().await;
         ic.disconnect().await;
@@ -211,7 +168,7 @@ impl IcClients {
     /// The factories and configs, for the node. Both clients are on venue
     /// `ICMARKETS`, so Nautilus routes IC's data and orders to them without
     /// a route of ours.
-    pub(super) fn into_node_clients(self) -> Clients {
+    pub(crate) fn into_node_clients(self) -> Clients {
         Clients {
             data_factory: Box::new(IcDataClientFactory),
             data_config: Box::new(self.data),
@@ -223,16 +180,20 @@ impl IcClients {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     use nautilus_common::{
         cache::Cache,
         clock::VirtualClock,
+        factories::{DataClientFactory, ExecutionClientFactory},
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
     };
-    use nautilus_model::identifiers::AccountId;
+    use nautilus_model::{
+        enums::OmsType,
+        identifiers::{AccountId, ClientId, TraderId, Venue},
+    };
 
-    use super::*;
+    use super::{factories::NAME, *};
 
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -393,5 +354,41 @@ mod tests {
             clock,
         );
         assert!(exec.is_ok(), "{:#}", exec.err().unwrap());
+    }
+
+    const XAUUSD: &str = "XAUUSD.ICMARKETS";
+
+    #[test]
+    fn a_series_other_than_the_quotes_of_an_ic_instrument_is_refused() {
+        let quotes = (NautilusDataType::QuoteTick, XAUUSD.to_owned());
+        let bars = (
+            NautilusDataType::Bar,
+            "XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL".to_owned(),
+        );
+        let elsewhere = (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO".to_owned());
+
+        assert_eq!(
+            quoted(std::slice::from_ref(&quotes)).unwrap(),
+            [InstrumentId::from(XAUUSD)]
+        );
+        let err = quoted(&[quotes, bars]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "IC serves quotes only, not the Bar of XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL"
+        );
+        let err = quoted(&[elsewhere]).unwrap_err();
+        assert!(err.to_string().contains("EUR/USD.IDEALPRO"), "{err}");
+    }
+
+    #[test]
+    fn book_deltas_and_custom_data_are_refused() {
+        let imbalance = NautilusDataType::Custom {
+            type_name: "Imbalance".to_string(),
+        };
+        for data_type in [NautilusDataType::OrderBookDelta, imbalance] {
+            let named = data_type.to_string();
+            let err = quoted(&[(data_type, XAUUSD.to_owned())]).unwrap_err();
+            assert!(err.to_string().contains(&named), "{err}");
+        }
     }
 }

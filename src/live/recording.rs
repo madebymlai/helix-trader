@@ -36,7 +36,7 @@ use nautilus_live::node::LiveNode;
 use nautilus_model::{data::NautilusDataType, identifiers::TraderId};
 use nautilus_persistence::config::{DataCatalogConfig, RotationConfig, StreamingConfig};
 
-use crate::data::catalog_path;
+use crate::catalog::catalog_path;
 
 /// Where the live node stages the data it streams; it promotes it into the
 /// catalog daily (`PROMOTION_INTERVAL`).

@@ -1,5 +1,5 @@
 //! fill-catalog's fill through a Nautilus node, at its seam: what the
-//! catalog lacks (`data::missing`), filled by a `NodeFill` whose node holds
+//! catalog lacks (`catalog::missing`), filled by a `NodeFill` whose node holds
 //! a fake data client answering as Databento's does (a completed
 //! `DataResponseEnvelope`, `RequestFailed` on an error), and the catalog.
 //! The data engine writes each answer back; the tests read the catalog,
@@ -23,7 +23,7 @@ use std::{
 };
 
 use helix_trader::{
-    data::{FillData, NodeClient, NodeFill, missing},
+    catalog::{FillData, NodeClient, NodeFill, missing},
     strategy::{DataRequirements, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};

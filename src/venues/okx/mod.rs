@@ -22,7 +22,7 @@
 //! The fill (`OkxHistory::fill`) is temporary: OKX's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
 //! back. Once nautilus_trader#5473 is fixed, OKX fills through the node as
-//! Databento and IC do (see `data::NodeFill`).
+//! Databento and IC do (see `catalog::NodeFill`).
 
 use std::{collections::HashMap, io::Cursor, time::Duration};
 
@@ -57,7 +57,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::HistorySource;
-use crate::{data::fill_catalog, strategy::SeriesSlice};
+use crate::{catalog::fill_catalog, strategy::SeriesSlice};
 
 mod archive;
 mod live;

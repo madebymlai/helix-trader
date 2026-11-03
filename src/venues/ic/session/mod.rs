@@ -1,56 +1,40 @@
-//! IC Markets history and account, over Spotware's cTrader Open API: the
-//! instruments of IC's forex and metals and their tick history, merged
-//! into quotes, and the cTrader session the live node's clients
-//! (`live/ic`) share. fill-catalog fills the catalog with them through the
-//! node, by IC's data client (see `node_fill`).
-//!
-//! Nautilus has no cTrader adapter, so this module and `live/ic` are one,
-//! laid out as Nautilus' adapters are (`docs/developer_guide/adapters.md`):
-//! Spotware's protobuf messages (`messages`, from the vendored `proto/`),
-//! the environment and credential (`config`), the connection (`websocket`,
-//! an outer client and its handler task) and the parsing of symbols into
-//! instruments (`parse`), the tick history merged into quotes (`ticks`),
-//! the account (`account`) and the token pair with the token file that
-//! keeps it renewed (`token`). IC's instruments are on venue `ICMARKETS`
-//! (`XAUUSD.ICMARKETS`).
+//! The cTrader session on IC's account, which history, the data client's
+//! live quotes and the execution client share: the instruments of IC's
+//! forex and metals and their tick history, merged into quotes (`ticks`),
+//! the spot subscriptions, and the account, its open positions, orders
+//! and deals, and its trade requests, over the connection (`websocket`).
 
-use std::{collections::HashMap, str::FromStr};
+use std::collections::HashMap;
 
-pub use self::config::IcConnection;
-use self::{
-    account::IcAccount,
-    config::{IcAccountId, IcCredential},
-    messages::{
-        ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
-        ProtoOaDealListRes, ProtoOaDynamicLeverage, ProtoOaGetDynamicLeverageByIdReq,
-        ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
-        ProtoOaOrder, ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderListReq,
-        ProtoOaOrderListRes, ProtoOaQuoteType, ProtoOaReconcileReq, ProtoOaReconcileRes,
-        ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
-        ProtoOaTraderReq, ProtoOaTraderRes, TradeRequest,
-    },
-    ticks::{SideTicks, Tick},
-    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents, TradeEvents, TradeSent},
-};
-use super::node_fill::FillData;
 use anyhow::{Context, ensure};
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_model::{
-    data::{NautilusDataType, QuoteTick},
+    data::QuoteTick,
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
 
-pub(crate) mod account;
-pub(crate) mod config;
-pub(crate) mod messages;
-pub(crate) mod parse;
-#[cfg(test)]
-pub(crate) mod testing;
+use self::ticks::{SideTicks, Tick};
+use super::{
+    common::{
+        account::IcAccount,
+        messages::{
+            self, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
+            ProtoOaDealListRes, ProtoOaDynamicLeverage, ProtoOaGetDynamicLeverageByIdReq,
+            ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
+            ProtoOaOrder, ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderListReq,
+            ProtoOaOrderListRes, ProtoOaQuoteType, ProtoOaReconcileReq, ProtoOaReconcileRes,
+            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
+            ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, TradeRequest,
+        },
+        parse,
+    },
+    config::{IcAccountId, IcConnection, IcCredential},
+    websocket::{HEARTBEAT_INTERVAL, IcWebSocketClient, SpotEvents, TradeEvents, TradeSent},
+};
+
 pub(crate) mod ticks;
-mod token;
-pub(crate) mod websocket;
 
 /// A cTrader session on IC's account: history, the spot subscriptions of
 /// the data client, and the account, open positions and deals of the
@@ -105,29 +89,6 @@ impl IcHistory {
         let account_id = credential.account_id;
         let (client, spots) = IcWebSocketClient::connect(url, credential, heartbeat).await?;
         Ok((Self { client, account_id }, spots))
-    }
-
-    /// The instruments of `series`, each the quotes of an IC instrument:
-    /// those IC's data client loads to fill them through the node.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming the first series that is not the quotes of
-    /// an IC instrument: IC serves nothing else.
-    pub fn quoted(series: &[(NautilusDataType, String)]) -> anyhow::Result<Vec<InstrumentId>> {
-        series
-            .iter()
-            .map(|(data_type, identifier)| quotes_of(data_type, identifier))
-            .collect()
-    }
-
-    /// The window one request holds at most in a fill through the node
-    /// (see `NodeFill::add`): a week, the most one tick request spans,
-    /// about 0.7 M BID and 0.7 M ASK ticks of XAUUSD (`README.md`, "Tick
-    /// history").
-    #[must_use]
-    pub fn period(_data: FillData) -> SignedDuration {
-        SignedDuration::from_hours(7 * 24)
     }
 
     /// Checks the account: hedging and `IC_ACCOUNT_ID`'s (see `account`).
@@ -593,22 +554,6 @@ pub(crate) struct IcSymbol {
     pub(crate) symbol_id: i64,
 }
 
-/// The IC instrument whose quotes the series of `data_type` and
-/// `identifier` is; an error for any other series.
-pub(crate) fn quotes_of(
-    data_type: &NautilusDataType,
-    identifier: &str,
-) -> anyhow::Result<InstrumentId> {
-    ensure!(
-        *data_type == NautilusDataType::QuoteTick,
-        "IC serves quotes only, not the {data_type} of {identifier}"
-    );
-    let id = InstrumentId::from_str(identifier)
-        .with_context(|| format!("{identifier} is no instrument id"))?;
-    parse::ensure_ic(id)?;
-    Ok(id)
-}
-
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
@@ -636,12 +581,12 @@ mod tests {
 
     use super::{
         messages::{Payload, ProtoMessage},
-        testing::{
-            self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            TRADER_RES, accept_auth, replay, reply, tick_answer,
-        },
         ticks::Tick,
         *,
+    };
+    use crate::venues::ic::testing::{
+        self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
+        TRADER_RES, accept_auth, replay, reply, tick_answer,
     };
 
     /// A cTrader serving the captured assets, symbols and details.
@@ -876,42 +821,6 @@ mod tests {
         assert_eq!(err.to_string(), "EUR/USD.IDEALPRO is not on ICMARKETS");
         assert_eq!(requests(&received), []);
         history.disconnect().await;
-    }
-
-    const XAUUSD: &str = "XAUUSD.ICMARKETS";
-
-    #[test]
-    fn a_series_other_than_the_quotes_of_an_ic_instrument_is_refused() {
-        let quotes = (NautilusDataType::QuoteTick, XAUUSD.to_owned());
-        let bars = (
-            NautilusDataType::Bar,
-            "XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL".to_owned(),
-        );
-        let elsewhere = (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO".to_owned());
-
-        assert_eq!(
-            IcHistory::quoted(std::slice::from_ref(&quotes)).unwrap(),
-            [InstrumentId::from(XAUUSD)]
-        );
-        let err = IcHistory::quoted(&[quotes, bars]).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "IC serves quotes only, not the Bar of XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL"
-        );
-        let err = IcHistory::quoted(&[elsewhere]).unwrap_err();
-        assert!(err.to_string().contains("EUR/USD.IDEALPRO"), "{err}");
-    }
-
-    #[test]
-    fn book_deltas_and_custom_data_are_refused() {
-        let imbalance = NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
-        for data_type in [NautilusDataType::OrderBookDelta, imbalance] {
-            let named = data_type.to_string();
-            let err = IcHistory::quoted(&[(data_type, XAUUSD.to_owned())]).unwrap_err();
-            assert!(err.to_string().contains(&named), "{err}");
-        }
     }
 
     /// The log records of the IC adapter at info and above, for the demo

@@ -1,5 +1,5 @@
 //! Databento history of `GLBX` instruments (CME Globex, `GLBX.MDP3`),
-//! filled through the node (see `data::NodeFill`) by Nautilus' Databento
+//! filled through the node (see `catalog::NodeFill`) by Nautilus' Databento
 //! data client (`DatabentoDataClient`), whose answers the data engine
 //! writes back to the catalog: definitions, MBP-10 as `OrderBookDepth`
 //! snapshots, trades as `TradeTick`s, quotes, each contract under its own
@@ -22,7 +22,7 @@ use nautilus_live::config::RoutingConfig;
 use nautilus_model::identifiers::Venue;
 
 use super::HistorySource;
-use crate::data::{FillData, FillRequest, NodeClient};
+use crate::catalog::{FillData, FillRequest, NodeClient};
 
 /// Nautilus' map of Databento publishers to venues, copied from
 /// `crates/adapters/databento/publishers.json` at the pinned commit: the
@@ -76,7 +76,7 @@ impl DatabentoHistory {
         DAY
     }
 
-    /// Checks `requests`, of `GLBX` instruments (see `data::missing`),
+    /// Checks `requests`, of `GLBX` instruments (see `catalog::missing`),
     /// against the dataset's end, then logs Databento's quote for each and
     /// their total, before any data is asked for.
     ///
@@ -193,7 +193,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        data::missing,
+        catalog::missing,
         strategy::{DataRequirements, TickSeries},
     };
 
