@@ -34,12 +34,14 @@ pub fn at(time: &str) -> Timestamp {
 }
 
 /// IC's margin of XAUUSD on the demo account: 1 / 30, the account's 1:30
-/// under the symbol's 1:200 (`src/venues/ic/README.md`, "Margins").
+/// under the symbol's 1:200 (`src/venues/ic/README.md`, "Account, margins
+/// and costs").
 pub fn margin() -> Decimal {
     Decimal::ONE / Decimal::from(30)
 }
 
-/// XAUUSD as IC defines it (`src/venues/ic/README.md`, "Currency pairs").
+/// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and
+/// account").
 pub fn instrument() -> InstrumentAny {
     InstrumentAny::CurrencyPair(
         CurrencyPair::builder()

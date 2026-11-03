@@ -1,24 +1,14 @@
-//! IC Markets, over Spotware's cTrader Open API: the instruments of IC's
-//! forex and metals and their quotes, from cTrader's tick history, for the
-//! catalog, which fill-catalog fills through the node by IC's data client
-//! (see `catalog::NodeFill`), and the live node's clients on a hedging
-//! account. IC's instruments are on venue `ICMARKETS` (`XAUUSD.ICMARKETS`).
+//! IC Markets, over Spotware's cTrader Open API through the cTrader
+//! adapter (`ctrader`): the instruments of IC's forex and metals and their
+//! quotes, from cTrader's tick history, for the catalog, which fill-catalog
+//! fills through the node by IC's data client (see `catalog::NodeFill`),
+//! and the live node's clients on a hedging account. IC's instruments are
+//! on venue `ICMARKETS` (`XAUUSD.ICMARKETS`), its clients named `ICMARKETS`.
 //! See `README.md`.
 //!
-//! Nautilus has no cTrader adapter, so the submodules are one, laid out as
-//! Nautilus' adapters are (`docs/developer_guide/adapters.md`) and private
-//! to this module: `common` (Spotware's protobuf messages from the
-//! vendored `proto/`, the parsing of symbols into instruments, the account
-//! check, the token pair and its token file), `config` (the environment,
-//! the credential and the client configs), `websocket` (the connection: an
-//! outer client and its handler task), `session` (`IcHistory`, the cTrader
-//! session history and both clients share: the tick history merged into
-//! quotes, the spot subscriptions, the trade requests), `data` (the data
-//! client, its live quotes from the spot events), `execution` (the
-//! execution client: the trade requests of orders, the dispatch of trade
-//! events, the reconciliation reports) and `factories`.
-//!
-//! This module itself holds IC's couplings to helix: which instruments a
+//! The adapter names no broker: this module supplies IC's venue and client
+//! name, and reads IC's connection into the adapter's typed config
+//! (`config`). It holds IC's couplings to helix too: which instruments a
 //! fill's IC data client loads, from the strategy's catalog series
 //! (`quoted`), the client (`node_client`) and the period of its requests
 //! (`period`), and the live node's clients (`clients`), on the environment
@@ -28,35 +18,76 @@
 use std::str::FromStr;
 
 use anyhow::{Context, ensure};
+use ctrader::{
+    CTraderConnection, CTraderDataClientConfig, CTraderDataClientFactory,
+    CTraderExecutionClientConfig, CTraderExecutionClientFactory, CTraderSession, SERVED_DATA,
+    TICK_REQUEST_SPAN,
+};
 use jiff::SignedDuration;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{BarType, NautilusDataType},
-    identifiers::InstrumentId,
+    identifiers::{ClientId, InstrumentId},
 };
 
-use self::common::parse;
-pub(crate) use self::common::parse::IC_VENUE;
-pub use self::{
-    config::{IcConnection, IcDataClientConfig, IcExecutionClientConfig},
-    factories::{IcDataClientFactory, IcExecutionClientFactory},
-    session::IcHistory,
-};
+use super::HistorySource;
 use crate::{
     catalog::{FillData, NodeClient},
     live::node::Clients,
     strategy::catalog_series,
 };
 
-mod common;
 mod config;
-mod data;
-mod execution;
-mod factories;
-mod session;
-#[cfg(test)]
-mod testing;
-mod websocket;
+
+/// The venue of IC's instruments.
+pub(crate) const IC_VENUE: &str = "ICMARKETS";
+
+/// The name of IC's clients, and so their `ClientId` and their factories'
+/// names.
+const CLIENT_NAME: &str = "ICMARKETS";
+
+/// IC's connection: the environment `IC_ENVIRONMENT` names and the
+/// credential from `IC_CLIENT_ID`, `IC_CLIENT_SECRET`, `IC_ACCESS_TOKEN`,
+/// `IC_REFRESH_TOKEN` and `IC_ACCOUNT_ID`, from the environment (or
+/// `.env`, once read), its token file
+/// `$XDG_STATE_HOME/helix-trader/ic-token.json` (by default
+/// `~/.local/state/helix-trader/ic-token.json`).
+///
+/// # Errors
+///
+/// Returns an error if the environment is not `demo` or `live`, if a
+/// credential variable is missing or invalid, or if there is no state
+/// directory; never a value.
+pub fn connection() -> anyhow::Result<CTraderConnection> {
+    config::connection(|name| std::env::var(name).ok())
+}
+
+/// The config of IC's execution client on `connection`, reading the
+/// reports of `instrument_ids`.
+#[must_use]
+pub fn execution_config(
+    connection: CTraderConnection,
+    instrument_ids: Vec<InstrumentId>,
+) -> CTraderExecutionClientConfig {
+    CTraderExecutionClientConfig {
+        client_id: ClientId::new(CLIENT_NAME),
+        connection,
+        instrument_ids,
+    }
+}
+
+/// The config of IC's data client on `connection`, loading
+/// `instrument_ids`.
+fn data_config(
+    connection: CTraderConnection,
+    instrument_ids: Vec<InstrumentId>,
+) -> CTraderDataClientConfig {
+    CTraderDataClientConfig {
+        client_id: ClientId::new(CLIENT_NAME),
+        connection,
+        instrument_ids,
+    }
+}
 
 /// The instruments of `series`, each the quotes of an IC instrument:
 /// those IC's data client loads to fill them through the node.
@@ -76,53 +107,53 @@ pub fn quoted(series: &[(NautilusDataType, String)]) -> anyhow::Result<Vec<Instr
 /// `identifier` is; an error for any other series.
 fn quotes_of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<InstrumentId> {
     ensure!(
-        *data_type == NautilusDataType::QuoteTick,
+        *data_type == SERVED_DATA,
         "IC serves quotes only, not the {data_type} of {identifier}"
     );
     let id = InstrumentId::from_str(identifier)
         .with_context(|| format!("{identifier} is no instrument id"))?;
-    parse::ensure_ic(id)?;
+    ensure!(
+        HistorySource::of(id) == HistorySource::Ic,
+        "{id} is not on {IC_VENUE}"
+    );
     Ok(id)
 }
 
 /// IC's data client for a fill through the node (see `NodeFill::add`),
 /// loading `instrument_ids` (see `quoted`), on the connection of the
-/// environment (`IcConnection::from_env`). It names its venue, so
-/// Nautilus routes IC's requests to it without a route of ours.
+/// environment (`connection`). It names its venue, so Nautilus routes
+/// IC's requests to it without a route of ours.
 ///
 /// # Errors
 ///
-/// As `IcConnection::from_env`.
+/// As `connection`.
 pub fn node_client(instrument_ids: Vec<InstrumentId>) -> anyhow::Result<NodeClient> {
+    let config = data_config(connection()?, instrument_ids);
     Ok(NodeClient {
-        factory: Box::new(IcDataClientFactory),
-        config: Box::new(IcDataClientConfig {
-            connection: IcConnection::from_env()?,
-            instrument_ids,
-        }),
+        factory: Box::new(CTraderDataClientFactory::new(&config)),
+        config: Box::new(config),
         routing: RoutingConfig::default(),
     })
 }
 
 /// The window one request holds at most in a fill through the node
-/// (see `NodeFill::add`): a week, the most one tick request spans,
-/// about 0.7 M BID and 0.7 M ASK ticks of XAUUSD (`README.md`, "Tick
-/// history").
+/// (see `NodeFill::add`): a week, the most one tick request spans
+/// (`ctrader::TICK_REQUEST_SPAN`).
 #[must_use]
 pub fn period(_data: FillData) -> SignedDuration {
-    SignedDuration::from_hours(7 * 24)
+    TICK_REQUEST_SPAN
 }
 
 /// The IC client configs of a node trading IC instruments.
 #[derive(Debug, Clone)]
 pub(crate) struct IcClients {
-    data: IcDataClientConfig,
-    exec: IcExecutionClientConfig,
+    data: CTraderDataClientConfig,
+    exec: CTraderExecutionClientConfig,
 }
 
 /// The client configs of the IC instruments `bar_types` are built from,
 /// their quotes (IC serves nothing else), on the connection `var` reads
-/// (`IcConnection::from_vars`), before anything connects.
+/// (see `connection`), before anything connects.
 ///
 /// # Errors
 ///
@@ -134,32 +165,26 @@ pub(crate) fn clients(
     var: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<IcClients> {
     let instrument_ids = quoted(&catalog_series(bar_types))?;
-    let connection = IcConnection::from_vars(var)?;
+    let connection = config::connection(var)?;
     Ok(IcClients {
-        data: IcDataClientConfig {
-            connection: connection.clone(),
-            instrument_ids: instrument_ids.clone(),
-        },
-        exec: IcExecutionClientConfig {
-            connection,
-            instrument_ids,
-        },
+        data: data_config(connection.clone(), instrument_ids.clone()),
+        exec: execution_config(connection, instrument_ids),
     })
 }
 
 impl IcClients {
     /// Checks the account the clients trade, on a session of its own
     /// closed before the node connects: hedging and `IC_ACCOUNT_ID`'s (see
-    /// `IcHistory::check_account`). Run before the node is built, so a
+    /// `CTraderSession::check_account`). Run before the node is built, so a
     /// wrong account fails the start with its reason.
     ///
     /// # Errors
     ///
     /// Returns an error if cTrader cannot be reached or refuses the
     /// credential, or if the account does not suit (see
-    /// `IcHistory::check_account`).
+    /// `CTraderSession::check_account`).
     pub(crate) async fn check_account(&self) -> anyhow::Result<()> {
-        let ic = IcHistory::connect_as(&self.data.connection).await?;
+        let ic = CTraderSession::connect(&self.data.connection).await?;
         let checked = ic.check_account().await;
         ic.disconnect().await;
         checked
@@ -170,9 +195,12 @@ impl IcClients {
     /// a route of ours.
     pub(crate) fn into_node_clients(self) -> Clients {
         Clients {
-            data_factory: Box::new(IcDataClientFactory),
+            data_factory: Box::new(CTraderDataClientFactory::new(&self.data)),
             data_config: Box::new(self.data),
-            exec: Some((Box::new(IcExecutionClientFactory), Box::new(self.exec))),
+            exec: Some((
+                Box::new(CTraderExecutionClientFactory::new(&self.exec)),
+                Box::new(self.exec),
+            )),
             routing: RoutingConfig::default(),
         }
     }
@@ -193,7 +221,7 @@ mod tests {
         identifiers::{AccountId, ClientId, TraderId, Venue},
     };
 
-    use super::{factories::NAME, *};
+    use super::*;
 
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -290,8 +318,9 @@ mod tests {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
 
-        let client = IcDataClientFactory
-            .create(NAME, &config, cache.into(), clock)
+        let factory = CTraderDataClientFactory::new(&config);
+        let client = factory
+            .create(factory.name(), &config, cache.into(), clock)
             .unwrap();
 
         assert_eq!(client.client_id(), ClientId::from("ICMARKETS"));
@@ -307,10 +336,11 @@ mod tests {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
 
-        let client = IcExecutionClientFactory
+        let factory = CTraderExecutionClientFactory::new(&config);
+        let client = factory
             .create(
                 TraderId::from("HELIX-001"),
-                NAME,
+                factory.name(),
                 &config,
                 cache.into(),
                 clock,
