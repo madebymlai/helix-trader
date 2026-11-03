@@ -3,21 +3,15 @@
 //! data client (`DatabentoDataClient`), whose answers the data engine
 //! writes back to the catalog: definitions, MBP-10 as `OrderBookDepth`
 //! snapshots, trades as `TradeTick`s, quotes, each contract under its own
-//! id. What stays here is what Nautilus' client does not do: Databento's
-//! cost quotes and the dataset's end, checked before the node starts
-//! (paid requests are quoted first), and the period each series is asked
-//! in. See `README.md`.
+//! id. What stays here is what Nautilus' client does not do: the dataset's
+//! end, checked before the node starts, and the period each series is
+//! asked in. See `README.md`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, ensure};
-use databento::{dbn::Schema, historical::metadata::GetCostParams};
 use jiff::{SignedDuration, Timestamp};
-use nautilus_core::UnixNanos;
-use nautilus_databento::{
-    common::get_date_time_range, data::DatabentoDataClientConfig,
-    factories::DatabentoDataClientFactory, symbology::infer_symbology_type,
-};
+use nautilus_databento::{data::DatabentoDataClientConfig, factories::DatabentoDataClientFactory};
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::identifiers::Venue;
 
@@ -44,8 +38,7 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// Databento's historical API, for the history of `GLBX` instruments.
 #[derive(Debug)]
 pub struct DatabentoHistory {
-    /// Databento's own client, for the metadata Nautilus' does not give:
-    /// cost quotes and the dataset's end.
+    /// Databento's own client, for the dataset's end.
     metadata: databento::HistoricalClient,
     /// The config of Nautilus' data client, the node's.
     config: DatabentoDataClientConfig,
@@ -77,15 +70,14 @@ impl DatabentoHistory {
     }
 
     /// Checks `requests`, of `GLBX` instruments (see `catalog::missing`),
-    /// against the dataset's end, then logs Databento's quote for each and
-    /// their total, before any data is asked for.
+    /// against the dataset's end, before any data is asked for.
     ///
     /// # Errors
     ///
     /// Returns an error if a request is not of a `GLBX` instrument (before
     /// any request), if one ends at or past the data Databento has (a
-    /// request over it would fail), or if a metadata request fails.
-    pub async fn quote(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
+    /// request over it would fail), or if the metadata request fails.
+    pub async fn check(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
         for request in requests {
             ensure!(
                 HistorySource::of(request.instrument_id) == HistorySource::Databento,
@@ -106,13 +98,7 @@ impl DatabentoHistory {
         ensure_available(
             end,
             Timestamp::from_nanosecond(available.end.unix_timestamp_nanos())?,
-        )?;
-        let mut total = 0.0;
-        for request in requests {
-            total += self.log_cost(request).await?;
-        }
-        log::info!("Databento quotes ${total:.2} in all");
-        Ok(())
+        )
     }
 
     /// The node's data client: Nautilus' Databento client, routed the
@@ -129,39 +115,6 @@ impl DatabentoHistory {
             },
         }
     }
-
-    /// Logs and returns Databento's quote for `request`.
-    async fn log_cost(&self, request: &FillRequest) -> anyhow::Result<f64> {
-        let symbol = request.instrument_id.symbol.to_string();
-        let schema = schema(request.data);
-        let params = GetCostParams::builder()
-            .dataset(DATASET)
-            .symbols(vec![symbol.as_str()])
-            .schema(schema)
-            .stype_in(infer_symbology_type(&symbol))
-            .date_time_range(range(request)?)
-            .build();
-        let cost = self
-            .metadata
-            .clone()
-            .metadata()
-            .get_cost(&params)
-            .await
-            .with_context(|| format!("quoting {request}"))?;
-        log::info!("Databento quotes ${cost:.2} for {request} ({schema})");
-        Ok(cost)
-    }
-}
-
-/// The Databento schema Nautilus' client asks `data` in.
-fn schema(data: FillData) -> Schema {
-    match data {
-        FillData::Instrument => Schema::Definition,
-        FillData::Quotes => Schema::Mbp1,
-        FillData::Trades => Schema::Trades,
-        FillData::Depth => Schema::Mbp10,
-        FillData::Deltas => Schema::Mbo,
-    }
 }
 
 /// Refuses an `end` Databento has no data up to yet: a request over it
@@ -172,13 +125,6 @@ fn ensure_available(end: Timestamp, available_end: Timestamp) -> anyhow::Result<
         "{DATASET} has data up to {available_end} only, not up to {end}"
     );
     Ok(())
-}
-
-/// The window of `request` as Databento's date-time range, with an
-/// exclusive end.
-fn range(request: &FillRequest) -> anyhow::Result<databento::historical::DateTimeRange> {
-    let end = UnixNanos::from(request.to).as_u64() + 1;
-    get_date_time_range(UnixNanos::from(request.from), UnixNanos::from(end))
 }
 
 #[cfg(test)]
@@ -231,30 +177,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn each_series_is_quoted_in_the_schema_the_client_asks_it_in() {
-        assert_eq!(schema(FillData::Depth), Schema::Mbp10);
-        assert_eq!(schema(FillData::Deltas), Schema::Mbo);
-        assert_eq!(schema(FillData::Trades), Schema::Trades);
-        assert_eq!(schema(FillData::Quotes), Schema::Mbp1);
-        assert_eq!(schema(FillData::Instrument), Schema::Definition);
-    }
-
-    #[test]
-    fn a_quote_range_ends_1_ns_after_the_request() {
-        let request = FillRequest {
-            data: FillData::Depth,
-            instrument_id: InstrumentId::from("GCZ26.GLBX"),
-            from: ts("2026-10-26T00:00:00Z"),
-            to: ts("2026-10-26T02:59:59.999999999Z"),
-        };
-        let range = range(&request).unwrap();
-        assert_eq!(
-            range.end.unix_timestamp_nanos(),
-            ts("2026-10-26T03:00:00Z").as_nanosecond()
-        );
-    }
-
     #[tokio::test]
     async fn a_request_of_another_venue_is_refused_before_any_request() {
         let history = DatabentoHistory::new(&format!("db-{}", "0".repeat(29))).unwrap();
@@ -265,7 +187,7 @@ mod tests {
             to: ts("2026-10-26T12:00:00Z"),
         };
 
-        let err = history.quote(&[request]).await.unwrap_err();
+        let err = history.check(&[request]).await.unwrap_err();
 
         assert!(err.to_string().contains("GCZ26.XCEC"), "{err}");
     }

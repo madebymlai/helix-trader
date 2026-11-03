@@ -490,8 +490,8 @@ async fn main() -> anyhow::Result<()> {
 /// contract over its slice (`DataRequirements::slices`), every source given
 /// its slices: GLBX's and IC's fill through a Nautilus node (see
 /// `catalog::NodeFill`), by Databento's data client for GLBX instruments (the
-/// series declared, Databento's cost of every request quoted first, before
-/// the node starts) and IC's for IC instruments; OKX's archive fills OKX
+/// series declared, checked against the dataset's end before the node
+/// starts) and IC's for IC instruments; OKX's archive fills OKX
 /// instruments (their 1-minute candles) and IB (connected only if needed)
 /// the others, without a node until their clients answer with response
 /// envelopes. OKX, IC and IB refuse a series they do not serve.
@@ -546,7 +546,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
             let api_key =
                 std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
             let databento = DatabentoHistory::new(&api_key)?;
-            databento.quote(&requests).await?;
+            databento.check(&requests).await?;
             node.add(databento.node_client(), &requests, DatabentoHistory::period);
         }
     }

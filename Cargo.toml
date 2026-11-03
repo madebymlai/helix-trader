@@ -23,7 +23,7 @@ bollard = { version = "0.21.1", default-features = false, features = ["http", "p
 bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
-# The version of nautilus-databento, for the cost quotes its client does not make.
+# The version of nautilus-databento, for the dataset's end.
 databento = "=0.63.0"
 dotenvy = "0.15"
 jiff = { version = "0.2", features = ["serde"] }
