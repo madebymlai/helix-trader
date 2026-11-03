@@ -1,5 +1,5 @@
-# Captured from IC Markets' cTrader demo (2026-10-26, 18:03 UTC), protobuf
-# port 5035: IC's margin estimate (ProtoOAExpectedMarginReq) for 1 oz of
+# Captured from ACMEFX's cTrader demo (2026-10-26, 18:03 UTC), protobuf
+# port 5035: ACMEFX's margin estimate (ProtoOAExpectedMarginReq) for 1 oz of
 # XAUUSD (volume 100 cents) on the demo account (1:30, in EUR): 119.76 EUR to
 # buy, 119.75 to sell, about 1 oz at 4,018 USD / 1.12 USD per EUR / 30: the
 # account's 1:30, not the symbol's 1:200 (which would be about 18 EUR). The

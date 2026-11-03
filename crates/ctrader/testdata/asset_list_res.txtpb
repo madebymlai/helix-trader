@@ -1,4 +1,4 @@
-# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from ACMEFX's cTrader demo (2026-10-26), protobuf port 5035:
 # the account's assets, trimmed to those of the symbols in symbols_list_res.
 # Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
 # The .bin is the payload; this is its text form, from:
