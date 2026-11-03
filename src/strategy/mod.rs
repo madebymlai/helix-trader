@@ -633,7 +633,7 @@ mod tests {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
             ticks: vec![
                 tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
-                tick(NautilusDataType::TradeTick, "GCZ6.GLBX"),
+                tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
             ],
             warmup: SignedDuration::ZERO,
         };
@@ -643,8 +643,8 @@ mod tests {
             [
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCZ6.GLBX",
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
+                    "GCZ26.GLBX",
                     start,
                     end
                 ),
@@ -676,29 +676,29 @@ mod tests {
             [
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCQ6.GLBX",
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
+                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCZ6.GLBX",
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
+                    "GCZ26.GLBX",
                     at(roll),
                     end
                 ),
                 series_slice(
                     NautilusDataType::OrderBookDepth,
-                    "GCQ6.GLBX",
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
+                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
                 series_slice(
                     NautilusDataType::OrderBookDepth,
-                    "GCZ6.GLBX",
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
+                    "GCZ26.GLBX",
                     at(roll),
                     end
                 ),
@@ -720,15 +720,15 @@ mod tests {
             [
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCQ6.GLBX",
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
+                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCZ6.GLBX",
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
+                    "GCZ26.GLBX",
                     at(roll),
                     end
                 ),
@@ -750,18 +750,18 @@ mod tests {
     #[test]
     fn bars_on_a_contract_need_not_be_built_from_trades() {
         assert_eq!(
-            bar_slices("GCZ6.GLBX-1-MINUTE-MID-INTERNAL"),
+            bar_slices("GCZ26.GLBX-1-MINUTE-MID-INTERNAL"),
             [series_slice(
                 NautilusDataType::QuoteTick,
-                "GCZ6.GLBX",
-                "GCZ6.GLBX",
+                "GCZ26.GLBX",
+                "GCZ26.GLBX",
                 at("2026-07-01T00:00Z"),
                 at("2026-08-31T00:00Z")
             )]
         );
     }
 
-    /// GCQ6.GLBX stands for GC.GLBX up to the roll of 29 July and is read
+    /// GCQ26.GLBX stands for GC.GLBX up to the roll of 29 July and is read
     /// as itself over the whole span.
     #[test]
     fn a_contract_read_beside_its_root_is_one_slice_of_each_series_over_both() {
@@ -769,7 +769,7 @@ mod tests {
             bar_types: vec![],
             ticks: vec![
                 tick(NautilusDataType::TradeTick, "GC.GLBX"),
-                tick(NautilusDataType::TradeTick, "GCQ6.GLBX"),
+                tick(NautilusDataType::TradeTick, "GCQ26.GLBX"),
             ],
             warmup: SignedDuration::ZERO,
         };
@@ -779,15 +779,15 @@ mod tests {
             [
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCQ6.GLBX",
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
+                    "GCQ26.GLBX",
                     start,
                     end
                 ),
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCZ6.GLBX",
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
+                    "GCZ26.GLBX",
                     at("2026-07-29T00:00Z"),
                     end
                 ),
@@ -799,7 +799,7 @@ mod tests {
     fn the_contracts_of_a_root_and_of_a_contract_beside_it_are_one_slice_each() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
-            ticks: vec![tick(NautilusDataType::OrderBookDepth, "GCQ6.GLBX")],
+            ticks: vec![tick(NautilusDataType::OrderBookDepth, "GCQ26.GLBX")],
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
@@ -811,8 +811,8 @@ mod tests {
         assert_eq!(
             requirements.contract_slices(start, end),
             [
-                slice("GCQ6.GLBX", start, end),
-                slice("GCZ6.GLBX", at("2026-07-29T00:00Z"), end),
+                slice("GCQ26.GLBX", start, end),
+                slice("GCZ26.GLBX", at("2026-07-29T00:00Z"), end),
             ]
         );
     }

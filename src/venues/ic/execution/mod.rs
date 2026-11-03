@@ -1052,6 +1052,7 @@ impl ExecutionClient for IcExecutionClient {
                 cmd.venue_order_id,
                 &reason,
                 self.now(),
+                Some(cmd.command_id),
             );
         }
         Ok(())

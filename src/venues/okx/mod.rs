@@ -162,15 +162,13 @@ impl OkxHistory {
                     }
                     ArchiveModule::Funding => self.file_funding(id, file, from, to).await,
                 },
-                async |before| {
+                async |to| {
                     let funding = self
                         .client
-                        .request_funding_rates(id, None, Some(before), None)
+                        .request_funding_rates(id, None, Some(to), None)
                         .await
-                        .with_context(|| {
-                            format!("requesting the funding of {id} before {before}")
-                        })?;
-                    log::info!("{id}: {} funding rates before {before}", funding.len());
+                        .with_context(|| format!("requesting the funding of {id} up to {to}"))?;
+                    log::info!("{id}: {} funding rates up to {to}", funding.len());
                     Ok(funding)
                 },
             )
@@ -552,17 +550,17 @@ async fn fill_from_archive(
 /// Fills `catalog` with `instrument` and its funding at times in `[start,
 /// end]` from OKX's API, resuming 1 ns after the stored funding; a window
 /// the stored funding already covers asks for nothing.
-/// `request(before)` answers the funding at times before `before`, as
-/// Nautilus' `request_funding_rates` with `before` as its end (OKX's
-/// `after`, exclusive, in milliseconds): up to a page of OKX's newest, oldest
-/// first, the oldest without an interval, which Nautilus takes from the time
-/// before it. Pages go backwards from `end`, each ending 1 ms after the
-/// oldest time of the one before, so that this time comes again with its
-/// interval, until a page reaches before the window's first instant or holds
-/// only that time (OKX keeps about 3 months). Only updates with an interval
-/// are stored, over the window's first instant, or, if OKX's history does
-/// not reach it, its first update with an interval, to the newest update:
-/// funding not published yet is not covered.
+/// `request(to)` answers the funding at times up to `to`, included, as
+/// Nautilus' `request_funding_rates` with `to` as its end: up to a page of
+/// OKX's newest, oldest first, the oldest without an interval, which
+/// Nautilus takes from the time before it. Pages go backwards from `end`,
+/// each ending on the oldest time of the one before, so that this time
+/// comes again with its interval, until a page reaches before the window's
+/// first instant or holds only that time (OKX keeps about 3 months). Only
+/// updates with an interval are stored, over the window's first instant,
+/// or, if OKX's history does not reach it, its first update with an
+/// interval, to the newest update: funding not published yet is not
+/// covered.
 ///
 /// # Errors
 ///
@@ -589,15 +587,14 @@ async fn fill_funding_from_api(
     if begin > end {
         return Ok(());
     }
-    let millisecond = SignedDuration::from_millis(1);
     let in_window = |update: &FundingRateUpdate| {
         let time = Timestamp::from(update.ts_event);
         update.interval.is_some() && begin <= time && time <= end
     };
     let mut funding = Vec::new();
-    let mut before = end + millisecond;
+    let mut to = end;
     let reached = loop {
-        let page = request(before).await?;
+        let page = request(to).await?;
         let Some(oldest) = page.first() else {
             break false;
         };
@@ -609,7 +606,7 @@ async fn fill_funding_from_api(
         if page.len() == 1 {
             break false;
         }
-        before = oldest + millisecond;
+        to = oldest;
     };
     ensure!(
         reached || last.is_none(),

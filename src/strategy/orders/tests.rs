@@ -436,7 +436,11 @@ fn at_its_time_a_trade_its_filled_entry_purged_is_closed_and_its_legs_cancelled(
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(bracket(4)));
     fill(&probe, "T-1", "P-1", NOW, OmsType::Hedging);
-    probe.cache_rc().borrow_mut().purge_order(id("T-1"));
+    probe
+        .cache_rc()
+        .borrow_mut()
+        .purge_order(id("T-1"), false)
+        .unwrap();
 
     advance(&mut probe, &clock, NOW + 240 * MINUTE);
 

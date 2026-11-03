@@ -250,7 +250,7 @@ impl Product {
     }
 
     /// The instrument id of `contract`: the product's contract template
-    /// filled for it, on the root's venue (`GCZ6.GLBX`).
+    /// filled for it, on the root's venue (`GCZ26.GLBX`).
     pub(super) fn instrument_id(&self, contract: Contract) -> InstrumentId {
         InstrumentId::new(self.contract.fill(contract), self.root.venue)
     }

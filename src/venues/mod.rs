@@ -147,12 +147,12 @@ mod tests {
         for (id, history, live) in [
             ("BTC-USDT-SWAP.OKX", H::Okx, L::Okx),
             ("XAUUSD.ICMARKETS", H::Ic, L::Ic),
-            ("GCZ6.GLBX", H::Databento, L::Ib),
+            ("GCZ26.GLBX", H::Databento, L::Ib),
             ("GC.GLBX", H::Databento, L::Ib),
             ("GC.v.0.GLBX", H::Databento, L::Ib),
             ("SXR8.IBIS", H::Ib, L::Ib),
-            ("ESZ6.CME", H::Ib, L::Ib),
-            ("GCZ6.XCEC", H::Ib, L::Ib),
+            ("ESZ26.CME", H::Ib, L::Ib),
+            ("GCZ26.XCEC", H::Ib, L::Ib),
             ("EUR/USD.IDEALPRO", H::Ib, L::Ib),
             ("BTC-USDT-SWAP.BINANCE", H::Ib, L::Ib),
         ] {

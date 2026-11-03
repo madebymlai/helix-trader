@@ -244,7 +244,7 @@ mod tests {
     fn a_quote_range_ends_1_ns_after_the_request() {
         let request = FillRequest {
             data: FillData::Depth,
-            instrument_id: InstrumentId::from("GCZ6.GLBX"),
+            instrument_id: InstrumentId::from("GCZ26.GLBX"),
             from: ts("2026-10-26T00:00:00Z"),
             to: ts("2026-10-26T02:59:59.999999999Z"),
         };
@@ -260,14 +260,14 @@ mod tests {
         let history = DatabentoHistory::new(&format!("db-{}", "0".repeat(29))).unwrap();
         let request = FillRequest {
             data: FillData::Trades,
-            instrument_id: InstrumentId::from("GCZ6.XCEC"),
+            instrument_id: InstrumentId::from("GCZ26.XCEC"),
             from: ts("2026-10-26T00:00:00Z"),
             to: ts("2026-10-26T12:00:00Z"),
         };
 
         let err = history.quote(&[request]).await.unwrap_err();
 
-        assert!(err.to_string().contains("GCZ6.XCEC"), "{err}");
+        assert!(err.to_string().contains("GCZ26.XCEC"), "{err}");
     }
 
     /// Requirements reading the trades and book of each of `instrument_ids`.
@@ -294,7 +294,7 @@ mod tests {
 
     /// What the catalog lacks of the series of `instrument_ids` read over
     /// 2026-07-28 00:00 to 2026-07-29 12:00 UTC, across GC's roll from
-    /// GCQ6 to GCZ6 at 2026-07-29 00:00 (two weekdays before Friday 31
+    /// GCQ26 to GCZ26 at 2026-07-29 00:00 (two weekdays before Friday 31
     /// July, the last weekday before August, Q's delivery month): (data,
     /// contract, from, to).
     fn missing_across_the_roll(
@@ -332,22 +332,22 @@ mod tests {
         assert_eq!(
             missing_across_the_roll(&catalog, &["GC.GLBX"]),
             [
-                asked(FillData::Instrument, "GCQ6.GLBX", Q6_FROM, Q6_TO),
-                asked(FillData::Trades, "GCQ6.GLBX", Q6_FROM, Q6_TO),
-                asked(FillData::Depth, "GCQ6.GLBX", Q6_FROM, Q6_TO),
-                asked(FillData::Instrument, "GCZ6.GLBX", Z6_FROM, Z6_TO),
-                asked(FillData::Trades, "GCZ6.GLBX", Z6_FROM, Z6_TO),
-                asked(FillData::Depth, "GCZ6.GLBX", Z6_FROM, Z6_TO),
+                asked(FillData::Instrument, "GCQ26.GLBX", Q6_FROM, Q6_TO),
+                asked(FillData::Trades, "GCQ26.GLBX", Q6_FROM, Q6_TO),
+                asked(FillData::Depth, "GCQ26.GLBX", Q6_FROM, Q6_TO),
+                asked(FillData::Instrument, "GCZ26.GLBX", Z6_FROM, Z6_TO),
+                asked(FillData::Trades, "GCZ26.GLBX", Z6_FROM, Z6_TO),
+                asked(FillData::Depth, "GCZ26.GLBX", Z6_FROM, Z6_TO),
             ]
         );
     }
 
-    /// GCQ6's trades stored up to 13:00 on the 28th, its book not at all.
+    /// GCQ26's trades stored up to 13:00 on the 28th, its book not at all.
     #[test]
     fn each_contract_of_a_rolled_root_lacks_only_what_it_does_not_store() {
         let (_dir, catalog) = new_catalog();
         let trade = TradeTick::new(
-            InstrumentId::from("GCQ6.GLBX"),
+            InstrumentId::from("GCQ26.GLBX"),
             Price::from("4294.2"),
             Quantity::from(1),
             AggressorSide::Sell,
@@ -366,29 +366,29 @@ mod tests {
         assert_eq!(
             missing_across_the_roll(&catalog, &["GC.GLBX"])[..3],
             [
-                asked(FillData::Instrument, "GCQ6.GLBX", Q6_FROM, Q6_TO),
+                asked(FillData::Instrument, "GCQ26.GLBX", Q6_FROM, Q6_TO),
                 asked(
                     FillData::Trades,
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
                     "2026-07-28T13:00:00.000000001Z",
                     Q6_TO
                 ),
-                asked(FillData::Depth, "GCQ6.GLBX", Q6_FROM, Q6_TO),
+                asked(FillData::Depth, "GCQ26.GLBX", Q6_FROM, Q6_TO),
             ]
         );
     }
 
-    /// GCZ6.GLBX declared as itself is one slice over the window; with
+    /// GCZ26.GLBX declared as itself is one slice over the window; with
     /// GC.GLBX it is also the root's contract from the roll on.
     #[test]
     fn a_contract_declared_as_itself_and_through_its_root_is_asked_once_over_both() {
         let (_dir, catalog) = new_catalog();
         assert_eq!(
-            missing_across_the_roll(&catalog, &["GC.GLBX", "GCZ6.GLBX"])[3..],
+            missing_across_the_roll(&catalog, &["GC.GLBX", "GCZ26.GLBX"])[3..],
             [
-                asked(FillData::Instrument, "GCZ6.GLBX", Q6_FROM, Z6_TO),
-                asked(FillData::Trades, "GCZ6.GLBX", Q6_FROM, Z6_TO),
-                asked(FillData::Depth, "GCZ6.GLBX", Q6_FROM, Z6_TO),
+                asked(FillData::Instrument, "GCZ26.GLBX", Q6_FROM, Z6_TO),
+                asked(FillData::Trades, "GCZ26.GLBX", Q6_FROM, Z6_TO),
+                asked(FillData::Depth, "GCZ26.GLBX", Q6_FROM, Z6_TO),
             ]
         );
     }

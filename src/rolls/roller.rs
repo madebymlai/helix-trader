@@ -443,9 +443,9 @@ mod tests {
         }]
     }
 
-    /// GC rolls into GCG7 at 00:00 UTC on 2026-11-26 and into GCJ7 on
+    /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on
     /// 2027-01-27, two business days before the last business day of the
-    /// month before delivery (`calendar.toml`); GCJ7 rolls into GCM7.
+    /// month before delivery (`calendar.toml`); GCJ27 rolls into GCM27.
     #[test]
     fn a_live_roller_rolls_twice_requesting_each_post_contract_before_its_roll() {
         let (sent, rolls) = run(
@@ -459,21 +459,21 @@ mod tests {
                 .map(|roll| (roll.pre, roll.post))
                 .collect::<Vec<_>>(),
             [
-                (id("GCZ6.GLBX"), id("GCG7.GLBX")),
-                (id("GCG7.GLBX"), id("GCJ7.GLBX"))
+                (id("GCZ26.GLBX"), id("GCG27.GLBX")),
+                (id("GCG27.GLBX"), id("GCJ27.GLBX"))
             ]
         );
         assert_eq!(
             sent,
             [
-                Sent::Subscribe(id("GCZ6.GLBX")),
-                Sent::Request(id("GCG7.GLBX"), true),
-                Sent::Unsubscribe(id("GCZ6.GLBX")),
-                Sent::Subscribe(id("GCG7.GLBX")),
-                Sent::Request(id("GCJ7.GLBX"), true),
-                Sent::Unsubscribe(id("GCG7.GLBX")),
-                Sent::Subscribe(id("GCJ7.GLBX")),
-                Sent::Request(id("GCM7.GLBX"), true),
+                Sent::Subscribe(id("GCZ26.GLBX")),
+                Sent::Request(id("GCG27.GLBX"), true),
+                Sent::Unsubscribe(id("GCZ26.GLBX")),
+                Sent::Subscribe(id("GCG27.GLBX")),
+                Sent::Request(id("GCJ27.GLBX"), true),
+                Sent::Unsubscribe(id("GCG27.GLBX")),
+                Sent::Subscribe(id("GCJ27.GLBX")),
+                Sent::Request(id("GCM27.GLBX"), true),
             ]
         );
     }
@@ -489,11 +489,11 @@ mod tests {
         assert_eq!(
             sent,
             [
-                Sent::Subscribe(id("GCZ6.GLBX")),
-                Sent::Unsubscribe(id("GCZ6.GLBX")),
-                Sent::Subscribe(id("GCG7.GLBX")),
-                Sent::Unsubscribe(id("GCG7.GLBX")),
-                Sent::Subscribe(id("GCJ7.GLBX")),
+                Sent::Subscribe(id("GCZ26.GLBX")),
+                Sent::Unsubscribe(id("GCZ26.GLBX")),
+                Sent::Subscribe(id("GCG27.GLBX")),
+                Sent::Unsubscribe(id("GCG27.GLBX")),
+                Sent::Subscribe(id("GCJ27.GLBX")),
             ]
         );
     }
@@ -502,7 +502,7 @@ mod tests {
     fn a_live_roller_requests_nothing_for_a_plain_instrument() {
         let ticks = vec![TickSeries {
             data: NautilusDataType::TradeTick,
-            instrument_id: id("GCZ6.GLBX"),
+            instrument_id: id("GCZ26.GLBX"),
         }];
         let (sent, rolls) = run(
             &Roller::live(ticks),
@@ -510,6 +510,6 @@ mod tests {
             "2027-02-01T00:00:00Z",
         );
         assert!(rolls.is_empty());
-        assert_eq!(sent, [Sent::Subscribe(id("GCZ6.GLBX"))]);
+        assert_eq!(sent, [Sent::Subscribe(id("GCZ26.GLBX"))]);
     }
 }

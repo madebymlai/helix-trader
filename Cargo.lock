@@ -459,9 +459,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.18.2"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
+checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -469,9 +469,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.46.0"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc"
+checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
 dependencies = [
  "cc",
  "cmake",
@@ -3065,8 +3065,8 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nautilus-analysis"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3079,8 +3079,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-backtest"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3110,8 +3110,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-common"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3146,8 +3146,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-core"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3170,8 +3170,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-cryptography"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -3186,8 +3186,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-data"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3209,8 +3209,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-databento"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3240,8 +3240,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-execution"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3265,8 +3265,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-indicators"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "anyhow",
  "arraydeque",
@@ -3277,8 +3277,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-infrastructure"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3306,8 +3306,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-interactive-brokers"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3340,8 +3340,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-live"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3374,8 +3374,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-macros"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3384,8 +3384,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-model"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3416,8 +3416,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-network"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3463,8 +3463,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-okx"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3502,8 +3502,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-persistence"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3532,8 +3532,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-portfolio"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3551,8 +3551,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-risk"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "bon",
@@ -3571,8 +3571,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-serialization"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3590,8 +3590,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-system"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3617,8 +3617,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-trading"
-version = "0.67.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=04f766b4d434d67fc8672026fefa25135bdc01be#04f766b4d434d67fc8672026fefa25135bdc01be"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8dfef4b7725f8371d96c56cc0c7cdec5525a398d#8dfef4b7725f8371d96c56cc0c7cdec5525a398d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -5178,7 +5178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

@@ -566,7 +566,7 @@ mod tests {
         let three_hours = SignedDuration::from_hours(3);
         let asked = request(
             FillData::Depth,
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-21T02:00:00Z",
             "2026-10-21T08:30:00Z",
         );
@@ -587,13 +587,13 @@ mod tests {
         let day = SignedDuration::from_hours(24);
         let within = request(
             FillData::Trades,
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-21T00:00:00Z",
             "2026-10-21T23:59:59.999999999Z",
         );
         let across = request(
             FillData::Trades,
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-21T12:00:00Z",
             "2026-10-22T00:00:00Z",
         );
@@ -616,19 +616,19 @@ mod tests {
         let slices = [
             slice(
                 NautilusDataType::OrderBookDepth,
-                "GCQ6.GLBX",
+                "GCQ26.GLBX",
                 "2026-07-01T00:00:00Z",
                 "2026-07-30T23:59:59.999999999Z",
             ),
             slice(
                 NautilusDataType::OrderBookDepth,
-                "GCZ6.GLBX",
+                "GCZ26.GLBX",
                 "2026-07-31T00:00:00Z",
                 "2026-08-10T00:00:00Z",
             ),
             slice(
                 NautilusDataType::TradeTick,
-                "GCZ6.GLBX",
+                "GCZ26.GLBX",
                 "2026-08-01T00:00:00Z",
                 "2026-08-10T00:00:00Z",
             ),
@@ -641,31 +641,31 @@ mod tests {
             [
                 request(
                     FillData::Instrument,
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
                     "2026-07-01T00:00:00Z",
                     "2026-07-30T23:59:59.999999999Z"
                 ),
                 request(
                     FillData::Depth,
-                    "GCQ6.GLBX",
+                    "GCQ26.GLBX",
                     "2026-07-01T00:00:00Z",
                     "2026-07-30T23:59:59.999999999Z"
                 ),
                 request(
                     FillData::Instrument,
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
                     "2026-07-31T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
                 request(
                     FillData::Depth,
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
                     "2026-07-31T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
                 request(
                     FillData::Trades,
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
                     "2026-08-01T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
@@ -692,7 +692,7 @@ mod tests {
         // Stored over Wednesday, a weekend inside it covered as well.
         catalog
             .write_to_parquet(
-                &[trade("GCZ6.GLBX", "2026-10-21T10:00:00Z")],
+                &[trade("GCZ26.GLBX", "2026-10-21T10:00:00Z")],
                 Some(ts("2026-10-21T00:00:00Z").into()),
                 Some(ts("2026-10-21T23:59:59.999999999Z").into()),
                 None,
@@ -700,7 +700,7 @@ mod tests {
             .unwrap();
         let slices = [slice(
             NautilusDataType::TradeTick,
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-20T00:00:00Z",
             "2026-10-23T00:00:00Z",
         )];
@@ -712,13 +712,13 @@ mod tests {
             [
                 request(
                     FillData::Trades,
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
                     "2026-10-20T00:00:00Z",
                     "2026-10-20T23:59:59.999999999Z"
                 ),
                 request(
                     FillData::Trades,
-                    "GCZ6.GLBX",
+                    "GCZ26.GLBX",
                     "2026-10-22T00:00:00Z",
                     "2026-10-23T00:00:00Z"
                 ),
@@ -737,7 +737,7 @@ mod tests {
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         catalog
             .write_to_parquet(
-                &[trade("GCZ6.GLBX", "2026-10-21T10:00:00Z")],
+                &[trade("GCZ26.GLBX", "2026-10-21T10:00:00Z")],
                 Some(ts("2026-10-21T00:00:00Z").into()),
                 Some(ts("2026-10-21T23:59:59.999999999Z").into()),
                 None,
@@ -745,7 +745,7 @@ mod tests {
             .unwrap();
         let slices = [slice(
             NautilusDataType::TradeTick,
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-21T06:00:00Z",
             "2026-10-21T18:00:00Z",
         )];
@@ -814,11 +814,11 @@ mod tests {
     fn bars_are_refused_naming_the_series() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let bars = "GCZ6.GLBX-1-MINUTE-LAST-EXTERNAL";
+        let bars = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
         let slices = [SeriesSlice {
             series: (NautilusDataType::Bar, bars.to_string()),
             slice: Slice {
-                instrument_id: InstrumentId::from("GCZ6.GLBX"),
+                instrument_id: InstrumentId::from("GCZ26.GLBX"),
                 from: ts("2026-10-20T00:00:00Z"),
                 to: ts("2026-10-21T00:00:00Z"),
             },
@@ -835,7 +835,7 @@ mod tests {
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let slices = [slice(
             NautilusDataType::OrderBookDelta,
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-21T00:00:00Z",
             "2026-10-22T00:00:00Z",
         )];
@@ -846,7 +846,7 @@ mod tests {
             asked[1],
             request(
                 FillData::Deltas,
-                "GCZ6.GLBX",
+                "GCZ26.GLBX",
                 "2026-10-21T00:00:00Z",
                 "2026-10-22T00:00:00Z"
             )
@@ -861,7 +861,7 @@ mod tests {
             NautilusDataType::Custom {
                 type_name: "Imbalance".to_string(),
             },
-            "GCZ6.GLBX",
+            "GCZ26.GLBX",
             "2026-10-21T00:00:00Z",
             "2026-10-22T00:00:00Z",
         )];
@@ -869,6 +869,6 @@ mod tests {
         let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
 
         assert!(err.contains("Imbalance"), "{err}");
-        assert!(err.contains("GCZ6.GLBX"), "{err}");
+        assert!(err.contains("GCZ26.GLBX"), "{err}");
     }
 }

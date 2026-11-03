@@ -22,7 +22,7 @@ use super::*;
 const TOML: &str = r#"
     [data]
     series = [
-        { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+        { data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
     ]
     warmup = "720h"
     session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
@@ -34,7 +34,7 @@ const TOML: &str = r#"
     period = 30
 
     [trade]
-    instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
+    instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
 "#;
 
 /// The fields of the config errors refusing `toml`.
@@ -62,10 +62,13 @@ fn error_fields(toml: &str) -> Vec<String> {
 fn loads_from_toml() {
     let config = EmaCrossConfig::load(TOML).unwrap();
     assert_eq!(config.trade_size(), Quantity::from(1));
-    assert_eq!(config.trade_instrument_id(), InstrumentId::from("ESM4.CME"));
+    assert_eq!(
+        config.trade_instrument_id(),
+        InstrumentId::from("ESM24.CME")
+    );
     assert_eq!(
         config.trade_bar_type(),
-        BarType::from("ESM4.CME-1-HOUR-MID-INTERNAL")
+        BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL")
     );
 }
 
@@ -145,9 +148,9 @@ fn rejects_fast_period_not_below_slow() {
 #[test]
 fn rejects_two_traded_instruments() {
     let toml = TOML.replace(
-        "instruments = [{ instrument_id = \"ESM4.CME\", trade_size = \"1\" }]",
-        "instruments = [{ instrument_id = \"ESM4.CME\", trade_size = \"1\" }, \
-         { instrument_id = \"ESH4.CME\", trade_size = \"1\" }]",
+        "instruments = [{ instrument_id = \"ESM24.CME\", trade_size = \"1\" }]",
+        "instruments = [{ instrument_id = \"ESM24.CME\", trade_size = \"1\" }, \
+         { instrument_id = \"ESH24.CME\", trade_size = \"1\" }]",
     );
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
 }
@@ -157,7 +160,7 @@ fn rejects_two_traded_instruments() {
 #[test]
 fn rejects_no_traded_instrument_alone() {
     let toml = TOML.replace(
-        "instruments = [{ instrument_id = \"ESM4.CME\", trade_size = \"1\" }]",
+        "instruments = [{ instrument_id = \"ESM24.CME\", trade_size = \"1\" }]",
         "instruments = []",
     );
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
@@ -166,8 +169,8 @@ fn rejects_no_traded_instrument_alone() {
 #[test]
 fn rejects_a_trade_instrument_without_bars() {
     let toml = TOML.replace(
-        "{ instrument_id = \"ESM4.CME\", trade_size",
-        "{ instrument_id = \"ESU4.CME\", trade_size",
+        "{ instrument_id = \"ESM24.CME\", trade_size",
+        "{ instrument_id = \"ESU24.CME\", trade_size",
     );
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
@@ -186,21 +189,21 @@ fn listing(series: &str) -> String {
 #[test]
 fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
     let toml = listing(
-        r#"{ data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
+        r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
     );
     assert_eq!(error_fields(&toml), ["data.series[1]"]);
     let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("ESM4.CME-2-HOUR-MID-INTERNAL"), "{err}");
+    assert!(err.contains("ESM24.CME-2-HOUR-MID-INTERNAL"), "{err}");
 }
 
 #[test]
 fn rejects_bars_of_another_instrument_as_unread() {
     let toml = listing(
-        r#"{ data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
+        r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
     );
     assert_eq!(error_fields(&toml), ["data.series[1]"]);
     let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("ESH4.CME-1-HOUR-MID-INTERNAL"), "{err}");
+    assert!(err.contains("ESH24.CME-1-HOUR-MID-INTERNAL"), "{err}");
 }
 
 /// The crossover reads its bars series once: listed again, it is refused
@@ -208,7 +211,7 @@ fn rejects_bars_of_another_instrument_as_unread() {
 #[test]
 fn rejects_its_bars_series_listed_twice() {
     let toml = listing(
-        r#"{ data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
+        r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
     );
     let err = EmaCrossConfig::load(&toml).unwrap_err();
     let Some(ConfigError::Duplicate {
@@ -219,16 +222,16 @@ fn rejects_its_bars_series_listed_twice() {
         panic!("not one duplicate naming the series: {err}");
     };
     assert_eq!(field, "data.series[1]");
-    assert!(value.contains("ESM4.CME-1-HOUR-MID-INTERNAL"), "{value}");
+    assert!(value.contains("ESM24.CME-1-HOUR-MID-INTERNAL"), "{value}");
 }
 
 /// The crossover reads bars alone, even of the instrument it trades.
 #[test]
 fn rejects_ticks_of_the_trade_instrument_as_unread() {
-    let toml = listing(r#"{ data = "quotes", instrument_id = "ESM4.CME" }"#);
+    let toml = listing(r#"{ data = "quotes", instrument_id = "ESM24.CME" }"#);
     assert_eq!(error_fields(&toml), ["data.series[1]"]);
     let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("QuoteTick of ESM4.CME"), "{err}");
+    assert!(err.contains("QuoteTick of ESM24.CME"), "{err}");
 }
 
 /// The traded instrument without bars, its own error, is reported with
@@ -237,8 +240,8 @@ fn rejects_ticks_of_the_trade_instrument_as_unread() {
 fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
     let toml = TOML
         .replace(
-            "{ instrument_id = \"ESM4.CME\", trade_size",
-            "{ instrument_id = \"ESU4.CME\", trade_size",
+            "{ instrument_id = \"ESM24.CME\", trade_size",
+            "{ instrument_id = \"ESU24.CME\", trade_size",
         )
         .replace("\"720h\"", "\"0s\"");
     let mut fields = error_fields(&toml);
@@ -254,8 +257,8 @@ fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
 #[test]
 fn reports_every_unread_series_with_the_other_violations() {
     let toml = listing(
-        r#"{ data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
-        { data = "trades", instrument_id = "ESM4.CME" }"#,
+        r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+        { data = "trades", instrument_id = "ESM24.CME" }"#,
     )
     .replace("period = 10", "period = 30")
     .replace("\"720h\"", "\"0s\"");
@@ -278,7 +281,7 @@ fn reports_every_unread_series_with_the_other_violations() {
 #[test]
 fn rejects_a_futures_root_traded() {
     let toml = TOML
-        .replace("ESM4.CME", "GC.GLBX")
+        .replace("ESM24.CME", "GC.GLBX")
         .replace("price_type = \"MID\"", "price_type = \"LAST\"");
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
@@ -289,7 +292,7 @@ fn rejects_a_futures_root_traded() {
 /// root traded.
 #[test]
 fn rejects_bars_on_a_root_not_built_from_its_trades() {
-    let toml = TOML.replace("ESM4.CME", "GC.GLBX");
+    let toml = TOML.replace("ESM24.CME", "GC.GLBX");
     let mut fields = error_fields(&toml);
     fields.sort();
     assert_eq!(

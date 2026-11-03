@@ -55,7 +55,7 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
-const GCZ6: &str = "GCZ6.GLBX";
+const GCZ26: &str = "GCZ26.GLBX";
 
 /// Friday 17 October 2025 to Tuesday 21 October: a weekend without data
 /// inside.
@@ -88,23 +88,23 @@ fn end_before(s: &str) -> Timestamp {
 
 fn gcz6() -> InstrumentAny {
     let mut contract = futures_contract_es(None, None);
-    contract.id = InstrumentId::from(GCZ6);
+    contract.id = InstrumentId::from(GCZ26);
     InstrumentAny::FuturesContract(contract)
 }
 
 fn depth(at: &str) -> OrderBookDepth {
     let mut depth = stub_depth10();
-    depth.instrument_id = InstrumentId::from(GCZ6);
+    depth.instrument_id = InstrumentId::from(GCZ26);
     depth.ts_event = ts(at).into();
     depth.ts_init = ts(at).into();
     depth
 }
 
-/// A bid of one contract at 4000.00 added to GCZ6's book at `at`, the
+/// A bid of one contract at 4000.00 added to GCZ26's book at `at`, the
 /// last delta of its event.
 fn delta(at: &str) -> OrderBookDelta {
     OrderBookDelta::new(
-        InstrumentId::from(GCZ6),
+        InstrumentId::from(GCZ26),
         BookAction::Add,
         BookOrder::new(OrderSide::Buy, Price::from("4000.00"), Quantity::from(1), 1),
         RecordFlag::F_LAST as u8,
@@ -126,7 +126,7 @@ fn trade(id: &str, at: &str) -> TradeTick {
     )
 }
 
-/// The book of GCZ6 the venue has: a snapshot on Friday, Monday and
+/// The book of GCZ26 the venue has: a snapshot on Friday, Monday and
 /// Tuesday, none on the weekend.
 fn book() -> Vec<OrderBookDepth> {
     vec![
@@ -151,7 +151,7 @@ enum Answer {
     FailureEnvelope,
     /// The request refused (`Err`).
     Refused,
-    /// Trades of GCQ6 to a request of GCZ6's: rows the engine cannot
+    /// Trades of GCQ26 to a request of GCZ26's: rows the engine cannot
     /// write back.
     OtherContract,
 }
@@ -399,9 +399,9 @@ impl DataClient for FakeClient {
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
         let of = if self.venue.borrow().answer == Answer::OtherContract {
-            "GCQ6.GLBX"
+            "GCQ26.GLBX"
         } else {
-            GCZ6
+            GCZ26
         };
         let response = DataResponse::Trades(TradesResponse::new(
             request.request_id,
@@ -423,13 +423,13 @@ impl DataClient for FakeClient {
     }
 }
 
-/// The requirements reading `data` of GCZ6.
+/// The requirements reading `data` of GCZ26.
 fn reading(data: NautilusDataType) -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
         ticks: vec![TickSeries {
             data,
-            instrument_id: InstrumentId::from(GCZ6),
+            instrument_id: InstrumentId::from(GCZ26),
         }],
         warmup: SignedDuration::ZERO,
     }
@@ -469,18 +469,18 @@ fn fill(
 
 fn depth_intervals(dir: &Path) -> Vec<(u64, u64)> {
     ParquetDataCatalog::new(dir, None, None, None, None)
-        .get_intervals(&NautilusDataType::OrderBookDepth.into(), Some(GCZ6))
+        .get_intervals(&NautilusDataType::OrderBookDepth.into(), Some(GCZ26))
         .unwrap()
 }
 
-/// What the catalog in `dir` lacks of GCZ6's book over `[from, to]`.
+/// What the catalog in `dir` lacks of GCZ26's book over `[from, to]`.
 fn depth_lacking(dir: &Path, (from, to): (&str, &str)) -> Vec<(u64, u64)> {
     ParquetDataCatalog::new(dir, None, None, None, None)
         .get_missing_intervals_for_request(
             ns(from),
             ns(to),
             &NautilusDataType::OrderBookDepth.into(),
-            Some(GCZ6),
+            Some(GCZ26),
         )
         .unwrap()
 }
@@ -488,7 +488,7 @@ fn depth_lacking(dir: &Path, (from, to): (&str, &str)) -> Vec<(u64, u64)> {
 fn stored_book(dir: &Path) -> Vec<u64> {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog
-        .order_book_depths(Some(vec![GCZ6.to_string()]), None, None)
+        .order_book_depths(Some(vec![GCZ26.to_string()]), None, None)
         .unwrap()
         .iter()
         .map(|d| d.ts_init.as_u64())
@@ -542,10 +542,10 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     );
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let stored = catalog
-        .instruments(Some(&[GCZ6.to_string()]), None, None)
+        .instruments(Some(&[GCZ26.to_string()]), None, None)
         .unwrap();
     assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].id(), InstrumentId::from(GCZ6));
+    assert_eq!(stored[0].id(), InstrumentId::from(GCZ26));
 }
 
 /// The book stored over Friday to Monday but for 0.2 s before Friday's
@@ -638,7 +638,7 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
 
 #[test]
 fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
-    let friday = "the book depths of GCZ6.GLBX over \
+    let friday = "the book depths of GCZ26.GLBX over \
                   [2025-10-17T00:00:00Z, 2025-10-17T23:59:59.999999999Z]";
     for (answer, failure) in [
         // The venue's reason.
@@ -686,7 +686,7 @@ fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
     .to_string();
 
     assert!(
-        err.contains("the trades of GCZ6.GLBX over [2025-10-17T00:00:00Z"),
+        err.contains("the trades of GCZ26.GLBX over [2025-10-17T00:00:00Z"),
         "{err}"
     );
     assert!(err.contains("write-back failed"), "{err}");
@@ -717,7 +717,7 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let stored: Vec<OrderBookDelta> = catalog
-        .order_book_deltas(Some(vec![GCZ6.to_string()]), None, None)
+        .order_book_deltas(Some(vec![GCZ26.to_string()]), None, None)
         .unwrap();
     assert_eq!(stored, [delta("2025-10-20T10:00:00Z")]);
 }

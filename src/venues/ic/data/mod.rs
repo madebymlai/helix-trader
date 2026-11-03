@@ -151,7 +151,7 @@ impl IcDataClient {
         for symbol in &symbols {
             send(
                 &self.data_sender,
-                DataEvent::Instrument(symbol.instrument.clone()),
+                DataEvent::Data(symbol.instrument.clone().into()),
             );
         }
         let quotes = Arc::new(Mutex::new(quotes));
@@ -631,7 +631,10 @@ mod tests {
     /// Skips the two instruments sent at connect.
     async fn skip_instruments(events: &mut Events) {
         for _ in 0..2 {
-            assert!(matches!(next_event(events).await, DataEvent::Instrument(_)));
+            assert!(matches!(
+                next_event(events).await,
+                DataEvent::Data(Data::Instrument(_))
+            ));
         }
     }
 
@@ -664,7 +667,8 @@ mod tests {
 
         let mut ids = Vec::new();
         for _ in 0..2 {
-            let DataEvent::Instrument(instrument) = next_event(&mut events).await else {
+            let DataEvent::Data(Data::Instrument(instrument)) = next_event(&mut events).await
+            else {
                 panic!("not an instrument");
             };
             ids.push(instrument.id());

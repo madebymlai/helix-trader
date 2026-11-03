@@ -677,17 +677,17 @@ mod tests {
 
         [data]
         series = [
-            { data = "bars", instrument_id = "ESH4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
-            { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },
-            { data = "trades", instrument_id = "ESH4.CME" },
+            { data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+            { data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },
+            { data = "trades", instrument_id = "ESH24.CME" },
         ]
         warmup = "720h"
         session = { time_zone = "America/Chicago", open = "08:30", close = "15:00" }
 
         [trade]
         instruments = [
-            { instrument_id = "ESH4.CME", trade_size = "1" },
-            { instrument_id = "ESM4.CME", trade_size = "2" },
+            { instrument_id = "ESH24.CME", trade_size = "1" },
+            { instrument_id = "ESM24.CME", trade_size = "2" },
         ]
     "#;
 
@@ -747,12 +747,12 @@ mod tests {
             config.data_requirements(),
             DataRequirements {
                 bar_types: vec![
-                    BarType::from("ESH4.CME-1-HOUR-MID-INTERNAL"),
-                    BarType::from("ESM4.CME-5-MINUTE-BID-INTERNAL"),
+                    BarType::from("ESH24.CME-1-HOUR-MID-INTERNAL"),
+                    BarType::from("ESM24.CME-5-MINUTE-BID-INTERNAL"),
                 ],
                 ticks: vec![TickSeries {
                     data: NautilusDataType::TradeTick,
-                    instrument_id: InstrumentId::from("ESH4.CME"),
+                    instrument_id: InstrumentId::from("ESH24.CME"),
                 }],
                 warmup: SignedDuration::from_hours(720),
             }
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(
             config.trade.instruments[1],
             TradedInstrument {
-                instrument_id: InstrumentId::from("ESM4.CME"),
+                instrument_id: InstrumentId::from("ESM24.CME"),
                 trade_size: Quantity::from(2),
             }
         );
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn a_wrong_count_of_traded_instruments_is_refused() {
-        let toml = TOML.replace("{ instrument_id = \"ESM4.CME\", trade_size = \"2\" },", "");
+        let toml = TOML.replace("{ instrument_id = \"ESM24.CME\", trade_size = \"2\" },", "");
         assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn a_futures_root_traded_is_refused_naming_it() {
         let toml = TOML.replace(
-            "{ instrument_id = \"ESM4.CME\", trade_size",
+            "{ instrument_id = \"ESM24.CME\", trade_size",
             "{ instrument_id = \"GC.GLBX\", trade_size",
         );
         let err = load(&toml).unwrap_err();
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn a_futures_root_traded_is_reported_with_the_other_violations() {
         let toml = TOML.replace("\"720h\"", "\"0s\"").replace(
-            "{ instrument_id = \"ESM4.CME\", trade_size = \"2\" }",
+            "{ instrument_id = \"ESM24.CME\", trade_size = \"2\" }",
             "{ instrument_id = \"GC.GLBX\", trade_size = \"0\" }",
         );
         assert_eq!(
@@ -891,7 +891,7 @@ mod tests {
         );
         let err = shape_error(&toml);
         assert!(
-            err.contains("bar_spec") && err.contains("ESM4.CME"),
+            err.contains("bar_spec") && err.contains("ESM24.CME"),
             "{err}"
         );
     }
@@ -899,8 +899,8 @@ mod tests {
     #[test]
     fn a_tick_series_with_a_bar_spec_is_refused_naming_it() {
         let toml = TOML.replace(
-            "{ data = \"trades\", instrument_id = \"ESH4.CME\" }",
-            "{ data = \"trades\", instrument_id = \"ESH4.CME\", bar_spec = { step = 1, aggregation = \"HOUR\", price_type = \"MID\" } }",
+            "{ data = \"trades\", instrument_id = \"ESH24.CME\" }",
+            "{ data = \"trades\", instrument_id = \"ESH24.CME\", bar_spec = { step = 1, aggregation = \"HOUR\", price_type = \"MID\" } }",
         );
         let err = shape_error(&toml);
         assert!(err.contains("bar_spec"), "{err}");
@@ -986,8 +986,8 @@ mod tests {
 
             [trade]
             instruments = [
-                {{ instrument_id = "GCQ6.GLBX", trade_size = "1" }},
-                {{ instrument_id = "GCZ6.GLBX", trade_size = "1" }},
+                {{ instrument_id = "GCQ26.GLBX", trade_size = "1" }},
+                {{ instrument_id = "GCZ26.GLBX", trade_size = "1" }},
             ]
             "#
         )
@@ -1028,7 +1028,7 @@ mod tests {
     /// built from its quotes.
     #[test]
     fn bars_on_a_contract_of_a_root_need_not_be_built_from_its_trades() {
-        load(&gold_futures("GCZ6.GLBX", HOUR_MID)).unwrap();
+        load(&gold_futures("GCZ26.GLBX", HOUR_MID)).unwrap();
     }
 
     /// The bars on a root not built from its trades, and those built from
@@ -1038,14 +1038,14 @@ mod tests {
         let toml = gold_futures("GC.GLBX", HOUR_MID)
             .replace(
                 "price_type = \"MID\" } }]",
-                "price_type = \"MID\" } }, { data = \"bars\", instrument_id = \"GCZ6.GLBX\", \
+                "price_type = \"MID\" } }, { data = \"bars\", instrument_id = \"GCZ26.GLBX\", \
                  bar_spec = { step = 1, aggregation = \"HOUR\", price_type = \"LAST\" }, \
                  from = { step = 1, aggregation = \"MINUTE\", aggregation_source = \"INTERNAL\" } }]",
             )
             .replace("\"720h\"", "\"0s\"")
             .replace(
-                "{ instrument_id = \"GCZ6.GLBX\", trade_size = \"1\" }",
-                "{ instrument_id = \"GCZ6.GLBX\", trade_size = \"0\" }",
+                "{ instrument_id = \"GCZ26.GLBX\", trade_size = \"1\" }",
+                "{ instrument_id = \"GCZ26.GLBX\", trade_size = \"0\" }",
             );
         assert_eq!(
             error_fields(&toml),
@@ -1080,15 +1080,15 @@ mod tests {
         let config = load(&toml).unwrap();
         assert_eq!(
             config.data.bar_types().next(),
-            Some(BarType::from("ESH4.CME-1-HOUR-LAST-INTERNAL"))
+            Some(BarType::from("ESH24.CME-1-HOUR-LAST-INTERNAL"))
         );
     }
 
     #[test]
     fn bars_on_a_second_venue_are_refused() {
         let toml = TOML.replace(
-            "{ data = \"bars\", instrument_id = \"ESM4.CME\"",
-            "{ data = \"bars\", instrument_id = \"ESM4.EUREX\"",
+            "{ data = \"bars\", instrument_id = \"ESM24.CME\"",
+            "{ data = \"bars\", instrument_id = \"ESM24.EUREX\"",
         );
         assert_eq!(error_fields(&toml), ["data.series[1].instrument_id"]);
     }
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn ticks_may_be_of_another_venue() {
         let toml = TOML.replace(
-            "{ data = \"trades\", instrument_id = \"ESH4.CME\" }",
+            "{ data = \"trades\", instrument_id = \"ESH24.CME\" }",
             "{ data = \"trades\", instrument_id = \"FESX.EUREX\" }",
         );
         load(&toml).unwrap();
@@ -1110,11 +1110,11 @@ mod tests {
         assert_eq!(error_fields(&toml), ["data.series"]);
     }
 
-    /// The trades of ESH4 listed three times: each listing after the first
+    /// The trades of ESH24 listed three times: each listing after the first
     /// is refused under its field, naming them, with the other violations.
     #[test]
     fn a_series_listed_again_is_refused_under_each_later_listing_with_the_other_violations() {
-        let trades = r#"{ data = "trades", instrument_id = "ESH4.CME" },"#;
+        let trades = r#"{ data = "trades", instrument_id = "ESH24.CME" },"#;
         let toml = TOML
             .replace(trades, &[trades; 3].join("\n"))
             .replace("\"720h\"", "\"0s\"")
@@ -1133,7 +1133,7 @@ mod tests {
             else {
                 panic!("not a duplicate naming the series: {err:?}");
             };
-            assert!(value.contains("TradeTick of ESH4.CME"), "{value}");
+            assert!(value.contains("TradeTick of ESH24.CME"), "{value}");
         }
     }
 
@@ -1171,8 +1171,8 @@ mod tests {
     #[test]
     fn a_traded_instrument_no_series_reads_loads_its_quotes_into_the_requirements() {
         let toml = TOML.replace(
-            "{ instrument_id = \"ESM4.CME\", trade_size = \"2\" }",
-            "{ instrument_id = \"ESU4.CME\", trade_size = \"2\" }",
+            "{ instrument_id = \"ESM24.CME\", trade_size = \"2\" }",
+            "{ instrument_id = \"ESU24.CME\", trade_size = \"2\" }",
         );
         let config = load(&toml).unwrap();
         assert_eq!(
@@ -1180,11 +1180,11 @@ mod tests {
             [
                 TickSeries {
                     data: NautilusDataType::TradeTick,
-                    instrument_id: InstrumentId::from("ESH4.CME"),
+                    instrument_id: InstrumentId::from("ESH24.CME"),
                 },
                 TickSeries {
                     data: NautilusDataType::QuoteTick,
-                    instrument_id: InstrumentId::from("ESU4.CME"),
+                    instrument_id: InstrumentId::from("ESU24.CME"),
                 },
             ]
         );
@@ -1199,7 +1199,7 @@ mod tests {
             load(TOML).unwrap().data_requirements().ticks,
             [TickSeries {
                 data: NautilusDataType::TradeTick,
-                instrument_id: InstrumentId::from("ESH4.CME"),
+                instrument_id: InstrumentId::from("ESH24.CME"),
             }]
         );
     }
@@ -1216,7 +1216,7 @@ mod tests {
             .replace("\"720h\"", "\"0s\"")
             .replace("price_type = \"MID\"", "price_type = \"MARK\"")
             .replace("trade_size = \"2\"", "trade_size = \"0\"")
-            .replace("{ instrument_id = \"ESH4.CME\", trade_size = \"1\" },", "")
+            .replace("{ instrument_id = \"ESH24.CME\", trade_size = \"1\" },", "")
             .replace("spread = 3", "spread = 0");
         assert_eq!(
             error_fields(&toml),

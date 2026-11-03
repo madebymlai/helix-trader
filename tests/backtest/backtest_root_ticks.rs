@@ -1,5 +1,5 @@
 //! A model strategy's features on a futures root's ticks (`common::rolls`:
-//! GC.GLBX, rolling from GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July
+//! GC.GLBX, rolling from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July
 //! 2026), trading IC's gold, whose quotes the harness reads: a dataset run
 //! from 23:00 to 01:00 across the roll, deciding every 15 minutes, its
 //! model handle rolling the root's trades. The features read the pre

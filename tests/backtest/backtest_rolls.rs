@@ -1,5 +1,5 @@
 //! A strategy declaring a rolled root (`common::rolls`: GC.GLBX, rolling
-//! from GCQ6.GLBX to GCZ6.GLBX at 00:00 UTC on 29 July 2026) over a run
+//! from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026) over a run
 //! from 23:00 to 01:00 across the roll: the run replays each contract's
 //! series over its slice only, and a `Roller` switches the strategy's
 //! subscriptions from one contract to the next at the roll and tells it.

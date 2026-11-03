@@ -224,7 +224,7 @@ mod tests {
         }
     }
 
-    /// GC rolls into GCZ6 on 2026-07-29 and out of it into GCG7 on
+    /// GC rolls into GCZ26 on 2026-07-29 and out of it into GCG27 on
     /// 2026-11-26 (`rolls/README.md`, "GC against Databento"): the roller
     /// requests the contracts of the later rolls (`rolls::Roller::live`).
     #[test]
@@ -235,7 +235,7 @@ mod tests {
         };
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
-            ids(&["XAUUSD.ICMARKETS", "GCZ6.GLBX", "GCG7.GLBX"])
+            ids(&["XAUUSD.ICMARKETS", "GCZ26.GLBX", "GCG27.GLBX"])
         );
     }
 
@@ -251,7 +251,7 @@ mod tests {
                 at("2026-07-29T00:00Z") - SignedDuration::from_nanos(1)
             )
             .unwrap(),
-            ids(&["GCQ6.GLBX", "GCZ6.GLBX"])
+            ids(&["GCQ26.GLBX", "GCZ26.GLBX"])
         );
     }
 
@@ -260,16 +260,16 @@ mod tests {
         let requirements = ticks(NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
-            ids(&["GCZ6.GLBX", "GCG7.GLBX"])
+            ids(&["GCZ26.GLBX", "GCG27.GLBX"])
         );
     }
 
     #[test]
     fn a_contract_read_beside_its_root_loads_once() {
-        let requirements = ticks(NautilusDataType::TradeTick, &["GCZ6.GLBX", "GC.GLBX"]);
+        let requirements = ticks(NautilusDataType::TradeTick, &["GCZ26.GLBX", "GC.GLBX"]);
         assert_eq!(
             loaded_instrument_ids(&requirements, at("2026-08-10T14:30Z")).unwrap(),
-            ids(&["GCZ6.GLBX", "GCG7.GLBX"])
+            ids(&["GCZ26.GLBX", "GCG27.GLBX"])
         );
     }
 
@@ -306,6 +306,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("GC.GLBX-1-MINUTE-LAST-INTERNAL"), "{err}");
-        assert!(err.contains("GCZ6.GLBX"), "{err}");
+        assert!(err.contains("GCZ26.GLBX"), "{err}");
     }
 }

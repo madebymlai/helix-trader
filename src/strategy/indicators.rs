@@ -343,7 +343,7 @@ mod tests {
     const TOML: &str = r#"
         [data]
         series = [
-            { data = "bars", instrument_id = "ESM4.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+            { data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
         ]
         warmup = "24h"
 
@@ -360,7 +360,7 @@ mod tests {
         level = 100.5
 
         [trade]
-        instruments = [{ instrument_id = "ESM4.CME", trade_size = "1" }]
+        instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
     "#;
 
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Trend>> {
