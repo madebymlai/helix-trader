@@ -1,4 +1,4 @@
-# Captured from ACMEFX's cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # the answer to a reconcile request on the account with no open position
 # and no pending order.
 # Scrubbed: ctidTraderAccountId replaced by the fake 1000001.

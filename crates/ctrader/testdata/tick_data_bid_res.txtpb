@@ -1,4 +1,4 @@
-# Captured from ACMEFX's cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # the XAUUSD BID ticks of [2026-10-21T14:00:00Z, 14:00:05Z) (fromTimestamp
 # 1792591200000, toTimestamp 1792591205000), newest first, the first tick
 # absolute (Unix ms, price x 100000), the others differences from the one before.

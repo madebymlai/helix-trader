@@ -860,8 +860,9 @@ fn pending_venue_id(order: &OrderAny) -> Result<i64, String> {
         .and_then(|v| v.as_str().parse().ok())
         .ok_or_else(|| {
             format!(
-                "{} is not yet accepted by the venue",
-                order.client_order_id()
+                "{} is not yet accepted by {}",
+                order.client_order_id(),
+                order.instrument_id().venue
             )
         })
 }

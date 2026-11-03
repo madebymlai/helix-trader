@@ -113,8 +113,12 @@ async fn phase() {
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
-        account: Some(account()),
-        client_id: CLIENT_ID,
+        venues: crate::venues(&[
+            "--account",
+            &account().to_string(),
+            "--client-id",
+            &CLIENT_ID.to_string(),
+        ]),
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),

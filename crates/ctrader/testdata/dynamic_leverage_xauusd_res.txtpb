@@ -1,4 +1,4 @@
-# Captured from ACMEFX's cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # the dynamic leverage of XAUUSD (its leverageId 52543): one tier, 1:200
 # (leverage in cents, as ProtoOATrader.leverageInCents), up to 1,000,000 USD
 # (volume in cents) and, being the last, above it too.

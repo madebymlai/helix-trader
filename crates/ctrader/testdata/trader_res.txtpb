@@ -1,4 +1,4 @@
-# Captured from ACMEFX's cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # the answer to a trader request: the hedged demo account, in EUR.
 # Scrubbed: ctidTraderAccountId replaced by the fake 1000001, traderLogin by
 # the fake 2000002, brokerName by the fake acmefx; the payload re-encoded
