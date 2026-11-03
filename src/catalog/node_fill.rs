@@ -86,18 +86,6 @@ impl FillData {
             other => bail!("no source filled through the node serves {other}"),
         })
     }
-
-    /// The Nautilus data type of a series; none for the instrument.
-    #[must_use]
-    pub fn data_type(self) -> Option<NautilusDataType> {
-        match self {
-            Self::Instrument => None,
-            Self::Quotes => Some(NautilusDataType::QuoteTick),
-            Self::Trades => Some(NautilusDataType::TradeTick),
-            Self::Depth => Some(NautilusDataType::OrderBookDepth),
-            Self::Deltas => Some(NautilusDataType::OrderBookDelta),
-        }
-    }
 }
 
 impl fmt::Display for FillData {
@@ -284,10 +272,9 @@ impl NodeFill {
     /// # Errors
     ///
     /// Returns an error if the node fails to build or run; naming the
-    /// request, if one fails or its client answers with a failure; if the
-    /// node stops before every request is answered; or if a window answered
-    /// with data is not covered in the catalog after the run (see
-    /// `check_coverage`). What was written before stays.
+    /// request, if one fails, its client answers with a failure or its
+    /// answer is not written back; or if the node stops before every
+    /// request is answered. What was written before stays.
     pub async fn run(self, catalog_dir: &Path) -> anyhow::Result<()> {
         let Self { clients, requests } = self;
         if requests.is_empty() {
@@ -344,63 +331,17 @@ impl NodeFill {
         }
         ensure!(
             done,
-            "the node stopped with {} of {total} requests answered",
-            answered.len()
+            "the node stopped with {answered} of {total} requests answered"
         );
-        check_coverage(
-            &ParquetDataCatalog::new(catalog_dir, None, None, None, None),
-            &answered,
-        )
+        Ok(())
     }
 }
 
-/// Checks that each request of `answered` that came back with data is
-/// covered in `catalog`: Nautilus only logs a failed write-back
-/// (`update_catalog_from_response`), so the requester sees a success.
-/// Temporary: delete once nautilus_trader#5474 (a write-back failure
-/// reported to the requester) is fixed.
-///
-/// # Errors
-///
-/// Returns an error naming the first such request the catalog does not
-/// cover, and what it lacks.
-fn check_coverage(
-    catalog: &ParquetDataCatalog,
-    answered: &[(FillRequest, usize)],
-) -> anyhow::Result<()> {
-    for &(request, rows) in answered {
-        let Some(data_type) = request.data.data_type() else {
-            continue;
-        };
-        if rows == 0 {
-            continue;
-        }
-        let missing = catalog
-            .get_missing_intervals_for_request(
-                nanos(request.from),
-                nanos(request.to),
-                &data_type.into(),
-                Some(&request.instrument_id.to_string()),
-            )
-            .with_context(|| format!("reading the coverage of {request}"))?;
-        ensure!(
-            missing.is_empty(),
-            "{request} came back with {rows} rows, but the catalog lacks {:?} of it: \
-             Nautilus' write-back failed (see its log)",
-            missing
-                .iter()
-                .map(|&(from, to)| (at(from), at(to)))
-                .collect::<Vec<_>>()
-        );
-    }
-    Ok(())
-}
-
-/// How the actor's requests ended: those answered, with their rows, the
-/// first failure, and whether every request was answered.
+/// How the actor's requests ended: how many were answered, the first
+/// failure, and whether every request was answered.
 #[derive(Debug, Default)]
 struct Outcome {
-    answered: Vec<(FillRequest, usize)>,
+    answered: usize,
     failure: Option<String>,
     done: bool,
 }
@@ -509,7 +450,7 @@ impl DataActor for FillActor {
             _ => 0,
         };
         log::info!("{request}: {rows} rows");
-        self.outcome.borrow_mut().answered.push((request, rows));
+        self.outcome.borrow_mut().answered += 1;
         self.next();
         Ok(())
     }

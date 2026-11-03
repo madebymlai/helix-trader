@@ -671,7 +671,7 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
 }
 
 #[test]
-fn rows_the_engine_does_not_write_back_fail_the_coverage_check() {
+fn rows_the_engine_does_not_write_back_fail_the_fill_naming_the_request() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::OtherContract);
 
