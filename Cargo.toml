@@ -117,8 +117,9 @@ ustr.workspace = true
 [dev-dependencies]
 # The `DataClient` trait of the test venues' data clients.
 async-trait.workspace = true
-# The demo test of the cTrader session's token renewal, run on IC's demo.
-ctrader = { workspace = true, features = ["demo-test"] }
+# The hooks of the IC demo test of the cTrader session's token renewal
+# (`tests/live/ic_token_demo.rs`).
+ctrader = { workspace = true, features = ["test-support"] }
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"] }
 nautilus-model = { workspace = true, features = ["test-support"] }

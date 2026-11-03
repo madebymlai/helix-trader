@@ -208,8 +208,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
-        account: Some(account),
-        client_id: 46,
+        venues: crate::venues(&["--account", &account.to_string(), "--client-id", "46"]),
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),

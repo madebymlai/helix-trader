@@ -18,10 +18,11 @@ For a EUR account trading USD-quoted instruments, subscribe to `EURUSD.ICMARKETS
 
 ## Tests
 
-Offline tests of the environment and the clients' configuration are in `src/venues/ic`; the adapter's are in [the crate](../../../crates/ctrader/README.md#tests). The demo tests `tests/live/ic_demo.rs`, `tests/live/ic_live_demo.rs` and `tests/live/ic_orders_demo.rs` require `NAUTILUS_IC_RUN=1` in the shell and a demo account. **The orders test places demo-account orders**; verify the account and check it afterwards. Tests may renew shared tokens; see [credentials](#credentials) for token safety. The library renewal test `the_demo_session_renews_its_token_and_keeps_receiving_quotes` **rotates the real token pair**; run it only when prepared to manage the shared state file and recover credentials if renewal is interrupted. Run live-node tests in separate processes.
+Offline tests of the environment and the clients' configuration are in `src/venues/ic`; the adapter's are in [the crate](../../../crates/ctrader/README.md#tests). The demo tests `tests/live/ic_demo.rs`, `tests/live/ic_live_demo.rs`, `tests/live/ic_orders_demo.rs` and `tests/live/ic_token_demo.rs` require `NAUTILUS_IC_RUN=1` in the shell and a demo account. **The orders test places demo-account orders**; verify the account and check it afterwards. Tests may renew shared tokens; see [credentials](#credentials) for token safety. The renewal test `ic_token_demo::the_demo_session_renews_its_token_and_keeps_receiving_quotes` **rotates the real token pair** in the token file; run it only when prepared to manage the shared state file and recover credentials if renewal is interrupted. Run live-node tests in separate processes.
 
 ```sh
 NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture
 NAUTILUS_IC_RUN=1 cargo test --test live ic_live_demo:: -- --nocapture
 NAUTILUS_IC_RUN=1 cargo test --test live ic_orders_demo:: -- --nocapture
+NAUTILUS_IC_RUN=1 cargo test --test live ic_token_demo:: -- --nocapture
 ```

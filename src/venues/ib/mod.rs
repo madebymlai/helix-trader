@@ -2,7 +2,9 @@
 //! data client config its history and its live clients share, instruments
 //! and bars for `fill_catalog`, which asks for series of any data type: IB
 //! serves its 1-MINUTE TRADES bars only (see `IbHistory::data`), and the
-//! live node's clients (see `live`). See `README.md`.
+//! live node's clients (see `live`); the client id each command connects
+//! with, and live's account, are its flags (`IbHistoryArgs`,
+//! `live::IbLiveArgs`). See `README.md`.
 //!
 //! IB's fill (`IbHistory::fill`) is temporary: IB's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
@@ -18,6 +20,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, ensure};
+use clap::Args;
 use ibapi::contracts::{Contract, Symbol};
 use jiff::Timestamp;
 use nautilus_interactive_brokers::{
@@ -40,7 +43,17 @@ mod gateway;
 pub use gateway::IbAccount;
 use gateway::IbGateway;
 mod live;
-pub(crate) use live::clients;
+pub(crate) use live::{IbLiveArgs, clients};
+
+/// IB's settings of a catalog fill, fill-catalog's flags: the client id its
+/// history connects with (see `IbHistory::connect`).
+#[derive(Debug, Args)]
+pub(crate) struct IbHistoryArgs {
+    /// IB client id of this process; not the adapter default 1, so a live
+    /// node with the default id can run at the same time.
+    #[arg(long, default_value_t = 10)]
+    pub(super) client_id: i32,
+}
 
 /// A connection to IB for history: instruments and bars, no node.
 pub struct IbHistory {

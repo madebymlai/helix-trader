@@ -1,4 +1,4 @@
-# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # the answer to a cancel of an order already cancelled.
 # Scrubbed: ctidTraderAccountId replaced by the fake 1000001.
 # The .bin is the payload; this is its text form, from:

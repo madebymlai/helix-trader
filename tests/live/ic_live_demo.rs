@@ -190,8 +190,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
-        account: None,
-        client_id: 1,
+        venues: crate::venues(&[]),
         leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),

@@ -1,4 +1,4 @@
-# Captured from IC Markets' cTrader demo (2026-10-26), protobuf port 5035:
+# Captured from a cTrader broker's demo (2026-10-26), protobuf port 5035:
 # that closing order filled at 4023.56 by deal 953555151, the position
 # closed, charged 0.11 EUR.
 # Scrubbed: ctidTraderAccountId replaced by the fake 1000001.

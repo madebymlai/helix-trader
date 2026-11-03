@@ -447,6 +447,30 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
 }
 
 #[tokio::test]
+async fn a_modify_of_an_order_the_broker_has_not_accepted_is_denied_naming_the_venue() {
+    let mut node = Node::start(|_| vec![]).await;
+    let limit = order(OrderType::Limit, "PROBE-2", OrderSide::Buy, 1)
+        .price(Price::from("3822.73"))
+        .build();
+    node.submit(&limit, None);
+    node.order_events(1).await;
+
+    node.modify("PROBE-2", Some(Price::from("3821.73")), None);
+
+    let events = node.order_events(1).await;
+    let OrderEventAny::ModifyDenied(denied) = &events[0] else {
+        panic!("not a modify denial: {events:?}");
+    };
+    assert_eq!(denied.client_order_id, ClientOrderId::from("PROBE-2"));
+    assert!(
+        denied.reason.as_str().contains(VENUE),
+        "the reason does not name {VENUE}: {}",
+        denied.reason
+    );
+    node.client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
 async fn an_order_the_broker_refuses_is_rejected_with_its_reason() {
     let mut node = Node::start(|request| {
         vec![event(

@@ -6,9 +6,12 @@ rust-version.workspace = true
 publish = false
 
 [features]
-# The opt-in end-to-end test of a session's token renewal on a real cTrader
-# server (`demo`), for a caller that holds a demo account's credential.
-demo-test = []
+# The hooks of a caller's end-to-end test of a session's token renewal on a
+# real cTrader server, as Nautilus' crates expose theirs: a forced renewal
+# (`CTraderSession::renew_token`), a session's raw spot events
+# (`CTraderSession::connect_with_spots`, `SpotEvents`) and the pair its
+# token file holds (`CTraderCredential::stored_tokens`, `TokenPair`).
+test-support = []
 
 [dependencies]
 anyhow.workspace = true
