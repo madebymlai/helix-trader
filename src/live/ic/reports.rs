@@ -560,8 +560,5 @@ pub(super) fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result
 /// A Unix time in milliseconds, which must be there.
 pub(super) fn millis(ms: Option<i64>) -> anyhow::Result<UnixNanos> {
     let ms = ms.context("no time")?;
-    let ms = u64::try_from(ms).with_context(|| format!("time {ms} ms before 1970"))?;
-    ms.checked_mul(1_000_000)
-        .map(UnixNanos::new)
-        .with_context(|| format!("time {ms} ms out of range"))
+    UnixNanos::from_millis_checked(ms).with_context(|| format!("time {ms} ms out of range"))
 }
