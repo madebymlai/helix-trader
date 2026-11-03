@@ -20,7 +20,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use helix_trader::{
-    data::{IcConnection, IcHistory, NodeClient, NodeFill, REQUEST_TIMEOUT, missing},
+    data::{IcConnection, IcHistory, NodeClient, NodeFill, missing},
     live::{
         IcDataClientConfig, IcDataClientFactory, IcExecutionClientConfig, IcExecutionClientFactory,
     },
@@ -143,7 +143,7 @@ pub(crate) async fn fill_quotes_through_node(
     };
     let mut node = NodeFill::new();
     node.add(client, &requests, IcHistory::period);
-    node.run(dir, REQUEST_TIMEOUT).await
+    node.run(dir).await
 }
 
 /// A day of XAU/USD: Wednesday 21 October 2026 UTC, split for the resumed
