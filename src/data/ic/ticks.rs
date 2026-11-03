@@ -26,8 +26,6 @@ pub(super) const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// 4128.47000.
 const PRICE_SCALE: u32 = 5;
 
-const NANOS_PER_MS: u64 = 1_000_000;
-
 /// The nominal size of both sides of a quote, in units, unless the
 /// instrument's maximum order is smaller (see `quote_size`).
 const QUOTE_SIZE: f64 = 100_000.0;
@@ -311,7 +309,8 @@ impl QuoteMerge {
     /// # Errors
     ///
     /// Returns an error if a price is not on the instrument's precision, or
-    /// `ms` is before 1970.
+    /// `ms` is out of Nautilus' range of Unix times (before 1970 among
+    /// them).
     pub(crate) fn next(
         &mut self,
         ms: i64,
@@ -327,10 +326,8 @@ impl QuoteMerge {
         if a < b {
             return Ok(Merged::Crossed);
         }
-        let ts_event = UnixNanos::from(
-            u64::try_from(ms).with_context(|| format!("a tick at {ms} ms, before 1970"))?
-                * NANOS_PER_MS,
-        );
+        let ts_event = UnixNanos::from_millis_checked(ms)
+            .with_context(|| format!("a tick at {ms} ms, out of range"))?;
         Ok(Merged::Quote(QuoteTick::new(
             self.instrument_id,
             price(b, self.precision)?,

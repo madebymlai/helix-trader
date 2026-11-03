@@ -335,7 +335,10 @@ impl IcExecutionClient {
         from: UnixNanos,
         to: UnixNanos,
     ) -> anyhow::Result<Vec<FillReport>> {
-        let deals = session.history.deals(millis(from), millis(to)).await?;
+        let deals = session
+            .history
+            .deals(orders::millis(from), orders::millis(to))
+            .await?;
         let reports = self.reports(session, ts_init);
         let mut fills = Vec::new();
         for deal in &deals {
@@ -779,8 +782,8 @@ impl IcExecutionClient {
                 let close = Tag::Close(id).to_string();
                 let orders = history
                     .orders(
-                        millis(since) - QUERY_MARGIN_MS,
-                        millis(now) + QUERY_MARGIN_MS,
+                        orders::millis(since) - QUERY_MARGIN_MS,
+                        orders::millis(now) + QUERY_MARGIN_MS,
                     )
                     .await?;
                 orders
@@ -1270,8 +1273,7 @@ impl ExecutionClient for IcExecutionClient {
             .position
             .iter()
             .filter_map(|p| p.trade_data.open_timestamp)
-            .filter_map(|ms| u64::try_from(ms).ok())
-            .map(|ms| UnixNanos::new(ms.saturating_mul(1_000_000)))
+            .filter_map(UnixNanos::from_millis_checked)
             .min();
         let start = [lookback, venue_open, cached_open]
             .into_iter()
@@ -1279,10 +1281,10 @@ impl ExecutionClient for IcExecutionClient {
             .min()
             .unwrap_or(ts_init);
         // One cutoff for the request and the report window: cTrader's, in ms.
-        let start = UnixNanos::new(start.as_u64() / 1_000_000 * 1_000_000);
+        let start = start.floor(DurationNanos::from_millis(1));
         let deals = session
             .history
-            .deals(millis(start), millis(ts_init))
+            .deals(orders::millis(start), orders::millis(ts_init))
             .await?;
         let (kept, unexplained) = explained(&deals, &open_volumes(&open.position));
         if !unexplained.is_empty() {
@@ -1314,11 +1316,6 @@ impl ExecutionClient for IcExecutionClient {
         mass_status.set_report_window(Some(start), unexplained.is_empty());
         Ok(Some(mass_status))
     }
-}
-
-/// `nanos` in whole milliseconds.
-fn millis(nanos: UnixNanos) -> i64 {
-    i64::try_from(nanos.as_u64() / 1_000_000).unwrap_or(i64::MAX)
 }
 
 fn log_receipt(count: usize, kind: &str, level: LogLevel) {
