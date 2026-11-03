@@ -6,7 +6,7 @@ The instrument venue selects the source: [OKX](okx/README.md) for `OKX`, [Databe
 
 ## Fill paths
 
-Databento and IC answer historical requests through a Nautilus node. The node requests missing intervals sequentially and writes completed responses back. IB and OKX use the direct `fill_catalog` writer: their clients return payloads without the completed response envelope required for node writeback (nautilus_trader#5472 and #5473). A failed request stops the fill; previously written data remains.
+Databento and IC answer historical requests through a Nautilus node. The node requests missing intervals sequentially and writes completed responses back. It waits for each answer with no deadline, as Nautilus requests have none: both clients answer every request, a failed one with its failure, and a client that never answered would leave the fill waiting until interrupted. IB and OKX use the direct `fill_catalog` writer: their clients return payloads without the completed response envelope required for node writeback (nautilus_trader#5472 and #5473). A failed request stops the fill; previously written data remains.
 
 Node requests are cut into source-sized, epoch-aligned inclusive windows, ending 1 ns before the next. A definition precedes its series. The node verifies coverage for windows that returned rows because Nautilus can log a writeback failure without reporting it to the requester (nautilus_trader#5474). An empty answer may record coverage when adjacent to stored data; an isolated empty window records nothing and is requested again. A wholly empty first fill is not an error.
 
