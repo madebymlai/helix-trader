@@ -278,8 +278,20 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         .query(Some(vec![XAUUSD.to_owned()]), None, None, None, None, true)
         .unwrap();
     let seen = |q: &QuoteTick| (q.ts_event, q.bid_price, q.ask_price);
-    let warmup_end = warmup_quotes.last().unwrap().ts_event;
-    let written_back: Vec<_> = stored
+    let warmup_last = warmup_quotes.last().unwrap();
+    let warmup_end = warmup_last.ts_event;
+    // cTrader's first spot after a subscription resends the latest tick, so
+    // the first live quote can be the warmup's last again.
+    let repeated = quotes.first().is_some_and(|q| seen(q) == seen(warmup_last));
+    println!(
+        "the first live quote repeats the warmup's last: {repeated}; \
+         the catalog holds that tick {} time(s)",
+        stored
+            .iter()
+            .filter(|q| seen(q) == seen(warmup_last))
+            .count()
+    );
+    let mut written_back: Vec<_> = stored
         .iter()
         .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns && q.ts_event <= warmup_end)
         .map(seen)
@@ -289,6 +301,10 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns)
         .map(seen)
         .collect();
+    // The repeat, stamped as the warmup's last, is streamed beside it.
+    if repeated && written_back.len() > from_ic.len() {
+        written_back.pop();
+    }
     assert_eq!(written_back, from_ic, "IC's answer was not written back");
     let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
         - started.checked_sub(warmup).unwrap().as_nanosecond();
@@ -325,17 +341,19 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     assert!(quotes.iter().all(|q| q.ts_event.as_u64() % 1_000_000 == 0));
     assert!(quotes.windows(2).all(|w| w[0].ts_event <= w[1].ts_event));
     assert!(quotes.iter().all(|q| q.bid_size == Quantity::from(10_000)));
-    // The hand-off: no live quote repeats the warmup's last.
-    assert!(quotes[0].ts_event > warmup_quotes.last().unwrap().ts_event);
-    // Streamed into the catalog: the live quotes the strategy got, in order,
-    // then those the node received until its clients disconnected (see
-    // `live/README.md`, "Recording into the catalog").
+    // The hand-off: past the one repeat allowed, every live quote is newer
+    // than the warmup's last.
+    let new = &quotes[usize::from(repeated)..];
+    assert!(new.iter().all(|q| q.ts_event > warmup_end));
+    // Streamed into the catalog: the new live quotes the strategy got, in
+    // order, then those the node received until its clients disconnected
+    // (see `live/README.md`, "Recording into the catalog").
     let streamed: Vec<_> = stored
         .iter()
-        .filter(|q| q.ts_event >= quotes[0].ts_event)
+        .filter(|q| q.ts_event > warmup_end)
         .map(seen)
         .collect();
-    let got: Vec<_> = quotes.iter().map(seen).collect();
+    let got: Vec<_> = new.iter().map(seen).collect();
     println!("{} quotes streamed", streamed.len());
     assert!(
         streamed.starts_with(&got),
