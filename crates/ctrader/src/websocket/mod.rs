@@ -58,7 +58,7 @@ use nautilus_network::{
     Message,
     ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota},
     websocket::{
-        AuthTracker, MessageHandler, SubscriptionState, WebSocketClient, WebSocketConfig,
+        AuthTracker, EpochMessageHandler, SubscriptionState, WebSocketClient, WebSocketConfig,
         split_topic,
     },
 };
@@ -205,10 +205,10 @@ impl CTraderWebSocketClient {
             }
             time::sleep(LOCK_RETRY).await;
         };
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Message>();
-        let message_handler: MessageHandler = Arc::new(move |message| {
+        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<(u64, Message)>();
+        let message_handler: EpochMessageHandler = Arc::new(move |epoch, message| {
             // The receiver is gone only once the handler has stopped.
-            let _ = raw_tx.send(message);
+            let _ = raw_tx.send((epoch, message));
         });
         let config = WebSocketConfig::builder()
             .url(url.to_owned())
@@ -218,20 +218,19 @@ impl CTraderWebSocketClient {
             .context("the historical request period is zero")?;
         let historical =
             RateLimiter::new_with_quota(None, vec![(Ustr::from(HISTORICAL_KEY), historical)]);
-        let client = WebSocketClient::builder()
+        let client = WebSocketClient::epoch_builder()
             .config(config)
-            .message_handler(message_handler)
+            .epoch_handler(message_handler)
             .connect()
             .await
             .with_context(|| format!("connecting to cTrader at {url}"))?;
 
         // The transport invalidates the session's authentication when the
         // connection drops and fails it once closed. Its reconnect buffer
-        // does not wait for the authentication: the auth frames are binary,
-        // which the transport cannot bind to a connection, so they would
-        // wait behind it.
+        // waits for the authentication; the handler's frames, bound to their
+        // connection, never go through it.
         let auth = AuthTracker::new();
-        client.set_auth_tracker(auth.clone(), false);
+        client.set_auth_tracker(auth.clone(), true);
         let subscriptions = SubscriptionState::new(TOPIC_DELIMITER);
         let authenticated = auth.begin();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -1346,6 +1345,62 @@ mod tests {
             .map(|r| r.symbol_id)
             .collect();
         assert_eq!(again, [vec![1]]);
+        client.disconnect().await;
+    }
+
+    /// A spot subscription asked while the transport reconnects, the
+    /// session still ready as far as the handler knows, goes out on the new
+    /// connection with the others, once it is authenticated.
+    #[tokio::test]
+    async fn a_spot_subscription_during_a_reconnect_goes_out_once_authenticated_again() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let reconnecting = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&reconnecting);
+        let (url, received) = testing::start_delayed(
+            move |connection| {
+                if connection == 0 {
+                    return Duration::ZERO;
+                }
+                seen.store(true, Ordering::SeqCst);
+                Duration::from_millis(1500)
+            },
+            closing_peer(ProtoOaSubscribeSpotsReq::TYPE),
+        );
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
+            .await
+            .unwrap();
+        client.subscribe_spots(1).unwrap();
+        assert_eq!(next_spot(&mut spots).await, spot_event(1));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !reconnecting.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+
+        let mut events = [
+            next_spot(&mut spots).await.symbol_id,
+            next_spot(&mut spots).await.symbol_id,
+        ];
+        events.sort_unstable();
+        assert_eq!(events, [1, 41]);
+        assert_eq!(
+            payload_types(&received, 1),
+            [
+                ProtoOaApplicationAuthReq::TYPE,
+                ProtoOaAccountAuthReq::TYPE,
+                ProtoOaSubscribeSpotsReq::TYPE
+            ]
+        );
+        let mut again = spot_subscriptions(&received, 1).remove(0).symbol_id;
+        again.sort_unstable();
+        assert_eq!(again, [1, 41]);
+        assert_eq!(spot_subscriptions(&received, 0).len(), 1);
         client.disconnect().await;
     }
 
