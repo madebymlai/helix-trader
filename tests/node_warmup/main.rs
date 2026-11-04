@@ -472,7 +472,7 @@ fn run(
         node.dispose();
     });
     let failure = failure.borrow().clone();
-    let exits = exits.borrow().clone();
+    let exits = *exits.borrow();
     (failure, exits)
 }
 
