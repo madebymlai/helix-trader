@@ -12,9 +12,15 @@
 
 use std::{any::Any, cell::RefCell, path::Path, rc::Rc, time::Duration};
 
-use helix_trader::strategy::{
-    DataRequirements,
-    warmup::{self, Warmup},
+use helix_trader::{
+    model::{
+        decide::DecisionRule,
+        targets::{Barrier, BarrierExits, Side, Stops, TargetsConfig},
+    },
+    strategy::{
+        DataRequirements, TickSeries,
+        warmup::{self, Warmup},
+    },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -43,7 +49,7 @@ use nautilus_live::{
     config::{LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::{
-    data::{Bar, BarType, QuoteTick, TradeTick},
+    data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
     identifiers::{ClientId, InstrumentId, TraderId, Venue},
     instruments::{InstrumentAny, stubs::futures_contract_es},
     types::{Price, Quantity},
@@ -69,12 +75,11 @@ fn gcz26() -> InstrumentAny {
     InstrumentAny::FuturesContract(contract)
 }
 
-/// The venue's price at the minute closing at `ns`: a whole number of
-/// dollars moving by one a minute, so that a bar's prices tell which
-/// minutes built it.
+/// The venue's price at the minute closing at `ns`: its number since the
+/// epoch, in dollars, moving by one a minute, so that a bar's prices tell
+/// which minutes built it and every hour's true range is 60.
 fn price_at(ns: u64) -> Price {
-    let minute = ns / MINUTE_NS;
-    Price::from(format!("{}.00", 4000 + minute % 1000).as_str())
+    Price::from(format!("{}.00", ns / MINUTE_NS).as_str())
 }
 
 /// The closes of the minutes in `[start, end]`, outside `closed`.
@@ -341,6 +346,10 @@ impl ActorIndicator for Fed {
 struct Warming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
+    /// The barrier's stops, started as a model handle does, and read for the
+    /// long side when the warmup ends.
+    stops: Option<Rc<Stops>>,
+    exits: Rc<RefCell<Option<BarrierExits>>>,
     failure: Rc<RefCell<Option<String>>>,
 }
 
@@ -349,7 +358,11 @@ nautilus_actor!(Warming);
 impl DataActor for Warming {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.cache_rc().borrow_mut().add_instrument(gcz26())?;
-        Rc::clone(&self.warmup).start(self)
+        Rc::clone(&self.warmup).start(self)?;
+        if let Some(stops) = self.stops.clone() {
+            stops.start(self);
+        }
+        Ok(())
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -357,6 +370,9 @@ impl DataActor for Warming {
             *self.failure.borrow_mut() = Some(format!("{e:#}"));
         }
         if !self.warmup.is_warming() {
+            if let Some(stops) = self.stops.clone() {
+                *self.exits.borrow_mut() = stops.at(self, Side::Long)?;
+            }
             self.shutdown_system(Some("the warmup ended".to_string()));
         }
         Ok(())
@@ -379,15 +395,31 @@ fn warm(
     bar_type: &str,
     length: SignedDuration,
 ) -> Warmed {
-    let bar_types = vec![BarType::from(bar_type)];
     let requirements = DataRequirements {
-        bar_types: bar_types.clone(),
+        bar_types: vec![BarType::from(bar_type)],
         ticks: vec![],
         warmup: length,
     };
     let fed = Rc::new(Fed::default());
-    let warmup =
-        Rc::new(Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator));
+    let warmup = Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator);
+    let (failure, _) = run(dir, venue, &requirements, warmup, None);
+    Warmed {
+        bars: fed.bars.borrow().clone(),
+        failure,
+    }
+}
+
+/// Runs `warmup`, and `stops`, of a strategy of `requirements` on a node with
+/// the catalog in `dir`, its history asked of `venue`: why it failed, if it
+/// did, and the long side's barrier when it ended.
+fn run(
+    dir: &Path,
+    venue: &Rc<RefCell<FakeVenue>>,
+    requirements: &DataRequirements,
+    warmup: Warmup,
+    stops: Option<Rc<Stops>>,
+) -> (Option<String>, Option<BarrierExits>) {
+    let warmup = Rc::new(warmup);
     let config = LiveNodeConfig {
         environment: Environment::Live,
         trader_id: TraderId::from("WARMUP-001"),
@@ -399,10 +431,11 @@ fn warm(
             None,
         )],
         cache: Some(warmup.cache_config().unwrap()),
-        data_engine: warmup::live_data_engine_config(&bar_types),
+        data_engine: warmup::live_data_engine_config(&requirements.bar_types),
         ..Default::default()
     };
     let failure = Rc::new(RefCell::new(None));
+    let exits = Rc::new(RefCell::new(None));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -427,6 +460,8 @@ fn warm(
         node.add_actor(Warming {
             core: DataActorCore::new(DataActorConfig::default()),
             warmup,
+            stops,
+            exits: Rc::clone(&exits),
             failure: Rc::clone(&failure),
         })
         .unwrap();
@@ -437,10 +472,8 @@ fn warm(
         node.dispose();
     });
     let failure = failure.borrow().clone();
-    Warmed {
-        bars: fed.bars.borrow().clone(),
-        failure,
-    }
+    let exits = exits.borrow().clone();
+    (failure, exits)
 }
 
 /// The time a bar closes, in ns.
@@ -609,4 +642,76 @@ fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
     );
     assert!(warmed.bars.len() >= 29 * 60, "{} bars", warmed.bars.len());
     assert!(one_every(&warmed.bars, MINUTE_NS));
+}
+
+/// The long side's barrier when a warmup of 72 hours of `requirements`' ends:
+/// a bracket's take profit two ATRs away, its stop one, the ATR of model_ema's
+/// config, on hourly bars.
+fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> BarrierExits {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    let requirements = DataRequirements {
+        bar_types,
+        ticks,
+        warmup: WARMUP,
+    };
+    let barrier: Barrier = toml::from_str(
+        r#"
+        take_profit = { atr = 2.0 }
+        stop = { atr = 1.0 }
+        limit = "45m"
+        atr = { period = 14, ma_type = "WILDER" }
+        "#,
+    )
+    .unwrap();
+    let targets = TargetsConfig {
+        instrument_id: InstrumentId::from(GCZ26),
+        quantity: Quantity::from(1),
+        barrier: Some(barrier),
+        horizon: None,
+    };
+    let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
+    let stops = Rc::new(
+        Stops::new(&targets, hourly, &requirements)
+            .unwrap()
+            .expect("a barrier"),
+    );
+    let warmup = stops.warmed(Warmup::live(&requirements));
+    let (failure, exits) = run(dir.path(), &venue, &requirements, warmup, Some(stops));
+    assert_eq!(failure, None);
+    assert_eq!(venue.borrow().asked.len(), 4);
+    exits.expect("a bracket: the ATR is warm when the warmup ends")
+}
+
+/// Every hour's true range is 60 and each bar reaches the ATR once, in order,
+/// so the bracket is 3 ATRs wide, 180, within what the first bar's range, 59,
+/// still weighs after a Wilder's 70 bars. A bar handed over again would throw
+/// the true range back by hundreds, and the Wilder's memory would hold it.
+fn assert_three_atrs_wide(exits: &BarrierExits) {
+    let width = exits.take_profit.as_f64() - exits.stop.as_f64();
+    assert!((179.0..=181.0).contains(&width), "{exits:?}");
+}
+
+/// A strategy reading quotes: the ATR's bars are built from them, by the one
+/// request of the quotes, across its windows.
+#[test]
+fn a_warmup_of_quotes_warms_the_atr_of_a_bracket() {
+    let exits = bracket_of(
+        vec![],
+        vec![TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from(GCZ26),
+        }],
+    );
+
+    assert_three_atrs_wide(&exits);
+}
+
+/// A strategy reading composite bars: the ATR is on the same hour bars, which
+/// a node caches under their standard type.
+#[test]
+fn a_warmup_of_composite_bars_warms_the_atr_of_a_bracket() {
+    let exits = bracket_of(vec![BarType::from(COMPOSITE)], vec![]);
+
+    assert_three_atrs_wide(&exits);
 }
