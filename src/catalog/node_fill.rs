@@ -241,7 +241,7 @@ fn at(ns: u64) -> Timestamp {
 
 /// A source's data client for the node: its factory and config, and the
 /// venues Nautilus routes its requests to it by (none for a client naming
-/// its venue, as IC's).
+/// its venue, as a cTrader broker's).
 pub struct NodeClient {
     pub factory: Box<dyn DataClientFactory>,
     pub config: Box<dyn ClientConfig>,

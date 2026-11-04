@@ -3,7 +3,7 @@
 //! skipped, without them. Run one module per process, by its path:
 //!
 //! ```sh
-//! NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture
+//! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
 //! ```
 //!
 //! A module's tests share the process as they did when each module was its
@@ -27,13 +27,14 @@ use helix_trader::{live::Recording, venues::LiveVenueArgs};
 #[path = "../common/mod.rs"]
 mod common;
 
+mod ctrader_demo;
+mod ctrader_live_demo;
+mod ctrader_orders_demo;
+mod ctrader_token_demo;
+mod demo_broker;
 mod ib_gateway;
 mod ib_minute_bars;
 mod ib_restart;
-mod ic_demo;
-mod ic_live_demo;
-mod ic_orders_demo;
-mod ic_token_demo;
 mod okx_demo;
 mod streaming;
 

@@ -1,26 +1,21 @@
-//! End to end on IC Markets' cTrader demo: `Live` on XAU/USD checks the
-//! account, builds a node with IC's clients and a catalog already holding
-//! gold's quotes up to `CATALOG_BEHIND` before now (filled as fill-catalog
-//! fills it), and a recording strategy gets its minute bars warmed up from
-//! the catalog, then from IC's data client up to now, then live quotes and
-//! the bars Nautilus builds from them, until SIGINT; IC's answer is written
-//! back to the catalog, and the live quotes the node receives are streamed
-//! into it. It needs the app's `IC_CLIENT_ID` and
-//! `IC_CLIENT_SECRET`, the demo account's `IC_ACCESS_TOKEN`,
-//! `IC_REFRESH_TOKEN` (they seed the token file, which then holds the
-//! latest pair) and `IC_ACCOUNT_ID`, and `IC_ENVIRONMENT=demo`, from the environment or
-//! `.env` (any other environment fails the test before connecting), and
-//! gold's market open.
+//! End to end on a cTrader broker's demo: `Live` on XAU/USD checks the
+//! account, builds a node with the broker's clients and a catalog already
+//! holding gold's quotes up to `CATALOG_BEHIND` before now (filled as
+//! fill-catalog fills it), and a recording strategy gets its minute bars
+//! warmed up from the catalog, then from the broker's data client up to now,
+//! then live quotes and the bars Nautilus builds from them, until SIGINT;
+//! the broker's answer is written back to the catalog, and the live quotes
+//! the node receives are streamed into it. It needs what `ctrader_demo.rs`
+//! needs, and gold's market open.
 //!
-//! Gated as `ic_demo.rs` is: the test returns at once, saying it was
-//! skipped, unless `NAUTILUS_IC_RUN=1` is set in the shell. The strategy
-//! sends no order; IC's execution client reconciles the account. One node per
-//! process, hence its own module, run alone (`main.rs`). The node keeps its cache in Redis
+//! Gated as `ctrader_demo.rs` is. The strategy sends no order; the broker's
+//! execution client reconciles the account. One node per process, hence its
+//! own module, run alone (`main.rs`). The node keeps its cache in Redis
 //! (`live::redis`) under the test's trader, `HELIXTEST-101`, whose records
 //! the test deletes once the node has stopped cleanly. Run it with:
 //!
 //! ```sh
-//! NAUTILUS_IC_RUN=1 cargo test --test live ic_live_demo:: -- --nocapture
+//! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_live_demo:: -- --nocapture
 //! ```
 
 use crate::common;
@@ -39,8 +34,7 @@ use nautilus_common::{
 use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Bar, BarType, NautilusDataType, QuoteTick},
-    identifiers::{InstrumentId, StrategyId, TraderId},
-    types::Quantity,
+    identifiers::{StrategyId, TraderId},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_trading::{
@@ -49,30 +43,7 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so
-/// that the file cannot opt in.
-/// An opted-in run claims the process for this module (`claim_process`).
-fn opted_in(test: &str) -> bool {
-    let run = std::env::var("NAUTILUS_IC_RUN").is_ok_and(|value| value == "1");
-    if run {
-        crate::claim_process(module_path!());
-    } else {
-        println!("{test}: skipped; set NAUTILUS_IC_RUN=1 to run it on IC's cTrader demo");
-    }
-    run
-}
-
-/// Reads `.env` and refuses any environment but the demo.
-fn demo_only() {
-    dotenvy::dotenv().ok();
-    assert_eq!(
-        std::env::var("IC_ENVIRONMENT").as_deref(),
-        Ok("demo"),
-        "the IC end to end test runs on the demo only: set IC_ENVIRONMENT=demo"
-    );
-}
-
-const XAUUSD: &str = "XAUUSD.ICMARKETS";
+use crate::demo_broker::opted_in;
 
 /// How far before now the catalog's quotes end.
 const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(10);
@@ -149,11 +120,14 @@ const LIVE_RUN: Duration = Duration::from_secs(150);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
-    if !opted_in("live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now") {
+    let Some(broker) = opted_in(
+        "live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now",
+        module_path!(),
+    ) else {
         return;
-    }
-    demo_only();
-    let bar_type = BarType::from(format!("{XAUUSD}-1-MINUTE-MID-INTERNAL").as_str());
+    };
+    let gold = broker.gold();
+    let bar_type = BarType::from(format!("{gold}-1-MINUTE-MID-INTERNAL").as_str());
     let warmup = SignedDuration::from_mins(30);
     let requirements = DataRequirements {
         bar_types: vec![bar_type],
@@ -177,7 +151,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let catalog = tempfile::tempdir().unwrap();
     let now = jiff::Timestamp::now();
     let catalog_end = now - CATALOG_BEHIND;
-    crate::ic_demo::fill_quotes_through_node(
+    crate::ctrader_demo::fill_quotes_through_node(
+        broker,
         catalog.path(),
         bar_type.instrument_id(),
         now - warmup,
@@ -245,7 +220,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         quotes.last()
     );
     // One response over `[now - warmup, now]`, the catalog's quotes, then
-    // IC's for the rest, written back to the catalog.
+    // the broker's for the rest, written back to the catalog.
     assert_eq!(
         record.warmup_end,
         Some(Ok(())),
@@ -259,7 +234,10 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         .count();
     let parquet = ParquetDataCatalog::new(catalog.path(), None, None, None, None);
     let stored_to = parquet
-        .query_last_timestamp(&NautilusDataType::QuoteTick.into(), Some(XAUUSD))
+        .query_last_timestamp(
+            &NautilusDataType::QuoteTick.into(),
+            Some(gold.to_string().as_str()),
+        )
         .unwrap()
         .unwrap();
     println!(
@@ -269,13 +247,13 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     assert!(from_catalog > 0, "no warmup quote from the catalog");
     assert!(
         from_catalog < warmup_quotes.len(),
-        "no warmup quote from IC"
+        "no warmup quote from the broker"
     );
-    // IC's answer, written back: the catalog's quotes after its own end up
-    // to the warmup's last are the warmup's from IC. A check of the
+    // The broker's answer, written back: the catalog's quotes after its own end up
+    // to the warmup's last are the warmup's from it. A check of the
     // catalog's end alone would pass on the quotes the node streams.
     let stored: Vec<QuoteTick> = ParquetDataCatalog::new(catalog.path(), None, None, None, None)
-        .query(Some(vec![XAUUSD.to_owned()]), None, None, None, None, true)
+        .query(Some(vec![gold.to_string()]), None, None, None, None, true)
         .unwrap();
     let seen = |q: &QuoteTick| (q.ts_event, q.bid_price, q.ask_price);
     let warmup_last = warmup_quotes.last().unwrap();
@@ -296,16 +274,19 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns && q.ts_event <= warmup_end)
         .map(seen)
         .collect();
-    let from_ic: Vec<_> = warmup_quotes
+    let from_broker: Vec<_> = warmup_quotes
         .iter()
         .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns)
         .map(seen)
         .collect();
     // The repeat, stamped as the warmup's last, is streamed beside it.
-    if repeated && written_back.len() > from_ic.len() {
+    if repeated && written_back.len() > from_broker.len() {
         written_back.pop();
     }
-    assert_eq!(written_back, from_ic, "IC's answer was not written back");
+    assert_eq!(
+        written_back, from_broker,
+        "the broker's answer was not written back"
+    );
     let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
         - started.checked_sub(warmup).unwrap().as_nanosecond();
     assert!(
@@ -332,15 +313,15 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     );
     // Live quotes: at the spot's time, sized as the history's, ordered.
     assert!(!quotes.is_empty());
-    assert!(
-        quotes
-            .iter()
-            .all(|q| q.instrument_id == InstrumentId::from(XAUUSD))
-    );
+    assert!(quotes.iter().all(|q| q.instrument_id == gold));
     assert!(quotes.iter().all(|q| q.bid_price <= q.ask_price));
     assert!(quotes.iter().all(|q| q.ts_event.as_u64() % 1_000_000 == 0));
     assert!(quotes.windows(2).all(|w| w[0].ts_event <= w[1].ts_event));
-    assert!(quotes.iter().all(|q| q.bid_size == Quantity::from(10_000)));
+    assert!(
+        quotes
+            .iter()
+            .all(|q| q.bid_size == broker.gold_quote_size())
+    );
     // The hand-off: past the one repeat allowed, every live quote is newer
     // than the warmup's last.
     let new = &quotes[usize::from(repeated)..];
