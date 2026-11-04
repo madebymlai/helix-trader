@@ -18,12 +18,7 @@
 //!   gone cancels its leg), its fill fills the leg whose price is nearer the
 //!   deal's and cancels the other, its cancellation cancels them. While the
 //!   entry is pending its protections live on it, and its replacement
-//!   updates the legs the same way. A trailing stop loss set on an open
-//!   position is the position's leg the same way, from its acceptance.
-//! - **Trailing moves**: each move of a trailing stop loss
-//!   (`ProtoOATrailingSLChangedEvent`) updates the stop loss tracked to its
-//!   new level; a stop loss not tracked is reported at it, from the
-//!   position as cTrader last stated it (`positions`).
+//!   updates the legs the same way.
 //! - **External**: an event of an order not tracked (placed elsewhere, or
 //!   before a restart) becomes reports, which Nautilus reconciles: the
 //!   order's status with the deal's fill, or the legs' of a protection.
@@ -65,14 +60,13 @@ use nautilus_model::{
 use ustr::Ustr;
 
 use super::{
-    orders::{Leg, Protection, StopLoss, Tag, Trailing, parse_protection_id, protection_id},
+    orders::{Leg, Protection, Tag, parse_protection_id, protection_id},
     reports::{self, Reports},
 };
 use crate::{
     common::messages::{
         ProtoOaDeal, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaOrder, ProtoOaOrderStatus,
-        ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTradeSide,
-        ProtoOaTrailingSlChangedEvent,
+        ProtoOaOrderType,
     },
     websocket::{TradeEvent, TradeMessage},
 };
@@ -123,8 +117,6 @@ pub(super) struct Tracked {
     pub(super) price: Option<Price>,
     /// The stop price, or a stop loss's.
     pub(super) trigger_price: Option<Price>,
-    /// A trailing stop's offset.
-    pub(super) trailing: Option<Trailing>,
     pub(super) venue_order_id: Option<VenueOrderId>,
     pub(super) accepted: bool,
     pub(super) closed: bool,
@@ -173,13 +165,9 @@ pub(super) enum Role {
     },
     /// A bracket's leg, of `entry`.
     Leg { entry: ClientOrderId, leg: Leg },
-    /// A protection set on the open position `position`: a trailing stop
-    /// loss.
-    Protection { position: i64, leg: Leg },
 }
 
-/// The trade events' state: the orders tracked, the deals seen, and the
-/// open positions as cTrader last stated them.
+/// The trade events' state: the orders tracked, and the deals seen.
 #[derive(Debug)]
 pub(super) struct Dispatch {
     trader_id: TraderId,
@@ -188,42 +176,24 @@ pub(super) struct Dispatch {
     instruments: HashMap<i64, InstrumentAny>,
     orders: HashMap<ClientOrderId, Tracked>,
     deals: FifoCache<i64, DEALS_REMEMBERED>,
-    positions: HashMap<i64, ProtoOaPosition>,
 }
 
 impl Dispatch {
     /// A dispatch for `account_id` of `trader_id`, its deposit currency
-    /// `currency`, on the instruments loaded, by cTrader `symbolId`, the
-    /// account's `positions` open.
+    /// `currency`, on the instruments loaded, by cTrader `symbolId`.
     pub(super) fn new(
         trader_id: TraderId,
         account_id: AccountId,
         currency: Currency,
         instruments: HashMap<i64, InstrumentAny>,
-        positions: &[ProtoOaPosition],
     ) -> Self {
-        let mut dispatch = Self {
+        Self {
             trader_id,
             account_id,
             currency,
             instruments,
             orders: HashMap::new(),
             deals: FifoCache::new(),
-            positions: HashMap::new(),
-        };
-        for position in positions {
-            dispatch.note_position(position);
-        }
-        dispatch
-    }
-
-    /// Notes `position` as cTrader now states it: open, or gone.
-    fn note_position(&mut self, position: &ProtoOaPosition) {
-        if position.position_status() == ProtoOaPositionStatus::PositionStatusOpen {
-            self.positions
-                .insert(position.position_id, position.clone());
-        } else {
-            self.positions.remove(&position.position_id);
         }
     }
 
@@ -236,7 +206,6 @@ impl Dispatch {
                 quantity: order.quantity(),
                 price: order.price(),
                 trigger_price: order.trigger_price(),
-                trailing: Trailing::of(order),
                 venue_order_id: order.venue_order_id(),
                 accepted: order.venue_order_id().is_some(),
                 closed: order.is_closed(),
@@ -274,18 +243,14 @@ impl Dispatch {
     /// window, a query found: `id`, and a bracket entry's open legs, now
     /// closed. `None`, nothing concluded, while its request may still wait
     /// in the session's queue (the broker cannot hold it yet), for a
-    /// protection (a bracket's leg, or one set on a position: the broker
-    /// holds it on its entry or position, never as an order of its own), or
-    /// for an order closed. An order not
+    /// bracket's leg (the broker holds it on its entry or position, never
+    /// as an order of its own), or for an order closed. An order not
     /// tracked was not sent by this session: nothing of it waits.
     pub(super) fn absent(&mut self, id: ClientOrderId) -> Option<Vec<ClientOrderId>> {
         let Some(tracked) = self.orders.get(&id) else {
             return Some(vec![id]);
         };
-        if tracked.closed
-            || tracked.queued
-            || matches!(tracked.role, Role::Leg { .. } | Role::Protection { .. })
-        {
+        if tracked.closed || tracked.queued || matches!(tracked.role, Role::Leg { .. }) {
             return None;
         }
         let mut ids = vec![id];
@@ -303,41 +268,6 @@ impl Dispatch {
         Some(ids)
     }
 
-    /// The outputs of a query of `id`, a protection set on its position and
-    /// not yet accepted, which found the position holding `held`, its
-    /// trailing stop loss (none: no such stop, or the position gone):
-    /// accepted at it, else rejected for `reason`, its request having had no
-    /// effect. Nothing while its request may still wait in the session's
-    /// queue, or once it is accepted or closed.
-    pub(super) fn protection_found(
-        &mut self,
-        id: ClientOrderId,
-        held: Option<f64>,
-        reason: &str,
-        ts: UnixNanos,
-    ) -> Vec<Output> {
-        let Some(tracked) = self.open(id).filter(|t| !t.accepted && !t.queued) else {
-            return Vec::new();
-        };
-        let Role::Protection { position, leg } = tracked.role else {
-            return Vec::new();
-        };
-        match held {
-            Some(level) => {
-                // Its placement is done: the stop cTrader holds is it.
-                if let Some(t) = self.orders.get_mut(&id) {
-                    t.want = None;
-                }
-                self.stop_moved(id, &tracked, protection_id(position, leg), level, ts)
-                    .unwrap_or_else(|e| {
-                        log::error!("{id} at {level} left to reconciliation: {e:#}");
-                        Vec::new()
-                    })
-            }
-            None => vec![self.rejected(id, &tracked, Ustr::from(reason), ts)],
-        }
-    }
-
     /// The tracked order `id`, open or not.
     pub(super) fn tracked(&self, id: ClientOrderId) -> Option<&Tracked> {
         self.orders.get(&id)
@@ -350,9 +280,15 @@ impl Dispatch {
         }
     }
 
+    /// The latest change asked of the protection `id` and not yet seen
+    /// done.
+    pub(super) fn wanted(&self, id: ClientOrderId) -> Option<Want> {
+        self.orders.get(&id).and_then(|t| t.want)
+    }
+
     /// The protections of the bracket `entry` as last asked: each open
-    /// leg's wanted change, else its price, a trailing stop loss its
-    /// offset; the stop loss and take profit an amendment carries.
+    /// leg's wanted change, else its price; the stop loss and take profit
+    /// an amendment carries.
     pub(super) fn protection(&self, entry: ClientOrderId) -> Protection {
         let Some(Tracked {
             role:
@@ -366,31 +302,18 @@ impl Dispatch {
         else {
             return Protection::default();
         };
-        let open = |leg: Option<ClientOrderId>| {
-            self.orders
-                .get(&leg?)
-                .filter(|t| !t.closed && t.want != Some(Want::Remove))
+        let price = |leg: Option<ClientOrderId>, of: fn(&Tracked) -> Option<Price>| {
+            let tracked = self.orders.get(&leg?).filter(|t| !t.closed)?;
+            match tracked.want {
+                Some(Want::Move(price)) => Some(price),
+                Some(Want::Remove) => None,
+                None => of(tracked),
+            }
         };
-        let moved = |t: &Tracked| match t.want {
-            Some(Want::Move(price)) => Some(price),
-            _ => None,
-        };
-        let stop_loss = open(*stop_loss).and_then(|t| match t.trailing {
-            Some(trailing) => Some(StopLoss::Trailing(trailing)),
-            None => moved(t).or(t.trigger_price).map(StopLoss::At),
-        });
         Protection {
-            stop_loss,
-            take_profit: open(*take_profit).and_then(|t| moved(t).or(t.price)),
+            stop_loss: price(*stop_loss, |t| t.trigger_price),
+            take_profit: price(*take_profit, |t| t.price),
         }
-    }
-
-    /// The open protection `leg` set on `position`, if any: the node's
-    /// cache may not index it under its venue order id yet.
-    pub(super) fn protection_set(&self, position: i64, leg: Leg) -> Option<ClientOrderId> {
-        self.orders.iter().find_map(|(id, t)| {
-            (t.role == Role::Protection { position, leg } && !t.closed).then_some(*id)
-        })
     }
 
     /// Forgets the changes of the protections of `position` that the broker
@@ -420,7 +343,6 @@ impl Dispatch {
                 self.refused_by_id(id, &reason, ts_init)
             }
             TradeMessage::Refused(refused) => self.refused_by_id(id, &refused.to_string(), ts_init),
-            TradeMessage::TrailingStopMoved(moved) => self.trailing_moved(&moved, ts_init),
         }
     }
 
@@ -438,8 +360,8 @@ impl Dispatch {
     /// `commands`, each order's modify or cancel the request carries with
     /// its command's id: a new order or a close rejected as `refuse` does;
     /// a modify (an amendment) or a cancel (a cancellation, a removal of
-    /// protections) denied for each order still open, the change it wanted
-    /// forgotten (a cancel's removal, not an earlier move).
+    /// protections) denied for each order still open, its wanted change
+    /// forgotten.
     pub(super) fn unsent(
         &mut self,
         tag: Tag,
@@ -457,9 +379,7 @@ impl Dispatch {
             .iter()
             .filter_map(|&(id, command_id)| {
                 let tracked = self.orders.get_mut(&id).filter(|t| !t.closed)?;
-                if command == Command::Modify || tracked.want == Some(Want::Remove) {
-                    tracked.want = None;
-                }
+                tracked.want = None;
                 Some(Output::Denied(Denial {
                     command,
                     strategy_id: tracked.identity.strategy_id,
@@ -587,9 +507,6 @@ impl Dispatch {
     }
 
     fn execution(&mut self, event: &ProtoOaExecutionEvent, ts_init: UnixNanos) -> Vec<Output> {
-        if let Some(position) = &event.position {
-            self.note_position(position);
-        }
         let Some(order) = &event.order else {
             log::debug!(
                 "cTrader {} event without an order",
@@ -613,100 +530,6 @@ impl Dispatch {
             );
             Vec::new()
         })
-    }
-
-    /// The outputs of a move of a position's trailing stop loss: the stop
-    /// loss this client tracks updated to its new level (accepted first if
-    /// its acceptance has not come yet), else the report of the position's
-    /// stop loss as cTrader last stated the position, at its new level.
-    fn trailing_moved(
-        &mut self,
-        moved: &ProtoOaTrailingSlChangedEvent,
-        ts_init: UnixNanos,
-    ) -> Vec<Output> {
-        let position = moved.position_id;
-        let ts = reports::millis(Some(moved.utc_last_update_timestamp)).unwrap_or(ts_init);
-        if let Some(held) = self.positions.get_mut(&position) {
-            held.stop_loss = Some(moved.stop_price);
-            held.trailing_stop_loss = Some(true);
-            held.utc_last_update_timestamp = Some(moved.utc_last_update_timestamp);
-        }
-        let venue = protection_id(position, Leg::StopLoss);
-        let tracked = self
-            .protections(position, self.entry_of_position(position))
-            .into_iter()
-            .filter(|(leg, _)| *leg == Leg::StopLoss)
-            .find_map(|(_, id)| self.open(id).map(|t| (id, t)))
-            .or_else(|| {
-                self.orders
-                    .iter()
-                    .find(|(_, t)| !t.closed && t.venue_order_id == Some(venue))
-                    .map(|(id, t)| (*id, t.clone()))
-            });
-        let outputs = match tracked {
-            Some((id, tracked)) => self.stop_moved(id, &tracked, venue, moved.stop_price, ts),
-            None => self.external_stop_moved(position, ts_init),
-        };
-        outputs.unwrap_or_else(|e| {
-            log::error!(
-                "cTrader's trailing stop loss of position {position} at {} left to \
-                 reconciliation: {e:#}",
-                moved.stop_price
-            );
-            Vec::new()
-        })
-    }
-
-    /// The tracked stop loss `id` moved to `stop_price`: accepted as
-    /// `venue` if not yet, updated if its level changed.
-    fn stop_moved(
-        &mut self,
-        id: ClientOrderId,
-        tracked: &Tracked,
-        venue: VenueOrderId,
-        stop_price: f64,
-        ts: UnixNanos,
-    ) -> anyhow::Result<Vec<Output>> {
-        let instrument = self
-            .instruments
-            .values()
-            .find(|i| i.id() == tracked.identity.instrument_id)
-            .context("a stop loss of an instrument not loaded")?;
-        let price = reports::price(instrument, stop_price)?;
-        let mut out = Vec::new();
-        out.extend(self.accept(id, venue, ts));
-        if tracked.trigger_price != Some(price) {
-            let current = self.orders[&id].clone();
-            out.push(self.updated(id, &current, current.quantity, None, Some(price), ts));
-        }
-        if let Some(t) = self.orders.get_mut(&id) {
-            t.trigger_price = Some(price);
-            if t.want.is_some_and(|w| w.done(Some(price))) {
-                t.want = None;
-            }
-        }
-        Ok(out)
-    }
-
-    /// The report of the stop loss of `position`, not tracked, as cTrader
-    /// last stated the position, once it holds the stop's new level.
-    fn external_stop_moved(
-        &mut self,
-        position: i64,
-        ts_init: UnixNanos,
-    ) -> anyhow::Result<Vec<Output>> {
-        let Some(held) = self.positions.get(&position) else {
-            log::debug!("cTrader moved the trailing stop loss of position {position}, not known");
-            return Ok(Vec::new());
-        };
-        let venue = protection_id(position, Leg::StopLoss);
-        Ok(self
-            .reports(ts_init)
-            .protections(held)?
-            .into_iter()
-            .filter(|r| r.venue_order_id == venue)
-            .map(|r| Output::Report(ExecutionReport::Order(Box::new(r))))
-            .collect())
     }
 
     /// Whether `deal` is new, remembering it.
@@ -780,16 +603,14 @@ impl Dispatch {
                     (t.quantity, t.price, t.trigger_price) = (quantity, price, trigger);
                 }
                 if let Role::Entry { .. } = tracked.role {
-                    let protection = implied_protection(order)?;
-                    let legs = self.legs(id);
-                    out.extend(self.align_legs(&legs, None, protection, None, &instrument, ts)?);
+                    let protection = (order.stop_loss, order.take_profit);
+                    out.extend(self.align_legs(id, None, protection, None, &instrument, ts)?);
                 }
             }
             ProtoOaExecutionType::OrderCancelled | ProtoOaExecutionType::OrderExpired => {
                 let expired = event.execution_type() == ProtoOaExecutionType::OrderExpired;
                 out.push(self.closing(id, &tracked, Some(venue), expired, ts));
-                let legs = self.legs(id);
-                out.extend(self.cancel_legs(&legs, ts));
+                out.extend(self.cancel_legs(id, ts));
             }
             ProtoOaExecutionType::OrderRejected => {
                 let code = event.error_code.as_deref().unwrap_or("ORDER_REJECTED");
@@ -980,25 +801,10 @@ impl Dispatch {
         }
     }
 
-    /// The protections of `position`, by kind: the legs of its bracket
-    /// `entry`, if any, and those set on the position itself, open.
-    fn protections(
-        &self,
-        position: i64,
-        entry: Option<ClientOrderId>,
-    ) -> Vec<(Leg, ClientOrderId)> {
-        let mut legs = entry.map(|entry| self.legs(entry)).unwrap_or_default();
-        legs.extend(self.orders.iter().filter_map(|(id, t)| match t.role {
-            Role::Protection { position: p, leg } if p == position && !t.closed => Some((leg, *id)),
-            _ => None,
-        }));
-        legs
-    }
-
-    /// The cancellations of the open protections of `legs`.
-    fn cancel_legs(&mut self, legs: &[(Leg, ClientOrderId)], ts: UnixNanos) -> Vec<Output> {
+    /// The cancellations of the open legs of bracket `entry`.
+    fn cancel_legs(&mut self, entry: ClientOrderId, ts: UnixNanos) -> Vec<Output> {
         let mut out = Vec::new();
-        for &(_, leg) in legs {
+        for (_, leg) in self.legs(entry) {
             if let Some(tracked) = self.open(leg) {
                 out.push(self.closing(leg, &tracked, None, false, ts));
             }
@@ -1024,8 +830,11 @@ impl Dispatch {
         volume: i64,
         ts: UnixNanos,
     ) -> anyhow::Result<Vec<Output>> {
+        let Some(entry) = self.entry_of_position(position) else {
+            return Ok(Vec::new());
+        };
         let mut out = Vec::new();
-        for (_, leg) in self.protections(position, self.entry_of_position(position)) {
+        for (_, leg) in self.legs(entry) {
             let Some(tracked) = self.open(leg).filter(|t| t.accepted) else {
                 continue;
             };
@@ -1052,14 +861,13 @@ impl Dispatch {
         Ok(out)
     }
 
-    /// Brings the protections `legs` (a bracket's legs, protections set on
-    /// a position) in line with the protection cTrader holds, `(stop loss,
-    /// take profit)`: a leg whose price came is accepted (as `accept_on`'s
-    /// leg, once the position holds it) or updated, a leg whose price went
-    /// cancelled.
+    /// Brings the legs of bracket `entry` in line with the protection
+    /// cTrader holds, `(stop loss, take profit)`: a leg whose price came is
+    /// accepted (as `accept_on`'s leg, once the position holds it) or
+    /// updated, a leg whose price went cancelled.
     fn align_legs(
         &mut self,
-        legs: &[(Leg, ClientOrderId)],
+        entry: ClientOrderId,
         accept_on: Option<i64>,
         (stop_loss, take_profit): (Option<f64>, Option<f64>),
         quantity: Option<Quantity>,
@@ -1067,7 +875,7 @@ impl Dispatch {
         ts: UnixNanos,
     ) -> anyhow::Result<Vec<Output>> {
         let mut out = Vec::new();
-        for &(leg, id) in legs {
+        for (leg, id) in self.legs(entry) {
             let Some(tracked) = self.open(id) else {
                 continue;
             };
@@ -1137,50 +945,23 @@ impl Dispatch {
                 )
             })
             .or_else(|| self.entry_of_position(position));
-        let legs = self.protections(position, entry);
-        if legs.is_empty() {
+        let Some(entry) = entry else {
             return self.external_protection(event, order, ts_init);
-        }
-        // The kinds no open order tracked here is: reported, as if external.
-        let untracked: Vec<Leg> = [Leg::StopLoss, Leg::TakeProfit]
-            .into_iter()
-            .filter(|kind| {
-                !legs
-                    .iter()
-                    .any(|(leg, id)| leg == kind && self.open(*id).is_some())
-            })
-            .collect();
+        };
         let instrument = self.instrument(order.trade_data.symbol_id)?.clone();
         let ts = reports::millis(order.utc_last_update_timestamp).unwrap_or(ts_init);
         let prices = (order.stop_price, order.limit_price);
         match event.execution_type() {
             ProtoOaExecutionType::OrderAccepted | ProtoOaExecutionType::OrderReplaced => {
                 let quantity = reports::quantity(&instrument, order.trade_data.volume)?;
-                let mut out = self.align_legs(
-                    &legs,
+                self.align_legs(
+                    entry,
                     Some(position),
                     prices,
                     Some(quantity),
                     &instrument,
                     ts,
-                )?;
-                out.extend(self.untracked_status(
-                    order,
-                    &untracked,
-                    OrderStatus::Accepted,
-                    ts_init,
-                )?);
-                let held = |price: Option<f64>| {
-                    price
-                        .filter(|p| *p > 0.0)
-                        .map(|p| reports::price(&instrument, p))
-                        .transpose()
-                };
-                self.settle(
-                    position,
-                    (held(order.stop_price)?, held(order.limit_price)?),
-                );
-                Ok(out)
+                )
             }
             ProtoOaExecutionType::OrderFilled | ProtoOaExecutionType::OrderPartialFill => {
                 let Some(deal) = event.deal.as_ref().filter(|d| reports::fills(d)) else {
@@ -1190,6 +971,7 @@ impl Dispatch {
                     return Ok(Vec::new());
                 }
                 let hit = triggered(order, deal);
+                let legs = self.legs(entry);
                 let mut out = Vec::new();
                 // The leg hit fills first, then the other is cancelled.
                 for &(leg, id) in legs.iter().filter(|(leg, _)| *leg == hit) {
@@ -1203,39 +985,16 @@ impl Dispatch {
                         t.closed = order.order_status() == ProtoOaOrderStatus::OrderStatusFilled;
                     }
                 }
-                if untracked.contains(&hit)
-                    && let Some((status, fill)) =
-                        self.reports(ts_init).protection_fill(order, deal, hit)?
-                {
-                    out.push(Output::Report(ExecutionReport::OrderWithFills(
-                        Box::new(status),
-                        vec![fill],
-                    )));
-                }
                 for &(leg, id) in legs.iter().filter(|(leg, _)| *leg != hit) {
                     if let Some(tracked) = self.open(id) {
                         let venue = protection_id(position, leg);
                         out.push(self.closing(id, &tracked, Some(venue), false, ts));
                     }
                 }
-                let others: Vec<Leg> = untracked.into_iter().filter(|l| *l != hit).collect();
-                out.extend(self.untracked_status(
-                    order,
-                    &others,
-                    OrderStatus::Canceled,
-                    ts_init,
-                )?);
                 Ok(out)
             }
             ProtoOaExecutionType::OrderCancelled | ProtoOaExecutionType::OrderExpired => {
-                let mut out = self.cancel_legs(&legs, ts);
-                out.extend(self.untracked_status(
-                    order,
-                    &untracked,
-                    OrderStatus::Canceled,
-                    ts_init,
-                )?);
-                Ok(out)
+                Ok(self.cancel_legs(entry, ts))
             }
             other => {
                 log::debug!(
@@ -1245,25 +1004,6 @@ impl Dispatch {
                 Ok(Vec::new())
             }
         }
-    }
-
-    /// The reports of the protections `kinds` of the protection order
-    /// `order` as `status`, those it holds.
-    fn untracked_status(
-        &self,
-        order: &ProtoOaOrder,
-        kinds: &[Leg],
-        status: OrderStatus,
-        ts_init: UnixNanos,
-    ) -> anyhow::Result<Vec<Output>> {
-        let reports = self.reports(ts_init);
-        let mut out = Vec::new();
-        for &kind in kinds {
-            if let Some(report) = reports.protection_status(order, kind, status)? {
-                out.push(Output::Report(ExecutionReport::Order(Box::new(report))));
-            }
-        }
-        Ok(out)
     }
 
     fn reports(&self, ts_init: UnixNanos) -> Reports<'_> {
@@ -1378,39 +1118,6 @@ impl Dispatch {
     }
 }
 
-/// The stop loss and take profit a pending entry holds, at their prices:
-/// absolute, or relative to the entry's price, as cTrader states those of
-/// an entry carrying a trailing stop loss (its answer to the amendment of
-/// such an entry states them relative only, demo, 2026-11-04).
-fn implied_protection(order: &ProtoOaOrder) -> anyhow::Result<(Option<f64>, Option<f64>)> {
-    let entry = order.limit_price.or(order.stop_price);
-    let below = order.trade_data.trade_side() == ProtoOaTradeSide::Buy;
-    let at = |relative: Option<i64>, below: bool| -> anyhow::Result<Option<f64>> {
-        let (Some(relative), Some(entry)) = (relative.filter(|r| *r > 0), entry) else {
-            return Ok(None);
-        };
-        let entry = reports::decimal(entry)?;
-        let distance = rust_decimal::Decimal::new(relative, 5);
-        let price = if below {
-            entry - distance
-        } else {
-            entry + distance
-        };
-        Ok(rust_decimal::prelude::ToPrimitive::to_f64(&price))
-    };
-    let absolute = |price: Option<f64>| price.filter(|p| *p > 0.0);
-    Ok((
-        match absolute(order.stop_loss) {
-            Some(price) => Some(price),
-            None => at(order.relative_stop_loss, below)?,
-        },
-        match absolute(order.take_profit) {
-            Some(price) => Some(price),
-            None => at(order.relative_take_profit, !below)?,
-        },
-    ))
-}
-
 /// The Nautilus order an order of cTrader's is: its `clientOrderId`, or for
 /// a closing order the close request's tag cTrader made it.
 fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
@@ -1465,7 +1172,6 @@ mod tests {
             AccountId::from("ACMEFX-DEMO"),
             Currency::from("EUR"),
             HashMap::new(),
-            &[],
         )
     }
 
@@ -1486,31 +1192,6 @@ mod tests {
 
     fn id(id: &str) -> ClientOrderId {
         ClientOrderId::from(id)
-    }
-
-    #[test]
-    fn a_stop_a_query_finds_on_its_position_has_its_placement_done() {
-        let mut dispatch = dispatch();
-        let stop = OrderTestBuilder::new(OrderType::TrailingStopMarket)
-            .instrument_id(InstrumentId::from("XAUUSD.ACMEFX"))
-            .client_order_id(id("O-1"))
-            .side(OrderSide::Sell)
-            .quantity(Quantity::from(1))
-            .trailing_offset(rust_decimal::Decimal::ONE)
-            .trailing_offset_type(nautilus_model::enums::TrailingOffsetType::Price)
-            .build();
-        let role = Role::Protection {
-            position: 7,
-            leg: Leg::StopLoss,
-        };
-        dispatch.track(&stop, role);
-        dispatch.want(id("O-1"), Want::Move(Price::from("4041.26")));
-        dispatch.sent(Tag::New(id("O-1")));
-
-        // Trailed past its placement before the query.
-        dispatch.protection_found(id("O-1"), Some(4041.27), "", UnixNanos::default());
-
-        assert_eq!(dispatch.tracked(id("O-1")).unwrap().want, None);
     }
 
     #[test]

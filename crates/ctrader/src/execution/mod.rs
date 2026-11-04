@@ -12,12 +12,10 @@
 //! Orders (see `orders`): a submission is checked, tracked, reported
 //! submitted and sent; a bracket's protections go on its entry, then live
 //! on the position; an order naming a position closes it, in part or
-//! whole, or adds to it, but a trailing stop market naming a position
-//! becomes its trailing stop loss. A modification amends a pending order,
-//! or moves a protection (`ProtoOAAmendPositionSLTPReq`, both prices,
-//! cTrader dropping one left out, the other as last asked, a trailing stop
-//! loss still trailing); a cancel cancels a pending order, or removes a
-//! protection. A new order or a close the session
+//! whole, or adds to it. A modification amends a pending order, or moves a
+//! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
+//! one left out, the other as last asked); a cancel cancels a pending
+//! order, or removes a protection. A new order or a close the session
 //! never sent is rejected, a modify or cancel denied; one sent but
 //! unanswered stays in flight
 //! (`retain_unresolved_submissions`) until its events, a query or
@@ -57,20 +55,18 @@ use nautilus_core::{
 use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter, task::TaskGroup};
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{AccountType, ContingencyType, OmsType, OrderSide, OrderType},
+    enums::{AccountType, ContingencyType, OmsType, OrderType},
     events::{AccountState, OrderDeniedReason},
-    identifiers::{
-        AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, Venue, VenueOrderId,
-    },
+    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, Venue, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
-    types::{AccountBalance, MarginBalance, Price, Quantity},
+    types::{AccountBalance, MarginBalance, Price},
 };
 
 use self::{
     dispatch::{Command, Denial, Dispatch, Output, Role, Want},
-    orders::{Leg, Placement, Protection, StopLoss, Tag, Trailing, parse_protection_id},
+    orders::{Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
 use super::{
@@ -214,10 +210,10 @@ impl CTraderExecutionClient {
             let symbols = session.symbols(&self.instrument_ids).await?;
             let open = session.reconcile().await?;
             let (balances, margins) = account.state(&open.position)?;
-            Ok::<_, anyhow::Error>((trades, account, symbols, open, balances, margins))
+            Ok::<_, anyhow::Error>((trades, account, symbols, balances, margins))
         }
         .await;
-        let (mut trades, account, symbols, open, balances, margins) = match opened {
+        let (mut trades, account, symbols, balances, margins) = match opened {
             Ok(opened) => opened,
             Err(e) => {
                 session.disconnect().await;
@@ -234,7 +230,6 @@ impl CTraderExecutionClient {
             self.core.account_id,
             account.currency,
             instruments.clone(),
-            &open.position,
         )));
         let stream = Arc::clone(&dispatch);
         let emitter = self.emitter.clone();
@@ -496,29 +491,6 @@ impl CTraderExecutionClient {
             .ok_or(OrderDeniedReason::InstrumentNotFound { instrument_id })
     }
 
-    /// The instrument `instrument_id`, if loaded.
-    fn instrument(
-        session: &Session,
-        instrument_id: InstrumentId,
-    ) -> Result<&InstrumentAny, OrderDeniedReason> {
-        let symbol_id = Self::symbol_id(session, instrument_id)?;
-        session
-            .instruments
-            .get(&symbol_id)
-            .ok_or(OrderDeniedReason::InstrumentNotFound { instrument_id })
-    }
-
-    /// The price `side` trades `instrument_id` at now, by the node's last
-    /// quote: the ask for a buy, the bid for a sell.
-    fn market(&self, instrument_id: InstrumentId, side: OrderSide) -> Option<Price> {
-        let cache = self.core.cache();
-        let quote = cache.quote(&instrument_id)?;
-        Some(match side {
-            OrderSide::Buy => quote.ask_price,
-            _ => quote.bid_price,
-        })
-    }
-
     /// Places `order`, into the position `cmd_position` names if any, with
     /// `protection`: denied if it cannot be, else tracked as `role`,
     /// submitted and sent.
@@ -526,12 +498,11 @@ impl CTraderExecutionClient {
         &self,
         session: &Session,
         order: &OrderAny,
-        cmd_position: Option<PositionId>,
+        cmd_position: Option<nautilus_model::identifiers::PositionId>,
         protection: Protection,
         role: Role,
     ) -> Result<(), OrderDeniedReason> {
         let symbol_id = Self::symbol_id(session, order.instrument_id())?;
-        let instrument = Self::instrument(session, order.instrument_id())?;
         let position = match cmd_position {
             Some(id) => Some(
                 self.core
@@ -541,15 +512,7 @@ impl CTraderExecutionClient {
             ),
             None => None,
         };
-        let market = self.market(order.instrument_id(), order.order_side());
-        let placement = orders::placement(
-            order,
-            symbol_id,
-            instrument,
-            position.as_ref(),
-            protection,
-            market,
-        )?;
+        let placement = orders::placement(order, symbol_id, position.as_ref(), protection)?;
         session.dispatch().track(order, role);
         self.emitter.emit_order_submitted(order);
         let id = order.client_order_id();
@@ -560,69 +523,15 @@ impl CTraderExecutionClient {
         Ok(())
     }
 
-    /// Sets the trailing stop `order` on the open position `position_id`
-    /// as its stop loss, at its offset from the price that triggers it now
-    /// (see `orders::trailing_level`): denied if it cannot be, or if the
-    /// position has a stop loss order (see `stop_loss_of`); else tracked as
-    /// the position's, submitted and sent, the position's take profit as
-    /// last asked with it.
-    fn place_trailing_stop(
-        &self,
-        session: &Session,
-        order: &OrderAny,
-        position_id: PositionId,
-    ) -> Result<(), OrderDeniedReason> {
-        let instrument = Self::instrument(session, order.instrument_id())?;
-        let position = self
-            .core
-            .cache()
-            .position_owned(&position_id)
-            .ok_or(OrderDeniedReason::PositionNotFound { position_id })?;
-        let venue_position = orders::venue_position_id(position_id)?;
-        let trailing = Trailing::checked(order)?;
-        if let Some(stop_loss) = self.stop_loss_of(session, venue_position) {
-            return Err(OrderDeniedReason::InvalidPositionId {
-                position_id,
-                detail: format!(
-                    "the position has a stop loss order ({stop_loss}): a position takes one, \
-                     whose level a modify moves"
-                ),
-            });
-        }
-        let market = self.market(order.instrument_id(), order.order_side());
-        let level = orders::trailing_level(order, trailing, &position, instrument, market)?;
-        let id = order.client_order_id();
-        let role = Role::Protection {
-            position: venue_position,
-            leg: Leg::StopLoss,
-        };
-        session.dispatch().track(order, role);
-        session.dispatch().want(id, Want::Move(level));
-        self.emitter.emit_order_submitted(order);
-        let request = self.amend_protections(session, venue_position);
-        self.send(session, request, Tag::New(id), Vec::new());
-        Ok(())
-    }
-
-    /// The stop loss order of the cTrader position `position`, open or not:
-    /// the order the node's cache holds under the position's `-SL` venue
-    /// order id, which the cache gives no other order, else the one being
-    /// set on it.
-    fn stop_loss_of(&self, session: &Session, position: i64) -> Option<ClientOrderId> {
-        let venue = orders::protection_id(position, Leg::StopLoss);
-        let held = self.core.cache().client_order_id(&venue).copied();
-        held.or_else(|| session.dispatch().protection_set(position, Leg::StopLoss))
-    }
-
     /// Submits the bracket of `orders`: an entry (market, limit or stop
-    /// market) whose protections are its children, a stop loss (a stop
-    /// market, or a trailing stop market) and a limit take profit, each
-    /// for the entry's quantity on the other side.
+    /// market) whose protections are its children, a stop market stop
+    /// loss and a limit take profit, each for the entry's quantity on the
+    /// other side.
     fn submit_bracket(
         &self,
         session: &Session,
         orders: &[OrderAny],
-        cmd_position: Option<PositionId>,
+        cmd_position: Option<nautilus_model::identifiers::PositionId>,
     ) -> Result<(), OrderDeniedReason> {
         let unsupported = |detail: &str| OrderDeniedReason::UnsupportedOrderList {
             detail: detail.to_owned(),
@@ -646,11 +555,7 @@ impl CTraderExecutionClient {
             match leg.order_type() {
                 OrderType::StopMarket if protects && stop_loss.is_none() => {
                     stop_loss = Some(leg.client_order_id());
-                    protection.stop_loss = leg.trigger_price().map(StopLoss::At);
-                }
-                OrderType::TrailingStopMarket if protects && stop_loss.is_none() => {
-                    stop_loss = Some(leg.client_order_id());
-                    protection.stop_loss = Some(StopLoss::Trailing(Trailing::checked(leg)?));
+                    protection.stop_loss = leg.trigger_price();
                 }
                 OrderType::Limit if protects && take_profit.is_none() => {
                     take_profit = Some(leg.client_order_id());
@@ -658,9 +563,8 @@ impl CTraderExecutionClient {
                 }
                 _ => {
                     return Err(unsupported(
-                        "cTrader protects an entry with one stop loss (a stop market or a \
-                         trailing stop market) and one limit take profit, for its quantity, on \
-                         the other side",
+                        "cTrader protects an entry with one stop market stop loss and one limit \
+                         take profit, for its quantity, on the other side",
                     ));
                 }
             }
@@ -705,78 +609,67 @@ impl CTraderExecutionClient {
         self.core.cache().order_owned(id)
     }
 
-    /// The protection `leg` of `position` as last asked, and its order:
-    /// the open order the node's cache holds as the position's leg, else the
-    /// one set on the position; at the dispatch's wanted change of it, else
-    /// at its price (the dispatch's, if the cache holds none yet); none once
-    /// removed.
-    fn asked_protection(
-        &self,
-        session: &Session,
-        position: i64,
-        leg: Leg,
-    ) -> Option<(Price, OrderAny)> {
+    /// The price of the protection `leg` of `position` as last asked: none
+    /// if it is not open in the node's cache, else the dispatch's wanted
+    /// change of it, else its price in the cache.
+    fn asked_protection(&self, session: &Session, position: i64, leg: Leg) -> Option<Price> {
+        let venue = orders::protection_id(position, leg);
         let cache = self.core.cache();
-        let id = cache
-            .client_order_id(&orders::protection_id(position, leg))
-            .copied()
-            .filter(|id| cache.order(id).is_some_and(|o| !o.is_closed()))
-            .or_else(|| session.dispatch().protection_set(position, leg))?;
-        let order = cache.order(&id)?.clone();
-        let tracked = session.dispatch().tracked(id).cloned();
-        let price = match tracked.as_ref().and_then(|t| t.want) {
+        let id = cache.client_order_id(&venue)?;
+        let order = cache.order(id)?;
+        if order.is_closed() {
+            return None;
+        }
+        match session.dispatch().wanted(*id) {
             Some(Want::Move(price)) => Some(price),
             Some(Want::Remove) => None,
-            // The cache may not hold the level the dispatch accepted yet.
-            None => leg_price(&order, leg).or_else(|| {
-                tracked.and_then(|t| match leg {
-                    Leg::StopLoss => t.trigger_price,
-                    Leg::TakeProfit => t.price,
-                })
-            }),
-        }?;
-        Some((price, order))
+            None => match leg {
+                Leg::StopLoss => order.trigger_price(),
+                Leg::TakeProfit => order.price(),
+            },
+        }
     }
 
     /// The request setting the protections of `position` as last asked
-    /// (see `asked_protection`): both, since cTrader drops one left out,
-    /// the stop loss trailing if its order trails.
+    /// (see `asked_protection`): both prices, since cTrader drops a price
+    /// left out.
     fn amend_protections(&self, session: &Session, position: i64) -> ProtoOaAmendPositionSltpReq {
-        let stop_loss = self.asked_protection(session, position, Leg::StopLoss);
-        let take_profit = self
-            .asked_protection(session, position, Leg::TakeProfit)
-            .map(|(price, _)| price);
-        orders::amend_position(
-            position,
-            stop_loss.as_ref().map(|(price, order)| (*price, order)),
-            take_profit,
-        )
+        let price = |leg| self.asked_protection(session, position, leg);
+        ProtoOaAmendPositionSltpReq {
+            position_id: position,
+            stop_loss: price(Leg::StopLoss).map(|p| p.as_f64()),
+            take_profit: price(Leg::TakeProfit).map(|p| p.as_f64()),
+            ..Default::default()
+        }
     }
 
-    /// The amendment of the pending `order` (its cTrader id `venue`) to
-    /// `quantity`, `price` and `trigger_price` (its own where none),
-    /// carrying the bracket's `protection` (see `orders::amend_entry`).
-    fn amend_entry(
-        session: &Session,
+    /// The amendment of the pending order `entry` (its venue order id
+    /// `venue`) to `quantity`, `price` and `trigger_price`, carrying the
+    /// bracket's `protection`.
+    fn amend_order(
         order: &OrderAny,
         venue: i64,
-        quantity: Option<Quantity>,
+        quantity: nautilus_model::types::Quantity,
         price: Option<Price>,
         trigger_price: Option<Price>,
         protection: Protection,
-    ) -> Result<ProtoOaAmendOrderReq, String> {
-        let instrument =
-            Self::instrument(session, order.instrument_id()).map_err(|e| e.to_string())?;
-        orders::amend_entry(
-            order,
-            venue,
-            instrument,
-            quantity.unwrap_or(order.quantity()),
-            price,
-            trigger_price,
-            protection,
-        )
-        .map_err(|e| e.to_string())
+    ) -> Result<ProtoOaAmendOrderReq, OrderDeniedReason> {
+        let mut request = ProtoOaAmendOrderReq {
+            order_id: venue,
+            volume: Some(orders::volume(quantity)?),
+            stop_loss: protection.stop_loss.map(|p| p.as_f64()),
+            take_profit: protection.take_profit.map(|p| p.as_f64()),
+            ..Default::default()
+        };
+        match order.order_type() {
+            OrderType::Limit => request.limit_price = price.or(order.price()).map(|p| p.as_f64()),
+            OrderType::StopMarket => {
+                request.stop_price = trigger_price.or(order.trigger_price()).map(|p| p.as_f64());
+                request.set_stop_trigger_method(orders::trigger_method(order.trigger_type())?);
+            }
+            _ => {}
+        }
+        Ok(request)
     }
 
     /// Modifies the order of `cmd`, or refuses it with the reason.
@@ -811,12 +704,6 @@ impl CTraderExecutionClient {
         let tracked_role = session.dispatch().tracked(id).map(|t| t.role);
         if let Some(Role::Leg { entry, leg }) = tracked_role {
             // The entry is pending: the protection lives on it.
-            if order.order_type() == OrderType::TrailingStopMarket {
-                return Err(format!(
-                    "{id} trails at its offset from its entry's fill: it has no level to move \
-                     until its position holds it"
-                ));
-            }
             let entry_order = self
                 .cached_order(&entry)
                 .ok_or_else(|| format!("the entry {entry} is not in the cache"))?;
@@ -830,29 +717,29 @@ impl CTraderExecutionClient {
                 .ok_or("no price to move to")?;
             session.dispatch().want(id, Want::Move(price));
             let protection = session.dispatch().protection(entry);
-            let request = Self::amend_entry(
-                session,
+            let request = Self::amend_order(
                 &entry_order,
                 entry_venue,
-                None,
+                entry_order.quantity(),
                 None,
                 None,
                 protection,
-            )?;
+            )
+            .map_err(|e| e.to_string())?;
             self.send(session, request, Tag::Protect(id), commands());
             return Ok(());
         }
         let venue = pending_venue_id(&order)?;
         let protection = session.dispatch().protection(id);
-        let request = Self::amend_entry(
-            session,
+        let request = Self::amend_order(
             &order,
             venue,
-            cmd.quantity,
+            cmd.quantity.unwrap_or(order.quantity()),
             cmd.price,
             cmd.trigger_price,
             protection,
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
         self.send(session, request, Tag::Amend(id), commands());
         Ok(())
     }
@@ -886,15 +773,15 @@ impl CTraderExecutionClient {
                     let venue = pending_venue_id(&entry_order)?;
                     session.dispatch().want(id, Want::Remove);
                     let protection = session.dispatch().protection(entry);
-                    let request = Self::amend_entry(
-                        session,
+                    let request = Self::amend_order(
                         &entry_order,
                         venue,
-                        None,
+                        entry_order.quantity(),
                         None,
                         None,
                         protection,
-                    )?;
+                    )
+                    .map_err(|e| e.to_string())?;
                     self.send(session, request, Tag::Unprotect(id), vec![(id, command_id)]);
                     return Ok(());
                 }
@@ -914,34 +801,6 @@ impl CTraderExecutionClient {
             let request = self.amend_protections(session, position);
             self.send(session, request, Tag::Unprotect(legs[0].0), legs);
         }
-    }
-
-    /// Concludes `id`, a stop set on `position` and not yet accepted, from
-    /// the position as the broker holds it (see
-    /// `Dispatch::protection_found`).
-    fn query_protection(&self, session: &Session, id: ClientOrderId, position: i64) {
-        let dispatch = Arc::clone(&session.dispatch);
-        let ctrader = Arc::clone(&session.ctrader);
-        let emitter = self.emitter.clone();
-        let (clock, venue) = (self.clock, self.core.venue);
-        self.spawn_command("protection query", async move {
-            let open = ctrader.reconcile().await?;
-            let held = open
-                .position
-                .iter()
-                .find(|p| p.position_id == position && p.trailing_stop_loss == Some(true))
-                .and_then(|p| p.stop_loss)
-                .filter(|p| *p > 0.0);
-            let reason = format!(
-                "{venue} holds no trailing stop loss on position {position}: it never took effect"
-            );
-            let outputs = dispatch
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .protection_found(id, held, &reason, clock.get_time_ns());
-            emit(&emitter, outputs);
-            Ok(())
-        });
     }
 
     /// The order `id` (venue order id `venue`, sent at the earliest at
@@ -1200,19 +1059,13 @@ impl ExecutionClient for CTraderExecutionClient {
             log::warn!("{} is closed: not submitted", order.client_order_id());
             return Ok(());
         }
-        let placed = match cmd.position_id {
-            Some(position_id) if order.order_type() == OrderType::TrailingStopMarket => {
-                self.place_trailing_stop(session, &order, position_id)
-            }
-            position_id => self.place(
-                session,
-                &order,
-                position_id,
-                Protection::default(),
-                Role::Order,
-            ),
-        };
-        if let Err(denied) = placed {
+        if let Err(denied) = self.place(
+            session,
+            &order,
+            cmd.position_id,
+            Protection::default(),
+            Role::Order,
+        ) {
             self.emitter.emit_order_denied(&order, &denied.to_string());
         }
         Ok(())
@@ -1315,17 +1168,10 @@ impl ExecutionClient for CTraderExecutionClient {
     /// `-TP`) is not queried: the open-order check reads it. Nor is a
     /// bracket's leg, tracked or not: cTrader holds it on its entry or
     /// position, never as an order of its own, so its absence from the
-    /// order list concludes nothing. A stop set on a position and not yet
-    /// accepted is concluded from the position: accepted at the trailing
-    /// stop loss it holds, else rejected.
+    /// order list concludes nothing.
     fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let session = self.session()?;
         let id = cmd.client_order_id;
-        let tracked = session.dispatch().tracked(id).map(|t| (t.role, t.accepted));
-        if let Some((Role::Protection { position, .. }, false)) = tracked {
-            self.query_protection(session, id, position);
-            return Ok(());
-        }
         let order = self.cached_order(&id);
         if order
             .as_ref()
@@ -2180,38 +2026,6 @@ mod tests {
         assert_eq!(short_sl.trigger_type, Some(TriggerType::DoubleBidAsk));
         assert!(!orders.contains_key(&VenueOrderId::from("102-TP")));
         assert!(!orders.contains_key(&VenueOrderId::from("103-SL")));
-    }
-
-    #[tokio::test]
-    async fn a_trailing_stop_loss_is_an_open_trailing_stop_market_at_its_level() {
-        let mut long = position(101, ProtoOaTradeSide::Buy, 100, 0);
-        long.stop_loss = Some(4041.27);
-        long.trailing_stop_loss = Some(true);
-        let venue = Script {
-            reconcile: Some(ProtoOaReconcileRes {
-                ctid_trader_account_id: ACCOUNT_ID,
-                position: vec![long],
-                ..Default::default()
-            }),
-            ..Script::default()
-        };
-
-        let (mass_status, _) = mass_status(venue, None).await;
-
-        let orders = mass_status.order_reports();
-        let stop = &orders[&VenueOrderId::from("101-SL")];
-        assert_eq!(stop.order_type, OrderType::TrailingStopMarket);
-        assert_eq!(stop.order_side, Some(OrderSide::Sell));
-        assert_eq!(stop.trigger_price, Some(Price::from("4041.27")));
-        assert_eq!(stop.trigger_type, Some(TriggerType::BidAsk));
-        // cTrader states no distance.
-        assert_eq!(stop.trailing_offset, Some(Decimal::ZERO));
-        assert_eq!(
-            stop.trailing_offset_type,
-            Some(nautilus_model::enums::TrailingOffsetType::Price)
-        );
-        assert!(stop.reduce_only);
-        assert_eq!(stop.order_status, OrderStatus::Accepted);
     }
 
     #[tokio::test]

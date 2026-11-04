@@ -41,12 +41,11 @@
 //!
 //! Trade requests (orders, amendments, cancels, closes) go out under the
 //! `clientMsgId` their caller chose, who learns only whether the frame was
-//! sent: their outcome comes as trade events, the execution events, order
-//! errors and trailing stop loss moves of the account and cTrader's error
-//! answers to a trade request, passed on with their `clientMsgId` once a
-//! listener asked for them (`TradeEvents`). A trade request still waiting
-//! when the session fails or the connection closes was never sent, and says
-//! so.
+//! sent: their outcome comes as trade events, the execution events and
+//! order errors of the account and cTrader's error answers to a trade
+//! request, passed on with their `clientMsgId` once a listener asked for
+//! them (`TradeEvents`). A trade request still waiting when the session
+//! fails or the connection closes was never sent, and says so.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -70,9 +69,8 @@ use crate::{
         ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
         ProtoOaClientDisconnectEvent, ProtoOaErrorRes, ProtoOaExecutionEvent,
         ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent,
-        ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaTrailingSlChangedEvent,
-        ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, frame, open, payload_name,
-        secret_frame,
+        ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq,
+        ProtoOaUnsubscribeSpotsRes, frame, open, payload_name, secret_frame,
     },
     common::token::{TokenLock, TokenPair, TokenStore},
     config::{CTraderCredential, CTraderSettingNames},
@@ -1091,13 +1089,6 @@ impl CTraderWsHandler {
             match open::<ProtoOaOrderErrorEvent>(envelope) {
                 Ok(event) => self.pass_trade(envelope, TradeMessage::OrderError(event)),
                 Err(e) => log::warn!("cTrader order error event: {e}"),
-            }
-            return;
-        }
-        if envelope.payload_type == ProtoOaTrailingSlChangedEvent::TYPE {
-            match open::<ProtoOaTrailingSlChangedEvent>(envelope) {
-                Ok(event) => self.pass_trade(envelope, TradeMessage::TrailingStopMoved(event)),
-                Err(e) => log::warn!("cTrader trailing stop loss event: {e}"),
             }
             return;
         }

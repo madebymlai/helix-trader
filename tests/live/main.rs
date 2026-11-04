@@ -34,7 +34,6 @@ mod ic_demo;
 mod ic_live_demo;
 mod ic_orders_demo;
 mod ic_token_demo;
-mod ic_trailing_demo;
 mod okx_demo;
 mod streaming;
 

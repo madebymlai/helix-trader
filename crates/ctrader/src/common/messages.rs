@@ -35,8 +35,7 @@ pub(crate) use proto::{
     ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol, ProtoOaSymbolByIdReq,
     ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTickData,
     ProtoOaTimeInForce, ProtoOaTradeSide, ProtoOaTrader, ProtoOaTraderReq, ProtoOaTraderRes,
-    ProtoOaTrailingSlChangedEvent, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
-    ProtoPayloadType,
+    ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
 };
 
 // The tests build synthetic positions, deals and leverage tiers from these,
@@ -106,7 +105,6 @@ payload! {
     ProtoOaClosePositionReq => ProtoOaPayloadType::ProtoOaClosePositionReq,
     ProtoOaExecutionEvent => ProtoOaPayloadType::ProtoOaExecutionEvent,
     ProtoOaOrderErrorEvent => ProtoOaPayloadType::ProtoOaOrderErrorEvent,
-    ProtoOaTrailingSlChangedEvent => ProtoOaPayloadType::ProtoOaTrailingSlChangedEvent,
 }
 
 /// A trade request: one of the account's, which the session fills in.

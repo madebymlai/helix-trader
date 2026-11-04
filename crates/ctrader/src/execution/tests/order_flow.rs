@@ -33,8 +33,6 @@ use crate::{
     },
 };
 
-mod trailing;
-
 /// Whether the peer's `trades` answer `request`: a trade request or an
 /// order query.
 pub(super) fn answered(request: &ProtoMessage) -> bool {
@@ -91,17 +89,9 @@ struct Node {
 
 impl Node {
     async fn start(trades: impl Fn(&ProtoMessage) -> Vec<Action> + Send + Sync + 'static) -> Self {
-        Self::start_on(Script::default(), trades).await
-    }
-
-    /// As `start`, the peer serving `venue`.
-    async fn start_on(
-        venue: Script,
-        trades: impl Fn(&ProtoMessage) -> Vec<Action> + Send + Sync + 'static,
-    ) -> Self {
         let venue = Script {
             trades: Some(Arc::new(trades)),
-            ..venue
+            ..Script::default()
         };
         let (mut client, cache, mut events, received, tokens) = started(venue);
         connect(&mut client, &mut events, &cache).await;

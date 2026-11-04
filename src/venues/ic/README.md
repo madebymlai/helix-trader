@@ -16,16 +16,13 @@ Instrument margins are IC's: the lower of the account's leverage and the symbol'
 
 For a EUR account trading USD-quoted instruments, subscribe to `EURUSD.ICMARKETS` quotes as well: Nautilus needs the USD/EUR conversion rate for margin validation and denies orders without it.
 
-
-A strategy's trailing stop goes to IC as the position's trailing stop loss (see [the adapter](../../../crates/ctrader/README.md#trailing-stops)), checked on the demo by `tests/live/ic_trailing_demo.rs`. Its rule differs from the trailing exit of the pre-registered gold test (`docs/research/prereg-gold-trailing-stop.md`), which trails the bid at the full distance from the entry's fill and moves only once the bid passes the fill: on a bracket's market buy, IC's stop trails the entry's spread closer and starts moving a spread earlier.
 ## Tests
 
-Offline tests of the environment and the clients' configuration are in `src/venues/ic`; the adapter's are in [the crate](../../../crates/ctrader/README.md#tests). The demo tests `tests/live/ic_demo.rs`, `tests/live/ic_live_demo.rs`, `tests/live/ic_orders_demo.rs`, `tests/live/ic_trailing_demo.rs` and `tests/live/ic_token_demo.rs` require `NAUTILUS_IC_RUN=1` in the shell and a demo account. **The orders and trailing tests place demo-account orders**; verify the account and check it afterwards. Tests may renew shared tokens; see [credentials](#credentials) for token safety. The renewal test `ic_token_demo::the_demo_session_renews_its_token_and_keeps_receiving_quotes` **rotates the real token pair** in the token file; run it only when prepared to manage the shared state file and recover credentials if renewal is interrupted. Run live-node tests in separate processes.
+Offline tests of the environment and the clients' configuration are in `src/venues/ic`; the adapter's are in [the crate](../../../crates/ctrader/README.md#tests). The demo tests `tests/live/ic_demo.rs`, `tests/live/ic_live_demo.rs`, `tests/live/ic_orders_demo.rs` and `tests/live/ic_token_demo.rs` require `NAUTILUS_IC_RUN=1` in the shell and a demo account. **The orders test places demo-account orders**; verify the account and check it afterwards. Tests may renew shared tokens; see [credentials](#credentials) for token safety. The renewal test `ic_token_demo::the_demo_session_renews_its_token_and_keeps_receiving_quotes` **rotates the real token pair** in the token file; run it only when prepared to manage the shared state file and recover credentials if renewal is interrupted. Run live-node tests in separate processes.
 
 ```sh
 NAUTILUS_IC_RUN=1 cargo test --test live ic_demo:: -- --nocapture
 NAUTILUS_IC_RUN=1 cargo test --test live ic_live_demo:: -- --nocapture
 NAUTILUS_IC_RUN=1 cargo test --test live ic_orders_demo:: -- --nocapture
-NAUTILUS_IC_RUN=1 cargo test --test live ic_trailing_demo:: -- --nocapture
 NAUTILUS_IC_RUN=1 cargo test --test live ic_token_demo:: -- --nocapture
 ```

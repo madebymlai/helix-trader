@@ -7,13 +7,8 @@
 //! - **Stop loss and take profit**: cTrader holds them on the position
 //!   (`stopLoss`, `takeProfit`, amended by position id), so each becomes an
 //!   open reduce-only order of the position, its venue order id the
-//!   position's with `-SL` or `-TP`: a stop market order at the stop loss
-//!   (a trailing stop market if it trails, `trailingStopLoss`), a limit
-//!   order at the take profit, for the position's volume. cTrader states a
-//!   trailing stop's level, never the distance it trails at (demo,
-//!   2026-11-04: not on the position, its protection order or the
-//!   reconcile answer), so its report's offset is 0, by price; an order
-//!   the node holds keeps its own.
+//!   position's with `-SL` or `-TP`: a stop market order at the stop loss,
+//!   a limit order at the take profit, for the position's volume.
 //! - **Pending orders** (`ProtoOAOrder`): an `OrderStatusReport` each, by
 //!   `orderId`, with the position it opens into or closes, if any.
 //! - **Deals** (`ProtoOADeal`, filled): a `FillReport` each, by `dealId`,
@@ -32,8 +27,7 @@ use anyhow::{Context, bail, ensure};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::{
-        LiquiditySide, OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce,
-        TrailingOffsetType, TriggerType,
+        LiquiditySide, OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce, TriggerType,
     },
     identifiers::{AccountId, ClientOrderId, PositionId, TradeId, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
@@ -153,11 +147,11 @@ impl Reports<'_> {
         let mut reports = Vec::new();
         if let Some(stop_loss) = position.stop_loss.filter(|p| *p > 0.0) {
             let trigger = price(instrument, stop_loss).with_context(what)?;
-            let trails = position.trailing_stop_loss == Some(true);
-            let report = protection(Leg::StopLoss, Leg::StopLoss.order_type(trails))
-                .with_trigger_price(trigger)
-                .with_trigger_type(trigger_type(position.stop_loss_trigger_method()));
-            reports.push(trailing(report, trails));
+            reports.push(
+                protection(Leg::StopLoss, OrderType::StopMarket)
+                    .with_trigger_price(trigger)
+                    .with_trigger_type(trigger_type(position.stop_loss_trigger_method())),
+            );
         }
         if let Some(take_profit) = position.take_profit.filter(|p| *p > 0.0) {
             let limit = price(instrument, take_profit).with_context(what)?;
@@ -201,14 +195,13 @@ impl Reports<'_> {
         };
         let ts =
             millis(order.utc_last_update_timestamp.or(trade.open_timestamp)).with_context(what)?;
-        let trails = leg == Leg::StopLoss && order.trailing_stop_loss == Some(true);
         let report = OrderStatusReport::new(
             self.account_id,
             instrument.id(),
             None,
             protection_id(position, leg),
             Some(side(trade.trade_side())),
-            leg.order_type(trails),
+            leg.order_type(),
             TimeInForce::Gtc,
             status,
             quantity,
@@ -222,12 +215,9 @@ impl Reports<'_> {
         .with_venue_position_id(position_id(position));
         let held = price(instrument, held).with_context(what)?;
         Ok(Some(match leg {
-            Leg::StopLoss => trailing(
-                report
-                    .with_trigger_price(held)
-                    .with_trigger_type(trigger_type(order.stop_trigger_method())),
-                trails,
-            ),
+            Leg::StopLoss => report
+                .with_trigger_price(held)
+                .with_trigger_type(trigger_type(order.stop_trigger_method())),
             Leg::TakeProfit => report.with_price(held),
         }))
     }
@@ -438,18 +428,6 @@ impl Reports<'_> {
             self.ts_init,
             None,
         )))
-    }
-}
-
-/// `report`, of a stop loss, with the trailing offset cTrader never states
-/// (0, by price) if it `trails`.
-fn trailing(report: OrderStatusReport, trails: bool) -> OrderStatusReport {
-    if trails {
-        report
-            .with_trailing_offset(Decimal::ZERO)
-            .with_trailing_offset_type(TrailingOffsetType::Price)
-    } else {
-        report
     }
 }
 
