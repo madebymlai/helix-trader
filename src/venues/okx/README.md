@@ -4,7 +4,7 @@ OKX serves `OKX` instruments, history and live (see the [routing table](../mod.r
 
 ## History
 
-`fill-catalog` fills swaps and X-Perps through the node with Nautilus' OKX data client, on public endpoints without a key: the strategy's source series and each instrument's funding, over what the catalog lacks, funding before the other series of an instrument. Bars are requested a UTC day at a time. The data engine writes back only the windows the client reports complete; the fill counts a window answered without that report, writes nothing for it, and asks for it again on the next run. A series the client does not serve fails the fill. Definitions do not come back through the node: they are read from OKX's public API and written before the node starts. Dated futures are refused.
+`fill-catalog` fills swaps and X-Perps through the node with Nautilus' OKX data client, on public endpoints without a key: the strategy's source series and each instrument's funding, over what the catalog lacks, funding before the other series of an instrument. Bars are requested a day at a time. The data engine writes back only the windows the client reports complete; the fill counts a window answered without that report, writes nothing for it, and asks for it again on the next run. A series the client does not serve fails the fill. Definitions do not come back through the node: they are read from OKX's public API and written before the node starts. Dated futures are refused.
 
 ### Funding and margins
 

@@ -7,18 +7,19 @@
 //! (`get_missing_intervals_for_request`): per contract its definitions, then
 //! each series' missing windows, the slivers between a live node's promoted
 //! files among them, each asked once and closed by its write-back. A
-//! `NodeFill` gathers each source's data client with its requests, cut into
-//! windows of the source's period, and `run` builds a live node with those clients and the catalog, and an
-//! actor asking for one window at a time with `update_catalog`. The data
-//! engine serves what the catalog holds, asks the client for the rest and
-//! writes the answer back over the window asked for. The actor waits for
-//! Nautilus' answer to each request (`on_data_response`) with no deadline
-//! of its own, as Nautilus' requests have none: each client the fill asks
-//! answers every request, a failed one with the failure in its response
-//! envelope, and one that never answered would hold the run until it is
-//! interrupted. The actor records the first failure (a failed request, a
-//! failure envelope) and stops the node; `run` returns it. See
-//! `README.md`, "Fill paths".
+//! `NodeFill` gathers each source's data client with its requests and the
+//! source's period, and `run` builds a live node with those clients and the
+//! catalog, and an actor asking for one request at a time with
+//! `update_catalog`, each series by Nautilus' time-range pipeline
+//! (`time_range_generator`): the data engine asks for a window of the period
+//! at a time, serves what the catalog holds, asks the client for the rest and
+//! writes each answer back over its window. The actor waits for Nautilus'
+//! answer to each request (`on_data_response`) with no deadline of its own,
+//! as Nautilus' requests have none: each client the fill asks answers every
+//! request, a failed one with the failure in its response envelope, and one
+//! that never answered would hold the run until it is interrupted. The actor
+//! records the first failure (a failed request, a failure envelope) and stops
+//! the node; `run` returns it. See `README.md`, "Fill paths".
 
 use std::{
     cell::RefCell,
@@ -144,24 +145,19 @@ impl fmt::Display for FillRequest {
 }
 
 impl FillRequest {
-    /// This request cut into the windows of `period` it touches, aligned on
-    /// multiples of `period` from the Unix epoch (a day: each UTC midnight),
-    /// each ending 1 ns before the next starts, the first and last cut to
-    /// the request.
-    fn windows(self, period: SignedDuration) -> Vec<Self> {
-        let period_ns = period.as_nanos();
-        let mut windows = Vec::new();
-        let mut from = self.from;
-        while from <= self.to {
-            let ns = from.as_nanosecond();
-            let next = (ns.div_euclid(period_ns) + 1) * period_ns;
-            let to = Timestamp::from_nanosecond(next - 1)
-                .expect("a period end within jiff's range")
-                .min(self.to);
-            windows.push(Self { from, to, ..self });
-            from = to + SignedDuration::from_nanos(1);
-        }
-        windows
+    /// Nautilus' `durations_seconds` of this request in windows of `period`:
+    /// the period, once per window it can hold. The data engine takes the
+    /// next duration after an empty window, the first again after one with
+    /// data, and ends the request, reporting success, when they run out, so
+    /// one per window carries it across any run of empty windows.
+    ///
+    /// Windows start at `from` and end at each multiple of `period` from it,
+    /// the next starting 1 ns later; so `span / period + 1` is the most.
+    fn durations_seconds(self, period: SignedDuration) -> Vec<f64> {
+        let span = self.to.duration_since(self.from).as_nanos();
+        let windows = span / period.as_nanos() + 1;
+        let windows = usize::try_from(windows).expect("a request of a sane number of windows");
+        vec![period.as_secs_f64(); windows]
     }
 }
 
@@ -253,7 +249,15 @@ pub struct NodeClient {
 #[derive(Default)]
 pub struct NodeFill {
     clients: Vec<NodeClient>,
-    requests: Vec<FillRequest>,
+    requests: Vec<Asked>,
+}
+
+/// A request of the fill, and the period of the windows the data engine asks
+/// it in; a definition has none, being asked whole.
+#[derive(Debug, Clone, Copy)]
+struct Asked {
+    request: FillRequest,
+    period: Option<SignedDuration>,
 }
 
 impl NodeFill {
@@ -263,10 +267,10 @@ impl NodeFill {
         Self::default()
     }
 
-    /// Adds `requests` (see `missing`), asked of `client`, each series cut
-    /// into the windows of `period(data)` (see `FillRequest::windows`): the
-    /// most of it one request holds. A definition is asked whole. No
-    /// request leaves the client out of the node, so it never connects.
+    /// Adds `requests` (see `missing`), asked of `client`, each series in
+    /// windows of `period(data)`: the most of it one answer holds, and one
+    /// write-back covers. A definition is asked whole. No request leaves the
+    /// client out of the node, so it never connects.
     pub fn add(
         &mut self,
         client: NodeClient,
@@ -277,18 +281,20 @@ impl NodeFill {
             return;
         }
         self.clients.push(client);
-        for &request in requests {
-            match request.data {
-                FillData::Instrument => self.requests.push(request),
-                data => self.requests.extend(request.windows(period(data))),
-            }
-        }
+        self.requests.extend(requests.iter().map(|&request| Asked {
+            request,
+            period: match request.data {
+                FillData::Instrument => None,
+                data => Some(period(data)),
+            },
+        }));
     }
 
     /// Fills the catalog in `catalog_dir` through a live node with the
     /// clients and the catalog, one request at a time, each with
     /// `update_catalog`, so the data engine writes each answer back over
-    /// its window. Each series request carries the price precision of its
+    /// its window, and what was written stays if a later window fails. Each
+    /// series request carries the price precision of its
     /// instrument's definition, asked first (`price_precision`: Databento's
     /// client then asks for no definitions of its own). Nothing asked
     /// builds no node.
@@ -339,6 +345,7 @@ impl NodeFill {
             core: DataActorCore::new(DataActorConfig::default()),
             requests: requests.into(),
             pending: None,
+            rows: 0,
             precisions: HashMap::new(),
             outcome: Rc::clone(&outcome),
         })?;
@@ -376,9 +383,11 @@ struct Outcome {
 #[derive(Debug)]
 struct FillActor {
     core: DataActorCore,
-    requests: VecDeque<FillRequest>,
+    requests: VecDeque<Asked>,
     /// The request in flight and its id.
     pending: Option<(UUID4, FillRequest)>,
+    /// The rows the request in flight has got so far, over its windows.
+    rows: usize,
     /// The price precision of each instrument whose definition came back.
     precisions: HashMap<InstrumentId, u8>,
     outcome: Rc<RefCell<Outcome>>,
@@ -387,20 +396,24 @@ struct FillActor {
 impl FillActor {
     /// Asks for the next request or, all answered, stops the node.
     fn next(&mut self) {
-        let Some(request) = self.requests.pop_front() else {
+        let Some(asked) = self.requests.pop_front() else {
             self.outcome.borrow_mut().done = true;
             self.shutdown_system(Some("every fill request answered".to_string()));
             return;
         };
+        let request = asked.request;
         log::info!("Asking for {request}");
-        match self.issue(request) {
+        self.rows = 0;
+        match self.issue(asked) {
             Ok(id) => self.pending = Some((id, request)),
             Err(e) => self.fail(format!("asking for {request}: {e:#}")),
         }
     }
 
-    /// Sends `request` to the data engine, with `update_catalog`.
-    fn issue(&mut self, request: FillRequest) -> anyhow::Result<UUID4> {
+    /// Sends `asked` to the data engine, with `update_catalog`, a series in
+    /// windows of its period.
+    fn issue(&mut self, asked: Asked) -> anyhow::Result<UUID4> {
+        let request = asked.request;
         let FillRequest {
             data,
             instrument_id,
@@ -408,6 +421,13 @@ impl FillActor {
             to,
         } = request;
         let mut params = vec![("update_catalog".to_string(), json!(true))];
+        if let Some(period) = asked.period {
+            params.push(("time_range_generator".to_string(), json!("")));
+            params.push((
+                "durations_seconds".to_string(),
+                json!(request.durations_seconds(period)),
+            ));
+        }
         if data != FillData::Instrument
             && let Some(precision) = self.precisions.get(&instrument_id)
         {
@@ -460,12 +480,11 @@ impl DataActor for FillActor {
         if *response.correlation_id() != id {
             return Ok(());
         }
-        self.pending = None;
         if let Some(reason) = response.failure_reason() {
             self.fail(format!("{request} failed: {reason}"));
             return Ok(());
         }
-        let rows = match response.response() {
+        self.rows += match response.response() {
             Some(DataResponse::Instrument(answer)) => {
                 self.precisions
                     .insert(answer.instrument_id, answer.data.price_precision());
@@ -479,7 +498,12 @@ impl DataActor for FillActor {
             Some(DataResponse::FundingRates(answer)) => answer.data.len(),
             _ => 0,
         };
-        log::info!("{request}: {rows} rows");
+        // A window of the request, written back; the next one is on its way.
+        if !response.completed() {
+            return Ok(());
+        }
+        self.pending = None;
+        log::info!("{request}: {} rows", self.rows);
         self.outcome.borrow_mut().answered += 1;
         self.next();
         Ok(())
@@ -523,61 +547,6 @@ mod tests {
                 to: ts(to),
             },
         }
-    }
-
-    fn windows(of: FillRequest, period: SignedDuration) -> Vec<(String, String)> {
-        of.windows(period)
-            .iter()
-            .map(|w| (w.from.to_string(), w.to.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn a_request_is_cut_on_the_period_s_multiples_from_the_epoch() {
-        let three_hours = SignedDuration::from_hours(3);
-        let asked = request(
-            FillData::Depth,
-            "GCZ26.GLBX",
-            "2026-10-21T02:00:00Z",
-            "2026-10-21T08:30:00Z",
-        );
-
-        assert_eq!(
-            windows(asked, three_hours),
-            [
-                ("2026-10-21T02:00:00Z", "2026-10-21T02:59:59.999999999Z"),
-                ("2026-10-21T03:00:00Z", "2026-10-21T05:59:59.999999999Z"),
-                ("2026-10-21T06:00:00Z", "2026-10-21T08:30:00Z"),
-            ]
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-        );
-    }
-
-    #[test]
-    fn a_request_within_one_period_is_one_window_and_a_day_ends_at_midnight() {
-        let day = SignedDuration::from_hours(24);
-        let within = request(
-            FillData::Trades,
-            "GCZ26.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-21T23:59:59.999999999Z",
-        );
-        let across = request(
-            FillData::Trades,
-            "GCZ26.GLBX",
-            "2026-10-21T12:00:00Z",
-            "2026-10-22T00:00:00Z",
-        );
-
-        assert_eq!(windows(within, day).len(), 1);
-        assert_eq!(
-            windows(across, day),
-            [
-                ("2026-10-21T12:00:00Z", "2026-10-21T23:59:59.999999999Z"),
-                ("2026-10-22T00:00:00Z", "2026-10-22T00:00:00Z"),
-            ]
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-        );
     }
 
     #[test]

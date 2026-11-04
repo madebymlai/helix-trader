@@ -597,7 +597,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 
 /// Adds to `node` the fill of `series`, the quotes of the instruments of the
 /// cTrader broker of `venue`, over what the catalog misses of `slices`, a
-/// request holding at most what one tick request spans. The connection is
+/// window holding at most what one tick request spans. The connection is
 /// read only if something is missing, so a complete catalog needs no
 /// credential.
 ///
