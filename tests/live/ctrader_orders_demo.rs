@@ -1,28 +1,26 @@
-//! End to end on IC Markets' cTrader demo, with orders: `Live` on XAU/USD
-//! and EUR/USD with IC's clients, a strategy sending, once it has a quote
+//! End to end on a cTrader broker's demo, with orders: `Live` on XAU/USD
+//! and EUR/USD with the broker's clients, a strategy sending, once it has a quote
 //! of each, one bracket of gold's minimum, 1 oz
 //! (a market buy, its stop loss 30.00 below the bid, its take profit 30.00
 //! above the ask), closing the position it opens at once by its id
 //! (`close_position`), and recording every order event. The node stops
-//! once the position is closed; then IC's execution client reads the
-//! account: no position, no order open.
+//! once the position is closed; then the broker's execution client reads
+//! the account: no position, no order open.
 //!
-//! EUR/USD's quotes are there for Nautilus' risk engine: on the account in
-//! EUR it converts an order's USD margin at the cache's EUR/USD, and
-//! denies the order without one (`VALIDATION_FAILED: Account currency
-//! conversion failed: No exchange rate from USD to EUR`, demo,
-//! 2026-10-26).
+//! EUR/USD's quotes are there for Nautilus' risk engine: on an account in
+//! EUR, as IC's demo is, it converts an order's USD margin at the cache's
+//! EUR/USD, and denies the order without one (`VALIDATION_FAILED: Account
+//! currency conversion failed: No exchange rate from USD to EUR`, demo,
+//! 2026-10-26). An account in USD does not need them.
 //!
-//! It needs what `ic_live_demo.rs` needs, and gold's market open; it runs on
-//! the demo only (`IC_ENVIRONMENT=demo`, any other fails it before
-//! connecting). Gated as `ic_demo.rs` is: the test returns at once, saying
-//! it was skipped, unless `NAUTILUS_IC_RUN=1` is set in the shell. One
-//! node per process, hence its own module, run alone (`main.rs`). The node keeps its cache in Redis
-//! under the test's trader, `HELIXTEST-102`, whose records the test deletes.
-//! Run it with:
+//! It needs what `ctrader_live_demo.rs` needs, and gold's market open.
+//! Gated as `ctrader_demo.rs` is. One node per process, hence its own
+//! module, run alone (`main.rs`). The node keeps its cache in Redis under
+//! the test's trader, `HELIXTEST-102`, whose records the test deletes. Run
+//! it with:
 //!
 //! ```sh
-//! NAUTILUS_IC_RUN=1 cargo test --test live ic_orders_demo:: -- --nocapture
+//! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_orders_demo:: -- --nocapture
 //! ```
 
 use crate::common;
@@ -38,11 +36,10 @@ use std::{
     time::Duration,
 };
 
-use ctrader::CTraderExecutionClientFactory;
+use ctrader::{CTraderExecutionClientConfig, CTraderExecutionClientFactory};
 use helix_trader::{
     live::Live,
     strategy::{DataRequirements, warmup::Warmup},
-    venues::ic,
 };
 use jiff::SignedDuration;
 use nautilus_common::{
@@ -67,31 +64,8 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so
-/// that the file cannot opt in.
-/// An opted-in run claims the process for this module (`claim_process`).
-fn opted_in(test: &str) -> bool {
-    let run = std::env::var("NAUTILUS_IC_RUN").is_ok_and(|value| value == "1");
-    if run {
-        crate::claim_process(module_path!());
-    } else {
-        println!("{test}: skipped; set NAUTILUS_IC_RUN=1 to run it on IC's cTrader demo");
-    }
-    run
-}
+use crate::demo_broker::{DemoBroker, opted_in};
 
-/// Reads `.env` and refuses any environment but the demo.
-fn demo_only() {
-    dotenvy::dotenv().ok();
-    assert_eq!(
-        std::env::var("IC_ENVIRONMENT").as_deref(),
-        Ok("demo"),
-        "the IC end to end test runs on the demo only: set IC_ENVIRONMENT=demo"
-    );
-}
-
-const XAUUSD: &str = "XAUUSD.ICMARKETS";
-const EURUSD: &str = "EURUSD.ICMARKETS";
 const TRADER: &str = "HELIXTEST-102";
 
 /// What the strategy saw, in order: each order event as `(client order id,
@@ -110,6 +84,8 @@ struct Record {
 #[derive(Debug)]
 struct BracketOnce {
     core: StrategyCore,
+    gold: InstrumentId,
+    eurusd: InstrumentId,
     record: Arc<Mutex<Record>>,
     done: Arc<AtomicBool>,
     rate_known: bool,
@@ -187,13 +163,13 @@ nautilus_strategy!(BracketOnce, {
 
 impl DataActor for BracketOnce {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        self.subscribe_quotes(InstrumentId::from(EURUSD), None, None);
-        self.subscribe_quotes(InstrumentId::from(XAUUSD), None, None);
+        self.subscribe_quotes(self.eurusd, None, None);
+        self.subscribe_quotes(self.gold, None, None);
         Ok(())
     }
 
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
-        if quote.instrument_id == InstrumentId::from(EURUSD) {
+        if quote.instrument_id == self.eurusd {
             self.rate_known = true;
             return Ok(());
         }
@@ -218,7 +194,7 @@ impl DataActor for BracketOnce {
 
     /// Leaves nothing open, whatever happened.
     fn on_stop(&mut self) -> anyhow::Result<()> {
-        let id = InstrumentId::from(XAUUSD);
+        let id = self.gold;
         self.cancel_all_orders(id, None, None, true, None)?;
         self.close_all_positions(id, None, None, None, None, None, None, None)
     }
@@ -229,12 +205,14 @@ const DEADLINE: Duration = Duration::from_secs(180);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat() {
-    if !opted_in("a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat") {
+    let Some(broker) = opted_in(
+        "a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat",
+        module_path!(),
+    ) else {
         return;
-    }
-    demo_only();
-    let bar_types =
-        [XAUUSD, EURUSD].map(|id| BarType::from(format!("{id}-1-MINUTE-MID-INTERNAL").as_str()));
+    };
+    let bar_types = [broker.gold(), broker.eurusd()]
+        .map(|id| BarType::from(format!("{id}-1-MINUTE-MID-INTERNAL").as_str()));
     let requirements = DataRequirements {
         bar_types: bar_types.to_vec(),
         ticks: vec![],
@@ -248,6 +226,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
+        gold: broker.gold(),
+        eurusd: broker.eurusd(),
         record: Arc::clone(&record),
         done: Arc::clone(&done),
         rate_known: false,
@@ -289,9 +269,9 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
 
     interrupt.abort();
     common::cache::delete_trader(TRADER).await;
-    let (positions, orders) = open_at_ic().await;
+    let (positions, orders) = open_at_broker(broker).await;
     ran.expect("the node stops within 90 s of SIGINT").unwrap();
-    println!("IC after the run: {positions} open positions, {orders} open orders");
+    println!("after the run: {positions} open positions, {orders} open orders");
     assert_eq!((positions, orders), (0, 0), "the demo account is not flat");
 
     let record = record.lock().unwrap();
@@ -339,32 +319,32 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     for fill in [entry, close] {
         assert_eq!(fill.position_id, Some(opened.position_id));
         assert_eq!(fill.last_qty, Quantity::from(1));
-        // IC's Raw charge: 30 USD per million per side, in EUR on this
-        // account: 1 oz of gold, about 4,000 USD, is charged 0.10 to 0.12 EUR.
         let commission = fill.commission.expect("no commission");
-        assert_eq!(commission.currency.code.as_str(), "EUR");
-        let notional_usd = fill.last_px.as_f64();
-        let usd = notional_usd * 30.0 / 1_000_000.0;
+        assert_eq!(
+            commission.currency.code.as_str(),
+            broker.commission_currency()
+        );
+        let expected = broker.gold_commission(fill.last_px.as_f64());
         println!(
-            "{} fill at {}: commission {commission}, 30 per million is {usd:.4} USD",
+            "{} fill at {}: commission {commission}, expected {expected:?}",
             fill.order_side, fill.last_px
         );
         assert!(
-            (0.75 * usd..=usd).contains(&commission.as_f64()),
-            "{commission} for {usd} USD"
+            expected.contains(&commission.as_f64()),
+            "{commission} outside {expected:?}"
         );
     }
     assert_eq!(entry.order_side, OrderSide::Buy);
     assert_eq!(close.order_side, OrderSide::Sell);
 }
 
-/// The open positions and orders IC's execution client reports on the
-/// demo account, as the node's startup reconciliation reads them.
-async fn open_at_ic() -> (usize, usize) {
+/// The open positions and orders the execution client of `broker` reports
+/// on the demo account, as the node's startup reconciliation reads them.
+async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
     let cache = Rc::new(RefCell::new(Cache::default()));
-    let config = ic::execution_config(ic::connection().unwrap(), vec![InstrumentId::from(XAUUSD)]);
+    let config = CTraderExecutionClientConfig::new(broker.connection(), vec![broker.gold()]);
     let factory = CTraderExecutionClientFactory::new(&config);
     let mut client = factory
         .create(

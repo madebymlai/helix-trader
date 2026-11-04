@@ -33,8 +33,11 @@ use helix_trader::{
         model_ema::ModelEma,
     },
     venues::{
-        HistorySource, HistoryVenueArgs, LiveVenueArgs, databento::DatabentoHistory, ic,
+        HistorySource, HistoryVenueArgs, LiveVenueArgs, ctrader_node_client,
+        databento::DatabentoHistory,
+        ic,
         okx::{self, OkxHistory},
+        pepperstone,
     },
 };
 use jiff::{Timestamp, civil::Date};
@@ -43,7 +46,12 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
-use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
+use nautilus_model::{
+    data::NautilusDataType,
+    enums::OmsType,
+    identifiers::{TraderId, Venue},
+    types::Money,
+};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -57,14 +65,14 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX
-    /// (OKX instruments), Databento (GLBX instruments), IC Markets'
-    /// cTrader (IC instruments) or
-    /// Interactive Brokers (the others).
+    /// (OKX instruments), Databento (GLBX instruments), cTrader (IC
+    /// Markets' and Pepperstone's instruments) or Interactive Brokers (the
+    /// others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
     /// Runs the strategy on a live node with Interactive Brokers, IC
-    /// Markets or OKX; stops on Ctrl-C.
+    /// Markets, Pepperstone or OKX; stops on Ctrl-C.
     Live(LiveArgs),
     /// Trains the strategy's models at a time, those without one valid
     /// from it, replaying the days its dataset lacks, and prints each
@@ -128,8 +136,8 @@ struct BacktestArgs {
     balance: Money,
     /// The account's leverage, for example 10: a position locks its value
     /// divided by it, times the instrument's margin. 1 is no leverage. For
-    /// venues whose instruments carry margins of 1 (OKX); IC's carry IC's
-    /// own margin, so an IC backtest keeps 1.
+    /// venues whose instruments carry margins of 1 (OKX); the cTrader
+    /// brokers' carry the broker's own margin, so their backtests keep 1.
     #[arg(long, default_value = "1")]
     leverage: Decimal,
     /// The model store a strategy trading on a model reads its models
@@ -275,7 +283,8 @@ struct LiveArgs {
     #[arg(long, default_value = "HELIX-001", value_parser = parse_trader_id)]
     trader_id: TraderId,
     /// The catalog directory, fill-catalog's and the backtests': the warmup
-    /// is read from it first, and IC's history is written back to it.
+    /// is read from it first, and a cTrader broker's history is written
+    /// back to it.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
     /// The directory the node stages the data it streams into the
@@ -483,11 +492,11 @@ async fn main() -> anyhow::Result<()> {
 /// its slices: GLBX's, IC's and OKX's fill through a Nautilus node (see
 /// `catalog::NodeFill`), by Databento's data client for GLBX instruments (the
 /// series declared, checked against the dataset's end before the node
-/// starts), IC's for IC instruments and OKX's for OKX instruments (their
-/// series and funding, their definitions written before the node starts);
-/// IB (connected only if needed) fills the others, without a node until its
-/// client answers with response envelopes. IC and IB refuse a series they
-/// do not serve.
+/// starts), the cTrader brokers' for theirs (`add_ctrader_fill`) and OKX's
+/// for OKX instruments (their series and funding, their definitions written
+/// before the node starts); IB (connected only if needed) fills the others,
+/// without a node until its client answers with response envelopes. The
+/// cTrader brokers and IB refuse a series they do not serve.
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = data_requirements(args.run.strategy, &args.run.config)?;
@@ -510,15 +519,16 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     // The source of an instrument is its venue's (`HistorySource`): OKX for
-    // OKX, Databento for GLBX, IC's cTrader for IC, IB for every other
-    // venue.
-    let (mut okx_ids, mut databento_ids, mut ic_ids, mut ib_ids) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // OKX, Databento for GLBX, cTrader for IC and Pepperstone, IB for every
+    // other venue.
+    let (mut okx_ids, mut databento_ids, mut ic_ids, mut pepperstone_ids, mut ib_ids) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
         match HistorySource::of(id) {
             HistorySource::Okx => okx_ids.push(id),
             HistorySource::Databento => databento_ids.push(id),
             HistorySource::Ic => ic_ids.push(id),
+            HistorySource::Pepperstone => pepperstone_ids.push(id),
             HistorySource::Ib => ib_ids.push(id),
         }
     }
@@ -544,11 +554,26 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
         }
     }
     if !ic_ids.is_empty() {
-        let instrument_ids = ic::quoted(&requirements.of_instruments(&ic_ids).catalog_series())?;
-        let requests = missing(&catalog, &slices_of(HistorySource::Ic))?;
-        if !requests.is_empty() {
-            node.add(ic::node_client(instrument_ids)?, &requests, ic::period);
-        }
+        add_ctrader_fill(
+            &mut node,
+            &catalog,
+            ic::VENUE,
+            ic::connection,
+            &requirements.of_instruments(&ic_ids).catalog_series(),
+            &slices_of(HistorySource::Ic),
+        )?;
+    }
+    if !pepperstone_ids.is_empty() {
+        add_ctrader_fill(
+            &mut node,
+            &catalog,
+            pepperstone::VENUE,
+            pepperstone::connection,
+            &requirements
+                .of_instruments(&pepperstone_ids)
+                .catalog_series(),
+            &slices_of(HistorySource::Pepperstone),
+        )?;
     }
     if !okx_ids.is_empty() {
         let slices = slices_of(HistorySource::Okx);
@@ -566,6 +591,36 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     if !ib_ids.is_empty() {
         let ib = args.venues.connect_ib(end, Timestamp::now()).await?;
         ib.fill(&mut catalog, &slices_of(HistorySource::Ib)).await?;
+    }
+    Ok(())
+}
+
+/// Adds to `node` the fill of `series`, the quotes of the instruments of the
+/// cTrader broker of `venue`, over what the catalog misses of `slices`, a
+/// request holding at most what one tick request spans. The connection is
+/// read only if something is missing, so a complete catalog needs no
+/// credential.
+///
+/// # Errors
+///
+/// Returns an error if a series is not the quotes of an instrument on
+/// `venue`, if the catalog cannot be read, or as `connection`.
+fn add_ctrader_fill(
+    node: &mut NodeFill,
+    catalog: &ParquetDataCatalog,
+    venue: &str,
+    connection: fn() -> anyhow::Result<ctrader::CTraderConnection>,
+    series: &[(NautilusDataType, String)],
+    slices: &[SeriesSlice],
+) -> anyhow::Result<()> {
+    let instrument_ids = ctrader::quoted(Venue::new(venue), series)?;
+    let requests = missing(catalog, slices)?;
+    if !requests.is_empty() {
+        node.add(
+            ctrader_node_client(connection()?, instrument_ids),
+            &requests,
+            |_| ctrader::TICK_REQUEST_SPAN,
+        );
     }
     Ok(())
 }

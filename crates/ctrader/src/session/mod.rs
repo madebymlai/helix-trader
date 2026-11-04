@@ -48,6 +48,25 @@ pub struct CTraderSession {
     names: CTraderSettingNames,
 }
 
+impl CTraderConnection {
+    /// Checks the account, on a session of its own closed again: hedging
+    /// and the credential's (see `CTraderSession::check_account`). Run
+    /// before a node is built, so a wrong account fails the start with its
+    /// reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cTrader cannot be reached or refuses the
+    /// credential, or if the account does not suit (see
+    /// `CTraderSession::check_account`).
+    pub async fn check_account(&self) -> anyhow::Result<()> {
+        let session = CTraderSession::connect(self).await?;
+        let checked = session.check_account().await;
+        session.disconnect().await;
+        checked
+    }
+}
+
 impl CTraderSession {
     /// Connects to the environment of `connection` and authenticates its
     /// credential, with the token file's pair (the credential's pair seeds

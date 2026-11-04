@@ -1,6 +1,6 @@
 //! A NautilusTrader adapter for Spotware's cTrader Open API, naming no
-//! broker: the caller configures the broker's venue, the name of its
-//! clients and the connection (`config`), and the adapter serves the
+//! broker: the caller names the broker's venue and the variables of its
+//! account (`config`), and the adapter serves the
 //! broker's forex and metals, their quotes from cTrader's tick history and
 //! live from its spot events, and trades a hedging account. See
 //! `README.md`.
@@ -22,9 +22,10 @@ use jiff::SignedDuration;
 use nautilus_model::data::NautilusDataType;
 
 pub use self::{
+    common::parse::quoted,
     config::{
-        CTraderAccountId, CTraderConnection, CTraderCredential, CTraderDataClientConfig,
-        CTraderEnvironment, CTraderExecutionClientConfig, CTraderSettingNames,
+        CTraderAccountId, CTraderAccountVars, CTraderConnection, CTraderCredential,
+        CTraderDataClientConfig, CTraderEnvironment, CTraderExecutionClientConfig,
     },
     factories::{CTraderDataClientFactory, CTraderExecutionClientFactory},
     session::CTraderSession,

@@ -25,11 +25,12 @@
 //!
 //! Anything else (an index, a share) is refused, naming the symbol.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, ensure};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
+    data::NautilusDataType,
     identifiers::{InstrumentId, Symbol, Venue},
     instruments::CurrencyPair,
     types::{Currency, Price, Quantity},
@@ -37,6 +38,7 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use super::messages::{ProtoOaAsset, ProtoOaDynamicLeverage, ProtoOaLightSymbol, ProtoOaSymbol};
+use crate::SERVED_DATA;
 
 /// The cTrader symbol name of `id`, an instrument of the broker: its
 /// symbol.
@@ -199,6 +201,32 @@ pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The instruments of `series`, each the quotes of an instrument on
+/// `venue`: those the broker's data client loads to serve them.
+///
+/// # Errors
+///
+/// Returns an error naming the first series that is not the quotes of an
+/// instrument on `venue`: the adapter serves nothing else (`SERVED_DATA`).
+pub fn quoted(
+    venue: Venue,
+    series: &[(NautilusDataType, String)],
+) -> anyhow::Result<Vec<InstrumentId>> {
+    series
+        .iter()
+        .map(|(data_type, identifier)| {
+            ensure!(
+                *data_type == SERVED_DATA,
+                "{venue} serves quotes only, not the {data_type} of {identifier}"
+            );
+            let id = InstrumentId::from_str(identifier)
+                .with_context(|| format!("{identifier} is no instrument id"))?;
+            ensure_on(id, venue)?;
+            Ok(id)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
@@ -218,6 +246,57 @@ mod tests {
 
     fn venue() -> Venue {
         Venue::new(VENUE)
+    }
+
+    /// A series of gold's quotes on the made-up venue.
+    fn gold_quotes() -> (NautilusDataType, String) {
+        (NautilusDataType::QuoteTick, format!("XAUUSD.{VENUE}"))
+    }
+
+    #[test]
+    fn the_quotes_of_the_venue_s_instruments_are_those_it_loads() {
+        let eurusd = (NautilusDataType::QuoteTick, format!("EURUSD.{VENUE}"));
+
+        let ids = quoted(venue(), &[gold_quotes(), eurusd]).unwrap();
+
+        assert_eq!(
+            ids,
+            [
+                InstrumentId::from(format!("XAUUSD.{VENUE}").as_str()),
+                InstrumentId::from(format!("EURUSD.{VENUE}").as_str()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_series_not_of_quotes_is_refused_naming_it() {
+        let bars = format!("XAUUSD.{VENUE}-1-MINUTE-BID-EXTERNAL");
+        let imbalance = NautilusDataType::Custom {
+            type_name: "Imbalance".to_string(),
+        };
+        for data_type in [
+            NautilusDataType::Bar,
+            NautilusDataType::OrderBookDelta,
+            imbalance,
+        ] {
+            let named = data_type.to_string();
+
+            let err = quoted(venue(), &[gold_quotes(), (data_type, bars.clone())])
+                .unwrap_err()
+                .to_string();
+
+            assert!(err.contains("serves quotes only"), "{err}");
+            assert!(err.contains(&named) && err.contains(&bars), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_quotes_of_an_instrument_on_another_venue_are_refused_naming_it() {
+        let elsewhere = (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO".to_owned());
+
+        let err = quoted(venue(), &[elsewhere]).unwrap_err().to_string();
+
+        assert!(err.contains("EUR/USD.IDEALPRO"), "{err}");
     }
 
     /// The captured symbols, assets and details (see `testdata/`).

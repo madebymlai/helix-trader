@@ -1,54 +1,27 @@
-//! End to end on IC Markets' cTrader demo, the token pair: a forced
+//! End to end on a cTrader broker's demo, the token pair: a forced
 //! renewal of the access token on a running session, which goes on
 //! receiving quotes and answering requests; then a fresh session
 //! authenticates from the token file without renewing. It ROTATES the
-//! account's real token pair, in IC's token file, the one `ic::connection`
-//! names (`$XDG_STATE_HOME/helix-trader/ic-token.json`, by default
-//! `~/.local/state/helix-trader/ic-token.json`): the file keeps the new
-//! pair, `.env`'s is spent. It needs what `ic_demo.rs` needs, through the
+//! login's real token pair, every broker's, in the token file
+//! (`$XDG_STATE_HOME/ctrader/token.json`, by default
+//! `~/.local/state/ctrader/token.json`): the file keeps the new pair,
+//! `.env`'s is spent. It needs what `ctrader_demo.rs` needs, through the
 //! cTrader adapter's hooks (its `test-support` feature).
 //!
-//! Gated as `ic_demo.rs` is: the test returns at once, saying it was
-//! skipped, unless `NAUTILUS_IC_RUN=1` is set in the shell; demo only, no
-//! order. Its own module, run alone (`main.rs`), so that the other IC demo
-//! tests' sessions do not run on the pair it rotates. Run it with:
+//! Gated as `ctrader_demo.rs` is; demo only, no order. Its own module, run
+//! alone (`main.rs`), so that the other demo tests' sessions do not run on
+//! the pair it rotates. Run it with:
 //!
 //! ```sh
-//! NAUTILUS_IC_RUN=1 cargo test --test live ic_token_demo:: -- --nocapture
+//! NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_token_demo:: -- --nocapture
 //! ```
 
 use std::{os::unix::fs::PermissionsExt, sync::Mutex, time::Duration};
 
 use ctrader::{CTraderSession, SpotEvents};
-use helix_trader::venues::ic;
 use jiff::{SignedDuration, Timestamp};
-use nautilus_model::identifiers::InstrumentId;
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so
-/// that the file cannot opt in.
-/// An opted-in run claims the process for this module (`claim_process`).
-fn opted_in(test: &str) -> bool {
-    let run = std::env::var("NAUTILUS_IC_RUN").is_ok_and(|value| value == "1");
-    if run {
-        crate::claim_process(module_path!());
-    } else {
-        println!("{test}: skipped; set NAUTILUS_IC_RUN=1 to run it on IC's cTrader demo");
-    }
-    run
-}
-
-/// Reads `.env` and refuses any environment but the demo.
-fn demo_only() {
-    dotenvy::dotenv().ok();
-    assert_eq!(
-        std::env::var("IC_ENVIRONMENT").as_deref(),
-        Ok("demo"),
-        "the IC end to end test runs on the demo only: set IC_ENVIRONMENT=demo"
-    );
-}
-
-const XAUUSD: &str = "XAUUSD.ICMARKETS";
-const EURUSD: &str = "EURUSD.ICMARKETS";
+use crate::demo_broker::opted_in;
 
 /// The log records of the cTrader adapter at info and above, for the test
 /// to show: none holds a token.
@@ -93,17 +66,19 @@ async fn next_spot_at(spots: &mut SpotEvents, timeout: Duration) -> Timestamp {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
-    if !opted_in("the_demo_session_renews_its_token_and_keeps_receiving_quotes") {
+    let Some(broker) = opted_in(
+        "the_demo_session_renews_its_token_and_keeps_receiving_quotes",
+        module_path!(),
+    ) else {
         return;
-    }
-    demo_only();
+    };
     let _ = log::set_logger(&CAPTURED);
     log::set_max_level(log::LevelFilter::Info);
     let _logs = ShowLogs;
-    let connection = ic::connection().unwrap();
+    let connection = broker.connection();
     let credential = &connection.credential;
     let stored = || credential.stored_tokens().unwrap();
-    let ids = [InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)];
+    let ids = [broker.gold(), broker.eurusd()];
     let (session, mut spots) = CTraderSession::connect_with_spots(&connection, &ids)
         .await
         .unwrap();

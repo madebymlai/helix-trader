@@ -78,8 +78,9 @@ pub struct Backtest {
 }
 
 /// The venues whose accounts hold each trade as a position of its own:
-/// IC Markets, whose cTrader account is hedging (`venues::ic`).
-const HEDGING_VENUES: &[&str] = &["ICMARKETS"];
+/// the cTrader brokers, whose accounts are hedging (`venues::ic`,
+/// `venues::pepperstone`).
+const HEDGING_VENUES: &[&str] = &["ICMARKETS", "PEPPERSTONE"];
 
 /// How the accounts of `venue` keep positions, as the live execution
 /// client declares it: `Hedging` for the venues in `HEDGING_VENUES`,
@@ -345,8 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn ic_markets_hedges_positions() {
+    fn ctrader_brokers_hedge_positions() {
         assert_eq!(venue_oms_type(Venue::from("ICMARKETS")), OmsType::Hedging);
+        assert_eq!(venue_oms_type(Venue::from("PEPPERSTONE")), OmsType::Hedging);
     }
 
     #[test]
