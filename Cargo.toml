@@ -23,28 +23,28 @@ async-trait = "0.1"
 ctrader = { path = "crates/ctrader" }
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
-nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
 # Keep Nautilus' 64-bit prices, as for nautilus-okx.
-nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d", default-features = false }
-nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d", default-features = false }
-nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd", default-features = false }
+nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd", default-features = false }
+nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
 # Keep Nautilus' 64-bit prices: the crate's default turns on 128-bit prices
 # (high-precision) for the whole build.
-nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d", default-features = false }
-nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
-nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8dfef4b7725f8371d96c56cc0c7cdec5525a398d" }
+nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd", default-features = false }
+nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
+nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "a3184de46cfe29ade3a3da1c409b4bf12ee9f2cd" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 # Floats read back to the bit: the probes of a stored model.
