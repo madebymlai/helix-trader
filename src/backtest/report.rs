@@ -9,7 +9,10 @@
 //! replayed quotes of their instrument; a run on bars or trades alone has
 //! no spread to measure.
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+};
 
 use anyhow::{Context, ensure};
 use nautilus_backtest::result::BacktestResult;
@@ -17,7 +20,7 @@ use nautilus_common::cache::Cache;
 use nautilus_model::{
     data::QuoteTick,
     enums::{OrderSide, PriceType},
-    events::OrderEventAny,
+    events::{OrderEventAny, OrderFilled},
     identifiers::InstrumentId,
     instruments::Instrument,
     orders::Order,
@@ -48,74 +51,143 @@ struct Costs {
 
 impl Outcome {
     /// `result` and the costs of every fill of the orders in `cache`, each
-    /// on the last of `quotes` of its instrument stamped at or before the
-    /// fill: the quote the venue filled it on. A fill of an instrument
-    /// with no quote in `quotes` (a run on bars or trades) has no spread.
+    /// on the quote it filled on: the last quote of its instrument stamped
+    /// at or before the fill in `streams`, the quote series the run
+    /// replayed, each in time order, a later stream's quote winning a tie
+    /// (see `fill_quotes`). A fill of an instrument with no quote in
+    /// `streams` (a run on bars or trades) has no spread.
     ///
     /// # Errors
     ///
-    /// Returns an error if a fill's instrument is not in `cache` or is
-    /// inverse (its value is not linear in the price), or if its instrument
-    /// has quotes and none precedes the fill.
-    pub(super) fn new(
+    /// Returns an error if a stream does or is out of time order, if a
+    /// fill's instrument is not in `cache` or is inverse (its value is not
+    /// linear in the price), or if its instrument has quotes and none
+    /// precedes the fill.
+    pub(super) fn new<S>(
         result: BacktestResult,
         cache: &Cache,
-        quotes: &[QuoteTick],
-    ) -> anyhow::Result<Self> {
-        let mut quoted: BTreeMap<InstrumentId, Vec<&QuoteTick>> = BTreeMap::new();
-        for quote in quotes {
-            quoted.entry(quote.instrument_id).or_default().push(quote);
-        }
-        for quotes in quoted.values_mut() {
-            quotes.sort_by_key(|quote| quote.ts_init);
-        }
+        streams: impl IntoIterator<Item = S>,
+    ) -> anyhow::Result<Self>
+    where
+        S: IntoIterator<Item = anyhow::Result<QuoteTick>>,
+    {
+        let orders = cache.orders(None, None, None, None, None);
+        let fills: Vec<&OrderFilled> = orders
+            .iter()
+            .flat_map(|order| order.events())
+            .filter_map(|event| match event {
+                OrderEventAny::Filled(fill) => Some(fill),
+                _ => None,
+            })
+            .collect();
+        let (quotes, quoted) = fill_quotes(&fills, streams)?;
         let mut costs: BTreeMap<String, Costs> = BTreeMap::new();
-        for order in cache.orders(None, None, None, None, None) {
-            for event in order.events() {
-                let OrderEventAny::Filled(fill) = event else {
-                    continue;
-                };
-                let id = fill.instrument_id;
-                let instrument = cache
-                    .instrument(&id)
-                    .with_context(|| format!("instrument {id} of a fill not in the cache"))?;
-                ensure!(!instrument.is_inverse(), "{id} is inverse");
-                let cost = costs.entry(fill.currency.code.to_string()).or_default();
-                cost.trades += 1;
-                if let Some(commission) = fill.commission {
-                    let code = commission.currency.code.to_string();
-                    costs.entry(code).or_default().commission += commission.as_decimal();
-                }
-                let Some(quotes) = quoted.get(&id) else {
-                    costs
-                        .entry(fill.currency.code.to_string())
-                        .or_default()
-                        .unquoted += 1;
-                    continue;
-                };
-                let before = quotes.partition_point(|quote| quote.ts_init <= fill.ts_event);
-                let quote = before
-                    .checked_sub(1)
-                    .map(|at| quotes[at])
-                    .with_context(|| {
-                        format!("no quote of {id} before its fill at {}", fill.ts_event)
-                    })?;
-                let mid = quote.extract_price(PriceType::Mid)?.as_decimal();
-                let price = fill.last_px.as_decimal();
-                let paid = if fill.order_side == OrderSide::Buy {
-                    price - mid
-                } else {
-                    mid - price
-                };
-                let size = fill.last_qty.as_decimal() * instrument.multiplier().as_decimal();
+        for (fill, quote) in fills.into_iter().zip(quotes) {
+            let id = fill.instrument_id;
+            let instrument = cache
+                .instrument(&id)
+                .with_context(|| format!("instrument {id} of a fill not in the cache"))?;
+            ensure!(!instrument.is_inverse(), "{id} is inverse");
+            let cost = costs.entry(fill.currency.code.to_string()).or_default();
+            cost.trades += 1;
+            if let Some(commission) = fill.commission {
+                let code = commission.currency.code.to_string();
+                costs.entry(code).or_default().commission += commission.as_decimal();
+            }
+            if !quoted.contains(&id) {
                 costs
                     .entry(fill.currency.code.to_string())
                     .or_default()
-                    .spread += paid * size;
+                    .unquoted += 1;
+                continue;
             }
+            let quote = quote.with_context(|| {
+                format!("no quote of {id} before its fill at {}", fill.ts_event)
+            })?;
+            let mid = quote.extract_price(PriceType::Mid)?.as_decimal();
+            let price = fill.last_px.as_decimal();
+            let paid = if fill.order_side == OrderSide::Buy {
+                price - mid
+            } else {
+                mid - price
+            };
+            let size = fill.last_qty.as_decimal() * instrument.multiplier().as_decimal();
+            costs
+                .entry(fill.currency.code.to_string())
+                .or_default()
+                .spread += paid * size;
         }
         Ok(Self { result, costs })
     }
+}
+
+/// The quote each of `fills` filled on, the last of its instrument stamped
+/// at or before it in `streams`, a later stream's winning a tie, and the
+/// instruments `streams` quote. Each stream, in time order, is read once
+/// alongside each instrument's fills in time order, and dropped before the
+/// next: the quotes are never held, so that a run's whole quote history
+/// costs no memory.
+///
+/// # Errors
+///
+/// Returns an error if a stream does, or holds a quote stamped before the
+/// last of its instrument ahead of it.
+fn fill_quotes<S>(
+    fills: &[&OrderFilled],
+    streams: impl IntoIterator<Item = S>,
+) -> anyhow::Result<(Vec<Option<QuoteTick>>, BTreeSet<InstrumentId>)>
+where
+    S: IntoIterator<Item = anyhow::Result<QuoteTick>>,
+{
+    let mut by_instrument: BTreeMap<InstrumentId, Vec<usize>> = BTreeMap::new();
+    for (at, fill) in fills.iter().enumerate() {
+        by_instrument.entry(fill.instrument_id).or_default().push(at);
+    }
+    for ats in by_instrument.values_mut() {
+        ats.sort_by_key(|&at| fills[at].ts_event);
+    }
+    let mut quotes: Vec<Option<QuoteTick>> = vec![None; fills.len()];
+    let mut settle = |at: usize, quote: Option<QuoteTick>| {
+        if let Some(quote) = quote
+            && quotes[at].is_none_or(|best| best.ts_init <= quote.ts_init)
+        {
+            quotes[at] = Some(quote);
+        }
+    };
+    let mut quoted = BTreeSet::new();
+    for stream in streams {
+        // Per instrument, its first fill the stream has not passed and its
+        // last quote.
+        let mut walk: BTreeMap<InstrumentId, (usize, Option<QuoteTick>)> = BTreeMap::new();
+        for quote in stream {
+            let quote = quote?;
+            let id = quote.instrument_id;
+            quoted.insert(id);
+            let ats = by_instrument.get(&id).map_or(&[][..], Vec::as_slice);
+            let (next, last) = walk.entry(id).or_default();
+            if let Some(last) = last {
+                ensure!(
+                    last.ts_init <= quote.ts_init,
+                    "quotes of {id} out of time order: {} after {}",
+                    quote.ts_init,
+                    last.ts_init
+                );
+            }
+            while let Some(&at) = ats.get(*next)
+                && fills[at].ts_event < quote.ts_init
+            {
+                settle(at, *last);
+                *next += 1;
+            }
+            *last = Some(quote);
+        }
+        for (id, (next, last)) in walk {
+            for &at in &by_instrument.get(&id).map_or(&[][..], Vec::as_slice)[next..] {
+                settle(at, last);
+            }
+        }
+    }
+    Ok((quotes, quoted))
 }
 
 /// `outcome` as text: one `name: value` line per figure, sections in a
@@ -224,6 +296,19 @@ mod tests {
         px: &str,
         commission: &str,
     ) -> OrderAny {
+        filled_at(id, instrument, side, qty, px, commission, 2)
+    }
+
+    /// The order of `filled`, filled at `ts` ns.
+    fn filled_at(
+        id: &str,
+        instrument: &InstrumentAny,
+        side: OrderSide,
+        qty: u64,
+        px: &str,
+        commission: &str,
+        ts: u64,
+    ) -> OrderAny {
         let order = OrderTestBuilder::new(OrderType::Market)
             .client_order_id(ClientOrderId::from(id))
             .instrument_id(instrument.id())
@@ -234,7 +319,7 @@ mod tests {
         let fill = OrderFilledTestBuilder::new(&order, instrument)
             .last_px(Price::from(px))
             .commission(Money::from(commission))
-            .ts_event(UnixNanos::from(2))
+            .ts_event(UnixNanos::from(ts))
             .build();
         order.apply(fill).unwrap();
         order
@@ -305,16 +390,103 @@ mod tests {
         ] {
             cache.add_order(order, None, None, false).unwrap();
         }
-        let quote = QuoteTick::new(
-            sxr8.id(),
-            Price::from("99.90"),
-            Price::from("100.10"),
+        let quote = quote(&sxr8, "99.90", "100.10", 1);
+        Outcome::new(result, &cache, [[Ok(quote)]]).unwrap()
+    }
+
+    /// A quote of `instrument` at `bid` and `ask`, stamped `ts` ns.
+    fn quote(instrument: &InstrumentAny, bid: &str, ask: &str, ts: u64) -> QuoteTick {
+        QuoteTick::new(
+            instrument.id(),
+            Price::from(bid),
+            Price::from(ask),
             Quantity::from(1),
             Quantity::from(1),
-            UnixNanos::from(1),
-            UnixNanos::from(1),
-        );
-        Outcome::new(result, &cache, &[quote]).unwrap()
+            UnixNanos::from(ts),
+            UnixNanos::from(ts),
+        )
+    }
+
+    /// A result of no figures, for the costs alone.
+    fn empty_result() -> BacktestResult {
+        BacktestResult {
+            trader_id: "BACKTESTER-001".to_string(),
+            machine_id: "machine".to_string(),
+            instance_id: UUID4::new(),
+            run_config_id: None,
+            run_id: None,
+            run_started: None,
+            run_finished: None,
+            backtest_start: None,
+            backtest_end: None,
+            elapsed_time_secs: 0.0,
+            iterations: 0,
+            total_events: 0,
+            total_orders: 0,
+            total_positions: 0,
+            summary: Default::default(),
+            stats_pnls: Default::default(),
+            stats_returns: Default::default(),
+            stats_general: Default::default(),
+            returns_series: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn each_fill_costs_on_the_last_quote_at_or_before_it_a_later_stream_winning_a_tie() {
+        let sxr8 = sxr8();
+        let mut cache = Cache::default();
+        cache.add_instrument(sxr8.clone()).unwrap();
+        // Buys of 10 at 101.00 at 2, 4 and 9 ns.
+        for (id, ts) in [("O-1", 2), ("O-2", 4), ("O-3", 9)] {
+            let order = filled_at(id, &sxr8, OrderSide::Buy, 10, "101.00", "0 EUR", ts);
+            cache.add_order(order, None, None, false).unwrap();
+        }
+        // The 2 ns fill: mid 100.50, the second stream's tie at 2 ns. The 4
+        // ns fill: mid 100.80 at 3 ns, not the 5 ns quote after it. The 9
+        // ns fill: mid 100.90, the first stream's last.
+        let first = [
+            quote(&sxr8, "99.90", "100.10", 1),
+            quote(&sxr8, "99.80", "100.00", 2),
+            quote(&sxr8, "100.80", "101.00", 6),
+        ];
+        let second = [
+            quote(&sxr8, "100.40", "100.60", 2),
+            quote(&sxr8, "100.70", "100.90", 3),
+            quote(&sxr8, "99.00", "99.20", 5),
+        ];
+        let streams = [first.map(Ok), second.map(Ok)];
+        let outcome = Outcome::new(empty_result(), &cache, streams).unwrap();
+        // (101.00 - 100.50 + 101.00 - 100.80 + 101.00 - 100.90) * 10.
+        assert_eq!(outcome.costs["EUR"].spread, Decimal::from(8));
+        assert_eq!(outcome.costs["EUR"].unquoted, 0);
+    }
+
+    #[test]
+    fn refuses_a_stream_out_of_time_order() {
+        let sxr8 = sxr8();
+        let mut cache = Cache::default();
+        cache.add_instrument(sxr8.clone()).unwrap();
+        let order = filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR");
+        cache.add_order(order, None, None, false).unwrap();
+        let stream = [
+            quote(&sxr8, "99.90", "100.10", 3),
+            quote(&sxr8, "99.90", "100.10", 1),
+        ];
+        let err = Outcome::new(empty_result(), &cache, [stream.map(Ok)]).unwrap_err();
+        assert!(err.to_string().contains("out of time order"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_fill_of_a_quoted_instrument_with_no_quote_before_it() {
+        let sxr8 = sxr8();
+        let mut cache = Cache::default();
+        cache.add_instrument(sxr8.clone()).unwrap();
+        let order = filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR");
+        cache.add_order(order, None, None, false).unwrap();
+        let stream = [Ok(quote(&sxr8, "99.90", "100.10", 3))];
+        let err = Outcome::new(empty_result(), &cache, [stream]).unwrap_err();
+        assert!(err.to_string().contains("no quote of SXR8.IBIS before its fill"), "{err}");
     }
 
     #[test]
