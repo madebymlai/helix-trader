@@ -83,7 +83,11 @@
 //! some bars are built from is requested once, building them. Each
 //! response ends at `now`, trimmed to it, and the roller, started right
 //! after, subscribes to the series with `start_ns` its own `now`
-//! (`subscription_params`), so no tick is handed twice. Nautilus hands a
+//! (`subscription_params`). That keeps the data engine from starting the
+//! subscription at the catalog's end; it filters nothing from the live
+//! stream. A venue can resend its latest tick on a subscription, as IC and
+//! IB do on quotes, and Nautilus forwards it, so the warmup's last tick can
+//! come once more as the first live one, stamped as it was. Nautilus hands a
 //! response's quotes and trades to the indicators registered for their
 //! instrument, so a strategy's features registered for the contract
 //! before the requests read them with no further call; it routes depth
