@@ -26,15 +26,16 @@ use nautilus_backtest::{
     result::BacktestResult,
 };
 use nautilus_common::{actor::DataActorNative, component::Component};
-use nautilus_core::UnixNanos;
+use nautilus_core::{Params, UnixNanos};
 use nautilus_execution::engine::config::ExecutionEngineConfig;
 use nautilus_model::{
-    data::{Data, NautilusDataType},
+    data::{Data, DataBatch, NautilusDataType, QuoteTick},
     enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
 };
 use nautilus_persistence::{
-    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+    backend::parquet::catalog::ParquetDataCatalog, catalog::types::CatalogQuery,
+    config::DataCatalogConfig,
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
@@ -240,8 +241,9 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
 /// `custom_data`) added to its engine, and returns its
 /// one result, its return statistics with `MaxDrawdown` (registered with
 /// the portfolio before the run), with the costs of the fills in the
-/// engine's cache, each on the quotes the run replayed, if any, loaded
-/// again as the node loads them (the other series are not).
+/// engine's cache, each on the quotes the run replayed, if any, read
+/// again from the catalog a batch at a time (see `replayed_quotes`; the
+/// other series are not read).
 pub(super) fn run<S>(
     config: BacktestRunConfig,
     custom: Vec<Data>,
@@ -255,22 +257,53 @@ where
     let [result] = <[BacktestResult; 1]>::try_from(results)
         .map_err(|results| anyhow!("{} results from one run", results.len()))?;
     let config = &node.configs()[0];
-    let mut quotes = Vec::new();
-    let quoted = config
+    let quotes = config
         .data()
         .iter()
-        .filter(|data| *data.data_type() == NautilusDataType::QuoteTick);
-    for data in quoted {
-        let replayed = BacktestNode::load_data_config(data, config.start(), config.end())?;
-        quotes.extend(replayed.into_iter().filter_map(|data| match data {
-            Data::Quote(quote) => Some(quote),
-            _ => None,
-        }));
-    }
+        .filter(|data| *data.data_type() == NautilusDataType::QuoteTick)
+        .map(|data| replayed_quotes(data, config.start(), config.end()));
     let engine = node.get_engine(RUN_ID).context("no engine for the run")?;
-    let outcome = Outcome::new(result, &engine.kernel().cache.borrow(), &quotes);
+    let outcome = Outcome::new(result, &engine.kernel().cache.borrow(), quotes);
     node.dispose();
     outcome
+}
+
+/// The quotes `data` replays in a run from `start` to `end`, in time
+/// order, read from its catalog a batch at a time by the query the node
+/// streams them by (Nautilus' `BacktestNode::load_data_config` collects
+/// the same query into memory, all at once). An error opening the catalog
+/// or reading a batch is an item.
+fn replayed_quotes(
+    data: &BacktestDataConfig,
+    start: Option<UnixNanos>,
+    end: Option<UnixNanos>,
+) -> Box<dyn Iterator<Item = anyhow::Result<QuoteTick>>> {
+    let query = CatalogQuery::new(data.data_type().clone())
+        .with_identifiers(data.query_identifiers())
+        .with_range(
+            start.into_iter().chain(data.start_time()).max(),
+            end.into_iter().chain(data.end_time()).min(),
+        )
+        .with_where_clause(data.filter_expr().map(str::to_string))
+        .with_params(Some(Params::new(
+            [(
+                "optimize_file_loading".to_string(),
+                data.optimize_file_loading().into(),
+            )]
+            .into(),
+        )));
+    let session = BacktestNode::load_catalog(data)
+        .and_then(|mut catalog| catalog.query_batch_session(&query, None));
+    let mut session = match session {
+        Ok(session) => session,
+        Err(err) => return Box::new(std::iter::once(Err(err))),
+    };
+    let batches = std::iter::from_fn(move || session.next_batch().transpose());
+    Box::new(batches.flat_map(|batch| match batch {
+        Ok(DataBatch::Quote(quotes)) => quotes.iter().copied().map(Ok).collect(),
+        Ok(_) => vec![Err(anyhow!("a quote query yielded other data"))],
+        Err(err) => vec![Err(err)],
+    }))
 }
 
 /// Runs `config` with `strategy` on a new `BacktestNode`, `custom` added
