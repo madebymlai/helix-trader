@@ -26,12 +26,18 @@
 //! connection, are not sent again: the (un)subscriptions asked meanwhile
 //! wait, and are sent once the account is authenticated again.
 //!
-//! The transport invalidates the authentication as soon as it finds the
-//! connection dead, while the handler learns of the reconnect only from
-//! `RECONNECTED`, once the new connection is up: a frame sent meanwhile
-//! would wait for the new connection and reach it before its
-//! authentication. So from then on requests and spot changes wait, as
-//! during an auth, and the heartbeat and a scheduled renewal are skipped.
+//! Every frame but the heartbeat is bound to the connection the session
+//! authenticates on (`WebSocketClient::send_bytes_on_connection`, the
+//! connection's epoch as its `RECONNECTED` carries it): the transport
+//! writes it there or not at all, never on the next connection, which it
+//! would reach before its authentication. A frame refused because that
+//! connection is gone, or going (refused at once while the transport
+//! reconnects, as Nautilus' OKX handler does), was never sent: a request
+//! or a trade request waits for the new session, as during an auth; a spot
+//! change waits in the subscription state, which the new session sends;
+//! the auth frames and a renewal wait for the new connection. The
+//! heartbeat goes to the current connection. A frame whose write timed out
+//! may have reached cTrader: it counts as sent.
 //!
 //! Trade requests (orders, amendments, cancels, closes) go out under the
 //! `clientMsgId` their caller chose, who learns only whether the frame was
@@ -48,7 +54,8 @@ use nautilus_common::live::dst::time::{self, Duration, Instant, MissedTickBehavi
 use nautilus_core::{string::secret::SecretString, time::get_atomic_clock_realtime};
 use nautilus_network::{
     Message, RECONNECTED,
-    websocket::{AuthTracker, SubscriptionState, WebSocketClient, auth::AuthState},
+    error::SendError,
+    websocket::{AuthTracker, SubscriptionState, WebSocketClient},
 };
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
@@ -89,9 +96,19 @@ fn playground(names: &CTraderSettingNames) -> String {
 /// Where a response goes: the caller awaiting it.
 pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 
-/// Where a trade request's sending goes: `Ok` once its frame is written,
-/// an error if it never was.
+/// Where a trade request's sending goes: `Ok` once its frame is written
+/// (or its write timed out: cTrader may have it), an error if it never
+/// was.
 pub(super) type Sent = oneshot::Sender<Result<(), CTraderError>>;
+
+/// Why a frame was not sent.
+enum Unsent {
+    /// The connection it is bound to is gone, or going: it waits for the
+    /// new one.
+    ConnectionChanged,
+    /// The transport refused it.
+    Failed(CTraderError),
+}
 
 /// Commands from the outer client to the handler.
 pub(super) enum HandlerCommand {
@@ -126,7 +143,8 @@ pub(super) enum HandlerCommand {
 
 /// Where the session stands. Requests wait while it authenticates.
 enum Session {
-    /// No client yet.
+    /// No client yet, or no connection to authenticate on until the next
+    /// `RECONNECTED`.
     Unconnected,
     /// The application auth request with this `clientMsgId` is out.
     ApplicationAuth(String),
@@ -195,6 +213,9 @@ impl Awaiting {
 
 pub(super) struct CTraderWsHandler {
     client: Option<WebSocketClient>,
+    /// The epoch of the connection the session authenticates, or
+    /// authenticated, on: every frame but the heartbeat is bound to it.
+    connection: u64,
     credential: CTraderCredential,
     /// The credential's token file.
     token_file: TokenStore,
@@ -215,7 +236,8 @@ pub(super) struct CTraderWsHandler {
     /// their slots meanwhile (see the outer client).
     auth: AuthTracker,
     cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
-    raw_rx: mpsc::UnboundedReceiver<Message>,
+    /// The transport's messages, each with its connection's epoch.
+    raw_rx: mpsc::UnboundedReceiver<(u64, Message)>,
     spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
     /// The listener of the trade events, once one asked.
     trade_tx: Option<mpsc::UnboundedSender<TradeEvent>>,
@@ -250,12 +272,13 @@ impl CTraderWsHandler {
         auth: AuthTracker,
         subscriptions: SubscriptionState,
         cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
-        raw_rx: mpsc::UnboundedReceiver<Message>,
+        raw_rx: mpsc::UnboundedReceiver<(u64, Message)>,
         spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
         heartbeat: Duration,
     ) -> Self {
         Self {
             client: None,
+            connection: 0,
             token_file: credential.tokens(),
             credential,
             tokens,
@@ -289,6 +312,7 @@ impl CTraderWsHandler {
                 biased;
                 command = self.cmd_rx.recv() => match command {
                     Some(HandlerCommand::SetClient(client)) => {
+                        self.connection = client.connection_epoch();
                         self.client = Some(client);
                         self.authenticate().await;
                     }
@@ -321,7 +345,7 @@ impl CTraderWsHandler {
                     }
                 },
                 message = self.raw_rx.recv() => match message {
-                    Some(message) => self.receive(message).await,
+                    Some((epoch, message)) => self.receive(epoch, message).await,
                     None => {
                         log::debug!("cTrader transport closed");
                         break;
@@ -343,7 +367,7 @@ impl CTraderWsHandler {
         while let Some(deadline) = self.renewal.as_ref().map(|r| r.deadline) {
             let left = deadline.saturating_duration_since(Instant::now());
             match time::timeout(left, self.raw_rx.recv()).await {
-                Ok(Some(message)) => self.receive(message).await,
+                Ok(Some((epoch, message))) => self.receive(epoch, message).await,
                 Ok(None) | Err(_) => break,
             }
         }
@@ -377,34 +401,60 @@ impl CTraderWsHandler {
         self.next_id.to_string()
     }
 
-    /// Sends one frame. No frame content is logged: auth frames hold the
-    /// secret and the token. The transport takes the frame; its copies are
-    /// out of the adapter's reach.
-    async fn send(&self, frame: Vec<u8>) -> Result<(), CTraderError> {
+    /// Sends one frame on the session's connection (see the module docs).
+    async fn send(&self, frame: Vec<u8>) -> Result<(), Unsent> {
+        self.send_on(frame, self.connection).await
+    }
+
+    /// Sends one frame on the connection of epoch `connection`, or not at
+    /// all. No frame content is logged: auth frames hold the secret and the
+    /// token. The transport takes the frame; its copies are out of the
+    /// adapter's reach.
+    async fn send_on(&self, frame: Vec<u8>, connection: u64) -> Result<(), Unsent> {
         let client = self
             .client
             .as_ref()
-            .ok_or_else(|| CTraderError::Transport("no connection".to_owned()))?;
-        client
-            .send_bytes(frame, None)
+            .ok_or_else(|| Unsent::Failed(CTraderError::Transport("no connection".to_owned())))?;
+        // Refused at once rather than held in the transport until a
+        // connection is up, which is not the frame's.
+        if client.connection_mode().is_reconnect() {
+            return Err(Unsent::ConnectionChanged);
+        }
+        match client
+            .send_bytes_on_connection(frame, None, connection)
             .await
-            .map_err(|e| CTraderError::Transport(e.to_string()))
+        {
+            Ok(()) => Ok(()),
+            Err(SendError::WriteTimeout) => {
+                log::warn!("cTrader frame write timed out: cTrader may have it");
+                Ok(())
+            }
+            Err(SendError::ConnectionChanged) => Err(Unsent::ConnectionChanged),
+            Err(e) => Err(Unsent::Failed(CTraderError::Transport(e.to_string()))),
+        }
     }
 
     /// cTrader's keepalive: a `ProtoHeartbeatEvent` frame, every 10 s
-    /// (help.ctrader.com/open-api, "Establish a connection"), on a live
-    /// connection only: it keeps that connection, as Nautilus skips a pong
-    /// while reconnecting (`WebSocketClient::send_pong`).
+    /// (help.ctrader.com/open-api, "Establish a connection"), on the
+    /// current connection while it is live: it keeps that connection, as
+    /// Nautilus skips a pong while reconnecting (`WebSocketClient::send_pong`).
     async fn send_heartbeat(&self) {
-        if !self.client.as_ref().is_some_and(WebSocketClient::is_active) {
+        let Some(client) = self.client.as_ref().filter(|c| c.is_active()) else {
             return;
+        };
+        let heartbeat = frame(&ProtoHeartbeatEvent::default(), None);
+        match self.send_on(heartbeat, client.connection_epoch()).await {
+            Ok(()) | Err(Unsent::ConnectionChanged) => {}
+            Err(Unsent::Failed(e)) => log::warn!("cTrader heartbeat not sent: {e}"),
         }
-        if let Err(e) = self
-            .send(frame(&ProtoHeartbeatEvent::default(), None))
-            .await
-        {
-            log::warn!("cTrader heartbeat not sent: {e}");
-        }
+    }
+
+    /// The connection being authenticated is gone: the session waits for
+    /// the new one's `RECONNECTED`, and requests with it.
+    fn await_connection(&mut self, sending: &str) {
+        log::debug!("cTrader {sending} not sent: the connection changed");
+        self.wake = None;
+        self.session = Session::Unconnected;
     }
 
     /// Starts the session: application auth, then account auth on its
@@ -430,7 +480,10 @@ impl CTraderWsHandler {
         request.client_secret.zeroize();
         match self.send(frame).await {
             Ok(()) => self.session = Session::ApplicationAuth(id),
-            Err(e) => self.fail_session(format!("sending the application auth: {e}")),
+            Err(Unsent::ConnectionChanged) => self.await_connection("application auth"),
+            Err(Unsent::Failed(e)) => {
+                self.fail_session(format!("sending the application auth: {e}"));
+            }
         }
     }
 
@@ -506,7 +559,9 @@ impl CTraderWsHandler {
                 });
                 self.wake = Some(deadline);
             }
-            Err(e) => self.fail_session(format!("sending the token renewal: {e}")),
+            // The new connection's application auth renews the token if due.
+            Err(Unsent::ConnectionChanged) => self.await_connection("token renewal"),
+            Err(Unsent::Failed(e)) => self.fail_session(format!("sending the token renewal: {e}")),
         }
     }
 
@@ -574,15 +629,14 @@ impl CTraderWsHandler {
         request.access_token.zeroize();
         match self.send(frame).await {
             Ok(()) => self.session = Session::AccountAuth(id),
-            Err(e) => self.fail_session(format!("sending the account auth: {e}")),
+            Err(Unsent::ConnectionChanged) => self.await_connection("account auth"),
+            Err(Unsent::Failed(e)) => self.fail_session(format!("sending the account auth: {e}")),
         }
     }
 
     /// Acts on the time `wake` set.
     async fn woken(&mut self) {
         match self.session {
-            // The new connection's application auth renews the token if due.
-            Session::Ready if self.connection_dropped() => {}
             Session::Ready | Session::TokenLock => self.renew().await,
             // The renewal stays out: a late answer is still saved.
             Session::Renewal => self.fail_session(format!(
@@ -595,17 +649,6 @@ impl CTraderWsHandler {
             | Session::AccountAuth(_)
             | Session::Failed(_) => {}
         }
-    }
-
-    /// Whether the transport dropped the ready session's connection: it
-    /// invalidates the authentication at once (see the module docs). A
-    /// transport closed for good fails it instead: frames are then sent,
-    /// and fail at once. Temporary: once nautilus_trader#5526 (binary sends
-    /// bound to a connection) is released, the sends are bound to the
-    /// connection the session authenticated on, and this check gives way to
-    /// theirs.
-    fn connection_dropped(&self) -> bool {
-        self.auth.auth_state() == AuthState::Unauthenticated
     }
 
     async fn ready(&mut self) {
@@ -682,7 +725,7 @@ impl CTraderWsHandler {
     /// replay, or kept until the account is authenticated again (or the
     /// new connection's session, which takes them into the state).
     async fn change_spots(&mut self, symbol_id: i64, subscribe: bool) {
-        if matches!(self.session, Session::Ready) && !self.connection_dropped() {
+        if matches!(self.session, Session::Ready) {
             if self.mark_spots(symbol_id, subscribe) {
                 self.send_spots(subscribe, vec![symbol_id]).await;
             }
@@ -710,7 +753,9 @@ impl CTraderWsHandler {
 
     /// Subscribes to the spot events of `symbol_ids`, with their
     /// timestamps, or unsubscribes from them; cTrader's answer confirms or
-    /// fails them (see `spots_answered`).
+    /// fails them (see `spots_answered`). One refused because the
+    /// connection changed stays marked in the state, which the new
+    /// connection's session sends.
     async fn send_spots(&mut self, subscribe: bool, symbol_ids: Vec<i64>) {
         let id = self.next_id();
         let account = self.credential.account_id.get();
@@ -740,7 +785,12 @@ impl CTraderWsHandler {
                     },
                 );
             }
-            Err(e) => {
+            Err(Unsent::ConnectionChanged) => {
+                log::debug!(
+                    "cTrader spot change of {symbol_ids:?} not sent: the connection changed"
+                );
+            }
+            Err(Unsent::Failed(e)) => {
                 log::error!("cTrader spot subscription of {symbol_ids:?} not sent: {e}");
                 if subscribe {
                     for symbol_id in &symbol_ids {
@@ -753,13 +803,11 @@ impl CTraderWsHandler {
 
     async fn request(&mut self, request: Queued) {
         match &self.session {
-            Session::Ready if !self.connection_dropped() => self.dispatch(request).await,
+            Session::Ready => self.dispatch(request).await,
             Session::Failed(reason) => {
                 request.awaiting.fail(CTraderError::Session(reason.clone()));
             }
-            // The transport reconnects: the request waits for the new session.
-            Session::Ready
-            | Session::Unconnected
+            Session::Unconnected
             | Session::ApplicationAuth(_)
             | Session::TokenLock
             | Session::Renewal
@@ -769,6 +817,8 @@ impl CTraderWsHandler {
         }
     }
 
+    /// Sends `request`; one refused because the connection changed waits
+    /// for the new session.
     async fn dispatch(&mut self, request: Queued) {
         let id = match &request.awaiting {
             Awaiting::Caller(_) => self.next_id(),
@@ -776,13 +826,24 @@ impl CTraderWsHandler {
         };
         let frame = ProtoMessage {
             payload_type: request.payload_type,
-            payload: Some(request.payload),
+            payload: Some(request.payload.clone()),
             client_msg_id: Some(id.clone()),
         }
         .encode_to_vec();
-        if let Err(e) = self.send(frame).await {
-            request.awaiting.fail(e);
-            return;
+        match self.send(frame).await {
+            Ok(()) => {}
+            Err(Unsent::ConnectionChanged) => {
+                log::debug!(
+                    "cTrader {} held for the new session",
+                    payload_name(request.payload_type)
+                );
+                self.queued.push(request);
+                return;
+            }
+            Err(Unsent::Failed(e)) => {
+                request.awaiting.fail(e);
+                return;
+            }
         }
         // Callers that timed out left their replies closed.
         self.pending.retain(|_, pending| match pending {
@@ -800,14 +861,15 @@ impl CTraderWsHandler {
         }
     }
 
-    async fn receive(&mut self, message: Message) {
+    /// A message of the connection of epoch `epoch`.
+    async fn receive(&mut self, epoch: u64, message: Message) {
         match message {
             Message::Binary(bytes) => match ProtoMessage::decode(&bytes[..]) {
                 Ok(envelope) => self.route(envelope).await,
                 Err(e) => log::warn!("malformed cTrader frame ({} bytes): {e}", bytes.len()),
             },
             Message::Text(text) if &text[..] == RECONNECTED.as_bytes() => {
-                self.reconnected().await;
+                self.reconnected(epoch).await;
             }
             Message::Text(text) => {
                 log::warn!("unexpected cTrader text frame ({} bytes)", text.len());
@@ -816,11 +878,13 @@ impl CTraderWsHandler {
         }
     }
 
-    /// The transport replaced the connection: a new cTrader session, so
-    /// the responses still pending are lost, and it authenticates again
-    /// before serving the requests that wait.
-    async fn reconnected(&mut self) {
+    /// The transport replaced the connection with the one of epoch
+    /// `epoch`: a new cTrader session, so the responses still pending are
+    /// lost, and it authenticates again before serving the requests that
+    /// wait.
+    async fn reconnected(&mut self, epoch: u64) {
         log::warn!("cTrader reconnected: authenticating again");
+        self.connection = epoch;
         self.abandon_renewal("the connection was replaced");
         self.fail_pending(&CTraderError::ConnectionLost);
         drop(self.auth.begin());
