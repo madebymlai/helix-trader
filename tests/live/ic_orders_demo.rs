@@ -360,7 +360,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
 
 /// The open positions and orders IC's execution client reports on the
 /// demo account, as the node's startup reconciliation reads them.
-async fn open_at_ic() -> (usize, usize) {
+pub(crate) async fn open_at_ic() -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
     let cache = Rc::new(RefCell::new(Cache::default()));

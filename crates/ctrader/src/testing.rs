@@ -115,6 +115,21 @@ pub(crate) const EXECUTION_STOP_LOSS_ACCEPTED: &[u8] =
     include_bytes!("../testdata/execution_stop_loss_accepted.bin");
 pub(crate) const EXECUTION_STOP_LOSS_FILLED: &[u8] =
     include_bytes!("../testdata/execution_stop_loss_filled.bin");
+// A trailing stop loss on the demo (2026-11-04): a bracket entry's,
+// relative, and one set on an open position, which then moved.
+pub(crate) const EXECUTION_TRAILING_ENTRY_FILLED: &[u8] =
+    include_bytes!("../testdata/execution_trailing_entry_filled.bin");
+pub(crate) const EXECUTION_TRAILING_PROTECTION_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_trailing_protection_accepted.bin");
+pub(crate) const EXECUTION_TRAILING_STOP_LOSS_FILLED: &[u8] =
+    include_bytes!("../testdata/execution_trailing_stop_loss_filled.bin");
+pub(crate) const EXECUTION_TRAILING_SET_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_trailing_set_accepted.bin");
+pub(crate) const EXECUTION_TRAILING_SET_REPLACED: &[u8] =
+    include_bytes!("../testdata/execution_trailing_set_replaced.bin");
+pub(crate) const EXECUTION_TRAILING_SET_FILLED: &[u8] =
+    include_bytes!("../testdata/execution_trailing_set_filled.bin");
+pub(crate) const TRAILING_SL_CHANGED: &[u8] = include_bytes!("../testdata/trailing_sl_changed.bin");
 pub(crate) const ORDER_ERROR_BAD_VOLUME: &[u8] =
     include_bytes!("../testdata/order_error_bad_volume.bin");
 pub(crate) const ORDER_ERROR_ORDER_NOT_FOUND: &[u8] =
