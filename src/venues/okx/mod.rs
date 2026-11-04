@@ -51,7 +51,7 @@ pub(crate) use live::clients;
 /// before it, which a backtest does not settle, so the windows are long.
 const FUNDING_PERIOD: SignedDuration = SignedDuration::from_hours(14 * 24);
 
-/// The window one request of bars holds at most: a UTC day, 1,440 minute
+/// The window one request of bars holds at most: a day, 1,440 minute
 /// bars, 15 of the client's history pages of 100.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
@@ -156,7 +156,7 @@ pub fn requests(
 }
 
 /// The window one request of `data` holds at most (see `NodeFill::add`):
-/// `FUNDING_PERIOD` of funding, a UTC day of bars.
+/// `FUNDING_PERIOD` of funding, a day of bars.
 #[must_use]
 pub fn period(data: FillData) -> SignedDuration {
     match data {

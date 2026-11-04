@@ -84,6 +84,11 @@ fn before(s: &str) -> u64 {
     ns(s) - 1
 }
 
+/// 1 ns after `s`: where the window after one ending at `s` starts.
+fn after(s: &str) -> u64 {
+    ns(s) + 1
+}
+
 /// The time 1 ns before `s`.
 fn end_before(s: &str) -> Timestamp {
     ts(s) - SignedDuration::from_nanos(1)
@@ -157,6 +162,9 @@ enum Answer {
     /// Trades of GCQ26 to a request of GCZ26's: rows the engine cannot
     /// write back.
     OtherContract,
+    /// As `Data` for a window starting before this time, as `Failed` from
+    /// it on: the venue cutting the history part way through a request.
+    FailedFrom(u64),
 }
 
 /// What the fake venue holds and was asked.
@@ -247,7 +255,12 @@ impl FakeClient {
         venue.most_in_flight = venue.most_in_flight.max(in_flight);
         let done = Arc::clone(&venue.in_flight);
         let envelope = |response| DataResponseEnvelope::new(response, true, None);
-        let event = match venue.answer {
+        let answer = match venue.answer {
+            Answer::FailedFrom(from) if start >= from => Answer::Failed,
+            Answer::FailedFrom(_) => Answer::Data,
+            answer => answer,
+        };
+        let event = match answer {
             Answer::Data | Answer::OtherContract => DataEvent::ResponseEnvelope(envelope(response)),
             Answer::Later => {
                 let sender = self.sender.clone();
@@ -268,6 +281,7 @@ impl FakeClient {
                 envelope(response).with_failure("venue cut the history".to_string()),
             ),
             Answer::Refused => anyhow::bail!("venue refused the request"),
+            Answer::FailedFrom(_) => unreachable!("resolved above"),
         };
         done.fetch_sub(1, Ordering::SeqCst);
         self.sender.send(event)?;
@@ -581,25 +595,24 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let asked_twice = venue.borrow().asked.len();
     fill(dir.path(), &venue, &book_of, (ts(FRI), ts(WED)), DAY).unwrap();
 
-    // The definition over the window, then a day a request, each with the
-    // definition's price precision; the weekend asked once, answered
-    // empty. Then only what Tuesday adds; then nothing.
+    // The definition over the window, then a day a request from its start,
+    // each with the definition's price precision; the weekend asked once,
+    // answered empty. Then only what Tuesday adds; then nothing.
     let precision = Some(2);
     assert_eq!(
         venue.borrow().asked,
         [
             (FillData::Instrument, ns(FRI), before(TUE), None),
-            (FillData::Depth, ns(FRI), before(SAT), precision),
-            (FillData::Depth, ns(SAT), before(SUN), precision),
-            (FillData::Depth, ns(SUN), before(MON), precision),
-            (FillData::Depth, ns(MON), before(TUE), precision),
+            (FillData::Depth, ns(FRI), ns(SAT), precision),
+            (FillData::Depth, after(SAT), ns(SUN), precision),
+            (FillData::Depth, after(SUN), ns(MON), precision),
+            (FillData::Depth, after(MON), before(TUE), precision),
             // The definition stored, the catalog answers it.
-            (FillData::Depth, ns(TUE), before(WED), precision),
-            (FillData::Depth, ns(WED), ns(WED), precision),
+            (FillData::Depth, ns(TUE), ns(WED), precision),
         ]
     );
-    assert_eq!(asked_twice, 7);
-    // The empty weekend and the empty instant of Wednesday covered too.
+    assert_eq!(asked_twice, 6);
+    // The empty weekend covered too.
     assert_eq!(depth_lacking(dir.path(), (FRI, WED)), []);
     assert_eq!(
         stored_book(dir.path()),
@@ -695,19 +708,105 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     assert_eq!(
         windows,
         [
-            (ns("2025-10-17T00:00:00Z"), before("2025-10-17T03:00:00Z")),
-            (ns("2025-10-17T03:00:00Z"), before("2025-10-17T06:00:00Z")),
-            (ns("2025-10-17T06:00:00Z"), before("2025-10-17T09:00:00Z")),
-            (ns("2025-10-17T09:00:00Z"), before("2025-10-17T12:00:00Z")),
+            (ns("2025-10-17T00:00:00Z"), ns("2025-10-17T03:00:00Z")),
+            (after("2025-10-17T03:00:00Z"), ns("2025-10-17T06:00:00Z")),
+            (after("2025-10-17T06:00:00Z"), ns("2025-10-17T09:00:00Z")),
+            (
+                after("2025-10-17T09:00:00Z"),
+                before("2025-10-17T12:00:00Z")
+            ),
         ]
     );
     assert_eq!(venue.borrow().most_in_flight, 1);
 }
 
+/// The venue holds only Tuesday's snapshot: every window but the last is
+/// empty, the most a request can hold, and none of them ends the fill. With
+/// no stored data beside them they record nothing, so the next fill asks for
+/// them again.
+#[test]
+fn a_run_of_empty_windows_does_not_end_the_fill() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Data);
+    venue.borrow_mut().book = vec![depth("2025-10-21T10:00:00Z")];
+
+    fill(
+        dir.path(),
+        &venue,
+        &reading(NautilusDataType::OrderBookDepth),
+        (ts(FRI), end_before(WED)),
+        DAY,
+    )
+    .unwrap();
+
+    let windows: Vec<(u64, u64)> = venue.borrow().asked[1..]
+        .iter()
+        .map(|&(_, from, to, _)| (from, to))
+        .collect();
+    assert_eq!(
+        windows,
+        [
+            (ns(FRI), ns(SAT)),
+            (after(SAT), ns(SUN)),
+            (after(SUN), ns(MON)),
+            (after(MON), ns(TUE)),
+            (after(TUE), before(WED)),
+        ]
+    );
+    assert_eq!(stored_book(dir.path()), [ns("2025-10-21T10:00:00Z")]);
+    assert_eq!(
+        depth_lacking(dir.path(), (FRI, "2025-10-21T23:59:59.999999999Z")),
+        [(ns(FRI), ns(TUE))]
+    );
+}
+
+/// The venue cuts the history at Sunday's window. What came before stays
+/// written, window by window, and the next fill asks only from there.
+#[test]
+fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::FailedFrom(ns(SUN)));
+    let book_of = reading(NautilusDataType::OrderBookDepth);
+    let window = (ts(FRI), end_before(TUE));
+
+    let err = fill(dir.path(), &venue, &book_of, window, DAY)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("venue cut the history"), "{err}");
+    // The definition and three windows: Monday's never asked.
+    assert_eq!(venue.borrow().asked.len(), 4);
+    assert_eq!(stored_book(dir.path()), [ns("2025-10-17T10:00:00Z")]);
+    assert_eq!(
+        depth_lacking(dir.path(), (FRI, "2025-10-20T23:59:59.999999999Z")),
+        [(after(SUN), before(TUE))]
+    );
+
+    venue.borrow_mut().answer = Answer::Data;
+    venue.borrow_mut().asked.clear();
+    fill(dir.path(), &venue, &book_of, window, DAY).unwrap();
+
+    assert_eq!(
+        venue.borrow().asked,
+        [
+            (FillData::Depth, after(SUN), ns(MON) + 1, Some(2)),
+            (FillData::Depth, ns(MON) + 2, before(TUE), Some(2)),
+        ]
+    );
+    assert_eq!(
+        stored_book(dir.path()),
+        [ns("2025-10-17T10:00:00Z"), ns("2025-10-20T10:00:00Z")]
+    );
+    assert_eq!(
+        depth_lacking(dir.path(), (FRI, "2025-10-20T23:59:59.999999999Z")),
+        []
+    );
+}
+
 #[test]
 fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
-    let friday = "the book depths of GCZ26.GLBX over \
-                  [2025-10-17T00:00:00Z, 2025-10-17T23:59:59.999999999Z]";
+    let friday_on = "the book depths of GCZ26.GLBX over \
+                     [2025-10-17T00:00:00Z, 2025-10-18T23:59:59.999999999Z]";
     for (answer, failure) in [
         // The venue's reason.
         (Answer::Failed, "failed: venue cut the history"),
@@ -729,10 +828,10 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
         .to_string();
 
         assert!(
-            err.contains(&format!("{friday} {failure}")),
+            err.contains(&format!("{friday_on} {failure}")),
             "{answer:?}: {err}"
         );
-        // The first day failed: the second never asked.
+        // The first window failed: the second never asked.
         assert_eq!(venue.borrow().asked.len(), 2, "{answer:?}");
         assert_eq!(depth_intervals(dir.path()), [], "{answer:?}");
     }
@@ -779,8 +878,8 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
         venue.borrow().asked,
         [
             (FillData::Instrument, ns(MON), before(WED), None),
-            (FillData::Deltas, ns(MON), before(TUE), precision),
-            (FillData::Deltas, ns(TUE), before(WED), precision),
+            (FillData::Deltas, ns(MON), ns(TUE), precision),
+            (FillData::Deltas, after(TUE), before(WED), precision),
         ]
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -849,10 +948,10 @@ fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_serie
         venue.borrow().asked,
         [
             (FillData::Instrument, ns(FRI), before(SUN), None),
-            (FillData::Funding, ns(FRI), before(SAT), precision),
-            (FillData::Funding, ns(SAT), before(SUN), precision),
-            (bars, ns(FRI), before(SAT), precision),
-            (bars, ns(SAT), before(SUN), precision),
+            (FillData::Funding, ns(FRI), ns(SAT), precision),
+            (FillData::Funding, after(SAT), before(SUN), precision),
+            (bars, ns(FRI), ns(SAT), precision),
+            (bars, after(SAT), before(SUN), precision),
         ]
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);

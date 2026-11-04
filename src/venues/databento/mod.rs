@@ -29,7 +29,7 @@ const PUBLISHERS: &str = concat!(
 /// The Databento dataset of `GLBX` instruments.
 const DATASET: &str = "GLBX.MDP3";
 
-/// The window of one request of any series: a UTC day. A busy day of
+/// The window of one request of any series: a day. A busy day of
 /// COMEX gold MBP-10 is about 7 million snapshots, some 7.5 GB decoded,
 /// which Nautilus' write copies once more; Databento answers each request
 /// after a wait that shorter windows only multiply.
@@ -63,7 +63,7 @@ impl DatabentoHistory {
     }
 
     /// The window one request of any series holds at most (see
-    /// `NodeFill::add`): a UTC day.
+    /// `NodeFill::add`): a day.
     #[must_use]
     pub fn period(_data: FillData) -> SignedDuration {
         DAY
