@@ -29,9 +29,11 @@
 //! its own and asking for the next, a catalog answering what it holds of each.
 //! One aggregator builds a request's bars across its windows, its params
 //! being the request's, not the windows'. Nautilus ignores the windows of a
-//! continuous future's request and takes none on custom data. Deltas are asked
-//! at once: each window would replay the deltas from its day's start into a
-//! snapshot of its own. The node runs on between windows, so features can be
+//! continuous future's request and takes none on custom data. A window of
+//! deltas whose day's start a catalog holds, earlier windows' write-back
+//! included, is read from there and opens with a snapshot of the book at its
+//! own start, so a book indicator reads one per window beside the day's. The
+//! node runs on between windows, so features can be
 //! initialized on the older windows alone; a decision waits for the end.
 //!
 //! Each request carries the params
@@ -93,7 +95,7 @@
 //! alone: `request_quotes`, `request_trades`, `request_book_depth` and
 //! `request_book_deltas` (with the book type the roller subscribes to,
 //! `rolls::DELTAS_BOOK_TYPE`, onto which Nautilus replays the deltas from
-//! the day's start into the snapshot the response opens with). A series
+//! the day's start into the snapshot a window opens with). A series
 //! some bars are built from is requested once, building them. The last
 //! window ends at `now`, trimmed to it, and the roller, started right
 //! after, subscribes to the series with `start_ns` its own `now`
@@ -520,8 +522,8 @@ impl Debug for Warmup {
 /// the contract standing for its instrument now, once with the bars built
 /// from it if any, custom data from the catalog alone (see `CATALOG`). The
 /// warmup of each request arrives a window at a time in
-/// `on_historical_bars`, `on_historical_trades`, `on_historical_quotes` or
-/// `on_historical_book_depth`, at once in `on_historical_book_deltas` or
+/// `on_historical_bars`, `on_historical_trades`, `on_historical_quotes`,
+/// `on_historical_book_depth` or `on_historical_book_deltas`, at once in
 /// `on_historical_data`; the end of each request and of the group in
 /// `on_data_response`, where `finished` tells the group's. `group` is the
 /// caller's, stored before the call: a group whose requests are all answered
@@ -612,7 +614,10 @@ where
                     None,
                     Some(request_params(
                         built.iter(),
-                        [("book_type".to_string(), json!(DELTAS_BOOK_TYPE.to_string()))],
+                        windows.iter().cloned().chain([(
+                            "book_type".to_string(),
+                            json!(DELTAS_BOOK_TYPE.to_string()),
+                        )]),
                     )),
                 )?,
                 // From the catalog alone (see `CATALOG`), with no params:
@@ -1420,12 +1425,10 @@ mod tests {
         assert_eq!(recorder.bar_types.take(), []);
     }
 
-    /// The bars, quotes, trades and depth of a day are asked in windows of
-    /// 23 hours, the two a day can hold: under a day, so that IB counts no
-    /// sessions. Deltas are asked at once: each window would replay the
-    /// deltas from its day's start into a snapshot of its own.
+    /// A day of every series is asked in windows of 23 hours, the two a day
+    /// can hold: under a day, so that IB counts no sessions.
     #[test]
-    fn every_series_but_deltas_is_asked_in_windows_under_a_day() {
+    fn every_series_is_asked_in_windows_under_a_day() {
         let warmup = Warmup::live(&reading(&[
             "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL",
             "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
@@ -1439,16 +1442,16 @@ mod tests {
 
         warmup.start(&mut probe).unwrap();
 
-        for (source, _, params) in sent_requests(&commands) {
+        let sent = sent_requests(&commands);
+        assert_eq!(sent.len(), 5);
+        for (source, _, params) in sent {
             let params = params.expect("params");
-            let windows = params.get("durations_seconds").cloned();
-            let generator = params.contains_key("time_range_generator");
-            if source == Source::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX")) {
-                assert_eq!((windows, generator), (None, false), "{source:?}");
-            } else {
-                assert_eq!(windows, Some(json!([82_800.0, 82_800.0])), "{source:?}");
-                assert!(generator, "{source:?}");
-            }
+            assert!(params.contains_key("time_range_generator"), "{source:?}");
+            assert_eq!(
+                params.get("durations_seconds"),
+                Some(&json!([82_800.0, 82_800.0])),
+                "{source:?}"
+            );
         }
     }
 

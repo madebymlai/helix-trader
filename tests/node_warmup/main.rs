@@ -19,7 +19,7 @@ use helix_trader::{
     },
     strategy::{
         DataRequirements, TickSeries,
-        warmup::{self, Warmup},
+        warmup::{self, BookIndicator, Warmup},
     },
 };
 use jiff::{SignedDuration, Timestamp};
@@ -37,8 +37,8 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            BarsResponse, DataRequestFailed, DataResponseEnvelope, QuotesResponse, RequestBars,
-            RequestQuotes,
+            BarsResponse, BookDeltasResponse, DataRequestFailed, DataResponseEnvelope,
+            QuotesResponse, RequestBars, RequestBookDeltas, RequestQuotes,
         },
     },
     nautilus_actor,
@@ -49,9 +49,14 @@ use nautilus_live::{
     config::{LiveNodeConfig, RoutingConfig},
 };
 use nautilus_model::{
-    data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
+    data::{
+        Bar, BarType, BookOrder, NautilusDataType, OrderBookDelta, OrderBookDeltas, QuoteTick,
+        TradeTick,
+    },
+    enums::{BookAction, BookType, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, TraderId, Venue},
     instruments::{InstrumentAny, stubs::futures_contract_es},
+    orderbook::OrderBook,
     types::{Price, Quantity},
 };
 use nautilus_persistence::config::DataCatalogConfig;
@@ -64,6 +69,7 @@ const MID_MINUTES: &str = "GCZ26.GLBX-1-MINUTE-MID-INTERNAL";
 
 const HOUR_NS: u64 = 3_600_000_000_000;
 const MINUTE_NS: u64 = 60_000_000_000;
+const DAY_NS: u64 = 24 * HOUR_NS;
 const WARMUP: SignedDuration = SignedDuration::from_hours(72);
 /// How long after its close a node builds a composite bar, which is stamped
 /// then (`warmup::bar_build_delay`).
@@ -274,6 +280,27 @@ impl DataClient for FakeClient {
         self.answer(request.request_id, (start, end), response)
     }
 
+    /// The venue's deltas in the request's window, a batch on each minute.
+    fn request_book_deltas(&self, request: RequestBookDeltas) -> anyhow::Result<()> {
+        let (start, end) = window(request.start, request.end);
+        let id = request.single_instrument_id()?;
+        let closed = self.venue.borrow().closed;
+        let rows: Vec<OrderBookDelta> = minutes(start, end, closed)
+            .flat_map(|ns| deltas_at(id, ns))
+            .collect();
+        let response = DataResponse::BookDeltas(BookDeltasResponse::new(
+            request.request_id,
+            self.id,
+            id,
+            rows,
+            Some(UnixNanos::from(start)),
+            Some(UnixNanos::from(end)),
+            UnixNanos::from(end),
+            request.params.clone(),
+        ));
+        self.answer(request.request_id, (start, end), response)
+    }
+
     /// The venue's quotes in the request's window, one on each minute.
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
@@ -304,6 +331,66 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(request.request_id, (start, end), response)
+    }
+}
+
+/// The venue's deltas at the minute closing at `ns`, as a book feed carries
+/// them: one bid added, its order id the minute, after a clear if the minute
+/// opens a UTC day, a snapshot of that bid alone.
+fn deltas_at(id: InstrumentId, ns: u64) -> Vec<OrderBookDelta> {
+    let order = BookOrder::new(
+        OrderSide::Buy,
+        price_at(ns),
+        Quantity::from(1),
+        ns / MINUTE_NS,
+    );
+    let last = RecordFlag::F_LAST as u8;
+    if ns.is_multiple_of(DAY_NS) {
+        let snapshot = RecordFlag::F_SNAPSHOT as u8;
+        vec![
+            OrderBookDelta::clear(id, 0, ns.into(), ns.into()),
+            OrderBookDelta::new(
+                id,
+                BookAction::Add,
+                order,
+                snapshot | last,
+                0,
+                ns.into(),
+                ns.into(),
+            ),
+        ]
+    } else {
+        vec![OrderBookDelta::new(
+            id,
+            BookAction::Add,
+            order,
+            last,
+            0,
+            ns.into(),
+            ns.into(),
+        )]
+    }
+}
+
+/// A book a warmup's deltas are applied to, as a feature keeping one does.
+#[derive(Debug)]
+struct Books {
+    book: RefCell<OrderBook>,
+    /// The stamp of each delta of the feed, a snapshot's aside.
+    fed: RefCell<Vec<u64>>,
+}
+
+impl BookIndicator for Books {
+    fn handle_depth(&self, _depth: &nautilus_model::data::OrderBookDepth) {}
+
+    fn handle_deltas(&self, deltas: &OrderBookDeltas) {
+        let of_the_feed = deltas
+            .deltas
+            .iter()
+            .filter(|delta| !RecordFlag::F_SNAPSHOT.matches(delta.flags))
+            .map(|delta| delta.ts_event.as_u64());
+        self.fed.borrow_mut().extend(of_the_feed);
+        self.book.borrow_mut().apply_deltas(deltas).unwrap();
     }
 }
 
@@ -362,6 +449,11 @@ impl DataActor for Warming {
         if let Some(stops) = self.stops.clone() {
             stops.start(self);
         }
+        Ok(())
+    }
+
+    fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
+        self.warmup.on_historical_book_deltas(deltas);
         Ok(())
     }
 
@@ -714,4 +806,82 @@ fn a_warmup_of_composite_bars_warms_the_atr_of_a_bracket() {
     let exits = bracket_of(vec![BarType::from(COMPOSITE)], vec![]);
 
     assert_three_atrs_wide(&exits);
+}
+
+/// A warmup of 72 hours of deltas on `dir`'s catalog: the book they build, how
+/// many batches cleared it, and what the venue was asked.
+fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
+    let venue = FakeVenue::new(Answer::Envelope);
+    let id = InstrumentId::from(GCZ26);
+    let ticks = vec![TickSeries {
+        data: NautilusDataType::OrderBookDelta,
+        instrument_id: id,
+    }];
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: ticks.clone(),
+        warmup: WARMUP,
+    };
+    let books = Rc::new(Books {
+        book: RefCell::new(OrderBook::new(id, BookType::L3_MBO)),
+        fed: RefCell::new(vec![]),
+    });
+    let warmup = Warmup::live(&requirements)
+        .reading(ticks)
+        .feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
+    let (failure, _) = run(dir, &venue, &requirements, warmup, None);
+    assert_eq!(failure, None);
+    let asked = venue.borrow().asked.clone();
+    (books, asked)
+}
+
+/// The book holds one bid for each minute since the last UTC midnight, the
+/// day's snapshot among them, up to the latest minute, as the venue's feed
+/// builds it, whatever snapshots the windows opened with; and each delta of
+/// the feed came once, in order, a minute after the one before or two across
+/// a midnight's snapshot. A repeat would not show in the book: an order added
+/// twice is one order.
+fn assert_the_days_book(books: &Books) {
+    let book = books.book.borrow();
+    let best = book.best_bid_price().expect("a bid");
+    let minute = best.as_f64() as u64;
+    let now = UnixNanos::from(Timestamp::now()).as_u64();
+    assert!(
+        now / MINUTE_NS - minute <= 2,
+        "the best bid is of minute {minute}"
+    );
+    let since_midnight = minute - (minute * MINUTE_NS / DAY_NS) * DAY_NS / MINUTE_NS;
+    let orders: usize = book.bids(None).map(|level| level.len()).sum();
+    assert_eq!(orders as u64, since_midnight + 1);
+    let fed = books.fed.borrow();
+    assert!(
+        fed.windows(2)
+            .all(|pair| [MINUTE_NS, 2 * MINUTE_NS].contains(&(pair[1] - pair[0]))),
+        "a delta repeated, lost or out of order"
+    );
+}
+
+/// The venue answers the first window of an empty catalog, and each after it
+/// from its day's start as the windows before wrote it back, with the rest
+/// asked of the venue.
+#[test]
+fn deltas_a_venue_answers_in_windows_build_the_days_book() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (books, asked) = warm_deltas(dir.path());
+
+    assert_eq!(asked.len(), 4);
+    assert_the_days_book(&books);
+}
+
+/// The catalog holds them: each window is read from its day's start and opens
+/// with a snapshot of the book at its own start.
+#[test]
+fn deltas_a_catalog_answers_in_windows_build_the_days_book_across_their_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    warm_deltas(dir.path());
+
+    let (books, _) = warm_deltas(dir.path());
+
+    assert_the_days_book(&books);
 }
