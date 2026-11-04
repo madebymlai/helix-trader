@@ -54,7 +54,7 @@ use nautilus_persistence::{
 use serde_json::json;
 
 use super::catalog_path;
-use crate::strategy::SeriesSlice;
+use crate::{strategy::SeriesSlice, time_range};
 
 /// The book depth of an `OrderBookDepth` request: MBP-10's.
 const DEPTH: usize = 10;
@@ -141,23 +141,6 @@ impl fmt::Display for FillRequest {
             "the {} of {} over [{}, {}]",
             self.data, self.instrument_id, self.from, self.to
         )
-    }
-}
-
-impl FillRequest {
-    /// Nautilus' `durations_seconds` of this request in windows of `period`:
-    /// the period, once per window it can hold. The data engine takes the
-    /// next duration after an empty window, the first again after one with
-    /// data, and ends the request, reporting success, when they run out, so
-    /// one per window carries it across any run of empty windows.
-    ///
-    /// Windows start at `from` and end at each multiple of `period` from it,
-    /// the next starting 1 ns later; so `span / period + 1` is the most.
-    fn durations_seconds(self, period: SignedDuration) -> Vec<f64> {
-        let span = self.to.duration_since(self.from).as_nanos();
-        let windows = span / period.as_nanos() + 1;
-        let windows = usize::try_from(windows).expect("a request of a sane number of windows");
-        vec![period.as_secs_f64(); windows]
     }
 }
 
@@ -422,11 +405,7 @@ impl FillActor {
         } = request;
         let mut params = vec![("update_catalog".to_string(), json!(true))];
         if let Some(period) = asked.period {
-            params.push(("time_range_generator".to_string(), json!("")));
-            params.push((
-                "durations_seconds".to_string(),
-                json!(request.durations_seconds(period)),
-            ));
+            params.extend(time_range::params(from, to, period));
         }
         if data != FillData::Instrument
             && let Some(precision) = self.precisions.get(&instrument_id)

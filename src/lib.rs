@@ -9,4 +9,5 @@ pub mod live;
 pub mod model;
 pub mod rolls;
 pub mod strategy;
+mod time_range;
 pub mod venues;

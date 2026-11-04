@@ -35,7 +35,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{Bar, OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick},
+    data::{OrderBookDelta, OrderBookDepth},
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::StrategyId,
 };
@@ -175,23 +175,10 @@ impl DataActor for ModelEma {
         Rc::clone(&self.model).start(self)
     }
 
-    /// Logs the end of the warmup; Nautilus logs a failed one as an error.
-    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        self.model.warmup().on_data_response(response)
-    }
-
     /// The warmup's bars reach only the cache: the warmup hands them to
-    /// the features and the barrier's ATR.
-    fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        self.model.warmup().on_historical(self, quotes)
-    }
-
-    fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
-        self.model.warmup().on_historical(self, trades)
-    }
-
-    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        self.model.warmup().on_historical(self, bars)
+    /// the features, and logs its end; Nautilus logs a failed one as an error.
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        self.model.warmup().on_data_response(self, response)
     }
 
     /// Nautilus routes no book or custom data to indicators: the warmup

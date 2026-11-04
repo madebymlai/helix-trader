@@ -28,7 +28,7 @@
 //! (`CustomDataIndicator`, `Warmup::on_historical_data`). Bars built from
 //! a warmup's quotes, trades or source bars reach only the cache, not the
 //! indicators: the strategy's warmup hands them to `handle_bar`
-//! (`Warmup::on_historical`, the warmup a model strategy's `ModelHandle`
+//! (`Warmup::on_data_response`, the warmup a model strategy's `ModelHandle`
 //! builds).
 //!
 //! A feature on the ticks or custom data of a futures root (`GC.GLBX`, see

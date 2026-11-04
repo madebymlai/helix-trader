@@ -32,7 +32,7 @@ use nautilus_common::{
 };
 use nautilus_indicators::average::ema::ExponentialMovingAverage;
 use nautilus_model::{
-    data::{Bar, BarType, QuoteTick, TradeTick},
+    data::{Bar, BarType},
     enums::OrderSide,
     identifiers::{InstrumentId, StrategyId},
     instruments::Instrument,
@@ -299,23 +299,10 @@ impl DataActor for EmaCross {
         Rc::clone(&self.warmup).start(self)
     }
 
-    /// Logs the end of the warmup; Nautilus logs a failed one as an error.
-    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        self.warmup.on_data_response(response)
-    }
-
     /// The warmup's bars reach only the cache: the warmup hands them to
-    /// the signal.
-    fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        self.warmup.on_historical(self, quotes)
-    }
-
-    fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
-        self.warmup.on_historical(self, trades)
-    }
-
-    fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
-        self.warmup.on_historical(self, bars)
+    /// the signal, and logs its end; Nautilus logs a failed one as an error.
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        self.warmup.on_data_response(self, response)
     }
 
     /// Nautilus has fed the bar to the signal; the strategy decides on it

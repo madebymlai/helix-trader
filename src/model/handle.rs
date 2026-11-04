@@ -6,7 +6,8 @@
 //! `on_start` registers the features (and starts the targets' ATR, in a
 //! dataset run) and starts the decision cadence; `decide`, at a decision
 //! of the cadence (its timer, `decide::is_decision`), snapshots the
-//! features, if the decision is fresh (data of the targets' instrument
+//! features, if no live warmup is still answering (`Warmup::is_warming`),
+//! the decision is fresh (data of the targets' instrument
 //! since the previous) and every one is initialized, and publishes their
 //! row (`decide::decide`), then:
 //!
@@ -463,9 +464,8 @@ impl ModelHandle {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
-        // Registered first: a warmup request the catalog answers alone is
-        // answered within `start`, its quotes and trades handed to the
-        // indicators registered by then.
+        // Registered first: Nautilus hands a warmup response's quotes and
+        // trades to the indicators registered by then.
         self.features.register(strategy);
         self.warmup.start(strategy)?;
         self.roller.start(strategy)?;
@@ -491,16 +491,16 @@ impl ModelHandle {
     }
 
     /// The strategy's warmup, which the handle builds and starts: its
-    /// strategy delegates `on_data_response`, `on_historical_quotes`,
-    /// `on_historical_trades`, `on_historical_bars`,
-    /// `on_historical_book_depth`, `on_historical_book_deltas` and
-    /// `on_historical_data` to it, and a live node sizes its cache from it.
+    /// strategy delegates `on_data_response`, `on_historical_book_depth`,
+    /// `on_historical_book_deltas` and `on_historical_data` to it, and a
+    /// live node sizes its cache from it.
     #[must_use]
     pub fn warmup(&self) -> Rc<Warmup> {
         Rc::clone(&self.warmup)
     }
 
-    /// Decides now, for `strategy`: the decision to trade, if any.
+    /// Decides now, for `strategy`: the decision to trade, if any; none
+    /// while the warmup is not answered yet (`Warmup::is_warming`).
     ///
     /// # Errors
     ///
@@ -510,6 +510,10 @@ impl ModelHandle {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
+        if self.warmup.is_warming() {
+            log::debug!("No decision: the warmup is not answered yet");
+            return Ok(None);
+        }
         let Some(row) = decide::decide(strategy, &self.features, self.rule, self.traded) else {
             return Ok(None);
         };
@@ -1320,6 +1324,21 @@ mod tests {
         probe: &Decider,
         models: &Path,
         config: &ModelConfig,
+        sides: (Option<usize>, Option<usize>),
+    ) -> Rc<ModelHandle> {
+        let mode = Mode::Backtest {
+            models: models.to_path_buf(),
+            venue: venue(),
+        };
+        sides_handle_in(mode, probe, models, config, sides)
+    }
+
+    /// `sides_handle`, in `mode`.
+    fn sides_handle_in(
+        mode: Mode,
+        probe: &Decider,
+        models: &Path,
+        config: &ModelConfig,
         (long, short): (Option<usize>, Option<usize>),
     ) -> Rc<ModelHandle> {
         let features = features();
@@ -1342,10 +1361,7 @@ mod tests {
             features,
             config,
             &requirements(),
-            Mode::Backtest {
-                models: models.to_path_buf(),
-                venue: venue(),
-            },
+            mode,
         )
         .unwrap()
     }
@@ -1598,7 +1614,13 @@ mod tests {
     fn a_live_warmup_sets_the_first_decisions_stop_from_the_barriers_atr() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle(&probe, models.path(), &atr_config(), (Some(8), None));
+        let handle = sides_handle_in(
+            live(models.path().to_path_buf()),
+            &probe,
+            models.path(),
+            &atr_config(),
+            (Some(8), None),
+        );
         handle.start(&mut probe).unwrap();
         probe
             .cache_rc()
@@ -1614,17 +1636,7 @@ mod tests {
                 ),
             ])
             .unwrap();
-        let response = [QuoteTick::new(
-            InstrumentId::from(AUD),
-            Price::from("0.69990"),
-            Price::from("0.70010"),
-            Quantity::from(1),
-            Quantity::from(1),
-            UnixNanos::from(at("2026-10-22T12:00:00Z")),
-            UnixNanos::from(at("2026-10-22T12:00:00Z")),
-        )];
-
-        handle.warmup().on_historical(&probe, &response).unwrap();
+        handle.warmup().complete(&probe).unwrap();
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
         assert_eq!(
@@ -1892,9 +1904,20 @@ mod tests {
     }
 
     /// The probe's handle trading live on the models under `models`,
-    /// started, deciding on `features`, warm: a quote came at the time of
-    /// `probe`.
+    /// started, its warmup ended, deciding on `features`, warm: a quote came
+    /// at the time of `probe`.
     fn live_handle(
+        probe: &mut Decider,
+        models: &Path,
+        features: Rc<FeatureSet>,
+    ) -> Rc<ModelHandle> {
+        let handle = warming_handle(probe, models, features);
+        handle.warmup().complete(probe).unwrap();
+        handle
+    }
+
+    /// `live_handle`, its warmup not answered yet.
+    fn warming_handle(
         probe: &mut Decider,
         models: &Path,
         features: Rc<FeatureSet>,
@@ -1937,6 +1960,28 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
         let handle = live_handle(&mut probe, models.path(), features());
 
+        assert_eq!(
+            probability(handle.decide(&mut probe).unwrap()),
+            Some(c(0.8))
+        );
+    }
+
+    /// A warmup reaches the features window by window with the node running
+    /// between them: features warm and fresh on what they got so far give no
+    /// decision until it ends, then the decision they give.
+    #[test]
+    fn a_live_node_does_not_decide_until_its_warmup_ends() {
+        let models = tempfile::tempdir().unwrap();
+        store(models.path())
+            .publish(&baseline("2026-10-22T00:00:00Z", 8))
+            .unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
+        let handle = warming_handle(&mut probe, models.path(), features());
+
+        let warming = probability(handle.decide(&mut probe).unwrap());
+        handle.warmup().complete(&probe).unwrap();
+
+        assert_eq!(warming, None);
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
             Some(c(0.8))
