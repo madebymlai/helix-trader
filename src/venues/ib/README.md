@@ -32,7 +32,7 @@ IB is netting. **IB's execution adapter rejects reduce-only orders:** bracket ex
 
 Live bars use full-session IB minute TRADES bars, matching history. Market orders can be priced from cached LAST bars; MID bars alone do not supply that price. Warmup ends at the request time, excluding the partial minute; the live subscription starts there. The data client does not write its historical answer back to the catalog.
 
-A warmup of a day or more may silently miss bars because IB counts days as sessions when segmenting requests; this live case remains unverified. See [history](#history) for history limitations.
+IB counts a duration of days as sessions, the current one included: 72 hours asked at once within a session lost the oldest of them (841 of 2,791 minute bars of SXR8, measured). So a warmup asks in windows under a day, which IB's client asks in seconds, and holds every bar of IB's history over them (`tests/live/ib_warmup_days.rs`). IB's client reports a failed history request as an answer with what it got, so a window failing leaves a gap in the warmup with no failure. See [history](#history) for history limitations.
 
 ## Tests
 
@@ -41,5 +41,6 @@ Offline tests are in `src/venues/ib`. IB end-to-end tests in `tests/live/` requi
 ```sh
 NAUTILUS_IB_RUN=1 cargo test --test live ib_gateway::
 NAUTILUS_IB_RUN=1 cargo test --test live ib_minute_bars:: -- --nocapture
+NAUTILUS_IB_RUN=1 cargo test --test live ib_warmup_days:: -- --nocapture
 NAUTILUS_IB_RUN=1 NAUTILUS_IB_LIVE_ORDERS=1 cargo test --test live ib_restart:: -- --test-threads=1
 ```

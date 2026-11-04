@@ -2,8 +2,8 @@
 //! account, builds a node with the broker's clients and a catalog already
 //! holding gold's quotes up to `CATALOG_BEHIND` before now (filled as
 //! fill-catalog fills it), and a recording strategy gets its minute bars
-//! warmed up from the catalog, then from the broker's data client up to now,
-//! then live quotes and the bars Nautilus builds from them, until SIGINT;
+//! warmed up over two windows from the catalog, then from the broker's data
+//! client up to now, each bar reaching its indicator once, then live quotes and the bars Nautilus builds from them, until SIGINT;
 //! the broker's answer is written back to the catalog, and the live quotes
 //! the node receives are streamed into it. It needs what `ctrader_demo.rs`
 //! needs, and gold's market open.
@@ -24,14 +24,14 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    rolls::ContinuousBars,
-    strategy::{DataRequirements, warmup},
+    strategy::{DataRequirements, warmup::Warmup},
 };
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::DataActor, logging::logger::LoggerConfig, messages::data::DataResponseEnvelope,
+    actor::{DataActor, indicators::SharedActorIndicator},
+    logging::logger::LoggerConfig,
+    messages::data::DataResponseEnvelope,
 };
-use nautilus_core::UUID4;
 use nautilus_model::{
     data::{Bar, BarType, NautilusDataType, QuoteTick},
     identifiers::{StrategyId, TraderId},
@@ -52,21 +52,19 @@ const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(10);
 #[derive(Debug, Default)]
 struct Record {
     warmup_quotes: Vec<QuoteTick>,
-    warmup: Vec<Bar>,
-    /// How the warmup ended: `Ok` complete, or the error.
-    warmup_end: Option<Result<(), String>>,
+    /// Why the warmup failed, if it did.
+    warmup_failure: Option<String>,
     bars: Vec<Bar>,
     quotes: Vec<QuoteTick>,
 }
 
-/// Warms up its bars through `strategy::warmup`, as a real strategy does,
+/// Warms up its bars through a `Warmup`, as a real strategy does,
 /// subscribes to the quotes, and records both. It sends no order.
 #[derive(Debug)]
 struct Recorder {
     core: StrategyCore,
     bar_type: BarType,
-    warmup: SignedDuration,
-    warmup_group: UUID4,
+    warmup: Rc<Warmup>,
     record: Rc<RefCell<Record>>,
 }
 
@@ -74,33 +72,23 @@ nautilus_strategy!(Recorder);
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        warmup::start(
-            self,
-            &[self.bar_type],
-            &[],
-            self.warmup,
-            &ContinuousBars::default(),
-            self.warmup_group,
-        )?;
+        Rc::clone(&self.warmup).start(self)?;
         self.subscribe_quotes(self.bar_type.instrument_id(), None, None);
         Ok(())
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        let end = match warmup::finished(self.warmup_group, response) {
-            Ok(false) => return Ok(()),
-            Ok(true) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        self.record.borrow_mut().warmup_end = Some(end);
+        if let Err(e) = Rc::clone(&self.warmup).on_data_response(self, response) {
+            self.record.borrow_mut().warmup_failure = Some(e.to_string());
+        }
         Ok(())
     }
 
     fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
-        let bars = warmup::bars(self, quotes);
-        let mut record = self.record.borrow_mut();
-        record.warmup_quotes.extend_from_slice(quotes);
-        record.warmup.extend(bars);
+        self.record
+            .borrow_mut()
+            .warmup_quotes
+            .extend_from_slice(quotes);
         Ok(())
     }
 
@@ -128,13 +116,17 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     };
     let gold = broker.gold();
     let bar_type = BarType::from(format!("{gold}-1-MINUTE-MID-INTERNAL").as_str());
-    let warmup = SignedDuration::from_mins(30);
+    // Over 23 hours: two windows.
+    let warmup = SignedDuration::from_hours(26);
     let requirements = DataRequirements {
         bar_types: vec![bar_type],
         ticks: vec![],
         warmup,
     };
     let record = Rc::new(RefCell::new(Record::default()));
+    let fed = Rc::new(crate::FedBars::default());
+    let warming =
+        Rc::new(Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator));
     let recorder = Recorder {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(StrategyId::from("RECORDER-001")),
@@ -142,8 +134,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             ..Default::default()
         }),
         bar_type,
-        warmup,
-        warmup_group: UUID4::new(),
+        warmup: Rc::clone(&warming),
         record: Rc::clone(&record),
     };
     // The catalog: gold and its quotes over [now - warmup, now -
@@ -183,12 +174,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
 
     let ran = tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
-        live.run(
-            &requirements,
-            &warmup::Warmup::live(&requirements),
-            recorder,
-            None,
-        ),
+        live.run(&requirements, &warming, recorder, None),
     )
     .await;
 
@@ -200,9 +186,10 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     // The node's records in Redis, under the test's trader.
     common::cache::delete_trader("HELIXTEST-101").await;
     let record = record.borrow();
+    let fed_bars = fed.bars.borrow();
     let (warmup_quotes, warmup_bars, bars, quotes) = (
         &record.warmup_quotes,
-        &record.warmup,
+        &*fed_bars,
         &record.bars,
         &record.quotes,
     );
@@ -219,13 +206,11 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         quotes.first(),
         quotes.last()
     );
-    // One response over `[now - warmup, now]`, the catalog's quotes, then
-    // the broker's for the rest, written back to the catalog.
-    assert_eq!(
-        record.warmup_end,
-        Some(Ok(())),
-        "the warmup did not complete"
-    );
+    // Responses over `[now - warmup, now]`, a window at a time, the
+    // catalog's quotes, then the broker's for the rest, written back to the
+    // catalog.
+    assert_eq!(record.warmup_failure, None);
+    assert!(!warming.is_warming(), "the warmup did not complete");
     assert!(!warmup_quotes.is_empty(), "no warmup quote");
     let catalog_end_ns = catalog_end.as_nanosecond();
     let from_catalog = warmup_quotes
@@ -289,8 +274,9 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     );
     let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
         - started.checked_sub(warmup).unwrap().as_nanosecond();
+    // Within gold's daily close, should the window start in it.
     assert!(
-        (0..120_000_000_000).contains(&from_window_start),
+        (0..5_400_000_000_000).contains(&from_window_start),
         "the warmup starts {from_window_start} ns after the run's start - warmup"
     );
     assert!(
@@ -298,9 +284,15 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .windows(2)
             .all(|w| w[0].ts_event <= w[1].ts_event)
     );
-    // Warm, up to now: the first live bar is the minute after the last
-    // warmup bar.
+    // Warm, up to now, each bar once: the first live bar is the minute after
+    // the last warmup bar.
     assert!(warmup_bars.len() >= 20, "{} warmup bars", warmup_bars.len());
+    assert!(
+        warmup_bars
+            .windows(2)
+            .all(|w| w[0].ts_event < w[1].ts_event),
+        "a warmup bar handed over twice or out of order"
+    );
     assert!(bars.len() >= 2, "{} live bars", bars.len());
     let minute = 60_000_000_000;
     assert_eq!(

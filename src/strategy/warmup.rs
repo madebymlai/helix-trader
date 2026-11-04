@@ -3,8 +3,9 @@
 //! indicators before the live stream. A backtest or a dataset run makes no
 //! request: its strategy only subscribes (`subscribe`), and its indicators
 //! warm on the data replayed, from the run's start. Either way a strategy
-//! decides once its indicators are initialized (`indicators_initialized`),
-//! never on the end of a warmup.
+//! decides once its indicators are initialized (`indicators_initialized`);
+//! a model strategy, on a timer, also waits for a live warmup to end
+//! (`Warmup::is_warming`).
 //!
 //! Owns Nautilus' protocol, so that no strategy names it. The request is
 //! chosen from the bar type alone: a composite bar type is built from its
@@ -22,6 +23,17 @@
 //! Left open, IB's answer holds that bar too, partial (stamped at its
 //! close, after `now`), and the live stream sends it again, complete.
 //!
+//! Long requests come a window at a time: each is one of Nautilus' time-range
+//! requests in windows of 23 hours (`WINDOW`, `time_range`), the data engine
+//! asking a client for one window, handing its answer on, writing it back on
+//! its own and asking for the next, a catalog answering what it holds of each.
+//! One aggregator builds a request's bars across its windows, its params
+//! being the request's, not the windows'. Nautilus ignores the windows of a
+//! continuous future's request and takes none on custom data. Deltas are asked
+//! at once: each window would replay the deltas from its day's start into a
+//! snapshot of its own. The node runs on between windows, so features can be
+//! initialized on the older windows alone; a decision waits for the end.
+//!
 //! Each request carries the params
 //! `bar_types` (the data engine aggregates the response into those bars),
 //! `update_subscriptions` (the aggregator goes on with the live data, so
@@ -32,9 +44,11 @@
 //! a catalog registered, the engine answers from it first and asks the
 //! venue only for what it lacks, then writes back the answers a data
 //! client certifies complete, as IC's does). The bars a request builds
-//! reach only the cache: the response carries what was requested, and the
-//! built bars are in the cache when it arrives; Nautilus delivers no built
-//! bars.
+//! reach only the cache, Nautilus delivering no built bars, under their
+//! standard type, a composite's without its source: the warmup hands them to
+//! its indicators, each once, when the request completes
+//! (`Warmup::on_data_response`). A response's data is that window's alone,
+//! and the request's completion carries none.
 //!
 //! The requests form one request group (`DataActor::request_group`):
 //! Nautilus calls `on_data_response` with the group once every request is
@@ -80,8 +94,8 @@
 //! `request_book_deltas` (with the book type the roller subscribes to,
 //! `rolls::DELTAS_BOOK_TYPE`, onto which Nautilus replays the deltas from
 //! the day's start into the snapshot the response opens with). A series
-//! some bars are built from is requested once, building them. Each
-//! response ends at `now`, trimmed to it, and the roller, started right
+//! some bars are built from is requested once, building them. The last
+//! window ends at `now`, trimmed to it, and the roller, started right
 //! after, subscribes to the series with `start_ns` its own `now`
 //! (`subscription_params`). That keeps the data engine from starting the
 //! subscription at the catalog's end; it filters nothing from the live
@@ -108,14 +122,20 @@
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it. The
-//! functions are its parts: `start` from `on_start`, `bars` from
-//! `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
+//! functions are its parts: `start` from `on_start`,
 //! `Warmup::on_historical_book_depth`, `on_historical_book_deltas` and
-//! `on_historical_data` from the hooks of the same names, and `finished`
-//! from `on_data_response`, then, on bars on a root, `continuous_bars`; in
-//! a backtest or a dataset run `subscribe` from `on_start` alone.
+//! `on_historical_data` from the hooks of the same names, and
+//! `Warmup::on_data_response`, or `finished` alone, from `on_data_response`,
+//! then, on bars on a root, `continuous_bars`; in a backtest or a dataset run
+//! `subscribe` from `on_start` alone.
 
-use std::{any::Any, cell::Cell, collections::BTreeMap, fmt::Debug, rc::Rc};
+use std::{
+    any::Any,
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, HashMap},
+    fmt::Debug,
+    rc::Rc,
+};
 
 use anyhow::{Context, bail, ensure};
 use jiff::{SignedDuration, Timestamp};
@@ -129,10 +149,10 @@ use nautilus_data::engine::config::DataEngineConfig;
 use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
     data::{
-        Bar, BarType, CustomData, Data, DataType, NautilusDataType, OrderBookDelta,
-        OrderBookDeltas, OrderBookDepth,
+        Bar, BarType, CustomData, DataType, NautilusDataType, OrderBookDelta, OrderBookDeltas,
+        OrderBookDepth,
     },
-    enums::{AggregationSource, RecordFlag},
+    enums::RecordFlag,
     identifiers::{ClientId, Venue},
 };
 use serde_json::{Value, json};
@@ -140,7 +160,15 @@ use serde_json::{Value, json};
 use crate::{
     rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
     strategy::{DataRequirements, Source, TickSeries, bar_sources},
+    time_range,
 };
+
+/// The window a warmup is asked in (see `time_range`): under a day, as IB's
+/// client asks a duration of a day or more in days and IB counts those as
+/// sessions, the current one included, so that 72 hours started in a session
+/// lost the oldest of them (841 of 2,791 bars of SXR8, measured 2026-11-04).
+/// Under a day it asks in seconds. Venues page within a window.
+const WINDOW: SignedDuration = SignedDuration::from_hours(23);
 
 /// The data client a warmup's request of custom data names: no data client
 /// serves custom data, and Nautilus' data engine answers a request naming
@@ -176,18 +204,18 @@ pub trait CustomDataIndicator {
 /// owner of the protocol above, so that a strategy holds one and its hooks
 /// delegate to it. Nautilus delivers historical data only to the
 /// strategy's own hooks, so a strategy calls `start` from `on_start`,
-/// `on_data_response` from `on_data_response`, `on_historical` from
-/// `on_historical_quotes`, `on_historical_trades` and `on_historical_bars`,
-/// and `on_historical_book_depth`, `on_historical_book_deltas` and
+/// `on_data_response` from `on_data_response`, and
+/// `on_historical_book_depth`, `on_historical_book_deltas` and
 /// `on_historical_data` from theirs.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the barrier's
 /// ATR's) and of the tick series its features read (`reading`), and
-/// subscribes to the bars from the warmup's end; the bars of each response
+/// subscribes to the bars from the warmup's end; the bars each request built
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest
-/// first, its depth and deltas to its book indicators (`feeding_books`),
-/// its custom data to its custom data indicators (`feeding_custom_data`).
+/// first, when it completes, each response's depth and deltas to its book
+/// indicators (`feeding_books`), its custom data to its custom data
+/// indicators (`feeding_custom_data`).
 /// On a replay `start` subscribes to the strategy's bar types alone: the
 /// harness subscribes to its own.
 /// The strategies read no bars on a root, so a warmup has no continuous
@@ -211,6 +239,10 @@ pub struct Warmup {
     custom_data: Vec<Rc<dyn CustomDataIndicator>>,
     /// The request group of the last live start.
     group: Cell<UUID4>,
+    /// Whether that group has not ended yet.
+    warming: Cell<bool>,
+    /// The bar types each request of that start not yet complete builds.
+    building: RefCell<HashMap<UUID4, Vec<BarType>>>,
 }
 
 /// What a warmup's `start` does.
@@ -248,6 +280,8 @@ impl Warmup {
             books: Vec::new(),
             custom_data: Vec::new(),
             group: Cell::new(UUID4::new()),
+            warming: Cell::new(false),
+            building: RefCell::default(),
         }
     }
 
@@ -317,14 +351,20 @@ impl Warmup {
         match self.start {
             Start::Request => {
                 self.group.set(UUID4::new());
-                start(
+                self.warming.set(true);
+                let requested = start(
                     actor,
                     &self.built(),
                     &self.ticks,
                     self.length,
                     &continuous,
                     self.group.get(),
-                )
+                )?;
+                if requested.is_empty() {
+                    self.warming.set(false);
+                }
+                *self.building.borrow_mut() = requested.into_iter().collect();
+                Ok(())
             }
             Start::Subscribe => {
                 subscribe(actor, &self.bar_types, &continuous);
@@ -333,39 +373,61 @@ impl Warmup {
         }
     }
 
-    /// Logs the end of the warmup, if `response` ends it, from the actor's
-    /// `on_data_response`.
+    /// Reads `response`, from the actor's `on_data_response`: hands the bars
+    /// a request built to the indicators the warmup feeds, oldest first, once
+    /// the request completes, failed or not, and logs the end of the warmup,
+    /// if `response` ends it.
     ///
     /// # Errors
     ///
-    /// Returns an error naming the reason if the warmup ended incomplete
-    /// (see `finished`), which Nautilus logs.
-    pub fn on_data_response(&self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+    /// Returns an error if an indicator fails to read a bar, or naming the
+    /// reason if the warmup ended incomplete (see `finished`), which Nautilus
+    /// logs.
+    pub fn on_data_response<A>(
+        &self,
+        actor: &A,
+        response: &DataResponseEnvelope,
+    ) -> anyhow::Result<()>
+    where
+        A: DataActor + DataActorNative,
+    {
+        if *response.correlation_id() == self.group.get() {
+            self.warming.set(false);
+        }
+        if response.completed() {
+            let built = self.building.borrow_mut().remove(response.correlation_id());
+            for bar in built_bars(actor, &built.unwrap_or_default()) {
+                for indicator in &self.indicators {
+                    indicator.handle_bar(&bar)?;
+                }
+            }
+        }
         if finished(self.group.get(), response)? {
             log::info!("Warmup complete");
         }
         Ok(())
     }
 
-    /// Hands the warmup bars of `response`, the quotes, trades or bars of
-    /// a response to `actor`'s warmup request, to the indicators the
-    /// warmup feeds, oldest first, from the actor's `on_historical_quotes`,
-    /// `on_historical_trades` and `on_historical_bars`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an indicator fails to read a bar.
-    pub fn on_historical<A, D>(&self, actor: &A, response: &[D]) -> anyhow::Result<()>
+    /// Reads the completion of every request of the last start, then of its
+    /// group, as a node answering them all brings them.
+    #[cfg(test)]
+    pub(crate) fn complete<A>(&self, actor: &A) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative,
-        D: Copy + Into<Data>,
     {
-        for bar in bars(actor, response) {
-            for indicator in &self.indicators {
-                indicator.handle_bar(&bar)?;
-            }
+        let requests: Vec<UUID4> = self.building.borrow().keys().copied().collect();
+        for id in requests.into_iter().chain([self.group.get()]) {
+            self.on_data_response(actor, &DataResponseEnvelope::terminal(id, None))?;
         }
         Ok(())
+    }
+
+    /// Whether a live start's requests are not all answered yet: its windows
+    /// reach the indicators one at a time, with the node running between
+    /// them, so what they hold until then is no state to decide on.
+    #[must_use]
+    pub fn is_warming(&self) -> bool {
+        self.warming.get()
     }
 
     /// Hands the book depth of `response`, a response to the warmup's
@@ -440,6 +502,8 @@ impl Debug for Warmup {
             .field("books", &self.books.len())
             .field("custom_data", &self.custom_data.len())
             .field("group", &self.group)
+            .field("warming", &self.warming)
+            .field("building", &self.building)
             .finish()
     }
 }
@@ -455,15 +519,16 @@ impl Debug for Warmup {
 /// instrument of BID, ASK and MID bars; each tick series is requested on
 /// the contract standing for its instrument now, once with the bars built
 /// from it if any, custom data from the catalog alone (see `CATALOG`). The
-/// warmup of each request arrives in `on_historical_bars`,
-/// `on_historical_trades`, `on_historical_quotes`,
-/// `on_historical_book_depth`, `on_historical_book_deltas` or
-/// `on_historical_data`; the end of the group in `on_data_response`, where
-/// `finished` tells it. `group` is the caller's, stored before the call: a
-/// group whose requests are all answered at once ends before this returns.
-/// No bar types and no ticks
-/// make no request and no group, which `DataActor::request_group` refuses
-/// empty.
+/// warmup of each request arrives a window at a time in
+/// `on_historical_bars`, `on_historical_trades`, `on_historical_quotes` or
+/// `on_historical_book_depth`, at once in `on_historical_book_deltas` or
+/// `on_historical_data`; the end of each request and of the group in
+/// `on_data_response`, where `finished` tells the group's. `group` is the
+/// caller's, stored before the call: a group whose requests are all answered
+/// at once ends before this returns. No bar types and no ticks make no
+/// request and no group, which `DataActor::request_group` refuses empty.
+/// Returns each request's id with the bar types it builds, none for a
+/// continuous future's, read once the group ended (`continuous_bars`).
 ///
 /// # Errors
 ///
@@ -477,19 +542,20 @@ pub fn start<A>(
     warmup: SignedDuration,
     continuous: &ContinuousBars,
     group: UUID4,
-) -> anyhow::Result<()>
+) -> anyhow::Result<Vec<(UUID4, Vec<BarType>)>>
 where
     A: DataActor + DataActorNative + Debug + 'static,
 {
     let now = actor.clock().utc_now();
     let start = now.checked_sub(warmup)?;
+    let windows = time_range::params(start, now, WINDOW);
     let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = bar_types
         .iter()
         .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
     let mut requested = Vec::new();
     for bar_type in &continuous_bars {
         let params = continuous.params(bar_type.instrument_id());
-        requested.push(actor.request_bars(
+        let id = actor.request_bars(
             *bar_type,
             Some(start),
             Some(now),
@@ -499,11 +565,13 @@ where
                 [bar_type].into_iter(),
                 params.into_iter().flatten(),
             )),
-        )?);
+        )?;
+        // Read once the group ended (see `continuous_bars`).
+        requested.push((id, vec![]));
     }
     for (source, built) in requests(&others, ticks, now) {
-        let params = Some(request_params(built.iter(), []));
-        requested.push(match source {
+        let params = Some(request_params(built.iter(), windows.clone()));
+        let id = match source {
             Source::Bars(source) => {
                 actor.request_bars(source, Some(start), Some(now), None, None, params)?
             }
@@ -559,13 +627,15 @@ where
                 )?,
                 data => unreachable!("{data} is not read by a tick feature"),
             },
-        });
+        };
+        requested.push((id, built));
     }
     if !requested.is_empty() {
-        actor.request_group(requested, Some(group))?;
+        let ids = requested.iter().map(|(id, _)| *id).collect();
+        actor.request_group(ids, Some(group))?;
     }
     subscribe_from(actor, bar_types, continuous, UnixNanos::from(now));
-    Ok(())
+    Ok(requested)
 }
 
 /// Subscribes `actor` to `bar_types`, internal bar types, from now, with
@@ -724,56 +794,27 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
     }
 }
 
-/// The warmup bars built from `response`, the bars, trades or quotes of a
-/// response to `start`, oldest first: those of the bar types of its
-/// instrument built from its series (see `built_from`).
-pub fn bars<A, D>(actor: &A, response: &[D]) -> Vec<Bar>
+/// The bars of `bar_types` in `actor`'s cache, oldest first. A node caches a
+/// bar type's bars under its standard type, a composite's without its source
+/// (`BarType::standard`, `TimeBarAggregator::new`).
+fn built_bars<A>(actor: &A, bar_types: &[BarType]) -> Vec<Bar>
 where
     A: DataActor + DataActorNative,
-    D: Copy + Into<Data>,
 {
-    let Some(&first) = response.first() else {
-        return vec![];
-    };
-    let first: Data = first.into();
-    let instrument_id = first.instrument_id();
     let cache = actor.cache();
-    let cached = cache.bar_types(Some(&instrument_id), None, AggregationSource::Internal);
-    let mut bars: Vec<Bar> = built_from(&cached, first)
+    let mut bars: Vec<Bar> = bar_types
         .iter()
-        .flat_map(|bar_type| cache.bars(bar_type).unwrap_or_default())
+        .flat_map(|bar_type| cache.bars(&bar_type.standard()).unwrap_or_default())
         .collect();
     // The cache holds the newest first.
     bars.sort_by_key(|bar| bar.ts_event);
     bars
 }
 
-/// Those of `bar_types` built from the series of `response`, the first
-/// datum of a response to `start`: its catalog series (see
-/// `strategy::catalog_series`), the bar type of source bars, the data type
-/// and instrument of ticks. Another response of the warmup on the same
-/// instrument builds the others.
-fn built_from(bar_types: &[BarType], response: Data) -> Vec<BarType> {
-    let series = match response {
-        Data::Bar(bar) => (NautilusDataType::Bar, bar.bar_type.to_string()),
-        data => (
-            NautilusDataType::from_data(&data),
-            data.instrument_id().to_string(),
-        ),
-    };
-    bar_types
-        .iter()
-        .zip(bar_sources(bar_types))
-        .filter(|(_, source)| source.series() == series)
-        .map(|(bar_type, _)| *bar_type)
-        .collect()
-}
-
 /// The warmup bars of those of `bar_types` on a root with continuous bars
 /// in `continuous`, oldest first. Nautilus builds a continuous future's
-/// warmup into the cache only and answers its request with no bars, so
-/// `bars` gets none of them: a strategy reads them here once `finished`
-/// tells the group ended. A backtest's group ends in `start`, before any
+/// warmup into the cache only and answers its request with no bars: a
+/// strategy reads them here once `finished` tells the group ended. A backtest's group ends in `start`, before any
 /// bar of the run reaches the cache.
 pub fn continuous_bars<A>(actor: &A, bar_types: &[BarType], continuous: &ContinuousBars) -> Vec<Bar>
 where
@@ -971,11 +1012,11 @@ mod tests {
         (probe, sent)
     }
 
-    /// The requests of `commands`, in order: each its series and the bar
-    /// types it builds (its `bar_types` param).
-    fn requested(
+    /// The requests of `commands`, in order: each its series, its id and its
+    /// params.
+    fn sent_requests(
         commands: &TypedIntoMessageSavingHandler<DataCommand>,
-    ) -> Vec<(Source, Vec<BarType>)> {
+    ) -> Vec<(Source, UUID4, Option<Params>)> {
         let ticks = |data, instrument_ids: &[InstrumentId]| {
             let [instrument_id] = instrument_ids else {
                 panic!("one instrument")
@@ -993,6 +1034,7 @@ mod tests {
                 _ => None,
             })
             .map(|request| {
+                let id = *request.request_id();
                 let (source, params) = match request {
                     RequestCommand::Quotes(request) => (
                         ticks(NautilusDataType::QuoteTick, &request.instrument_ids),
@@ -1018,6 +1060,19 @@ mod tests {
                     }
                     other => panic!("unexpected {other:?}"),
                 };
+                (source, id, params)
+            })
+            .collect()
+    }
+
+    /// The requests of `commands`, in order: each its series and the bar
+    /// types it builds (its `bar_types` param).
+    fn requested(
+        commands: &TypedIntoMessageSavingHandler<DataCommand>,
+    ) -> Vec<(Source, Vec<BarType>)> {
+        sent_requests(commands)
+            .into_iter()
+            .map(|(source, _, params)| {
                 let built = params
                     .as_ref()
                     .and_then(|params| params.get("bar_types"))
@@ -1314,49 +1369,114 @@ mod tests {
         );
     }
 
-    /// A response hands over the bars built from it alone: on an
-    /// instrument with LAST and MID bars, a trades response the LAST bars,
-    /// a quotes response the MID bars, so neither feeds the other's twice.
+    /// A request's completion hands over the bars of the bar types it built
+    /// alone, each once, under the standard type a node caches them by: the
+    /// composite's under its type without its source. Another request's
+    /// completion hands over its own.
     #[test]
-    fn a_response_hands_over_the_bars_built_from_its_series_alone() {
-        let hour_last = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL");
+    fn a_completed_request_hands_over_the_bars_it_built_alone() {
         let hour_mid = BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL");
         let composite = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
         let recorder = Rc::new(Recorder::default());
         let warmup = Warmup::live(&reading(&[
-            "ESM24.CME-1-HOUR-LAST-INTERNAL",
             "ESM24.CME-1-HOUR-MID-INTERNAL",
             "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
         ]))
         .feeding(Rc::clone(&recorder) as SharedActorIndicator);
-        let (probe, _) = registered();
-        for bar_type in [hour_last, hour_mid, composite] {
+        let (mut probe, commands) = registered();
+        warmup.start(&mut probe).unwrap();
+        for bar_type in [hour_mid, composite.standard()] {
             let bar = Bar {
                 bar_type,
                 ..Bar::default()
             };
             probe.cache_rc().borrow_mut().add_bar(bar).unwrap();
         }
-        let instrument_id = InstrumentId::from("ESM24.CME");
-        let trade = TradeTick {
-            instrument_id,
-            ..TradeTick::default()
+        let id_of = |wanted: &Source| {
+            sent_requests(&commands)
+                .into_iter()
+                .find_map(|(source, id, _)| (source == *wanted).then_some(id))
+                .unwrap()
         };
-        let quote = QuoteTick {
-            instrument_id,
-            ..QuoteTick::default()
-        };
-        let minute = Bar {
-            bar_type: BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL"),
-            ..Bar::default()
-        };
+        let quotes = id_of(&Source::Ticks(tick(
+            NautilusDataType::QuoteTick,
+            "ESM24.CME",
+        )));
+        let minutes = id_of(&Source::Bars(BarType::from(
+            "ESM24.CME-1-MINUTE-LAST-EXTERNAL",
+        )));
+        let completed = |id| DataResponseEnvelope::terminal(id, None);
 
-        warmup.on_historical(&probe, &[trade]).unwrap();
-        assert_eq!(recorder.bar_types.take(), [hour_last]);
-        warmup.on_historical(&probe, &[quote]).unwrap();
+        warmup.on_data_response(&probe, &completed(quotes)).unwrap();
         assert_eq!(recorder.bar_types.take(), [hour_mid]);
-        warmup.on_historical(&probe, &[minute]).unwrap();
-        assert_eq!(recorder.bar_types.take(), [composite]);
+        warmup
+            .on_data_response(&probe, &completed(minutes))
+            .unwrap();
+        assert_eq!(recorder.bar_types.take(), [composite.standard()]);
+        // Its completion reads once: nothing is handed over again.
+        warmup
+            .on_data_response(&probe, &completed(minutes))
+            .unwrap();
+        assert_eq!(recorder.bar_types.take(), []);
+    }
+
+    /// The bars, quotes, trades and depth of a day are asked in windows of
+    /// 23 hours, the two a day can hold: under a day, so that IB counts no
+    /// sessions. Deltas are asked at once: each window would replay the
+    /// deltas from its day's start into a snapshot of its own.
+    #[test]
+    fn every_series_but_deltas_is_asked_in_windows_under_a_day() {
+        let warmup = Warmup::live(&reading(&[
+            "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL",
+            "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+        ]))
+        .reading(vec![
+            tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
+            tick(NautilusDataType::OrderBookDepth, "GCZ26.GLBX"),
+            tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX"),
+        ]);
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        for (source, _, params) in sent_requests(&commands) {
+            let params = params.expect("params");
+            let windows = params.get("durations_seconds").cloned();
+            let generator = params.contains_key("time_range_generator");
+            if source == Source::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX")) {
+                assert_eq!((windows, generator), (None, false), "{source:?}");
+            } else {
+                assert_eq!(windows, Some(json!([82_800.0, 82_800.0])), "{source:?}");
+                assert!(generator, "{source:?}");
+            }
+        }
+    }
+
+    /// A live start's warmup goes on until its group ends, whatever its
+    /// requests answered by then; a replay's makes no request and so none.
+    #[test]
+    fn a_warmup_goes_on_until_its_group_ends() {
+        let warmup = Warmup::live(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]));
+        let (mut probe, commands) = registered();
+        warmup.start(&mut probe).unwrap();
+        let (_, request, _) = sent_requests(&commands).remove(0);
+
+        let started = warmup.is_warming();
+        warmup
+            .on_data_response(&probe, &DataResponseEnvelope::terminal(request, None))
+            .unwrap();
+        let answered = warmup.is_warming();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            (started, answered, warmup.is_warming()),
+            (true, true, false)
+        );
+
+        let replayed = Warmup::replayed(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]));
+        let (mut probe, _) = registered();
+        replayed.start(&mut probe).unwrap();
+        assert!(!replayed.is_warming());
     }
 
     /// Custom data of the tests: an imbalance of a book.

@@ -19,10 +19,12 @@
 //! child processes, none in this one, so it claims nothing and runs beside
 //! any module.
 
-use std::{path::Path, sync::OnceLock};
+use std::{cell::RefCell, path::Path, sync::OnceLock};
 
 use clap::{Args, Command, FromArgMatches};
 use helix_trader::{live::Recording, venues::LiveVenueArgs};
+use nautilus_common::actor::indicators::ActorIndicator;
+use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -35,8 +37,42 @@ mod demo_broker;
 mod ib_gateway;
 mod ib_minute_bars;
 mod ib_restart;
+mod ib_warmup_days;
 mod okx_demo;
 mod streaming;
+
+/// An indicator a warmup feeds, recording each bar it hands over.
+#[derive(Debug, Default)]
+struct FedBars {
+    bars: RefCell<Vec<Bar>>,
+}
+
+impl ActorIndicator for FedBars {
+    fn key(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn initialized(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    fn handle_quote(&self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn handle_trade(&self, _trade: &TradeTick) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        self.bars.borrow_mut().push(*bar);
+        Ok(())
+    }
+}
 
 /// The module whose gated tests run in this process.
 static CLAIMED: OnceLock<&'static str> = OnceLock::new();
