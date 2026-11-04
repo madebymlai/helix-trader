@@ -1,0 +1,88 @@
+# Captured from a cTrader broker's demo (2026-11-04), protobuf port 5035:
+# that trailing stop loss hit before it moved: its protection order
+# filled at 4042.19 by deal 956884987, the position closed.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001, clientOrderId
+# SPIKE-1 renamed PROBE-7.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_trailing_stop_loss_filled.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_FILLED
+position {
+  positionId: 692481830
+  tradeData {
+    symbolId: 41
+    volume: 0
+    tradeSide: BUY
+    openTimestamp: 1793791388242
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1793791414411
+  }
+  positionStatus: POSITION_STATUS_CLOSED
+  swap: 0
+  price: 0
+  utcLastUpdateTimestamp: 1793791414411
+  commission: 0
+  marginRate: 0
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 0
+  moneyDigits: 2
+  trailingStopLoss: true
+}
+order {
+  orderId: 1035538040
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1793791388252
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1793791414411
+  }
+  orderType: STOP_LOSS_TAKE_PROFIT
+  orderStatus: ORDER_STATUS_FILLED
+  executionPrice: 4042.19
+  executedVolume: 100
+  utcLastUpdateTimestamp: 1793791414411
+  closingOrder: true
+  stopPrice: 4042.26
+  clientOrderId: "PROBE-7"
+  timeInForce: GOOD_TILL_CANCEL
+  positionId: 692481830
+  trailingStopLoss: true
+  stopTriggerMethod: TRADE
+}
+deal {
+  dealId: 956884987
+  orderId: 1035538040
+  positionId: 692481830
+  volume: 100
+  filledVolume: 100
+  symbolId: 41
+  createTimestamp: 1793791414178
+  executionTimestamp: 1793791414411
+  utcLastUpdateTimestamp: 1793791414411
+  executionPrice: 4042.19
+  tradeSide: SELL
+  dealStatus: FILLED
+  marginRate: 3594.2
+  commission: -11
+  baseToUsdConversionRate: 4042.19
+  closePositionDetail {
+    entryPrice: 4043.26
+    grossProfit: -95
+    swap: 0
+    commission: -22
+    balance: 99999573
+    quoteToDepositConversionRate: 0.88918923725347232
+    closedVolume: 100
+    balanceVersion: 13
+    moneyDigits: 2
+    pnlConversionFee: 0
+  }
+  moneyDigits: 2
+}
+isServerEvent: true

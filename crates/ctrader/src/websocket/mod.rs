@@ -69,7 +69,7 @@ use self::handler::{CTraderWsHandler, HandlerCommand, LOCK_RETRY};
 use super::{
     common::messages::{
         CTraderError, Payload, ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaSpotEvent,
-        is_historical, open,
+        ProtoOaTrailingSlChangedEvent, is_historical, open,
     },
     config::CTraderCredential,
 };
@@ -150,6 +150,8 @@ pub(crate) enum TradeMessage {
     Execution(ProtoOaExecutionEvent),
     /// An order the server refused.
     OrderError(ProtoOaOrderErrorEvent),
+    /// A position's trailing stop loss moved with the price.
+    TrailingStopMoved(ProtoOaTrailingSlChangedEvent),
     /// cTrader's error answer to a trade request (`CTraderError::Venue`).
     Refused(CTraderError),
 }
