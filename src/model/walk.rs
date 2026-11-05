@@ -13,7 +13,7 @@
 //! (`Schedule::times`: each retrain time, or, never retrained, the start
 //! alone) whose plan fits a model (`Schedule::plan`), each planned once
 //! the trains before it published. Never retrained, a backtest whose
-//! primary or meta then has no model in use at its start is refused: it
+//! sides or meta then have no model in use at its start is refused: it
 //! would trade nothing (`Schedule::ensure_trades`). Each build and train
 //! is a child process in a backtest (one Nautilus node per process),
 //! handed in by the caller; a train finds the days it reads from there
@@ -89,7 +89,7 @@ pub struct WalkForward {
 }
 
 /// The out-of-sample scores of a backtest: of each model, the meta's on
-/// the rows the primary in use made a trade of.
+/// the rows a side is picked on.
 pub type Scores = Models<ModelScores>;
 
 /// The out-of-sample scores of one model.
@@ -179,7 +179,7 @@ impl WalkForward {
     /// of its days); then `train` trains at each train time of the span
     /// (`Schedule::times`) whose plan fits a model (`Schedule::plan`,
     /// `Training::train_at`), in time order, each planned after the
-    /// trains before it: a primary model they publish gives the meta its
+    /// trains before it: a side's model they publish gives the meta its
     /// rows from then on. A backtest that could then trade nothing is
     /// refused (`Schedule::ensure_trades`).
     ///
@@ -187,7 +187,7 @@ impl WalkForward {
     ///
     /// Returns an error if the span is empty, the dataset or a store
     /// cannot be read, as `build` and `train` do, or, never retrained, if
-    /// the primary or the meta has no model in use at `start`.
+    /// the sides or the meta have no model in use at `start`.
     pub fn prepare(
         &self,
         start: Timestamp,
@@ -1394,8 +1394,8 @@ Short model scores, out of sample, over the span
         config
     }
 
-    /// The primary's models in the store at both retrain times and the two
-    /// days before, its meta model's at none: the backtest builds from the
+    /// The sides' models in the store at both retrain times and the two
+    /// days before, their meta model's at none: the backtest builds from the
     /// meta's longer window and trains at both times, where the meta lacks
     /// a model.
     #[test]
@@ -1464,10 +1464,10 @@ Short model scores, out of sample, over the span
     }
 
     /// On an empty store the meta waits at the first retrain, the 7th, with
-    /// no primary model before it, so reads no row there: the backtest
-    /// builds from the primary's window, the 6th, not the meta's.
+    /// no side's model before it, so reads no row there: the backtest
+    /// builds from the sides' window, the 6th, not the meta's.
     #[test]
-    fn a_backtest_from_an_empty_store_builds_from_the_primarys_window_its_meta_waiting() {
+    fn a_backtest_from_an_empty_store_builds_from_the_sides_window_its_meta_waiting() {
         let dir = tempfile::tempdir().unwrap();
 
         let built = built(&meta_walk(dir.path()));
@@ -1478,10 +1478,10 @@ Short model scores, out of sample, over the span
         );
     }
 
-    /// The primary's first model is the 6th's: the meta's rows, its
+    /// The sides' first model is the 6th's: the meta's rows, its
     /// decisions, start there, though its window starts on the 5th.
     #[test]
-    fn a_backtest_builds_no_day_before_the_primarys_first_model() {
+    fn a_backtest_builds_no_day_before_the_sides_first_model() {
         let dir = tempfile::tempdir().unwrap();
         for at in [
             at("2026-01-06T00:00:00Z"),
@@ -1515,7 +1515,7 @@ Short model scores, out of sample, over the span
     }
 
     /// A train of `meta_walk(dir)` at `at`, publishing as
-    /// `Training::train_at` may: the primary, and the meta if the primary
+    /// `Training::train_at` may: the sides, and the meta if the sides
     /// had a model before `at`.
     fn train_both(dir: &Path, at: Timestamp) -> anyhow::Result<()> {
         let config = with_meta();
@@ -1531,8 +1531,8 @@ Short model scores, out of sample, over the span
         Ok(())
     }
 
-    /// A meta model has no row before its primary's first model, so none
-    /// is trained at the primary's first retrain time: a second backtest
+    /// A meta model has no row before its sides' first model, so none
+    /// is trained at the sides' first retrain time: a second backtest
     /// of the span finds nothing to train.
     #[test]
     fn a_second_backtest_with_a_meta_model_trains_nothing() {
@@ -1562,11 +1562,11 @@ Short model scores, out of sample, over the span
         assert_eq!(trained.take(), []);
     }
 
-    /// A backtest from the 8th trains no meta there, the primary's first
-    /// model; a backtest from the 7th then trains the primary at the 7th
+    /// A backtest from the 8th trains no meta there, the sides' first
+    /// model; a backtest from the 7th then trains the sides at the 7th
     /// first, which gives the meta at the 8th rows: it trains there too.
     #[test]
-    fn a_backtest_from_earlier_trains_the_meta_where_the_primary_now_precedes_it() {
+    fn a_backtest_from_earlier_trains_the_meta_where_the_sides_now_precede_it() {
         let dir = tempfile::tempdir().unwrap();
         let walk = meta_walk(dir.path());
         let end = at("2026-01-10T00:00:00Z");
@@ -1718,9 +1718,9 @@ Short model scores, out of sample, over the span
     }
 
     /// Never retrained, the train at the start published no side: the
-    /// backtest would trade nothing, and is refused, naming the primary.
+    /// backtest would trade nothing, and is refused, naming the sides.
     #[test]
-    fn a_backtest_never_retrained_with_no_primary_model_at_its_start_is_refused_naming_it() {
+    fn a_backtest_never_retrained_with_no_sides_model_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), never());
 
@@ -1733,7 +1733,7 @@ Short model scores, out of sample, over the span
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("primary"), "{err}");
+        assert!(err.contains("no side has a model in use"), "{err}");
         assert!(!err.contains("meta"), "{err}");
     }
 
@@ -1747,10 +1747,10 @@ Short model scores, out of sample, over the span
 
     /// What `prepare` of the walk of `never_with_meta` in `dir` over the
     /// 7th and the 8th asked for, or its error, on an empty store. A train
-    /// publishes as a train of two times would: if `primary`, a model of
+    /// publishes as a train of two times would: if `sides`, a model of
     /// each side valid from the meta's window of 48 hours before it, and
     /// if `meta`, a meta model valid from it.
-    fn prepared_two_time(dir: &Path, primary: bool, meta: bool) -> anyhow::Result<Asked> {
+    fn prepared_two_time(dir: &Path, sides: bool, meta: bool) -> anyhow::Result<Asked> {
         let config = never_with_meta();
         let walk = walk_of(dir, config.clone());
         let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
@@ -1763,7 +1763,7 @@ Short model scores, out of sample, over the span
             },
             |at| {
                 trained.borrow_mut().push(at);
-                if primary {
+                if sides {
                     publish(dir, &config, at - SignedDuration::from_hours(48));
                 }
                 if meta {
@@ -1808,25 +1808,28 @@ Short model scores, out of sample, over the span
             .to_string();
 
         assert!(err.contains("meta"), "{err}");
-        assert!(!err.contains("primary"), "{err}");
+        assert!(!err.contains("no side"), "{err}");
     }
 
     /// Never retrained, on an empty store, the train at the start
     /// publishes no side, and so leaves the meta waiting: the backtest is
-    /// refused, naming the primary and the meta.
+    /// refused, naming the sides and the meta.
     #[test]
-    fn a_backtest_never_retrained_whose_primary_was_refused_at_its_start_is_refused_naming_both() {
+    fn a_backtest_never_retrained_whose_sides_were_refused_at_its_start_is_refused_naming_both() {
         let dir = tempfile::tempdir().unwrap();
 
         let err = prepared_two_time(dir.path(), false, false)
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("primary") && err.contains("meta"), "{err}");
+        assert!(
+            err.contains("no side has a model in use") && err.contains("meta"),
+            "{err}"
+        );
     }
 
     /// Retrained, a backtest whose every train published nothing runs: a
-    /// later retrain may publish, and its primary's scores stay.
+    /// later retrain may publish, and its sides' scores stay.
     #[test]
     fn a_retrained_backtest_whose_trains_were_all_refused_still_runs() {
         let dir = tempfile::tempdir().unwrap();

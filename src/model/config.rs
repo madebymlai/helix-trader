@@ -5,9 +5,9 @@
 //! to trade a side, and its learner; and, optionally, the meta model
 //! filtering its trades.
 //!
-//! A strategy has at most two levels of models: a primary, the side
-//! models of a `ModelConfig`, and one meta model (`MetaConfig`) deciding
-//! whether to take the primary's trade. The types hold no third: a meta
+//! A strategy has at most two levels of models: the side models of a
+//! `ModelConfig`, and one meta model (`MetaConfig`) deciding whether to
+//! take the trade of the side picked. The types hold no third: a meta
 //! section has no meta section of its own, and writing one is refused at
 //! load as an unknown field.
 
@@ -79,24 +79,24 @@ pub struct ModelConfig<T = TargetConfig> {
     pub meta: Option<MetaConfig>,
 }
 
-/// A meta model: on each decision the primary makes a trade of, whether
-/// that trade, the target on its side, wins, learned from the primary's
-/// features, its side and its probability. It is
-/// retrained on the primary's schedule, right after the primary, or, the
-/// primary never retrained, trained once and kept.
+/// A meta model: on each decision that picks a side, whether that side's
+/// trade, the target on it, wins, learned from the sides' features, the
+/// side picked and its probability. It is retrained on the sides'
+/// schedule, right after them, or, the sides never retrained, trained
+/// once and kept.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct MetaConfig {
     /// How far back from a retrain its rows go; never before the
-    /// primary's first model, whose predictions the rows need. Never
-    /// retrained, a model primary trained with its meta, neither in use,
-    /// is trained as of this much before the meta, so its out-of-sample
+    /// sides' first model, whose predictions the rows need. Never
+    /// retrained, sides trained with their meta, neither in use, are
+    /// trained as of this much before the meta, so their out-of-sample
     /// decisions over the window are the meta's rows.
     pub window: SignedDuration,
     /// The last part of the window the model is scored on and not fitted
     /// on.
     pub holdout: SignedDuration,
-    /// The probability from which the primary's trade is taken.
+    /// The probability from which the trade of the side picked is taken.
     pub threshold: f64,
     /// The least net P&L per trade the meta's decisions earn on the
     /// holdout for its model to be published, in the target's P&L
@@ -122,7 +122,7 @@ pub struct Sizing {
     pub max: Decimal,
 }
 
-/// The sides a model primary trades, each with its margin: the expected
+/// The sides a strategy trades, each with its margin: the expected
 /// net P&L of a trade, in the target's P&L currency per trade of its
 /// quantity, from which the side is traded (`payoff`), such as
 /// `margins = { long = 0.5, short = 0.5 }`. A side without one has no
@@ -258,7 +258,7 @@ impl ModelConfig {
 }
 
 /// Pushes onto `errors` the violation of `target` not closing before the
-/// next decision of `rule`: the primary trades the target, and a live
+/// next decision of `rule`: the sides trade the target, and a live
 /// account nets a new trade into one still open, where a dataset run's
 /// hedging venue keeps them apart.
 fn validate_cadence(rule: DecisionRule, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
@@ -278,7 +278,7 @@ fn validate_cadence(rule: DecisionRule, target: &TargetConfig, errors: &mut Conf
 
 impl MetaConfig {
     /// Pushes onto `errors` every violation of the meta model against the
-    /// primary's `target`, each under its field of `[model.meta]`
+    /// sides' `target`, each under its field of `[model.meta]`
     /// (`model.meta.…`): the learner invalid (see
     /// `LearnerConfig::validate`), the target's limit not shorter than the
     /// window, the holdout not positive or leaving no fitted row, the
@@ -392,9 +392,9 @@ fn learner(learner: &LearnerConfig, field: &str) -> ConfigResult<()> {
 /// violations of the limit of `target` not shorter than `window`, under
 /// `limit_field`, or `holdout` not positive or too long to leave a fitted
 /// row before it and the calibration, as long as it, before it (`train`):
-/// the window longer than twice the holdout and the limit. The primary's
-/// window is its target's to fit, and a meta's the meta's own, set beside
-/// the target it shares.
+/// the window longer than twice the holdout and the limit. The sides'
+/// window is their target's to fit, and a meta's the meta's own, set
+/// beside the target it shares.
 fn validate_window(
     window: SignedDuration,
     holdout: SignedDuration,
@@ -947,7 +947,7 @@ mod tests {
         assert!(err.contains("unknown field `meta`"), "{err}");
     }
 
-    /// A primary on a time-only target: its meta model learns those trades,
+    /// Sides on a time-only target: their meta model learns those trades,
     /// no exit being needed.
     #[test]
     fn a_meta_model_on_a_time_only_target_is_loaded() {
@@ -988,7 +988,7 @@ mod tests {
     }
 
     /// The target's limit, 45 minutes, does not fit the meta's window: that
-    /// window is the meta's own to widen, the limit the primary's too.
+    /// window is the meta's own to widen, the limit the sides' too.
     #[test]
     fn a_meta_window_not_longer_than_the_targets_limit_is_refused() {
         let err = meta_refused(r#"window = "45m""#);

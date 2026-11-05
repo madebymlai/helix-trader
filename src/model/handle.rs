@@ -38,9 +38,9 @@
 //!   trades, and the handle its order and position events, and the rows
 //!   the targets settle are collected for the caller of the run.
 //!
-//! With a meta model (`model::meta`), a trade of the primary is taken only
-//! if the meta model in use, on the row with the primary's side and that
-//! side's probability, predicts at least its threshold, sized from that
+//! With a meta model (`model::meta`), the trade of the side picked is
+//! taken only if the meta model in use, on the row with that side and its
+//! probability, predicts at least its threshold, sized from that
 //! probability if the meta sizes (`MetaConfig::size`); no meta model valid
 //! yet is no trade.
 //!
@@ -184,11 +184,10 @@ pub struct Decision {
     /// The target's size, or, with a meta model sizing, its multiple of it.
     pub quantity: Quantity,
     /// The calibrated probability that the trade gains, of the model
-    /// deciding: the meta model's, if any, else that of the primary's
-    /// model of the side.
+    /// deciding: the meta model's, if any, else that of the side's model.
     pub probability: f64,
-    /// The net P&L the primary's model of the side expects, in the
-    /// instrument's P&L currency, on the target's size.
+    /// The net P&L the side's model expects, in the instrument's P&L
+    /// currency, on the target's size.
     pub expected_pnl: f64,
     /// The price the target is set from (`targets::TradedTarget`): the mid
     /// of the instrument's last quote, else its last trade, else its last
@@ -1449,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn a_meta_model_from_its_threshold_takes_the_primarys_trade() {
+    fn a_meta_model_from_its_threshold_takes_the_trade_of_the_side_picked() {
         let models = tempfile::tempdir().unwrap();
         let handle = meta_handle(models.path(), &with_meta(meta(None)), 7);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1461,7 +1460,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
                 probability: c(0.7),
-                // The primary's, its long of 0.6.
+                // The side's model's, its long of 0.6.
                 expected_pnl: 2.0 * c(0.6) - 1.0,
                 reference: Price::from("0.70000"),
                 take_profit: None,

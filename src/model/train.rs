@@ -12,11 +12,11 @@
 //! (`schedule::Schedule::plan`), from the stores' valid-froms alone: a
 //! model with a current model at `t` keeps it, in use (retrained, the one
 //! valid from `t`; never retrained, the latest valid by `t`, so each model
-//! is trained once); a model primary's meta with no primary model before
-//! `t` waits for primary decisions; the others are fitted, as of `t`, or,
-//! never retrained, a primary's sides with neither them nor the meta in
-//! use, as of `t` less the meta's window, the meta at `t` on their
-//! decisions. With nothing to fit the train replays nothing.
+//! is trained once); a meta with no side's model before `t` waits for the
+//! sides' decisions; the others are fitted, as of `t`, or, never retrained,
+//! the sides with neither them nor the meta in use, as of `t` less the
+//! meta's window, the meta at `t` on their decisions. With nothing to fit
+//! the train replays nothing.
 //!
 //! A model fitted as of `t'`, the train's time or before it, takes the
 //! rows of the window ending at `t'` (`ModelConfig::window`), the days
@@ -64,15 +64,15 @@
 //! stays a rename per side: a crash between them leaves one published, which
 //! the next train keeps in use and judges the other beside.
 //!
-//! With a meta model (`model::meta`), the primary trains first, then the
+//! With a meta model (`model::meta`), the sides train first, then the
 //! meta, on the same rows, of the one replay: the meta's window is its
-//! own (`MetaConfig::window`), from the primary's first model on, and its
-//! rows are made from the primary's out-of-sample decisions, those of the
-//! models of the store the primary used at each decision, read once the
+//! own (`MetaConfig::window`), from the sides' first model on, and its
+//! rows are made from the sides' out-of-sample decisions, those of the
+//! models of the stores in use at each decision, read once the
 //! sides published: the ones just published valid from `t` used by none,
 //! those of a train at two times, valid from the window's start, used
 //! throughout it; and should the sides of such a train publish none, the
-//! meta waits for primary decisions (`Plan::meta_after_sides`). Fitting and
+//! meta waits for the sides' decisions (`Plan::meta_after_sides`). Fitting and
 //! calibrating are a side's; the meta is judged alone, on its own holdout, by
 //! its log loss and the trades of the side picked taken from its threshold
 //! (`MetaConfig::threshold`), and published in its own store.
@@ -111,21 +111,21 @@ use crate::strategy::DataRequirements;
 /// The most rows of the holdout a published model is probed on.
 const PROBES: usize = 16;
 
-/// The training of one strategy's models: its primary's sides, its meta
-/// model, or both.
+/// The training of one strategy's models: its sides, its meta model, or
+/// both.
 #[derive(Debug)]
 pub struct Training {
     strategy_id: StrategyId,
     target: TargetConfig,
     dataset: Dataset,
-    /// How the rows' trades read in the primary's payoffs.
+    /// How the rows' trades read in the sides' payoffs.
     realised: Realised,
     /// What each train does to each model.
     schedule: Schedule,
     /// The strategy's models: the stores the plan reads, and the side
     /// models the meta's rows are made from.
     models: ModelSet,
-    /// Each model: of each side the primary trades, and the meta model, if
+    /// Each model: of each side the strategy trades, and the meta model, if
     /// any.
     levels: Models<Level>,
 }
@@ -185,7 +185,7 @@ enum Planned<'a> {
 }
 
 /// What a train did: the outcome of each model of the strategy, none for
-/// a model it has not (a side the primary does not trade, or the meta of
+/// a model it has not (a side it does not trade, or the meta of
 /// a strategy without one).
 pub type Trained = Models<Outcome>;
 
@@ -220,8 +220,8 @@ pub enum Kept {
     /// The dataset holds rows that do not match the strategy's features or
     /// target; the mismatch.
     SchemaMismatch(String),
-    /// A model primary's meta waits for primary decisions to learn from: no
-    /// primary model is valid before the train, so none was fitted
+    /// A meta waits for the sides' decisions to learn from: no side's model
+    /// is valid before the train, so none was fitted
     /// (`schedule::Step::Wait`).
     Waiting,
 }
@@ -288,7 +288,7 @@ impl Training {
     /// at all if it fits none. Fits each side's model the plan fits, as of
     /// its time, and judges the sides together (`sides`), then the meta model
     /// as the plan has it once the sides are published
-    /// (`Plan::meta_after_sides`), its rows the primary's decisions by the
+    /// (`Plan::meta_after_sides`), its rows the sides' decisions by the
     /// store as the sides left it: each fitted is published, or its current
     /// model kept with the reason; a model the plan keeps is in use, and a
     /// meta the plan makes wait is kept, waiting.
@@ -621,8 +621,8 @@ impl Training {
 }
 
 impl Level {
-    /// The level of `meta`: it learns whether the target on the primary's
-    /// side wins.
+    /// The level of `meta`: it learns whether the target on the side picked
+    /// wins.
     fn of_meta(meta: &MetaLevel) -> Self {
         let config = meta.config();
         Self {
@@ -827,7 +827,7 @@ impl fmt::Display for Kept {
             Self::SchemaMismatch(why) => write!(f, "schema mismatch: {why}"),
             Self::Waiting => write!(
                 f,
-                "waiting for primary decisions: no primary model is valid before the train"
+                "waiting for the sides' decisions: no side's model is valid before the train"
             ),
         }
     }
@@ -1264,7 +1264,7 @@ mod tests {
             ("2026-01-08T00:00:00Z", 0.5),
         ];
         for (valid_from, probability) in models {
-            primary(&short, Side::Short, valid_from, probability);
+            publish_baseline(&short, Side::Short, valid_from, probability);
         }
 
         let trained = training.train_at(t, |_, _| Ok(short_showing_no_signal()));
@@ -1411,7 +1411,7 @@ mod tests {
     fn with_no_side_surviving_each_reports_its_own_log_loss_and_no_earnings() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
-        primary(
+        publish_baseline(
             &store(dir.path(), &config(), Side::Short),
             Side::Short,
             "2026-01-05T00:00:00Z",
@@ -1448,7 +1448,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
-        primary(
+        publish_baseline(
             &store(dir.path(), &config(), Side::Long),
             Side::Long,
             "2026-01-07T00:00:00Z",
@@ -1681,7 +1681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
-        primary(
+        publish_baseline(
             &store(dir.path(), &config(), Side::Long),
             Side::Long,
             "2026-01-07T00:00:00Z",
@@ -1713,7 +1713,7 @@ mod tests {
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
         for side in Side::BOTH {
-            primary(
+            publish_baseline(
                 &store(dir.path(), &config(), side),
                 side,
                 "2026-01-07T00:00:00Z",
@@ -1759,7 +1759,7 @@ mod tests {
         let training = training(dir.path(), never());
         let t = at("2026-01-07T00:00:00Z");
         let sixth = at("2026-01-06T00:00:00Z");
-        primary_of(
+        publish_baseline_of(
             never(),
             &store(dir.path(), &never(), Side::Long),
             Side::Long,
@@ -2112,20 +2112,21 @@ mod tests {
             .build()
     }
 
-    /// The calibration of the primary's models of the meta tests.
+    /// The calibration of the sides' models of the meta tests.
     const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
-    /// Publishes in `store` a primary baseline of `config()` valid from
-    /// `valid_from`, predicting `probability` on every row, as `primary_of`.
-    fn primary(store: &ModelStore, side: Side, valid_from: &str, probability: f64) {
-        primary_of(config(), store, side, valid_from, probability);
+    /// Publishes in `store` a baseline of `side`, of `config()`, valid from
+    /// `valid_from`, predicting `probability` on every row, as
+    /// `publish_baseline_of`.
+    fn publish_baseline(store: &ModelStore, side: Side, valid_from: &str, probability: f64) {
+        publish_baseline_of(config(), store, side, valid_from, probability);
     }
 
-    /// Publishes in `store` a primary baseline of `config` valid from
+    /// Publishes in `store` a baseline of `side`, of `config`, valid from
     /// `valid_from`, predicting `probability` on every row, calibrated by
     /// `CALIBRATION`, expecting a win and a loss of 1R, its baseline the
     /// mean of its training labels.
-    fn primary_of(
+    fn publish_baseline_of(
         config: ModelConfig,
         store: &ModelStore,
         side: Side,
@@ -2168,7 +2169,7 @@ mod tests {
             .unwrap();
     }
 
-    /// The decisions of the 6th: one before the primary's first models (a
+    /// The decisions of the 6th: one before the sides' first models (a
     /// win of the long), four long trades of the models valid from 06:00,
     /// the long's predicting 0.8 and the short's 0.2: fitted on, a win and
     /// a loss of the long (meta labels true, false); calibrated on, the
@@ -2188,10 +2189,10 @@ mod tests {
         ]
     }
 
-    /// The primary's models of a training in `dir` as `config` says: from
+    /// The sides' models of a training in `dir` as `config` says: from
     /// 06:00 a long, from 17:00 a short, and from 21:00, after every row, a
     /// long again, which no row may use.
-    fn primaries(dir: &Path, config: &ModelConfig) {
+    fn publish_baselines(dir: &Path, config: &ModelConfig) {
         let (long, short) = (
             store(dir, config, Side::Long),
             store(dir, config, Side::Short),
@@ -2201,14 +2202,14 @@ mod tests {
             ("2026-01-06T17:00:00Z", 0.2),
             ("2026-01-06T21:00:00Z", 0.9),
         ] {
-            primary_of(
+            publish_baseline_of(
                 config.clone(),
                 &long,
                 Side::Long,
                 valid_from,
                 long_probability,
             );
-            primary_of(
+            publish_baseline_of(
                 config.clone(),
                 &short,
                 Side::Short,
@@ -2219,10 +2220,10 @@ mod tests {
     }
 
     #[test]
-    fn a_meta_model_learns_the_primarys_side_from_its_out_of_sample_decisions() {
+    fn a_meta_model_learns_the_side_picked_from_its_out_of_sample_decisions() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
-        primaries(dir.path(), &with_meta(24));
+        publish_baselines(dir.path(), &with_meta(24));
         let t = at("2026-01-07T00:00:00Z");
 
         let trained = training.train_at(t, |_, _| Ok(meta_rows()));
@@ -2238,30 +2239,30 @@ mod tests {
         let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
         assert_eq!(
             stored.manifest.feature_names,
-            ["mid_0", "primary_side", "primary_probability"]
+            ["mid_0", "picked_side", "picked_probability"]
         );
         assert_eq!(stored.manifest.side, None);
         let short = CALIBRATION.apply(0.8);
         let probes: Vec<&Vec<f64>> = stored.manifest.probes.iter().map(|p| &p.row).collect();
         assert_eq!(probes, [&vec![0.3, -1.0, short], &vec![0.7, -1.0, short]]);
         // Fitted on the two long trades, a win and a loss: the decision
-        // before the primary's first model is no row.
+        // before the sides' first model is no row.
         let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
         assert_eq!(model.predict(&[f64::NAN, 1.0, 0.8]).unwrap(), 0.5);
     }
 
     /// `meta_rows` with the long's loss at 10:00 a win: the meta, on the
-    /// longs of the primary's models valid from 06:00, is fitted on the
+    /// longs of the sides' models valid from 06:00, is fitted on the
     /// wins at 08:00 and 10:00 and calibrated on the loss at 13:00 and the
     /// win at 15:00, three wins in four, 3/4; not on the decision at 05:00,
-    /// before the primary's first model, a win, nor on the holdout's shorts,
+    /// before the sides' first model, a win, nor on the holdout's shorts,
     /// a loss and a win.
     #[test]
     fn a_published_metas_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
     {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
-        primaries(dir.path(), &with_meta(24));
+        publish_baselines(dir.path(), &with_meta(24));
         let t = at("2026-01-07T00:00:00Z");
         let mut rows = meta_rows();
         rows[2] = row("2026-01-06T10:00:00Z", vec![0.5], true, hour());
@@ -2295,9 +2296,9 @@ mod tests {
             .collect()
     }
 
-    /// A meta model learns the trade its primary sends, on a target with no
-    /// exits too. `meta_rows` with the long's loss at 10:00 a win, each
-    /// closed at its time: the primary's long at each of the four morning
+    /// A meta model learns the trade of the side picked, on a target with
+    /// no exits too. `meta_rows` with the long's loss at 10:00 a win, each
+    /// closed at its time: the long picked at each of the four morning
     /// rows expects `2 c(0.8) - 1`, 0.554 USD, a unit of 1 in money and no
     /// stop to weigh, above its margin of 0.5; so the meta is fitted on the
     /// wins at 08:00 and 10:00 and calibrated on the loss at 13:00 and the
@@ -2310,7 +2311,7 @@ mod tests {
             .limit(SignedDuration::from_hours(1))
             .build();
         let training = training(dir.path(), config.clone());
-        primaries(dir.path(), &config);
+        publish_baselines(dir.path(), &config);
         let t = at("2026-01-07T00:00:00Z");
         let mut rows = meta_rows();
         rows[2] = row("2026-01-06T10:00:00Z", vec![0.5], true, hour());
@@ -2327,7 +2328,7 @@ mod tests {
     }
 
     /// A meta example carries the unit of its trade, the worth of the stop
-    /// of the side the primary picked: on `meta_rows` with each short's
+    /// of the side picked: on `meta_rows` with each short's
     /// stop 4 away, the long's 2, worth 4 and 2 USD on one AUD/USD, the
     /// four buys of the models valid from 06:00 carry 2 and the two sells
     /// of those valid from 17:00 carry 4, the short still expecting less
@@ -2336,7 +2337,7 @@ mod tests {
     fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta(24);
-        primaries(dir.path(), &config);
+        publish_baselines(dir.path(), &config);
         let realised = Realised::new(&catalog(dir.path()), &config.target).unwrap();
         let rows: Vec<DatasetRow> = meta_rows()
             .into_iter()
@@ -2383,7 +2384,7 @@ mod tests {
     fn a_store_that_cannot_be_listed_fails_the_metas_examples() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta(24);
-        primaries(dir.path(), &config);
+        publish_baselines(dir.path(), &config);
         store(dir.path(), &config, Side::Short).break_listing();
         let realised = Realised::new(&catalog(dir.path()), &config.target).unwrap();
 
@@ -2397,7 +2398,7 @@ mod tests {
     /// holdout's a loss at 0.3 and a win at 0.7, which the meta, taking the
     /// win, publishes on.
     #[test]
-    fn a_long_only_primary_gives_its_meta_model_buys_alone() {
+    fn a_long_only_strategy_gives_its_meta_model_buys_alone() {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
             margins: Margins {
@@ -2410,7 +2411,7 @@ mod tests {
         for (valid_from, probability) in
             [("2026-01-06T06:00:00Z", 0.8), ("2026-01-06T17:00:00Z", 0.6)]
         {
-            primary(
+            publish_baseline(
                 &store(dir.path(), &long_only, Side::Long),
                 Side::Long,
                 valid_from,
@@ -2434,15 +2435,15 @@ mod tests {
         assert_eq!(probes, [&vec![0.3, 1.0, long], &vec![0.7, 1.0, long]]);
     }
 
-    /// The meta's window of 36 hours is longer than the primary's 24, and
-    /// starts after the primary's first models, of the 5th.
+    /// The meta's window of 36 hours is longer than the sides' 24, and
+    /// starts after the sides' first models, of the 5th.
     #[test]
     fn a_train_with_a_meta_model_replays_once_from_the_longer_windows_first_day() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
-        primaries(dir.path(), &with_meta(36));
+        publish_baselines(dir.path(), &with_meta(36));
         for side in Side::BOTH {
-            primary(
+            publish_baseline(
                 &store(dir.path(), &with_meta(36), side),
                 side,
                 "2026-01-05T00:00:00Z",
@@ -2463,13 +2464,13 @@ mod tests {
     }
 
     /// The meta's window of 36 hours starts on the 5th, before the
-    /// primary's first models, of 06:00 of the 6th, where its rows start:
+    /// sides' first models, of 06:00 of the 6th, where its rows start:
     /// the one replay starts with the sides' window, on the 6th.
     #[test]
-    fn a_train_replays_no_day_before_the_primarys_first_model() {
+    fn a_train_replays_no_day_before_the_sides_first_model() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
-        primaries(dir.path(), &with_meta(36));
+        publish_baselines(dir.path(), &with_meta(36));
         let mut replays = vec![];
 
         training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
@@ -2483,11 +2484,11 @@ mod tests {
         );
     }
 
-    /// No primary model is valid before the train, so no row of the meta
-    /// has a primary decision: the meta waits, and none is fitted, the
+    /// No side's model is valid before the train, so no row of the meta
+    /// has a decision of the sides: the meta waits, and none is fitted, the
     /// sides fitted and published as ever.
     #[test]
-    fn a_meta_model_without_a_primary_model_before_it_waits() {
+    fn a_meta_model_without_a_sides_model_before_it_waits() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
 
@@ -2502,19 +2503,19 @@ mod tests {
         );
     }
 
-    /// Never retrained, the primary's models of the 6th, the last valid
+    /// Never retrained, the sides' models of the 6th, the last valid
     /// from 21:00, are in use at the train of the 7th: kept, their
     /// decisions give the meta its rows, and the meta is fitted alone,
     /// learning from the very models in use.
     #[test]
-    fn never_retrained_a_meta_whose_primary_is_in_use_is_fitted_alone() {
+    fn never_retrained_a_meta_whose_sides_are_in_use_is_fitted_alone() {
         let dir = tempfile::tempdir().unwrap();
         let config = ModelConfig {
             retrain: Retrain::Never,
             ..with_meta(24)
         };
         let training = training(dir.path(), config.clone());
-        primaries(dir.path(), &config);
+        publish_baselines(dir.path(), &config);
         let t = at("2026-01-07T00:00:00Z");
         let last = at("2026-01-06T21:00:00Z");
 
@@ -2690,10 +2691,11 @@ mod tests {
     }
 
     /// Two trades picked on the sides' holdout, below a minimum of three,
-    /// neither publishes as of the 7th: the meta has no primary decision
-    /// to learn from, and waits, with no fit attempted, as the train says.
+    /// neither publishes as of the 7th: the meta has no decision of the
+    /// sides to learn from, and waits, with no fit attempted, as the train
+    /// says.
     #[test]
-    fn a_primary_refused_in_a_two_time_train_leaves_the_meta_waiting() {
+    fn the_sides_refused_in_a_two_time_train_leave_the_meta_waiting() {
         let dir = tempfile::tempdir().unwrap();
         let three = ModelConfig {
             min_trades: 3,
@@ -2712,7 +2714,7 @@ mod tests {
         assert!(
             trained
                 .to_string()
-                .contains("waiting for primary decisions"),
+                .contains("waiting for the sides' decisions"),
             "{trained}"
         );
         assert!(
@@ -2758,7 +2760,7 @@ mod tests {
     }
 
     /// A model kept in use reads with its valid-from; a waiting meta as
-    /// waiting for primary decisions.
+    /// waiting for the sides' decisions.
     #[test]
     fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting() {
         let in_use = Outcome::InUse {
@@ -2773,7 +2775,7 @@ mod tests {
             "{in_use}"
         );
         assert!(
-            waiting.contains("waiting for primary decisions"),
+            waiting.contains("waiting for the sides' decisions"),
             "{waiting}"
         );
     }

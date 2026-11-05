@@ -116,36 +116,36 @@ use crate::{
     },
 };
 
-/// The names of a primary's side and probability, the last values of a
-/// meta model's rows.
-pub const PRIMARY_FEATURES: [&str; 2] = ["primary_side", "primary_probability"];
+/// The names of the side picked and its probability, the last values of
+/// a meta model's rows.
+pub const PICKED_FEATURES: [&str; 2] = ["picked_side", "picked_probability"];
 
-/// The values of a primary's `side` and `probability`, in the order of
-/// `PRIMARY_FEATURES`: the side 1 a buy, -1 a sell.
-fn primary_values(side: OrderSide, probability: f64) -> [f64; 2] {
+/// The values of the `side` picked and its `probability`, in the order of
+/// `PICKED_FEATURES`: the side 1 a buy, -1 a sell.
+fn picked_values(side: OrderSide, probability: f64) -> [f64; 2] {
     let side = if side == OrderSide::Buy { 1.0 } else { -1.0 };
     [side, probability]
 }
 
-/// The names of a meta model's features, of its primary's `names`: those,
-/// then the primary's side and probability (`PRIMARY_FEATURES`).
+/// The names of a meta model's features, of its sides' `names`: those,
+/// then the side picked and its probability (`PICKED_FEATURES`).
 #[must_use]
 pub fn meta_names(names: &[String]) -> Vec<String> {
     names
         .iter()
         .cloned()
-        .chain(PRIMARY_FEATURES.map(String::from))
+        .chain(PICKED_FEATURES.map(String::from))
         .collect()
 }
 
-/// A meta model's row: the primary's `features`, then its `side` and
-/// `probability`, in the order of `meta_names`.
+/// A meta model's row: the sides' `features`, then the `side` picked and
+/// its `probability`, in the order of `meta_names`.
 #[must_use]
 pub fn meta_row(features: &[f64], side: OrderSide, probability: f64) -> Vec<f64> {
     features
         .iter()
         .copied()
-        .chain(primary_values(side, probability))
+        .chain(picked_values(side, probability))
         .collect()
 }
 

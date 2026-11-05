@@ -13,11 +13,11 @@
 //! training, side and margins, and of the same manifest. Backtest and live
 //! read the same list.
 //!
-//! A meta model's store sits in a `meta/` directory beside its primary's
-//! sides, under their training settings, keyed by its own (its learner and
-//! settings, window, holdout, threshold and minimums) and the primary's
+//! A meta model's store sits in a `meta/` directory beside its sides,
+//! under their training settings, keyed by its own (its learner and
+//! settings, window, holdout, threshold and minimums) and the sides'
 //! margins, which make its rows. A meta model is only ever listed beside
-//! meta models of the same primary.
+//! meta models of the same sides.
 //!
 //! A strategy's stores are built together, as its model set (`ModelSet`),
 //! and only there: the fingerprint is computed once and keys them all. The
@@ -78,7 +78,7 @@ const EXTENSION: &str = "json";
 /// apart.
 static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
-/// The directory of the meta models within the directory of their primary's
+/// The directory of the meta models within the directory of their sides'
 /// models.
 const META: &str = "meta";
 
@@ -154,8 +154,8 @@ pub struct ModelManifest {
     pub feature_names: Vec<String>,
     /// The target spec.
     pub target: TargetConfig,
-    /// The side of the target a primary's model learned; none for a meta
-    /// model, which learns the primary's.
+    /// The side of the target the model learned; none for a meta model,
+    /// which learns the trade of the side picked.
     pub side: Option<Side>,
     pub learner: LearnerConfig,
     /// The calibration of the model's predictions.
@@ -518,10 +518,9 @@ impl ModelStore {
     }
 
     /// The store of the meta model `meta` in `training`, the directory of
-    /// the training settings of its primary's sides, which trade
-    /// `margins`: beside the sides, under `meta/` and the meta's training
-    /// settings, the primary's margins among them (they make the meta's
-    /// rows).
+    /// the training settings of its sides, which trade `margins`: beside
+    /// the sides, under `meta/` and the meta's training settings, the
+    /// sides' margins among them (they make the meta's rows).
     ///
     /// # Errors
     ///
@@ -1203,7 +1202,7 @@ mod tests {
     }
 
     /// A meta model published under one threshold and minimums may fall
-    /// short of others, and the primary's margins make its rows: a meta
+    /// short of others, and the sides' margins make its rows: a meta
     /// of another threshold, minimums or margins lists none of them.
     #[test]
     fn a_meta_model_of_another_threshold_minimums_or_margins_is_not_listed() {
@@ -1244,7 +1243,8 @@ mod tests {
         }
     }
 
-    /// A meta model taking the primary's trades from a probability of 0.55.
+    /// A meta model taking the trades of the side picked from a probability
+    /// of 0.55.
     fn meta_config() -> MetaConfig {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(48))
@@ -1267,7 +1267,7 @@ mod tests {
     /// A weekly-retrained strategy trades on the models of its own
     /// retrains, never on one a daily-retrained strategy published between
     /// them: a store of either retrain lists its own models alone, a
-    /// side's and a model primary's meta's alike.
+    /// side's and a meta's alike.
     #[test]
     fn a_store_lists_only_the_models_of_its_retrain_interval() {
         let daily = Retrain::Every(SignedDuration::from_hours(24));
@@ -1299,11 +1299,11 @@ mod tests {
     type StoreOf = fn(&Path, Retrain) -> ModelStore;
 
     /// Each kind of store, of a strategy retrained as a `Retrain` says: a
-    /// side's and a model primary's meta's.
+    /// side's and a meta's.
     fn stores() -> [(&'static str, StoreOf); 2] {
         [
             ("a side's", |root, retrain| store(root, &retrained(retrain))),
-            ("a model primary's meta's", |root, retrain| {
+            ("a meta's", |root, retrain| {
                 meta_store(root, &retrained(retrain), &meta_config())
             }),
         ]

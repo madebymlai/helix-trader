@@ -1,6 +1,6 @@
-//! What a model primary's trade on a side is expected to make, and the
-//! side it trades: decisions on expected net P&L, each decision weighing
-//! the costs of its own (Elkan 2001; Bahnsen et al. 2015).
+//! What a side's trade is expected to make, and the side picked:
+//! decisions on expected net P&L, each decision weighing the costs of its
+//! own (Elkan 2001; Bahnsen et al. 2015).
 //!
 //! A side's model is published with its expected win and loss
 //! (`Payoff`): with exits, in R, the multiple of the stop's distance a
