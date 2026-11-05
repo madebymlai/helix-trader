@@ -436,9 +436,9 @@ pub fn missing() -> FeatureSetBuilder {
     )
 }
 
-/// The calibration of the baselines, `c(p) = 1 / (1 + e^(2 - 4p))`,
-/// increasing: c(0.5) = 0.5.
-pub const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+/// The calibration of the baselines, the odds `o` of a prediction becoming
+/// `o^0.9`, increasing: c(0.5) = 0.5.
+pub const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
 /// A baseline long or short model of the probe deciding on `features` as
 /// `config` says, valid from `valid_from`, predicting `trues` tenths

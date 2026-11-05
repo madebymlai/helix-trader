@@ -819,9 +819,10 @@ mod tests {
     /// 12:00, the holdout from 18:00. Fitted, a win and a loss of the long
     /// (the fake's mean 0.5). Calibrated on, the fake predicting its
     /// feature, a loss at 0.25 and a win at 0.75, the loss's stop 4 away:
-    /// Platt's targets 1/3 and 2/3, the curve 1 / (1 + 4^(1 - 2p)). Held
-    /// out, a win at 0.8 and a loss at 0.3, calibrated 1 / (1 + 4^-0.6)
-    /// and 1 / (1 + 4^0.4) (AUC 1). Around them, wins on the feature 0.1
+    /// Platt's targets 1/3 and 2/3, the odds of 1/3 and 3 becoming 1/2 and 2,
+    /// so odds `o` become `o^s`, `s` being ln 2 / ln 3. Held out, a win at 0.8
+    /// and a loss at 0.3, of odds 4 and 3/7, calibrated 1 / (1 + 4^-s) and
+    /// 1 / (1 + (7/3)^s) (AUC 1). Around them, wins on the feature 0.1
     /// that would change the fit or the calibration if taken: one before
     /// the window, one before the calibration settling after its start,
     /// one before the holdout settling after its start, one in the holdout
@@ -891,13 +892,14 @@ mod tests {
         close(calibration.apply(0.75), 2.0 / 3.0);
         let probes: Vec<&Vec<f64>> = long.manifest.probes.iter().map(|p| &p.row).collect();
         assert_eq!(probes, [&vec![0.8], &vec![0.3]]);
+        let s = 2_f64.ln() / 3_f64.ln();
         close(
             long.manifest.probes[0].prediction,
-            1.0 / (1.0 + 4_f64.powf(-0.6)),
+            1.0 / (1.0 + 4_f64.powf(-s)),
         );
         close(
             long.manifest.probes[1].prediction,
-            1.0 / (1.0 + 4_f64.powf(0.4)),
+            1.0 / (1.0 + (7.0_f64 / 3.0).powf(s)),
         );
         let payoff = long.manifest.payoff.unwrap();
         close(payoff.win, 1.5);
@@ -931,24 +933,26 @@ mod tests {
 
     /// Worked by hand on `rows`'s holdout, each side's trades 2 USD of
     /// stop, its decision on the expected P&L of its payoff from 0.5 USD.
-    /// The long at 19:00 is calibrated c = 1 / (1 + 4^-0.6), expected
-    /// (1.5c - 0.75(1 - c)) 2 = 1.64 USD, and wins 3 USD: taken; at 20:00
-    /// c = 1 / (1 + 4^0.4), expected 0.14 USD: not. The short, calibrated 1 / (1 +
-    /// 4^(2p - 1)), expects at 19:00 a loss; at 20:00, c = 1 / (1 + 4^-0.4),
-    /// (1.125c - (1 - c)) 2 = 0.71 USD, and wins 3 USD: taken. Each side
-    /// takes a win of 3 USD, every trade a win of 3 and a loss of 2 (0.5
-    /// per trade); at 1.5 times the commission of 0.2 each makes 0.1 less.
-    /// The log loss of each is (ln (1 + 4^-0.6) + ln (1 + 4^-0.4)) / 2, the
-    /// baseline's, the mean of two wins in four, ln 2; the AUC 1.
+    /// With `s` = ln 2 / ln 3, the long at 19:00 is calibrated c = 1 / (1 +
+    /// 4^-s), expected (1.5c - 0.75(1 - c)) 2 = 1.68 USD, and wins 3 USD:
+    /// taken; at 20:00 c = 1 / (1 + (7/3)^s), expected 0.16 USD: not. The
+    /// short, whose odds `o` become `o^-s`, expects at 19:00 a loss; at 20:00,
+    /// c = 1 / (1 + (3/7)^s), (1.125c - (1 - c)) 2 = 0.68 USD, and wins 3 USD:
+    /// taken. Each side takes a win of 3 USD, every trade a win of 3 and a
+    /// loss of 2 (0.5 per trade); at 1.5 times the commission of 0.2 each
+    /// makes 0.1 less. The log loss of each is (ln (1 + 4^-s) + ln (1 +
+    /// (3/7)^s)) / 2, the baseline's, the mean of two wins in four, ln 2; the
+    /// AUC 1.
     #[test]
     fn each_side_is_judged_on_what_its_decisions_earned_on_the_holdout() {
         let dir = tempfile::tempdir().unwrap();
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
-        let log_loss = (1.0 + 4_f64.powf(-0.6))
+        let s = 2_f64.ln() / 3_f64.ln();
+        let log_loss = (1.0 + 4_f64.powf(-s))
             .ln()
-            .midpoint((1.0 + 4_f64.powf(-0.4)).ln());
+            .midpoint((1.0 + (3.0_f64 / 7.0).powf(s)).ln());
         for holdout in [holdout_of(trained.long), holdout_of(trained.short)] {
             let Earnings {
                 taken,
@@ -1324,10 +1328,10 @@ mod tests {
     }
 
     /// The holdout's long wins at 0.8 and loses at 0.3, as its short does:
-    /// the short, calibrated decreasing, gives its win 1 / (1 + 4^0.6) and
-    /// its loss 1 / (1 + 4^-0.4), a log loss of (ln (1 + 4^0.6) + ln (1 +
-    /// 4^0.4)) / 2, above the baseline's ln 2: it publishes nothing, while
-    /// the long publishes.
+    /// the short, calibrated decreasing, with `s` = ln 2 / ln 3, gives its win
+    /// 1 / (1 + 4^s) and its loss 1 / (1 + (3/7)^s), a log loss of (ln (1 +
+    /// 4^s) + ln (1 + (7/3)^s)) / 2, above the baseline's ln 2: it publishes
+    /// nothing, while the long publishes.
     #[test]
     fn a_side_whose_holdout_falls_short_publishes_nothing_and_the_other_publishes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1345,11 +1349,12 @@ mod tests {
         let Refusal::LogLoss { log_loss, baseline } = why else {
             panic!("{why:?}");
         };
+        let s = 2_f64.ln() / 3_f64.ln();
         close(
             log_loss,
-            (1.0 + 4_f64.powf(0.6))
+            (1.0 + 4_f64.powf(s))
                 .ln()
-                .midpoint((1.0 + 4_f64.powf(0.4)).ln()),
+                .midpoint((1.0 + (7.0_f64 / 3.0).powf(s)).ln()),
         );
         close(baseline, 2_f64.ln());
         assert!(
@@ -1543,7 +1548,7 @@ mod tests {
     }
 
     /// The calibration of the primary's models of the meta tests.
-    const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+    const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
     /// Publishes in `store` a primary baseline valid from `valid_from`,
     /// predicting `probability` on every row, calibrated by `CALIBRATION`,
@@ -2046,7 +2051,8 @@ mod tests {
 
     /// The meta at the 8th learns from the decisions of the sides just
     /// published over its window, the 7th: held out, the short's at 0.3 and
-    /// the long's at 0.7, each side's probability 1 / (1 + 4^-0.4).
+    /// the long's at 0.7, each side's probability 1 / (1 + (3/7)^s), `s` being
+    /// ln 2 / ln 3.
     #[test]
     fn a_two_time_trains_meta_learns_from_the_sides_decisions_over_its_window() {
         let dir = tempfile::tempdir().unwrap();
@@ -2059,7 +2065,7 @@ mod tests {
             .read(at("2026-01-08T00:00:00Z"))
             .unwrap();
 
-        let probability = 1.0 / (1.0 + 4_f64.powf(-0.4));
+        let probability = 1.0 / (1.0 + (3.0_f64 / 7.0).powf(2_f64.ln() / 3_f64.ln()));
         let probes: Vec<&Vec<f64>> = meta.manifest.probes.iter().map(|p| &p.row).collect();
         let [short, long] = probes[..] else {
             panic!("{probes:?}");

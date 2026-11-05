@@ -87,7 +87,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -906,7 +906,7 @@ mod tests {
                 label: Label::Horizon,
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
-                calibration: Calibration { a: -4.0, b: 2.0 },
+                calibration: Calibration { a: -0.9, b: 0.0 },
                 baseline: 0.5,
                 payoff: Some(Payoff {
                     win: 1.5,
@@ -1306,14 +1306,14 @@ mod tests {
     }
 
     /// Every prediction of a loaded model is calibrated, its probes too:
-    /// the fake predicts the first feature, 0.75, calibrated by a = -4 and
-    /// b = 2 to 1 / (1 + e^-1).
+    /// the fake predicts the first feature, 0.75, of odds 3, calibrated by
+    /// a = -0.9 and b = 0 to 1 / (1 + 3^-0.9).
     #[test]
     fn a_loaded_model_predicts_through_its_calibration() {
         let mut stored = model("2026-10-22T00:00:00Z", &[]);
         stored.manifest.probes = vec![Probe {
             row: vec![0.75],
-            prediction: 1.0 / (1.0 + (-1.0_f64).exp()),
+            prediction: 1.0 / (1.0 + (-0.9 * 3_f64.ln()).exp()),
         }];
 
         let loaded = stored
@@ -1322,7 +1322,7 @@ mod tests {
 
         let prediction = loaded.predict(&[0.25]).unwrap();
         assert!(
-            (prediction - 1.0 / (1.0 + 1.0_f64.exp())).abs() < 1e-12,
+            (prediction - 1.0 / (1.0 + 3_f64.powf(0.9))).abs() < 1e-12,
             "{prediction}"
         );
     }
