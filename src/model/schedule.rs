@@ -24,7 +24,7 @@
 //! before its run, takes the times the same timer fires over its span on a
 //! virtual clock of its own (`Schedule::times`). Never retrained, a live
 //! node has no retrain actor, so no timer is set, and a backtest trains at
-//! its start alone, then, should its primary or its meta have no model in
+//! its start alone, then, should its sides or its meta have no model in
 //! use there, is refused: it would trade nothing, and no train comes
 //! after.
 //!
@@ -33,23 +33,23 @@
 //! `Models`): a model whose current model at `t` exists keeps it, in use
 //! (retrained, the one valid exactly from `t`; never retrained, the
 //! latest valid at or before `t`); the others are fitted as of `t`, on
-//! the rows of their window back from `t` settled by then; but a model
-//! primary's meta, whose rows are the primary's decisions, waits while no
-//! primary model is valid before `t`, and its rows start at the primary's
-//! first model at the earliest. Never retrained, a meta whose primary is
-//! in use is so fitted alone, on the decisions of the very models it will
-//! filter; and with neither the meta nor a side of a model primary in
-//! use, one train trains both, at two times: the sides as of `t` less the
-//! meta's window, on their window back from there, published valid from
-//! then, and the meta at `t`, on their out-of-sample decisions over its
-//! window, so that it filters the very models it learned from. The rule
-//! is the current model's alone: it applies where a side fitted as of
-//! the earlier time would be current at `t`, never so retrained, whose
-//! models stay on the grid. Should those sides publish none, the meta
-//! waits (`Plan::meta_after_sides`). The plan answers whether the train
-//! fits anything and where its one replay starts (`Plan::replay_from`), at
-//! the first row a fit reads: a kept model reads none, its baseline its
-//! own, published with it (`store::ModelManifest::baseline`).
+//! the rows of their window back from `t` settled by then; but a meta,
+//! whose rows are the sides' decisions, waits while no side's model is
+//! valid before `t`, and its rows start at the sides' first model at the
+//! earliest. Never retrained, a meta whose sides are in use is so fitted
+//! alone, on the decisions of the very models it will filter; and with
+//! neither the meta nor a side in use, one train trains both, at two
+//! times: the sides as of `t` less the meta's window, on their window
+//! back from there, published valid from then, and the meta at `t`, on
+//! their out-of-sample decisions over its window, so that it filters the
+//! very models it learned from. The rule is the current model's alone: it
+//! applies where a side fitted as of the earlier time would be current at
+//! `t`, never so retrained, whose models stay on the grid. Should those
+//! sides publish none, the meta waits (`Plan::meta_after_sides`). The plan
+//! answers whether the train fits anything and where its one replay starts
+//! (`Plan::replay_from`), at the first row a fit reads: a kept model reads
+//! none, its baseline its own, published with it
+//! (`store::ModelManifest::baseline`).
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -85,14 +85,14 @@ pub enum Retrain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schedule {
     retrain: Retrain,
-    /// The window of the primary's sides.
-    primary: SignedDuration,
+    /// The sides' window.
+    sides: SignedDuration,
     /// The meta model's window, if there is one.
     meta: Option<SignedDuration>,
 }
 
-/// A value for each model of a strategy: each side of a model primary,
-/// and its meta model; none for a model it has not.
+/// A value for each model of a strategy: each side, and its meta model;
+/// none for a model it has not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Models<T> {
     pub long: Option<T>,
@@ -109,9 +109,8 @@ pub enum Step {
     /// `at`, and publishes it valid from `at`: the train's time, or the
     /// meta's window before it for a side of a train at two times.
     Fit { from: Timestamp, at: Timestamp },
-    /// Fits none: a model primary's meta, whose rows are the primary's
-    /// decisions, with no primary model valid before the train to make
-    /// them.
+    /// Fits none: a meta, whose rows are the sides' decisions, with no
+    /// side's model valid before the train to make them.
     Wait,
 }
 
@@ -123,13 +122,13 @@ pub struct Plan {
 }
 
 impl Schedule {
-    /// The schedule of a model primary's section, and of its meta model if
-    /// it has one.
+    /// The schedule of a `[model]` section, and of its meta model if it
+    /// has one.
     #[must_use]
     pub fn of_model(config: &ModelConfig) -> Self {
         Self {
             retrain: config.retrain,
-            primary: config.window,
+            sides: config.window,
             meta: config.meta.as_ref().map(|meta| meta.window),
         }
     }
@@ -162,16 +161,15 @@ impl Schedule {
     /// The plan of a train at `at`, the stores of the models holding
     /// models valid from `valid_froms`: a model keeps its current model at
     /// `at`, if any (`Retrain::current`), else is fitted as of `at` on the
-    /// rows of its window back from `at`; but a model primary's meta waits
-    /// while no primary model is valid before `at`, and its rows start at
-    /// the primary's first model at the earliest, since a row before it
-    /// has no decision of the primary. With no current model of the meta nor of a
-    /// side of a model primary, the sides are fitted as of the meta's
-    /// window before `at` instead, on their window back from there, if a
-    /// model fitted then would be current at `at` (never so retrained):
-    /// their decisions over the meta's window, out of sample, are the
-    /// meta's rows, and the meta, fitted at `at`, filters the very models
-    /// it learned from.
+    /// rows of its window back from `at`; but a meta waits while no side's
+    /// model is valid before `at`, and its rows start at the sides' first
+    /// model at the earliest, since a row before it has no decision of the
+    /// sides. With no current model of the meta nor of a side, the sides
+    /// are fitted as of the meta's window before `at` instead, on their
+    /// window back from there, if a model fitted then would be current at
+    /// `at` (never so retrained): their decisions over the meta's window,
+    /// out of sample, are the meta's rows, and the meta, fitted at `at`,
+    /// filters the very models it learned from.
     #[must_use]
     pub fn plan(&self, at: Timestamp, valid_froms: &Models<Vec<Timestamp>>) -> Plan {
         let current = |valid_froms: &[Timestamp]| self.retrain.current(valid_froms, at);
@@ -202,15 +200,15 @@ impl Schedule {
             let valid_froms = valid_froms.as_deref()?;
             Some(match early {
                 Some(early) => Step::Fit {
-                    from: early - self.primary,
+                    from: early - self.sides,
                     at: early,
                 },
-                None => step(valid_froms, self.primary, Timestamp::MIN),
+                None => step(valid_froms, self.sides, Timestamp::MIN),
             })
         };
-        // The primary's first model before `at`, of either side, its fits
+        // The sides' first model before `at`, of either side, their fits
         // before `at` included: the meta waits without one.
-        let first = first_before(at, primary(valid_froms).chain(early));
+        let first = first_before(at, sides(valid_froms).chain(early));
         let meta = || {
             let (window, meta) = (self.meta?, valid_froms.meta.as_deref()?);
             Some(match first {
@@ -230,13 +228,13 @@ impl Schedule {
 
     /// Refuses a run from `start` that could trade nothing, the stores of
     /// the models holding models valid from `valid_froms`: never
-    /// retrained, no train comes after the start, so a model primary with
+    /// retrained, no train comes after the start, so a strategy with
     /// no side's model in use there, or a meta with none, would trade
     /// nothing; retrained, a later retrain may publish one.
     ///
     /// # Errors
     ///
-    /// Returns an error naming the primary, the meta, or both, with no
+    /// Returns an error naming the sides, the meta, or both, with no
     /// model in use at `start`, never retrained.
     pub fn ensure_trades(
         &self,
@@ -254,7 +252,7 @@ impl Schedule {
             .flatten()
             .any(in_use)
         {
-            idle.push("no side of the primary has a model in use");
+            idle.push("no side has a model in use");
         }
         if valid_froms.meta.as_ref().is_some_and(|meta| !in_use(meta)) {
             idle.push("the meta has no model in use");
@@ -278,12 +276,12 @@ impl Plan {
 
     /// The meta's step once the train fitted the sides, the stores of the
     /// models then holding models valid from `valid_froms`: as planned,
-    /// but the meta waits while no primary model is valid before the
+    /// but the meta waits while no side's model is valid before the
     /// train, as when the sides fitted before it published none.
     #[must_use]
     pub fn meta_after_sides(&self, valid_froms: &Models<Vec<Timestamp>>) -> Option<Step> {
         Some(match self.steps.meta? {
-            Step::Fit { .. } if first_before(self.at, primary(valid_froms)).is_none() => Step::Wait,
+            Step::Fit { .. } if first_before(self.at, sides(valid_froms)).is_none() => Step::Wait,
             step => step,
         })
     }
@@ -399,9 +397,8 @@ impl<T> Models<T> {
     }
 }
 
-/// The valid-froms of the stores of the primary's sides, of
-/// `valid_froms`.
-fn primary(valid_froms: &Models<Vec<Timestamp>>) -> impl Iterator<Item = Timestamp> + '_ {
+/// The valid-froms of the stores of the sides, of `valid_froms`.
+fn sides(valid_froms: &Models<Vec<Timestamp>>) -> impl Iterator<Item = Timestamp> + '_ {
     valid_froms
         .long
         .iter()
@@ -585,12 +582,12 @@ mod tests {
         SignedDuration::from_hours(hours)
     }
 
-    /// A model primary trained on a window of 24 hours, its meta on one of
-    /// 48, retrained every day.
+    /// Sides trained on a window of 24 hours, their meta on one of 48,
+    /// retrained every day.
     fn daily() -> Schedule {
         Schedule {
             retrain: Retrain::Every(day()),
-            primary: hours(24),
+            sides: hours(24),
             meta: Some(hours(48)),
         }
     }
@@ -603,8 +600,8 @@ mod tests {
         }
     }
 
-    /// The valid-froms of the stores of a model primary's long, its short
-    /// and its meta.
+    /// The valid-froms of the stores of a strategy's long, its short and
+    /// its meta.
     fn stores(long: &[&str], short: &[&str], meta: &[&str]) -> Models<Vec<Timestamp>> {
         let times = |times: &[&str]| Some(times.iter().map(|time| at(time)).collect());
         Models {
@@ -661,11 +658,11 @@ mod tests {
         assert_eq!(plan.steps.meta, Some(keep(SEVENTH)));
     }
 
-    /// The meta's window of 48 hours starts on the 5th: with the primary's
+    /// The meta's window of 48 hours starts on the 5th: with the sides'
     /// first model of either side valid from 06:00 of the 6th, its rows
     /// start there; with one valid from the 4th, at the window's start.
     #[test]
-    fn the_metas_rows_start_at_the_primarys_first_model_at_the_earliest() {
+    fn the_metas_rows_start_at_the_sides_first_model_at_the_earliest() {
         for (long, short, from) in [
             (
                 "2026-01-06T12:00:00Z",
@@ -684,17 +681,17 @@ mod tests {
         }
     }
 
-    /// A model primary's models valid from the train's time alone are no
+    /// The sides' models valid from the train's time alone are no
     /// decisions before it: the meta waits.
     #[test]
-    fn a_meta_waits_for_a_primary_model_before_the_train() {
+    fn a_meta_waits_for_a_sides_model_before_the_train() {
         let plan = daily().plan(at(SEVENTH), &stores(&[SEVENTH], &[SEVENTH], &[]));
 
         assert_eq!(plan.steps.meta, Some(Step::Wait));
     }
 
     /// The sides fit on the 6th; the meta, kept, reads no row, though its
-    /// window starts on the 5th, after the primary's first model, the 4th.
+    /// window starts on the 5th, after the sides' first model, the 4th.
     #[test]
     fn the_replay_starts_at_the_first_row_fitted_a_kept_model_reading_none() {
         let first = "2026-01-04T00:00:00Z";
@@ -758,11 +755,11 @@ mod tests {
         assert_eq!(plan.steps.meta, Some(fit(FIFTH, SEVENTH)));
     }
 
-    /// Never retrained, the primary's models of the 6th are in use at the
+    /// Never retrained, the sides' models of the 6th are in use at the
     /// train of the 7th: kept, they give the meta its rows from the 6th,
     /// and the meta fits alone.
     #[test]
-    fn never_retrained_a_meta_whose_primary_is_in_use_fits_alone() {
+    fn never_retrained_a_meta_whose_sides_are_in_use_fits_alone() {
         let plan = never().plan(at(SEVENTH), &stores(&[SIXTH], &[SIXTH], &[]));
 
         assert_eq!(in_use(plan.steps.long), Some(at(SIXTH)));
@@ -770,7 +767,7 @@ mod tests {
         assert_eq!(plan.steps.meta, Some(fit(SIXTH, SEVENTH)));
     }
 
-    /// Never retrained, with no model of the primary nor of the meta by
+    /// Never retrained, with no model of the sides nor of the meta by
     /// the train of the 7th, on an empty store or one holding models of
     /// the 8th alone (published by a train from later): the sides fit as
     /// of the 5th, the meta's window of 48 hours before the train, on
@@ -809,7 +806,7 @@ mod tests {
     /// Retrained, a model fitted before the train would not be current at
     /// it, so whatever the stores hold every model fits as of the train,
     /// if at all: on an empty store or one of models after the train, the
-    /// meta waiting; with the primary's models of the 5th, the meta too.
+    /// meta waiting; with the sides' models of the 5th, the meta too.
     #[test]
     fn retrained_every_model_fits_as_of_the_train() {
         for (stores, meta) in [
@@ -859,8 +856,8 @@ mod tests {
     }
 
     /// The sides of a two-time train fitted as of the 5th: the meta fits
-    /// as planned once either published, and waits, with no primary
-    /// decision to learn from, if neither did.
+    /// as planned once either published, and waits, with no decision of
+    /// the sides to learn from, if neither did.
     #[test]
     fn a_two_time_trains_meta_fits_once_a_side_published_and_waits_if_none_did() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[]));

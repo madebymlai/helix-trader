@@ -27,8 +27,8 @@
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
-//! trade of the primary, the strategy's side models, trained on the
-//! primary's out-of-sample predictions.
+//! trade of the side picked, trained on the out-of-sample predictions of
+//! the strategy's side models.
 //!
 //! `ModelStrategy` is what a strategy trading on a model gives the
 //! harness: the binary's backtest, live, train and dataset runs are
