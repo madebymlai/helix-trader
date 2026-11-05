@@ -2,11 +2,9 @@
 //! would have earned there, not how well a model ranks the rows.
 //!
 //! The decision takes some of the trades of its rows: the sides', the side
-//! picked on each row (`train`, `deciding::DecidingModels::pick_among`); a meta
-//! model's (`Threshold`), the trades of the side picked from its threshold. A
-//! side's own rule (`Margin`), those of its trades whose expected net P&L
-//! (`store::SideModel::expected_pnl`) clears its margin (`payoff::pick`), is
-//! what the walk-forward's scores read (`walk`).
+//! picked on each row (`deciding::DecidingModels`), which a train's gate and
+//! the walk-forward's scores both read (`train`, `walk`); a meta model's
+//! (`Threshold`), the trades of the side picked from its threshold.
 //! What the trades earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
 //! of their net P&Ls (`calculate_from_realized_pnls`), as the backtest
 //! report reads them, beside the same of every trade of the rows, which
@@ -33,12 +31,7 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    dataset::DatasetRow,
-    payoff::{self, Realised},
-    store::{LoadedModel, SideModel},
-    targets::Side,
-};
+use super::{dataset::DatasetRow, payoff::Realised, targets::Side};
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -129,27 +122,6 @@ pub enum Refusal {
     Every { pnl: f64, every: f64 },
 }
 
-/// A model's decision rule on a row: whether it takes the row's trade,
-/// judging a model of its level.
-pub(super) trait Rule: Copy {
-    /// The models the rule judges.
-    type Model;
-
-    /// The calibrated probability `model` predicts on `example`, and
-    /// whether the rule takes the example's trade.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the model fails to predict.
-    fn judge(self, model: &Self::Model, example: &Example) -> anyhow::Result<(f64, bool)>;
-}
-
-/// A side model's own decision rule, as the walk-forward's scores read it: its
-/// side's trade taken when the side model's expected net P&L at its
-/// probability, on the row's unit, clears the margin (`payoff::pick`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Margin(pub f64);
-
 /// A meta model's decision rule: the trade of the side picked taken from the
 /// threshold (`takes`), in a decision as in a holdout.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -185,7 +157,7 @@ impl Trades {
 }
 
 impl Earnings {
-    /// The earnings of `rows`, each whether the rule took it and its trade.
+    /// The earnings of `rows`, each whether the decision took it and its trade.
     #[must_use]
     pub fn of(rows: &[(bool, Trade)]) -> Self {
         let trades = |taken_only: bool, factor: f64| {
@@ -270,28 +242,6 @@ impl Example {
     /// The realised value of its trade: its net P&L over its unit.
     pub(super) fn realised(&self) -> f64 {
         self.trade.pnl / self.unit
-    }
-}
-
-impl Rule for Margin {
-    type Model = SideModel;
-
-    fn judge(self, model: &SideModel, example: &Example) -> anyhow::Result<(f64, bool)> {
-        let probability = model.predict(&example.features)?;
-        let expected = model.expected_pnl(probability, example.unit);
-        Ok((
-            probability,
-            payoff::pick([((), expected, self.0)]).is_some(),
-        ))
-    }
-}
-
-impl Rule for Threshold {
-    type Model = LoadedModel;
-
-    fn judge(self, model: &LoadedModel, example: &Example) -> anyhow::Result<(f64, bool)> {
-        let probability = model.predict(&example.features)?;
-        Ok((probability, self.takes(probability)))
     }
 }
 
@@ -430,7 +380,7 @@ mod tests {
         );
     }
 
-    /// A holdout whose rule took 3 trades of 1.2 each, every trade's 0.4,
+    /// A holdout whose decision took 3 trades of 1.2 each, every trade's 0.4,
     /// its log loss 0.6 against the baseline's 0.69.
     fn holdout() -> Holdout {
         let trades = |count, expectancy| Trades {
