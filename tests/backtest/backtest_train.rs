@@ -6,9 +6,9 @@
 //! marks where the hour starts: 1 at the bottom, 0 at the top. The fake's
 //! prediction is the feature, calibrated increasing for the long, which
 //! wins every even hour, and decreasing for the short, which wins every
-//! odd one: each side takes the trades it wins, and earns more per trade
-//! than taking every trade. One node per thread: a test training twice
-//! trains the first time on a thread of its own.
+//! odd one: each row picks the side that wins it, and the trades picked earn
+//! more per trade than taking every trade. One node per thread: a test
+//! training twice trains the first time on a thread of its own.
 
 use std::{path::Path, rc::Rc};
 
@@ -223,9 +223,11 @@ fn published(outcome: Option<Outcome>) -> Holdout {
 /// Those fills are 58 and 62 quotes of 45 s after the hour starts, each
 /// row settling at 46:30 past it. Held out, the decisions of 12:00 to 23:00
 /// of the 22nd, the last settled at 23:46:30, before the train: six at the
-/// bottom, six at the top. Each side takes the six it wins, 2.66 per trade,
-/// every trade (6 x 2.66 - 6 x 3.34) / 12. At 1.5 times the commission of
-/// 0.24 each trade makes 0.12 less. Every row ranked right: AUC 1.
+/// bottom, six at the top. Each row picks the side that wins it, the long at
+/// the bottom and the short at the top: 12 trades of 2.66, beside every trade,
+/// a win and a loss of each row, (12 x 2.66 - 12 x 3.34) / 24. Both sides hold
+/// those earnings. At 1.5 times the commission of 0.24 each trade makes 0.12
+/// less. Every row ranked right: AUC 1.
 #[test]
 fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_identical_predictions()
 {
@@ -237,31 +239,24 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
 
     let Trained { long, short, meta } = trained;
     assert_eq!(meta, None);
-    for (holdout, taken, every, every_stressed) in [
-        (
-            published(long),
-            6,
-            (6.0 * 2.66 - 6.0 * 3.34) / 12.0,
-            (6.0 * 2.54 - 6.0 * 3.46) / 12.0,
-        ),
-        (
-            published(short),
-            6,
-            (6.0 * 2.66 - 6.0 * 3.34) / 12.0,
-            (6.0 * 2.54 - 6.0 * 3.46) / 12.0,
-        ),
-    ] {
+    for holdout in [published(long), published(short)] {
         let earnings = holdout.earnings;
         assert_eq!(
             (earnings.taken.count, earnings.every.count),
-            (taken, 12),
+            (12, 24),
             "{holdout:?}"
         );
         close(earnings.taken.expectancy, 2.66);
         close(earnings.taken.win_rate, 1.0);
-        close(earnings.every.expectancy, every);
+        close(
+            earnings.every.expectancy,
+            (12.0 * 2.66 - 12.0 * 3.34) / 24.0,
+        );
         close(earnings.taken_stressed.expectancy, 2.54);
-        close(earnings.every_stressed.expectancy, every_stressed);
+        close(
+            earnings.every_stressed.expectancy,
+            (12.0 * 2.54 - 12.0 * 3.46) / 24.0,
+        );
         assert_eq!(holdout.auc, Some(1.0));
         assert!(holdout.log_loss < holdout.baseline_log_loss, "{holdout:?}");
     }
@@ -287,7 +282,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
 }
 
 /// An hour later the holdout is the decisions of 13:00 to 00:00: each
-/// side takes the trades it wins, 2.66 USD each, short of a minimum of 3.
+/// row picks the side that wins it, 2.66 USD each, short of a minimum of 3.
 #[test]
 fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
     let catalog = catalog();

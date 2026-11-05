@@ -20,7 +20,7 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         dataset::{self, Commission, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
-        features::{Feature, FeatureSet, FeatureSetBuilder, PRIMARY_FEATURES},
+        features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES},
         handle::{Decision, Mode, ModelHandle, SettledRows},
         holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
@@ -461,8 +461,8 @@ pub fn baseline_of(
     )
 }
 
-/// A baseline meta model of the primary deciding on `features` as `config`
-/// says (the primary's side and probability after its features), valid
+/// A baseline meta model of the sides deciding on `features` as `config`
+/// says (the side picked and its probability after their features), valid
 /// from `valid_from`, predicting `trues` tenths whatever the row, as
 /// `baseline_of`.
 pub fn meta_baseline_of(
@@ -475,13 +475,13 @@ pub fn meta_baseline_of(
         .names()
         .iter()
         .cloned()
-        .chain(PRIMARY_FEATURES.map(String::from))
+        .chain(PICKED_FEATURES.map(String::from))
         .collect();
     stored_baseline(features, config, names, None, valid_from, trues)
 }
 
-/// A baseline of `feature_names`, of `side` for a primary and none for a
-/// meta, of the probe deciding on `features`, as `baseline_of` says.
+/// A baseline of `feature_names`, of `side` for a side's model and none
+/// for a meta, of the probe deciding on `features`, as `baseline_of` says.
 fn stored_baseline(
     features: &FeatureSet,
     config: &ModelConfig,
@@ -510,8 +510,8 @@ fn stored_baseline(
 }
 
 /// A baseline of `strategy_id`, of its features `feature_names` under
-/// `fingerprint`, decided as `config` says, of `side` for a primary and
-/// none for a meta, valid from `valid_from`, predicting `trues` tenths
+/// `fingerprint`, decided as `config` says, of `side` for a side's model
+/// and none for a meta, valid from `valid_from`, predicting `trues` tenths
 /// whatever the row, as `baseline_of` says, its manifest's baseline the
 /// mean of its training labels, `trues` tenths uncalibrated.
 pub fn baseline_stored(

@@ -305,6 +305,32 @@ pub enum Side {
     Short,
 }
 
+/// A value for each side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerSide<T> {
+    pub long: T,
+    pub short: T,
+}
+
+impl<T> PerSide<T> {
+    /// The value of `side`.
+    #[must_use]
+    pub const fn of(&self, side: Side) -> &T {
+        match side {
+            Side::Long => &self.long,
+            Side::Short => &self.short,
+        }
+    }
+
+    /// The value of `f` of each side's.
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> PerSide<U> {
+        PerSide {
+            long: f(self.long),
+            short: f(self.short),
+        }
+    }
+}
+
 /// A target as a decision sets it on one side (`TradedTarget::at`): the
 /// price it is set from, its exits on the instrument's ticks if it has
 /// them, when it ends after its send, and what the unit of its side's
@@ -818,7 +844,7 @@ impl TradedTarget {
         }
     }
 
-    /// The target of `side` at a decision of `strategy` now; none with no
+    /// The target of each side at a decision of `strategy` now; none with no
     /// price of the instrument yet, the ATR not yet initialized or an exit
     /// on the decision's price (`Target::exits`), as a dataset run opens no
     /// target then. Without exits, the instrument itself is not read, so
@@ -827,9 +853,9 @@ impl TradedTarget {
     /// # Errors
     ///
     /// Returns an error if, with exits, the instrument is not in the cache,
-    /// or an exit is outside its prices or the stop has no worth (on an
+    /// or an exit is outside its prices or a stop has no worth (on an
     /// inverse instrument, see `ensure_linear`).
-    pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<SideTarget>>
+    pub fn at<S>(&self, strategy: &S) -> anyhow::Result<Option<PerSide<SideTarget>>>
     where
         S: DataActor + DataActorNative,
     {
@@ -844,15 +870,19 @@ impl TradedTarget {
         let cache = strategy.cache();
         let time_limit = self.spec.limit;
         if self.spec.bracket().is_none() {
-            return Ok(
-                reference(&cache, &instrument_id).map(|reference| SideTarget {
+            return Ok(reference(&cache, &instrument_id).map(|reference| {
+                let target = SideTarget {
                     reference,
                     take_profit: None,
                     stop: None,
                     time_limit,
                     unit: 1.0,
-                }),
-            );
+                };
+                PerSide {
+                    long: target,
+                    short: target,
+                }
+            }));
         }
         let instrument = cache
             .instrument(&instrument_id)
@@ -863,22 +893,28 @@ impl TradedTarget {
         let Some(exits) = self.spec.exits(&instrument, reference.as_decimal(), atr)? else {
             return Ok(None);
         };
-        let (_, take_profit, stop) = exits
-            .into_iter()
-            .find(|(of, _, _)| *of == side)
-            .expect("a bracket has exits on both sides");
-        let distance = (stop.as_decimal() - reference.as_decimal()).abs();
-        let unit = stop_worth(
-            &instrument,
-            self.quantity,
-            distance.to_f64().unwrap_or(f64::NAN),
-        )?;
-        Ok(Some(SideTarget {
-            reference,
-            take_profit: Some(take_profit),
-            stop: Some(stop),
-            time_limit,
-            unit,
+        let target = |side| -> anyhow::Result<SideTarget> {
+            let &(_, take_profit, stop) = exits
+                .iter()
+                .find(|(of, _, _)| *of == side)
+                .expect("a bracket has exits on both sides");
+            let distance = (stop.as_decimal() - reference.as_decimal()).abs();
+            let unit = stop_worth(
+                &instrument,
+                self.quantity,
+                distance.to_f64().unwrap_or(f64::NAN),
+            )?;
+            Ok(SideTarget {
+                reference,
+                take_profit: Some(take_profit),
+                stop: Some(stop),
+                time_limit,
+                unit,
+            })
+        };
+        Ok(Some(PerSide {
+            long: target(Side::Long)?,
+            short: target(Side::Short)?,
         }))
     }
 }

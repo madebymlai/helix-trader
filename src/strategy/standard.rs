@@ -1662,7 +1662,7 @@ mod tests {
 
         /// A meta model is a `[model.meta]` table, and no more: a meta of
         /// the meta is an unknown field. It learns the trades of its
-        /// primary's target.
+        /// sides' target.
         #[test]
         fn loads_a_meta_model_from_its_table_alone_and_no_deeper() {
             let toml = with_meta(

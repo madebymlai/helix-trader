@@ -1,14 +1,14 @@
-//! A retrained model's holdout as its publication reads it: what its
-//! decisions would have earned there, not how well it ranks the rows.
+//! A retrained model's holdout as its publication reads it: what the decision
+//! would have earned there, not how well a model ranks the rows.
 //!
-//! A model's decision rule (`Rule`) takes some of the trades of its rows
-//! (`Example`): a side model's (`Margin`), those whose expected net P&L
-//! (`store::SideModel::expected_pnl`) clears its margin (`payoff::pick`);
-//! a meta model's (`Threshold`), the primary's trades from its threshold.
-//! What they earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
+//! The decision takes some of the trades of its rows: the sides', the side
+//! picked on each row (`deciding::DecidingModels`), which a train's gate and
+//! the walk-forward's scores both read (`train`, `walk`); a meta model's
+//! (`Threshold`), the trades of the side picked from its threshold.
+//! What the trades earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
 //! of their net P&Ls (`calculate_from_realized_pnls`), as the backtest
-//! report reads them, beside the same of every trade of the rows, which a
-//! rule taking them all would earn; and both again at 1.5 times the
+//! report reads them, beside the same of every trade of the rows, which
+//! taking them all would earn; and both again at 1.5 times the
 //! commission (`STRESS`), reported only. Nautilus' `Expectancy` is the
 //! mean win times the win rate plus the mean loss times the loss rate,
 //! the rates among the trades that gained or lost: a trade at nought,
@@ -16,10 +16,10 @@
 //!
 //! A model is published (`Holdout::refusal` none) when, on its holdout,
 //! its calibrated probabilities' log loss is below the baseline's, the
-//! training mean's, and its rule's trades, at least the minimum count
-//! (`Minimums`), earned per trade at least the minimum net P&L and more
-//! than every trade of its rows did. The log loss and the AUC are ours
-//! (`score`): Nautilus scores trades, not probabilities. The AUC is
+//! training mean's (`Holdout::log_loss_refusal`), and the trades taken, at
+//! least the minimum count (`Minimums`), earned per trade at least the minimum
+//! net P&L and more than every trade of the rows did. The log loss and the AUC
+//! are ours (`score`): Nautilus scores trades, not probabilities. The AUC is
 //! reported, never required.
 
 use std::fmt;
@@ -31,12 +31,7 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    dataset::DatasetRow,
-    payoff::{self, Realised},
-    store::{LoadedModel, SideModel},
-    targets::Side,
-};
+use super::{dataset::DatasetRow, payoff::Realised, targets::Side};
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -56,8 +51,8 @@ pub struct Trade {
 pub(super) struct Example {
     pub features: Vec<f64>,
     pub label: bool,
-    /// The trade whose gain the label is: a side model's side's, a meta's
-    /// primary's chosen side's.
+    /// The trade whose gain the label is: of a side model's side, or of the
+    /// side picked for a meta.
     pub trade: Trade,
     /// The unit of the trade's payoff in the row (`Realised::unit`).
     pub unit: f64,
@@ -75,15 +70,16 @@ pub struct Trades {
     pub win_rate: Option<f64>,
 }
 
-/// What a model's decisions earned on rows, beside every trade of the
-/// rows, at the commission and at `STRESS` times it.
+/// What decisions earned on rows, beside every trade of the rows, at the
+/// commission and at `STRESS` times it; all at nought, the default, of no trade
+/// judged.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Earnings {
-    /// The trades the rule took.
+    /// The trades taken.
     pub taken: Trades,
     /// Every trade of the rows.
     pub every: Trades,
-    /// The trades the rule took, at `STRESS` times the commission.
+    /// The trades taken, at `STRESS` times the commission.
     pub taken_stressed: Trades,
     /// Every trade, at `STRESS` times the commission.
     pub every_stressed: Trades,
@@ -92,6 +88,9 @@ pub struct Earnings {
 /// A model's holdout as its publication reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Holdout {
+    /// What was judged: a meta's own, or the picks between the sides, the same
+    /// for each side; none for a side refused on its log loss with no side
+    /// surviving.
     pub earnings: Earnings,
     /// The log loss of the model's calibrated probabilities.
     pub log_loss: f64,
@@ -102,8 +101,8 @@ pub struct Holdout {
     pub auc: Option<f64>,
 }
 
-/// The least a model's holdout is published with: its rule's net P&L per
-/// trade, in the target's P&L currency, over at least a count of trades.
+/// The least a model's holdout is published with: the net P&L per trade taken,
+/// in the target's P&L currency, over at least a count of trades.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Minimums {
     pub min_pnl: f64,
@@ -115,39 +114,27 @@ pub struct Minimums {
 pub enum Refusal {
     /// Its log loss is not below the baseline's.
     LogLoss { log_loss: f64, baseline: f64 },
-    /// Its rule took fewer trades than the minimum.
+    /// Fewer trades were taken than the minimum.
     Trades { trades: usize, min_trades: usize },
-    /// Its rule's net P&L per trade is below the minimum.
+    /// The net P&L per trade taken is below the minimum.
     MinPnl { pnl: f64, min_pnl: f64 },
-    /// Its rule's net P&L per trade is not above every trade's.
+    /// The net P&L per trade taken is not above every trade's.
     Every { pnl: f64, every: f64 },
 }
 
-/// A model's decision rule on a row: whether it takes the row's trade,
-/// judging a model of its level.
-pub(super) trait Rule: Copy {
-    /// The models the rule judges.
-    type Model;
-
-    /// The calibrated probability `model` predicts on `example`, and
-    /// whether the rule takes the example's trade.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the model fails to predict.
-    fn judge(self, model: &Self::Model, example: &Example) -> anyhow::Result<(f64, bool)>;
-}
-
-/// A side model's decision rule: its side's trade taken when the side
-/// model's expected net P&L at its probability, on the row's unit, clears
-/// the margin (`payoff::pick`), as the handle trades it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Margin(pub f64);
-
-/// A meta model's decision rule: the primary's trade taken from the
-/// threshold, as the handle takes it.
+/// A meta model's decision rule: the trade of the side picked taken from the
+/// threshold (`takes`), in a decision as in a holdout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Threshold(pub f64);
+
+impl Threshold {
+    /// Whether a meta model's `probability` takes the trade: at or above
+    /// the threshold, so NaN does not.
+    #[must_use]
+    pub fn takes(self, probability: f64) -> bool {
+        probability >= self.0
+    }
+}
 
 impl Trade {
     /// Its net P&L had the commission been `factor` times what it was.
@@ -170,7 +157,7 @@ impl Trades {
 }
 
 impl Earnings {
-    /// The earnings of `rows`, each whether the rule took it and its trade.
+    /// The earnings of `rows`, each whether the decision took it and its trade.
     #[must_use]
     pub fn of(rows: &[(bool, Trade)]) -> Self {
         let trades = |taken_only: bool, factor: f64| {
@@ -196,13 +183,10 @@ impl Holdout {
     /// P&L and every trade's; none if it is.
     #[must_use]
     pub fn refusal(&self, minimums: Minimums) -> Option<Refusal> {
-        let Earnings { taken, every, .. } = self.earnings;
-        if self.log_loss >= self.baseline_log_loss {
-            return Some(Refusal::LogLoss {
-                log_loss: self.log_loss,
-                baseline: self.baseline_log_loss,
-            });
+        if let Some(refusal) = self.log_loss_refusal() {
+            return Some(refusal);
         }
+        let Earnings { taken, every, .. } = self.earnings;
         if taken.count < minimums.min_trades {
             return Some(Refusal::Trades {
                 trades: taken.count,
@@ -219,6 +203,16 @@ impl Holdout {
         // Every trade includes those taken: it has an expectancy too.
         let every = every.expectancy.unwrap_or(f64::NAN);
         (pnl <= every).then_some(Refusal::Every { pnl, every })
+    }
+
+    /// Why a model of this holdout is not published whatever it earned: its
+    /// log loss not below the baseline's.
+    #[must_use]
+    pub fn log_loss_refusal(&self) -> Option<Refusal> {
+        (self.log_loss >= self.baseline_log_loss).then_some(Refusal::LogLoss {
+            log_loss: self.log_loss,
+            baseline: self.baseline_log_loss,
+        })
     }
 }
 
@@ -248,28 +242,6 @@ impl Example {
     /// The realised value of its trade: its net P&L over its unit.
     pub(super) fn realised(&self) -> f64 {
         self.trade.pnl / self.unit
-    }
-}
-
-impl Rule for Margin {
-    type Model = SideModel;
-
-    fn judge(self, model: &SideModel, example: &Example) -> anyhow::Result<(f64, bool)> {
-        let probability = model.predict(&example.features)?;
-        let expected = model.expected_pnl(probability, example.unit);
-        Ok((
-            probability,
-            payoff::pick([((), expected, self.0)]).is_some(),
-        ))
-    }
-}
-
-impl Rule for Threshold {
-    type Model = LoadedModel;
-
-    fn judge(self, model: &LoadedModel, example: &Example) -> anyhow::Result<(f64, bool)> {
-        let probability = model.predict(&example.features)?;
-        Ok((probability, probability >= self.0))
     }
 }
 
@@ -350,6 +322,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_threshold_takes_a_probability_at_or_above_it_and_not_nan() {
+        let threshold = Threshold(0.6);
+
+        assert!(threshold.takes(0.6));
+        assert!(threshold.takes(0.61));
+        assert!(!threshold.takes(0.59));
+        assert!(!threshold.takes(f64::NAN));
+    }
+
     /// Taken, wins of 3 and a loss of 2: 3 times 2/3 less 2 times 1/3,
     /// 4/3. Every trade, besides a win of 0.5 and a loss of 2: the mean
     /// win 13/6 three times in five, the loss 2 twice, 0.5. At 1.5 times
@@ -398,7 +380,7 @@ mod tests {
         );
     }
 
-    /// A holdout whose rule took 3 trades of 1.2 each, every trade's 0.4,
+    /// A holdout whose decision took 3 trades of 1.2 each, every trade's 0.4,
     /// its log loss 0.6 against the baseline's 0.69.
     fn holdout() -> Holdout {
         let trades = |count, expectancy| Trades {

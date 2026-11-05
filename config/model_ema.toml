@@ -65,8 +65,8 @@ window = "720h"
 holdout = "120h"
 # Both sides traded, each from an expected net P&L of 0.5 USD a trade.
 margins = { long = 0.5, short = 0.5 }
-# A side's model is published if its decisions earn at least 1 USD a trade
-# over at least 30 trades of the holdout.
+# The sides' models are published together if the trades picked between them
+# earn at least 1 USD a trade over at least 30 trades of the holdout.
 min_pnl = 1.0
 min_trades = 30
 learner = { kind = "lightgbm" }

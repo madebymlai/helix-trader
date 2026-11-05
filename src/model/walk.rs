@@ -13,7 +13,7 @@
 //! (`Schedule::times`: each retrain time, or, never retrained, the start
 //! alone) whose plan fits a model (`Schedule::plan`), each planned once
 //! the trains before it published. Never retrained, a backtest whose
-//! primary or meta then has no model in use at its start is refused: it
+//! sides or meta then have no model in use at its start is refused: it
 //! would trade nothing (`Schedule::ensure_trades`). Each build and train
 //! is a child process in a backtest (one Nautilus node per process),
 //! handed in by the caller; a train finds the days it reads from there
@@ -40,12 +40,18 @@
 //! that decided it, and a row decided with no model, as a side's never
 //! retrained with none in use at the start, has no baseline either. The
 //! AUC and log loss (`score`) of both are given per side, per retrain
-//! period and over the span, and what the model's decisions earned there
-//! (`holdout::Earnings`), its decision rule taking the trades it would
-//! have taken (`holdout::Rule`: a side's expected net P&L clearing its
-//! margin, a meta's probability its threshold), beside every trade of the
-//! rows it decided, at the commission and at 1.5 times it: the figures a
-//! train's holdout is judged on, out of sample.
+//! period and over the span, on all the side's rows with a model, and what was
+//! earned there (`holdout::Earnings`), beside every trade of those rows, its
+//! own, at the commission and at 1.5 times it. A side's trades taken are those
+//! picked for it on each row by the decision itself
+//! (`deciding::DecidingModels::pick`), the picks a train's gate reads (`train`),
+//! before any meta: a row where both sides clear counts one trade, for the side
+//! expected the most, a tie none, so with no meta the sides' trades add up to
+//! the decisions returned. A meta's are the trades of the side picked from its
+//! threshold (`holdout::Threshold`), the figures its holdout is judged on, out
+//! of sample. All this judges the decision the handle returns, on the target's
+//! trade: no section adds the sides up, as the backtest's report gives what the
+//! strategy actually traded, which can differ whenever it filters its decisions.
 
 use std::{collections::BTreeSet, fmt, path::Path};
 
@@ -56,9 +62,10 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::ModelConfig,
-    dataset::{self, Dataset, DatasetVenue},
+    dataset::{self, Dataset, DatasetRow, DatasetVenue},
+    deciding::DecidingModels,
     features::FeatureSet,
-    holdout::{Earnings, Example, Margin, Rule, STRESS, Threshold},
+    holdout::{Earnings, Example, STRESS, Threshold},
     meta,
     payoff::Realised,
     schedule::{Models, Schedule},
@@ -82,7 +89,7 @@ pub struct WalkForward {
 }
 
 /// The out-of-sample scores of a backtest: of each model, the meta's on
-/// the rows the primary in use made a trade of.
+/// the rows a side is picked on.
 pub type Scores = Models<ModelScores>;
 
 /// The out-of-sample scores of one model.
@@ -95,7 +102,7 @@ pub struct ModelScores {
     /// The baselines' over the span, each row's its model's, on the
     /// model's rows.
     pub baseline: Score,
-    /// What the model's decisions earned over the span.
+    /// What was earned over the span, as in a period.
     pub earnings: Earnings,
 }
 
@@ -114,7 +121,8 @@ pub struct Period {
     /// The baselines', on the same rows: each row's that of the model that
     /// decided it.
     pub baseline: Score,
-    /// What the model's decisions earned, on the rows decided with one.
+    /// What was earned on the rows decided with one: the trades taken, a
+    /// side's those picked for it, beside every trade of those rows.
     pub earnings: Earnings,
 }
 
@@ -171,7 +179,7 @@ impl WalkForward {
     /// of its days); then `train` trains at each train time of the span
     /// (`Schedule::times`) whose plan fits a model (`Schedule::plan`,
     /// `Training::train_at`), in time order, each planned after the
-    /// trains before it: a primary model they publish gives the meta its
+    /// trains before it: a side's model they publish gives the meta its
     /// rows from then on. A backtest that could then trade nothing is
     /// refused (`Schedule::ensure_trades`).
     ///
@@ -179,7 +187,7 @@ impl WalkForward {
     ///
     /// Returns an error if the span is empty, the dataset or a store
     /// cannot be read, as `build` and `train` do, or, never retrained, if
-    /// the primary or the meta has no model in use at `start`.
+    /// the sides or the meta have no model in use at `start`.
     pub fn prepare(
         &self,
         start: Timestamp,
@@ -224,6 +232,7 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
+        let picked = self.picked(&rows)?;
         let mut scores = Scores {
             long: None,
             short: None,
@@ -241,7 +250,9 @@ impl WalkForward {
                 end,
                 &examples,
                 level.swap(),
-                Margin(level.margin()),
+                |model, row, example| {
+                    Ok((model.predict(&example.features)?, picked[row] == Some(side)))
+                },
             )?;
             match side {
                 Side::Long => scores.long = Some(side_scores),
@@ -249,6 +260,7 @@ impl WalkForward {
             }
         }
         if let Some(level) = self.models.meta() {
+            let threshold = Threshold(level.config().threshold);
             let examples = meta::examples(
                 &self.models,
                 &rows.iter().collect::<Vec<_>>(),
@@ -260,27 +272,46 @@ impl WalkForward {
                 end,
                 &examples,
                 level.swap(),
-                Threshold(level.config().threshold),
+                |model, _, example| {
+                    let probability = model.predict(&example.features)?;
+                    Ok((probability, threshold.takes(probability)))
+                },
             )?);
         }
         Ok(scores)
     }
+
+    /// The side picked on each of `rows`, in time order, by the decision
+    /// itself, before any meta: on the row's units, among the models in use
+    /// then (`DecidingModels::pick`).
+    fn picked(&self, rows: &[DatasetRow]) -> anyhow::Result<Vec<Option<Side>>> {
+        let mut models = DecidingModels::new(&self.models)?;
+        rows.iter()
+            .map(|row| {
+                let picked = models.pick(
+                    Timestamp::from(row.ts_event),
+                    &row.features,
+                    self.realised.units(row)?,
+                )?;
+                Ok(picked.map(|picked| picked.side))
+            })
+            .collect()
+    }
 }
 
 /// The scores over `[start, end)`, retrained at `times`, of the models
-/// `models` swaps in on `examples`, in time order, deciding by `rule`,
-/// each beside its own baseline on the rows it decided.
-fn score<R: Rule>(
+/// `models` swaps in on `examples`, in time order, each beside its own baseline
+/// on the rows it decided. `judge` gives, of the model in use on an example, at
+/// its position in `examples`, its calibrated probability and whether the
+/// example's trade was taken.
+fn score<M: Baselined>(
     times: &[Timestamp],
     start: Timestamp,
     end: Timestamp,
     examples: &[Example],
-    mut models: Swap<R::Model>,
-    rule: R,
-) -> anyhow::Result<ModelScores>
-where
-    R::Model: Baselined,
-{
+    mut models: Swap<M>,
+    judge: impl Fn(&M, usize, &Example) -> anyhow::Result<(f64, bool)>,
+) -> anyhow::Result<ModelScores> {
     let valid_froms = models.store().valid_froms()?;
     let (mut model_rows, mut baseline_rows, mut model_trades) = (vec![], vec![], vec![]);
     let mut periods = vec![];
@@ -289,15 +320,16 @@ where
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
         let (mut period_models, mut by_model, mut by_baseline, mut trades) =
             (BTreeSet::new(), vec![], vec![], vec![]);
-        for example in examples
+        for (row, example) in examples
             .iter()
-            .filter(|example| from_ns <= example.ts_event && example.ts_event < to_ns)
+            .enumerate()
+            .filter(|(_, example)| from_ns <= example.ts_event && example.ts_event < to_ns)
         {
             if let Some((valid_from, model)) =
                 models.at(Timestamp::from(example.ts_event), &valid_froms)
             {
                 period_models.insert(valid_from);
-                let (probability, taken) = rule.judge(model, example)?;
+                let (probability, taken) = judge(model, row, example)?;
                 by_model.push((probability, example.label));
                 by_baseline.push((model.baseline(), example.label));
                 trades.push((taken, example.trade));
@@ -390,8 +422,9 @@ fn lines(f: &mut fmt::Formatter<'_>, baseline: bool, score: Score) -> fmt::Resul
     writeln!(f, "  {rows}: {}", score.rows)
 }
 
-/// The lines of `earnings`: the trades the model's decisions took, every
-/// trade of the rows it decided, and both at `STRESS` times the commission.
+/// The lines of `earnings`: the trades taken, a side's those picked for it,
+/// every trade of the rows the model decided, and both at `STRESS` times the
+/// commission.
 fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
     let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
     let Earnings {
@@ -429,8 +462,10 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_model::{
         identifiers::InstrumentId,
+        instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Quantity},
     };
+    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -439,13 +474,13 @@ mod tests {
         config::{Margins, MetaConfig},
         dataset::Commission,
         decide::{DecisionRule, FeatureRow},
-        features::testing::last_mid,
+        features::{meta_names, testing::last_mid},
         holdout::{Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         schedule::Retrain,
         store::{ModelManifest, ModelStore, StoredModel},
-        targets::{Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow},
+        targets::{Distance, Distances, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -809,17 +844,208 @@ mod tests {
         close(short.baseline.log_loss, 0.867_563);
     }
 
-    /// Worked by hand: each model expects a win and a loss of 1 USD, so a
-    /// side trades from a calibrated 1/2, a feature of 0.5. The 7th, the
-    /// long takes the win at 0.8 and the loss at 0.6, nought per trade,
-    /// every trade (with the loss at 0.3) -1/3; the 8th, the win at 0.9,
-    /// every trade (with the win at 0.2) 1; the span, two wins and a loss
-    /// taken, 1/3, of five trades, 1/5. At 1.5 times the commission of 0.1
-    /// each trade makes 0.05 less. The short, the reverse trades of the
-    /// same decisions, takes on the 7th a loss and a win, nought, every
-    /// trade 1/3.
+    /// The scores over the 7th and the 8th of a walk in `dir` trading `side`
+    /// alone, a train publishing its model at each retrain time.
+    fn one_sided_scores(dir: &Path, side: Side) -> Scores {
+        let margin = |traded| (traded == side).then_some(0.0);
+        let config = ModelConfig {
+            margins: Margins {
+                long: margin(Side::Long),
+                short: margin(Side::Short),
+            },
+            ..config()
+        };
+        let walk = walk_of(dir, config.clone());
+        let span = ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z");
+        prepared(dir, &walk, span, Some(&config)).unwrap();
+        walk.scores(at(span.0), at(span.1)).unwrap()
+    }
+
+    /// Worked by hand, with no side to pick between: each model expects a win
+    /// and a loss of 1 USD, so a side trades from a calibrated 1/2, a feature
+    /// of 0.5. The 7th, the long takes the win at 0.8 and the loss at 0.6,
+    /// nought per trade, every trade (with the loss at 0.3) -1/3; the 8th, the
+    /// win at 0.9, every trade (with the win at 0.2) 1; the span, two wins and
+    /// a loss taken, 1/3, of five trades, 1/5. At 1.5 times the commission of
+    /// 0.1 each trade makes 0.05 less.
     #[test]
     fn each_period_reports_what_the_models_decisions_earned_beside_every_trade() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = one_sided_scores(dir.path(), Side::Long);
+
+        let long = scores.long.as_ref().unwrap();
+        let [first, second] = &long.periods[..] else {
+            panic!("{scores:?}");
+        };
+        trades_are(first.earnings.taken, 2, 0.0);
+        close(first.earnings.taken.win_rate, 0.5);
+        trades_are(first.earnings.every, 3, -1.0 / 3.0);
+        trades_are(first.earnings.taken_stressed, 2, -0.05);
+        trades_are(first.earnings.every_stressed, 3, -1.0 / 3.0 - 0.05);
+        trades_are(second.earnings.taken, 1, 1.0);
+        trades_are(second.earnings.every, 2, 1.0);
+        trades_are(long.earnings.taken, 3, 1.0 / 3.0);
+        trades_are(long.earnings.every, 5, 0.2);
+    }
+
+    /// The short alone, the reverse trades of the same decisions, takes on the
+    /// 7th a loss at 0.8 and a win at 0.6, nought, every trade 1/3.
+    #[test]
+    fn a_short_only_strategy_reports_what_its_decisions_earned_beside_every_trade() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = one_sided_scores(dir.path(), Side::Short);
+
+        let short = &scores.short.as_ref().unwrap().periods[0];
+        trades_are(short.earnings.taken, 2, 0.0);
+        trades_are(short.earnings.every, 3, 1.0 / 3.0);
+    }
+
+    /// The calibration of the short of `publish_opposed`: the odds `o` of a
+    /// prediction become `o^-0.9`, its probability the complement of what
+    /// `CALIBRATION` makes of the same prediction.
+    const OPPOSED: Calibration = Calibration { a: 0.9, b: 0.0 };
+
+    /// Publishes for `side` of a walk in `dir` as `config` says a fake model
+    /// valid from `valid_from`, with the baseline a train then fits
+    /// (`trained_baseline`), that expects a win of 3 USD and a loss of 1, so
+    /// `4p - 1` at a calibrated probability `p`, trading from 1/4. On a feature
+    /// `f` the long's `p` is `c(f)` (`CALIBRATION`), the short's `1 - c(f)`
+    /// (`OPPOSED`).
+    fn publish_opposed(dir: &Path, config: &ModelConfig, side: Side, valid_from: Timestamp) {
+        let fingerprint = dataset(dir, config).fingerprint().to_string();
+        let mut opposed = model(valid_from, fingerprint, trained_baseline(side, valid_from));
+        opposed.manifest.payoff = Some(Payoff {
+            win: 3.0,
+            loss: 1.0,
+        });
+        if side == Side::Short {
+            opposed.manifest.calibration = OPPOSED;
+        }
+        store(dir, config, side).publish(&opposed).unwrap();
+    }
+
+    /// The scores over the 7th and the 8th of `walk(dir)`, with `rows` and each
+    /// side's opposed models (`publish_opposed`) valid from the 7th and the 8th.
+    /// With c(0.2) = 0.223, c(0.3) = 0.318, c(0.6) = 0.590, c(0.8) = 0.777 and
+    /// c(0.9) = 0.878, each side's trade and what its model expects of it:
+    ///
+    /// - 04:00 of the 7th, 0.8: the long a win, 2.11; the short a loss, -0.11.
+    ///   Only the long clears.
+    /// - 08:00 of the 7th, 0.3: the long a loss, 0.27; the short a win, 1.73.
+    ///   Both clear, and the short is picked.
+    /// - 12:00 of the 7th, 0.6: the long a loss, 1.36; the short a win, 0.64.
+    ///   Both clear, and the long is picked.
+    /// - 06:00 of the 8th, 0.9: the long a win, 2.51; the short a loss, -0.51.
+    ///   Only the long clears.
+    /// - 10:00 of the 8th, 0.2: the long a win, -0.11; the short a loss, 2.11.
+    ///   Only the short clears.
+    fn opposed_scores(dir: &Path) -> Scores {
+        let walk = walk(dir);
+        build(dir);
+        for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
+            for side in Side::BOTH {
+                publish_opposed(dir, &config(), side, valid_from);
+            }
+        }
+        walk.scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap()
+    }
+
+    /// `trades` are `count` trades of `expectancy` net P&L per trade.
+    fn trades_are(trades: Trades, count: usize, expectancy: f64) {
+        assert_eq!(trades.count, count, "{trades:?}");
+        close(trades.expectancy, expectancy);
+    }
+
+    /// On the rows of `opposed_scores`: the 7th, the long takes the win at 0.8
+    /// and the loss at 0.6, nought per trade, the short the win at 0.3, 1,
+    /// though each side clears on one more; the 8th, the long the win at 0.9,
+    /// the short the loss at 0.2. The span, the long's two wins and a loss, 1/3,
+    /// the short's win and loss, nought: five trades of five rows.
+    #[test]
+    fn each_trade_counts_for_the_side_picked_alone_where_both_sides_clear() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = opposed_scores(dir.path());
+
+        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
+        trades_are(long.periods[0].earnings.taken, 2, 0.0);
+        close(long.periods[0].earnings.taken.win_rate, 0.5);
+        trades_are(short.periods[0].earnings.taken, 1, 1.0);
+        close(short.periods[0].earnings.taken.win_rate, 1.0);
+        trades_are(long.periods[1].earnings.taken, 1, 1.0);
+        trades_are(short.periods[1].earnings.taken, 1, -1.0);
+        trades_are(long.earnings.taken, 3, 1.0 / 3.0);
+        trades_are(short.earnings.taken, 2, 0.0);
+    }
+
+    /// At 1.5 times the commission of 0.1, each trade picked on the rows of
+    /// `opposed_scores` makes 0.05 less: the long's on the 7th, a win and a
+    /// loss, -0.05, the short's, a win, 0.95.
+    #[test]
+    fn a_sides_stressed_earnings_count_only_the_trades_picked_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = opposed_scores(dir.path());
+
+        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
+        trades_are(long.periods[0].earnings.taken_stressed, 2, -0.05);
+        trades_are(short.periods[0].earnings.taken_stressed, 1, 0.95);
+        trades_are(long.earnings.taken_stressed, 3, 1.0 / 3.0 - 0.05);
+        trades_are(short.earnings.taken_stressed, 2, -0.05);
+    }
+
+    /// On the rows of `opposed_scores`, the long's own trades: on the 7th a
+    /// win and two losses, -1/3; on the 8th two wins, 1; the span, 1/5. The
+    /// short's, the reverse: 1/3, -1 and -1/5. At 1.5 times the commission
+    /// each makes 0.05 less.
+    #[test]
+    fn each_sides_every_trade_stays_its_own_beside_the_trades_picked() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = opposed_scores(dir.path());
+
+        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
+        trades_are(long.periods[0].earnings.every, 3, -1.0 / 3.0);
+        trades_are(short.periods[0].earnings.every, 3, 1.0 / 3.0);
+        trades_are(long.periods[1].earnings.every, 2, 1.0);
+        trades_are(short.periods[1].earnings.every, 2, -1.0);
+        trades_are(long.earnings.every, 5, 0.2);
+        trades_are(short.earnings.every, 5, -0.2);
+        trades_are(long.earnings.every_stressed, 5, 0.15);
+        trades_are(short.earnings.every_stressed, 5, -0.25);
+    }
+
+    /// Worked as in
+    /// `each_period_scores_its_model_beside_that_models_own_baseline_on_the_same_rows`:
+    /// on the rows of `opposed_scores` the short's probabilities are the
+    /// complements of the long's and its labels the reverse, and its baseline
+    /// the complement too, so on the 7th each side has the one AUC and log
+    /// loss, on all three rows, though two are picked for the long and one for
+    /// the short.
+    #[test]
+    fn each_sides_auc_log_loss_and_baseline_stay_on_all_its_rows_with_a_model() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = opposed_scores(dir.path());
+
+        for side in [scores.long.unwrap(), scores.short.unwrap()] {
+            let first = &side.periods[0];
+            assert_eq!((first.model.rows, first.baseline.rows), (3, 3));
+            close(first.model.auc, 1.0);
+            close(first.model.log_loss, 0.509_155);
+            close(first.baseline.auc, 0.5);
+            close(first.baseline.log_loss, 0.867_563);
+            assert_eq!((side.model.rows, side.baseline.rows), (5, 5));
+        }
+    }
+
+    /// The models of both sides alike: on every row they expect the same, at
+    /// 0.8, 0.6 and 0.9 clearing their margins, at 0.3 and 0.2 not.
+    #[test]
+    fn a_row_where_the_sides_tie_counts_no_trade_for_either() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         prepare(dir.path(), &walk);
@@ -828,26 +1054,170 @@ mod tests {
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
-        let long = scores.long.as_ref().unwrap();
-        let [first, second] = &long.periods[..] else {
-            panic!("{scores:?}");
+        for side in [scores.long.unwrap(), scores.short.unwrap()] {
+            assert_eq!(side.earnings.taken.count, 0, "{side:?}");
+            assert_eq!(side.earnings.taken_stressed.count, 0, "{side:?}");
+            assert_eq!(side.earnings.every.count, 5, "{side:?}");
+            assert_eq!(side.model.rows, 5, "{side:?}");
+        }
+    }
+
+    /// The short's first model is the 8th's. On the 7th the long decides alone,
+    /// and all three rows clear: a win and two losses, -1/3. On the 8th the
+    /// models pick as in `opposed_scores`.
+    #[test]
+    fn a_side_with_no_model_yet_leaves_the_other_to_decide_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = walk(dir.path());
+        build(dir.path());
+        let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
+        publish_opposed(dir.path(), &config(), Side::Long, seventh);
+        publish_opposed(dir.path(), &config(), Side::Long, eighth);
+        publish_opposed(dir.path(), &config(), Side::Short, eighth);
+
+        let scores = walk.scores(seventh, at("2026-01-09T00:00:00Z")).unwrap();
+
+        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
+        trades_are(long.periods[0].earnings.taken, 3, -1.0 / 3.0);
+        assert_eq!(short.periods[0].earnings.taken.count, 0, "{short:?}");
+        assert_eq!(short.periods[0].earnings.every.count, 0, "{short:?}");
+        trades_are(long.periods[1].earnings.taken, 1, 1.0);
+        trades_are(short.periods[1].earnings.taken, 1, -1.0);
+    }
+
+    /// `config`, on a target with exits on AUD/USD, whose stops' worth the
+    /// scores read.
+    fn with_exits() -> ModelConfig {
+        ModelConfig {
+            target: TargetConfig::builder()
+                .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+                .quantity(Quantity::from(1))
+                .spec(
+                    Target::builder()
+                        .take_profit(Distance::BasisPoints(Decimal::from(20)))
+                        .stop(Distance::BasisPoints(Decimal::from(10)))
+                        .limit(SignedDuration::from_hours(1))
+                        .build(),
+                )
+                .build(),
+            ..config()
+        }
+    }
+
+    /// The row of `row`, a win of the long at 0.8, each side's stop as far as
+    /// `(long, short)` say.
+    fn row_of_stops(time: &str, (long, short): (i64, i64)) -> TargetRow {
+        let distances = |stop| {
+            Some(Distances {
+                take_profit: Decimal::from(3),
+                stop: Decimal::from(stop),
+            })
         };
-        let earned = |trades: Trades, count, expectancy| {
-            assert_eq!(trades.count, count, "{trades:?}");
-            close(trades.expectancy, expectancy);
-        };
-        earned(first.earnings.taken, 2, 0.0);
-        close(first.earnings.taken.win_rate, 0.5);
-        earned(first.earnings.every, 3, -1.0 / 3.0);
-        earned(first.earnings.taken_stressed, 2, -0.05);
-        earned(first.earnings.every_stressed, 3, -1.0 / 3.0 - 0.05);
-        earned(second.earnings.taken, 1, 1.0);
-        earned(second.earnings.every, 2, 1.0);
-        earned(long.earnings.taken, 3, 1.0 / 3.0);
-        earned(long.earnings.every, 5, 0.2);
-        let short = &scores.short.as_ref().unwrap().periods[0];
-        earned(short.earnings.taken, 2, 0.0);
-        earned(short.earnings.every, 3, 1.0 / 3.0);
+        let mut row = row(time, 0.8, true);
+        row.outcomes.long.distances = distances(long);
+        row.outcomes.short.distances = distances(short);
+        row
+    }
+
+    /// The models of both sides alike, expecting the same in R, which each
+    /// row's stops then make money: 2 and 4 away are worth 2 and 4 USD on one
+    /// AUD/USD. At 04:00 the short's is the further and it is picked, its
+    /// trade a loss; at 08:00 the long's, its trade a win. On equal units
+    /// they would tie.
+    #[test]
+    fn a_row_is_picked_on_each_sides_own_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_exits();
+        std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
+        ParquetDataCatalog::new(&dir.path().join("catalog"), None, None, None, None)
+            .write_instruments(vec![InstrumentAny::CurrencyPair(audusd_sim())])
+            .unwrap();
+        let walk = walk_of(dir.path(), config.clone());
+        let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
+        dataset(dir.path(), &config)
+            .write(
+                &[
+                    row_of_stops("2026-01-07T04:00:00Z", (2, 4)),
+                    row_of_stops("2026-01-07T08:00:00Z", (4, 2)),
+                ],
+                seventh,
+                eighth + SignedDuration::from_hours(1),
+            )
+            .unwrap();
+        publish(dir.path(), &config, seventh);
+
+        let scores = walk.scores(seventh, eighth).unwrap();
+
+        trades_are(scores.long.unwrap().earnings.taken, 1, 1.0);
+        trades_are(scores.short.unwrap().earnings.taken, 1, -1.0);
+    }
+
+    /// A fake meta model valid from `valid_from`, of `fingerprint`, on the
+    /// meta's features: its probability that of the row's first feature
+    /// calibrated by `CALIBRATION`.
+    fn meta_model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
+        let names = meta_names(features().names());
+        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![true]).unwrap();
+        let mut meta = model(valid_from, fingerprint, 0.5);
+        meta.manifest.side = None;
+        meta.manifest.payoff = None;
+        meta.manifest.feature_names = names;
+        meta.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
+        meta
+    }
+
+    /// The scores over the 7th and the 8th of `meta_walk(dir)`, with `rows`,
+    /// each side's opposed models (`publish_opposed`) and a meta model
+    /// (`meta_model`) valid from the 7th and the 8th, the meta taking a trade
+    /// from 1/2. The sides pick as in `opposed_scores`.
+    fn opposed_meta_scores(dir: &Path) -> Scores {
+        let walk = meta_walk(dir);
+        build(dir);
+        let config = with_meta();
+        let fingerprint = dataset(dir, &config).fingerprint().to_string();
+        for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
+            for side in Side::BOTH {
+                publish_opposed(dir, &config, side, valid_from);
+            }
+            meta_store(dir)
+                .publish(&meta_model(valid_from, fingerprint.clone()))
+                .unwrap();
+        }
+        walk.scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap()
+    }
+
+    /// On the five rows the sides pick on, the trade of the side picked, the
+    /// meta taking c(0.8), c(0.6) and c(0.9), not c(0.3) and c(0.2). The 7th: a
+    /// win, the short's win and a loss, 1/3, of which it takes the first and
+    /// the last, nought. The 8th: a win and the short's loss, nought, of which
+    /// it takes the win, 1. The span, 1/3 of three beside 1/5 of five.
+    #[test]
+    fn a_metas_earnings_read_the_trades_of_the_side_picked_from_its_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let meta = opposed_meta_scores(dir.path()).meta.unwrap();
+
+        assert_eq!(meta.model.rows, 5);
+        trades_are(meta.periods[0].earnings.taken, 2, 0.0);
+        trades_are(meta.periods[0].earnings.every, 3, 1.0 / 3.0);
+        trades_are(meta.periods[1].earnings.taken, 1, 1.0);
+        trades_are(meta.periods[1].earnings.every, 2, 0.0);
+        trades_are(meta.earnings.taken, 3, 1.0 / 3.0);
+        trades_are(meta.earnings.every, 5, 0.2);
+    }
+
+    /// With a meta filtering the side picked, each side still counts every
+    /// trade picked for it, as in `opposed_scores`: the meta's section says
+    /// which of them it took.
+    #[test]
+    fn a_sides_trades_picked_are_counted_before_any_meta() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let scores = opposed_meta_scores(dir.path());
+
+        trades_are(scores.long.unwrap().earnings.taken, 3, 1.0 / 3.0);
+        trades_are(scores.short.unwrap().earnings.taken, 2, 0.0);
     }
 
     #[test]
@@ -1024,8 +1394,8 @@ Short model scores, out of sample, over the span
         config
     }
 
-    /// The primary's models in the store at both retrain times and the two
-    /// days before, its meta model's at none: the backtest builds from the
+    /// The sides' models in the store at both retrain times and the two
+    /// days before, their meta model's at none: the backtest builds from the
     /// meta's longer window and trains at both times, where the meta lacks
     /// a model.
     #[test]
@@ -1094,10 +1464,10 @@ Short model scores, out of sample, over the span
     }
 
     /// On an empty store the meta waits at the first retrain, the 7th, with
-    /// no primary model before it, so reads no row there: the backtest
-    /// builds from the primary's window, the 6th, not the meta's.
+    /// no side's model before it, so reads no row there: the backtest
+    /// builds from the sides' window, the 6th, not the meta's.
     #[test]
-    fn a_backtest_from_an_empty_store_builds_from_the_primarys_window_its_meta_waiting() {
+    fn a_backtest_from_an_empty_store_builds_from_the_sides_window_its_meta_waiting() {
         let dir = tempfile::tempdir().unwrap();
 
         let built = built(&meta_walk(dir.path()));
@@ -1108,10 +1478,10 @@ Short model scores, out of sample, over the span
         );
     }
 
-    /// The primary's first model is the 6th's: the meta's rows, its
+    /// The sides' first model is the 6th's: the meta's rows, its
     /// decisions, start there, though its window starts on the 5th.
     #[test]
-    fn a_backtest_builds_no_day_before_the_primarys_first_model() {
+    fn a_backtest_builds_no_day_before_the_sides_first_model() {
         let dir = tempfile::tempdir().unwrap();
         for at in [
             at("2026-01-06T00:00:00Z"),
@@ -1145,7 +1515,7 @@ Short model scores, out of sample, over the span
     }
 
     /// A train of `meta_walk(dir)` at `at`, publishing as
-    /// `Training::train_at` may: the primary, and the meta if the primary
+    /// `Training::train_at` may: the sides, and the meta if the sides
     /// had a model before `at`.
     fn train_both(dir: &Path, at: Timestamp) -> anyhow::Result<()> {
         let config = with_meta();
@@ -1161,8 +1531,8 @@ Short model scores, out of sample, over the span
         Ok(())
     }
 
-    /// A meta model has no row before its primary's first model, so none
-    /// is trained at the primary's first retrain time: a second backtest
+    /// A meta model has no row before its sides' first model, so none
+    /// is trained at the sides' first retrain time: a second backtest
     /// of the span finds nothing to train.
     #[test]
     fn a_second_backtest_with_a_meta_model_trains_nothing() {
@@ -1192,11 +1562,11 @@ Short model scores, out of sample, over the span
         assert_eq!(trained.take(), []);
     }
 
-    /// A backtest from the 8th trains no meta there, the primary's first
-    /// model; a backtest from the 7th then trains the primary at the 7th
+    /// A backtest from the 8th trains no meta there, the sides' first
+    /// model; a backtest from the 7th then trains the sides at the 7th
     /// first, which gives the meta at the 8th rows: it trains there too.
     #[test]
-    fn a_backtest_from_earlier_trains_the_meta_where_the_primary_now_precedes_it() {
+    fn a_backtest_from_earlier_trains_the_meta_where_the_sides_now_precede_it() {
         let dir = tempfile::tempdir().unwrap();
         let walk = meta_walk(dir.path());
         let end = at("2026-01-10T00:00:00Z");
@@ -1348,9 +1718,9 @@ Short model scores, out of sample, over the span
     }
 
     /// Never retrained, the train at the start published no side: the
-    /// backtest would trade nothing, and is refused, naming the primary.
+    /// backtest would trade nothing, and is refused, naming the sides.
     #[test]
-    fn a_backtest_never_retrained_with_no_primary_model_at_its_start_is_refused_naming_it() {
+    fn a_backtest_never_retrained_with_no_sides_model_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), never());
 
@@ -1363,7 +1733,7 @@ Short model scores, out of sample, over the span
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("primary"), "{err}");
+        assert!(err.contains("no side has a model in use"), "{err}");
         assert!(!err.contains("meta"), "{err}");
     }
 
@@ -1377,10 +1747,10 @@ Short model scores, out of sample, over the span
 
     /// What `prepare` of the walk of `never_with_meta` in `dir` over the
     /// 7th and the 8th asked for, or its error, on an empty store. A train
-    /// publishes as a train of two times would: if `primary`, a model of
+    /// publishes as a train of two times would: if `sides`, a model of
     /// each side valid from the meta's window of 48 hours before it, and
     /// if `meta`, a meta model valid from it.
-    fn prepared_two_time(dir: &Path, primary: bool, meta: bool) -> anyhow::Result<Asked> {
+    fn prepared_two_time(dir: &Path, sides: bool, meta: bool) -> anyhow::Result<Asked> {
         let config = never_with_meta();
         let walk = walk_of(dir, config.clone());
         let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
@@ -1393,7 +1763,7 @@ Short model scores, out of sample, over the span
             },
             |at| {
                 trained.borrow_mut().push(at);
-                if primary {
+                if sides {
                     publish(dir, &config, at - SignedDuration::from_hours(48));
                 }
                 if meta {
@@ -1438,25 +1808,28 @@ Short model scores, out of sample, over the span
             .to_string();
 
         assert!(err.contains("meta"), "{err}");
-        assert!(!err.contains("primary"), "{err}");
+        assert!(!err.contains("no side"), "{err}");
     }
 
     /// Never retrained, on an empty store, the train at the start
     /// publishes no side, and so leaves the meta waiting: the backtest is
-    /// refused, naming the primary and the meta.
+    /// refused, naming the sides and the meta.
     #[test]
-    fn a_backtest_never_retrained_whose_primary_was_refused_at_its_start_is_refused_naming_both() {
+    fn a_backtest_never_retrained_whose_sides_were_refused_at_its_start_is_refused_naming_both() {
         let dir = tempfile::tempdir().unwrap();
 
         let err = prepared_two_time(dir.path(), false, false)
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("primary") && err.contains("meta"), "{err}");
+        assert!(
+            err.contains("no side has a model in use") && err.contains("meta"),
+            "{err}"
+        );
     }
 
     /// Retrained, a backtest whose every train published nothing runs: a
-    /// later retrain may publish, and its primary's scores stay.
+    /// later retrain may publish, and its sides' scores stay.
     #[test]
     fn a_retrained_backtest_whose_trains_were_all_refused_still_runs() {
         let dir = tempfile::tempdir().unwrap();
