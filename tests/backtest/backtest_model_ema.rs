@@ -8,8 +8,8 @@
 //! and the holdout's figures, as does a live node's launcher
 //! (`model::launcher`) starting that `train` as its child. A model
 //! published straight to the store, a baseline (`common::dataset`), trades
-//! from its valid-from: every decision a long on the horizon, closed 30
-//! minutes later. The binary's `backtest` builds its dataset and retrains
+//! from its valid-from: every decision a long on its time-only target,
+//! closed 30 minutes later. The binary's `backtest` builds its dataset and retrains
 //! on the schedule first, in child processes of its own, a retrain
 //! keeping the model no failure.
 
@@ -40,7 +40,7 @@ use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up an hour, learning whether the long of a 30-minute
-/// horizon gains, its trades, on
+/// time-only target gains, its trades, on
 /// a window of 46 hours, the last 12 held out and the 12 before them
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
@@ -62,8 +62,7 @@ const CONFIG: &str = r#"
 
     [model]
     decision = { every = "1h" }
-    targets = { horizon = "30m" }
-    label = "horizon"
+    target = { limit = "30m" }
     retrain = "24h"
     window = "46h"
     holdout = "12h"
@@ -297,7 +296,7 @@ fn backtest(
 
 /// A backtest from midnight of the 23rd to noon of the 24th builds its
 /// dataset, in a child process of the binary, from the first window,
-/// 02:00 of the 21st, to the end of the 24th plus the horizon, then
+/// 02:00 of the 21st, to the end of the 24th plus the target's limit, then
 /// retrains at midnight of each, in children too: without an edge, each
 /// keeps the current model, there being none, and the backtest goes on,
 /// each reason printed with its figures, to a run with no model: no

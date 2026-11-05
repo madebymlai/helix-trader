@@ -1,17 +1,19 @@
-//! The targets of a strategy's decisions, read from real orders on
+//! The target of a strategy's decisions, read from real orders on
 //! Nautilus' simulated venue.
 //!
-//! In a dataset run, at each decision `Targets::open` sends, for each
-//! target of the config and on each side, a long and a short, the orders
-//! whose outcome is the target, on a hedging margin account so that each
-//! is a position of its own, each the trade a strategy trading on a model
-//! of that target would place, sent through the shared order module
-//! (`strategy::orders::Trade::send_as`, the one sending of both):
+//! In a dataset run, at each decision `Targets::open` sends, on each side,
+//! a long and a short, the orders whose outcome is the target, on a hedging
+//! margin account so that each is a position of its own, each the trade a
+//! strategy trading on a model of that target would place, sent through the
+//! shared order module (`strategy::orders::Trade::send_as`, the one sending
+//! of both). The target (`Target`) has one limit and its exits, both or
+//! neither:
 //!
-//! - a triple barrier (`Barrier`): a bracket, a market entry, a take-profit
-//!   limit and a stop, the two exits one-updates-the-other, closed at the
-//!   limit after its send;
-//! - a horizon: a market entry closed at the horizon after its send.
+//! - with them: a bracket, a market entry, a take-profit limit and a stop,
+//!   the two exits one-updates-the-other, closed at the limit after its
+//!   send;
+//! - without them, time only: a market entry closed at the limit after its
+//!   send.
 //!
 //! The strategy hands its time events to the order module
 //! (`orders::on_time_event`), which at a trade's time limit cancels its
@@ -25,12 +27,12 @@
 //! trade, else the close of its last bar. Each distance is relative
 //! (`Distance`): basis points of that price, or multiples of an average
 //! true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR`
-//! unless the barrier gives its arguments, built by
+//! unless the target gives its arguments, built by
 //! Nautilus' `AverageTrueRange::new` as the config is validated, so that
 //! an argument Nautilus refuses panics at load. Its bars are Nautilus' bars of
 //! the instrument at the decision cadence, so a decision reads the bar
 //! closing at its time, built from what the strategy reads of it
-//! (`TargetsConfig::atr_bars`): the mids of its quotes, else the last
+//! (`TargetConfig::atr_bars`): the mids of its quotes, else the last
 //! prices of its trades, else, of its source bars alone, a composite bar
 //! type built from them. A backtest replays a source bar stamped at its
 //! close before the timer closing the bar of the cadence at that instant,
@@ -40,24 +42,26 @@
 //! decision on cold features is none. Each exit is on the instrument's
 //! nearest tick (Nautilus' tick grid), a tie away from the decision's
 //! price; an exit on the decision's price, no distance (a stop worth
-//! nothing, a P&L in R of none), opens no target either.
+//! nothing, a P&L in R of none), opens no target either. A time-only target
+//! has no distance, so no ATR: nothing of it is built, checked or
+//! subscribed to.
 //!
-//! Each order's client order id names its decision, target, side and leg,
-//! `D{n}-{B|H}{L|S}-{E|TP|SL}`: the decision's number in the run, `B` a
-//! barrier and `H` a horizon, `L` long and `S` short, the entry, take
-//! profit or stop. The outcome of a target is read from Nautilus' events
-//! alone: a closed position's opening order names its decision and side,
-//! its closing order the exit (a take profit, a stop, or a time close), and Nautilus reports its realised P&L net of commission,
-//! the position the commissions it is net of. The only state of our own
-//! is the rows being assembled.
+//! Each order's client order id names its decision, side and leg,
+//! `D{n}-{L|S}-{E|TP|SL}`: the decision's number in the run, `L` long and
+//! `S` short, the entry, take profit or stop. The outcome of a target is
+//! read from Nautilus' events alone: a closed position's opening order
+//! names its decision and side, its closing order the exit (a take profit,
+//! a stop, or a time close), and Nautilus reports its realised P&L net of
+//! commission, the position the commissions it is net of. The only state
+//! of our own is the rows being assembled.
 //!
-//! Once every target of a decision has an outcome, the decision is settled
+//! Once both sides of a decision have an outcome, the decision is settled
 //! and its row, a `TargetRow`, published on the message bus, custom data
-//! keyed by the strategy's id (`TargetRow::data_type`). A barrier's
+//! keyed by the strategy's id (`TargetRow::data_type`). With exits, the
 //! outcomes carry the distances its decision set on each side
 //! (`Distances`), in price from the decision's price: what makes a
 //! trade's P&L a multiple of its stop. A strategy trading on a model of
-//! the barrier sets the same exits at its decisions (`Stops`), and
+//! the target sets the same exits at its decisions (`TradedTarget`), and
 //! `stop_worth` makes a stop's distance money. A decision whose
 //! order the risk engine denies or the venue rejects, or whose entry has
 //! not filled by its time limit (the module cancels it then, and the
@@ -66,7 +70,7 @@
 //! decision whose positions are still open when the run stops.
 //!
 //! A quote at the same nanosecond as a time alert reaches the venue first,
-//! so a barrier hit at the time limit counts as inside the window. On bars
+//! so an exit hit at the time limit counts as inside the window. On bars
 //! alone the venue replays each bar's open, high, low and close, fills an
 //! entry at the last close, a take profit at its limit and a stop at its
 //! trigger: bars-only targets are as optimistic as bars-only backtests.
@@ -120,59 +124,39 @@ use crate::strategy::{
     warmup::Warmup,
 };
 
-/// The targets of each decision, from the strategy's config: on one
-/// instrument, of one size, a triple barrier, a horizon or both. The
-/// strategy's TOML has the targets alone (`TargetsTable`), on the
-/// instrument and of the size of its `[trade]` table (`TargetsTable::trading`).
+/// The target of each decision, from the strategy's config: on one
+/// instrument, of one size. The strategy's TOML has the target alone
+/// (`Target`), on the instrument and of the size of its `[trade]` table
+/// (`Target::trading`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
-pub struct TargetsConfig {
-    /// The instrument the targets trade.
+pub struct TargetConfig {
+    /// The instrument the target trades.
     pub instrument_id: InstrumentId,
     /// The size of every order, rounded to the instrument's sizes.
     pub quantity: Quantity,
-    /// The triple barrier, if any.
-    pub barrier: Option<Barrier>,
-    /// The horizon of the horizon target, if any, such as `"1h"`.
-    pub horizon: Option<SignedDuration>,
+    /// How its trades end.
+    pub spec: Target,
 }
 
-/// The targets as a model table of a strategy's TOML has them, `targets = {
-/// horizon = "1h", barrier = { .. } }`: what they trade is the strategy's
-/// `[trade]`, named once.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// A target as a model table of a strategy's TOML has it, what it trades
+/// being the strategy's `[trade]`, named once: how a decision's trades end.
+/// A bracket has both exits, each a distance from the decision's price, and
+/// its time limit, such as `{ take_profit = { atr = 2.0 }, stop = { bps = 20
+/// }, limit = "2h" }`, or with the ATR's arguments given, `{ .., atr = {
+/// period = 20, ma_type = "WILDER" } }`; a time-only target neither exit,
+/// `{ limit = "2h" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
-pub struct TargetsTable {
-    /// The triple barrier, if any.
-    pub barrier: Option<Barrier>,
-    /// The horizon of the horizon target, if any, such as `"1h"`.
-    pub horizon: Option<SignedDuration>,
-}
-
-impl TargetsTable {
-    /// The targets trading `traded`: its instrument, its size.
-    #[must_use]
-    pub fn trading(self, traded: &TradedInstrument) -> TargetsConfig {
-        TargetsConfig {
-            instrument_id: traded.instrument_id,
-            quantity: traded.trade_size,
-            barrier: self.barrier,
-            horizon: self.horizon,
-        }
-    }
-}
-
-/// A triple barrier: the exits of a bracket, each a distance from the
-/// decision's price, and its time limit, such as `{ take_profit = { atr =
-/// 2.0 }, stop = { bps = 20 }, limit = "2h" }`, or with the ATR's
-/// arguments given, `{ .., atr = { period = 20, ma_type = "WILDER" } }`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Barrier {
-    /// How far the take profit is, in the side's favour.
-    pub take_profit: Distance,
-    /// How far the stop is, against the side.
-    pub stop: Distance,
+pub struct Target {
+    /// How far the take profit is, in the side's favour: with a stop, or
+    /// not at all (`TargetConfig::validate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_profit: Option<Distance>,
+    /// How far the stop is, against the side: with a take profit, or not
+    /// at all (`TargetConfig::validate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Distance>,
     /// How long after the decision what is still open is closed.
     pub limit: SignedDuration,
     /// The average true range the `atr` distances are multiples of, if
@@ -188,13 +172,13 @@ pub enum Distance {
     /// Basis points of the decision's price, `{ bps = 20 }`.
     #[serde(rename = "bps")]
     BasisPoints(Decimal),
-    /// Multiples of the barrier's average true range at the decision,
+    /// Multiples of the target's average true range at the decision,
     /// `{ atr = 1.5 }`.
     #[serde(rename = "atr")]
     Atr(Decimal),
 }
 
-/// The average true range of a barrier without an `atr` table: Nautilus'
+/// The average true range of a target without an `atr` table: Nautilus'
 /// `AverageTrueRange` of Wilder's 14 bars, its other arguments Nautilus'
 /// defaults. An `atr` table gives Nautilus' arguments by their names
 /// (`AtrArgs`), `{ period = 20, ma_type = "WILDER", use_previous = true,
@@ -217,23 +201,13 @@ const ATR_UNITS: [BarAggregation; 5] = [
     BarAggregation::Millisecond,
 ];
 
-/// The average true range a barrier runs: `config`, on bars of
-/// `bar_type`, bars of the targets' instrument at the decision cadence,
-/// so that a decision reads the bar closing at its time
-/// (`TargetsConfig::atr_bars`).
+/// The average true range a target runs: `args`, on bars of `bar_type`,
+/// bars of the target's instrument at the decision cadence, so that a
+/// decision reads the bar closing at its time (`TargetConfig::atr_bars`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtrBars {
     pub bar_type: BarType,
     pub args: AtrArgs,
-}
-
-/// The target a model learns: whether its side of the barrier, or of the
-/// horizon, gains after its costs, `"barrier"` or `"horizon"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Label {
-    Barrier,
-    Horizon,
 }
 
 /// How a target's position was closed.
@@ -241,7 +215,7 @@ pub enum Label {
 pub enum Exit {
     TakeProfit,
     Stop,
-    /// At its time limit, or at the horizon.
+    /// At its time limit.
     Time,
 }
 
@@ -255,11 +229,11 @@ pub struct Outcome {
     /// realised P&L is net of (Nautilus' `Position::commissions`).
     pub commission: Money,
     pub exit: Exit,
-    /// The barrier the decision set on the side; none for a horizon.
+    /// The exits the decision set on the side; none without exits.
     pub distances: Option<Distances>,
 }
 
-/// How far a barrier's exits on one side are from the decision's price,
+/// How far a target's exits on one side are from the decision's price,
 /// in price, as the decision set them: on the instrument's ticks, the
 /// basis points or ATRs resolved at it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -268,23 +242,21 @@ pub struct Distances {
     pub stop: Decimal,
 }
 
-/// The outcomes of a target on each side.
+/// The outcome of a decision's target on each side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Outcomes {
     pub long: Outcome,
     pub short: Outcome,
 }
 
-/// A settled decision: its features and the outcome of each of its
-/// targets, published on the message bus.
+/// A settled decision: its features and the outcome of its target on each
+/// side, published on the message bus.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TargetRow {
     /// The decision, as `decide` published it.
     pub decision: FeatureRow,
-    /// The triple barrier's outcomes, if the config has one.
-    pub barrier: Option<Outcomes>,
-    /// The horizon target's outcomes, if the config has one.
-    pub horizon: Option<Outcomes>,
+    /// The target's outcomes.
+    pub outcomes: Outcomes,
     /// When the last of its positions closed.
     pub settled_at: UnixNanos,
 }
@@ -293,9 +265,9 @@ pub struct TargetRow {
 /// strategy calls `open` at each decision, and hands its order and
 /// position events and its time events to the methods of their names.
 pub struct Targets {
-    config: TargetsConfig,
-    /// The barrier's average true range, if a distance is in ATRs.
-    atr: Option<Rc<BarrierAtr>>,
+    config: TargetConfig,
+    /// The target's average true range, if a distance is in ATRs.
+    atr: Option<Rc<TargetAtr>>,
     state: RefCell<State>,
 }
 
@@ -312,23 +284,16 @@ struct State {
 /// An open decision.
 struct Decision {
     row: FeatureRow,
-    /// The barrier set on each side, if the config has one.
+    /// The exits set on each side, if the target has them.
     distances: BTreeMap<Side, Distances>,
-    outcomes: BTreeMap<(Kind, Side), Outcome>,
+    outcomes: BTreeMap<Side, Outcome>,
 }
 
-/// A target of a decision on one side: what its orders' ids name.
+/// A decision's target on one side: what its orders' ids name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Target {
+struct DecisionSide {
     decision: u64,
-    kind: Kind,
     side: Side,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Kind {
-    Barrier,
-    Horizon,
 }
 
 /// A side of a target, and of a model: the long or the short, `"long"` or
@@ -340,15 +305,18 @@ pub enum Side {
     Short,
 }
 
-/// A barrier as a decision sets it on one side (`Stops::at`): its take
-/// profit and stop on the instrument's ticks, the price they are set from,
-/// and what the stop is worth in money.
+/// A target as a decision sets it on one side (`TradedTarget::at`): the
+/// price it is set from, its exits on the instrument's ticks if it has
+/// them, when it ends after its send, and what the unit of its side's
+/// payoff is worth in money: the stop's worth (`stop_worth`), the payoff
+/// being in R, or 1 without exits, the payoff being in money.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BarrierExits {
+pub struct SideTarget {
     pub reference: Price,
-    pub take_profit: Price,
-    pub stop: Price,
-    pub stop_worth: f64,
+    pub take_profit: Option<Price>,
+    pub stop: Option<Price>,
+    pub time_limit: SignedDuration,
+    pub unit: f64,
 }
 
 /// An order of a target.
@@ -359,20 +327,20 @@ enum Leg {
     Stop,
 }
 
-impl TargetsConfig {
+impl TargetConfig {
     /// # Errors
     ///
     /// Returns every violation, each Nautilus' `ConfigError` under its
-    /// field of `[model]` (`model.targets.…`), as one
-    /// `ConfigError::Multiple` if there are several: no target, the size, a
-    /// barrier's distance, its limit or the horizon not positive, an `atr`
-    /// table no distance uses, or an ATR without bars at the cadence of
-    /// `rule` built from what a strategy of `requirements` reads (see
-    /// `atr_bars`).
+    /// field of `[model]` (`model.target…`), as one
+    /// `ConfigError::Multiple` if there are several: the size not positive,
+    /// a take profit without a stop or a stop without a take profit, a
+    /// distance or the limit not positive, an `atr` table no distance uses,
+    /// or an ATR without bars at the cadence of `rule` built from what a
+    /// strategy of `requirements` reads (see `atr_bars`).
     ///
     /// # Panics
     ///
-    /// Panics if Nautilus refuses an argument of the barrier's ATR as it
+    /// Panics if Nautilus refuses an argument of the target's ATR as it
     /// builds it (`AverageTrueRange::new`).
     pub fn validate(
         &self,
@@ -380,65 +348,57 @@ impl TargetsConfig {
         requirements: &DataRequirements,
     ) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
+        let spec = self.spec;
         errors.check(
-            self.barrier.is_some() || self.horizon.is_some(),
+            self.quantity.is_positive(),
+            ConfigError::invalid_value("model.target", "the target quantity must be positive"),
+        );
+        errors.check(
+            spec.take_profit.is_some() == spec.stop.is_some(),
             ConfigError::invalid_value(
-                "model.targets",
-                "no target: neither a barrier nor a horizon",
+                "model.target",
+                "the target has a take profit or a stop alone: a bracket has both, a time-only \
+                 target neither",
             ),
         );
         errors.check(
-            self.quantity.is_positive(),
-            ConfigError::invalid_value("model.targets", "the target quantity must be positive"),
+            [spec.take_profit, spec.stop]
+                .into_iter()
+                .flatten()
+                .all(|distance| distance.value() > Decimal::ZERO),
+            ConfigError::invalid_value(
+                "model.target",
+                "the target's take profit and stop must be positive",
+            ),
         );
-        if let Some(barrier) = self.barrier {
-            errors.check(
-                barrier.take_profit.value() > Decimal::ZERO && barrier.stop.value() > Decimal::ZERO,
-                ConfigError::invalid_value(
-                    "model.targets.barrier",
-                    "the barrier's take profit and stop must be positive",
-                ),
-            );
-            errors.check(
-                barrier.limit.is_positive(),
-                ConfigError::invalid_value(
-                    "model.targets.barrier.limit",
-                    format!("the barrier's limit {:#} is not positive", barrier.limit),
-                ),
-            );
-            errors.check(
-                barrier.uses_atr() || barrier.atr.is_none(),
-                ConfigError::invalid_value(
-                    "model.targets.barrier.atr",
-                    "the barrier has an ATR no distance uses",
-                ),
-            );
-            let atr = |result: anyhow::Result<()>| {
-                result.map_err(|e| {
-                    ConfigError::invalid_value("model.targets.barrier.atr", format!("{e:#}"))
-                })
-            };
-            if let Some(args) = barrier.atr_args() {
-                // Nautilus checks the arguments as it builds the ATR.
-                errors.collect(atr(args.build().map(drop)));
-            }
-            errors.collect(atr(self.atr_bars(rule, requirements).map(drop)));
+        errors.check(
+            spec.limit.is_positive(),
+            ConfigError::invalid_value(
+                "model.target.limit",
+                format!("the target's limit {:#} is not positive", spec.limit),
+            ),
+        );
+        errors.check(
+            spec.uses_atr() || spec.atr.is_none(),
+            ConfigError::invalid_value(
+                "model.target.atr",
+                "the target has an ATR no distance uses",
+            ),
+        );
+        let atr = |result: anyhow::Result<()>| {
+            result.map_err(|e| ConfigError::invalid_value("model.target.atr", format!("{e:#}")))
+        };
+        if let Some(args) = spec.atr_args() {
+            // Nautilus checks the arguments as it builds the ATR.
+            errors.collect(atr(args.build().map(drop)));
         }
-        if let Some(horizon) = self.horizon {
-            errors.check(
-                horizon.is_positive(),
-                ConfigError::invalid_value(
-                    "model.targets.horizon",
-                    format!("the horizon {horizon:#} is not positive"),
-                ),
-            );
-        }
+        errors.collect(atr(self.atr_bars(rule, requirements).map(drop)));
         errors.into_result()
     }
 
-    /// The barrier's average true range deciding on `rule`, for a strategy
+    /// The target's average true range deciding on `rule`, for a strategy
     /// of `requirements`, if a distance is in ATRs: its period, and its
-    /// bars, Nautilus' internal bars of the targets' instrument at the
+    /// bars, Nautilus' internal bars of the target's instrument at the
     /// decision cadence, built from what the strategy reads of it, the
     /// first of:
     ///
@@ -467,7 +427,7 @@ impl TargetsConfig {
         rule: DecisionRule,
         requirements: &DataRequirements,
     ) -> anyhow::Result<Option<AtrBars>> {
-        let Some(config) = self.barrier.and_then(|barrier| barrier.atr_args()) else {
+        let Some(config) = self.spec.atr_args() else {
             return Ok(None);
         };
         let DecisionRule::Every(cadence) = rule;
@@ -482,7 +442,7 @@ impl TargetsConfig {
             .map(|(aggregation, unit)| (aggregation, nanos / unit))
         else {
             bail!(
-                "the barrier's ATR has no bars of the decision cadence {cadence:#}, not whole \
+                "the target's ATR has no bars of the decision cadence {cadence:#}, not whole \
                  milliseconds"
             );
         };
@@ -491,7 +451,7 @@ impl TargetsConfig {
                 .map_err(anyhow::Error::from)
                 .and_then(|step| BarSpecification::new_checked(step, aggregation, price_type))
                 .with_context(|| {
-                    format!("the barrier's ATR has no bars of the decision cadence {cadence:#}")
+                    format!("the target's ATR has no bars of the decision cadence {cadence:#}")
                 })
         };
         let traded = self.instrument_id;
@@ -509,13 +469,13 @@ impl TargetsConfig {
                 .collect();
             ensure!(
                 !sources.is_empty(),
-                "the barrier's ATR has no bars of {traded} to be built from: the strategy reads \
+                "the target's ATR has no bars of {traded} to be built from: the strategy reads \
                  neither its quotes, its trades nor its bars"
             );
             let Some(source) = longest_dividing(&sources, cadence) else {
                 let sources: Vec<String> = sources.iter().map(ToString::to_string).collect();
                 bail!(
-                    "the barrier's ATR has no bars of the decision cadence {cadence:#}: it is \
+                    "the target's ATR has no bars of the decision cadence {cadence:#}: it is \
                      not a whole multiple of the bars of {traded} the strategy reads, {}",
                     sources.join(", ")
                 );
@@ -536,106 +496,109 @@ impl TargetsConfig {
         }))
     }
 
-    /// The config as the fingerprint reads it, its barrier's ATR `atr` as
-    /// it runs: Nautilus' ATR as built, its arguments given or Nautilus'
-    /// defaults, and its bars, whose source changes the rows.
+    /// The config as the fingerprint reads it, its ATR `atr` as it runs:
+    /// Nautilus' ATR as built, its arguments given or Nautilus' defaults,
+    /// and its bars, whose source changes the rows.
     fn fingerprint_part(&self, atr: Option<AtrBars>) -> anyhow::Result<String> {
         let atr = atr
             .map(|atr| anyhow::Ok(format!("{} on bars of {}", atr.args.build()?, atr.bar_type)))
             .transpose()?;
-        let barrier = self.barrier.map(|b| {
-            format!(
-                "take profit {} stop {} limit {} ns atr {atr:?}",
-                b.take_profit,
-                b.stop,
-                b.limit.as_nanos()
-            )
-        });
-        let horizon = self.horizon.map(|horizon| horizon.as_nanos());
+        let exits = self
+            .spec
+            .bracket()
+            .map(|(take_profit, stop)| format!("take profit {take_profit} stop {stop}"));
         Ok(format!(
-            "{} {} barrier {barrier:?} horizon {horizon:?} ns",
-            self.instrument_id, self.quantity
+            "{} {} exits {exits:?} limit {} ns atr {atr:?}",
+            self.instrument_id,
+            self.quantity,
+            self.spec.limit.as_nanos()
         ))
     }
 
-    /// The longest time a decision's targets stay open: the barrier's
-    /// limit or the horizon. A decision is settled by then: a time close
-    /// fills at once, on the venue's last quote at the alert's own time.
+    /// The longest time a decision's target stays open: its limit. A
+    /// decision is settled by then: a time close fills at once, on the
+    /// venue's last quote at the alert's own time.
     #[must_use]
-    pub fn settles_within(&self) -> SignedDuration {
-        self.kinds()
-            .map(|(_, after)| after)
-            .max()
-            .unwrap_or(SignedDuration::ZERO)
+    pub const fn settles_within(&self) -> SignedDuration {
+        self.spec.limit
     }
 
     /// The names of the values of a row (`TargetRow::values`), in their
-    /// order: for the barrier, then the horizon, the long then the short,
-    /// each its P&L, its commission and its exit, and a barrier's the
-    /// distances of its take profit and its stop, such as
-    /// `barrier_long_pnl`, `barrier_long_commission`, `barrier_long_exit`,
-    /// `barrier_long_take_profit` and `barrier_long_stop`.
+    /// order: of the long then the short, each its P&L, its commission and
+    /// its exit, `long_pnl`, `long_commission` and `long_exit`, and with
+    /// exits the distances of its take profit and its stop,
+    /// `long_take_profit` and `long_stop`.
     #[must_use]
     pub fn target_names(&self) -> Vec<String> {
-        self.kinds()
-            .flat_map(|(kind, _)| {
-                Side::BOTH.into_iter().flat_map(move |side| {
-                    kind.values()
-                        .iter()
-                        .map(move |value| format!("{}_{}_{value}", kind.name(), side.name()))
-                })
+        let exits: &[&str] = match self.spec.bracket() {
+            Some(_) => &["take_profit", "stop"],
+            None => &[],
+        };
+        Side::BOTH
+            .into_iter()
+            .flat_map(|side| {
+                ["pnl", "commission", "exit"]
+                    .iter()
+                    .chain(exits)
+                    .map(move |value| format!("{}_{value}", side.name()))
             })
             .collect()
     }
 
-    /// Where the P&L of `label`'s target on `side` is among the values of
-    /// a row (`TargetRow::values`); none if the config has no such target.
+    /// Where the P&L of `side` is among the values of a row
+    /// (`TargetRow::values`).
     #[must_use]
-    pub fn pnl_index(&self, label: Label, side: Side) -> Option<usize> {
-        self.index(label, side, "pnl")
+    pub fn pnl_index(&self, side: Side) -> usize {
+        self.index(side, "pnl").expect("a row has a side's P&L")
     }
 
-    /// Where the commission of `label`'s target on `side` is among the
-    /// values of a row (`TargetRow::values`); none if the config has no
-    /// such target.
+    /// Where the commission of `side` is among the values of a row
+    /// (`TargetRow::values`).
     #[must_use]
-    pub fn commission_index(&self, label: Label, side: Side) -> Option<usize> {
-        self.index(label, side, "commission")
+    pub fn commission_index(&self, side: Side) -> usize {
+        self.index(side, "commission")
+            .expect("a row has a side's commission")
     }
 
-    /// Where the stop's distance of `label`'s target on `side` is among the
-    /// values of a row (`TargetRow::values`); none if the config has no
-    /// such target, or it is a horizon, which has no stop.
+    /// Where the stop's distance of `side` is among the values of a row
+    /// (`TargetRow::values`); none without exits.
     #[must_use]
-    pub fn stop_index(&self, label: Label, side: Side) -> Option<usize> {
-        self.index(label, side, "stop")
+    pub fn stop_index(&self, side: Side) -> Option<usize> {
+        self.index(side, "stop")
     }
 
-    /// Where `value` of `label`'s target on `side` is among the values of a
-    /// row, if it has one.
-    fn index(&self, label: Label, side: Side, value: &str) -> Option<usize> {
-        let kind = match label {
-            Label::Barrier => Kind::Barrier,
-            Label::Horizon => Kind::Horizon,
-        };
-        let name = format!("{}_{}_{value}", kind.name(), side.name());
+    /// Where `value` of `side` is among the values of a row, if it has one.
+    fn index(&self, side: Side, value: &str) -> Option<usize> {
+        let name = format!("{}_{value}", side.name());
         self.target_names().iter().position(|of| *of == name)
-    }
-
-    /// The kinds of target of the config.
-    fn kinds(&self) -> impl Iterator<Item = (Kind, SignedDuration)> {
-        let barrier = self.barrier.map(|b| (Kind::Barrier, b.limit));
-        let horizon = self.horizon.map(|h| (Kind::Horizon, h));
-        barrier.into_iter().chain(horizon)
     }
 }
 
-impl Barrier {
+impl Target {
+    /// The target trading `traded`: its instrument, its size.
+    #[must_use]
+    pub fn trading(self, traded: &TradedInstrument) -> TargetConfig {
+        TargetConfig {
+            instrument_id: traded.instrument_id,
+            quantity: traded.trade_size,
+            spec: self,
+        }
+    }
+
+    /// Its take profit and stop, if it has both; none of a time-only one.
+    #[must_use]
+    pub const fn bracket(&self) -> Option<(Distance, Distance)> {
+        match (self.take_profit, self.stop) {
+            (Some(take_profit), Some(stop)) => Some((take_profit, stop)),
+            _ => None,
+        }
+    }
+
     /// Whether a distance is in ATRs.
     fn uses_atr(&self) -> bool {
         [self.take_profit, self.stop]
             .iter()
-            .any(|distance| matches!(distance, Distance::Atr(_)))
+            .any(|distance| matches!(distance, Some(Distance::Atr(_))))
     }
 
     /// Its ATR, if a distance is in ATRs: its `atr` table's, else
@@ -646,10 +609,10 @@ impl Barrier {
 
     /// The take profit and stop of each side, the long then the short,
     /// from `reference` and, if a distance is in ATRs, the ATR's value
-    /// `atr`, each on the nearest tick of `instrument`; none if an exit
-    /// rounds onto `reference`, no distance (a stop's worth nothing, a P&L
-    /// in R of none), so that the decision is no target, as one on a cold
-    /// ATR.
+    /// `atr`, each on the nearest tick of `instrument`; none of them
+    /// without exits; none at all if an exit rounds onto `reference`, no
+    /// distance (a stop's worth nothing, a P&L in R of none), so that the
+    /// decision is no target, as one on a cold ATR.
     ///
     /// # Errors
     ///
@@ -664,11 +627,14 @@ impl Barrier {
         reference: Decimal,
         atr: Option<f64>,
     ) -> anyhow::Result<Option<Vec<(Side, Price, Price)>>> {
+        let Some((take_profit, stop)) = self.bracket() else {
+            return Ok(Some(vec![]));
+        };
         let atr = atr
             .map(|atr| Decimal::try_from(atr).with_context(|| format!("the ATR {atr}")))
             .transpose()?;
-        let take_profit = self.take_profit.length(reference, atr);
-        let stop = self.stop.length(reference, atr);
+        let take_profit = take_profit.length(reference, atr);
+        let stop = stop.length(reference, atr);
         let exits = Side::BOTH
             .into_iter()
             .map(|side| {
@@ -699,7 +665,7 @@ impl Distance {
     fn length(self, reference: Decimal, atr: Option<Decimal>) -> Decimal {
         match self {
             Self::BasisPoints(bps) => reference * bps / Decimal::from(10_000),
-            Self::Atr(multiple) => atr.expect("a validated barrier has its ATR") * multiple,
+            Self::Atr(multiple) => atr.expect("a validated target has its ATR") * multiple,
         }
     }
 }
@@ -761,14 +727,14 @@ fn nearest_tick(
     })
 }
 
-/// The average true range of a barrier, registered with the strategy's
+/// The average true range of a target, registered with the strategy's
 /// Nautilus indicators for the bars of its bar type.
-struct BarrierAtr {
+struct TargetAtr {
     bar_type: BarType,
     indicator: RefCell<AverageTrueRange>,
 }
 
-impl BarrierAtr {
+impl TargetAtr {
     fn new(bars: AtrBars) -> anyhow::Result<Self> {
         Ok(Self {
             bar_type: bars.bar_type,
@@ -796,44 +762,40 @@ impl BarrierAtr {
     }
 }
 
-/// The exits a decision of a trading strategy sets on each side of the
-/// barrier, as a dataset run's would: from the decision's price
-/// (`reference`) and the barrier's ATR, on the instrument's ticks; and
-/// its stop's worth in money (`stop_worth`), what an expected P&L in R is
-/// weighed by.
-pub struct Stops {
+/// The target as a decision of a trading strategy sets it on each side, as
+/// a dataset run's would: its exits, if it has them, from the decision's
+/// price (`reference`) and the target's ATR, on the instrument's ticks, and
+/// the worth of the unit an expected P&L is weighed by.
+pub struct TradedTarget {
     instrument_id: InstrumentId,
     quantity: Quantity,
-    barrier: Barrier,
-    atr: Option<Rc<BarrierAtr>>,
+    spec: Target,
+    atr: Option<Rc<TargetAtr>>,
 }
 
-impl Stops {
-    /// The stops of the barrier of `config`, for decisions on `rule` of a
-    /// strategy of `requirements`; none if `config` has no barrier.
+impl TradedTarget {
+    /// The target of `config`, for decisions on `rule` of a strategy of
+    /// `requirements`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the barrier's ATR has no bars (see
-    /// `TargetsConfig::atr_bars`).
+    /// Returns an error if the target's ATR has no bars (see
+    /// `TargetConfig::atr_bars`).
     pub fn new(
-        config: &TargetsConfig,
+        config: &TargetConfig,
         rule: DecisionRule,
         requirements: &DataRequirements,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some(barrier) = config.barrier else {
-            return Ok(None);
-        };
+    ) -> anyhow::Result<Self> {
         let atr = config.atr_bars(rule, requirements)?;
-        Ok(Some(Self {
+        Ok(Self {
             instrument_id: config.instrument_id,
             quantity: config.quantity,
-            barrier,
-            atr: atr.map(BarrierAtr::new).transpose()?.map(Rc::new),
-        }))
+            spec: config.spec,
+            atr: atr.map(TargetAtr::new).transpose()?.map(Rc::new),
+        })
     }
 
-    /// Starts the barrier's ATR, if any, on `actor`, from its `on_start`,
+    /// Starts the target's ATR, if any, on `actor`, from its `on_start`,
     /// as `Targets::start` does.
     pub fn start<A>(&self, actor: &mut A)
     where
@@ -844,7 +806,7 @@ impl Stops {
         }
     }
 
-    /// `warmup` building the bars of the barrier's ATR, if any, and handing
+    /// `warmup` building the bars of the target's ATR, if any, and handing
     /// them to it (`Warmup::building`): the warmup's bars reach only the
     /// cache, and live the first decision after a start then sets the stop
     /// a dataset run sets there.
@@ -856,23 +818,18 @@ impl Stops {
         }
     }
 
-    /// How long after its send a barrier trade is closed: its limit.
-    #[must_use]
-    pub const fn limit(&self) -> SignedDuration {
-        self.barrier.limit
-    }
-
-    /// The barrier of `side` at a decision of `strategy` now; none with no price of the
-    /// instrument yet, the ATR not yet initialized or an exit on the
-    /// decision's price (`Barrier::exits`), as a dataset run
-    /// opens no target then.
+    /// The target of `side` at a decision of `strategy` now; none with no
+    /// price of the instrument yet, the ATR not yet initialized or an exit
+    /// on the decision's price (`Target::exits`), as a dataset run opens no
+    /// target then. Without exits, the instrument itself is not read, so
+    /// nothing of it can refuse the trade.
     ///
     /// # Errors
     ///
-    /// Returns an error if the instrument is not in the cache, or an exit
-    /// is outside its prices or the stop has no worth (on an inverse
-    /// instrument, see `ensure_linear`).
-    pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<BarrierExits>>
+    /// Returns an error if, with exits, the instrument is not in the cache,
+    /// or an exit is outside its prices or the stop has no worth (on an
+    /// inverse instrument, see `ensure_linear`).
+    pub fn at<S>(&self, strategy: &S, side: Side) -> anyhow::Result<Option<SideTarget>>
     where
         S: DataActor + DataActorNative,
     {
@@ -885,41 +842,51 @@ impl Stops {
         };
         let instrument_id = self.instrument_id;
         let cache = strategy.cache();
+        let time_limit = self.spec.limit;
+        if self.spec.bracket().is_none() {
+            return Ok(
+                reference(&cache, &instrument_id).map(|reference| SideTarget {
+                    reference,
+                    take_profit: None,
+                    stop: None,
+                    time_limit,
+                    unit: 1.0,
+                }),
+            );
+        }
         let instrument = cache
             .instrument(&instrument_id)
             .with_context(|| format!("instrument {instrument_id} not in cache"))?;
         let Some(reference) = reference(&cache, &instrument_id) else {
             return Ok(None);
         };
-        let Some(exits) = self
-            .barrier
-            .exits(&instrument, reference.as_decimal(), atr)?
-        else {
+        let Some(exits) = self.spec.exits(&instrument, reference.as_decimal(), atr)? else {
             return Ok(None);
         };
         let (_, take_profit, stop) = exits
             .into_iter()
             .find(|(of, _, _)| *of == side)
-            .expect("a barrier has exits on both sides");
+            .expect("a bracket has exits on both sides");
         let distance = (stop.as_decimal() - reference.as_decimal()).abs();
-        let worth = stop_worth(
+        let unit = stop_worth(
             &instrument,
             self.quantity,
             distance.to_f64().unwrap_or(f64::NAN),
         )?;
-        Ok(Some(BarrierExits {
+        Ok(Some(SideTarget {
             reference,
-            take_profit,
-            stop,
-            stop_worth: worth,
+            take_profit: Some(take_profit),
+            stop: Some(stop),
+            time_limit,
+            unit,
         }))
     }
 }
 
-impl Debug for Stops {
+impl Debug for TradedTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Stops")
-            .field("barrier", &self.barrier)
+        f.debug_struct("TradedTarget")
+            .field("spec", &self.spec)
             .finish_non_exhaustive()
     }
 }
@@ -949,9 +916,10 @@ pub fn stop_worth(
         .as_f64())
 }
 
-/// Checks that a barrier's stops on `instrument` have a worth
+/// Checks that a target's stops on `instrument` have a worth
 /// (`stop_worth`): Nautilus' notional value of an inverse instrument's
-/// distance divides by it as a price, which is not what the stop risks.
+/// distance divides by it as a price, which is not what the stop risks. A
+/// time-only target has no stop to weigh, and works on it.
 ///
 /// # Errors
 ///
@@ -959,14 +927,14 @@ pub fn stop_worth(
 pub fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
     ensure!(
         !instrument.is_inverse(),
-        "{} is inverse: a barrier's stop on it has no worth in R",
+        "{} is inverse: a target's stop on it has no worth in R",
         instrument.id()
     );
     Ok(())
 }
 
 /// Nautilus' side of the ATR: it reads the bars of its bar type alone.
-impl ActorIndicator for BarrierAtr {
+impl ActorIndicator for TargetAtr {
     fn key(&self) -> usize {
         std::ptr::from_ref(self).addr()
     }
@@ -998,16 +966,16 @@ impl ActorIndicator for BarrierAtr {
     }
 }
 
-/// `fingerprint` extended with the targets of `config` deciding on `rule`
+/// `fingerprint` extended with the target of `config` deciding on `rule`
 /// for a strategy of `requirements`.
 ///
 /// # Errors
 ///
-/// Returns an error if the barrier's ATR has no bars (see
-/// `TargetsConfig::atr_bars`).
+/// Returns an error if the target's ATR has no bars (see
+/// `TargetConfig::atr_bars`).
 pub fn fingerprint(
     fingerprint: Fingerprint,
-    config: &TargetsConfig,
+    config: &TargetConfig,
     rule: DecisionRule,
     requirements: &DataRequirements,
 ) -> anyhow::Result<Fingerprint> {
@@ -1048,7 +1016,7 @@ impl Targets {
     /// Returns an error if `config` is invalid for `rule` and
     /// `requirements`.
     pub fn new(
-        config: TargetsConfig,
+        config: TargetConfig,
         rule: DecisionRule,
         requirements: &DataRequirements,
     ) -> anyhow::Result<Rc<Self>> {
@@ -1056,12 +1024,12 @@ impl Targets {
         let atr = config.atr_bars(rule, requirements)?;
         Ok(Rc::new(Self {
             config,
-            atr: atr.map(BarrierAtr::new).transpose()?.map(Rc::new),
+            atr: atr.map(TargetAtr::new).transpose()?.map(Rc::new),
             state: RefCell::new(State::default()),
         }))
     }
 
-    /// Starts the barrier's average true range, if any, on `actor`, from
+    /// Starts the target's average true range, if any, on `actor`, from
     /// its `on_start`: registers it with the actor's Nautilus indicators
     /// for its bars and subscribes the actor to them, so the data engine
     /// builds them, from the quotes, the trades or the source bars, and
@@ -1078,12 +1046,12 @@ impl Targets {
         }
     }
 
-    /// Opens the targets of the decision of `row`: for each target and
-    /// side, its orders, from `strategy`, and each target's time alert.
-    /// With no price of the instrument yet, the decision is unsettled;
-    /// with the barrier's ATR not yet initialized, or an exit of the
-    /// barrier on the decision's price (`Barrier::exits`), it opens
-    /// nothing, as a decision on cold features is none.
+    /// Opens the target of the decision of `row`: on each side, its
+    /// orders, from `strategy`, and its time alert. With no price of the
+    /// instrument yet, the decision is unsettled; with the target's ATR not
+    /// yet initialized, or an exit of the target on the decision's price
+    /// (`Target::exits`), it opens nothing, as a decision on cold features
+    /// is none.
     ///
     /// # Errors
     ///
@@ -1131,18 +1099,12 @@ impl Targets {
             return Ok(());
         };
         let reference = reference.as_decimal();
-        let exits = match self.config.barrier {
-            Some(barrier) => match barrier.exits(&instrument, reference, atr)? {
-                Some(exits) => exits,
-                None => {
-                    log::debug!(
-                        "decision at {time}: an exit of the barrier is on the price {reference} \
-                         of {instrument_id}; no targets"
-                    );
-                    return Ok(());
-                }
-            },
-            None => vec![],
+        let Some(exits) = self.config.spec.exits(&instrument, reference, atr)? else {
+            log::debug!(
+                "decision at {time}: an exit of the target is on the price {reference} of \
+                 {instrument_id}; no targets"
+            );
+            return Ok(());
         };
         let decision = next_decision();
         self.state
@@ -1156,8 +1118,8 @@ impl Targets {
         sent
     }
 
-    /// Sends the trades of `decision`, the brackets with `exits`, each
-    /// target on each side named by its ids.
+    /// Sends the trades of `decision`, the long then the short, with
+    /// `exits` if the target has them, each side named by its ids.
     fn send<S>(
         &self,
         strategy: &mut S,
@@ -1167,35 +1129,19 @@ impl Targets {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
-        let trade = |side: Side, exits| Trade {
-            instrument_id: self.config.instrument_id,
-            side: side.order_side(),
-            quantity: self.config.quantity,
-            exits,
-        };
-        let barriers = self.config.barrier.into_iter().flat_map(|barrier| {
-            exits.iter().map(move |&(side, take_profit, stop)| {
-                let exits = Exits {
-                    take_profit: Some(take_profit),
-                    stop_loss: Some(stop),
-                    time_limit: Some(barrier.limit),
-                };
-                (Target::new(decision, Kind::Barrier, side), exits)
-            })
-        });
-        let horizons = self.config.horizon.into_iter().flat_map(|horizon| {
-            Side::BOTH.map(|side| {
-                let exits = Exits {
-                    take_profit: None,
-                    stop_loss: None,
-                    time_limit: Some(horizon),
-                };
-                (Target::new(decision, Kind::Horizon, side), exits)
-            })
-        });
-        let trades: Vec<(Target, Exits)> = barriers.chain(horizons).collect();
-        for (named, exits) in trades {
-            trade(named.side, exits).send_as(strategy, named.order_ids())?;
+        for side in Side::BOTH {
+            let of_side = exits.iter().find(|(of, _, _)| *of == side);
+            let trade = Trade {
+                instrument_id: self.config.instrument_id,
+                side: side.order_side(),
+                quantity: self.config.quantity,
+                exits: Exits {
+                    take_profit: of_side.map(|&(_, take_profit, _)| take_profit),
+                    stop_loss: of_side.map(|&(_, _, stop)| stop),
+                    time_limit: Some(self.config.spec.limit),
+                },
+            };
+            trade.send_as(strategy, DecisionSide { decision, side }.order_ids())?;
         }
         Ok(())
     }
@@ -1207,7 +1153,7 @@ impl Targets {
         S: DataActor + DataActorNative,
     {
         let entry = event.client_order_id;
-        let Some((target, Leg::Entry)) = Target::parse(entry) else {
+        let Some((target, Leg::Entry)) = DecisionSide::parse(entry) else {
             return;
         };
         let unfilled = strategy
@@ -1234,13 +1180,13 @@ impl Targets {
 
     /// Records the outcome of the target whose position closed, from the
     /// event and the closing order, and publishes its decision's row,
-    /// from `strategy`, once every target of it has one. A position closed
-    /// by an order of no exit of its target leaves its decision unsettled.
+    /// from `strategy`, once both sides have one. A position closed by an
+    /// order of no exit of its target leaves its decision unsettled.
     pub fn on_position_closed<S>(&self, strategy: &S, event: &PositionClosed)
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
-        let Some((target, Leg::Entry)) = Target::parse(event.opening_order_id) else {
+        let Some((target, Leg::Entry)) = DecisionSide::parse(event.opening_order_id) else {
             return;
         };
         let exit = event
@@ -1278,20 +1224,15 @@ impl Targets {
                 return;
             };
             decision.outcomes.insert(
-                (target.kind, target.side),
-                decision.outcome(target, pnl, commission, exit),
+                target.side,
+                decision.outcome(target.side, pnl, commission, exit),
             );
-            let barrier = decision.outcomes(Kind::Barrier);
-            let horizon = decision.outcomes(Kind::Horizon);
-            if barrier.is_some() != self.config.barrier.is_some()
-                || horizon.is_some() != self.config.horizon.is_some()
-            {
+            let Some(outcomes) = decision.outcomes() else {
                 return;
-            }
+            };
             let row = TargetRow {
                 decision: decision.row.clone(),
-                barrier,
-                horizon,
+                outcomes,
                 settled_at: event.ts_event,
             };
             state.open.remove(&target.decision);
@@ -1318,7 +1259,7 @@ impl Targets {
 
     /// Unsettles the decision of `id`, a target's order refused `how`.
     fn refused(&self, id: ClientOrderId, how: &str, reason: Ustr) {
-        if let Some((target, _)) = Target::parse(id) {
+        if let Some((target, _)) = DecisionSide::parse(id) {
             self.unsettle(target.decision, format_args!("{id} {how}: {reason}"));
         }
     }
@@ -1347,7 +1288,7 @@ impl Debug for Targets {
 }
 
 impl Decision {
-    /// The decision of `row`, its barrier `exits` set from `reference`.
+    /// The decision of `row`, its `exits`, if any, set from `reference`.
     fn new(row: FeatureRow, exits: &[(Side, Price, Price)], reference: Decimal) -> Self {
         let distances = exits
             .iter()
@@ -1369,39 +1310,27 @@ impl Decision {
         }
     }
 
-    /// The outcome of its `target`, its position closed with `pnl`, net of
-    /// `commission`, by `exit`, a barrier's with the distances it set.
-    fn outcome(&self, target: Target, pnl: Money, commission: Money, exit: Exit) -> Outcome {
-        let distances = match target.kind {
-            Kind::Barrier => self.distances.get(&target.side).copied(),
-            Kind::Horizon => None,
-        };
+    /// The outcome of its target on `side`, its position closed with
+    /// `pnl`, net of `commission`, by `exit`, with the distances it set.
+    fn outcome(&self, side: Side, pnl: Money, commission: Money, exit: Exit) -> Outcome {
         Outcome {
             pnl,
             commission,
             exit,
-            distances,
+            distances: self.distances.get(&side).copied(),
         }
     }
 
-    /// The outcomes of `kind`, once it has both.
-    fn outcomes(&self, kind: Kind) -> Option<Outcomes> {
+    /// The outcomes of its target, once it has both.
+    fn outcomes(&self) -> Option<Outcomes> {
         Some(Outcomes {
-            long: *self.outcomes.get(&(kind, Side::Long))?,
-            short: *self.outcomes.get(&(kind, Side::Short))?,
+            long: *self.outcomes.get(&Side::Long)?,
+            short: *self.outcomes.get(&Side::Short)?,
         })
     }
 }
 
-impl Target {
-    fn new(decision: u64, kind: Kind, side: Side) -> Self {
-        Self {
-            decision,
-            kind,
-            side,
-        }
-    }
-
+impl DecisionSide {
     /// The client order ids of its orders, its legs' by `order_id`.
     fn order_ids(self) -> OrderIds {
         OrderIds {
@@ -1411,7 +1340,7 @@ impl Target {
         }
     }
 
-    /// The client order id of `leg`: `D{n}-{B|H}{L|S}-{E|TP|SL}`.
+    /// The client order id of `leg`: `D{n}-{L|S}-{E|TP|SL}`.
     fn order_id(self, leg: Leg) -> ClientOrderId {
         let side = match self.side {
             Side::Long => 'L',
@@ -1422,19 +1351,17 @@ impl Target {
             Leg::TakeProfit => "TP",
             Leg::Stop => "SL",
         };
-        let id = format!("D{}-{}{side}-{leg}", self.decision, self.kind.letter());
+        let id = format!("D{}-{side}-{leg}", self.decision);
         ClientOrderId::from(id.as_str())
     }
 
-    /// The target and leg `id` names, if a target's.
+    /// The decision's side and leg `id` names, if a target's.
     fn parse(id: ClientOrderId) -> Option<(Self, Leg)> {
         let (decision, rest) = id.as_str().strip_prefix('D')?.split_once('-')?;
-        let (target, leg) = rest.split_once('-')?;
-        let mut target = target.chars();
-        let kind = Kind::of(target.next()?)?;
-        let side = match target.next()? {
-            'L' => Side::Long,
-            'S' => Side::Short,
+        let (side, leg) = rest.split_once('-')?;
+        let side = match side {
+            "L" => Side::Long,
+            "S" => Side::Short,
             _ => return None,
         };
         let leg = match leg {
@@ -1443,42 +1370,13 @@ impl Target {
             "SL" => Leg::Stop,
             _ => return None,
         };
-        (target.next().is_none()).then_some(())?;
-        Some((Self::new(decision.parse().ok()?, kind, side), leg))
-    }
-}
-
-impl Kind {
-    /// The name of the kind in the names of a row's values.
-    fn name(self) -> &'static str {
-        match self {
-            Self::Barrier => "barrier",
-            Self::Horizon => "horizon",
-        }
-    }
-
-    fn letter(self) -> char {
-        match self {
-            Self::Barrier => 'B',
-            Self::Horizon => 'H',
-        }
-    }
-
-    fn of(letter: char) -> Option<Self> {
-        match letter {
-            'B' => Some(Self::Barrier),
-            'H' => Some(Self::Horizon),
-            _ => None,
-        }
-    }
-
-    /// The names of the values a row has of a target of this kind, on each
-    /// side.
-    const fn values(self) -> &'static [&'static str] {
-        match self {
-            Self::Barrier => &["pnl", "commission", "exit", "take_profit", "stop"],
-            Self::Horizon => &["pnl", "commission", "exit"],
-        }
+        Some((
+            Self {
+                decision: decision.parse().ok()?,
+                side,
+            },
+            leg,
+        ))
     }
 }
 
@@ -1517,10 +1415,10 @@ impl Side {
 /// time, its tag; none if it is no exit of the target.
 fn exit<S: DataActor + DataActorNative>(
     strategy: &S,
-    target: Target,
+    target: DecisionSide,
     closing: ClientOrderId,
 ) -> Option<Exit> {
-    match Target::parse(closing) {
+    match DecisionSide::parse(closing) {
         Some((of, Leg::TakeProfit)) if of == target => Some(Exit::TakeProfit),
         Some((of, Leg::Stop)) if of == target => Some(Exit::Stop),
         Some(_) => None,
@@ -1535,7 +1433,7 @@ fn exit<S: DataActor + DataActorNative>(
 /// The price a decision's exits are set from: the mid of the instrument's
 /// last quote, else its last trade, else the close of its last bar, of any
 /// bar type.
-pub(super) fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Price> {
+fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Price> {
     cache
         .price(instrument_id, PriceType::Mid)
         .or_else(|| cache.price(instrument_id, PriceType::Last))
@@ -1550,15 +1448,13 @@ pub(super) fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Optio
 }
 
 impl TargetRow {
-    /// The values of the row, in the order of `TargetsConfig::target_names`
+    /// The values of the row, in the order of `TargetConfig::target_names`
     /// of the config that made it: each P&L in its currency, each exit as
     /// `Exit::value`, each distance in price.
     #[must_use]
     pub fn values(&self) -> Vec<f64> {
-        [self.barrier, self.horizon]
+        [self.outcomes.long, self.outcomes.short]
             .into_iter()
-            .flatten()
-            .flat_map(|outcomes| [outcomes.long, outcomes.short])
             .flat_map(|outcome| {
                 let distances = outcome.distances.into_iter().flat_map(|distances| {
                     [distances.take_profit, distances.stop]

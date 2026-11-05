@@ -18,7 +18,7 @@ use crate::{
     common::{
         dataset::{
             CALIBRATION, STRATEGY, baseline_of, config, features, replay, replay_of, requirements,
-            targets, trade, venue, walk,
+            target, trade, venue, walk,
         },
         ic,
     },
@@ -27,7 +27,7 @@ use helix_trader::model::{
     config::{Margins, ModelConfig},
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
     store::{ModelSet, ModelStore, Probe},
-    targets::{Barrier, Distance, Side, TargetsConfig},
+    targets::{Distance, Side, Target, TargetConfig},
 };
 use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
@@ -161,7 +161,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
             .collect(),
         fitted
             .iter()
-            .map(|row| row.barrier.unwrap().long.pnl.as_f64() > 0.0)
+            .map(|row| row.outcomes.long.pnl.as_f64() > 0.0)
             .collect(),
     )
     .unwrap();
@@ -206,11 +206,10 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     }
 }
 
-/// The hand-worked targets' barrier (`backtest_targets`): 7.5 bps of the
+/// The hand-worked targets' bracket (`backtest_targets`): 7.5 bps of the
 /// decision's mid away on both sides, 3.00 USD on one ounce of gold,
-/// closed after 45 minutes, and a horizon of 30, both inside the hourly
-/// cadence; learning the barrier, and trading `side` alone at every
-/// decision.
+/// closed after 45 minutes, inside the hourly cadence; trading `side` alone
+/// at every decision.
 fn hand_worked(side: Side) -> ModelConfig {
     let traded = Some(f64::MIN);
     let margins = match side {
@@ -225,15 +224,13 @@ fn hand_worked(side: Side) -> ModelConfig {
     };
     let bps = Distance::BasisPoints(Decimal::new(75, 1));
     ModelConfig {
-        targets: TargetsConfig {
-            barrier: Some(Barrier {
-                take_profit: bps,
-                stop: bps,
-                limit: SignedDuration::from_mins(45),
-                atr: None,
-            }),
-            horizon: Some(SignedDuration::from_mins(30)),
-            ..targets()
+        target: TargetConfig {
+            spec: Target::builder()
+                .take_profit(bps)
+                .stop(bps)
+                .limit(SignedDuration::from_mins(45))
+                .build(),
+            ..target()
         },
         learner: LearnerConfig::Baseline {},
         margins,
@@ -243,7 +240,7 @@ fn hand_worked(side: Side) -> ModelConfig {
 
 /// Worked by hand on the quotes of the hand-worked targets: a dip at
 /// 09:20, a spike at 10:45:00.010 and a rise from 11:20. Over 08:30 to
-/// 12:30 a model of one side, trading every decision on its barrier,
+/// 12:30 a model of one side, trading every decision on its bracket,
 /// realises at the decisions of 09:00, 10:00 and 11:00 the P&L the
 /// dataset row of that decision recorded of that side: the long stopped
 /// (-3.64 USD), taking profit (2.66) and closed by time (0.56), the short
@@ -287,10 +284,9 @@ fn a_model_strategy_realises_per_trade_the_pnl_its_dataset_row_recorded() {
         let recorded: Vec<(UnixNanos, Money)> = rows
             .iter()
             .map(|row| {
-                let outcomes = row.barrier.unwrap();
                 let outcome = match side {
-                    Side::Long => outcomes.long,
-                    Side::Short => outcomes.short,
+                    Side::Long => row.outcomes.long,
+                    Side::Short => row.outcomes.short,
                 };
                 (row.decision.ts_event, outcome.pnl)
             })

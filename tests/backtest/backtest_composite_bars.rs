@@ -21,7 +21,7 @@ use helix_trader::{
         config::ModelConfig,
         features::FeatureSet,
         handle::{Mode, SettledRows},
-        targets::TargetsConfig,
+        targets::TargetConfig,
     },
     strategy::{DataRequirements, Declared, catalog_series},
 };
@@ -170,9 +170,9 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         warmup: SignedDuration::ZERO,
     };
     let config = ModelConfig {
-        targets: TargetsConfig {
+        target: TargetConfig {
             instrument_id: InstrumentId::from(common::INSTRUMENT_ID),
-            ..dataset::targets()
+            ..dataset::target()
         },
         ..dataset::config()
     };

@@ -20,7 +20,7 @@ use std::{path::Path, rc::Rc};
 use crate::common::{
     dataset::{
         STRATEGY, baseline_of, config, meta_baseline_of, missing, replay_on, requirements, rule,
-        targets, trade_on, venue, walk,
+        target, trade_on, venue, walk,
     },
     ic,
 };
@@ -77,7 +77,7 @@ fn model_primary() -> ModelConfig {
 
 /// Quotes from 23:00 of the 20th of October 2026 to 03:00 of the 26th:
 /// the dataset's days, from the window of the first retrain, to the
-/// span's end plus the longest target.
+/// span's end plus the target's limit.
 fn catalog() -> TempDir {
     walk(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
@@ -104,7 +104,7 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
 /// `row`, as a strategy of `features` loads it.
 fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
-    let fingerprint = dataset::fingerprint(features, rule(), &targets(), &requirements(), &venue())
+    let fingerprint = dataset::fingerprint(features, rule(), &target(), &requirements(), &venue())
         .unwrap()
         .to_string();
     stored
@@ -143,7 +143,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                     StrategyId::from(STRATEGY),
                     &features(),
                     rule(),
-                    targets(),
+                    target(),
                     &requirements(),
                     &venue(),
                 )?;

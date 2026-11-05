@@ -18,15 +18,15 @@
 //! `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
-//! targets in a dataset run; `schedule` is when a model is retrained, on
+//! target in a dataset run; `schedule` is when a model is retrained, on
 //! a fixed UTC grid, or that it never is, and what each train does to
 //! each model; `launcher`
 //! starts a live strategy's retrains, one
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
-//! trade of the primary, the strategy's rule or its model, trained on
-//! the primary's out-of-sample predictions.
+//! trade of the primary, the strategy's side models, trained on the
+//! primary's out-of-sample predictions.
 //!
 //! `ModelStrategy` is what a strategy trading on a model gives the
 //! harness: the binary's backtest, live, train and dataset runs are
@@ -89,9 +89,9 @@ pub trait ModelPart: Part {
 /// answer): the series its features read (`ModelPart::features`), their
 /// bar types (`FeatureSet::bar_types`) and their tick series
 /// (`FeatureSet::ticks`), then each series `[data]` lists that the
-/// barrier's ATR reads, its bars or the ticks they are built from
-/// (`catalog_series`). The ATR is built of what the strategy reads of the
-/// traded instrument (`TargetsConfig::atr_bars`), so it reads a series of
+/// target's ATR, if it has one, reads, its bars or the ticks they are built
+/// from (`catalog_series`). The ATR is built of what the strategy reads of
+/// the traded instrument (`TargetConfig::atr_bars`), so it reads a series of
 /// `[data]` if one serves it, and needs none listed.
 ///
 /// # Errors
@@ -106,9 +106,9 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
         .chain(features.ticks().into_iter().map(Series::Ticks))
         .collect();
     let model = config.model();
-    // An ATR without bars is the targets' violation (`ModelConfig::validate`).
+    // An ATR without bars is the target's violation (`ModelConfig::validate`).
     if let Ok(Some(atr)) = model
-        .targets
+        .target
         .atr_bars(model.decision, &config.data_requirements())
     {
         let built_of = catalog_series(&[atr.bar_type]);
@@ -186,7 +186,7 @@ pub trait ModelStrategy:
             config.strategy_id(),
             &features,
             model.decision,
-            model.targets,
+            model.target,
             &config.data_requirements(),
             venue,
         )
@@ -375,28 +375,23 @@ mod tests {
     "#;
 
     /// The probe trading gold, its features reading `features`, its
-    /// `[data]` listing `series`, deciding hourly on the `targets`, of
+    /// `[data]` listing `series`, deciding hourly on the `target`, of
     /// `TABLES`, loaded.
     fn load(
         features: &[&str],
         series: &[&str],
-        targets: &str,
+        target: &str,
     ) -> anyhow::Result<StandardConfig<ProbeParams>> {
-        load_of(features, series, targets, TABLES)
+        load_of(features, series, target, TABLES)
     }
 
     /// The probe as `load` has it, its `[indicators]` `tables`.
     fn load_of(
         features: &[&str],
         series: &[&str],
-        targets: &str,
+        target: &str,
         tables: &str,
     ) -> anyhow::Result<StandardConfig<ProbeParams>> {
-        let label = if targets.contains("barrier") {
-            "barrier"
-        } else {
-            "horizon"
-        };
         StandardConfig::load(&format!(
             r#"
             features = [{}]
@@ -412,8 +407,7 @@ mod tests {
 
             [model]
             decision = {{ every = "1h" }}
-            targets = {targets}
-            label = "{label}"
+            target = {target}
             retrain = "24h"
             window = "48h"
             holdout = "12h"
@@ -427,15 +421,14 @@ mod tests {
         ))
     }
 
-    const HORIZON: &str = r#"{ horizon = "30m" }"#;
-    /// A barrier in ATRs: Nautilus' ATR of 14 hourly bars of gold.
-    const BARRIER: &str =
-        r#"{ barrier = { take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" } }"#;
+    const TIME_ONLY: &str = r#"{ limit = "30m" }"#;
+    /// A bracket in ATRs: Nautilus' ATR of 14 hourly bars of gold.
+    const BRACKET: &str = r#"{ take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" }"#;
 
     /// Each config error refusing the probe's config of `features`,
-    /// `series` and `targets` (see `load`): its field and its message.
-    fn refusals(features: &[&str], series: &[&str], targets: &str) -> Vec<(String, String)> {
-        let err = load(features, series, targets).unwrap_err();
+    /// `series` and `target` (see `load`): its field and its message.
+    fn refusals(features: &[&str], series: &[&str], target: &str) -> Vec<(String, String)> {
+        let err = load(features, series, target).unwrap_err();
         let errors = match err.downcast_ref::<ConfigError>() {
             Some(ConfigError::Multiple { errors }) => errors.clone(),
             Some(err) => vec![err.clone()],
@@ -454,12 +447,12 @@ mod tests {
 
     #[test]
     fn features_reading_every_series_of_data_and_no_other_load() {
-        load(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], HORIZON).unwrap();
+        load(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], TIME_ONLY).unwrap();
     }
 
     #[test]
     fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it() {
-        let [(field, message)] = &refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], HORIZON)[..]
+        let [(field, message)] = &refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], TIME_ONLY)[..]
         else {
             panic!("not one refusal");
         };
@@ -470,7 +463,7 @@ mod tests {
 
     #[test]
     fn a_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let [(field, message)] = &refusals(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], HORIZON)[..]
+        let [(field, message)] = &refusals(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], TIME_ONLY)[..]
         else {
             panic!("not one refusal");
         };
@@ -488,7 +481,11 @@ mod tests {
             .replace("XAUUSD", "XAGUSD")
             .replace("MINUTE", "HOUR");
 
-        let mut refusals = refusals(&[GOLD_BARS, &silver_bars], &[GOLD_BARS, GC_TRADES], HORIZON);
+        let mut refusals = refusals(
+            &[GOLD_BARS, &silver_bars],
+            &[GOLD_BARS, GC_TRADES],
+            TIME_ONLY,
+        );
         refusals.sort();
 
         let [(missing, of_missing), (unread, of_unread)] = &refusals[..] else {
@@ -512,7 +509,7 @@ mod tests {
     fn bars_on_a_root_not_built_from_its_trades_are_refused_under_their_series() {
         let root_bars = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
 
-        let refusals = refusals(&[root_bars], &[root_bars], HORIZON);
+        let refusals = refusals(&[root_bars], &[root_bars], TIME_ONLY);
 
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
@@ -521,14 +518,15 @@ mod tests {
         assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
     }
 
-    /// The features read GC's trades alone; the barrier's ATR is built of
-    /// the quotes of the gold traded, which `[data]` lists for it.
+    /// The features read GC's trades alone; the target's ATR is built of
+    /// the quotes of the gold traded, which `[data]` lists for it; a
+    /// time-only target has no ATR to read them.
     #[test]
-    fn ticks_the_barrier_atr_reads_alone_are_read() {
+    fn ticks_the_target_atr_reads_alone_are_read() {
         let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
-        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BARRIER).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], HORIZON);
+        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BRACKET).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -539,14 +537,15 @@ mod tests {
         );
     }
 
-    /// Deciding hourly, the barrier's ATR runs on gold's hourly bars of
-    /// mids, which `[data]` lists and no feature reads.
+    /// Deciding hourly, the target's ATR runs on gold's hourly bars of
+    /// mids, which `[data]` lists and no feature reads; a time-only target
+    /// has no ATR to read them.
     #[test]
-    fn bars_the_barrier_atr_runs_on_alone_are_read() {
+    fn bars_the_target_atr_runs_on_alone_are_read() {
         let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
 
-        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BARRIER).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], HORIZON);
+        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BRACKET).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -557,11 +556,11 @@ mod tests {
         );
     }
 
-    /// The barrier's ATR reads what it is built from, and nothing more:
+    /// The target's ATR reads what it is built from, and nothing more:
     /// its bars of gold's quotes leave the trades of GC unread.
     #[test]
-    fn a_series_neither_the_features_nor_the_barrier_atr_read_is_refused() {
-        let refusals = refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], BARRIER);
+    fn a_series_neither_the_features_nor_the_target_atr_read_is_refused() {
+        let refusals = refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], BRACKET);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -569,21 +568,18 @@ mod tests {
         assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
     }
 
-    /// An unread series and a horizon of an hour decided every hour are
+    /// An unread series and a limit of an hour decided every hour are
     /// both reported, each under its field.
     #[test]
     fn the_series_refusals_are_reported_with_the_other_violations() {
-        let mut fields: Vec<String> = refusals(
-            &[GOLD_BARS],
-            &[GOLD_BARS, GC_TRADES],
-            r#"{ horizon = "1h" }"#,
-        )
-        .into_iter()
-        .map(|(field, _)| field)
-        .collect();
+        let mut fields: Vec<String> =
+            refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], r#"{ limit = "1h" }"#)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect();
         fields.sort();
 
-        assert_eq!(fields, ["data.series[1]", "model.targets.horizon"]);
+        assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
     }
 
     /// The features read GC's trades once, and `[data]` lists them again:
@@ -593,7 +589,7 @@ mod tests {
         let err = load(
             &[GOLD_BARS, GC_TRADES],
             &[GC_TRADES, GOLD_BARS, GC_TRADES],
-            HORIZON,
+            TIME_ONLY,
         )
         .unwrap_err();
 
@@ -608,28 +604,25 @@ mod tests {
         assert!(value.contains("TradeTick of GC.GLBX"), "{value}");
     }
 
-    /// A series listed twice and a horizon of an hour decided every hour
+    /// A series listed twice and a limit of an hour decided every hour
     /// are both reported, each under its field.
     #[test]
     fn a_series_listed_twice_is_reported_with_the_other_violations() {
-        let mut fields: Vec<String> = refusals(
-            &[GOLD_BARS],
-            &[GOLD_BARS, GOLD_BARS],
-            r#"{ horizon = "1h" }"#,
-        )
-        .into_iter()
-        .map(|(field, _)| field)
-        .collect();
+        let mut fields: Vec<String> =
+            refusals(&[GOLD_BARS], &[GOLD_BARS, GOLD_BARS], r#"{ limit = "1h" }"#)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect();
         fields.sort();
 
-        assert_eq!(fields, ["data.series[1]", "model.targets.horizon"]);
+        assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
     }
 
     /// The part's own error building the features is the answer: no
     /// series is then refused for it.
     #[test]
     fn the_parts_error_building_the_features_is_reported_under_its_field() {
-        let refusals = refusals(&[], &[GOLD_BARS], HORIZON);
+        let refusals = refusals(&[], &[GOLD_BARS], TIME_ONLY);
         let fields: Vec<&str> = refusals.iter().map(|(field, _)| field.as_str()).collect();
         assert_eq!(fields, ["features"]);
     }
@@ -637,7 +630,7 @@ mod tests {
     /// The probe's features on gold's bars, of the tables `tables`, as its
     /// part builds them of the loaded config.
     fn features_of(tables: &str) -> Rc<FeatureSet> {
-        ProbeParams::features(&load_of(&[GOLD_BARS], &[GOLD_BARS], HORIZON, tables).unwrap())
+        ProbeParams::features(&load_of(&[GOLD_BARS], &[GOLD_BARS], TIME_ONLY, tables).unwrap())
             .unwrap()
     }
 
@@ -691,8 +684,7 @@ mod tests {
             .replace(r#""15m""#, r#""0s""#)
             .replace("[indicators.filter]\n        period = 5\n", "");
 
-        let err =
-            load_of(&[GOLD_BARS], &[GOLD_BARS], r#"{ horizon = "1h" }"#, &tables).unwrap_err();
+        let err = load_of(&[GOLD_BARS], &[GOLD_BARS], r#"{ limit = "1h" }"#, &tables).unwrap_err();
 
         let Some(ConfigError::Multiple { errors }) = err.downcast_ref::<ConfigError>() else {
             panic!("not several config errors: {err}");
@@ -709,11 +701,7 @@ mod tests {
         fields.sort();
         assert_eq!(
             fields,
-            [
-                "indicators.filter",
-                "indicators.span",
-                "model.targets.horizon"
-            ]
+            ["indicators.filter", "indicators.span", "model.target.limit"]
         );
     }
 }

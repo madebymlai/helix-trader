@@ -1,9 +1,9 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
-//! targets of its decisions and the one its model learns, how often a
-//! model is retrained, if ever, and the window it is trained on, the
-//! least its holdout earns to be published, the margins its expected P&L
-//! must clear to trade a side, and its learner; and, optionally, the meta
-//! model filtering its trades.
+//! target of its decisions, which its model learns, how often a model is
+//! retrained, if ever, and the window it is trained on, the least its
+//! holdout earns to be published, the margins its expected P&L must clear
+//! to trade a side, and its learner; and, optionally, the meta model
+//! filtering its trades.
 //!
 //! A strategy has at most two levels of models: a primary, the side
 //! models of a `ModelConfig`, and one meta model (`MetaConfig`) deciding
@@ -21,7 +21,7 @@ use super::{
     holdout::Minimums,
     learner::LearnerConfig,
     schedule::Retrain,
-    targets::{Label, Side, TargetsConfig, TargetsTable},
+    targets::{Side, Target, TargetConfig},
 };
 use crate::strategy::{DataRequirements, TradedInstrument};
 
@@ -30,8 +30,7 @@ use crate::strategy::{DataRequirements, TradedInstrument};
 /// ```toml
 /// [model]
 /// decision = { every = "1h" }
-/// targets = { horizon = "45m" }
-/// label = "horizon"
+/// target = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, limit = "45m" }
 /// retrain = "168h"
 /// window = "720h"
 /// holdout = "120h"
@@ -41,18 +40,17 @@ use crate::strategy::{DataRequirements, TradedInstrument};
 /// learner = { kind = "lightgbm" }
 /// ```
 ///
-/// Its targets `T` are as the TOML has them, a `TargetsTable` (a
-/// `ModelSection`), until the section trades the instrument of the
-/// strategy's `[trade]` (`ModelSection::trading`).
+/// Its target `T` is as the TOML has it, a `Target` (a `ModelSection`),
+/// until the section trades the instrument of the strategy's `[trade]`
+/// (`ModelSection::trading`).
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
-pub struct ModelConfig<T = TargetsConfig> {
+pub struct ModelConfig<T = TargetConfig> {
     /// When the strategy decides.
     pub decision: DecisionRule,
-    /// The targets of each decision, read from orders in a dataset run.
-    pub targets: T,
-    /// The target the models learn: whether each side of it gains.
-    pub label: Label,
+    /// The target of each decision, read from orders in a dataset run: the
+    /// models learn whether each side of it gains.
+    pub target: T,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
     /// (`model::schedule`). Left out, never: each model is trained once and
@@ -68,7 +66,7 @@ pub struct ModelConfig<T = TargetsConfig> {
     /// The sides traded, each with the expected net P&L it trades from.
     pub margins: Margins,
     /// The least net P&L per trade a side's decisions earn on the holdout
-    /// for its model to be published, in the targets' P&L currency
+    /// for its model to be published, in the target's P&L currency
     /// (`holdout`).
     pub min_pnl: f64,
     /// The fewest trades a side's decisions take on the holdout for its
@@ -82,8 +80,8 @@ pub struct ModelConfig<T = TargetsConfig> {
 }
 
 /// A meta model: on each decision the primary makes a trade of, whether
-/// that trade, the target of the primary's label on its side, wins, learned
-/// from the primary's features, its side and its probability. It is
+/// that trade, the target on its side, wins, learned from the primary's
+/// features, its side and its probability. It is
 /// retrained on the primary's schedule, right after the primary, or, the
 /// primary never retrained, trained once and kept.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
@@ -101,7 +99,7 @@ pub struct MetaConfig {
     /// The probability from which the primary's trade is taken.
     pub threshold: f64,
     /// The least net P&L per trade the meta's decisions earn on the
-    /// holdout for its model to be published, in the targets' P&L
+    /// holdout for its model to be published, in the target's P&L
     /// currency (`holdout`).
     pub min_pnl: f64,
     /// The fewest trades the meta's decisions take on the holdout for its
@@ -110,12 +108,12 @@ pub struct MetaConfig {
     /// The learner and its settings.
     pub learner: LearnerConfig,
     /// How a trade taken is sized from the probability; none trades the
-    /// targets' size.
+    /// target's size.
     pub size: Option<Sizing>,
 }
 
 /// A trade's size from the meta model's probability: a multiple of the
-/// targets' size, `min` at the threshold, `max` at a probability of 1,
+/// target's size, `min` at the threshold, `max` at a probability of 1,
 /// linear between, such as `size = { min = 0.5, max = 2 }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,7 +123,7 @@ pub struct Sizing {
 }
 
 /// The sides a model primary trades, each with its margin: the expected
-/// net P&L of a trade, in the targets' P&L currency per trade of their
+/// net P&L of a trade, in the target's P&L currency per trade of its
 /// quantity, from which the side is traded (`payoff`), such as
 /// `margins = { long = 0.5, short = 0.5 }`. A side without one has no
 /// model, trained, stored, scored nor traded: `{ long = 0.5 }` is a
@@ -155,18 +153,17 @@ impl Margins {
     }
 }
 
-/// A model section as a strategy's TOML has it: its targets trade nothing
+/// A model section as a strategy's TOML has it: its target trades nothing
 /// yet.
-pub type ModelSection = ModelConfig<TargetsTable>;
+pub type ModelSection = ModelConfig<Target>;
 
 impl ModelSection {
-    /// The section, its targets trading `traded` (`TargetsTable::trading`).
+    /// The section, its target trading `traded` (`Target::trading`).
     #[must_use]
     pub fn trading(self, traded: &TradedInstrument) -> ModelConfig {
         let Self {
             decision,
-            targets,
-            label,
+            target,
             retrain,
             window,
             holdout,
@@ -178,8 +175,7 @@ impl ModelSection {
         } = self;
         ModelConfig {
             decision,
-            targets: targets.trading(traded),
-            label,
+            target: target.trading(traded),
             retrain,
             window,
             holdout,
@@ -200,44 +196,34 @@ impl ModelConfig {
     ///
     /// Returns every violation, each Nautilus' `ConfigError` under its
     /// field of `[model]` (`model.…`), as one `ConfigError::Multiple` if
-    /// there are several: the decision rule, the targets or the learner
-    /// invalid (see `DecisionRule::validate`, `TargetsConfig::validate`,
+    /// there are several: the decision rule, the target or the learner
+    /// invalid (see `DecisionRule::validate`, `TargetConfig::validate`,
     /// `LearnerConfig::validate`), the retrain interval not positive, the
-    /// barrier's ATR without bars built from what the strategy reads of
+    /// target's ATR without bars built from what the strategy reads of
     /// the instrument traded (see
-    /// `TargetsConfig::atr_bars`) or warming over longer than its warmup,
-    /// the label naming a target the config lacks, a target (the barrier's
-    /// limit or the horizon) not shorter than the window, the holdout not
+    /// `TargetConfig::atr_bars`) or warming over longer than its warmup,
+    /// the target's limit not shorter than the window, the holdout not
     /// positive or leaving no fitted row (see `validate_window`), the
     /// margins naming no side or one not finite, the minimums invalid (see
     /// `validate_minimums`), the meta model invalid (see
-    /// `MetaConfig::validate`), or a target not shorter than the decision
-    /// cadence (see `validate_cadence`).
+    /// `MetaConfig::validate`), or the target's limit not shorter than the
+    /// decision cadence (see `validate_cadence`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         validate_decisions(
             self.decision,
-            &self.targets,
+            &self.target,
             self.retrain,
             requirements,
             &mut errors,
         );
         errors.collect(learner(&self.learner, "model.learner"));
-        errors.check(
-            self.targets.pnl_index(self.label, Side::Long).is_some(),
-            ConfigError::invalid_value(
-                "model.label",
-                format!(
-                    "the label {:?} names a target the targets do not have",
-                    self.label
-                ),
-            ),
-        );
         validate_window(
             self.window,
             self.holdout,
-            &self.targets,
+            &self.target,
             "model",
+            "model.target.limit",
             &mut errors,
         );
         errors.check(
@@ -255,9 +241,9 @@ impl ModelConfig {
         }
         validate_minimums(self.minimums(), "model", &mut errors);
         if let Some(meta) = &self.meta {
-            meta.validate(&self.targets, &mut errors);
+            meta.validate(&self.target, &mut errors);
         }
-        validate_cadence(self.decision, &self.targets, &mut errors);
+        validate_cadence(self.decision, &self.target, &mut errors);
         errors.into_result()
     }
 
@@ -271,55 +257,44 @@ impl ModelConfig {
     }
 }
 
-/// Pushes onto `errors` the violation of a target of `targets` not closing
-/// before the next decision of `rule`: the primary trades the target of
-/// its label, and a live account nets a new trade into one still open,
-/// where a dataset run's hedging venue keeps them apart.
-fn validate_cadence(
-    rule: DecisionRule,
-    targets: &TargetsConfig,
-    errors: &mut ConfigErrorCollector,
-) {
+/// Pushes onto `errors` the violation of `target` not closing before the
+/// next decision of `rule`: the primary trades the target, and a live
+/// account nets a new trade into one still open, where a dataset run's
+/// hedging venue keeps them apart.
+fn validate_cadence(rule: DecisionRule, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
     let DecisionRule::Every(cadence) = rule;
-    if let Some(barrier) = targets.barrier {
-        errors.check(
-            barrier.limit < cadence,
-            ConfigError::invalid_value(
-                "model.targets.barrier.limit",
-                format!(
-                    "the barrier's limit {:#} is not shorter than the decision cadence \
-                     {cadence:#}: a trade would still be open at the next decision",
-                    barrier.limit
-                ),
+    let limit = target.settles_within();
+    errors.check(
+        limit < cadence,
+        ConfigError::invalid_value(
+            "model.target.limit",
+            format!(
+                "the target's limit {limit:#} is not shorter than the decision cadence \
+                 {cadence:#}: a trade would still be open at the next decision"
             ),
-        );
-    }
-    if let Some(horizon) = targets.horizon {
-        errors.check(
-            horizon < cadence,
-            ConfigError::invalid_value(
-                "model.targets.horizon",
-                format!(
-                    "the horizon {horizon:#} is not shorter than the decision cadence \
-                     {cadence:#}: a trade would still be open at the next decision"
-                ),
-            ),
-        );
-    }
+        ),
+    );
 }
 
 impl MetaConfig {
     /// Pushes onto `errors` every violation of the meta model against the
-    /// primary's `targets`, each under its field of `[model.meta]`
+    /// primary's `target`, each under its field of `[model.meta]`
     /// (`model.meta.…`): the learner invalid (see
-    /// `LearnerConfig::validate`), a target not shorter than the window, the
-    /// holdout not positive or leaving no fitted row, the threshold not a
-    /// probability, the minimums invalid (see `validate_minimums`), or the
+    /// `LearnerConfig::validate`), the target's limit not shorter than the
+    /// window, the holdout not positive or leaving no fitted row, the
+    /// threshold not a probability, the minimums invalid (see `validate_minimums`), or the
     /// sizing's multiples not positive with the minimum not above the
     /// maximum.
-    pub fn validate(&self, targets: &TargetsConfig, errors: &mut ConfigErrorCollector) {
+    pub fn validate(&self, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
         errors.collect(learner(&self.learner, "model.meta.learner"));
-        validate_window(self.window, self.holdout, targets, "model.meta", errors);
+        validate_window(
+            self.window,
+            self.holdout,
+            target,
+            "model.meta",
+            "model.meta.window",
+            errors,
+        );
         errors.check(
             (0.0..=1.0).contains(&self.threshold),
             ConfigError::invalid_value(
@@ -351,7 +326,7 @@ impl MetaConfig {
         }
     }
 
-    /// The multiple of the targets' size a trade taken at `probability`
+    /// The multiple of the target's size a trade taken at `probability`
     /// is: one without sizing; with it, `min` at the threshold, `max` at a
     /// probability of 1, linear between.
     #[must_use]
@@ -370,11 +345,11 @@ impl MetaConfig {
 }
 
 /// Pushes onto `errors` the violations of what every model section has:
-/// the decision `rule`, the `targets`, the `retrain` (`Retrain::validate`),
+/// the decision `rule`, the `target`, the `retrain` (`Retrain::validate`),
 /// against the strategy's `requirements`.
 fn validate_decisions(
     rule: DecisionRule,
-    targets: &TargetsConfig,
+    target: &TargetConfig,
     retrain: Retrain,
     requirements: &DataRequirements,
     errors: &mut ConfigErrorCollector,
@@ -383,10 +358,10 @@ fn validate_decisions(
         rule.validate()
             .map_err(|e| ConfigError::invalid_value("model.decision", format!("{e:#}"))),
     );
-    errors.collect(targets.validate(rule, requirements));
+    errors.collect(target.validate(rule, requirements));
     retrain.validate(errors);
-    // An ATR without bars is the targets' violation, pushed above.
-    if let Ok(Some(atr)) = targets.atr_bars(rule, requirements) {
+    // An ATR without bars is the target's violation, pushed above.
+    if let Ok(Some(atr)) = target.atr_bars(rule, requirements) {
         // A dataset run replays the warmup before its first day, and no
         // more: an ATR still cold then opens no target at the day's first
         // decisions, which a longer build would.
@@ -396,9 +371,9 @@ fn validate_decisions(
         errors.check(
             warms.is_some_and(|warms| warms <= requirements.warmup),
             ConfigError::invalid_value(
-                "model.targets.barrier.atr",
+                "model.target.atr",
                 format!(
-                    "the barrier's ATR of {} bars of {} warms over longer than the warmup {:#}",
+                    "the target's ATR of {} bars of {} warms over longer than the warmup {:#}",
                     atr.args.period, atr.bar_type, requirements.warmup
                 ),
             ),
@@ -413,33 +388,36 @@ fn learner(learner: &LearnerConfig, field: &str) -> ConfigResult<()> {
         .map_err(|e| ConfigError::invalid_value(field, format!("{e:#}")))
 }
 
-/// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
-/// violations of the longest of `targets` not shorter than `window`, or
-/// `holdout` not positive or too long to leave a fitted row before it and
-/// the calibration, as long as it, before it (`train`): the window longer
-/// than twice the holdout and the longest target.
+/// Pushes onto `errors`, of `section` (`model` or `model.meta`), the
+/// violations of the limit of `target` not shorter than `window`, under
+/// `limit_field`, or `holdout` not positive or too long to leave a fitted
+/// row before it and the calibration, as long as it, before it (`train`):
+/// the window longer than twice the holdout and the limit. The primary's
+/// window is its target's to fit, and a meta's the meta's own, set beside
+/// the target it shares.
 fn validate_window(
     window: SignedDuration,
     holdout: SignedDuration,
-    targets: &TargetsConfig,
+    target: &TargetConfig,
     section: &str,
+    limit_field: &str,
     errors: &mut ConfigErrorCollector,
 ) {
-    let longest = targets.settles_within();
+    let limit = target.settles_within();
     errors.check(
-        longest < window,
+        limit < window,
         ConfigError::invalid_value(
-            format!("{section}.window"),
-            format!("the longest target {longest:#} is not shorter than the window {window:#}"),
+            limit_field,
+            format!("the target's limit {limit:#} is not shorter than the window {window:#}"),
         ),
     );
     errors.check(
-        holdout.is_positive() && holdout * 2 + longest < window,
+        holdout.is_positive() && holdout * 2 + limit < window,
         ConfigError::invalid_value(
             format!("{section}.holdout"),
             format!(
                 "the holdout {holdout:#} and the calibration as long before it leave no fitted \
-                 row in the window {window:#} after the longest target {longest:#}"
+                 row in the window {window:#} after the target's limit {limit:#}"
             ),
         ),
     );
@@ -480,13 +458,11 @@ mod tests {
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
-    /// A model section deciding every hour, with a barrier closed after 45
-    /// minutes and a horizon of 30, on a window of 48 hours, 12 of them
-    /// held out.
+    /// A model section deciding every hour, with a bracket closed after 45
+    /// minutes, on a window of 48 hours, 12 of them held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
-        targets = { horizon = "30m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" } }
-        label = "barrier"
+        target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
@@ -544,6 +520,23 @@ mod tests {
         format!("{:#}", load(toml).unwrap_err())
     }
 
+    /// The fields of the config errors refusing `toml`.
+    fn refused_fields(toml: &str) -> Vec<String> {
+        let err = load(toml).unwrap_err();
+        let errors = match err.downcast_ref::<ConfigError>() {
+            Some(ConfigError::Multiple { errors }) => errors.clone(),
+            Some(err) => vec![err.clone()],
+            None => panic!("not a config error: {err:#}"),
+        };
+        errors
+            .into_iter()
+            .map(|err| match err {
+                ConfigError::InvalidValue { field, .. } => field,
+                err => panic!("unexpected config error {err:?}"),
+            })
+            .collect()
+    }
+
     #[test]
     fn a_section_reads_from_toml() {
         let config = load(SECTION).unwrap();
@@ -552,8 +545,11 @@ mod tests {
             config.decision,
             DecisionRule::Every(SignedDuration::from_hours(1))
         );
-        assert_eq!(config.targets.instrument_id, InstrumentId::from(GOLD));
-        assert_eq!(config.label, Label::Barrier);
+        assert_eq!(config.target.instrument_id, InstrumentId::from(GOLD));
+        assert_eq!(
+            config.target.settles_within(),
+            SignedDuration::from_mins(45)
+        );
         assert_eq!(
             config.retrain,
             Retrain::Every(SignedDuration::from_hours(24))
@@ -600,46 +596,43 @@ mod tests {
         }
     }
 
+    /// Time only, or a bracket: the target closes after its limit at the
+    /// latest, which the window must hold. Deciding every 72 hours, so that
+    /// the cadence holds these limits and the window alone refuses them.
     #[test]
-    fn a_horizon_not_shorter_than_the_window_is_refused() {
-        let toml = section(r#"targets = { horizon = "48h" }"#)
-            .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+    fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit() {
+        for target in [
+            r#"target = { limit = "48h" }"#,
+            r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "49h" }"#,
+        ] {
+            let toml = section(target).replace(r#"every = "1h""#, r#"every = "72h""#);
 
-        assert!(
-            refused(&toml).contains("not shorter than the window"),
-            "{}",
-            refused(&toml)
-        );
+            assert!(
+                refused(&toml).contains("not shorter than the window"),
+                "{}",
+                refused(&toml)
+            );
+            assert_eq!(
+                refused_fields(&toml),
+                ["model.target.limit", "model.holdout"],
+                "{target}"
+            );
+        }
     }
 
+    /// Deciding every hour, a bracket closed after an hour, or a time-only
+    /// trade of an hour and a half, would still be open at the next
+    /// decision.
     #[test]
-    fn a_limit_not_shorter_than_the_window_is_refused() {
-        let toml = section(
-            r#"targets = { barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "49h" } }"#,
-        );
-
-        assert!(
-            refused(&toml).contains("not shorter than the window"),
-            "{}",
-            refused(&toml)
-        );
-    }
-
-    /// Deciding every hour, a barrier closed after an hour, or a horizon of
-    /// one, would still be open at the next decision.
-    #[test]
-    fn a_target_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
-        for (targets, named) in [
+    fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
+        for (target, named) in [
             (
-                r#"horizon = "30m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "1h" }"#,
+                r#"take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "1h""#,
                 "limit 1h",
             ),
-            (
-                r#"horizon = "90m", barrier = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
-                "horizon 1h 30m",
-            ),
+            (r#"limit = "90m""#, "limit 1h 30m"),
         ] {
-            let toml = section(&format!(r#"targets = {{ {targets} }}"#));
+            let toml = section(&format!(r#"target = {{ {target} }}"#));
 
             let err = refused(&toml);
 
@@ -647,7 +640,85 @@ mod tests {
                 err.contains(named) && err.contains("cadence 1h"),
                 "{named}: {err}"
             );
+            assert_eq!(refused_fields(&toml), ["model.target.limit"], "{named}");
         }
+    }
+
+    /// A trade closed at its time alone: no exit, and no ATR to read a
+    /// price of, warm or subscribe to.
+    #[test]
+    fn a_target_of_a_limit_alone_loads_with_no_exits() {
+        let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
+
+        config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
+        assert_eq!(config.target.spec.bracket(), None);
+        assert_eq!(
+            config.target.settles_within(),
+            SignedDuration::from_mins(30)
+        );
+        assert_eq!(config.target.target_names().len(), 6);
+        assert!(
+            config
+                .target
+                .atr_bars(config.decision, &reading_gold(&["order_book_depths"], &[]))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// `Trade::send_as` has both exits or neither: one alone would refuse
+    /// every order, so the load refuses it, beside the section's others.
+    #[test]
+    fn a_take_profit_or_a_stop_alone_is_refused_under_the_target() {
+        for target in [
+            r#"target = { take_profit = { bps = 7.5 }, limit = "45m" }"#,
+            r#"target = { stop = { bps = 5 }, limit = "45m" }"#,
+        ] {
+            let toml = section(target);
+
+            assert_eq!(refused_fields(&toml), ["model.target"], "{target}");
+
+            let with_another = toml.replace("min_trades = 30", "min_trades = 0");
+            let fields = refused_fields(&with_another);
+            assert!(
+                fields.iter().any(|field| field == "model.target")
+                    && fields.iter().any(|field| field == "model.min_trades"),
+                "{target}: {fields:?}"
+            );
+        }
+    }
+
+    /// The two targets and the label chosen among them are gone: each is
+    /// an unknown field, of the section and of the target.
+    #[test]
+    fn the_fields_of_two_targets_and_a_label_are_refused_as_unknown() {
+        for (toml, name) in [
+            (section(r#"barrier = { limit = "45m" }"#), "barrier"),
+            (section(r#"horizon = "45m""#), "horizon"),
+            (section(r#"targets = { horizon = "45m" }"#), "targets"),
+            (section(r#"label = "barrier""#), "label"),
+            (
+                section(r#"target = { limit = "45m", barrier = { limit = "45m" } }"#),
+                "barrier",
+            ),
+            (
+                section(r#"target = { limit = "45m", horizon = "45m" }"#),
+                "horizon",
+            ),
+        ] {
+            let err = refused(&toml);
+
+            assert!(err.contains(&format!("unknown field `{name}`")), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_target_without_a_limit_is_refused() {
+        let toml = section(r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }"#);
+
+        let err = refused(&toml);
+
+        assert!(err.contains("missing field `limit`"), "{err}");
     }
 
     /// The window of 48 hours holds the holdout, the calibration as long
@@ -720,19 +791,12 @@ mod tests {
         config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
     }
 
-    #[test]
-    fn a_label_of_a_target_the_config_lacks_is_refused() {
-        let toml = section(r#"targets = { horizon = "1h" }"#);
-
-        assert!(refused(&toml).contains("label"), "{}", refused(&toml));
-    }
-
-    /// A barrier 2 ATRs away in the side's favour, 1.5 against it, its ATR
+    /// A bracket 2 ATRs away in the side's favour, 1.5 against it, its ATR
     /// `atr`, a table or none.
     fn atr_section(atr: Option<&str>) -> String {
         let atr = atr.map(|atr| format!(", atr = {atr}")).unwrap_or_default();
         section(&format!(
-            r#"targets = {{ barrier = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }} }}"#
+            r#"target = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }}"#
         ))
     }
 
@@ -750,7 +814,7 @@ mod tests {
     /// its first day, would open no target at that day's first decisions
     /// after a shorter one.
     #[test]
-    fn a_barrier_atr_warming_longer_than_the_warmup_is_refused() {
+    fn a_target_atr_warming_longer_than_the_warmup_is_refused() {
         for (atr, hours) in [(None, 14), (Some("{ period = 3 }"), 3)] {
             let config = parse(&atr_section(atr)).unwrap();
 
@@ -792,10 +856,25 @@ mod tests {
         }
     }
 
+    /// A time-only target has no distance to warm an ATR for, whatever the
+    /// warmup, and an `atr` table is refused on it as on any target with
+    /// no distance in ATRs.
+    #[test]
+    fn a_time_only_target_has_no_atr_to_warm_and_refuses_an_atr_table() {
+        let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
+        config
+            .validate(&reading_gold_for(SignedDuration::ZERO))
+            .unwrap();
+
+        let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
+
+        assert_eq!(refused_fields(&toml), ["model.target.atr"]);
+    }
+
     /// Without quotes, the ATR's bars are built from the trades, or from
     /// the source bars the strategy reads.
     #[test]
-    fn a_barrier_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes() {
+    fn a_target_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes() {
         let config = parse(&atr_section(None)).unwrap();
 
         for requirements in [
@@ -809,10 +888,10 @@ mod tests {
         }
     }
 
-    /// Neither quotes, trades nor bars of the targets' instrument: the
+    /// Neither quotes, trades nor bars of the target's instrument: the
     /// ATR's bars have nothing to be built from.
     #[test]
-    fn a_barrier_atr_on_an_instrument_whose_prices_the_strategy_does_not_read_is_refused() {
+    fn a_target_atr_on_an_instrument_whose_prices_the_strategy_does_not_read_is_refused() {
         let config = parse(&atr_section(None)).unwrap();
 
         let err = format!(
@@ -825,7 +904,7 @@ mod tests {
         assert!(err.contains("ATR") && err.contains(GOLD), "{err}");
     }
 
-    /// A meta model on the section's barrier, held out its last 12 hours.
+    /// A meta model on the section's target, held out its last 12 hours.
     const META: &str = r#"
         [meta]
         window = "36h"
@@ -868,16 +947,15 @@ mod tests {
         assert!(err.contains("unknown field `meta`"), "{err}");
     }
 
-    /// A primary on a horizon alone: its meta model learns the horizon's
-    /// trades, and no barrier is needed.
+    /// A primary on a time-only target: its meta model learns those trades,
+    /// no exit being needed.
     #[test]
-    fn a_meta_model_on_a_primary_with_no_barrier_is_loaded() {
-        let toml = section(r#"targets = { horizon = "30m" }"#)
-            .replace(r#"label = "barrier""#, r#"label = "horizon""#);
+    fn a_meta_model_on_a_time_only_target_is_loaded() {
+        let toml = section(r#"target = { limit = "30m" }"#);
 
         let config = load(&format!("{toml}\n{META}")).unwrap();
 
-        assert_eq!(config.targets.barrier, None);
+        assert_eq!(config.target.spec.bracket(), None);
         assert!(config.meta.is_some());
     }
 
@@ -897,29 +975,6 @@ mod tests {
         );
     }
 
-    /// A horizon-labelled primary trades its horizon, a barrier besides it
-    /// or not, and its meta model learns those trades.
-    #[test]
-    fn a_meta_model_on_a_horizon_labelled_primary_is_loaded() {
-        let toml = SECTION.replace(r#"label = "barrier""#, r#"label = "horizon""#);
-
-        let config = load(&format!("{toml}\n{META}")).unwrap();
-
-        assert_eq!(config.label, Label::Horizon);
-        assert!(config.meta.is_some());
-    }
-
-    /// The label names a target the targets lack, a meta model or not:
-    /// the primary's barrier trade is no trade.
-    #[test]
-    fn a_meta_model_on_a_barrier_label_with_no_barrier_is_refused_under_the_label() {
-        let toml = section(r#"targets = { horizon = "30m" }"#);
-
-        let err = refused(&format!("{toml}\n{META}"));
-
-        assert!(err.contains("model.label"), "{err}");
-    }
-
     /// The refusal of the section with `META`, `line` added to it or, if
     /// its key is there, replacing it.
     fn meta_refused(line: &str) -> String {
@@ -932,9 +987,10 @@ mod tests {
         refused(&format!("{SECTION}\n{}", meta.join("\n")))
     }
 
-    /// The barrier's limit, 45 minutes, is the longest target.
+    /// The target's limit, 45 minutes, does not fit the meta's window: that
+    /// window is the meta's own to widen, the limit the primary's too.
     #[test]
-    fn a_meta_window_not_longer_than_the_longest_target_is_refused() {
+    fn a_meta_window_not_longer_than_the_targets_limit_is_refused() {
         let err = meta_refused(r#"window = "45m""#);
 
         assert!(err.contains("model.meta.window"), "{err}");
@@ -973,7 +1029,7 @@ mod tests {
     }
 
     /// From the threshold 0.6 to a probability of 1, 0.5 to 2 times the
-    /// targets' size: 0.8, half way, is 1.25 times.
+    /// target's size: 0.8, half way, is 1.25 times.
     #[test]
     fn a_meta_probability_sizes_the_trade_from_the_threshold_to_one() {
         let meta = MetaConfig::builder()

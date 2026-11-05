@@ -1,8 +1,8 @@
 //! The model runs of the model tests: a probe deciding every hour on the
 //! last mid of IC's gold through its model handle (`model::handle`),
-//! either opening the targets of each decision in a dataset run
+//! either opening the target of each decision in a dataset run
 //! (`Backtest::run_dataset`), the targets subscribing to the bars of
-//! their ATR, if any, the rows they settle collected, or trading on the
+//! its ATR, if any, the rows they settle collected, or trading on the
 //! models of a store, sending its trades, its decisions' rows, trades and
 //! closed positions recorded; on IC's hedging venue both. And the
 //! random walk of quotes they replay.
@@ -26,7 +26,7 @@ use helix_trader::{
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
-        targets::{Barrier, Distance, Label, Side, TargetRow, TargetsConfig},
+        targets::{Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, orders},
 };
@@ -150,23 +150,22 @@ pub fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// A bracket 7.5 bps away on both sides closed after 2 hours, the longest
-/// target, and a horizon of 1 hour, of one ounce.
-pub fn targets() -> TargetsConfig {
-    TargetsConfig::builder()
+/// A bracket 7.5 bps away on both sides closed after 2 hours, of one ounce.
+pub fn target() -> TargetConfig {
+    TargetConfig::builder()
         .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
         .quantity(Quantity::from(1))
-        .barrier(Barrier {
-            take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
-            stop: Distance::BasisPoints(Decimal::new(75, 1)),
-            limit: SignedDuration::from_hours(2),
-            atr: None,
-        })
-        .horizon(SignedDuration::from_hours(1))
+        .spec(
+            Target::builder()
+                .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
+                .stop(Distance::BasisPoints(Decimal::new(75, 1)))
+                .limit(SignedDuration::from_hours(2))
+                .build(),
+        )
         .build()
 }
 
-/// The probe's decisions and targets, learning whether each side of the
+/// The probe's decisions and target, learning whether each side of the
 /// bracket gains, on a window of 46 hours, the last 12 held out and the
 /// 12 before them calibrated on, by the fake learner, published from
 /// nought per trade over a trade; each side traded from an expected net
@@ -174,8 +173,7 @@ pub fn targets() -> TargetsConfig {
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
-        .targets(targets())
-        .label(Label::Barrier)
+        .target(target())
         .retrain(SignedDuration::from_hours(24))
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
@@ -495,7 +493,7 @@ fn stored_baseline(
     let fingerprint = dataset::fingerprint(
         features,
         config.decision,
-        &config.targets,
+        &config.target,
         &requirements(),
         &venue(),
     )
@@ -536,12 +534,7 @@ pub fn baseline_stored(
             valid_from,
             fingerprint,
             feature_names,
-            targets: config.targets.clone(),
-            label: if side.is_some() {
-                config.label
-            } else {
-                Label::Barrier
-            },
+            target: config.target.clone(),
             side,
             learner: LearnerConfig::Baseline {},
             calibration: CALIBRATION,

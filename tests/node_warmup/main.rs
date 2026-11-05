@@ -15,7 +15,7 @@ use std::{any::Any, cell::RefCell, path::Path, rc::Rc, time::Duration};
 use helix_trader::{
     model::{
         decide::DecisionRule,
-        targets::{Barrier, BarrierExits, Side, Stops, TargetsConfig},
+        targets::{Side, SideTarget, Target, TargetConfig, TradedTarget},
     },
     strategy::{
         DataRequirements, TickSeries,
@@ -433,10 +433,10 @@ impl ActorIndicator for Fed {
 struct Warming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
-    /// The barrier's stops, started as a model handle does, and read for the
-    /// long side when the warmup ends.
-    stops: Option<Rc<Stops>>,
-    exits: Rc<RefCell<Option<BarrierExits>>>,
+    /// The target, started as a model handle does, and read for the long
+    /// side when the warmup ends.
+    traded: Option<Rc<TradedTarget>>,
+    exits: Rc<RefCell<Option<SideTarget>>>,
     failure: Rc<RefCell<Option<String>>>,
 }
 
@@ -446,8 +446,8 @@ impl DataActor for Warming {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.cache_rc().borrow_mut().add_instrument(gcz26())?;
         Rc::clone(&self.warmup).start(self)?;
-        if let Some(stops) = self.stops.clone() {
-            stops.start(self);
+        if let Some(traded) = self.traded.clone() {
+            traded.start(self);
         }
         Ok(())
     }
@@ -462,8 +462,8 @@ impl DataActor for Warming {
             *self.failure.borrow_mut() = Some(format!("{e:#}"));
         }
         if !self.warmup.is_warming() {
-            if let Some(stops) = self.stops.clone() {
-                *self.exits.borrow_mut() = stops.at(self, Side::Long)?;
+            if let Some(traded) = self.traded.clone() {
+                *self.exits.borrow_mut() = traded.at(self, Side::Long)?;
             }
             self.shutdown_system(Some("the warmup ended".to_string()));
         }
@@ -501,16 +501,16 @@ fn warm(
     }
 }
 
-/// Runs `warmup`, and `stops`, of a strategy of `requirements` on a node with
+/// Runs `warmup`, and `traded`, of a strategy of `requirements` on a node with
 /// the catalog in `dir`, its history asked of `venue`: why it failed, if it
-/// did, and the long side's barrier when it ended.
+/// did, and the long side's target when it ended.
 fn run(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
     requirements: &DataRequirements,
     warmup: Warmup,
-    stops: Option<Rc<Stops>>,
-) -> (Option<String>, Option<BarrierExits>) {
+    traded: Option<Rc<TradedTarget>>,
+) -> (Option<String>, Option<SideTarget>) {
     let warmup = Rc::new(warmup);
     let config = LiveNodeConfig {
         environment: Environment::Live,
@@ -552,7 +552,7 @@ fn run(
         node.add_actor(Warming {
             core: DataActorCore::new(DataActorConfig::default()),
             warmup,
-            stops,
+            traded,
             exits: Rc::clone(&exits),
             failure: Rc::clone(&failure),
         })
@@ -736,10 +736,10 @@ fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
     assert!(one_every(&warmed.bars, MINUTE_NS));
 }
 
-/// The long side's barrier when a warmup of 72 hours of `requirements`' ends:
+/// The long side's target when a warmup of 72 hours of `requirements`' ends:
 /// a bracket's take profit two ATRs away, its stop one, the ATR of model_ema's
 /// config, on hourly bars.
-fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> BarrierExits {
+fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
     let requirements = DataRequirements {
@@ -747,7 +747,7 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> BarrierExits {
         ticks,
         warmup: WARMUP,
     };
-    let barrier: Barrier = toml::from_str(
+    let spec: Target = toml::from_str(
         r#"
         take_profit = { atr = 2.0 }
         stop = { atr = 1.0 }
@@ -756,20 +756,15 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> BarrierExits {
         "#,
     )
     .unwrap();
-    let targets = TargetsConfig {
+    let target = TargetConfig {
         instrument_id: InstrumentId::from(GCZ26),
         quantity: Quantity::from(1),
-        barrier: Some(barrier),
-        horizon: None,
+        spec,
     };
     let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
-    let stops = Rc::new(
-        Stops::new(&targets, hourly, &requirements)
-            .unwrap()
-            .expect("a barrier"),
-    );
-    let warmup = stops.warmed(Warmup::live(&requirements));
-    let (failure, exits) = run(dir.path(), &venue, &requirements, warmup, Some(stops));
+    let traded = Rc::new(TradedTarget::new(&target, hourly, &requirements).unwrap());
+    let warmup = traded.warmed(Warmup::live(&requirements));
+    let (failure, exits) = run(dir.path(), &venue, &requirements, warmup, Some(traded));
     assert_eq!(failure, None);
     assert_eq!(venue.borrow().asked.len(), 4);
     exits.expect("a bracket: the ATR is warm when the warmup ends")
@@ -779,8 +774,8 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> BarrierExits {
 /// so the bracket is 3 ATRs wide, 180, within what the first bar's range, 59,
 /// still weighs after a Wilder's 70 bars. A bar handed over again would throw
 /// the true range back by hundreds, and the Wilder's memory would hold it.
-fn assert_three_atrs_wide(exits: &BarrierExits) {
-    let width = exits.take_profit.as_f64() - exits.stop.as_f64();
+fn assert_three_atrs_wide(exits: &SideTarget) {
+    let width = exits.take_profit.unwrap().as_f64() - exits.stop.unwrap().as_f64();
     assert!((179.0..=181.0).contains(&width), "{exits:?}");
 }
 

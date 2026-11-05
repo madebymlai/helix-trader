@@ -2,9 +2,9 @@
 //! the time it was trained at.
 //!
 //! A store is a directory per strategy id, fingerprint (that of its
-//! dataset: the features, the decision rule, the targets and the
+//! dataset: the features, the decision rule, the target and the
 //! venue settings of its dataset runs, see `dataset::fingerprint`) and training
-//! settings (the learner and its settings, the label, the retrain interval,
+//! settings (the learner and its settings, the retrain interval,
 //! the window, the holdout and the minimums its holdout must meet to be
 //! published, `holdout::Minimums`) with the store `VERSION`, and side, the
 //! long or the short, keyed by its margin, which decides the trades its
@@ -32,7 +32,7 @@
 //!
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
-//! target spec, label and side, the learner, the calibration of its
+//! target spec and side, the learner, the calibration of its
 //! predictions, its baseline (the training mean of the labels of the rows
 //! it was fitted and calibrated on), a side's expected payoff, its holdout
 //! (`holdout::Holdout`) and probe rows with the calibrated predictions the
@@ -66,7 +66,7 @@ use super::{
     learner::{LearnerConfig, Model, SavedModel},
     payoff::Payoff,
     schedule::{Models, Retrain},
-    targets::{Label, Side, TargetsConfig},
+    targets::{Side, TargetConfig},
 };
 use crate::strategy::DataRequirements;
 
@@ -87,7 +87,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -146,15 +146,13 @@ pub struct ModelManifest {
     pub strategy_id: StrategyId,
     /// The time the model was trained at, from which it is valid.
     pub valid_from: Timestamp,
-    /// The fingerprint of the features, the decision rule, the targets and
+    /// The fingerprint of the features, the decision rule, the target and
     /// the venue of its dataset runs.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
     /// The target spec.
-    pub targets: TargetsConfig,
-    /// The target the model learned.
-    pub label: Label,
+    pub target: TargetConfig,
     /// The side of the target a primary's model learned; none for a meta
     /// model, which learns the primary's.
     pub side: Option<Side>,
@@ -311,8 +309,8 @@ impl SideModel {
     }
 
     /// The expected net P&L of a trade of the side won with `probability`,
-    /// in money, its payoff's unit worth `unit` (on a barrier the worth of
-    /// the trade's stop, the payoff being in R; one on a horizon): the
+    /// in money, its payoff's unit worth `unit` (with exits the worth of
+    /// the trade's stop, the payoff being in R; one without): the
     /// payoff's expectation at the probability (`Payoff::expected`) times
     /// the unit.
     #[must_use]
@@ -336,7 +334,7 @@ impl Baselined for SideModel {
 
 impl ModelSet {
     /// The models, under `root`, of `strategy_id` deciding with `features`
-    /// as `config` says, on targets for a strategy of `requirements`, run
+    /// as `config` says, on its target for a strategy of `requirements`, run
     /// on `venue`, and trained as `config` says: the store of each side its
     /// margins trade, and of its meta model if `config` has a meta section,
     /// in the directory of its dataset's fingerprint and its training
@@ -357,7 +355,7 @@ impl ModelSet {
         let fingerprint = dataset::fingerprint(
             features,
             config.decision,
-            &config.targets,
+            &config.target,
             requirements,
             venue,
         )?;
@@ -614,8 +612,8 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
 /// The directory, under `root`, of the models of `strategy_id` whose
 /// dataset has `fingerprint`, its side models trained as `config` says,
 /// of the store `version` (`VERSION`): its dataset's, then the side
-/// models' training settings, the learner and its settings, the label,
-/// the retrain interval, the window, the holdout and the minimums of its
+/// models' training settings, the learner and its settings, the retrain
+/// interval, the window, the holdout and the minimums of its
 /// holdout, and the version.
 fn training_directory(
     root: &Path,
@@ -626,7 +624,6 @@ fn training_directory(
 ) -> anyhow::Result<PathBuf> {
     let settings = Fingerprint::default()
         .with(serde_json::to_string(&config.learner)?.as_bytes())
-        .with(format!("{:?}", config.label).as_bytes())
         .with(retrain_setting(config.retrain).as_bytes())
         .with(&config.window.as_nanos().to_le_bytes())
         .with(&config.holdout.as_nanos().to_le_bytes())
@@ -797,6 +794,7 @@ mod tests {
         features::testing::last_mid,
         holdout::Earnings,
         learner::{LearnerConfig, TrainingSet},
+        targets::Target,
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -809,14 +807,17 @@ mod tests {
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
-            .targets(
-                TargetsConfig::builder()
+            .target(
+                TargetConfig::builder()
                     .instrument_id(InstrumentId::from(GOLD))
                     .quantity(Quantity::from(1))
-                    .horizon(SignedDuration::from_hours(1))
+                    .spec(
+                        Target::builder()
+                            .limit(SignedDuration::from_hours(1))
+                            .build(),
+                    )
                     .build(),
             )
-            .label(Label::Horizon)
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
@@ -902,8 +903,7 @@ mod tests {
                 valid_from: at(valid_from),
                 fingerprint: "f".repeat(64),
                 feature_names: vec!["mid".to_string()],
-                targets: config().targets,
-                label: Label::Horizon,
+                target: config().target,
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
                 calibration: Calibration { a: -0.9, b: 0.0 },
@@ -1038,13 +1038,13 @@ mod tests {
     }
 
     #[test]
-    fn other_training_settings_targets_minimums_or_margin_list_none_of_the_models() {
+    fn other_training_settings_target_minimums_or_margin_list_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
-        let mut targets = config().targets;
-        targets.horizon = Some(SignedDuration::from_mins(30));
+        let mut target = config().target;
+        target.spec.limit = SignedDuration::from_mins(30);
         let others = [
             ModelConfig {
                 learner: LearnerConfig::Baseline {},
@@ -1058,10 +1058,7 @@ mod tests {
                 holdout: SignedDuration::from_hours(6),
                 ..config()
             },
-            ModelConfig {
-                targets,
-                ..config()
-            },
+            ModelConfig { target, ..config() },
         ];
 
         for other in others {
@@ -1105,7 +1102,7 @@ mod tests {
         let fingerprint = dataset::fingerprint(
             &features(),
             config.decision,
-            &config.targets,
+            &config.target,
             &requirements(),
             &venue(),
         )

@@ -16,7 +16,7 @@ use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        STRATEGY, baseline_of, config, missing, replay_on, requirements, rule, targets, trade_on,
+        STRATEGY, baseline_of, config, missing, replay_on, requirements, rule, target, trade_on,
         venue, walk,
     },
     ic,
@@ -27,7 +27,7 @@ use helix_trader::model::{
     features::FeatureSet,
     schedule::Retrain,
     store::{ModelSet, ModelStore},
-    targets::{Label, Side},
+    targets::Side,
     walk::WalkForward,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -54,7 +54,7 @@ fn config_daily() -> ModelConfig {
 
 /// Quotes from 23:00 of the 20th of October 2026 to 03:00 of the 26th:
 /// the dataset's days, from the window of the first retrain, to the
-/// span's end plus the longest target.
+/// span's end plus the target's limit.
 fn catalog() -> TempDir {
     walk(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
@@ -119,7 +119,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                                 StrategyId::from(STRATEGY),
                                 &features(),
                                 rule(),
-                                targets(),
+                                target(),
                                 &requirements(),
                                 &venue(),
                             )?;
@@ -209,7 +209,7 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
 /// `at` on the missing feature: the same on every row.
 fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
     let fingerprint =
-        dataset::fingerprint(&features(), rule(), &targets(), &requirements(), &venue())
+        dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
             .unwrap()
             .to_string();
     store
@@ -246,14 +246,14 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
         StrategyId::from(STRATEGY),
         &features(),
         rule(),
-        targets(),
+        target(),
         &requirements(),
         &venue(),
     )
     .unwrap()
     .read(start, end)
     .unwrap();
-    let pnl = targets().pnl_index(Label::Barrier, Side::Long).unwrap();
+    let pnl = target().pnl_index(Side::Long);
     assert_eq!(scores.short, None);
     let long = scores.long.unwrap();
     assert_eq!(long.periods.len(), 3);

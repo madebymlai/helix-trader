@@ -42,7 +42,7 @@ use super::{
 pub const STRESS: f64 = 1.5;
 
 /// A row's trade: its net P&L and the commission it is net of, in the
-/// targets' P&L currency.
+/// target's P&L currency.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trade {
     pub pnl: f64,
@@ -51,7 +51,7 @@ pub struct Trade {
 
 /// A row as a model is fitted and judged on it: its features and its
 /// label, the trade the label is of and the unit of that trade's payoff,
-/// the decision's time and when its targets settled.
+/// the decision's time and when its target settled.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Example {
     pub features: Vec<f64>,
@@ -103,7 +103,7 @@ pub struct Holdout {
 }
 
 /// The least a model's holdout is published with: its rule's net P&L per
-/// trade, in the targets' P&L currency, over at least a count of trades.
+/// trade, in the target's P&L currency, over at least a count of trades.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Minimums {
     pub min_pnl: f64,

@@ -4,9 +4,8 @@
 //!
 //! A model primary has a model for each side it trades (the sides of its
 //! margins, `ModelConfig::margins`): the long's learns whether the long of
-//! the label's target gains after its costs, the short's whether its
-//! short does (`targets::Label`), both on the same rows, window and
-//! holdout. Each is fitted, calibrated, judged and published on its own:
+//! the target gains after its costs, the short's whether its short does,
+//! both on the same rows, window and holdout. Each is fitted, calibrated, judged and published on its own:
 //! a side whose holdout falls short keeps its current model, the other
 //! may publish.
 //!
@@ -24,8 +23,8 @@
 //! rows of the window ending at `t'` (`ModelConfig::window`), the days
 //! the dataset lacks built by one replay to the train's time from the
 //! first row a fit reads (`Dataset::settled`), and drops the rows not
-//! settled at `t'`: no row's targets reach past `t'`, so the purge
-//! between the rows and the model's first use is the longest target, by
+//! settled at `t'`: no row's target reaches past `t'`, so the purge
+//! between the rows and the model's first use is the target's limit, by
 //! construction. The window ends in the holdout (`ModelConfig::holdout`)
 //! and, before it, the calibration, as long, each part's rows taken with
 //! the same gap: a model is fitted on the rows before the calibration
@@ -86,7 +85,7 @@ use super::{
     store::{
         LoadedModel, MetaLevel, ModelManifest, ModelSet, ModelStore, Probe, SideModel, StoredModel,
     },
-    targets::{Label, Side, TargetRow, TargetsConfig},
+    targets::{Side, TargetConfig, TargetRow},
 };
 use crate::strategy::DataRequirements;
 
@@ -98,7 +97,7 @@ const PROBES: usize = 16;
 #[derive(Debug)]
 pub struct Training {
     strategy_id: StrategyId,
-    targets: TargetsConfig,
+    target: TargetConfig,
     dataset: Dataset,
     /// How the rows' trades read in the primary's payoffs.
     realised: Realised,
@@ -118,8 +117,6 @@ pub struct Training {
 struct Level {
     /// The names of the features of its rows, in order.
     feature_names: Vec<String>,
-    /// The target it learns, as its manifest says.
-    label: Label,
     /// What its models are, and which trades of the holdout they take.
     kind: Kind,
     holdout: SignedDuration,
@@ -172,7 +169,7 @@ pub enum Kept {
     /// no holdout to judge; the error.
     Failed(String),
     /// The dataset holds rows that do not match the strategy's features or
-    /// targets; the mismatch.
+    /// target; the mismatch.
     SchemaMismatch(String),
     /// A model primary's meta waits for primary decisions to learn from: no
     /// primary model is valid before the train, so none was fitted
@@ -189,9 +186,8 @@ impl Training {
     ///
     /// # Errors
     ///
-    /// Returns an error if the targets are invalid, the label names a
-    /// target they lack, a barrier's instrument is not in the catalog, or a
-    /// store cannot be keyed.
+    /// Returns an error if the target is invalid, the instrument of its
+    /// exits is not in the catalog or is inverse, or a store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -201,12 +197,11 @@ impl Training {
         requirements: &DataRequirements,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
-        let realised = Realised::new(catalog, &config.targets, config.label)?;
+        let realised = Realised::new(catalog, &config.target)?;
         let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         let side = |side| {
             models.side(side).map(|traded| Level {
                 feature_names: features.names().to_vec(),
-                label: config.label,
                 kind: Kind::Side {
                     side,
                     rule: Margin(traded.margin()),
@@ -220,7 +215,7 @@ impl Training {
         let levels = Models {
             long: side(Side::Long),
             short: side(Side::Short),
-            meta: models.meta().map(|meta| Level::of_meta(meta, config.label)),
+            meta: models.meta().map(Level::of_meta),
         };
         Ok(Self {
             strategy_id,
@@ -229,14 +224,14 @@ impl Training {
                 strategy_id,
                 features,
                 config.decision,
-                config.targets.clone(),
+                config.target.clone(),
                 requirements,
                 venue,
             )?,
             schedule: Schedule::of_model(&config),
             models,
             levels,
-            targets: config.targets,
+            target: config.target,
             realised,
         })
     }
@@ -416,8 +411,7 @@ impl Training {
                 valid_from: at,
                 fingerprint: self.dataset.fingerprint().to_string(),
                 feature_names: level.feature_names.clone(),
-                targets: self.targets.clone(),
-                label: level.label,
+                target: self.target.clone(),
                 side,
                 learner: level.learner.clone(),
                 calibration,
@@ -436,14 +430,12 @@ impl Training {
 }
 
 impl Level {
-    /// The level of `meta`: it learns whether the target of the primary's
-    /// `label` on the primary's side wins, taking the primary's trade from
-    /// its threshold.
-    fn of_meta(meta: &MetaLevel, label: Label) -> Self {
+    /// The level of `meta`: it learns whether the target on the primary's
+    /// side wins, taking the primary's trade from its threshold.
+    fn of_meta(meta: &MetaLevel) -> Self {
         let config = meta.config();
         Self {
             feature_names: meta.feature_names().to_vec(),
-            label,
             kind: Kind::Meta {
                 rule: Threshold(config.threshold),
             },
@@ -619,8 +611,7 @@ mod tests {
             holdout::Trades,
             learner::LearnerConfig,
             targets::{
-                Barrier, Distance, Distances, Exit, Label, Outcome as TargetOutcome, Outcomes,
-                TargetRow, TargetsConfig,
+                Distance, Distances, Exit, Outcome as TargetOutcome, Outcomes, Target, TargetRow,
             },
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
@@ -646,28 +637,26 @@ mod tests {
             .unwrap()
     }
 
-    /// The fake learner on hourly decisions of one AUD/USD, learning the
-    /// barrier (closed after 2 hours; a horizon of 1 hour besides) on both
-    /// sides, trading each from an expected 0.5 USD, on a window of 24
-    /// hours, the last 6 held out and the 6 before them calibrated on,
+    /// The fake learner on hourly decisions of one AUD/USD, learning a
+    /// bracket closed after 2 hours on both sides, trading each from an
+    /// expected 0.5 USD, on a window of 24 hours, the last 6 held out and the 6 before them calibrated on,
     /// published from 1 USD per trade over a trade.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
-            .targets(
-                TargetsConfig::builder()
+            .target(
+                TargetConfig::builder()
                     .instrument_id(InstrumentId::from(AUD))
                     .quantity(Quantity::from(1))
-                    .barrier(Barrier {
-                        take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
-                        stop: Distance::BasisPoints(Decimal::from(5)),
-                        limit: SignedDuration::from_hours(2),
-                        atr: None,
-                    })
-                    .horizon(SignedDuration::from_hours(1))
+                    .spec(
+                        Target::builder()
+                            .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
+                            .stop(Distance::BasisPoints(Decimal::from(5)))
+                            .limit(SignedDuration::from_hours(2))
+                            .build(),
+                    )
                     .build(),
             )
-            .label(Label::Barrier)
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
@@ -759,9 +748,8 @@ mod tests {
     }
 
     /// The row of the decision at `time` on `features`, settled `after` it:
-    /// on the barrier, each side 2 from its stop, a side winning 3 USD at
-    /// its take profit, losing 2 at its stop, net of 0.2 USD of
-    /// commission.
+    /// each side 2 from its stop, a side winning 3 USD at its take profit,
+    /// losing 2 at its stop, net of 0.2 USD of commission.
     fn row_of(
         time: &str,
         features: Vec<f64>,
@@ -769,21 +757,20 @@ mod tests {
         after: SignedDuration,
     ) -> TargetRow {
         let ns = UnixNanos::from(at(time));
-        let outcome = |pnl: &str, exit, distances| TargetOutcome {
-            pnl: Money::from(pnl),
-            commission: Money::from("0.2 USD"),
-            exit,
-            distances,
-        };
-        let barrier = |wins| {
-            let distances = Some(Distances {
-                take_profit: Decimal::from(3),
-                stop: Decimal::from(2),
-            });
-            if wins {
-                outcome("3 USD", Exit::TakeProfit, distances)
+        let outcome = |wins| {
+            let (pnl, exit) = if wins {
+                ("3 USD", Exit::TakeProfit)
             } else {
-                outcome("-2 USD", Exit::Stop, distances)
+                ("-2 USD", Exit::Stop)
+            };
+            TargetOutcome {
+                pnl: Money::from(pnl),
+                commission: Money::from("0.2 USD"),
+                exit,
+                distances: Some(Distances {
+                    take_profit: Decimal::from(3),
+                    stop: Decimal::from(2),
+                }),
             }
         };
         TargetRow {
@@ -793,14 +780,10 @@ mod tests {
                 ts_event: ns,
                 ts_init: ns,
             },
-            barrier: Some(Outcomes {
-                long: barrier(long_wins),
-                short: barrier(short_wins),
-            }),
-            horizon: Some(Outcomes {
-                long: outcome("0.5 USD", Exit::Time, None),
-                short: outcome("-0.5 USD", Exit::Time, None),
-            }),
+            outcomes: Outcomes {
+                long: outcome(long_wins),
+                short: outcome(short_wins),
+            },
             settled_at: UnixNanos::from(at(time) + after),
         }
     }
@@ -851,8 +834,8 @@ mod tests {
             row("2026-01-06T20:00:00Z", vec![0.3], false, hour()),
             row("2026-01-06T23:30:00Z", vec![0.1], true, hour()),
         ];
-        let barrier = rows[4].barrier.as_mut().unwrap();
-        for outcome in [&mut barrier.long, &mut barrier.short] {
+        let outcomes = &mut rows[4].outcomes;
+        for outcome in [&mut outcomes.long, &mut outcomes.short] {
             outcome.distances.as_mut().unwrap().stop = Decimal::from(4);
         }
         rows
@@ -980,7 +963,7 @@ mod tests {
         for (i, &(feature, pnl)) in holdout.iter().enumerate() {
             let time = format!("2026-01-06T{:02}:00:00Z", 18 + i);
             let mut row = row(&time, vec![feature], !pnl.starts_with('-'), hour());
-            row.barrier.as_mut().unwrap().long.pnl = Money::from(pnl);
+            row.outcomes.long.pnl = Money::from(pnl);
             rows.push(row);
         }
         rows
@@ -1239,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn a_published_model_carries_its_schema_targets_and_learner() {
+    fn a_published_model_carries_its_schema_target_and_learner() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
@@ -1258,15 +1241,14 @@ mod tests {
             crate::model::dataset::fingerprint(
                 &features(),
                 config().decision,
-                &config().targets,
+                &config().target,
                 &requirements(),
                 &venue(),
             )
             .unwrap()
             .to_string()
         );
-        assert_eq!(manifest.targets, config().targets);
-        assert_eq!(manifest.label, Label::Barrier);
+        assert_eq!(manifest.target, config().target);
         assert_eq!(manifest.learner, LearnerConfig::Fake {});
     }
 
@@ -1550,16 +1532,27 @@ mod tests {
     /// The calibration of the primary's models of the meta tests.
     const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
-    /// Publishes in `store` a primary baseline valid from `valid_from`,
-    /// predicting `probability` on every row, calibrated by `CALIBRATION`,
-    /// expecting a win and a loss of 1R, its baseline the mean of its
-    /// training labels.
+    /// Publishes in `store` a primary baseline of `config()` valid from
+    /// `valid_from`, predicting `probability` on every row, as `primary_of`.
     fn primary(store: &ModelStore, side: Side, valid_from: &str, probability: f64) {
+        primary_of(config(), store, side, valid_from, probability);
+    }
+
+    /// Publishes in `store` a primary baseline of `config` valid from
+    /// `valid_from`, predicting `probability` on every row, calibrated by
+    /// `CALIBRATION`, expecting a win and a loss of 1R, its baseline the
+    /// mean of its training labels.
+    fn primary_of(
+        config: ModelConfig,
+        store: &ModelStore,
+        side: Side,
+        valid_from: &str,
+        probability: f64,
+    ) {
         let trues = (probability * 10.0).round() as usize;
         let labels = (0..10).map(|i| i < trues).collect();
         let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
         let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
-        let config = config();
         store
             .publish(&StoredModel {
                 manifest: ModelManifest {
@@ -1568,15 +1561,14 @@ mod tests {
                     fingerprint: crate::model::dataset::fingerprint(
                         &features(),
                         config.decision,
-                        &config.targets,
+                        &config.target,
                         &requirements(),
                         &venue(),
                     )
                     .unwrap()
                     .to_string(),
                     feature_names: vec!["mid_0".to_string()],
-                    targets: config.targets,
-                    label: config.label,
+                    target: config.target,
                     side: Some(side),
                     learner: LearnerConfig::Baseline {},
                     calibration: CALIBRATION,
@@ -1626,8 +1618,20 @@ mod tests {
             ("2026-01-06T17:00:00Z", 0.2),
             ("2026-01-06T21:00:00Z", 0.9),
         ] {
-            primary(&long, Side::Long, valid_from, long_probability);
-            primary(&short, Side::Short, valid_from, 1.0 - long_probability);
+            primary_of(
+                config.clone(),
+                &long,
+                Side::Long,
+                valid_from,
+                long_probability,
+            );
+            primary_of(
+                config.clone(),
+                &short,
+                Side::Short,
+                valid_from,
+                1.0 - long_probability,
+            );
         }
     }
 
@@ -1653,7 +1657,6 @@ mod tests {
             stored.manifest.feature_names,
             ["mid_0", "primary_side", "primary_probability"]
         );
-        assert_eq!(stored.manifest.label, Label::Barrier);
         assert_eq!(stored.manifest.side, None);
         let short = CALIBRATION.apply(0.8);
         let probes: Vec<&Vec<f64>> = stored.manifest.probes.iter().map(|p| &p.row).collect();
@@ -1690,59 +1693,54 @@ mod tests {
         assert_eq!(stored.manifest.baseline, 0.75);
     }
 
-    /// `rows` with their outcomes on the horizon, closed at its time, and
-    /// their reverse on the barrier, the long's the short's and the short's
-    /// the long's.
-    fn on_the_horizon(rows: Vec<TargetRow>) -> Vec<TargetRow> {
+    /// `rows` as a time-only target has them: closed at their time, with
+    /// no distances.
+    fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
+        let at_its_time = |outcome| TargetOutcome {
+            exit: Exit::Time,
+            distances: None,
+            ..outcome
+        };
         rows.into_iter()
-            .map(|row| {
-                let Outcomes { long, short } = row.barrier.unwrap();
-                let at_its_time = |outcome| TargetOutcome {
-                    exit: Exit::Time,
-                    distances: None,
-                    ..outcome
-                };
-                TargetRow {
-                    barrier: Some(Outcomes {
-                        long: short,
-                        short: long,
-                    }),
-                    horizon: Some(Outcomes {
-                        long: at_its_time(long),
-                        short: at_its_time(short),
-                    }),
-                    ..row
-                }
+            .map(|row| TargetRow {
+                outcomes: Outcomes {
+                    long: at_its_time(row.outcomes.long),
+                    short: at_its_time(row.outcomes.short),
+                },
+                ..row
             })
             .collect()
     }
 
-    /// A meta model learns the trade its primary sends. On the horizon,
-    /// `meta_rows` with the long's loss at 10:00 a win: fitted on the wins
-    /// at 08:00 and 10:00 and calibrated on the loss at 13:00 and the win
-    /// at 15:00, three wins in four, 3/4. Its barrier the reverse would have
-    /// made it 1/4.
+    /// A meta model learns the trade its primary sends, on a target with no
+    /// exits too. `meta_rows` with the long's loss at 10:00 a win, each
+    /// closed at its time: the primary's long at each of the four morning
+    /// rows expects `2 c(0.8) - 1`, 0.554 USD, a unit of 1 in money and no
+    /// stop to weigh, above its margin of 0.5; so the meta is fitted on the
+    /// wins at 08:00 and 10:00 and calibrated on the loss at 13:00 and the
+    /// win at 15:00, three wins in four, 3/4.
     #[test]
-    fn a_horizon_labelled_meta_model_learns_from_the_horizons_outcomes() {
+    fn a_meta_model_on_a_time_only_target_learns_from_its_trades() {
         let dir = tempfile::tempdir().unwrap();
-        let config = ModelConfig {
-            label: Label::Horizon,
-            ..with_meta(24)
-        };
+        let mut config = with_meta(24);
+        config.target.spec = Target::builder()
+            .limit(SignedDuration::from_hours(1))
+            .build();
         let training = training(dir.path(), config.clone());
         primaries(dir.path(), &config);
         let t = at("2026-01-07T00:00:00Z");
         let mut rows = meta_rows();
         rows[2] = row("2026-01-06T10:00:00Z", vec![0.5], true, hour());
 
-        let trained = training.train_at(t, |_, _| Ok(on_the_horizon(rows)));
+        let trained = training.train_at(t, |_, _| Ok(at_their_time(rows)));
 
         assert!(
             matches!(trained.meta, Some(Outcome::Published { .. })),
             "{trained:?}"
         );
         let manifest = meta_store(dir.path(), &config).read(t).unwrap().manifest;
-        assert_eq!((manifest.label, manifest.baseline), (Label::Horizon, 0.75));
+        assert_eq!(manifest.baseline, 0.75);
+        assert_eq!(manifest.target.spec.bracket(), None);
     }
 
     /// A meta example carries the unit of its trade, the worth of the stop
@@ -1756,12 +1754,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta(24);
         primaries(dir.path(), &config);
-        let realised = Realised::new(&catalog(dir.path()), &config.targets, config.label).unwrap();
+        let realised = Realised::new(&catalog(dir.path()), &config.target).unwrap();
         let rows: Vec<DatasetRow> = meta_rows()
             .into_iter()
             .map(|mut row| {
-                let short = &mut row.barrier.as_mut().unwrap().short;
-                short.distances.as_mut().unwrap().stop = Decimal::from(4);
+                row.outcomes.short.distances.as_mut().unwrap().stop = Decimal::from(4);
                 DatasetRow {
                     features: row.decision.features.clone(),
                     targets: row.values(),

@@ -8,11 +8,10 @@
 //! decides only when the primary signals, on the primary's features with
 //! its side and the chosen side's probability after them
 //! (`PRIMARY_FEATURES`), and learns whether the primary's trade, the target
-//! of its label on its side, a barrier's or a horizon's, wins after its
-//! costs, read as the side models read their trades (`payoff::Realised`,
-//! on the side models' label): a dataset row
-//! opens a long and a short at every decision, so the row has the trade of
-//! either side, and the meta's rows need no replay of their own.
+//! on its side, with exits or time only, wins after its costs, read as the
+//! side models read their trades (`payoff::Realised`): a dataset row opens
+//! a long and a short at every decision, so the row has the trade of either
+//! side, and the meta's rows need no replay of their own.
 //!
 //! The primary's rows are its dataset's, each decided by the models of
 //! each side in use at it as a strategy would have used them
@@ -43,8 +42,8 @@ use super::{
 
 /// The meta's examples of the primary's dataset `rows`, in time order:
 /// each row the primary makes a trade of, its features with the primary's
-/// side and probability, its label whether the trade on that side, of the
-/// label `realised` reads, won, with the trade and its unit. The primary's
+/// side and probability, its label whether the trade on that side, as
+/// `realised` reads it, won, with the trade and its unit. The primary's
 /// decision on a row is that of the models of each side of `models` in use
 /// then, as its stores list them now, none before the first, the rows'
 /// trades read by `realised`.

@@ -88,8 +88,7 @@ mod tests {
 
         [model]
         decision = { every = "1h" }
-        targets = { horizon = "30m" }
-        label = "horizon"
+        target = { limit = "30m" }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
