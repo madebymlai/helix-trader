@@ -220,7 +220,7 @@ impl Training {
         let levels = Models {
             long: side(Side::Long),
             short: side(Side::Short),
-            meta: models.meta().map(Level::of_meta),
+            meta: models.meta().map(|meta| Level::of_meta(meta, config.label)),
         };
         Ok(Self {
             strategy_id,
@@ -436,13 +436,14 @@ impl Training {
 }
 
 impl Level {
-    /// The level of `meta`: it learns whether the barrier on the primary's
-    /// side wins, taking the primary's trade from its threshold.
-    fn of_meta(meta: &MetaLevel) -> Self {
+    /// The level of `meta`: it learns whether the target of the primary's
+    /// `label` on the primary's side wins, taking the primary's trade from
+    /// its threshold.
+    fn of_meta(meta: &MetaLevel, label: Label) -> Self {
         let config = meta.config();
         Self {
             feature_names: meta.feature_names().to_vec(),
-            label: Label::Barrier,
+            label,
             kind: Kind::Meta {
                 rule: Threshold(config.threshold),
             },
@@ -1682,6 +1683,61 @@ mod tests {
         );
         let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
         assert_eq!(stored.manifest.baseline, 0.75);
+    }
+
+    /// `rows` with their outcomes on the horizon, closed at its time, and
+    /// their reverse on the barrier, the long's the short's and the short's
+    /// the long's.
+    fn on_the_horizon(rows: Vec<TargetRow>) -> Vec<TargetRow> {
+        rows.into_iter()
+            .map(|row| {
+                let Outcomes { long, short } = row.barrier.unwrap();
+                let at_its_time = |outcome| TargetOutcome {
+                    exit: Exit::Time,
+                    distances: None,
+                    ..outcome
+                };
+                TargetRow {
+                    barrier: Some(Outcomes {
+                        long: short,
+                        short: long,
+                    }),
+                    horizon: Some(Outcomes {
+                        long: at_its_time(long),
+                        short: at_its_time(short),
+                    }),
+                    ..row
+                }
+            })
+            .collect()
+    }
+
+    /// A meta model learns the trade its primary sends. On the horizon,
+    /// `meta_rows` with the long's loss at 10:00 a win: fitted on the wins
+    /// at 08:00 and 10:00 and calibrated on the loss at 13:00 and the win
+    /// at 15:00, three wins in four, 3/4. Its barrier the reverse would have
+    /// made it 1/4.
+    #[test]
+    fn a_horizon_labelled_meta_model_learns_from_the_horizons_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ModelConfig {
+            label: Label::Horizon,
+            ..with_meta(24)
+        };
+        let training = training(dir.path(), config.clone());
+        primaries(dir.path(), &config);
+        let t = at("2026-01-07T00:00:00Z");
+        let mut rows = meta_rows();
+        rows[2] = row("2026-01-06T10:00:00Z", vec![0.5], true, hour());
+
+        let trained = training.train_at(t, |_, _| Ok(on_the_horizon(rows)));
+
+        assert!(
+            matches!(trained.meta, Some(Outcome::Published { .. })),
+            "{trained:?}"
+        );
+        let manifest = meta_store(dir.path(), &config).read(t).unwrap().manifest;
+        assert_eq!((manifest.label, manifest.baseline), (Label::Horizon, 0.75));
     }
 
     /// A meta example carries the unit of its trade, the worth of the stop
