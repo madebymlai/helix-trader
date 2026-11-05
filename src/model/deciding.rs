@@ -21,7 +21,8 @@
 //! A model is swapped in only inside a decision, before it predicts
 //! (`store::Swap`), so no decision mixes two models. `pick` picks among the
 //! sides with a model valid at the time, by `pick_among`, the rule for models
-//! already in hand, on `payoff::pick`. `decide` takes the side picked if the
+//! already in hand, on `payoff::pick`, which a train's gate also judges its
+//! candidates by, being in no store yet. `decide` takes the side picked if the
 //! meta model valid then predicts at least its threshold (`holdout::Threshold`)
 //! on the row with that side and its probability (`features::meta_row`), sized
 //! from that probability if the meta sizes (`MetaConfig::size`). The meta's

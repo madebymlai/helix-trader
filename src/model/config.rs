@@ -65,12 +65,12 @@ pub struct ModelConfig<T = TargetConfig> {
     pub holdout: SignedDuration,
     /// The sides traded, each with the expected net P&L it trades from.
     pub margins: Margins,
-    /// The least net P&L per trade a side's decisions earn on the holdout
-    /// for its model to be published, in the target's P&L currency
-    /// (`holdout`).
+    /// The least net P&L per trade the trades picked between the sides earn
+    /// on the holdout for the sides' models to be published, in the target's
+    /// P&L currency (`holdout`, `train`).
     pub min_pnl: f64,
-    /// The fewest trades a side's decisions take on the holdout for its
-    /// model to be published.
+    /// The fewest trades picked between the sides on the holdout for the
+    /// sides' models to be published.
     pub min_trades: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,

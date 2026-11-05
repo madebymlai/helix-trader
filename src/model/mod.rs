@@ -13,8 +13,9 @@
 //! side a decision trades;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
-//! dataset and publishing in the `store` each whose `holdout`, what its
-//! decisions would have earned there and its `score`, meets the minimums;
+//! dataset and publishing them together in the `store` if their `holdout`,
+//! each side's `score` and what the decision would have earned there, meets
+//! the minimums;
 //! `deciding` is the decision itself, the side picked among the models
 //! valid at a time, the meta's threshold and the size; `handle` is
 //! what the strategy holds and decides through, trading on the latest

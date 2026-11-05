@@ -7,10 +7,11 @@
 //! settings (the learner and its settings, the retrain interval,
 //! the window, the holdout and the minimums its holdout must meet to be
 //! published, `holdout::Minimums`) with the store `VERSION`, and side, the
-//! long or the short, keyed by its margin, which decides the trades its
-//! holdout is judged on, so a model is only ever listed beside models of
-//! the same features, costs, training, side and margin, and of the same
-//! manifest. Backtest and live read the same list.
+//! long or the short, keyed by the margins of both sides, which decide the
+//! side picked on each row of the holdout and so what either publishes, so a
+//! model is only ever listed beside models of the same features, costs,
+//! training, side and margins, and of the same manifest. Backtest and live
+//! read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory beside its primary's
 //! sides, under their training settings, keyed by its own (its learner and
@@ -87,7 +88,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -368,7 +369,7 @@ impl ModelSet {
                 side,
                 margin,
                 models: CheckedStore {
-                    store: ModelStore::new(&training, side, margin),
+                    store: ModelStore::new(&training, side, config.margins),
                     feature_names: features.names().to_vec(),
                     fingerprint: fingerprint.clone(),
                 },
@@ -503,13 +504,14 @@ impl CheckedStore {
 
 impl ModelStore {
     /// The store of the `side` models in `training`, the directory of
-    /// their training settings: `long/` or `short/`, keyed by the side's
-    /// `margin`, which decides the trades its holdout is judged on.
-    fn new(training: &Path, side: Side, margin: f64) -> Self {
+    /// their training settings: `long/` or `short/`, keyed by the `margins` of
+    /// the sides, which decide the side picked on each row of the holdout and
+    /// so what either side publishes.
+    fn new(training: &Path, side: Side, margins: Margins) -> Self {
         Self {
             directory: training.join(side.name()).join(
                 Fingerprint::default()
-                    .with(&margin.to_le_bytes())
+                    .with(margins_text(margins).as_bytes())
                     .to_string(),
             ),
         }
@@ -525,9 +527,7 @@ impl ModelStore {
     ///
     /// Returns an error if the meta's learner cannot be written as JSON.
     fn meta(training: &Path, meta: &MetaConfig, margins: Margins) -> anyhow::Result<Self> {
-        let Margins { long, short } = margins;
-        let settings =
-            meta_settings(meta)?.with(format!("long {long:?} short {short:?}").as_bytes());
+        let settings = meta_settings(meta)?.with(margins_text(margins).as_bytes());
         Ok(Self {
             directory: training.join(META).join(settings.to_string()),
         })
@@ -619,6 +619,15 @@ impl ModelStore {
     pub(super) fn mend_listing(&self) {
         fs::remove_file(self.unlistable()).unwrap();
     }
+
+    /// Makes publishing to the store fail (`publish`), listing it still finding
+    /// nothing: its directory a link to nowhere.
+    #[cfg(test)]
+    pub(super) fn break_publishing(&self) {
+        fs::create_dir_all(self.directory.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(self.directory.with_extension("nowhere"), &self.directory)
+            .unwrap();
+    }
 }
 
 /// The directory, under `root`, of the stores of `strategy_id` whose
@@ -664,6 +673,12 @@ fn retrain_setting(retrain: Retrain) -> String {
         Retrain::Every(every) => format!("retrain every {}", every.as_nanos()),
         Retrain::Never => "retrain never".to_string(),
     }
+}
+
+/// The margins `margins` as the keys of the stores hold them.
+fn margins_text(margins: Margins) -> String {
+    let Margins { long, short } = margins;
+    format!("long {long:?} short {short:?}")
 }
 
 /// The training settings of `meta`: its learner, window, holdout, and
@@ -1141,24 +1156,37 @@ mod tests {
         assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
+    /// One side's margin changes which side is picked on a row, so what the
+    /// other publishes: a side's models list only beside the same margins of
+    /// both sides, a side not traded being another margin.
     #[test]
-    fn the_short_margin_does_not_key_the_long_models() {
+    fn either_sides_margin_keys_both_sides_stores() {
         let dir = tempfile::tempdir().unwrap();
-        store(dir.path(), &config())
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-            .unwrap();
-        let other_short = ModelConfig {
-            margins: Margins {
-                long: Some(0.5),
-                short: None,
-            },
+        for side in Side::BOTH {
+            side_store(dir.path(), &config(), &venue(), side)
+                .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+                .unwrap();
+        }
+        let margins = |long, short| ModelConfig {
+            margins: Margins { long, short },
             ..config()
         };
 
-        assert_eq!(
-            store(dir.path(), &other_short).valid_froms().unwrap(),
-            [at("2026-10-22T00:00:00Z")]
-        );
+        for (side, other) in [
+            (Side::Long, margins(Some(0.5), Some(0.75))),
+            (Side::Long, margins(Some(0.5), None)),
+            (Side::Short, margins(Some(0.75), Some(0.5))),
+            (Side::Short, margins(None, Some(0.5))),
+        ] {
+            assert!(
+                side_store(dir.path(), &other, &venue(), side)
+                    .valid_froms()
+                    .unwrap()
+                    .is_empty(),
+                "{side:?}: {:?}",
+                other.margins
+            );
+        }
     }
 
     /// The store of the meta model `meta` of `config`.

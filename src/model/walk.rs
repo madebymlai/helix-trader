@@ -44,8 +44,10 @@
 //! (`holdout::Earnings`), its decision rule taking the trades it would
 //! have taken (`holdout::Rule`: a side's expected net P&L clearing its
 //! margin, a meta's probability its threshold), beside every trade of the
-//! rows it decided, at the commission and at 1.5 times it: the figures a
-//! train's holdout is judged on, out of sample.
+//! rows it decided, at the commission and at 1.5 times it: a meta's are the
+//! figures its holdout is judged on, out of sample; a side's are its own,
+//! while a train's holdout is judged on the trades picked between the sides
+//! (`train`).
 
 use std::{collections::BTreeSet, fmt, path::Path};
 
