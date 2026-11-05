@@ -81,7 +81,7 @@ enum Command {
     Train(Box<TrainArgs>),
     /// Builds the strategy's dataset over the days from --start to --end,
     /// those it lacks, by a dataset run of the strategy over the catalog
-    /// to the last day's end plus its longest target. Internal: the
+    /// to the last day's end plus its target's limit. Internal: the
     /// backtest of a strategy trading on a model spawns it, so `--help`
     /// does not list it.
     #[command(hide = true)]
@@ -972,7 +972,7 @@ fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result
 
 /// Builds the strategy's dataset over the days from `--start` to the day
 /// before `--end` (`dataset::days`), those it lacks, by one dataset run
-/// (`DatasetRun`) to the last one's end plus the longest target, and
+/// (`DatasetRun`) to the last one's end plus the target's limit, and
 /// prints the days built.
 fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;

@@ -1,7 +1,7 @@
 //! The golden rows: the dataset of the `model_ema` strategy built over
 //! three days of the fixture's random walk of IC's gold, its rows (their
-//! times, features and every target value: P&L, commission, exit and a
-//! barrier's distances) printed exactly and compared with the committed
+//! times, features and every target value: P&L, commission, exit and the
+//! exits' distances) printed exactly and compared with the committed
 //! snapshot `golden_rows.csv`.
 //!
 //! The fingerprint a dataset and its models are stored under reads the
@@ -34,8 +34,7 @@ use jiff::{SignedDuration, Timestamp};
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up 4 hours; a bracket 1.5 ATRs of 3 hourly bars in
-/// its favour, 7.5 bps against, closed after 45 minutes, and a horizon of
-/// 30 minutes, of one ounce.
+/// its favour, 7.5 bps against, closed after 45 minutes, of one ounce.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -54,8 +53,7 @@ const CONFIG: &str = r#"
 
     [model]
     decision = { every = "1h" }
-    targets = { horizon = "30m", barrier = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, limit = "45m", atr = { period = 3 } } }
-    label = "barrier"
+    target = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, limit = "45m", atr = { period = 3 } }
     retrain = "24h"
     window = "46h"
     holdout = "12h"

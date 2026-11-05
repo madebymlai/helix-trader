@@ -3,15 +3,15 @@
 //! the costs of its own (Elkan 2001; Bahnsen et al. 2015).
 //!
 //! A side's model is published with its expected win and loss
-//! (`Payoff`): on a barrier, in R, the multiple of the stop's distance a
+//! (`Payoff`): with exits, in R, the multiple of the stop's distance a
 //! trade realised, its net P&L (fees and slippage included) over its own
 //! stop's worth (`targets::stop_worth`), so a stop-out with slippage can
-//! be below -1R; on a horizon, which has no stop, in money. They are the
-//! means of the training rows' wins and of their losses, Nautilus'
+//! be below -1R; on a time-only target, which has no stop, in money. They
+//! are the means of the training rows' wins and of their losses, Nautilus'
 //! `AvgWinner` and `AvgLoser` of their realised values. At a decision a
 //! side's expected net P&L is its calibrated probability `p` times the
-//! win, less `1 - p` times the loss (`Payoff::expected`), on a barrier
-//! times the worth of the stop the decision sets: the costs, in the
+//! win, less `1 - p` times the loss (`Payoff::expected`), with exits times
+//! the worth of the stop the decision sets: the costs, in the
 //! realised R, scale with each decision's stop, and a fixed cost weighs
 //! more against a tight ATR stop. A side trades if that is at or above its
 //! margin (`ModelConfig::margins`); of two, the larger, none at a tie
@@ -31,11 +31,11 @@ use serde::{Deserialize, Serialize};
 use super::{
     dataset::DatasetRow,
     holdout::Trade,
-    targets::{self, Label, Side, TargetsConfig},
+    targets::{self, Side, TargetConfig},
 };
 
-/// The expected win and loss of a side's trade, both positive: in R on a
-/// barrier, in the targets' P&L currency on a horizon.
+/// The expected win and loss of a side's trade, both positive: in R with
+/// exits, in the target's P&L currency on a time-only target.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Payoff {
     pub win: f64,
@@ -73,66 +73,52 @@ impl Payoff {
     }
 }
 
-/// How the trades of a dataset's rows are read: each side's trade of
-/// their label, its net P&L and commission (`holdout::Trade`), and the
-/// unit of its payoff, the worth of its stop on a barrier
-/// (`targets::stop_worth`, the instrument the catalog holds), one on a
-/// horizon, its realised value its net P&L over its unit.
+/// How the trades of a dataset's rows are read: each side's trade, its net
+/// P&L and commission (`holdout::Trade`), and the unit of its payoff, the
+/// worth of its stop with exits (`targets::stop_worth`, the instrument the
+/// catalog holds), one without, its realised value its net P&L over its
+/// unit.
 #[derive(Debug)]
 pub struct Realised {
-    /// Where each side's P&L, its commission and, on a barrier, its
-    /// stop's distance are among a row's target values, the long's first.
+    /// Where each side's P&L, its commission and, with exits, its stop's
+    /// distance are among a row's target values, the long's first.
     sides: [(usize, usize, Option<usize>); 2],
-    /// On a barrier, the targets' instrument and quantity, which make a
+    /// With exits, the target's instrument and quantity, which make a
     /// distance money.
     worth: Option<(InstrumentAny, Quantity)>,
 }
 
 impl Realised {
-    /// The reading of the rows of `targets` learned as `label`, a barrier's
-    /// stops worth what they are on the targets' instrument as the catalog
-    /// at `catalog` last holds it.
+    /// The reading of the rows of `target`, its stops, with exits, worth
+    /// what they are on its instrument as the catalog at `catalog` last
+    /// holds it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the targets have no `label` target, or the
-    /// catalog holds no instrument of the barrier's targets or an inverse
-    /// one (see `targets::ensure_linear`).
-    pub fn new(catalog: &Path, targets: &TargetsConfig, label: Label) -> anyhow::Result<Self> {
+    /// Returns an error if, with exits, the catalog holds no instrument of
+    /// the target or an inverse one (see `targets::ensure_linear`).
+    pub fn new(catalog: &Path, target: &TargetConfig) -> anyhow::Result<Self> {
         let sides = Side::BOTH.map(|side| {
             (
-                targets.pnl_index(label, side),
-                targets.commission_index(label, side),
-                targets.stop_index(label, side),
+                target.pnl_index(side),
+                target.commission_index(side),
+                target.stop_index(side),
             )
         });
-        let [
-            (Some(long), Some(long_commission), long_stop),
-            (Some(short), Some(short_commission), short_stop),
-        ] = sides
-        else {
-            anyhow::bail!("the label {label:?} has no target");
-        };
-        let worth = match label {
-            Label::Horizon => None,
-            Label::Barrier => {
-                let id = targets.instrument_id;
+        let worth = match target.spec.bracket() {
+            None => None,
+            Some(_) => {
+                let id = target.instrument_id;
                 let instrument = ParquetDataCatalog::new(catalog, None, None, None, None)
                     .query_instruments(Some(&[id.to_string()]))
                     .with_context(|| format!("reading the instrument {id}"))?
                     .pop()
                     .with_context(|| format!("the catalog holds no instrument {id}"))?;
                 targets::ensure_linear(&instrument)?;
-                Some((instrument, targets.quantity))
+                Some((instrument, target.quantity))
             }
         };
-        Ok(Self {
-            sides: [
-                (long, long_commission, long_stop),
-                (short, short_commission, short_stop),
-            ],
-            worth,
-        })
+        Ok(Self { sides, worth })
     }
 
     /// Whether `side`'s trade in `row` gained after its costs: the label of
@@ -153,7 +139,7 @@ impl Realised {
     }
 
     /// The unit of `side`'s payoff in `row`, in money: the worth of the
-    /// stop its decision set on a barrier, one on a horizon.
+    /// stop its decision set with exits, one without.
     ///
     /// # Errors
     ///
@@ -207,7 +193,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::model::targets::{Barrier, Distance};
+    use crate::model::targets::{Distance, Target};
 
     fn close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
@@ -274,38 +260,60 @@ mod tests {
         assert_eq!(pick::<Side>([]), None);
     }
 
-    /// Bybit's inverse BTCUSD, settled in BTC, in a catalog, and targets on
-    /// it with a barrier and a horizon.
-    fn inverse() -> (tempfile::TempDir, TargetsConfig) {
+    /// Bybit's inverse BTCUSD, settled in BTC, in a catalog, and the target
+    /// `spec` on it.
+    fn inverse(spec: Target) -> (tempfile::TempDir, TargetConfig) {
         let instrument = InstrumentAny::CryptoPerpetual(btcusd_bybit());
         let dir = tempfile::tempdir().unwrap();
         ParquetDataCatalog::new(dir.path(), None, None, None, None)
             .write_instruments(vec![instrument.clone()])
             .unwrap();
-        let targets = TargetsConfig::builder()
+        let target = TargetConfig::builder()
             .instrument_id(instrument.id())
             .quantity(Quantity::from(1))
-            .barrier(Barrier {
-                take_profit: Distance::BasisPoints(Decimal::from(20)),
-                stop: Distance::BasisPoints(Decimal::from(10)),
-                limit: SignedDuration::from_mins(30),
-                atr: None,
-            })
-            .horizon(SignedDuration::from_mins(30))
+            .spec(spec)
             .build();
-        (dir, targets)
+        (dir, target)
     }
 
     /// Nautilus' notional value of an inverse instrument divides by the
-    /// price, so a stop's distance has no worth in R on it: a barrier
-    /// label is refused; a horizon, in money, has no stop to weigh.
+    /// price, so a stop's distance has no worth in R on it.
     #[test]
-    fn a_barrier_on_an_inverse_instrument_is_refused() {
-        let (catalog, targets) = inverse();
+    fn a_target_with_exits_on_an_inverse_instrument_is_refused() {
+        let (catalog, target) = inverse(
+            Target::builder()
+                .take_profit(Distance::BasisPoints(Decimal::from(20)))
+                .stop(Distance::BasisPoints(Decimal::from(10)))
+                .limit(SignedDuration::from_mins(30))
+                .build(),
+        );
 
-        let err = Realised::new(catalog.path(), &targets, Label::Barrier).unwrap_err();
+        let err = Realised::new(catalog.path(), &target).unwrap_err();
 
         assert!(format!("{err:#}").contains("inverse"), "{err:#}");
-        assert!(Realised::new(catalog.path(), &targets, Label::Horizon).is_ok());
+    }
+
+    /// In money, a time-only target has no stop to weigh, and so no need of
+    /// `targets::ensure_linear`: it works on an inverse instrument.
+    #[test]
+    fn a_time_only_target_on_an_inverse_instrument_reads_its_trades_in_money() {
+        let (catalog, target) = inverse(
+            Target::builder()
+                .limit(SignedDuration::from_mins(30))
+                .build(),
+        );
+
+        let realised = Realised::new(catalog.path(), &target).unwrap();
+
+        let row = DatasetRow::new(
+            vec![],
+            vec![2.0, 0.1, 0.0, -2.0, 0.1, 0.0],
+            0.into(),
+            0.into(),
+            0.into(),
+        );
+        assert_eq!(realised.unit(&row, Side::Long).unwrap(), 1.0);
+        assert!(realised.gained(&row, Side::Long));
+        assert!(!realised.gained(&row, Side::Short));
     }
 }

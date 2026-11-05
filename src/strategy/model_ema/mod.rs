@@ -5,12 +5,12 @@
 //! side expected to clear its margin is a decision
 //! (`handle::Decision`), whose trade it sends as given through the shared
 //! order module (`decision.trade().send`, `strategy::orders`): the target
-//! its model was labelled on, as a dataset run sets it at the decision on
-//! that side, a bracket closed at the barrier's limit or a market entry
-//! closed at the horizon, both from the send. It hands the module its time
+//! its model learned, as a dataset run sets it at the decision on that
+//! side, a bracket or a market entry, closed at the target's limit from the
+//! send. It hands the module its time
 //! events, which close the trades at their time, and the module sets the
 //! time of the trades still open again at start, as after a restart.
-//! Every target closes before the next decision (`ModelConfig::validate`),
+//! The target closes before the next decision (`ModelConfig::validate`),
 //! so trades do not overlap, on a hedging venue as on a netting one. It
 //! decides only once its indicators are initialized: warm from the replay
 //! in a backtest or a dataset run, from its warmup request live. Nautilus'
@@ -22,9 +22,9 @@
 //!
 //! In a dataset run (`Mode::Dataset`, the replay of its dataset and its
 //! training, `model::ModelStrategy`) it places no trade of its own: the
-//! handle opens each decision's targets, through the same module, and is
-//! handed the order and position events; the module closes the targets
-//! at their time as it does the trades.
+//! handle opens each decision's target, through the same module, and is
+//! handed the order and position events; the module closes its trades at
+//! their time as it does its own.
 
 mod features;
 
@@ -61,7 +61,7 @@ use crate::{
 pub type ModelEmaConfig = StandardConfig<ModelEmaParams>;
 
 /// The strategy's part: no fields of its own. It trades on a model, whose
-/// targets trade the one instrument of `[trade]`, of its size; its
+/// target trades the one instrument of `[trade]`, of its size; its
 /// features are a fast and a slow Nautilus `ExponentialMovingAverage`,
 /// `[indicators.fast]` and `[indicators.slow]`, of every bars series of
 /// `[data]`.
@@ -85,7 +85,7 @@ impl Part for ModelEmaParams {
         }
     }
 
-    /// What its features and the barrier's ATR read (`model::reads`).
+    /// What its features and the target's ATR read (`model::reads`).
     fn reads(config: &ModelEmaConfig) -> ConfigResult<Vec<Series>> {
         model::reads(config)
     }
@@ -167,7 +167,7 @@ nautilus_strategy!(ModelEma, {
 
 impl DataActor for ModelEma {
     /// Starts the model handle, which starts the warmup: live, it requests
-    /// the warmup of the bars and of the barrier's ATR, then subscribes to
+    /// the warmup of the bars and of the target's ATR, then subscribes to
     /// them; then the features, registered as its Nautilus indicator, and
     /// the decisions.
     fn on_start(&mut self) -> anyhow::Result<()> {
@@ -201,7 +201,7 @@ impl DataActor for ModelEma {
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
             // It decides only once its indicators are initialized: the
-            // features, and in a dataset run the barrier's ATR.
+            // features, and in a dataset run the target's ATR.
             if !self.core().indicators_initialized()? {
                 return Ok(());
             }
@@ -251,8 +251,8 @@ mod tests {
         strategy::orders::{Exits, Trade},
     };
 
-    /// Trades AUD/USD on a horizon of 30 minutes, deciding hourly on its
-    /// averages of 10 and 30 hourly bars.
+    /// Trades AUD/USD on a time-only target of 30 minutes, deciding hourly on
+    /// its averages of 10 and 30 hourly bars.
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -271,8 +271,7 @@ mod tests {
 
         [model]
         decision = { every = "1h" }
-        targets = { horizon = "30m" }
-        label = "horizon"
+        target = { limit = "30m" }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
@@ -305,9 +304,8 @@ mod tests {
         )
     }
 
-    /// Its features read bars alone: the quotes of the AUD/USD traded,
-    /// which the barrier's ATR of a horizon does not run on, are read by
-    /// none.
+    /// Its features read bars alone: the quotes of the AUD/USD traded, which
+    /// a time-only target has no ATR to run on, are read by none.
     #[test]
     fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
         let err = ModelEmaConfig::load(&with_quotes()).unwrap_err();
@@ -320,16 +318,14 @@ mod tests {
         assert!(reason.contains("QuoteTick of AUD/USD.SIM"), "{reason}");
     }
 
-    /// Labelled on a barrier 2 and 1 ATRs out, the barrier's ATR is built
-    /// of the quotes of the AUD/USD traded: it reads them.
+    /// On a bracket 2 and 1 ATRs out, the target's ATR is built of the
+    /// quotes of the AUD/USD traded: it reads them.
     #[test]
-    fn quotes_the_barrier_atr_is_built_of_load() {
-        let toml = with_quotes()
-            .replace(
-                r#"targets = { horizon = "30m" }"#,
-                r#"targets = { barrier = { take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" } }"#,
-            )
-            .replace(r#"label = "horizon""#, r#"label = "barrier""#);
+    fn quotes_the_target_atr_is_built_of_load() {
+        let toml = with_quotes().replace(
+            r#"target = { limit = "30m" }"#,
+            r#"target = { take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" }"#,
+        );
 
         ModelEmaConfig::load(&toml).unwrap();
     }
@@ -418,7 +414,7 @@ mod tests {
         assert_eq!(refused_fields(&toml), ["indicators.fast"]);
     }
 
-    /// A refused period, a table it does not declare and a horizon of an
+    /// A refused period, a table it does not declare and a limit of an
     /// hour decided every hour are reported at once, each under its
     /// field.
     #[test]
@@ -426,18 +422,14 @@ mod tests {
         let toml = CONFIG
             .replace("period = 10", "period = 0")
             .replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]")
-            .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+            .replace(r#"limit = "30m""#, r#"limit = "1h""#);
 
         let mut fields = refused_fields(&toml);
         fields.sort();
 
         assert_eq!(
             fields,
-            [
-                "indicators.fast",
-                "indicators.medium",
-                "model.targets.horizon"
-            ]
+            ["indicators.fast", "indicators.medium", "model.target.limit"]
         );
     }
 

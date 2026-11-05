@@ -3,15 +3,15 @@
 //!
 //! A dataset is the settled rows of one strategy (`TargetRow`, from a
 //! dataset run), each its decision's features and the values of its
-//! targets, stored as Nautilus custom data, `DatasetRow`, one type for
-//! every strategy. Features and targets are list columns, so each strategy
+//! target, stored as Nautilus custom data, `DatasetRow`, one type for
+//! every strategy. Features and target values are list columns, so each strategy
 //! has the width of its own, and its rows are stored under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
 //! `targets::fingerprint`, the venue settings of its dataset runs,
 //! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
 //! names, the arguments of their `[indicators]` tables, their warmup or
-//! version, the decision rule, a target, what the
-//! strategy reads that a barrier's ATR is built from, the commission,
+//! version, the decision rule, the target, what the
+//! strategy reads that its ATR is built from, the commission,
 //! balance or leverage of its dataset runs, or the dataset version finds
 //! no row, and the dataset is rebuilt. The
 //! config is read by value, the code by version: the dataset's for the
@@ -23,8 +23,8 @@
 //!
 //! The catalog's intervals of the rows are the cache: `missing` asks the
 //! catalog for the days of a span it does not cover, and `build` replays
-//! them, once, from the first missing day to the last plus the longest
-//! target (`TargetsConfig::settles_within`), then writes them. The replay
+//! them, once, from the first missing day to the last plus the target's
+//! limit (`TargetConfig::settles_within`), then writes them. The replay
 //! starts the features' warmup (`FeatureSet::warmup`) before the first
 //! day, so that the indicators read at the day's first decisions the data
 //! before it, as inside a longer build; the rows decided before the day
@@ -65,7 +65,7 @@
 //! intervals, the cache: it is never consolidated.
 //!
 //! Beside the files, each dataset has a manifest, `manifest.json`: its
-//! strategy, fingerprint, feature names in order, target spec and names,
+//! strategy, fingerprint, feature names in order, target spec and value names,
 //! and the days it holds, rewritten whole (write, then rename) at each
 //! write.
 
@@ -94,12 +94,12 @@ use serde_json::json;
 use super::{
     decide::{self, DecisionRule},
     features::{FeatureSet, Fingerprint},
-    targets::{self, TargetRow, TargetsConfig},
+    targets::{self, TargetConfig, TargetRow},
 };
 use crate::strategy::{DataRequirements, warmup};
 
 /// The version of the code that makes every strategy's rows: the
-/// decisions (`decide`), the targets (`targets`), the shared feature code
+/// decisions (`decide`), the target's (`targets`), the shared feature code
 /// (`features`), and the Nautilus they run on, its indicators, matching
 /// engine and fill model. In every dataset's fingerprint: bumped by hand
 /// whenever what that code makes of the same data and config changes,
@@ -107,7 +107,7 @@ use crate::strategy::{DataRequirements, warmup};
 /// rebuilds every dataset and model. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
 /// without a bump.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -121,8 +121,8 @@ const MANIFEST: &str = "manifest.json";
 pub struct DatasetRow {
     /// The value of each feature, in the order of the dataset's names.
     pub features: Vec<f64>,
-    /// The value of each target, in the order of the dataset's target
-    /// names (`TargetsConfig::target_names`).
+    /// Each value of its target, in the order of the dataset's target
+    /// names (`TargetConfig::target_names`).
     pub targets: Vec<f64>,
     /// When the last of the decision's positions closed.
     pub settled_at: UnixNanos,
@@ -150,15 +150,15 @@ impl std::error::Error for SchemaMismatch {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub strategy_id: StrategyId,
-    /// The fingerprint of the features, the decision rule, the targets and
+    /// The fingerprint of the features, the decision rule, the target and
     /// the venue of its dataset runs.
     pub fingerprint: String,
     /// The names of the features, in the order of a row's values.
     pub feature_names: Vec<String>,
-    /// The names of the targets, in the order of a row's values.
+    /// The names of the target's values, in the order of a row's values.
     pub target_names: Vec<String>,
     /// The target spec.
-    pub targets: TargetsConfig,
+    pub target: TargetConfig,
     /// The days stored, in runs of consecutive days.
     pub days: Vec<Days>,
 }
@@ -227,43 +227,43 @@ pub struct Dataset {
     feature_names: Vec<String>,
     /// How much a replay runs before its first day: the features' warmup.
     warmup: SignedDuration,
-    targets: TargetsConfig,
+    target: TargetConfig,
 }
 
 impl Dataset {
     /// The dataset of `strategy_id`, deciding with `features` on `rule`,
-    /// of `targets` for a strategy of `requirements`, run on `venue`,
+    /// of `target` for a strategy of `requirements`, run on `venue`,
     /// in the catalog at `catalog`. Registers `DatasetRow` with Nautilus,
     /// as any reader of the catalog must.
     ///
     /// # Errors
     ///
-    /// Returns an error if `targets` is invalid for `rule` and
+    /// Returns an error if `target` is invalid for `rule` and
     /// `requirements`.
     pub fn new(
         catalog: &Path,
         strategy_id: StrategyId,
         features: &FeatureSet,
         rule: DecisionRule,
-        targets: TargetsConfig,
+        target: TargetConfig,
         requirements: &DataRequirements,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
-        targets.validate(rule, requirements)?;
+        target.validate(rule, requirements)?;
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
         Ok(Self {
             catalog: catalog.to_path_buf(),
             strategy_id,
-            fingerprint: fingerprint(features, rule, &targets, requirements, venue)?,
+            fingerprint: fingerprint(features, rule, &target, requirements, venue)?,
             warmup: features.warmup(),
             feature_names: features.names().to_vec(),
-            targets,
+            target,
         })
     }
 
     /// Builds the days `first` to `last` the dataset is missing: `replay`
     /// runs the strategy from the features' warmup before the first missing
-    /// day's start to the last's end plus the longest target and returns
+    /// day's start to the last's end plus the target's limit and returns
     /// the rows it settled, which are written (see `write`), but those
     /// decided before the first day. The cached days among them are written
     /// again, recomputed. With no day missing, nothing is replayed.
@@ -284,7 +284,7 @@ impl Dataset {
             return Ok(missing);
         };
         let from = start_of(first)?;
-        let to = start_of(last.tomorrow()?)? + self.targets.settles_within();
+        let to = start_of(last.tomorrow()?)? + self.target.settles_within();
         let rows = replay(from - self.warmup, to)?;
         self.write(&rows, from, to)?;
         Ok(missing)
@@ -364,8 +364,8 @@ impl Dataset {
     }
 
     /// Writes the `rows` of a replay over `[from, to]` for the days it
-    /// settled, those it replayed whole and whose end plus the longest
-    /// target is not after `to`, and the manifest. What the catalog holds
+    /// settled, those it replayed whole and whose end plus the target's
+    /// limit is not after `to`, and the manifest. What the catalog holds
     /// over those days is deleted first; the rows of other days are
     /// dropped.
     ///
@@ -459,7 +459,7 @@ impl Dataset {
                     .downcast_ref::<DatasetRow>()
                     .cloned()
                     .with_context(|| format!("the dataset {identifier} holds {custom:?}"))?;
-                let targets = self.targets.target_names().len();
+                let targets = self.target.target_names().len();
                 if row.features.len() != self.feature_names.len() || row.targets.len() != targets {
                     bail!(SchemaMismatch(format!(
                         "the dataset {identifier} holds a row of {} features and {} targets, \
@@ -489,7 +489,7 @@ impl Dataset {
     }
 
     /// The days a replay over `[from, to]` settles: those it replayed
-    /// whole, its end at least the longest target past theirs.
+    /// whole, its end at least the target's limit past theirs.
     fn settled_days(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Date>> {
         let first = day_of(from.into());
         let mut day = if start_of(first)? == from {
@@ -498,7 +498,7 @@ impl Dataset {
             first.tomorrow()?
         };
         let mut days = vec![];
-        while start_of(day.tomorrow()?)? + self.targets.settles_within() <= to {
+        while start_of(day.tomorrow()?)? + self.target.settles_within() <= to {
             days.push(day);
             day = day.tomorrow()?;
         }
@@ -525,8 +525,8 @@ impl Dataset {
             strategy_id: self.strategy_id,
             fingerprint: self.fingerprint.to_string(),
             feature_names: self.feature_names.clone(),
-            target_names: self.targets.target_names(),
-            targets: self.targets.clone(),
+            target_names: self.target.target_names(),
+            target: self.target.clone(),
             days,
         };
         let directory = self.directory()?;
@@ -583,10 +583,10 @@ impl DatasetRow {
 }
 
 /// The fingerprint of a dataset of `features` deciding on `rule`, of
-/// `targets` for a strategy of `requirements`, run on `venue`: the
+/// `target` for a strategy of `requirements`, run on `venue`: the
 /// decisions' (`decide::fingerprint`), deciding the bar build delay of the
 /// requirements' bar types after the grid (`warmup::bar_build_delay`),
-/// extended by the targets' (`targets::fingerprint`), the venue's settings
+/// extended by the target's (`targets::fingerprint`), the venue's settings
 /// and the dataset `VERSION`.
 ///
 /// # Errors
@@ -595,11 +595,11 @@ impl DatasetRow {
 pub fn fingerprint(
     features: &FeatureSet,
     rule: DecisionRule,
-    targets: &TargetsConfig,
+    target: &TargetConfig,
     requirements: &DataRequirements,
     venue: &DatasetVenue,
 ) -> anyhow::Result<Fingerprint> {
-    versioned_fingerprint(VERSION, features, rule, targets, requirements, venue)
+    versioned_fingerprint(VERSION, features, rule, target, requirements, venue)
 }
 
 /// `fingerprint` at the dataset version `version`.
@@ -607,14 +607,14 @@ fn versioned_fingerprint(
     version: u32,
     features: &FeatureSet,
     rule: DecisionRule,
-    targets: &TargetsConfig,
+    target: &TargetConfig,
     requirements: &DataRequirements,
     venue: &DatasetVenue,
 ) -> anyhow::Result<Fingerprint> {
     let delay = warmup::bar_build_delay(&requirements.bar_types);
     Ok(targets::fingerprint(
         decide::fingerprint(features, rule, delay),
-        targets,
+        target,
         rule,
         requirements,
     )?
@@ -664,7 +664,7 @@ mod tests {
     use crate::{
         model::{
             decide::FeatureRow,
-            targets::{Barrier, Distance, Distances, Exit, Outcome, Outcomes},
+            targets::{Distance, Distances, Exit, Outcome, Outcomes, Target},
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
@@ -704,18 +704,18 @@ mod tests {
             .unwrap()
     }
 
-    /// A barrier with a limit of 2 hours and a horizon of 1 hour.
-    fn targets() -> TargetsConfig {
-        TargetsConfig::builder()
+    /// A bracket with a limit of 2 hours.
+    fn target() -> TargetConfig {
+        TargetConfig::builder()
             .instrument_id(InstrumentId::from(GOLD))
             .quantity(Quantity::from(1))
-            .barrier(Barrier {
-                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
-                stop: Distance::BasisPoints(Decimal::from(5)),
-                limit: SignedDuration::from_hours(2),
-                atr: None,
-            })
-            .horizon(SignedDuration::from_hours(1))
+            .spec(
+                Target::builder()
+                    .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
+                    .stop(Distance::BasisPoints(Decimal::from(5)))
+                    .limit(SignedDuration::from_hours(2))
+                    .build(),
+            )
             .build()
     }
 
@@ -747,7 +747,7 @@ mod tests {
             StrategyId::from(strategy),
             &features(width),
             DecisionRule::Every(SignedDuration::from_hours(1)),
-            targets(),
+            target(),
             &requirements(),
             &venue(),
         )
@@ -760,21 +760,20 @@ mod tests {
 
     /// The row of the decision at `time`, settled an hour later: its
     /// features, a long winning `pnl` at its take profit and a short losing
-    /// as much at its stop on the barrier, each 3 from its take profit and
-    /// 2 from its stop, the reverse at the horizon.
+    /// as much at its stop, each 3 from its take profit and 2 from its stop.
     fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let loss = format!("-{pnl}");
-        let outcome = |pnl: &str, exit, distances| Outcome {
+        let distances = Some(Distances {
+            take_profit: Decimal::from(3),
+            stop: Decimal::from(2),
+        });
+        let outcome = |pnl: &str, exit| Outcome {
             pnl: Money::from(&*format!("{pnl} USD")),
             commission: Money::from("0.1 USD"),
             exit,
             distances,
         };
-        let barrier = Some(Distances {
-            take_profit: Decimal::from(3),
-            stop: Decimal::from(2),
-        });
         TargetRow {
             decision: FeatureRow {
                 strategy_id: StrategyId::from(STRATEGY),
@@ -782,14 +781,10 @@ mod tests {
                 ts_event: ns,
                 ts_init: ns,
             },
-            barrier: Some(Outcomes {
-                long: outcome(pnl, Exit::TakeProfit, barrier),
-                short: outcome(&loss, Exit::Stop, barrier),
-            }),
-            horizon: Some(Outcomes {
-                long: outcome(&loss, Exit::Time, None),
-                short: outcome(pnl, Exit::Time, None),
-            }),
+            outcomes: Outcomes {
+                long: outcome(pnl, Exit::TakeProfit),
+                short: outcome(&loss, Exit::Stop),
+            },
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
         }
     }
@@ -799,9 +794,7 @@ mod tests {
         let ns = UnixNanos::from(at(time));
         DatasetRow {
             features,
-            targets: vec![
-                pnl, 0.1, 1.0, 3.0, 2.0, -pnl, 0.1, -1.0, 3.0, 2.0, -pnl, 0.1, 0.0, pnl, 0.1, 0.0,
-            ],
+            targets: vec![pnl, 0.1, 1.0, 3.0, 2.0, -pnl, 0.1, -1.0, 3.0, 2.0],
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
             ts_event: ns,
             ts_init: ns,
@@ -880,7 +873,7 @@ mod tests {
             row("2026-01-06T09:00:00Z", vec![2.0], "1"),
         ];
 
-        // The barrier's limit, 2 hours, is the longest target.
+        // The target's limit is 2 hours.
         dataset
             .write(
                 &rows,
@@ -1010,19 +1003,19 @@ mod tests {
     }
 
     #[test]
-    fn a_change_of_the_features_the_decisions_the_targets_or_the_commission_finds_an_empty_cache() {
+    fn a_change_of_the_features_the_decisions_the_target_or_the_commission_finds_an_empty_cache() {
         let dir = tempfile::tempdir().unwrap();
         let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
         dataset(dir.path(), STRATEGY, 1)
             .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
             .unwrap();
-        let changed = |rule, targets, commission| {
+        let changed = |rule, target, commission| {
             Dataset::new(
                 dir.path(),
                 StrategyId::from(STRATEGY),
                 &features(1),
                 rule,
-                targets,
+                target,
                 &requirements(),
                 &DatasetVenue {
                     commission,
@@ -1036,21 +1029,24 @@ mod tests {
             dataset(dir.path(), STRATEGY, 2),
             changed(
                 DecisionRule::Every(SignedDuration::from_mins(30)),
-                targets(),
+                target(),
                 venue().commission,
             ),
             changed(
                 hourly,
-                TargetsConfig {
-                    horizon: Some(SignedDuration::from_mins(30)),
-                    ..targets()
+                TargetConfig {
+                    spec: Target {
+                        limit: SignedDuration::from_mins(30),
+                        ..target().spec
+                    },
+                    ..target()
                 },
                 venue().commission,
             ),
-            changed(hourly, targets(), Commission::Rate("0.00004".to_string())),
+            changed(hourly, target(), Commission::Rate("0.00004".to_string())),
             changed(
                 hourly,
-                targets(),
+                target(),
                 Commission::PerOrder("0.00003 USD".to_string()),
             ),
         ];
@@ -1102,26 +1098,20 @@ mod tests {
 
         assert_eq!(manifest.strategy_id, StrategyId::from(STRATEGY));
         assert_eq!(manifest.feature_names, ["mid_0", "mid_1"]);
-        assert_eq!(manifest.targets, targets());
+        assert_eq!(manifest.target, target());
         assert_eq!(
             manifest.target_names,
             [
-                "barrier_long_pnl",
-                "barrier_long_commission",
-                "barrier_long_exit",
-                "barrier_long_take_profit",
-                "barrier_long_stop",
-                "barrier_short_pnl",
-                "barrier_short_commission",
-                "barrier_short_exit",
-                "barrier_short_take_profit",
-                "barrier_short_stop",
-                "horizon_long_pnl",
-                "horizon_long_commission",
-                "horizon_long_exit",
-                "horizon_short_pnl",
-                "horizon_short_commission",
-                "horizon_short_exit",
+                "long_pnl",
+                "long_commission",
+                "long_exit",
+                "long_take_profit",
+                "long_stop",
+                "short_pnl",
+                "short_commission",
+                "short_exit",
+                "short_take_profit",
+                "short_stop",
             ]
         );
         assert_eq!(
@@ -1150,14 +1140,14 @@ mod tests {
                 version,
                 &features(1),
                 rule,
-                &targets(),
+                &target(),
                 &requirements(),
                 &venue(),
             )
             .unwrap()
         };
         let current =
-            fingerprint(&features(1), rule, &targets(), &requirements(), &venue()).unwrap();
+            fingerprint(&features(1), rule, &target(), &requirements(), &venue()).unwrap();
 
         assert_ne!(current, at(VERSION + 1));
     }
@@ -1166,14 +1156,14 @@ mod tests {
     /// (`warmup::bar_build_delay`), so its rows are another dataset than
     /// those of the same strategy with the delay ignored: the one reading
     /// gold's quotes alone, its requirements keying nothing else, the
-    /// targets having no ATR.
+    /// target having no ATR.
     #[test]
     fn a_strategy_on_composite_bars_is_keyed_by_its_build_delay() {
         let of = |requirements: &DataRequirements| {
             fingerprint(
                 &features(1),
                 DecisionRule::Every(SignedDuration::from_hours(1)),
-                &targets(),
+                &target(),
                 requirements,
                 &venue(),
             )
@@ -1198,7 +1188,7 @@ mod tests {
             fingerprint(
                 &features(1),
                 DecisionRule::Every(SignedDuration::from_hours(1)),
-                &targets(),
+                &target(),
                 &requirements(),
                 &venue,
             )
@@ -1284,7 +1274,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features,
             DecisionRule::Every(SignedDuration::from_hours(1)),
-            targets(),
+            target(),
             &requirements(),
             &venue(),
         )
@@ -1445,7 +1435,7 @@ mod tests {
             .unwrap();
         let mut replays = vec![];
 
-        // The barrier's limit, 2 hours, settles the 6th by 02:00 of the 7th.
+        // The target's limit, 2 hours, settles the 6th by 02:00 of the 7th.
         let missing = dataset
             .missing(day("2026-01-05"), day("2026-01-07"))
             .unwrap();

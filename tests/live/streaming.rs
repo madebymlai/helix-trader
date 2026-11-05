@@ -574,8 +574,7 @@ const MODEL_EMA_CONFIG: &str = r#"
 
     [model]
     decision = { every = "2s" }
-    targets = { horizon = "1s" }
-    label = "horizon"
+    target = { limit = "1s" }
     retrain = "24h"
     window = "46h"
     holdout = "12h"

@@ -112,7 +112,7 @@ fn a_dataset_build_replays_through_a_sliver_between_promoted_files() {
         StrategyId::from(dataset::STRATEGY),
         &dataset::features(),
         dataset::rule(),
-        dataset::targets(),
+        dataset::target(),
         &dataset::requirements(),
         &dataset::venue(),
     )

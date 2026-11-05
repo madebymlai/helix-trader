@@ -3,36 +3,36 @@
 //!
 //! The strategy shares a `ModelHandle` (an `Rc`), built from its features
 //! and the model section of its config, in a `Mode`. `start` from
-//! `on_start` registers the features (and starts the targets' ATR, in a
-//! dataset run) and starts the decision cadence; `decide`, at a decision
+//! `on_start` registers the features (and starts the target's ATR, if it
+//! has one) and starts the decision cadence; `decide`, at a decision
 //! of the cadence (its timer, `decide::is_decision`), snapshots the
 //! features, if no live warmup is still answering (`Warmup::is_warming`),
-//! the decision is fresh (data of the targets' instrument
+//! the decision is fresh (data of the target's instrument
 //! since the previous) and every one is initialized, and publishes their
 //! row (`decide::decide`), then:
 //!
 //! - trading (`Mode::Backtest`, `Mode::Live`): takes, for each side of
 //!   the config's margins, the latest model of its store
 //!   (`store::ModelStore`) valid at the decision, its calibrated
-//!   probability on the row, and its expected net P&L (`payoff`): on a
-//!   barrier label, the expected R times the worth of the stop the
-//!   decision sets (`targets::Stops`, from the decision's price and the
-//!   barrier's ATR, which the handle runs), on a horizon in money. It
+//!   probability on the row, and its expected net P&L (`payoff`): with
+//!   exits, the expected R times the worth of the stop the decision sets
+//!   (`targets::TradedTarget`, from the decision's price and the target's
+//!   ATR, which the handle runs), on a time-only target in money. It
 //!   returns the `Decision` of the side clearing its margin, the larger of
-//!   two (`payoff::pick`), as plain data: the side, the targets' size, the
-//!   probability and expected net P&L, and the target of its label as the
-//!   decision sets it on that side, its reference price, take profit,
-//!   stop and time limit. The handle sends no order and handles no
+//!   two (`payoff::pick`), as plain data: the side, the target's size, the
+//!   probability and expected net P&L, and the target as the decision sets
+//!   it on that side, its reference price, take profit, stop and time
+//!   limit. The handle sends no order and handles no
 //!   trade's time: the strategy trades the decision, as given
 //!   (`Decision::trade`, sent through `strategy::orders` as a dataset run
 //!   sends its targets) or otherwise, and closes its trades through the
 //!   same module. A side with no model valid yet never trades; a stale
-//!   decision, cold features, a barrier ATR not yet initialized, no side
+//!   decision, cold features, a target's ATR not yet initialized, no side
 //!   clearing its margin or two tied are no decision, never an error.
-//! - in a dataset run (`Mode::Dataset`): opens the decision's targets
+//! - in a dataset run (`Mode::Dataset`): opens the decision's target
 //!   (`targets::Targets`, through `strategy::orders`) and returns no
 //!   decision, so the strategy places no trade of its own; the strategy
-//!   hands the order module its time events, which close the targets'
+//!   hands the order module its time events, which close the target's
 //!   trades, and the handle its order and position events, and the rows
 //!   the targets settle are collected for the caller of the run.
 //!
@@ -58,7 +58,7 @@
 //! the traded instrument its data requirements hold, which the harness
 //! reads for the decisions' freshness, its quotes among them when no
 //! series of the strategy reads it (`StandardConfig::data_requirements`,
-//! the decision's reference price, the venue's fills and the barrier's
+//! the decision's reference price, the venue's fills and the target's
 //! ATR then coming from them): `start` subscribes each
 //! on the contract standing for it, a plain instrument once, a root on its
 //! front contract with its roll alert, and the strategy hands the handle
@@ -84,9 +84,9 @@
 //! from the catalog alone, handed to the features, and the roller's
 //! subscriptions continue from its end, so the first decision after a
 //! start is warm. A series of the traded instrument no feature reads,
-//! custom data among them, has no warmup. It warms the barrier's ATR from
+//! custom data among them, has no warmup. It warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
-//! ATR's bars too (`Stops::warmed`), and the warmup hands the bars of the
+//! ATR's bars too (`TradedTarget::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop a
 //! dataset run sets there. A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
@@ -104,7 +104,6 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
@@ -127,7 +126,7 @@ use super::{
     features::{FeatureSet, meta_row},
     payoff,
     store::{LoadedModel, MetaLevel, ModelSet, SideModel, Swap},
-    targets::{self, BarrierExits, Label, Side, Stops, TargetRow, Targets, TargetsConfig},
+    targets::{Side, SideTarget, TargetConfig, TargetRow, Targets, TradedTarget},
 };
 use crate::{
     rolls::Roller,
@@ -142,13 +141,13 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum Mode {
     /// Trades in a backtest on the models of the store under `models`
-    /// whose targets are those of its dataset runs, on `venue`.
+    /// whose target is that of its dataset runs, on `venue`.
     Backtest {
         models: PathBuf,
         venue: DatasetVenue,
     },
-    /// Trades live on the models of the store under `models` whose targets
-    /// are those of the dataset runs of its trains, on `venue`, deciding
+    /// Trades live on the models of the store under `models` whose target
+    /// is that of the dataset runs of its trains, on `venue`, deciding
     /// the live node's bar build delay late, as a backtest does; apart from
     /// `Backtest` for its warmup, which requests the history up to now
     /// (`Warmup::live`), and its roller, which loads each post contract
@@ -158,8 +157,8 @@ pub enum Mode {
         models: PathBuf,
         venue: DatasetVenue,
     },
-    /// Opens each decision's targets, for a dataset run, and collects the
-    /// rows they settle in `rows`.
+    /// Opens each decision's target, for a dataset run, and collects the
+    /// rows it settles in `rows`.
     Dataset { rows: SettledRows },
 }
 
@@ -167,40 +166,40 @@ pub enum Mode {
 pub type SettledRows = Rc<RefCell<Vec<TargetRow>>>;
 
 /// A decision to trade, as plain data: the side the model picks, of the
-/// targets' size and instrument, its calibrated probability and expected
-/// net P&L, and the target its model was labelled on as the decision sets
-/// it on that side, the prices a dataset run sets there. The handle sends
+/// target's size and instrument, its calibrated probability and expected
+/// net P&L, and the target its model learned as the decision sets it on
+/// that side, the prices a dataset run sets there. The handle sends
 /// nothing: a strategy trades it as given (`trade`), or otherwise, and then
-/// the model's holdout figures describe the labelled trade, not its own.
+/// the model's holdout figures describe the target's trade, not its own.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decision {
-    /// The targets' instrument.
+    /// The target's instrument.
     pub instrument_id: InstrumentId,
     pub side: OrderSide,
-    /// The targets' size, or, with a meta model sizing, its multiple of it.
+    /// The target's size, or, with a meta model sizing, its multiple of it.
     pub quantity: Quantity,
-    /// The calibrated probability that the label is true of the model
+    /// The calibrated probability that the trade gains, of the model
     /// deciding: the meta model's, if any, else that of the primary's
     /// model of the side.
     pub probability: f64,
     /// The net P&L the primary's model of the side expects, in the
-    /// instrument's P&L currency, on the targets' size.
+    /// instrument's P&L currency, on the target's size.
     pub expected_pnl: f64,
-    /// The price the target is set from (`targets::Stops`): the mid of the
-    /// instrument's last quote, else its last trade, else its last close.
+    /// The price the target is set from (`targets::TradedTarget`): the mid
+    /// of the instrument's last quote, else its last trade, else its last
+    /// close.
     pub reference: Price,
-    /// On a barrier, its take profit and stop on the instrument's ticks;
-    /// none on a horizon.
+    /// With exits, its take profit and stop on the instrument's ticks; none
+    /// on a time-only target.
     pub take_profit: Option<Price>,
     pub stop: Option<Price>,
-    /// When the target ends after its send: the barrier's limit or the
-    /// horizon.
+    /// When the target ends after its send: its limit.
     pub time_limit: SignedDuration,
 }
 
 impl Decision {
-    /// The trade the model was labelled on, the one a dataset run sends at
-    /// the decision on that side: a bracket with the barrier's exits, or a
+    /// The trade the model learned, the one a dataset run sends at the
+    /// decision on that side: a bracket with the target's exits, or a
     /// market entry, closed at the time limit (`strategy::orders`).
     #[must_use]
     pub const fn trade(&self) -> Trade {
@@ -213,27 +212,6 @@ impl Decision {
                 stop_loss: self.stop,
                 time_limit: Some(self.time_limit),
             },
-        }
-    }
-}
-
-/// What a decision on a side sets of its target.
-#[derive(Debug, Clone, Copy)]
-struct Target {
-    reference: Price,
-    take_profit: Option<Price>,
-    stop: Option<Price>,
-    time_limit: SignedDuration,
-}
-
-impl Target {
-    /// The barrier `exits`, closed after `limit`.
-    const fn barrier(exits: BarrierExits, limit: SignedDuration) -> Self {
-        Self {
-            reference: exits.reference,
-            take_profit: Some(exits.take_profit),
-            stop: Some(exits.stop),
-            time_limit: limit,
         }
     }
 }
@@ -251,7 +229,7 @@ pub struct ModelHandle {
     /// The instrument traded, whose data makes a decision fresh.
     traded: InstrumentId,
     serving: Serving,
-    /// The strategy's warmup, which feeds the features and the barrier's
+    /// The strategy's warmup, which feeds the features and the target's
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
     /// Subscribes the features' ticks, on the contract standing for each
@@ -268,43 +246,20 @@ enum Serving {
     },
 }
 
-impl Serving {
-    /// The stops of the barrier the handle trades on, if any: none on a
-    /// horizon, and in a dataset run, which warms on its replay.
-    fn stops(&self) -> Option<&Stops> {
-        let Serving::Trading(trading) = self else {
-            return None;
-        };
-        match &trading.labelled {
-            Labelled::Barrier(stops) => Some(stops),
-            Labelled::Horizon(_) => None,
-        }
-    }
-}
-
 /// The trading side of a handle.
 #[derive(Debug)]
 struct Trading {
     /// The models of each side traded, which pick the side of a trade.
     sides: Vec<SideModels>,
-    /// The target of the side models' label, which their trades are on.
-    labelled: Labelled,
+    /// The target the side models' trades are on, as each decision sets
+    /// it.
+    target: TradedTarget,
     /// The meta model taking the side models' trades, if any.
     meta: Option<MetaModels>,
-    /// The targets' instrument.
+    /// The target's instrument.
     instrument_id: InstrumentId,
-    /// The targets' size.
+    /// The target's size.
     quantity: Quantity,
-}
-
-/// The target the side models' trades are on, their label's.
-#[derive(Debug)]
-enum Labelled {
-    /// The barrier's exits as the decision sets them; the worth of its
-    /// stop weighs the expected R.
-    Barrier(Stops),
-    /// The horizon, expected in money.
-    Horizon(SignedDuration),
 }
 
 /// The models of a side, and its margin.
@@ -333,7 +288,7 @@ impl ModelHandle {
     /// # Errors
     ///
     /// Returns an error if the decision rule is invalid, a store cannot be
-    /// keyed or, in a dataset run, the targets are invalid.
+    /// keyed or, in a dataset run, the target is invalid.
     pub fn new(
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
@@ -353,30 +308,18 @@ impl ModelHandle {
                     models: Models(RefCell::new(level.swap())),
                 })
                 .collect();
-            let labelled = match config.label {
-                Label::Barrier => Labelled::Barrier(
-                    Stops::new(&config.targets, config.decision, requirements)?
-                        .context("the label is the barrier, and the targets have none")?,
-                ),
-                Label::Horizon => Labelled::Horizon(
-                    config
-                        .targets
-                        .horizon
-                        .context("the label is the horizon, and the targets have none")?,
-                ),
-            };
             Ok(Trading {
                 sides,
-                labelled,
+                target: TradedTarget::new(&config.target, config.decision, requirements)?,
                 meta,
-                instrument_id: config.targets.instrument_id,
-                quantity: config.targets.quantity,
+                instrument_id: config.target.instrument_id,
+                quantity: config.target.quantity,
             })
         };
         Self::built(
             strategy_id,
             &features,
-            (config.decision, &config.targets),
+            (config.decision, &config.target),
             requirements,
             mode,
             trading,
@@ -384,20 +327,20 @@ impl ModelHandle {
     }
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
-    /// `targets`, for a strategy of `requirements`, in `mode`: trading as
+    /// `target`, for a strategy of `requirements`, in `mode`: trading as
     /// `trading` builds it on the models under the store's root, of the
-    /// targets of the dataset runs on the mode's venue, or opening the
-    /// targets.
+    /// target of the dataset runs on the mode's venue, or opening the
+    /// target.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
-        (rule, targets): (DecisionRule, &TargetsConfig),
+        (rule, target): (DecisionRule, &TargetConfig),
         requirements: &DataRequirements,
         mode: Mode,
         trading: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Trading>,
     ) -> anyhow::Result<Rc<Self>> {
         rule.validate()?;
-        let traded = targets.instrument_id;
+        let traded = target.instrument_id;
         let mut ticks = features.ticks();
         for tick in requirements
             .ticks
@@ -426,13 +369,14 @@ impl ModelHandle {
                 Serving::Trading(Box::new(trading(&models, &venue)?))
             }
             Mode::Dataset { rows } => Serving::Dataset {
-                targets: Targets::new(targets.clone(), rule, requirements)?,
+                targets: Targets::new(target.clone(), rule, requirements)?,
                 rows,
             },
         };
-        let warmup = match serving.stops() {
-            Some(stops) => stops.warmed(warmup),
-            None => warmup,
+        // A dataset run warms on its replay.
+        let warmup = match &serving {
+            Serving::Trading(trading) => trading.target.warmed(warmup),
+            Serving::Dataset { .. } => warmup,
         };
         Ok(Rc::new(Self {
             strategy_id,
@@ -451,9 +395,8 @@ impl ModelHandle {
     /// requesting the history of the bars and of the features' ticks, then
     /// the roller, which subscribes the features' ticks and the traded
     /// instrument's from now, where the warmup ends, a root's on the
-    /// contract standing for it; starts the barrier's ATR (the stops',
-    /// trading on a model labelled on the barrier, or, in a dataset run,
-    /// the targets', and collects the rows they settle); then
+    /// contract standing for it; starts the target's ATR, if it has one (in
+    /// a dataset run the targets', and collects the rows they settle); then
     /// starts the decision cadence, `warmup::bar_build_delay` late.
     ///
     /// # Errors
@@ -470,11 +413,7 @@ impl ModelHandle {
         self.warmup.start(strategy)?;
         self.roller.start(strategy)?;
         match &self.serving {
-            Serving::Trading(_) => {
-                if let Some(stops) = self.serving.stops() {
-                    stops.start(strategy);
-                }
-            }
+            Serving::Trading(trading) => trading.target.start(strategy),
             Serving::Dataset { targets, rows } => {
                 targets.start(strategy);
                 let rows = Rc::clone(rows);
@@ -594,8 +533,8 @@ impl ModelHandle {
 impl Trading {
     /// The decision of `strategy` at `now` on `row`: of the side whose
     /// latest model valid then expects a net P&L clearing its margin, the
-    /// larger of two, on the target of its label as the decision sets it
-    /// on the side, taken if its meta model takes it.
+    /// larger of two, on the target as the decision sets it on the side,
+    /// taken if its meta model takes it.
     fn decide<S>(
         &self,
         strategy: &S,
@@ -617,9 +556,10 @@ impl Trading {
             // unit yet.
             let Some(valued) = models.at(now, |model| {
                 let probability = model.predict(row)?;
-                let target = self.labelled.at(strategy, self.instrument_id, *side)?;
-                Ok(target.map(|(target, unit)| {
-                    (target, probability, model.expected_pnl(probability, unit))
+                let target = self.target.at(strategy, *side)?;
+                Ok(target.map(|target| {
+                    let expected = model.expected_pnl(probability, target.unit);
+                    (target, probability, expected)
                 }))
             })?
             else {
@@ -644,12 +584,12 @@ impl Trading {
         }
     }
 
-    /// The decision on `side` of the targets' size and instrument, on
+    /// The decision on `side` of the target's size and instrument, on
     /// `target`, at `probability`, expecting `expected_pnl`.
     const fn decision(
         &self,
         side: OrderSide,
-        target: Target,
+        target: SideTarget,
         probability: f64,
         expected_pnl: f64,
     ) -> Decision {
@@ -663,45 +603,6 @@ impl Trading {
             take_profit: target.take_profit,
             stop: target.stop,
             time_limit: target.time_limit,
-        }
-    }
-}
-
-impl Labelled {
-    /// The target of a trade on `side` of `instrument_id` at a decision of
-    /// `strategy` now, and what the unit of its side's payoff is worth: on
-    /// a barrier its exits there and the worth of its stop, none as
-    /// `Stops::at`; on a horizon the horizon and 1, the payoff being in
-    /// money, none with no price of the instrument yet.
-    ///
-    /// # Errors
-    ///
-    /// As `Stops::at`.
-    fn at<S>(
-        &self,
-        strategy: &S,
-        instrument_id: InstrumentId,
-        side: Side,
-    ) -> anyhow::Result<Option<(Target, f64)>>
-    where
-        S: DataActor + DataActorNative,
-    {
-        match self {
-            Self::Barrier(stops) => Ok(stops
-                .at(strategy, side)?
-                .map(|exits| (Target::barrier(exits, stops.limit()), exits.stop_worth))),
-            Self::Horizon(horizon) => {
-                let reference = targets::reference(&strategy.cache(), &instrument_id);
-                Ok(reference.map(|reference| {
-                    let target = Target {
-                        reference,
-                        take_profit: None,
-                        stop: None,
-                        time_limit: *horizon,
-                    };
-                    (target, 1.0)
-                }))
-            }
         }
     }
 }
@@ -735,7 +636,7 @@ impl MetaModels {
         }
     }
 
-    /// The primary's `decision`, of the targets' size, if the meta model in
+    /// The primary's `decision`, of the target's size, if the meta model in
     /// use at `now` predicts at least its threshold on `row`, at its
     /// probability and sized from it; no trade without a meta model.
     ///
@@ -813,7 +714,7 @@ mod tests {
         payoff::Payoff,
         schedule::Retrain,
         store::{ModelManifest, ModelStore, Probe, StoredModel},
-        targets::{Barrier, DEFAULT_ATR, Distance, Label, TargetsConfig},
+        targets::{DEFAULT_ATR, Distance, Target},
     };
     use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
     use rust_decimal::Decimal;
@@ -887,8 +788,8 @@ mod tests {
             .borrow_mut()
             .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
         let cache = Rc::new(RefCell::new(Cache::default()));
-        // AUD/USD in the cache, quoted at 0.69990/0.70010: a barrier's
-        // stops are set from its mid.
+        // AUD/USD in the cache, quoted at 0.69990/0.70010: a target's
+        // exits are set from its mid.
         cache
             .borrow_mut()
             .add_instrument(InstrumentAny::CurrencyPair(audusd_sim()))
@@ -949,19 +850,22 @@ mod tests {
         features.handle_quote(&quote).unwrap();
     }
 
-    /// Hourly decisions on a horizon of 1 hour of 1000 AUD/USD, each side
-    /// traded from an expected net P&L of nought, the baseline learner.
+    /// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, each
+    /// side traded from an expected net P&L of nought, the baseline learner.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
-            .targets(
-                TargetsConfig::builder()
+            .target(
+                TargetConfig::builder()
                     .instrument_id(InstrumentId::from(AUD))
                     .quantity(Quantity::from(1000))
-                    .horizon(SignedDuration::from_hours(1))
+                    .spec(
+                        Target::builder()
+                            .limit(SignedDuration::from_hours(1))
+                            .build(),
+                    )
                     .build(),
             )
-            .label(Label::Horizon)
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
@@ -1068,15 +972,14 @@ mod tests {
                 fingerprint: dataset::fingerprint(
                     features,
                     config.decision,
-                    &config.targets,
+                    &config.target,
                     &requirements(),
                     &venue(),
                 )
                 .unwrap()
                 .to_string(),
                 feature_names: vec!["mid".to_string()],
-                targets: config.targets,
-                label: config.label,
+                target: config.target,
                 side: Some(side),
                 learner: config.learner,
                 calibration: CALIBRATION,
@@ -1453,17 +1356,16 @@ mod tests {
         assert_eq!(long.decide(&mut probe).unwrap(), None);
     }
 
-    /// `config` learning a barrier a take profit 20 bps and a stop `stop`
+    /// `config` learning a bracket a take profit 20 bps and a stop `stop`
     /// bps from the decision's price, trading the long from 0.30 USD.
-    fn barrier_config(stop: i64) -> ModelConfig {
+    fn bracket_config(stop: i64) -> ModelConfig {
         let mut config = config();
-        config.targets.barrier = Some(Barrier {
-            take_profit: Distance::BasisPoints(Decimal::from(20)),
-            stop: Distance::BasisPoints(Decimal::from(stop)),
+        config.target.spec = Target {
+            take_profit: Some(Distance::BasisPoints(Decimal::from(20))),
+            stop: Some(Distance::BasisPoints(Decimal::from(stop))),
             limit: SignedDuration::from_hours(2),
             atr: None,
-        });
-        config.label = Label::Barrier;
+        };
         config.margins = Margins {
             long: Some(0.3),
             short: None,
@@ -1476,14 +1378,14 @@ mod tests {
     /// 0.70 USD on 1000 AUD/USD: 0.376 USD expected, above the margin of
     /// 0.30; 2 bps away, 0.00014, worth 0.14 USD: 0.075 USD, below it.
     #[test]
-    fn a_barriers_expected_r_is_weighed_by_the_worth_of_the_decisions_stop() {
+    fn a_brackets_expected_r_is_weighed_by_the_worth_of_the_decisions_stop() {
         let decide = |stop| {
             let models = tempfile::tempdir().unwrap();
             let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
             let handle = sides_handle(
                 &probe,
                 models.path(),
-                &barrier_config(stop),
+                &bracket_config(stop),
                 (Some(8), None),
             );
             handle.start(&mut probe).unwrap();
@@ -1498,10 +1400,10 @@ mod tests {
     /// bps above, 0.00140, and its stop 10 bps below, 0.00070: the
     /// prices a dataset run's long sets there, closed 2 hours later.
     #[test]
-    fn a_barrier_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
+    fn a_bracket_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle(&probe, models.path(), &barrier_config(10), (Some(8), None));
+        let handle = sides_handle(&probe, models.path(), &bracket_config(10), (Some(8), None));
         handle.start(&mut probe).unwrap();
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
@@ -1522,19 +1424,49 @@ mod tests {
         assert_eq!(decision.reference, Price::from("0.70000"));
     }
 
-    /// `barrier_config` with a take profit 2 and a stop 1 average true
+    /// Worked by hand. `config`'s target is a limit alone, in money: the
+    /// long of 0.6 expects its win and loss of 1 at c(0.6), and its trade is
+    /// a market entry closed an hour later, no exit set from the mid of
+    /// 0.70000, what `Trade::send_as` sends without them.
+    #[test]
+    fn a_time_only_trade_has_no_exits_and_closes_at_its_limit() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &config(), (Some(6), None));
+        handle.start(&mut probe).unwrap();
+
+        let decision = handle.decide(&mut probe).unwrap().unwrap();
+
+        assert_eq!(
+            decision.trade(),
+            Trade {
+                instrument_id: InstrumentId::from(AUD),
+                side: OrderSide::Buy,
+                quantity: Quantity::from(1000),
+                exits: Exits {
+                    take_profit: None,
+                    stop_loss: None,
+                    time_limit: Some(SignedDuration::from_hours(1)),
+                },
+            }
+        );
+        assert_eq!(decision.reference, Price::from("0.70000"));
+        assert_eq!(decision.expected_pnl, 2.0 * c(0.6) - 1.0);
+    }
+
+    /// `bracket_config` with a take profit 2 and a stop 1 average true
     /// ranges away, the ATR of 2 hourly bars, the cadence's.
     fn atr_config() -> ModelConfig {
-        let mut config = barrier_config(10);
-        config.targets.barrier = Some(Barrier {
-            take_profit: Distance::Atr(Decimal::from(2)),
-            stop: Distance::Atr(Decimal::ONE),
+        let mut config = bracket_config(10);
+        config.target.spec = Target {
+            take_profit: Some(Distance::Atr(Decimal::from(2))),
+            stop: Some(Distance::Atr(Decimal::ONE)),
             limit: SignedDuration::from_hours(2),
             atr: Some(AtrArgs {
                 period: 2,
                 ..DEFAULT_ATR
             }),
-        });
+        };
         config
     }
 
@@ -1571,12 +1503,12 @@ mod tests {
         .unwrap()
     }
 
-    /// Deciding every minute, the barrier's ATR is on 1-minute bars, finer
+    /// Deciding every minute, the target's ATR is on 1-minute bars, finer
     /// than the strategy's hourly bars: the live cache holds the day's
     /// 1,440 of them, and one spanning the start, on top of Nautilus'
     /// default 10,000, not the 25 hourly bars alone.
     #[test]
-    fn a_live_cache_holds_the_warmup_of_the_barriers_atr_on_finer_bars() {
+    fn a_live_cache_holds_the_warmup_of_the_targets_atr_on_finer_bars() {
         let models = tempfile::tempdir().unwrap();
         let mut config = atr_config();
         config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
@@ -1587,13 +1519,25 @@ mod tests {
         assert_eq!(cache.bar_capacity, 10_000 + 1_441);
     }
 
-    /// A barrier in basis points has no ATR: the live cache holds the
+    /// A bracket in basis points has no ATR: the live cache holds the
     /// warmup of the strategy's bars alone, 24 hourly bars and one
     /// spanning the start.
     #[test]
     fn a_live_cache_without_an_atr_holds_the_warmup_of_the_strategys_bars() {
         let models = tempfile::tempdir().unwrap();
-        let handle = hourly_live_handle(&barrier_config(10), models.path());
+        let handle = hourly_live_handle(&bracket_config(10), models.path());
+
+        let cache = handle.warmup().cache_config().unwrap();
+
+        assert_eq!(cache.bar_capacity, 10_000 + 25);
+    }
+
+    /// A time-only target has no ATR at all: as with `bracket_config`, the
+    /// live cache holds the warmup of the strategy's bars alone.
+    #[test]
+    fn a_live_cache_of_a_time_only_target_holds_the_warmup_of_the_strategys_bars() {
+        let models = tempfile::tempdir().unwrap();
+        let handle = hourly_live_handle(&config(), models.path());
 
         let cache = handle.warmup().cache_config().unwrap();
 
@@ -1611,7 +1555,7 @@ mod tests {
     /// worth 1 USD on 1000 AUD/USD, 0.537 USD expected, above the margin.
     /// Without the warmup the ATR is cold and the decision no trade.
     #[test]
-    fn a_live_warmup_sets_the_first_decisions_stop_from_the_barriers_atr() {
+    fn a_live_warmup_sets_the_first_decisions_stop_from_the_targets_atr() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle_in(
@@ -2020,7 +1964,7 @@ mod tests {
     /// mean of its training labels.
     fn baseline_of(
         features: &FeatureSet,
-        (decision, targets): (DecisionRule, &TargetsConfig),
+        (decision, target): (DecisionRule, &TargetConfig),
         feature_names: &[&str],
         valid_from: &str,
         trues: usize,
@@ -2036,15 +1980,14 @@ mod tests {
                 fingerprint: dataset::fingerprint(
                     features,
                     decision,
-                    targets,
+                    target,
                     &requirements(),
                     &venue(),
                 )
                 .unwrap()
                 .to_string(),
                 feature_names: feature_names.iter().map(ToString::to_string).collect(),
-                targets: targets.clone(),
-                label: Label::Barrier,
+                target: target.clone(),
                 side: None,
                 learner: LearnerConfig::Baseline {},
                 calibration: CALIBRATION,
@@ -2075,18 +2018,12 @@ mod tests {
         }
     }
 
-    /// `config` on a barrier besides its horizon, its trades taken by
-    /// `meta`.
+    /// `config`, its trades taken by `meta`.
     fn with_meta(meta: MetaConfig) -> ModelConfig {
-        let mut config = config();
-        config.targets.barrier = Some(Barrier {
-            take_profit: Distance::BasisPoints(Decimal::from(10)),
-            stop: Distance::BasisPoints(Decimal::from(10)),
-            limit: SignedDuration::from_hours(2),
-            atr: None,
-        });
-        config.meta = Some(meta);
-        config
+        ModelConfig {
+            meta: Some(meta),
+            ..config()
+        }
     }
 
     /// The probe's handle trading in a backtest on the models under
@@ -2102,7 +2039,7 @@ mod tests {
         let meta = meta_trues.map(|trues| {
             baseline_of(
                 &features(),
-                (config.decision, &config.targets),
+                (config.decision, &config.target),
                 &META_NAMES,
                 "2026-10-22T00:00:00Z",
                 trues,
@@ -2127,7 +2064,7 @@ mod tests {
             .store()
             .publish(&baseline_of(
                 &features,
-                (config.decision, &config.targets),
+                (config.decision, &config.target),
                 &["mid"],
                 "2026-10-22T00:00:00Z",
                 trues,
@@ -2226,7 +2163,7 @@ mod tests {
     /// calibrated by `CALIBRATION`.
     fn learned_of(
         features: &FeatureSet,
-        decision: (DecisionRule, &TargetsConfig),
+        decision: (DecisionRule, &TargetConfig),
         learner: &LearnerConfig,
         (rows, labels): (Vec<f64>, Vec<bool>),
     ) -> StoredModel {
@@ -2258,7 +2195,7 @@ mod tests {
         }
         learned_of(
             &features(),
-            (config.decision, &config.targets),
+            (config.decision, &config.target),
             &config.meta.as_ref().unwrap().learner,
             (rows, labels),
         )

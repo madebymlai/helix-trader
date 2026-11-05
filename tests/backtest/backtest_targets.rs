@@ -1,14 +1,14 @@
 //! Targets from orders (`model::targets`): a probe decides every hour on
-//! one feature, the last mid, trade or close, and opens at each decision a
-//! triple-barrier bracket and a horizon trade on each side, on a hedging
+//! one feature, the last mid, trade or close, and opens at each decision
+//! its target on each side, a bracket or a time-only trade, on a hedging
 //! venue, through `Backtest::run_dataset`; it records the target rows
-//! published for it. On quotes, trades and minute bars, with barriers and
+//! published for it. On quotes, trades and minute bars, with exits and
 //! paths chosen so that each target is worked out by hand: a long ended by
-//! its stop and a short by its take profit, a barrier hit at the very
-//! nanosecond of the time limit (inside the window), barriers left alone
-//! (closed by time), a bar touching both barriers (the venue replays its
+//! its stop and a short by its take profit, an exit hit at the very
+//! nanosecond of the time limit (inside the window), exits left alone
+//! (closed by time), a bar touching both exits (the venue replays its
 //! high before its low), the last decision unsettled at the end of data,
-//! barriers in basis points and exits in average true ranges of hourly
+//! exits in basis points and in average true ranges of hourly
 //! bars, the cadence's, which the targets subscribe to themselves, built
 //! from the quotes, from the trades alone and from minute bars alone, no
 //! order before the ATR is initialized; deciding on LAST bars the run
@@ -31,8 +31,8 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
         targets::{
-            Barrier, DEFAULT_ATR, Distance, Distances, Exit, Outcome, Outcomes, TargetRow, Targets,
-            TargetsConfig,
+            DEFAULT_ATR, Distance, Distances, Exit, Outcome, Outcomes, Target, TargetConfig,
+            TargetRow, Targets,
         },
     },
     strategy::{AtrArgs, DataRequirements, Declared, TickSeries, orders},
@@ -121,6 +121,8 @@ struct Record {
     decisions: usize,
     /// When each of its orders filled, in order.
     fills: Vec<UnixNanos>,
+    /// The client order id of each of its orders filled, in order.
+    filled: Vec<String>,
 }
 
 /// Decides every hour on its one feature and opens the targets of each
@@ -137,7 +139,7 @@ struct TargetProbe {
 
 impl TargetProbe {
     /// The probe deciding every hour on `source`, opening `targets`.
-    fn new(source: Source, targets: TargetsConfig) -> (Self, Rc<RefCell<Record>>) {
+    fn new(source: Source, targets: TargetConfig) -> (Self, Rc<RefCell<Record>>) {
         Self::every(source, targets, SignedDuration::from_hours(1))
     }
 
@@ -145,7 +147,7 @@ impl TargetProbe {
     /// whose ATR, if any, is on bars of `every`.
     fn every(
         source: Source,
-        targets: TargetsConfig,
+        targets: TargetConfig,
         every: SignedDuration,
     ) -> (Self, Rc<RefCell<Record>>) {
         let tables = tables(
@@ -182,7 +184,9 @@ impl TargetProbe {
 
 nautilus_strategy!(TargetProbe, {
     fn on_order_filled(&mut self, event: &OrderFilled) {
-        self.record.borrow_mut().fills.push(event.ts_event);
+        let mut record = self.record.borrow_mut();
+        record.fills.push(event.ts_event);
+        record.filled.push(event.client_order_id.to_string());
     }
 
     fn on_order_canceled(&mut self, event: &OrderCanceled) {
@@ -246,22 +250,34 @@ impl DataActor for TargetProbe {
     }
 }
 
-/// The targets of every test: a bracket `bps` basis points of the
-/// decision's price away on both sides, closed 45 minutes after its
-/// decision, and a horizon of 30 minutes, of `quantity` of
-/// `instrument_id`.
-fn targets(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetsConfig {
-    TargetsConfig::builder()
+/// `spec`, of `quantity` of `instrument_id`.
+fn trading(spec: Target, instrument_id: &str, quantity: &str) -> TargetConfig {
+    TargetConfig::builder()
         .instrument_id(InstrumentId::from(instrument_id))
         .quantity(Quantity::from(quantity))
-        .barrier(Barrier {
-            take_profit: Distance::BasisPoints(bps),
-            stop: Distance::BasisPoints(bps),
-            limit: SignedDuration::from_mins(45),
-            atr: None,
-        })
-        .horizon(SignedDuration::from_mins(30))
+        .spec(spec)
         .build()
+}
+
+/// A bracket `bps` basis points of the decision's price away on both
+/// sides, closed 45 minutes after its decision, of `quantity` of
+/// `instrument_id`.
+fn bracket(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetConfig {
+    let spec = Target::builder()
+        .take_profit(Distance::BasisPoints(bps))
+        .stop(Distance::BasisPoints(bps))
+        .limit(SignedDuration::from_mins(45))
+        .build();
+    trading(spec, instrument_id, quantity)
+}
+
+/// A trade with no exits, closed 30 minutes after its decision, of
+/// `quantity` of `instrument_id`.
+fn time_only(instrument_id: &str, quantity: &str) -> TargetConfig {
+    let spec = Target::builder()
+        .limit(SignedDuration::from_mins(30))
+        .build();
+    trading(spec, instrument_id, quantity)
 }
 
 /// The decision at `hh_mm` and `features`: it fires 10 ms after its time.
@@ -290,9 +306,9 @@ fn outcomes(long: Outcome, short: Outcome) -> Outcomes {
     Outcomes { long, short }
 }
 
-/// The barrier's outcomes `long` and `short`, each side's take profit
+/// A bracket's outcomes `long` and `short`, each side's take profit
 /// `take_profit` and its stop `stop` from the decision's price.
-fn barrier(long: Outcome, short: Outcome, take_profit: &str, stop: &str) -> Outcomes {
+fn with_exits(long: Outcome, short: Outcome, take_profit: &str, stop: &str) -> Outcomes {
     let distances = Some(Distances {
         take_profit: take_profit.parse().unwrap(),
         stop: stop.parse().unwrap(),
@@ -303,19 +319,12 @@ fn barrier(long: Outcome, short: Outcome, take_profit: &str, stop: &str) -> Outc
     }
 }
 
-/// The row of `decision`, settled `settled` after its time.
-fn row(
-    decision: FeatureRow,
-    barrier: Outcomes,
-    horizon: Outcomes,
-    settled: SignedDuration,
-) -> TargetRow {
-    let settled_at = UnixNanos::from(Timestamp::from(decision.ts_event) + settled);
+/// The row of `decision`, its target's `outcomes`, settled at `settled_at`.
+fn row(decision: FeatureRow, outcomes: Outcomes, settled_at: Timestamp) -> TargetRow {
     TargetRow {
         decision,
-        barrier: Some(barrier),
-        horizon: Some(horizon),
-        settled_at,
+        outcomes,
+        settled_at: UnixNanos::from(settled_at),
     }
 }
 
@@ -373,7 +382,7 @@ pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
     )
 }
 
-/// One ounce, barriers 7.5 bps from the mid of 4000.10, 3.000075, on the
+/// One ounce, exits 7.5 bps from the mid of 4000.10, 3.000075, on the
 /// nearest cent: a long enters at the ask, 4000.20, its take profit a sell
 /// limit at 4003.10 and its stop a sell stop at 3997.10, both on the bid;
 /// a short enters at the bid,
@@ -385,7 +394,68 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) =
-        TargetProbe::new(source, targets(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
+        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
+
+    gold_backtest(catalog.path().to_path_buf())
+        .run_dataset(probe)
+        .unwrap();
+
+    let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
+    let expected = [
+        // The dip at 09:20, 3996.80/3997.00: the long's stop fills at the
+        // bid, 3996.80 (-3.40 - 0.24); the short's take profit at its limit,
+        // 3997.10 (+2.90 - 0.24). Both on that quote, which settles the row.
+        row(
+            decision(at("09:00"), 4000.10),
+            with_exits(
+                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
+                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
+                "3.00",
+                "3.00",
+            ),
+            ic::at("09:20:00"),
+        ),
+        // The spike at the bracket's time limit, at the same nanosecond as
+        // its alert: inside the window, the long's take profit fills at
+        // 4003.10, the short's stop at the ask, 4003.40.
+        row(
+            decision(at("10:00"), 4000.10),
+            with_exits(
+                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
+                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
+                "3.00",
+                "3.00",
+            ),
+            ic::at("10:45:00.010"),
+        ),
+        // No exit reached: both closed by time, on 4001.00/4001.20, the
+        // long +0.80, the short -1.20, less the fees.
+        row(
+            decision(at("11:00"), 4000.10),
+            with_exits(
+                outcome("0.56 USD", "0.24 USD", Exit::Time),
+                outcome("-1.44 USD", "0.24 USD", Exit::Time),
+                "3.00",
+                "3.00",
+            ),
+            ic::at("11:45:00.010"),
+        ),
+        // The 12:00 decision's positions are open at the end, 12:30:
+        // unsettled, no row.
+    ];
+    assert_eq!(record.borrow().rows, expected);
+}
+
+/// One ounce, no exits, on the same quotes: each side enters as a bracket
+/// does, its position closed 30 minutes after its send on the quote then,
+/// each fill paying 0.12 USD. The dip at 09:20 and the spike at 10:45 pass
+/// by it.
+#[test]
+fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let (probe, record) = TargetProbe::new(source, time_only(ic::INSTRUMENT_ID, "1"));
 
     gold_backtest(catalog.path().to_path_buf())
         .run_dataset(probe)
@@ -400,59 +470,58 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         )
     };
     let expected = [
-        // The dip at 09:20, 3996.80/3997.00: the long's stop fills at the
-        // bid, 3996.80 (-3.40 - 0.24); the short's take profit at its limit,
-        // 3997.10 (+2.90 - 0.24). The horizon closes on the flat quote.
         row(
             decision(at("09:00"), 4000.10),
-            barrier(
-                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
-                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
-                "3.00",
-                "3.00",
-            ),
             flat(),
-            SignedDuration::from_mins(30),
+            ic::at("09:30:00.010"),
         ),
-        // The spike at the bracket's time limit, at the same nanosecond as
-        // its alert: inside the window, the long's take profit fills at
-        // 4003.10, the short's stop at the ask, 4003.40.
         row(
             decision(at("10:00"), 4000.10),
-            barrier(
-                outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
-                outcome("-3.64 USD", "0.24 USD", Exit::Stop),
-                "3.00",
-                "3.00",
-            ),
             flat(),
-            SignedDuration::from_mins(45),
+            ic::at("10:30:00.010"),
         ),
-        // No barrier reached: both closed by time, on 4001.00/4001.20, the
-        // long +0.80, the short -1.20, less the fees.
+        // Closed on 4001.00/4001.20, the long +0.80, the short -1.20, less
+        // the fees.
         row(
             decision(at("11:00"), 4000.10),
-            barrier(
-                outcome("0.56 USD", "0.24 USD", Exit::Time),
-                outcome("-1.44 USD", "0.24 USD", Exit::Time),
-                "3.00",
-                "3.00",
-            ),
             outcomes(
                 outcome("0.56 USD", "0.24 USD", Exit::Time),
                 outcome("-1.44 USD", "0.24 USD", Exit::Time),
             ),
-            SignedDuration::from_mins(45),
+            ic::at("11:30:00.010"),
         ),
-        // The 12:00 decision's positions are open at the end, 12:30:
-        // unsettled, no row.
+        // The 12:00 decision closes 10 ms after the end, 12:30: unsettled,
+        // no row.
     ];
     assert_eq!(record.borrow().rows, expected);
 }
 
+/// Each order's id is its decision's number, its side and its leg, so the
+/// outcome of a position reads from its orders alone: over the first
+/// decision to 09:25, the entries, and on the dip at 09:20 the long's stop
+/// and the short's take profit.
+#[test]
+fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let (probe, record) =
+        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
+    let backtest = Backtest {
+        end: ic::at("09:25:00"),
+        ..gold_backtest(catalog.path().to_path_buf())
+    };
+
+    backtest.run_dataset(probe).unwrap();
+
+    let mut filled = record.borrow().filled.clone();
+    filled.sort();
+    assert_eq!(filled, ["D0-L-E", "D0-L-SL", "D0-S-E", "D0-S-TP"]);
+}
+
 /// Every order exceeds the instrument's largest, 10,000 oz: the risk
 /// engine denies each, and their decision, unsettled, has no row. The run
-/// ends at 09:20, before the 09:00 decision's horizon and time limit.
+/// ends at 09:20, before the 09:00 decision's time limit.
 #[test]
 fn denied_orders_leave_their_decisions_unsettled() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -460,7 +529,7 @@ fn denied_orders_leave_their_decisions_unsettled() {
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(
         source,
-        targets(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
+        bracket(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
     );
     let backtest = Backtest {
         end: ic::at("09:20:00"),
@@ -560,7 +629,7 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
     }
 }
 
-/// One contract (0.01 BTC), barriers 10 bps, 100, from the close of
+/// One contract (0.01 BTC), exits 10 bps, 100, from the close of
 /// 100,000, on minute bars alone: the venue fills a market order at the
 /// last close, a take profit at its limit and a stop at its trigger, and
 /// replays each bar's open, high, low and close in that order. Each fill
@@ -570,7 +639,7 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
 fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
-    let (probe, record) = TargetProbe::new(source, targets(BTC, "1.00", Decimal::from(10)));
+    let (probe, record) = TargetProbe::new(source, bracket(BTC, "1.00", Decimal::from(10)));
 
     btc_backtest(&catalog).run_dataset(probe).unwrap();
 
@@ -582,46 +651,84 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         )
     };
     let expected = [
-        // The bar touching both barriers: its high comes first, so the
+        // The bar touching both exits: its high comes first, so the
         // long's take profit fills at 100,100 (+1 less 1.0005 of fees, a
         // loss) and the short's stop at its trigger, 100,100 (-1 - 1.0005).
+        // It opens at 09:10 and is replayed at its close.
         row(
             decision(at("09:00"), 100_000.0),
-            barrier(
+            with_exits(
                 outcome("-0.0005 USDT", "1.0005 USDT", Exit::TakeProfit),
                 outcome("-2.0005 USDT", "1.0005 USDT", Exit::Stop),
                 "100",
                 "100",
             ),
-            flat(),
-            SignedDuration::from_mins(30),
+            ic::at("09:11:00"),
         ),
         // The fall: the long's stop at its trigger, 99,900 (-1 - 0.9995),
-        // the short's take profit at its limit (+1 - 0.9995).
+        // the short's take profit at its limit (+1 - 0.9995). The bar opens
+        // at 10:20 and is replayed at its close.
         row(
             decision(at("10:00"), 100_000.0),
-            barrier(
+            with_exits(
                 outcome("-1.9995 USDT", "0.9995 USDT", Exit::Stop),
                 outcome("0.0005 USDT", "0.9995 USDT", Exit::TakeProfit),
                 "100",
                 "100",
             ),
-            flat(),
-            SignedDuration::from_mins(30),
+            ic::at("10:21:00"),
         ),
         row(
             decision(at("11:00"), 100_000.0),
-            barrier(flat().long, flat().short, "100", "100"),
-            flat(),
-            SignedDuration::from_mins(45),
+            with_exits(flat().long, flat().short, "100", "100"),
+            ic::at("11:45:00.010"),
         ),
     ];
     let record = record.borrow();
     assert_eq!(record.rows, expected);
     // A take profit can lose net of fees: its sign is the P&L's.
-    let barrier = record.rows[0].barrier.unwrap();
-    assert_eq!((barrier.long.sign(), barrier.short.sign()), (-1, -1));
-    assert_eq!(record.rows[1].barrier.unwrap().short.sign(), 1);
+    let outcomes = record.rows[0].outcomes;
+    assert_eq!((outcomes.long.sign(), outcomes.short.sign()), (-1, -1));
+    assert_eq!(record.rows[1].outcomes.short.sign(), 1);
+}
+
+/// One contract, no exits, on the same bars: each side enters at the last
+/// close, 100,000, and closes 30 minutes after its send at the last close,
+/// 100,000 still, the bars touching 100,150 and 99,850 passing by it: its
+/// two fees of 0.5 USDT lost.
+#[test]
+fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
+    let catalog = btc_catalog(btc_bar);
+    let source = Source::Bars(BarType::from(BTC_MINUTE));
+    let (probe, record) = TargetProbe::new(source, time_only(BTC, "1.00"));
+
+    btc_backtest(&catalog).run_dataset(probe).unwrap();
+
+    let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
+    let flat = || {
+        outcomes(
+            outcome("-1 USDT", "1 USDT", Exit::Time),
+            outcome("-1 USDT", "1 USDT", Exit::Time),
+        )
+    };
+    let expected = [
+        row(
+            decision(at("09:00"), 100_000.0),
+            flat(),
+            ic::at("09:30:00.010"),
+        ),
+        row(
+            decision(at("10:00"), 100_000.0),
+            flat(),
+            ic::at("10:30:00.010"),
+        ),
+        row(
+            decision(at("11:00"), 100_000.0),
+            flat(),
+            ic::at("11:30:00.010"),
+        ),
+    ];
+    assert_eq!(record.borrow().rows, expected);
 }
 
 // ------------------------------------------------------------------- atr
@@ -660,20 +767,16 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         end: ic::at("10:50:00"),
         ..gold_backtest(catalog.path().to_path_buf())
     };
-    let config = TargetsConfig::builder()
-        .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
-        .quantity(Quantity::from(1))
-        .barrier(Barrier {
-            take_profit: Distance::Atr(Decimal::from(2)),
-            stop: Distance::Atr(Decimal::new(15, 1)),
-            limit: SignedDuration::from_mins(45),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
-            }),
-        })
-        .horizon(SignedDuration::from_mins(30))
-        .build();
+    let spec = Target {
+        take_profit: Some(Distance::Atr(Decimal::from(2))),
+        stop: Some(Distance::Atr(Decimal::new(15, 1))),
+        limit: SignedDuration::from_mins(45),
+        atr: Some(AtrArgs {
+            period: 2,
+            ..DEFAULT_ATR
+        }),
+    };
+    let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(source, config);
 
@@ -684,21 +787,17 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         // 4000.90, its stop at 3999.50; the short at 4000.00, its take
         // profit at 3999.30, its stop a buy stop at 4000.70. The rise at
         // 10:20 fills the long's take profit at its limit (+0.70 - 0.24)
-        // and the short's stop at the ask, 4001.10 (-1.10 - 0.24). The
-        // horizon closes both on the flat quote at 10:30.
+        // and the short's stop at the ask, 4001.10 (-1.10 - 0.24), on that
+        // quote, which settles the row.
         row(
             decision(ic::at("10:00:00"), 4000.10),
-            barrier(
+            with_exits(
                 outcome("0.46 USD", "0.24 USD", Exit::TakeProfit),
                 outcome("-1.34 USD", "0.24 USD", Exit::Stop),
                 "0.80",
                 "0.60",
             ),
-            outcomes(
-                outcome("-0.44 USD", "0.24 USD", Exit::Time),
-                outcome("-0.44 USD", "0.24 USD", Exit::Time),
-            ),
-            SignedDuration::from_mins(30),
+            ic::at("10:20:00"),
         ),
     ];
     let record = record.borrow();
@@ -723,20 +822,16 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
         end: ic::at("10:50:00"),
         ..gold_backtest(catalog.path().to_path_buf())
     };
-    let config = TargetsConfig::builder()
-        .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
-        .quantity(Quantity::from(1))
-        .barrier(Barrier {
-            take_profit: Distance::Atr(Decimal::from(2)),
-            stop: Distance::Atr(Decimal::new(1, 2)),
-            limit: SignedDuration::from_mins(45),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
-            }),
-        })
-        .horizon(SignedDuration::from_mins(30))
-        .build();
+    let spec = Target {
+        take_profit: Some(Distance::Atr(Decimal::from(2))),
+        stop: Some(Distance::Atr(Decimal::new(1, 2))),
+        limit: SignedDuration::from_mins(45),
+        atr: Some(AtrArgs {
+            period: 2,
+            ..DEFAULT_ATR
+        }),
+    };
+    let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(source, config);
 
@@ -747,24 +842,20 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
     assert!(record.fills.is_empty(), "{:?}", record.fills);
 }
 
-/// The barrier of the ATR tests on BTC: a take profit 2 and a stop 1.5
+/// The bracket of the ATR tests on BTC: a take profit 2 and a stop 1.5
 /// average true ranges of 2 hourly bars away, closed 45 minutes after its
-/// decision, beside a horizon of 30 minutes, of one contract.
-fn btc_atr_targets() -> TargetsConfig {
-    TargetsConfig::builder()
-        .instrument_id(InstrumentId::from(BTC))
-        .quantity(Quantity::from("1.00"))
-        .barrier(Barrier {
-            take_profit: Distance::Atr(Decimal::from(2)),
-            stop: Distance::Atr(Decimal::new(15, 1)),
-            limit: SignedDuration::from_mins(45),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
-            }),
-        })
-        .horizon(SignedDuration::from_mins(30))
-        .build()
+/// decision, of one contract.
+fn btc_atr_targets() -> TargetConfig {
+    let spec = Target {
+        take_profit: Some(Distance::Atr(Decimal::from(2))),
+        stop: Some(Distance::Atr(Decimal::new(15, 1))),
+        limit: SignedDuration::from_mins(45),
+        atr: Some(AtrArgs {
+            period: 2,
+            ..DEFAULT_ATR
+        }),
+    };
+    trading(spec, BTC, "1.00")
 }
 
 /// A trade of one contract of BTC-USDT-SWAP at `time` and `price`, of no
@@ -875,21 +966,16 @@ fn btc_trades_atr_rows() -> [TargetRow; 1] {
         // profit at 99,890, its stop a buy stop at 100,082.5. The trade at
         // 100,120 at 10:20 fills the long's take profit at its limit
         // (+1.10 - 0.5 - 0.50055) and the short's stop at the trade,
-        // 100,120 (-1.20 - 0.5 - 0.5006). The horizon closes both on the
-        // flat trade at 10:30, its two fees lost.
+        // 100,120 (-1.20 - 0.5 - 0.5006), which settles the row.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            barrier(
+            with_exits(
                 outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
                 outcome("-2.2006 USDT", "1.0006 USDT", Exit::Stop),
                 "110",
                 "82.5",
             ),
-            outcomes(
-                outcome("-1 USDT", "1 USDT", Exit::Time),
-                outcome("-1 USDT", "1 USDT", Exit::Time),
-            ),
-            SignedDuration::from_mins(30),
+            ic::at("10:20:00"),
         ),
     ]
 }
@@ -941,21 +1027,16 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         // The minute opening 10:20 replays its high, 100,120, first: the
         // long's take profit fills at its limit, 100,110 (+1.10 - 0.5 -
         // 0.50055), the short's stop at its trigger, 100,082.5 (-0.825 -
-        // 0.5 - 0.5004125). The horizon closes both on the flat close at
-        // 10:30, its two fees lost.
+        // 0.5 - 0.5004125), the minute replayed at its close, 10:21.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            barrier(
+            with_exits(
                 outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
                 outcome("-1.8254125 USDT", "1.0004125 USDT", Exit::Stop),
                 "110",
                 "82.5",
             ),
-            outcomes(
-                outcome("-1 USDT", "1 USDT", Exit::Time),
-                outcome("-1 USDT", "1 USDT", Exit::Time),
-            ),
-            SignedDuration::from_mins(30),
+            ic::at("10:21:00"),
         ),
     ];
     let record = record.borrow();
@@ -996,17 +1077,12 @@ fn walk_run(
             end,
             ..gold_backtest(catalog)
         };
-        let config = TargetsConfig::builder()
-            .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
-            .quantity(Quantity::from(1))
-            .barrier(Barrier {
-                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
-                stop: Distance::BasisPoints(Decimal::new(75, 1)),
-                limit: SignedDuration::from_hours(2),
-                atr: None,
-            })
-            .horizon(SignedDuration::from_hours(1))
+        let spec = Target::builder()
+            .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
+            .stop(Distance::BasisPoints(Decimal::new(75, 1)))
+            .limit(SignedDuration::from_hours(2))
             .build();
+        let config = trading(spec, ic::INSTRUMENT_ID, "1");
         let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
         let (probe, record) = TargetProbe::every(source, config, SignedDuration::from_mins(15));
         if dataset {
@@ -1046,7 +1122,7 @@ fn targets_are_the_same_with_the_cache_purged_and_without() {
     let (kept, closed_kept) = walk_run(catalog.path().to_path_buf(), start, end, false);
 
     // Every decision whose time limit, two hours on, passes before the end
-    // settles, none denied on 10M USD; a later one settles if its barriers
+    // settles, none denied on 10M USD; a later one settles if its exits
     // are hit before the end.
     let settled: BTreeSet<UnixNanos> = purged.iter().map(|row| row.decision.ts_event).collect();
     let mut due = 0;
@@ -1057,8 +1133,10 @@ fn targets_are_the_same_with_the_cache_purged_and_without() {
         decision += SignedDuration::from_mins(15);
     }
     assert_eq!(purged, kept);
-    // Unpurged, the cache holds each closed order, four or more a target;
-    // purged, only those closed in the last minutes.
-    assert!(closed_kept >= 4 * 2 * due, "{closed_kept} kept");
+    // Unpurged, the cache holds each closed order, three or more on each
+    // side of a decision: its entry and its two exits, filled or cancelled,
+    // and any close at its time; purged, only those closed in the last
+    // minutes.
+    assert!(closed_kept >= 3 * 2 * due, "{closed_kept} kept");
     assert!(closed_purged < 50, "{closed_purged} left after purging");
 }

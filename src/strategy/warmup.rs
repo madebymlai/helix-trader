@@ -211,7 +211,7 @@ pub trait CustomDataIndicator {
 /// `on_historical_data` from theirs.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
-/// of those the strategy's harness needs warm (`building`, the barrier's
+/// of those the strategy's harness needs warm (`building`, the target's
 /// ATR's) and of the tick series its features read (`reading`), and
 /// subscribes to the bars from the warmup's end; the bars each request built
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest

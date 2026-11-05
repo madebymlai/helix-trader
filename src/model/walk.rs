@@ -136,9 +136,8 @@ impl WalkForward {
     ///
     /// # Errors
     ///
-    /// Returns an error if the targets are invalid, the label names a
-    /// target they lack, a barrier's instrument is not in the catalog, or
-    /// a store cannot be keyed.
+    /// Returns an error if the target is invalid, the instrument of its
+    /// exits is not in the catalog or is inverse, or a store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -150,13 +149,13 @@ impl WalkForward {
     ) -> anyhow::Result<Self> {
         let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         Ok(Self {
-            realised: Realised::new(catalog, &config.targets, config.label)?,
+            realised: Realised::new(catalog, &config.target)?,
             dataset: Dataset::new(
                 catalog,
                 strategy_id,
                 features,
                 config.decision,
-                config.targets.clone(),
+                config.target.clone(),
                 requirements,
                 venue,
             )?,
@@ -446,7 +445,7 @@ mod tests {
         payoff::Payoff,
         schedule::Retrain,
         store::{ModelManifest, ModelStore, StoredModel},
-        targets::{Barrier, Distance, Exit, Label, Outcome, Outcomes, TargetRow, TargetsConfig},
+        targets::{Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -457,19 +456,22 @@ mod tests {
     }
 
     /// The fake learner on hourly decisions, learning whether the long of
-    /// a horizon of 1 hour gains, trading each side from an expected 0,
+    /// a time-only target of 1 hour gains, trading each side from an expected 0,
     /// retrained every day on the day before, its last 6 hours held out.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
-            .targets(
-                TargetsConfig::builder()
+            .target(
+                TargetConfig::builder()
                     .instrument_id(InstrumentId::from(GOLD))
                     .quantity(Quantity::from(1))
-                    .horizon(SignedDuration::from_hours(1))
+                    .spec(
+                        Target::builder()
+                            .limit(SignedDuration::from_hours(1))
+                            .build(),
+                    )
                     .build(),
             )
-            .label(Label::Horizon)
             .retrain(SignedDuration::from_hours(24))
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
@@ -551,11 +553,10 @@ mod tests {
                 ts_event: ns,
                 ts_init: ns,
             },
-            barrier: None,
-            horizon: Some(Outcomes {
+            outcomes: Outcomes {
                 long: outcome(long),
                 short: outcome(short),
-            }),
+            },
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
         }
     }
@@ -586,7 +587,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             &features(),
             config.decision,
-            config.targets.clone(),
+            config.target.clone(),
             &requirements(),
             &venue(),
         )
@@ -619,8 +620,7 @@ mod tests {
                 valid_from,
                 fingerprint,
                 feature_names: features().names().to_vec(),
-                targets: config().targets,
-                label: Label::Horizon,
+                target: config().target,
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
                 calibration: CALIBRATION,
@@ -1008,16 +1008,9 @@ Short model scores, out of sample, over the span
         );
     }
 
-    /// `config` on a barrier besides its horizon, with a meta model on a
-    /// window of 48 hours.
+    /// `config`, with a meta model on a window of 48 hours.
     fn with_meta() -> ModelConfig {
         let mut config = config();
-        config.targets.barrier = Some(Barrier {
-            take_profit: Distance::BasisPoints(Decimal::from(10)),
-            stop: Distance::BasisPoints(Decimal::from(10)),
-            limit: SignedDuration::from_hours(2),
-            atr: None,
-        });
         config.meta = Some(
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))

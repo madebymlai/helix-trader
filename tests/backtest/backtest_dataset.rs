@@ -4,8 +4,8 @@
 //! rows published for it; a dataset build replays the days it lacks
 //! through it and stores the rows in the catalog. A second build of the
 //! same span replays no day, and the rows read back are those the replay
-//! settled over the days built. A barrier ATR warming over exactly the
-//! warmup opens the targets of a day's first decision. One node per
+//! settled over the days built. A target's ATR warming over exactly the
+//! warmup opens the target of a day's first decision. One node per
 //! thread: the second build runs none.
 
 use std::{collections::VecDeque, rc::Rc};
@@ -13,7 +13,7 @@ use std::{collections::VecDeque, rc::Rc};
 use crate::common::{
     dataset::{
         Lcg, MID, STRATEGY, config, features, mid_tables, replay, replay_of, replay_on,
-        requirements, rule, targets, venue, walk,
+        requirements, rule, target, venue, walk,
     },
     features::tables,
     ic,
@@ -23,7 +23,7 @@ use helix_trader::{
         config::ModelConfig,
         dataset::{Dataset, DatasetRow},
         features::{Feature, FeatureSet},
-        targets::{Barrier, Distance, TargetsConfig},
+        targets::{Distance, Target, TargetConfig},
     },
     strategy::{DataRequirements, Declared, IndicatorArgs, TickSeries},
 };
@@ -51,7 +51,7 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
         StrategyId::from(STRATEGY),
         &features(),
         rule(),
-        targets(),
+        target(),
         &requirements(),
         &venue(),
     )
@@ -190,7 +190,7 @@ fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
             StrategyId::from(STRATEGY),
             &two_hour_mean(),
             rule(),
-            targets(),
+            target(),
             &requirements(),
             &venue(),
         )
@@ -264,7 +264,7 @@ fn stored_by_a_build_to(last: Date, from: Timestamp, to: Timestamp) -> Vec<Datas
             StrategyId::from(STRATEGY),
             &features(),
             rule(),
-            targets(),
+            target(),
             &requirements(),
             &venue(),
         )
@@ -288,7 +288,7 @@ fn friday_stored_by_a_build_to(last: Date) -> Vec<DatasetRow> {
 
 /// A build cut on Friday replays to 02:00 on Saturday, one cut on Monday
 /// through the weekend to 02:00 on Tuesday. The decision at 21:00, on
-/// Friday's last quote, still settles at its time limits: the venue fills
+/// Friday's last quote, still settles at its time limit: the venue fills
 /// the time close, a market order, on the last quote it has, as it fills
 /// any market order between quotes, so neither build waits for Sunday's
 /// open, and both store the same Friday. The decisions at 22:00 and 23:00,
@@ -332,21 +332,19 @@ fn a_closed_market_stores_no_row() {
 }
 
 /// The probe's config with the bracket 1.5 ATRs away on both sides,
-/// closed after 45 minutes, and a horizon of 30, both inside the hourly
-/// cadence, the ATR of its default 14 bars of that cadence, which it
-/// declares nowhere: the targets subscribe to IC's gold's hourly mids.
+/// closed after 45 minutes, inside the hourly cadence, the ATR of its
+/// default 14 bars of that cadence, which it declares nowhere: the targets
+/// subscribe to IC's gold's hourly mids.
 fn atr_config() -> ModelConfig {
-    let barrier = Barrier {
-        take_profit: Distance::Atr(Decimal::new(15, 1)),
-        stop: Distance::Atr(Decimal::new(15, 1)),
-        limit: SignedDuration::from_mins(45),
-        atr: None,
-    };
+    let bracket = Target::builder()
+        .take_profit(Distance::Atr(Decimal::new(15, 1)))
+        .stop(Distance::Atr(Decimal::new(15, 1)))
+        .limit(SignedDuration::from_mins(45))
+        .build();
     ModelConfig {
-        targets: TargetsConfig {
-            barrier: Some(barrier),
-            horizon: Some(SignedDuration::from_mins(30)),
-            ..targets()
+        target: TargetConfig {
+            spec: bracket,
+            ..target()
         },
         ..config()
     }
@@ -379,7 +377,7 @@ fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> 
             StrategyId::from(STRATEGY),
             &mid_warming_for(warmup),
             config.decision,
-            config.targets.clone(),
+            config.target.clone(),
             &requirements(),
             &venue(),
         )
@@ -413,18 +411,18 @@ fn reading_quotes(warmup: SignedDuration) -> DataRequirements {
     }
 }
 
-/// A barrier ATR of its default 14 bars, hours at the probe's cadence,
+/// A target's ATR of its default 14 bars, hours at the probe's cadence,
 /// warms over exactly a warmup of 14 hours, which validation accepts: a
 /// build of a day alone replays from 10:00 the day before, and the data
 /// engine builds the 14 hourly bars after it, on the targets'
 /// subscription alone, each over its hour's quotes, the last at midnight,
-/// 10 ms before the day's first decision, which opens its targets. The
+/// 10 ms before the day's first decision, which opens its target. The
 /// quotes are 2.5 s off the hour: one at 10:00 itself, the replay's
 /// first, would close a 15th bar, the hour before, and hide a warmup a
 /// bar short. An hour shorter, validation refuses the warmup, and that
 /// decision opens nothing, the ATR a bar short.
 #[test]
-fn a_barrier_atr_warming_over_exactly_the_warmup_opens_the_day_s_first_decision() {
+fn a_target_atr_warming_over_exactly_the_warmup_opens_the_day_s_first_decision() {
     let (thursday, margin) = (
         Date::constant(2026, 10, 22),
         SignedDuration::from_millis(10),

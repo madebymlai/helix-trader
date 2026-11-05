@@ -6,8 +6,7 @@
 # Every field is described in `src/strategy/README.md`.
 #
 # Its trades are its model's decisions, sent as given: the target its
-# model was labelled on, here the barrier of [model].targets, a bracket
-# closed at its limit.
+# model learned, [model].target, here a bracket closed at its limit.
 
 # Nautilus' StrategyConfig; defaults to MODEL_EMA-001 when left out, and
 # Nautilus tags the strategy's orders with the id's tag, 001. The strategy
@@ -19,13 +18,13 @@
 # The series read (all stored in the catalog): hourly bars of the mid,
 # built by Nautilus from the quotes, of each instrument; each gives the
 # model its two averages. A model strategy lists the series its features
-# or its barrier's ATR read, and no other, or no run starts.
+# or its target's ATR read, and no other, or no run starts.
 series = [
     { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
     { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
 ]
 # How far back a live node's warmup request goes at start, and a dataset
-# build's lead-in: enough for the slow average's 30 bars and the barrier's
+# build's lead-in: enough for the slow average's 30 bars and the target's
 # ATR.
 warmup = "72h"
 
@@ -44,23 +43,22 @@ period = 10
 period = 30
 
 [trade]
-# The one instrument traded, whose targets the model learns, and the size
+# The one instrument traded, whose target the model learns, and the size
 # of each trade.
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
 
-# The model, of a strategy trading on one: its targets trade [trade]'s
+# The model, of a strategy trading on one: its target trades [trade]'s
 # instrument, of its trade_size.
 [model]
 # A decision every hour, on the hour's bars.
 decision = { every = "1h" }
-# The targets each decision is labelled on: a triple barrier, its take
-# profit 2 and its stop 1 average true ranges from the decision's price
-# (Nautilus' AverageTrueRange of the hourly bars, by its arguments), closed
-# 45 minutes after its send if neither is reached, and a horizon of 45
-# minutes. Each closes before the next decision.
-targets = { barrier = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, limit = "45m", atr = { period = 14, ma_type = "WILDER" } }, horizon = "45m" }
-# The target the models learn, and the trade the strategy sends.
-label = "barrier"
+# The target of each decision, which the models learn and the strategy
+# sends: a bracket, its take profit 2 and its stop 1 average true ranges
+# from the decision's price (Nautilus' AverageTrueRange of the hourly bars,
+# by its arguments), closed 45 minutes after its send if neither is reached,
+# before the next decision. Without its exits and `atr`, `{ limit = "45m" }`
+# is a trade closed at its time alone.
+target = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, limit = "45m", atr = { period = 14, ma_type = "WILDER" } }
 # Retrained weekly on the last 30 days, the last 5 held out to score it.
 retrain = "168h"
 window = "720h"

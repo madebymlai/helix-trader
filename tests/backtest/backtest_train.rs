@@ -13,7 +13,7 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{STRATEGY, replay_on, requirements, rule, targets, venue},
+    dataset::{STRATEGY, replay_on, requirements, rule, target, venue},
     features::tables,
     ic,
 };
@@ -25,7 +25,7 @@ use helix_trader::{
         holdout::{Holdout, Refusal},
         learner::LearnerConfig,
         store::{ModelSet, ModelStore},
-        targets::{Label, Side},
+        targets::Side,
         train::{Kept, Outcome, Trained, Training},
     },
     strategy::{Declared, IndicatorArgs},
@@ -139,8 +139,7 @@ fn features() -> Rc<FeatureSet> {
 fn config(min_pnl: f64) -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
-        .targets(targets())
-        .label(Label::Barrier)
+        .target(target())
         .retrain(SignedDuration::from_hours(24))
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
@@ -221,12 +220,12 @@ fn published(outcome: Option<Outcome>) -> Holdout {
 /// reaches it, +2.90 less two fees of 0.12, 2.66 USD; the short enters at
 /// the bid, 4000.00, and its stop at 4003.10 fills when the ask reaches
 /// it, -3.10 less the fees, -3.34. At the top, mid 4004.10, the reverse.
-/// Held out, the decisions of 12:00 to 22:00 of the 22nd (that of 23:00
-/// settles at the horizon after the train): six at the bottom, five at
-/// the top. The long takes the six it wins, 2.66 per trade, every trade
-/// (6 x 2.66 - 5 x 3.34) / 11; the short the five it wins, 2.66, every
-/// trade (5 x 2.66 - 6 x 3.34) / 11. At 1.5 times the commission of 0.24
-/// each trade makes 0.12 less. Every row ranked right: AUC 1.
+/// Those fills are 58 and 62 quotes of 45 s after the hour starts, each
+/// row settling at 46:30 past it. Held out, the decisions of 12:00 to 23:00
+/// of the 22nd, the last settled at 23:46:30, before the train: six at the
+/// bottom, six at the top. Each side takes the six it wins, 2.66 per trade,
+/// every trade (6 x 2.66 - 6 x 3.34) / 12. At 1.5 times the commission of
+/// 0.24 each trade makes 0.12 less. Every row ranked right: AUC 1.
 #[test]
 fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_identical_predictions()
 {
@@ -242,20 +241,20 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
         (
             published(long),
             6,
-            (6.0 * 2.66 - 5.0 * 3.34) / 11.0,
-            (6.0 * 2.54 - 5.0 * 3.46) / 11.0,
+            (6.0 * 2.66 - 6.0 * 3.34) / 12.0,
+            (6.0 * 2.54 - 6.0 * 3.46) / 12.0,
         ),
         (
             published(short),
-            5,
-            (5.0 * 2.66 - 6.0 * 3.34) / 11.0,
-            (5.0 * 2.54 - 6.0 * 3.46) / 11.0,
+            6,
+            (6.0 * 2.66 - 6.0 * 3.34) / 12.0,
+            (6.0 * 2.54 - 6.0 * 3.46) / 12.0,
         ),
     ] {
         let earnings = holdout.earnings;
         assert_eq!(
             (earnings.taken.count, earnings.every.count),
-            (taken, 11),
+            (taken, 12),
             "{holdout:?}"
         );
         close(earnings.taken.expectancy, 2.66);
@@ -267,7 +266,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
         assert!(holdout.log_loss < holdout.baseline_log_loss, "{holdout:?}");
     }
     let fingerprint =
-        dataset::fingerprint(&features(), rule(), &targets(), &requirements(), &venue())
+        dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
             .unwrap()
             .to_string();
     for side in Side::BOTH {
@@ -287,7 +286,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
     }
 }
 
-/// An hour later the holdout is the decisions of 13:00 to 23:00: each
+/// An hour later the holdout is the decisions of 13:00 to 00:00: each
 /// side takes the trades it wins, 2.66 USD each, short of a minimum of 3.
 #[test]
 fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {

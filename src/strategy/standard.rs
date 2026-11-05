@@ -35,7 +35,7 @@ use crate::{
 ///   without one.
 /// - `[trade]`: what it trades (see `TradeConfig`).
 /// - `[model]`: the model of a strategy trading on one
-///   (`Part::TAKES_MODEL`), whose targets trade `[trade]`'s instrument (see
+///   (`Part::TAKES_MODEL`), whose target trades `[trade]`'s instrument (see
 ///   `ModelSection`, `model`); required of such a strategy, and a key no
 ///   table takes of any other.
 /// - the strategy's own fields, `P` itself, at the top level beside them:
@@ -209,7 +209,7 @@ impl<P: Part> StandardConfig<P> {
             .expect("a validated config has a strategy id")
     }
 
-    /// The model, its targets trading the instrument of `[trade]`, of its
+    /// The model, its target trading the instrument of `[trade]`, of its
     /// size.
     ///
     /// # Panics
@@ -1241,7 +1241,7 @@ mod tests {
             model::{
                 decide::DecisionRule,
                 learner::LearnerConfig,
-                targets::{Barrier, Distance, Label},
+                targets::{Distance, Target},
             },
             strategy::AtrArgs,
         };
@@ -1282,8 +1282,7 @@ mod tests {
 
             [model]
             decision = { every = "1h" }
-            targets = { horizon = "30m" }
-            label = "horizon"
+            target = { limit = "30m" }
             retrain = "24h"
             window = "48h"
             holdout = "12h"
@@ -1321,17 +1320,16 @@ mod tests {
             }
         }
 
-        /// `TOML` labelled on a barrier 2 ATRs out and 1.5 ATRs against,
-        /// closed after 45 minutes, its ATR `atr`, as the `targets` line
-        /// has it, warmed up over the 3 hourly bars an ATR of 3 bars needs.
+        /// `TOML` on a bracket 2 ATRs out and 1.5 ATRs against, closed
+        /// after 45 minutes, its ATR `atr`, as the `target` line has it,
+        /// warmed up over the 3 hourly bars an ATR of 3 bars needs.
         fn with_atr(atr: &str) -> String {
             TOML.replace(r#"warmup = "1h""#, r#"warmup = "3h""#).replace(
-                r#"targets = { horizon = "30m" }"#,
+                r#"target = { limit = "30m" }"#,
                 &format!(
-                    r#"targets = {{ barrier = {{ take_profit = {{ atr = 2 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }} }}"#
+                    r#"target = {{ take_profit = {{ atr = 2 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }}"#
                 ),
             )
-            .replace(r#"label = "horizon""#, r#"label = "barrier""#)
         }
 
         #[test]
@@ -1342,12 +1340,12 @@ mod tests {
                 [BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")]
             );
             let model = config.model();
-            assert_eq!(model.targets.horizon, Some(SignedDuration::from_mins(30)));
+            assert_eq!(model.target.spec.limit, SignedDuration::from_mins(30));
+            assert_eq!(model.target.spec.bracket(), None);
             assert_eq!(
                 model.decision,
                 DecisionRule::Every(SignedDuration::from_hours(1))
             );
-            assert_eq!(model.label, Label::Horizon);
             assert_eq!(model.learner, LearnerConfig::Baseline {});
         }
 
@@ -1360,24 +1358,21 @@ mod tests {
             assert!(err.contains("`model`"), "{err}");
         }
 
-        /// The targets trade what `[trade]` names: its one instrument, of
+        /// The target trades what `[trade]` names: its one instrument, of
         /// its size.
         #[test]
-        fn the_targets_trade_the_instrument_and_size_of_the_trade_table() {
-            let targets = load(TOML).unwrap().model().targets;
-            assert_eq!(
-                targets.instrument_id,
-                InstrumentId::from("XAUUSD.ICMARKETS")
-            );
-            assert_eq!(targets.quantity, Quantity::from(2));
+        fn the_target_trades_the_instrument_and_size_of_the_trade_table() {
+            let target = load(TOML).unwrap().model().target;
+            assert_eq!(target.instrument_id, InstrumentId::from("XAUUSD.ICMARKETS"));
+            assert_eq!(target.quantity, Quantity::from(2));
         }
 
         #[test]
-        fn targets_naming_an_instrument_or_a_quantity_are_refused_at_load() {
+        fn a_target_naming_an_instrument_or_a_quantity_is_refused_at_load() {
             for key in [r#"instrument_id = "XAUUSD.ICMARKETS""#, r#"quantity = "1""#] {
                 let toml = TOML.replace(
-                    r#"targets = { horizon"#,
-                    &format!(r#"targets = {{ {key}, horizon"#),
+                    r#"target = { limit"#,
+                    &format!(r#"target = {{ {key}, limit"#),
                 );
                 let name = key.split(' ').next().unwrap();
                 let err = shape_error(&toml);
@@ -1476,10 +1471,10 @@ mod tests {
         }
 
         /// Gold's 1-minute LAST bars are built from its trades, and the
-        /// strategy reads no quote of it: the barrier's ATR of 3 bars,
+        /// strategy reads no quote of it: the target's ATR of 3 bars,
         /// decided hourly, runs on hourly bars of its trades.
         #[test]
-        fn the_barrier_atr_of_a_strategy_reading_trades_runs_on_their_bars() {
+        fn the_target_atr_of_a_strategy_reading_trades_runs_on_their_bars() {
             let config = load(
                 &with_atr(", atr = { period = 3 }")
                     .replace(r#"price_type = "MID""#, r#"price_type = "LAST""#),
@@ -1488,7 +1483,7 @@ mod tests {
             let model = config.model();
 
             let atr = model
-                .targets
+                .target
                 .atr_bars(model.decision, &config.data_requirements())
                 .unwrap()
                 .unwrap();
@@ -1520,7 +1515,7 @@ mod tests {
         }
 
         /// The shared trade rules refuse the root, under its field of
-        /// `[trade]`; the model, whose targets trade it, does not refuse it
+        /// `[trade]`; the model, whose target trades it, does not refuse it
         /// again.
         #[test]
         fn a_futures_root_traded_is_refused_at_load_by_the_trade_rules() {
@@ -1533,14 +1528,14 @@ mod tests {
             assert!(err.to_string().contains("GC.GLBX"), "{err}");
         }
 
-        /// A trade on a horizon of an hour, decided every hour, would still
+        /// A trade closed after an hour, decided every hour, would still
         /// be open at the next decision.
         #[test]
         fn a_target_not_shorter_than_the_decision_cadence_is_refused() {
-            let toml = TOML.replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+            let toml = TOML.replace(r#"limit = "30m""#, r#"limit = "1h""#);
             let reason = model_refusal(&toml);
             assert!(
-                reason.contains("horizon 1h") && reason.contains("cadence 1h"),
+                reason.contains("limit 1h") && reason.contains("cadence 1h"),
                 "{reason}"
             );
         }
@@ -1558,19 +1553,19 @@ mod tests {
             assert!(err.contains("unknown field `min_pn`"), "{err}");
         }
 
-        /// The barrier's ATR takes Nautilus' `AverageTrueRange` arguments
+        /// The target's ATR takes Nautilus' `AverageTrueRange` arguments
         /// by their names, the moving average by Nautilus' name of it.
         #[test]
-        fn the_barrier_atr_takes_nautilus_average_true_range_arguments() {
+        fn the_target_atr_takes_nautilus_average_true_range_arguments() {
             let toml = with_atr(
                 r#", atr = { period = 3, ma_type = "simple", use_previous = false, value_floor = 0.5 }"#,
             );
-            let barrier = load(&toml).unwrap().model().targets.barrier.unwrap();
+            let spec = load(&toml).unwrap().model().target.spec;
             assert_eq!(
-                barrier,
-                Barrier {
-                    take_profit: Distance::Atr(2.into()),
-                    stop: Distance::Atr(rust_decimal::Decimal::new(15, 1)),
+                spec,
+                Target {
+                    take_profit: Some(Distance::Atr(2.into())),
+                    stop: Some(Distance::Atr(rust_decimal::Decimal::new(15, 1))),
                     limit: SignedDuration::from_mins(45),
                     atr: Some(AtrArgs {
                         period: 3,
@@ -1594,52 +1589,51 @@ mod tests {
         /// refuses, and the load builds the ATR.
         #[test]
         #[should_panic(expected = "period must be in 1..=")]
-        fn a_barrier_atr_of_no_bars_panics_at_load() {
+        fn a_target_atr_of_no_bars_panics_at_load() {
             let _ = load(&with_atr(r#", atr = { period = 0 }"#));
         }
 
-        /// The model's violation is its horizon of an hour, decided every
-        /// hour, reported under the horizon's field, `model.targets.horizon`,
+        /// The model's violation is its limit of an hour, decided every
+        /// hour, reported under the limit's field, `model.target.limit`,
         /// after the standard ones and the strategy id's.
         #[test]
         fn reports_the_models_violations_with_the_standard_ones() {
             let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
                 .replace("\"1h\"\n", "\"0s\"\n")
-                .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+                .replace(r#"limit = "30m""#, r#"limit = "1h""#);
             assert_eq!(
                 error_fields(&toml),
-                ["data.warmup", "base.strategy_id", "model.targets.horizon"]
+                ["data.warmup", "base.strategy_id", "model.target.limit"]
             );
         }
 
         /// Three violations of the model, each reported under its field at
         /// once: margins naming no side, no trade required on the holdout,
-        /// and a horizon of an hour decided every hour.
+        /// and a limit of an hour decided every hour.
         #[test]
         fn reports_every_violation_of_the_model_under_its_field() {
             let toml = TOML
                 .replace("margins = { long = 0.5, short = 0.5 }", "margins = {}")
                 .replace("min_trades = 30", "min_trades = 0")
-                .replace(r#"horizon = "30m""#, r#"horizon = "1h""#);
+                .replace(r#"limit = "30m""#, r#"limit = "1h""#);
 
             let mut fields = error_fields(&toml);
             fields.sort();
 
             assert_eq!(
                 fields,
-                ["model.margins", "model.min_trades", "model.targets.horizon"]
+                ["model.margins", "model.min_trades", "model.target.limit"]
             );
         }
 
-        /// TOML with a barrier labelled on, and `meta` after it.
+        /// TOML with a bracket, and `meta` after it.
         fn with_meta(meta: &str) -> String {
             format!(
                 "{}\n{meta}",
                 TOML.replace(
-                    r#"targets = { horizon = "30m" }"#,
-                    r#"targets = { horizon = "30m", barrier = { take_profit = { bps = 10 }, stop = { bps = 10 }, limit = "45m" } }"#,
+                    r#"target = { limit = "30m" }"#,
+                    r#"target = { take_profit = { bps = 10 }, stop = { bps = 10 }, limit = "45m" }"#,
                 )
-                .replace(r#"label = "horizon""#, r#"label = "barrier""#)
             )
         }
 
@@ -1667,8 +1661,8 @@ mod tests {
         }
 
         /// A meta model is a `[model.meta]` table, and no more: a meta of
-        /// the meta is an unknown field. It learns the barrier trades of a
-        /// primary labelled on the barrier.
+        /// the meta is an unknown field. It learns the trades of its
+        /// primary's target.
         #[test]
         fn loads_a_meta_model_from_its_table_alone_and_no_deeper() {
             let toml = with_meta(
