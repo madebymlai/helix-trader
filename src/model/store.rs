@@ -599,6 +599,26 @@ impl ModelStore {
     fn path(&self, valid_from: Timestamp) -> PathBuf {
         self.directory.join(format!("{valid_from}.{EXTENSION}"))
     }
+
+    /// A file of the store named by no time, so that listing it fails while
+    /// its models can still be read.
+    #[cfg(test)]
+    fn unlistable(&self) -> PathBuf {
+        self.directory.join(format!("no time.{EXTENSION}"))
+    }
+
+    /// Makes listing the store fail (`valid_froms`), until `mend_listing`.
+    #[cfg(test)]
+    pub(super) fn break_listing(&self) {
+        fs::create_dir_all(&self.directory).unwrap();
+        fs::write(self.unlistable(), "").unwrap();
+    }
+
+    /// Undoes `break_listing`.
+    #[cfg(test)]
+    pub(super) fn mend_listing(&self) {
+        fs::remove_file(self.unlistable()).unwrap();
+    }
 }
 
 /// The directory, under `root`, of the stores of `strategy_id` whose
