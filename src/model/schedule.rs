@@ -366,6 +366,14 @@ impl<T> Models<T> {
         }
     }
 
+    /// Sets the value of the model of `side`.
+    pub fn set_side(&mut self, side: Side, value: T) {
+        match side {
+            Side::Long => self.long = Some(value),
+            Side::Short => self.short = Some(value),
+        }
+    }
+
     /// The value of each model, the long's, the short's, then the meta's.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         [&self.long, &self.short, &self.meta].into_iter().flatten()
