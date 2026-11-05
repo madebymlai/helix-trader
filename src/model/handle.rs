@@ -1008,10 +1008,10 @@ mod tests {
             .clone()
     }
 
-    /// The calibration of every model of the tests, `c(p) = 1 / (1 +
-    /// e^(2 - 4p))`: c(0.5) = 0.5, c(0.6) = 0.598688, c(0.7) = 0.689974,
-    /// c(0.8) = 0.768525, c(0.9) = 0.832018.
-    const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+    /// The calibration of every model of the tests, the odds `o` of a
+    /// prediction becoming `o^0.9`: c(0.5) = 0.5, c(0.6) = 0.590231, c(0.7)
+    /// = 0.681909, c(0.8) = 0.776895, c(0.9) = 0.878415.
+    const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
     /// The calibrated probability of a prediction of `p`.
     fn c(p: f64) -> f64 {
@@ -1366,7 +1366,7 @@ mod tests {
         .unwrap()
     }
 
-    /// A long expecting `2 c(0.6) - 1`, 0.197 USD, clearing its margin of
+    /// A long expecting `2 c(0.6) - 1`, 0.180 USD, clearing its margin of
     /// nought; the short has no model yet, and never trades.
     #[test]
     fn a_side_expected_to_clear_its_margin_trades_the_targets_size() {
@@ -2091,7 +2091,7 @@ mod tests {
 
     /// The probe's handle trading in a backtest on the models under
     /// `models` as `config` says, its primary a long of 0.6 from midnight
-    /// (expecting 0.197 USD, above its margin of nought),
+    /// (expecting 0.180 USD, above its margin of nought),
     /// its meta model predicting `meta_trues` tenths, if any, its features
     /// warm by a quote at noon of the 22nd.
     fn meta_handle(
@@ -2192,7 +2192,7 @@ mod tests {
     }
 
     /// From the threshold 0.6 to 1, 0.5 to 2 times the size: the meta's
-    /// c(0.8), 0.768525, is 1.131968 times 1000.
+    /// c(0.8), 0.776895, is 1.163358 times 1000.
     #[test]
     fn a_sizing_meta_model_sizes_the_trade_from_its_probability() {
         let models = tempfile::tempdir().unwrap();
@@ -2206,7 +2206,7 @@ mod tests {
         let trade = handle.decide(&mut probe).unwrap().unwrap();
 
         let quantity = trade.quantity.as_f64();
-        assert!((quantity - 1_131.967_938).abs() < 1e-6, "{quantity}");
+        assert!((quantity - 1_163.357_700).abs() < 1e-6, "{quantity}");
         assert_eq!(trade.probability, c(0.8));
     }
 
@@ -2281,8 +2281,8 @@ mod tests {
     }
 
     /// The meta model reads the primary's probability from its place in
-    /// the row, after its side: it takes a buy at c(0.8) = 0.768525, which
-    /// it learned wins, and refuses one at c(0.6) = 0.598688, which it
+    /// the row, after its side: it takes a buy at c(0.8) = 0.776895, which
+    /// it learned wins, and refuses one at c(0.6) = 0.590231, which it
     /// learned loses.
     #[test]
     fn a_meta_model_decides_on_the_primarys_probability() {

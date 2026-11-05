@@ -604,8 +604,9 @@ mod tests {
             .unwrap();
     }
 
-    /// The calibration of the models of the tests: 1 / (1 + e^(2 - 4p)).
-    const CALIBRATION: Calibration = Calibration { a: -4.0, b: 2.0 };
+    /// The calibration of the models of the tests: the odds `o` of a
+    /// prediction become `o^0.9`.
+    const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
     /// A fake model valid from `valid_from`, of `fingerprint`, calibrated
     /// by `CALIBRATION`, its baseline `baseline`.
@@ -757,7 +758,7 @@ mod tests {
     /// Worked by hand, the long's, each model beside its own baseline, the
     /// training mean its train fitted (`trained_baseline`), on the rows it
     /// decided. The 7th, the fake's probabilities its feature `p`
-    /// calibrated, `c(p) = 1 / (1 + e^(2 - 4p))`: the win 0.8 above the
+    /// calibrated, the odds `o` of `p` becoming `o^0.9`: the win 0.8 above the
     /// losses 0.3 and 0.6 (AUC 1), log loss `-(ln c(0.8) + ln (1 - c(0.3)) +
     /// ln (1 - c(0.6))) / 3`; the 7th's model's baseline 2/3 throughout (AUC
     /// 0.5), `-(ln 2/3 + 2 ln 1/3) / 3`. The 8th, two wins (no AUC), `-(ln
@@ -791,16 +792,16 @@ mod tests {
         );
         assert_eq!((first.model.rows, first.baseline.rows), (3, 3));
         close(first.model.auc, 1.0);
-        close(first.model.log_loss, 0.515_799);
+        close(first.model.log_loss, 0.509_155);
         close(first.baseline.auc, 0.5);
         close(first.baseline.log_loss, 0.867_563);
         assert_eq!(second.models, [at("2026-01-08T00:00:00Z")]);
         assert_eq!((second.model.rows, second.model.auc), (2, None));
-        close(second.model.log_loss, 0.823_592);
+        close(second.model.log_loss, 0.814_876);
         close(second.baseline.log_loss, 1.098_612);
         assert_eq!((long.model.rows, long.baseline.rows), (5, 5));
         close(long.model.auc, 4.0 / 6.0);
-        close(long.model.log_loss, 0.638_916);
+        close(long.model.log_loss, 0.631_443);
         close(long.baseline.auc, 1.0 / 6.0);
         close(long.baseline.log_loss, 0.959_983);
         let short = &scores.short.as_ref().unwrap().periods[0];
