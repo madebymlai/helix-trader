@@ -7,11 +7,10 @@
 //! (`store::SideModel::expected_pnl`, `payoff::pick`). The meta model
 //! decides only when the primary signals, on the primary's features with
 //! its side and the chosen side's probability after them
-//! (`PRIMARY_FEATURES`), and learns whether the triple-barrier trade on
-//! the primary's side wins after its costs, read as the side models read
-//! their trades (`payoff::Realised`, on the side models' label, which the
-//! config requires be the barrier, `ModelConfig::validate`, and its
-//! targets to have one, `MetaConfig::validate`): a dataset row
+//! (`PRIMARY_FEATURES`), and learns whether the primary's trade, the target
+//! of its label on its side, a barrier's or a horizon's, wins after its
+//! costs, read as the side models read their trades (`payoff::Realised`,
+//! on the side models' label): a dataset row
 //! opens a long and a short at every decision, so the row has the trade of
 //! either side, and the meta's rows need no replay of their own.
 //!
@@ -44,11 +43,11 @@ use super::{
 
 /// The meta's examples of the primary's dataset `rows`, in time order:
 /// each row the primary makes a trade of, its features with the primary's
-/// side and probability, its label whether the barrier's trade on that
-/// side won, with the trade and its unit. The primary's decision on a row
-/// is that of the models of each side of `models` in use then, as its
-/// stores list them now, none before the first, the rows' trades read by
-/// `realised`.
+/// side and probability, its label whether the trade on that side, of the
+/// label `realised` reads, won, with the trade and its unit. The primary's
+/// decision on a row is that of the models of each side of `models` in use
+/// then, as its stores list them now, none before the first, the rows'
+/// trades read by `realised`.
 ///
 /// # Errors
 ///

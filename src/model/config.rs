@@ -82,10 +82,10 @@ pub struct ModelConfig<T = TargetsConfig> {
 }
 
 /// A meta model: on each decision the primary makes a trade of, whether
-/// the triple-barrier trade on the primary's side wins, learned from the
-/// primary's features, its side and its probability. It is retrained on
-/// the primary's schedule, right after the primary, or, the primary never
-/// retrained, trained once and kept.
+/// that trade, the target of the primary's label on its side, wins, learned
+/// from the primary's features, its side and its probability. It is
+/// retrained on the primary's schedule, right after the primary, or, the
+/// primary never retrained, trained once and kept.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct MetaConfig {
@@ -210,8 +210,7 @@ impl ModelConfig {
     /// limit or the horizon) not shorter than the window, the holdout not
     /// positive or leaving no fitted row (see `validate_window`), the
     /// margins naming no side or one not finite, the minimums invalid (see
-    /// `validate_minimums`), a meta model gating a primary not labelled on
-    /// the barrier, whose trades it learns, the meta model invalid (see
+    /// `validate_minimums`), the meta model invalid (see
     /// `MetaConfig::validate`), or a target not shorter than the decision
     /// cadence (see `validate_cadence`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
@@ -256,14 +255,6 @@ impl ModelConfig {
         }
         validate_minimums(self.minimums(), "model", &mut errors);
         if let Some(meta) = &self.meta {
-            errors.check(
-                self.label == Label::Barrier,
-                ConfigError::invalid_value(
-                    "model.meta",
-                    "the meta model learns whether the primary's barrier trade wins, and the \
-                     primary is labelled \"horizon\": it places horizon trades, not barrier ones",
-                ),
-            );
             meta.validate(&self.targets, &mut errors);
         }
         validate_cadence(self.decision, &self.targets, &mut errors);
@@ -320,21 +311,13 @@ fn validate_cadence(
 impl MetaConfig {
     /// Pushes onto `errors` every violation of the meta model against the
     /// primary's `targets`, each under its field of `[model.meta]`
-    /// (`model.meta.…`): the targets without a barrier, the trade the meta
-    /// model learns, the learner invalid (see `LearnerConfig::validate`), a
-    /// target not shorter than the window, the holdout not positive or
-    /// leaving no fitted row, the threshold not a probability, the minimums
-    /// invalid (see `validate_minimums`), or the sizing's multiples not
-    /// positive with the minimum not above the maximum.
+    /// (`model.meta.…`): the learner invalid (see
+    /// `LearnerConfig::validate`), a target not shorter than the window, the
+    /// holdout not positive or leaving no fitted row, the threshold not a
+    /// probability, the minimums invalid (see `validate_minimums`), or the
+    /// sizing's multiples not positive with the minimum not above the
+    /// maximum.
     pub fn validate(&self, targets: &TargetsConfig, errors: &mut ConfigErrorCollector) {
-        errors.check(
-            targets.barrier.is_some(),
-            ConfigError::invalid_value(
-                "model.meta",
-                "the meta model learns whether the primary's barrier trade wins, and the \
-                 targets have no barrier",
-            ),
-        );
         errors.collect(learner(&self.learner, "model.meta.learner"));
         validate_window(self.window, self.holdout, targets, "model.meta", errors);
         errors.check(
@@ -885,30 +868,17 @@ mod tests {
         assert!(err.contains("unknown field `meta`"), "{err}");
     }
 
-    /// A primary on a horizon alone: its meta model has no barrier trade
-    /// to learn, refused under `model.meta` beside the primary's horizon
-    /// label.
+    /// A primary on a horizon alone: its meta model learns the horizon's
+    /// trades, and no barrier is needed.
     #[test]
-    fn a_meta_model_without_a_barrier_is_refused() {
+    fn a_meta_model_on_a_primary_with_no_barrier_is_loaded() {
         let toml = section(r#"targets = { horizon = "30m" }"#)
             .replace(r#"label = "barrier""#, r#"label = "horizon""#);
-        let config = parse(&format!("{toml}\n{META}")).unwrap();
 
-        let err = config.validate(&reading(GOLD)).unwrap_err();
+        let config = load(&format!("{toml}\n{META}")).unwrap();
 
-        let shown = format!("{err:#}");
-        let errors = match err {
-            ConfigError::Multiple { errors } => errors,
-            err => vec![err],
-        };
-        assert!(
-            errors.iter().any(|err| matches!(
-                err,
-                ConfigError::InvalidValue { field, reason }
-                    if field == "model.meta" && reason.contains("no barrier")
-            )),
-            "{shown}"
-        );
+        assert_eq!(config.targets.barrier, None);
+        assert!(config.meta.is_some());
     }
 
     #[test]
@@ -927,17 +897,27 @@ mod tests {
         );
     }
 
-    /// A horizon-labelled primary trades its horizon, and the meta model
-    /// would gate it on barrier trades never placed.
+    /// A horizon-labelled primary trades its horizon, a barrier besides it
+    /// or not, and its meta model learns those trades.
     #[test]
-    fn a_meta_model_on_a_horizon_labelled_primary_is_refused_naming_both() {
+    fn a_meta_model_on_a_horizon_labelled_primary_is_loaded() {
         let toml = SECTION.replace(r#"label = "barrier""#, r#"label = "horizon""#);
+
+        let config = load(&format!("{toml}\n{META}")).unwrap();
+
+        assert_eq!(config.label, Label::Horizon);
+        assert!(config.meta.is_some());
+    }
+
+    /// The label names a target the targets lack, a meta model or not:
+    /// the primary's barrier trade is no trade.
+    #[test]
+    fn a_meta_model_on_a_barrier_label_with_no_barrier_is_refused_under_the_label() {
+        let toml = section(r#"targets = { horizon = "30m" }"#);
 
         let err = refused(&format!("{toml}\n{META}"));
 
-        assert!(err.contains("meta"), "{err}");
-        assert!(err.contains("horizon"), "{err}");
-        assert!(err.contains("barrier"), "{err}");
+        assert!(err.contains("model.label"), "{err}");
     }
 
     /// The refusal of the section with `META`, `line` added to it or, if
