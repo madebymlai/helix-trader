@@ -144,10 +144,19 @@ pub(super) trait Rule: Copy {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Margin(pub f64);
 
-/// A meta model's decision rule: the primary's trade taken from the
-/// threshold, as the handle takes it.
+/// A meta model's decision rule: the trade of the side picked taken from the
+/// threshold (`takes`), in a decision as in a holdout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Threshold(pub f64);
+
+impl Threshold {
+    /// Whether a meta model's `probability` takes the trade: at or above
+    /// the threshold, so NaN does not.
+    #[must_use]
+    pub fn takes(self, probability: f64) -> bool {
+        probability >= self.0
+    }
+}
 
 impl Trade {
     /// Its net P&L had the commission been `factor` times what it was.
@@ -269,7 +278,7 @@ impl Rule for Threshold {
 
     fn judge(self, model: &LoadedModel, example: &Example) -> anyhow::Result<(f64, bool)> {
         let probability = model.predict(&example.features)?;
-        Ok((probability, probability >= self.0))
+        Ok((probability, self.takes(probability)))
     }
 }
 
@@ -348,6 +357,16 @@ mod tests {
             pnl,
             commission: 0.3,
         }
+    }
+
+    #[test]
+    fn a_threshold_takes_a_probability_at_or_above_it_and_not_nan() {
+        let threshold = Threshold(0.6);
+
+        assert!(threshold.takes(0.6));
+        assert!(threshold.takes(0.61));
+        assert!(!threshold.takes(0.59));
+        assert!(!threshold.takes(f64::NAN));
     }
 
     /// Taken, wins of 3 and a loss of 2: 3 times 2/3 less 2 times 1/3,

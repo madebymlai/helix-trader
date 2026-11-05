@@ -2,8 +2,8 @@
 //! decides whether to take it, and optionally its size.
 //!
 //! The primary is a model, the side models of a `ModelConfig` with a meta
-//! section, whose side is the one its decision rule picks, on the expected
-//! net P&L of each side's calibrated probability
+//! section, whose side is the one the decision picks (`deciding`), on the
+//! expected net P&L of each side's calibrated probability
 //! (`store::SideModel::expected_pnl`, `payoff::pick`). The meta model
 //! decides only when the primary signals, on the primary's features with
 //! its side and the chosen side's probability after them
@@ -14,9 +14,10 @@
 //! side, and the meta's rows need no replay of their own.
 //!
 //! The primary's rows are its dataset's, each decided by the models of
-//! each side in use at it as a strategy would have used them
-//! (`store::Swap`), of the strategy's model set (`store::ModelSet`) as its
-//! stores are when the rows are made: the latest valid then, trained on
+//! each side in use at it through the code a strategy decides through
+//! (`deciding::DecidingModels`), of the strategy's model set
+//! (`store::ModelSet`) as its stores are when the rows are made, listed
+//! once, a read error failing them: the latest valid then, trained on
 //! rows settled by its valid-from, so every decision is out of sample; the
 //! worth of each side's stop is the row's own (`payoff::Realised::unit`).
 //! A row before the primary's first model has no decision: the meta's
@@ -33,55 +34,40 @@
 use jiff::Timestamp;
 
 use super::{
-    dataset::DatasetRow,
-    features::meta_row,
-    holdout::Example,
-    payoff::{self, Realised},
-    store::ModelSet,
+    dataset::DatasetRow, deciding::DecidingModels, features::meta_row, holdout::Example,
+    payoff::Realised, store::ModelSet,
 };
 
-/// The meta's examples of the primary's dataset `rows`, in time order:
-/// each row the primary makes a trade of, its features with the primary's
-/// side and probability, its label whether the trade on that side, as
-/// `realised` reads it, won, with the trade and its unit. The primary's
-/// decision on a row is that of the models of each side of `models` in use
-/// then, as its stores list them now, none before the first, the rows'
-/// trades read by `realised`.
+/// The meta's examples of the dataset `rows` of the sides, in time order:
+/// each row a side is picked on, its features with that side and its
+/// probability, its label whether the trade on that side, as `realised` reads
+/// it, won, with the trade and its unit. The side picked on a row is the one
+/// `DecidingModels` picks, on the row's units, among the models of `models` in
+/// use then, as its stores list them now, none before the first.
 ///
 /// # Errors
 ///
-/// Returns an error if a primary's store cannot be read, a model fails to
-/// predict, or a row's stop has no worth.
+/// Returns an error if a store cannot be read, a model fails to predict, or a
+/// row's stop has no worth.
 pub(super) fn examples(
     models: &ModelSet,
     rows: &[&DatasetRow],
     realised: &Realised,
 ) -> anyhow::Result<Vec<Example>> {
-    let mut swaps = models
-        .sides()
-        .map(|level| {
-            let valid_froms = level.store().valid_froms()?;
-            Ok((level.side(), level.margin(), valid_froms, level.swap()))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut models = DecidingModels::new(models)?;
     let mut examples = vec![];
     for row in rows {
-        let now = Timestamp::from(row.ts_event);
-        let mut decided = vec![];
-        for (side, margin, valid_froms, swap) in &mut swaps {
-            let Some((_, model)) = swap.at(now, valid_froms) else {
-                continue;
-            };
-            let probability = model.predict(&row.features)?;
-            let expected = model.expected_pnl(probability, realised.unit(row, *side)?);
-            decided.push(((*side, probability), expected, *margin));
-        }
-        let Some((side, probability)) = payoff::pick(decided) else {
+        let Some(picked) = models.pick(
+            Timestamp::from(row.ts_event),
+            &row.features,
+            realised.units(row)?,
+        )?
+        else {
             continue;
         };
         examples.push(Example {
-            features: meta_row(&row.features, side.order_side(), probability),
-            ..Example::of_side(row, side, realised)?
+            features: meta_row(&row.features, picked.side.order_side(), picked.probability),
+            ..Example::of_side(row, picked.side, realised)?
         });
     }
     Ok(examples)

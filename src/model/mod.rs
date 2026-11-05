@@ -15,7 +15,8 @@
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset and publishing in the `store` each whose `holdout`, what its
 //! decisions would have earned there and its `score`, meets the minimums;
-//! `handle` is
+//! `deciding` is the decision itself, the side picked among the models
+//! valid at a time, the meta's threshold and the size; `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! target in a dataset run; `schedule` is when a model is retrained, on
@@ -38,6 +39,7 @@ pub mod calibration;
 pub mod config;
 pub mod dataset;
 pub mod decide;
+pub mod deciding;
 pub mod features;
 pub mod handle;
 pub mod holdout;

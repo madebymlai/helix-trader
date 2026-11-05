@@ -1793,6 +1793,22 @@ mod tests {
         );
     }
 
+    /// The examples list the stores as they are when made: one that cannot be
+    /// listed fails them, rows or none, so a train never learns silently from
+    /// rows skipped.
+    #[test]
+    fn a_store_that_cannot_be_listed_fails_the_metas_examples() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_meta(24);
+        primaries(dir.path(), &config);
+        store(dir.path(), &config, Side::Short).break_listing();
+        let realised = Realised::new(&catalog(dir.path()), &config.target).unwrap();
+
+        let examples = meta::examples(&models(dir.path(), &config), &[], &realised);
+
+        assert!(examples.is_err());
+    }
+
     /// Margins of the long alone: the short's models are never asked, and
     /// the meta's rows are the long's trades, the
     /// holdout's a loss at 0.3 and a win at 0.7, which the meta, taking the
