@@ -23,7 +23,7 @@ use helix_trader::{
         config::ModelConfig,
         dataset::{Dataset, DatasetRow},
         features::{Feature, FeatureSet},
-        targets::{Distance, Target, TargetConfig},
+        targets::{BracketSpec, Distance, Target, TargetConfig},
     },
     strategy::{DataRequirements, Declared, IndicatorArgs, TickSeries},
 };
@@ -329,8 +329,11 @@ fn a_closed_market_stores_no_row() {
 /// subscribe to IC's gold's hourly mids.
 fn atr_config() -> ModelConfig {
     let bracket = Target::builder()
-        .take_profit(Distance::Atr(Decimal::new(15, 1)))
-        .stop(Distance::Atr(Decimal::new(15, 1)))
+        .bracket(BracketSpec {
+            take_profit: Distance::Atr(Decimal::new(15, 1)),
+            stop: Distance::Atr(Decimal::new(15, 1)),
+            atr: None,
+        })
         .limit(SignedDuration::from_mins(45))
         .build();
     ModelConfig {

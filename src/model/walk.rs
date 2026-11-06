@@ -463,7 +463,9 @@ mod tests {
         payoff::Payoff,
         schedule::Retrain,
         store::{ModelManifest, ModelStore, StoredModel},
-        targets::{Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow},
+        targets::{
+            BracketSpec, Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow,
+        },
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -1076,8 +1078,11 @@ mod tests {
                 .quantity(Quantity::from(1))
                 .spec(
                     Target::builder()
-                        .take_profit(Distance::BasisPoints(Decimal::from(20)))
-                        .stop(Distance::BasisPoints(Decimal::from(10)))
+                        .bracket(BracketSpec {
+                            take_profit: Distance::BasisPoints(Decimal::from(20)),
+                            stop: Distance::BasisPoints(Decimal::from(10)),
+                            atr: None,
+                        })
                         .limit(SignedDuration::from_hours(1))
                         .build(),
                 )

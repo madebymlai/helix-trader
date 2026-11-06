@@ -36,20 +36,26 @@ fn rule() -> DecisionRule {
     every(15)
 }
 
-/// A bracket: a take profit 20 bps away, a stop 1.5 ATRs of 14 bars,
-/// closed after 2 hours.
+/// A take profit 20 bps away, a stop 1.5 ATRs of 14 bars.
+fn exits_of_config() -> BracketSpec {
+    BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::from(20)),
+        stop: Distance::Atr(Decimal::new(15, 1)),
+        atr: Some(AtrArgs {
+            period: 14,
+            ..DEFAULT_ATR
+        }),
+    }
+}
+
+/// A bracket, `exits_of_config`, closed after 2 hours.
 fn config() -> TargetConfig {
     TargetConfig::builder()
         .instrument_id(InstrumentId::from(GOLD))
         .quantity(Quantity::from(1))
         .spec(Target {
-            take_profit: Some(Distance::BasisPoints(Decimal::from(20))),
-            stop: Some(Distance::Atr(Decimal::new(15, 1))),
+            bracket: Some(exits_of_config()),
             limit: SignedDuration::from_hours(2),
-            atr: Some(AtrArgs {
-                period: 14,
-                ..DEFAULT_ATR
-            }),
         })
         .build()
 }
@@ -64,6 +70,14 @@ fn bracket() -> Target {
     config().spec
 }
 
+/// The target of `config` with the exits `exits`.
+fn exiting(exits: BracketSpec) -> Target {
+    Target {
+        bracket: Some(exits),
+        ..bracket()
+    }
+}
+
 /// The time-only target of `config`'s instrument and size, closed after
 /// `limit`.
 fn time_only(limit: SignedDuration) -> TargetConfig {
@@ -73,21 +87,21 @@ fn time_only(limit: SignedDuration) -> TargetConfig {
 /// The target of `config` with both distances in basis points and no
 /// ATR.
 fn in_bps(take_profit: i64, stop: i64) -> Target {
-    Target {
-        take_profit: Some(Distance::BasisPoints(Decimal::from(take_profit))),
-        stop: Some(Distance::BasisPoints(Decimal::from(stop))),
+    exiting(BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::from(take_profit)),
+        stop: Distance::BasisPoints(Decimal::from(stop)),
         atr: None,
-        ..bracket()
-    }
+    })
 }
 
 /// The ATR's bars are the decision cadence's: naming them is refused.
 #[test]
 fn a_target_atr_naming_its_bar_type_is_refused_at_load() {
     let toml = r#"
+        limit = "2h"
+        [bracket]
         take_profit = { atr = 2 }
         stop = { atr = 1.5 }
-        limit = "2h"
         atr = { bar_type = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL", period = 14 }
     "#;
 
@@ -317,17 +331,17 @@ fn an_atr_on_an_instrument_the_strategy_reads_no_prices_of_is_refused() {
 /// 14 bars, which `atr = { period = .. }` overrides.
 #[test]
 fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
-    let default = of(Target {
+    let default = of(exiting(BracketSpec {
         atr: None,
-        ..bracket()
-    });
-    let overridden = of(Target {
+        ..exits_of_config()
+    }));
+    let overridden = of(exiting(BracketSpec {
         atr: Some(AtrArgs {
             period: 20,
             ..DEFAULT_ATR
         }),
-        ..bracket()
-    });
+        ..exits_of_config()
+    }));
 
     assert!(default.validate(rule(), &quotes()).is_ok());
     assert_eq!(atr_bars(&default, rule()).unwrap().1, 14);
@@ -362,26 +376,20 @@ fn a_bracket_and_a_time_only_target_are_valid() {
     );
 }
 
-/// `Trade::send_as` has both exits or neither: one alone is refused, by
-/// `validate` and by `Targets::new`, a dataset run sending no order of it.
+/// A bracket has both exits: one alone does not parse.
 #[test]
-fn one_exit_alone_is_invalid() {
-    for spec in [
-        Target {
-            stop: None,
-            ..in_bps(20, 10)
-        },
-        Target {
-            take_profit: None,
-            ..in_bps(20, 10)
-        },
+fn one_exit_alone_does_not_parse() {
+    for (toml, missing) in [
+        ("bracket = { take_profit = { bps = 20 } }", "stop"),
+        ("bracket = { stop = { bps = 10 } }", "take_profit"),
     ] {
-        let err = of(spec).validate(rule(), &quotes()).unwrap_err();
-        let ConfigError::InvalidValue { field, .. } = err else {
-            panic!("not one invalid value: {err:?}");
-        };
-        assert_eq!(field, "model.target");
-        assert!(Targets::new(of(spec), rule(), &quotes()).is_err());
+        let err = toml::from_str::<Target>(&format!("{toml}\nlimit = \"2h\"")).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains(&format!("missing field `{missing}`")),
+            "{err}"
+        );
     }
 }
 
@@ -394,10 +402,10 @@ fn sizes_distances_and_times_must_be_positive() {
         },
         of(in_bps(0, 10)),
         of(in_bps(10, -1)),
-        of(Target {
-            stop: Some(Distance::Atr(Decimal::ZERO)),
-            ..bracket()
-        }),
+        of(exiting(BracketSpec {
+            stop: Distance::Atr(Decimal::ZERO),
+            ..exits_of_config()
+        })),
         of(Target {
             limit: SignedDuration::ZERO,
             ..bracket()
@@ -418,13 +426,13 @@ fn sizes_distances_and_times_must_be_positive() {
 #[test]
 #[should_panic(expected = "period")]
 fn an_atr_of_no_bars_panics_as_validated() {
-    let config = of(Target {
+    let config = of(exiting(BracketSpec {
         atr: Some(AtrArgs {
             period: 0,
             ..DEFAULT_ATR
         }),
-        ..bracket()
-    });
+        ..exits_of_config()
+    }));
     let _ = config.validate(rule(), &quotes());
 }
 
@@ -433,13 +441,14 @@ fn an_atr_of_no_bars_panics_as_validated() {
 #[test]
 fn an_atr_reads_nautilus_arguments_from_toml() {
     let toml = r#"
+        limit = "2h"
+        [bracket]
         take_profit = { atr = 2 }
         stop = { atr = 1.5 }
-        limit = "2h"
         atr = { period = 20, ma_type = "Exponential", use_previous = false, value_floor = 0.25 }
     "#;
 
-    let atr = toml::from_str::<Target>(toml).unwrap().atr;
+    let atr = toml::from_str::<Target>(toml).unwrap().bracket.unwrap().atr;
 
     assert_eq!(
         atr,
@@ -484,15 +493,16 @@ fn a_table_trades_the_instrument_and_size_it_is_given() {
 fn an_atr_table_is_refused_unless_a_distance_uses_the_atr() {
     let valid = [
         of(in_bps(20, 10)),
-        of(Target {
-            take_profit: Some(Distance::Atr(Decimal::from(2))),
-            ..bracket()
-        }),
+        of(exiting(BracketSpec {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            ..exits_of_config()
+        })),
     ];
-    let unused = of(Target {
-        atr: bracket().atr,
-        ..in_bps(20, 10)
-    });
+    let unused = of(exiting(BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::from(20)),
+        stop: Distance::BasisPoints(Decimal::from(10)),
+        ..exits_of_config()
+    }));
 
     for config in valid {
         assert!(config.validate(rule(), &quotes()).is_ok(), "{config:?}");
@@ -527,14 +537,17 @@ fn half_point() -> InstrumentAny {
 
 /// The take profit and stop of the long and the short, from `target`
 /// at `reference` with `atr`, as text.
-fn exits(target: Target, reference: &str, atr: Option<f64>) -> Vec<(String, String)> {
+fn exits(target: Target, reference: &str, atr: Option<f64>) -> [(String, String); 2] {
     let reference = Decimal::from_str_exact(reference).unwrap();
-    super::exits(target.bracket().unwrap(), &half_point(), reference, atr)
+    let exits = super::exits(target.bracket.unwrap(), &half_point(), reference, atr)
         .unwrap()
-        .expect("exits off the reference")
-        .into_iter()
-        .map(|(_, take_profit, stop)| (take_profit.to_string(), stop.to_string()))
-        .collect()
+        .expect("exits off the reference");
+    [exits.long, exits.short].map(|bracket| {
+        (
+            bracket.take_profit.to_string(),
+            bracket.stop_loss.to_string(),
+        )
+    })
 }
 
 #[test]
@@ -560,10 +573,11 @@ fn exits_are_basis_points_of_the_reference_on_the_nearest_tick() {
 #[test]
 fn a_tie_between_two_ticks_goes_away_from_the_reference() {
     // 12.5 bps of 1000.0 is 1.25, half way between 1.0 and 1.5.
-    let target = Target {
-        take_profit: Some(Distance::BasisPoints(Decimal::new(125, 1))),
-        ..in_bps(10, 10)
-    };
+    let target = exiting(BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::new(125, 1)),
+        stop: Distance::BasisPoints(Decimal::from(10)),
+        atr: None,
+    });
 
     assert_eq!(
         exits(target, "1000.0", None),
@@ -578,11 +592,11 @@ fn a_tie_between_two_ticks_goes_away_from_the_reference() {
 fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
     // 1.5 ATRs of 2.1 is 3.15, nearer 3.0 than 3.5; 2 ATRs 4.2,
     // nearer 4.0.
-    let target = Target {
-        take_profit: Some(Distance::Atr(Decimal::new(15, 1))),
-        stop: Some(Distance::Atr(Decimal::from(2))),
-        ..bracket()
-    };
+    let target = exiting(BracketSpec {
+        take_profit: Distance::Atr(Decimal::new(15, 1)),
+        stop: Distance::Atr(Decimal::from(2)),
+        ..exits_of_config()
+    });
 
     assert_eq!(
         exits(target, "1000.0", Some(2.1)),
@@ -601,7 +615,11 @@ fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
 #[test]
 fn an_exit_rounding_onto_the_reference_gives_no_exits() {
     let exits_of = |take_profit: Decimal, stop: Decimal| {
-        let bracket = (Distance::Atr(take_profit), Distance::Atr(stop));
+        let bracket = BracketSpec {
+            take_profit: Distance::Atr(take_profit),
+            stop: Distance::Atr(stop),
+            atr: None,
+        };
         super::exits(bracket, &half_point(), Decimal::from(1000), Some(0.1)).unwrap()
     };
 
@@ -621,26 +639,26 @@ fn the_fingerprint_changes_with_every_target_spec() {
             quantity: Quantity::from(2),
             ..config()
         },
-        of(Target {
-            take_profit: Some(Distance::BasisPoints(Decimal::from(21))),
-            ..bracket()
-        }),
-        of(Target {
-            take_profit: Some(Distance::Atr(Decimal::from(20))),
-            ..bracket()
-        }),
-        of(Target {
-            stop: Some(Distance::Atr(Decimal::from(2))),
-            ..bracket()
-        }),
-        of(Target {
+        of(exiting(BracketSpec {
+            take_profit: Distance::BasisPoints(Decimal::from(21)),
+            ..exits_of_config()
+        })),
+        of(exiting(BracketSpec {
+            take_profit: Distance::Atr(Decimal::from(20)),
+            ..exits_of_config()
+        })),
+        of(exiting(BracketSpec {
+            stop: Distance::Atr(Decimal::from(2)),
+            ..exits_of_config()
+        })),
+        of(exiting(BracketSpec {
             atr: Some(AtrArgs {
                 period: 15,
                 ..DEFAULT_ATR
             }),
-            ..bracket()
-        }),
-        of(Target {
+            ..exits_of_config()
+        })),
+        of(exiting(BracketSpec {
             atr: Some(AtrArgs {
                 ma_type: Some(MovingAverageType::Simple),
                 ..AtrArgs {
@@ -648,9 +666,9 @@ fn the_fingerprint_changes_with_every_target_spec() {
                     ..DEFAULT_ATR
                 }
             }),
-            ..bracket()
-        }),
-        of(Target {
+            ..exits_of_config()
+        })),
+        of(exiting(BracketSpec {
             atr: Some(AtrArgs {
                 use_previous: Some(false),
                 ..AtrArgs {
@@ -658,9 +676,9 @@ fn the_fingerprint_changes_with_every_target_spec() {
                     ..DEFAULT_ATR
                 }
             }),
-            ..bracket()
-        }),
-        of(Target {
+            ..exits_of_config()
+        })),
+        of(exiting(BracketSpec {
             atr: Some(AtrArgs {
                 value_floor: Some(0.5),
                 ..AtrArgs {
@@ -668,8 +686,8 @@ fn the_fingerprint_changes_with_every_target_spec() {
                     ..DEFAULT_ATR
                 }
             }),
-            ..bracket()
-        }),
+            ..exits_of_config()
+        })),
         of(Target {
             limit: SignedDuration::from_hours(3),
             ..bracket()
@@ -727,19 +745,19 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
         .build()
         .unwrap()
         .fingerprint();
-    let default = of(Target {
+    let default = of(exiting(BracketSpec {
         atr: None,
-        ..bracket()
-    });
-    let written_out = of(Target {
+        ..exits_of_config()
+    }));
+    let written_out = of(exiting(BracketSpec {
         atr: Some(AtrArgs {
             period: 14,
             ma_type: Some(MovingAverageType::Wilder),
             use_previous: Some(true),
             value_floor: Some(0.0),
         }),
-        ..bracket()
-    });
+        ..exits_of_config()
+    }));
 
     assert_eq!(
         fingerprint(base, &default, rule(), &quotes()).unwrap(),
@@ -931,10 +949,11 @@ fn no_exits() -> Target {
 /// A take profit 20 bps away and a stop a tenth of a basis point away: on
 /// AUD/USD's ticks of 0.00001, a tick from 0.70000, none from 0.07000.
 fn tight_stop() -> Target {
-    Target {
-        stop: Some(Distance::BasisPoints(Decimal::new(1, 1))),
-        ..in_bps(20, 1)
-    }
+    exiting(BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::from(20)),
+        stop: Distance::BasisPoints(Decimal::new(1, 1)),
+        atr: None,
+    })
 }
 
 fn setter(config: &TargetConfig) -> TargetSetter {
@@ -966,10 +985,20 @@ fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop() {
     let set = setter(&on_aud(in_bps(20, 10))).at(&probe).unwrap().unwrap();
 
     assert_eq!(set.long.reference, Price::from("0.70000"));
-    assert_eq!(set.long.take_profit, Some(Price::from("0.70140")));
-    assert_eq!(set.long.stop, Some(Price::from("0.69930")));
-    assert_eq!(set.short.take_profit, Some(Price::from("0.69860")));
-    assert_eq!(set.short.stop, Some(Price::from("0.70070")));
+    assert_eq!(
+        set.long.bracket,
+        Some(Bracket {
+            take_profit: Price::from("0.70140"),
+            stop_loss: Price::from("0.69930"),
+        })
+    );
+    assert_eq!(
+        set.short.bracket,
+        Some(Bracket {
+            take_profit: Price::from("0.69860"),
+            stop_loss: Price::from("0.70070"),
+        })
+    );
     for unit in [set.long.unit, set.short.unit] {
         assert!((unit - 0.70).abs() < 1e-9, "{unit}");
     }
@@ -986,8 +1015,8 @@ fn a_time_only_target_is_set_with_a_unit_of_one_and_reads_no_instrument() {
 
     assert_eq!(set.long.unit, 1.0);
     assert_eq!(set.short.unit, 1.0);
-    assert_eq!(set.long.take_profit, None);
-    assert_eq!(set.short.stop, None);
+    assert_eq!(set.long.bracket, None);
+    assert_eq!(set.short.bracket, None);
     assert_eq!(set.long.reference, Price::from("0.70000"));
 }
 

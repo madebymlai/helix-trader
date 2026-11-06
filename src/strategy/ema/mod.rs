@@ -48,7 +48,7 @@ use serde::Deserialize;
 use self::signal::Signal;
 use crate::strategy::{
     DataRequirements, Declaration, Declared, EmaArgs, Part, Series, StandardConfig,
-    orders::{self, Exits, Trade},
+    orders::{self, Bracket, Exits, Trade},
     warmup::Warmup,
 };
 
@@ -260,8 +260,10 @@ impl EmaCross {
             side,
             quantity: self.config.trade_size(),
             exits: Exits {
-                take_profit: Some(instrument.try_make_price_from_decimal(take_profit)?),
-                stop_loss: Some(instrument.try_make_price_from_decimal(stop_loss)?),
+                bracket: Some(Bracket {
+                    take_profit: instrument.try_make_price_from_decimal(take_profit)?,
+                    stop_loss: instrument.try_make_price_from_decimal(stop_loss)?,
+                }),
                 time_limit: Some(HOLD),
             },
         })

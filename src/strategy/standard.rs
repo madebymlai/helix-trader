@@ -1241,7 +1241,7 @@ mod tests {
             model::{
                 decide::DecisionRule,
                 learner::LearnerConfig,
-                targets::{Distance, Target},
+                targets::{BracketSpec, Distance, Target},
             },
             strategy::AtrArgs,
         };
@@ -1327,7 +1327,7 @@ mod tests {
             TOML.replace(r#"warmup = "1h""#, r#"warmup = "3h""#).replace(
                 r#"target = { limit = "30m" }"#,
                 &format!(
-                    r#"target = {{ take_profit = {{ atr = 2 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }}"#
+                    r#"target = {{ bracket = {{ take_profit = {{ atr = 2 }}, stop = {{ atr = 1.5 }}{atr} }}, limit = "45m" }}"#
                 ),
             )
         }
@@ -1341,7 +1341,7 @@ mod tests {
             );
             let model = config.model();
             assert_eq!(model.target.spec.limit, SignedDuration::from_mins(30));
-            assert_eq!(model.target.spec.bracket(), None);
+            assert_eq!(model.target.spec.bracket, None);
             assert_eq!(
                 model.decision,
                 DecisionRule::Every(SignedDuration::from_hours(1))
@@ -1564,15 +1564,17 @@ mod tests {
             assert_eq!(
                 spec,
                 Target {
-                    take_profit: Some(Distance::Atr(2.into())),
-                    stop: Some(Distance::Atr(rust_decimal::Decimal::new(15, 1))),
-                    limit: SignedDuration::from_mins(45),
-                    atr: Some(AtrArgs {
-                        period: 3,
-                        ma_type: Some(MovingAverageType::Simple),
-                        use_previous: Some(false),
-                        value_floor: Some(0.5),
+                    bracket: Some(BracketSpec {
+                        take_profit: Distance::Atr(2.into()),
+                        stop: Distance::Atr(rust_decimal::Decimal::new(15, 1)),
+                        atr: Some(AtrArgs {
+                            period: 3,
+                            ma_type: Some(MovingAverageType::Simple),
+                            use_previous: Some(false),
+                            value_floor: Some(0.5),
+                        }),
                     }),
+                    limit: SignedDuration::from_mins(45),
                 }
             );
         }
@@ -1632,7 +1634,7 @@ mod tests {
                 "{}\n{meta}",
                 TOML.replace(
                     r#"target = { limit = "30m" }"#,
-                    r#"target = { take_profit = { bps = 10 }, stop = { bps = 10 }, limit = "45m" }"#,
+                    r#"target = { bracket = { take_profit = { bps = 10 }, stop = { bps = 10 } }, limit = "45m" }"#,
                 )
             )
         }

@@ -426,7 +426,8 @@ mod tests {
 
     const TIME_ONLY: &str = r#"{ limit = "30m" }"#;
     /// A bracket in ATRs: Nautilus' ATR of 14 hourly bars of gold.
-    const BRACKET: &str = r#"{ take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" }"#;
+    const BRACKET: &str =
+        r#"{ bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#;
 
     /// Each config error refusing the probe's config of `features`,
     /// `series` and `target` (see `load`): its field and its message.

@@ -26,7 +26,7 @@ use helix_trader::{
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
         store::{ModelManifest, Probe, StoredModel},
-        targets::{Distance, Side, Target, TargetConfig, TargetRow},
+        targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, orders},
 };
@@ -157,8 +157,11 @@ pub fn target() -> TargetConfig {
         .quantity(Quantity::from(1))
         .spec(
             Target::builder()
-                .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
-                .stop(Distance::BasisPoints(Decimal::new(75, 1)))
+                .bracket(BracketSpec {
+                    take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                    stop: Distance::BasisPoints(Decimal::new(75, 1)),
+                    atr: None,
+                })
                 .limit(SignedDuration::from_hours(2))
                 .build(),
         )

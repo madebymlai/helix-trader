@@ -6,13 +6,11 @@
 //! margin account so that each is a position of its own, each the trade a
 //! strategy trading on a model of that target would place, sent through the
 //! shared order module (`strategy::orders::Trade::send_as`, the one sending
-//! of both). The target (`Target`) has one limit and its exits, both or
-//! neither:
+//! of both). The target (`Target`) has one limit and a bracket or none:
 //!
-//! - with them: a bracket, a market entry, a take-profit limit and a stop,
-//!   the two exits one-updates-the-other, closed at the limit after its
-//!   send;
-//! - without them, time only: a market entry closed at the limit after its
+//! - with one: a market entry, a take-profit limit and a stop, the two exits
+//!   one-updates-the-other, closed at the limit after its send;
+//! - without one, time only: a market entry closed at the limit after its
 //!   send.
 //!
 //! The strategy hands its time events to the order module
@@ -22,12 +20,12 @@
 //! reduce-only orders a bracket's legs and `close_position` are (see
 //! `venues/ib/README.md`): a model strategy cannot trade live on IB.
 //!
-//! The exits are `take_profit` and `stop` away from the decision's price
-//! (`reference`): the mid of the instrument's last quote, else its last
-//! trade, else the close of its last bar. Each distance is relative
-//! (`Distance`): basis points of that price, or multiples of an average
-//! true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR`
-//! unless the target gives its arguments, built by
+//! The exits (`BracketSpec`) are `take_profit` and `stop` away from the
+//! decision's price (`reference`): the mid of the instrument's last quote,
+//! else its last trade, else the close of its last bar. Each distance is
+//! relative (`Distance`): basis points of that price, or multiples of an
+//! average true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR`
+//! unless the bracket gives its arguments, built by
 //! Nautilus' `AverageTrueRange::new` as the config is validated, so that
 //! an argument Nautilus refuses panics at load. Its bars are Nautilus' bars of
 //! the instrument at the decision cadence, so a decision reads the bar
@@ -125,7 +123,7 @@ use super::{
 };
 use crate::strategy::{
     AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
-    orders::{self, Exits, OrderIds, Trade},
+    orders::{self, Bracket, Exits, OrderIds, Trade},
     warmup::Warmup,
 };
 
@@ -146,26 +144,32 @@ pub struct TargetConfig {
 
 /// A target as a model table of a strategy's TOML has it, what it trades
 /// being the strategy's `[trade]`, named once: how a decision's trades end.
-/// A bracket has both exits, each a distance from the decision's price, and
-/// its time limit, such as `{ take_profit = { atr = 2.0 }, stop = { bps = 20
-/// }, limit = "2h" }`, or with the ATR's arguments given, `{ .., atr = {
-/// period = 20, ma_type = "WILDER" } }`; a time-only target neither exit,
-/// `{ limit = "2h" }`.
+/// A bracket and its time limit, such as `{ bracket = { take_profit = { atr =
+/// 2.0 }, stop = { bps = 20 } }, limit = "2h" }`, or with the ATR's arguments
+/// given, `{ bracket = { .., atr = { period = 20, ma_type = "WILDER" } }, .. }`;
+/// a time-only target the limit alone, `{ limit = "2h" }`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
-    /// How far the take profit is, in the side's favour: with a stop, or
-    /// not at all (`TargetConfig::validate`).
+    /// Its exits, if it has them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub take_profit: Option<Distance>,
-    /// How far the stop is, against the side: with a take profit, or not
-    /// at all (`TargetConfig::validate`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop: Option<Distance>,
+    pub bracket: Option<BracketSpec>,
     /// How long after the decision what is still open is closed.
     pub limit: SignedDuration,
+}
+
+/// A target's exits, each a distance from the decision's price, and the
+/// arguments of the ATR its distances may be in.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BracketSpec {
+    /// How far the take profit is, in the side's favour.
+    pub take_profit: Distance,
+    /// How far the stop is, against the side.
+    pub stop: Distance,
     /// The average true range the `atr` distances are multiples of, if
-    /// not `DEFAULT_ATR`: only with a distance in ATRs.
+    /// not `DEFAULT_ATR`: only with a distance in ATRs
+    /// (`TargetConfig::validate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atr: Option<AtrArgs>,
 }
@@ -183,7 +187,7 @@ pub enum Distance {
     Atr(Decimal),
 }
 
-/// The average true range of a target without an `atr` table: Nautilus'
+/// The average true range of a bracket without an `atr` table: Nautilus'
 /// `AverageTrueRange` of Wilder's 14 bars, its other arguments Nautilus'
 /// defaults. An `atr` table gives Nautilus' arguments by their names
 /// (`AtrArgs`), `{ period = 20, ma_type = "WILDER", use_previous = true,
@@ -336,8 +340,7 @@ impl<T> PerSide<T> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SideTarget {
     pub reference: Price,
-    pub take_profit: Option<Price>,
-    pub stop: Option<Price>,
+    pub bracket: Option<Bracket>,
     pub time_limit: SignedDuration,
     pub unit: f64,
 }
@@ -368,8 +371,7 @@ impl TargetConfig {
     /// Returns every violation, each Nautilus' `ConfigError` under its
     /// field of `[model]` (`model.target…`), as one
     /// `ConfigError::Multiple` if there are several: the size not positive,
-    /// a take profit without a stop or a stop without a take profit, a
-    /// distance or the limit not positive, an `atr` table no distance uses,
+    /// a distance or the limit not positive, an `atr` table no distance uses,
     /// or an ATR without bars at the cadence of `rule` built from what a
     /// strategy of `requirements` reads (see `atr_bars`).
     ///
@@ -389,20 +391,11 @@ impl TargetConfig {
             ConfigError::invalid_value("model.target", "the target quantity must be positive"),
         );
         errors.check(
-            spec.take_profit.is_some() == spec.stop.is_some(),
+            spec.bracket.is_none_or(|bracket| {
+                bracket.take_profit.value() > Decimal::ZERO && bracket.stop.value() > Decimal::ZERO
+            }),
             ConfigError::invalid_value(
-                "model.target",
-                "the target has a take profit or a stop alone: a bracket has both, a time-only \
-                 target neither",
-            ),
-        );
-        errors.check(
-            [spec.take_profit, spec.stop]
-                .into_iter()
-                .flatten()
-                .all(|distance| distance.value() > Decimal::ZERO),
-            ConfigError::invalid_value(
-                "model.target",
+                "model.target.bracket",
                 "the target's take profit and stop must be positive",
             ),
         );
@@ -414,14 +407,17 @@ impl TargetConfig {
             ),
         );
         errors.check(
-            spec.uses_atr() || spec.atr.is_none(),
+            spec.bracket
+                .is_none_or(|bracket| bracket.uses_atr() || bracket.atr.is_none()),
             ConfigError::invalid_value(
-                "model.target.atr",
+                "model.target.bracket.atr",
                 "the target has an ATR no distance uses",
             ),
         );
         let atr = |result: anyhow::Result<()>| {
-            result.map_err(|e| ConfigError::invalid_value("model.target.atr", format!("{e:#}")))
+            result.map_err(|e| {
+                ConfigError::invalid_value("model.target.bracket.atr", format!("{e:#}"))
+            })
         };
         if let Some(args) = spec.atr_args() {
             // Nautilus checks the arguments as it builds the ATR.
@@ -540,8 +536,8 @@ impl TargetConfig {
             .transpose()?;
         let exits = self
             .spec
-            .bracket()
-            .map(|(take_profit, stop)| format!("take profit {take_profit} stop {stop}"));
+            .bracket
+            .map(|bracket| format!("take profit {} stop {}", bracket.take_profit, bracket.stop));
         Ok(format!(
             "{} {} exits {exits:?} limit {} ns atr {atr:?}",
             self.instrument_id,
@@ -570,26 +566,21 @@ impl Target {
         }
     }
 
-    /// Its take profit and stop, if it has both; none of a time-only one.
-    #[must_use]
-    pub const fn bracket(&self) -> Option<(Distance, Distance)> {
-        match (self.take_profit, self.stop) {
-            (Some(take_profit), Some(stop)) => Some((take_profit, stop)),
-            _ => None,
-        }
+    /// Its ATR, if a distance is in ATRs: its `atr` table's, else
+    /// `DEFAULT_ATR`.
+    fn atr_args(&self) -> Option<AtrArgs> {
+        self.bracket
+            .filter(BracketSpec::uses_atr)
+            .map(|bracket| bracket.atr.unwrap_or(DEFAULT_ATR))
     }
+}
 
+impl BracketSpec {
     /// Whether a distance is in ATRs.
     fn uses_atr(&self) -> bool {
         [self.take_profit, self.stop]
             .iter()
-            .any(|distance| matches!(distance, Some(Distance::Atr(_))))
-    }
-
-    /// Its ATR, if a distance is in ATRs: its `atr` table's, else
-    /// `DEFAULT_ATR`.
-    fn atr_args(&self) -> Option<AtrArgs> {
-        self.uses_atr().then(|| self.atr.unwrap_or(DEFAULT_ATR))
+            .any(|distance| matches!(distance, Distance::Atr(_)))
     }
 }
 
@@ -619,11 +610,11 @@ impl Display for Distance {
     }
 }
 
-/// The take profit and stop of each side, the long then the short, of
-/// `bracket` from `reference` and, if a distance is in ATRs, the ATR's value
-/// `atr`, each on the nearest tick of `instrument`; none at all if an exit
-/// rounds onto `reference`, no distance (a stop's worth nothing, a P&L in R of
-/// none), so that the decision is no target, as one on a cold ATR.
+/// The take profit and stop of each side of `bracket`, from `reference` and,
+/// if a distance is in ATRs, the ATR's value `atr`, each on the nearest tick
+/// of `instrument`; none at all if an exit rounds onto `reference`, no
+/// distance (a stop's worth nothing, a P&L in R of none), so that the decision
+/// is no target, as one on a cold ATR.
 ///
 /// # Errors
 ///
@@ -633,29 +624,29 @@ impl Display for Distance {
 ///
 /// Panics if a distance is in ATRs and `atr` is none.
 fn exits(
-    (take_profit, stop): (Distance, Distance),
+    bracket: BracketSpec,
     instrument: &InstrumentAny,
     reference: Decimal,
     atr: Option<f64>,
-) -> anyhow::Result<Option<Vec<(Side, Price, Price)>>> {
+) -> anyhow::Result<Option<PerSide<Bracket>>> {
     let atr = atr
         .map(|atr| Decimal::try_from(atr).with_context(|| format!("the ATR {atr}")))
         .transpose()?;
-    let take_profit = take_profit.length(reference, atr);
-    let stop = stop.length(reference, atr);
-    let exits = Side::BOTH
-        .into_iter()
-        .map(|side| {
-            let favour = side.sign();
-            Ok((
-                side,
-                nearest_tick(instrument, reference + favour * take_profit, favour)?,
-                nearest_tick(instrument, reference - favour * stop, -favour)?,
-            ))
+    let take_profit = bracket.take_profit.length(reference, atr);
+    let stop = bracket.stop.length(reference, atr);
+    let of = |side: Side| -> anyhow::Result<Bracket> {
+        let favour = side.sign();
+        Ok(Bracket {
+            take_profit: nearest_tick(instrument, reference + favour * take_profit, favour)?,
+            stop_loss: nearest_tick(instrument, reference - favour * stop, -favour)?,
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let off_reference = exits.iter().all(|(_, take_profit, stop)| {
-        take_profit.as_decimal() != reference && stop.as_decimal() != reference
+    };
+    let exits = PerSide {
+        long: of(Side::Long)?,
+        short: of(Side::Short)?,
+    };
+    let off_reference = [exits.long, exits.short].iter().all(|bracket| {
+        bracket.take_profit.as_decimal() != reference && bracket.stop_loss.as_decimal() != reference
     });
     Ok(off_reference.then_some(exits))
 }
@@ -830,13 +821,12 @@ impl TargetSetter {
         let instrument_id = self.instrument_id;
         let cache = strategy.cache();
         let time_limit = self.spec.limit;
-        let Some(bracket) = self.spec.bracket() else {
+        let Some(bracket) = self.spec.bracket else {
             let target = reference(&cache, &instrument_id).ok_or(NoTarget::NoPrice);
             return Ok(target.map(|reference| {
                 let target = SideTarget {
                     reference,
-                    take_profit: None,
-                    stop: None,
+                    bracket: None,
                     time_limit,
                     unit: 1.0,
                 };
@@ -855,12 +845,8 @@ impl TargetSetter {
         let Some(exits) = exits(bracket, &instrument, reference.as_decimal(), atr)? else {
             return Ok(Err(NoTarget::ExitOnPrice(reference)));
         };
-        let target = |side| -> anyhow::Result<SideTarget> {
-            let &(_, take_profit, stop) = exits
-                .iter()
-                .find(|(of, _, _)| *of == side)
-                .expect("a bracket has exits on both sides");
-            let distance = (stop.as_decimal() - reference.as_decimal()).abs();
+        let target = |bracket: Bracket| -> anyhow::Result<SideTarget> {
+            let distance = (bracket.stop_loss.as_decimal() - reference.as_decimal()).abs();
             let unit = stop_worth(
                 &instrument,
                 self.quantity,
@@ -868,15 +854,14 @@ impl TargetSetter {
             )?;
             Ok(SideTarget {
                 reference,
-                take_profit: Some(take_profit),
-                stop: Some(stop),
+                bracket: Some(bracket),
                 time_limit,
                 unit,
             })
         };
         Ok(Ok(PerSide {
-            long: target(Side::Long)?,
-            short: target(Side::Short)?,
+            long: target(exits.long)?,
+            short: target(exits.short)?,
         }))
     }
 }
@@ -1043,7 +1028,7 @@ impl Targets {
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        if self.config.spec.bracket().is_some()
+        if self.config.spec.bracket.is_some()
             && let Some(instrument) = actor.cache().instrument(&self.config.instrument_id)
         {
             ensure_linear(&instrument)?;
@@ -1130,8 +1115,7 @@ impl Targets {
                 side: side.order_side(),
                 quantity: self.config.quantity,
                 exits: Exits {
-                    take_profit: target.take_profit,
-                    stop_loss: target.stop,
+                    bracket: target.bracket,
                     time_limit: Some(target.time_limit),
                 },
             };

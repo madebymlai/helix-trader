@@ -749,9 +749,10 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     };
     let spec: Target = toml::from_str(
         r#"
+        limit = "45m"
+        [bracket]
         take_profit = { atr = 2.0 }
         stop = { atr = 1.0 }
-        limit = "45m"
         atr = { period = 14, ma_type = "WILDER" }
         "#,
     )
@@ -775,7 +776,8 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
 /// still weighs after a Wilder's 70 bars. A bar handed over again would throw
 /// the true range back by hundreds, and the Wilder's memory would hold it.
 fn assert_three_atrs_wide(exits: &SideTarget) {
-    let width = exits.take_profit.unwrap().as_f64() - exits.stop.unwrap().as_f64();
+    let bracket = exits.bracket.unwrap();
+    let width = bracket.take_profit.as_f64() - bracket.stop_loss.as_f64();
     assert!((179.0..=181.0).contains(&width), "{exits:?}");
 }
 

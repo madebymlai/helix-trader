@@ -4,9 +4,9 @@
 //!
 //! A `Trade` is an instrument, a side, a quantity and its `Exits`.
 //! `Trade::send` rounds the quantity to the instrument's sizes and sends,
-//! with both exits, a Nautilus bracket (`OrderFactory::bracket`: a market
+//! with a `Bracket`, a Nautilus bracket (`OrderFactory::bracket`: a market
 //! entry, a take-profit limit and a stop-market, one-updates-the-other,
-//! the legs reduce-only), without them a market entry. A time limit sets a
+//! the legs reduce-only), without one a market entry. A time limit sets a
 //! time alert named after the entry, `TIME_ALERT` and its client order id,
 //! the time limit after the send, and tags the entry with it
 //! (`TIME_LIMIT_TAG`), where the cache, persisted live, keeps it.
@@ -45,7 +45,7 @@
 
 use std::{collections::BTreeSet, str::FromStr};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -87,14 +87,19 @@ pub struct Trade {
     pub exits: Exits,
 }
 
-/// How a trade ends: at its take profit or its stop loss, both or none,
-/// on the instrument's prices, or at its time limit after the send, if it
-/// has one.
+/// How a trade ends: at an exit of its bracket, if it has one, or at its
+/// time limit after the send, if it has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exits {
-    pub take_profit: Option<Price>,
-    pub stop_loss: Option<Price>,
+    pub bracket: Option<Bracket>,
     pub time_limit: Option<SignedDuration>,
+}
+
+/// A trade's take profit and stop loss, on the instrument's prices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bracket {
+    pub take_profit: Price,
+    pub stop_loss: Price,
 }
 
 /// The client order ids a trade's orders take, for a caller naming them:
@@ -108,14 +113,13 @@ pub struct OrderIds {
 
 impl Trade {
     /// Sends the trade from `strategy`, its orders of the factory's ids:
-    /// a bracket with both exits, a market entry without them, and its
-    /// time alert if it has a time limit.
+    /// a Nautilus bracket with a `Bracket`, a market entry without one, and
+    /// its time alert if it has a time limit.
     ///
     /// # Errors
     ///
-    /// Returns an error if one exit is given without the other, the
-    /// instrument is not in the cache, the quantity rounds to no size of
-    /// it, or Nautilus refuses an order or the alert.
+    /// Returns an error if the instrument is not in the cache, the quantity
+    /// rounds to no size of it, or Nautilus refuses an order or the alert.
     pub fn send<S>(&self, strategy: &mut S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
@@ -154,8 +158,11 @@ impl Trade {
             .exits
             .time_limit
             .map(|limit| Ustr::from(&format!("{TIME_LIMIT_TAG}{limit}")));
-        let entry = match (self.exits.take_profit, self.exits.stop_loss) {
-            (Some(take_profit), Some(stop_loss)) => {
+        let entry = match self.exits.bracket {
+            Some(Bracket {
+                take_profit,
+                stop_loss,
+            }) => {
                 let orders = strategy
                     .order()
                     .bracket()
@@ -179,7 +186,7 @@ impl Trade {
                 strategy.submit_order_list(orders, None, None, None)?;
                 entry
             }
-            (None, None) => {
+            None => {
                 let order = strategy.order().market(
                     instrument_id,
                     self.side,
@@ -196,10 +203,6 @@ impl Trade {
                 strategy.submit_order(order, None, None, None)?;
                 entry
             }
-            _ => bail!(
-                "a trade of {instrument_id} has a take profit or a stop loss alone: a \
-                 Nautilus bracket has both"
-            ),
         };
         match self.exits.time_limit {
             Some(limit) => {
