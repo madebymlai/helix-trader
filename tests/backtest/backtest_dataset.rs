@@ -82,15 +82,7 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
     let mut written: Vec<DatasetRow> = settled
         .iter()
         .filter(|row| Timestamp::from(row.decision.ts_event) < end)
-        .map(|row| {
-            DatasetRow::new(
-                row.decision.features.clone(),
-                row.values(),
-                row.settled_at,
-                row.decision.ts_event,
-                row.decision.ts_init,
-            )
-        })
+        .map(DatasetRow::of)
         .collect();
     written.sort_by_key(|row| row.ts_init);
     // A decision every hour of the two days, each settled.

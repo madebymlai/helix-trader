@@ -16,7 +16,7 @@
 //!   (`store::ModelStore`) valid at the decision, its calibrated
 //!   probability on the row, and its expected net P&L (`payoff`): with
 //!   exits, the expected R times the worth of the stop the decision sets
-//!   (`targets::TradedTarget`, from the decision's price and the target's
+//!   (`targets::TargetSetter`, from the decision's price and the target's
 //!   ATR, which the handle runs), on a time-only target in money. It
 //!   returns the `Decision` of the side clearing its margin, the larger of
 //!   two (`payoff::pick`), as plain data: the side, the target's size, the
@@ -91,7 +91,7 @@
 //! start is warm. A series of the traded instrument no feature reads,
 //! custom data among them, has no warmup. It warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
-//! ATR's bars too (`TradedTarget::warmed`), and the warmup hands the bars of the
+//! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop a
 //! dataset run sets there. A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
@@ -131,7 +131,7 @@ use super::{
     deciding::DecidingModels,
     features::FeatureSet,
     store::ModelSet,
-    targets::{TargetConfig, TargetRow, Targets, TradedTarget},
+    targets::{TargetConfig, TargetRow, TargetSetter, Targets},
 };
 use crate::{
     rolls::Roller,
@@ -189,7 +189,7 @@ pub struct Decision {
     /// The net P&L the side's model expects, in the instrument's P&L
     /// currency, on the target's size.
     pub expected_pnl: f64,
-    /// The price the target is set from (`targets::TradedTarget`): the mid
+    /// The price the target is set from (`targets::TargetSetter`): the mid
     /// of the instrument's last quote, else its last trade, else its last
     /// close.
     pub reference: Price,
@@ -257,7 +257,7 @@ struct Deciding {
     models: RefCell<DecidingModels>,
     /// The target the side models' trades are on, as each decision sets
     /// it.
-    target: TradedTarget,
+    target: TargetSetter,
     /// The target's instrument.
     instrument_id: InstrumentId,
     /// The target's size.
@@ -284,7 +284,7 @@ impl ModelHandle {
                 ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
             Ok(Deciding {
                 models: RefCell::new(DecidingModels::new(&models)?),
-                target: TradedTarget::new(&config.target, config.decision, requirements)?,
+                target: TargetSetter::new(&config.target, config.decision, requirements)?,
                 instrument_id: config.target.instrument_id,
                 quantity: config.target.quantity,
             })
@@ -374,8 +374,9 @@ impl ModelHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the warmup fails to start, or Nautilus refuses
-    /// a roll alert or the cadence's timer.
+    /// Returns an error if the warmup fails to start, Nautilus refuses a
+    /// roll alert or the cadence's timer, or, in a dataset run, the targets
+    /// refuse to start (`Targets::start`).
     pub fn start<S>(&self, strategy: &mut S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
@@ -388,7 +389,7 @@ impl ModelHandle {
         match &self.serving {
             Serving::Deciding(deciding) => deciding.target.start(strategy),
             Serving::Dataset { targets, rows } => {
-                targets.start(strategy);
+                targets.start(strategy)?;
                 let rows = Rc::clone(rows);
                 let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
                     if let Some(row) = data.data.as_any().downcast_ref::<TargetRow>() {
@@ -417,7 +418,7 @@ impl ModelHandle {
     /// # Errors
     ///
     /// Returns an error if a model fails to predict, deciding as
-    /// `TradedTarget::at` does, or, in a dataset run, as `Targets::open` does.
+    /// `TargetSetter::at` does, or, in a dataset run, as `Targets::open` does.
     pub fn decide<S>(&self, strategy: &mut S) -> anyhow::Result<Option<Decision>>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
@@ -521,7 +522,7 @@ impl Deciding {
         if let Err(e) = models.list() {
             log::error!("listing the models at {now}: {e:#}; the previous lists kept");
         }
-        let Some(targets) = self.target.at(strategy)? else {
+        let Ok(targets) = self.target.at(strategy)? else {
             return Ok(None);
         };
         let units = targets.map(|target| target.unit);
@@ -565,7 +566,10 @@ mod tests {
         data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
         enums::AggressorSide,
         identifiers::{ClientId, InstrumentId, TradeId, TraderId},
-        instruments::{InstrumentAny, stubs::audusd_sim},
+        instruments::{
+            Instrument, InstrumentAny,
+            stubs::{audusd_sim, btcusd_bybit},
+        },
         types::Price,
     };
     use nautilus_portfolio::portfolio::Portfolio;
@@ -1508,6 +1512,35 @@ mod tests {
         );
 
         assert!(built.is_err());
+    }
+
+    /// A dataset run's handle hands on the targets' refusal, which fails the
+    /// strategy's `on_start`, and so the run.
+    #[test]
+    fn a_dataset_runs_start_fails_on_a_bracket_on_an_inverse_instrument() {
+        let inverse = InstrumentAny::CryptoPerpetual(btcusd_bybit());
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_instrument(inverse.clone())
+            .unwrap();
+        let mut config = bracket_config(10);
+        config.target.instrument_id = inverse.id();
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            &config,
+            &requirements(),
+            Mode::Dataset {
+                rows: SettledRows::default(),
+            },
+        )
+        .unwrap();
+
+        let err = handle.start(&mut probe).unwrap_err();
+
+        assert!(format!("{err:#}").contains("inverse"), "{err:#}");
     }
 
     /// A quote of `eur` at noon, its mid 1.00000.

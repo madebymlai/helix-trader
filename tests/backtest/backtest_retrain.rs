@@ -253,7 +253,6 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
     .unwrap()
     .read(start, end)
     .unwrap();
-    let pnl = target().pnl_index(Side::Long);
     assert_eq!(scores.short, None);
     let long = scores.long.unwrap();
     assert_eq!(long.periods.len(), 3);
@@ -266,7 +265,7 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
         let gained: Vec<bool> = rows
             .iter()
             .filter(|row| from_ns <= row.ts_event && row.ts_event < to_ns)
-            .map(|row| row.targets[pnl] > 0.0)
+            .map(|row| row.gained(Side::Long))
             .collect();
         // The log loss of a constant `p` on the period's longs.
         let loss = |p: f64| {

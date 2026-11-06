@@ -97,7 +97,7 @@ use super::{
     holdout::{Earnings, Example, Holdout, Minimums, Refusal, Threshold},
     learner::{LearnerConfig, SavedModel, TrainingSet},
     meta,
-    payoff::{Payoff, Realised},
+    payoff::Payoff,
     schedule::{Models, Retrain, Schedule, Step},
     score,
     store::{
@@ -118,8 +118,6 @@ pub struct Training {
     strategy_id: StrategyId,
     target: TargetConfig,
     dataset: Dataset,
-    /// How the rows' trades read in the sides' payoffs.
-    realised: Realised,
     /// What each train does to each model.
     schedule: Schedule,
     /// The strategy's models: the stores the plan reads, and the side
@@ -217,8 +215,8 @@ pub enum Kept {
     /// had no row to fit, to calibrate on or to expect a payoff from, or
     /// no holdout to judge; the error.
     Failed(String),
-    /// The dataset holds rows that do not match the strategy's features or
-    /// target; the mismatch.
+    /// The dataset holds rows that do not match the strategy's features; the
+    /// mismatch.
     SchemaMismatch(String),
     /// A meta waits for the sides' decisions to learn from: no side's model
     /// is valid before the train, so none was fitted
@@ -235,8 +233,7 @@ impl Training {
     ///
     /// # Errors
     ///
-    /// Returns an error if the target is invalid, the instrument of its
-    /// exits is not in the catalog or is inverse, or a store cannot be keyed.
+    /// Returns an error if the target is invalid, or a store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -246,7 +243,6 @@ impl Training {
         requirements: &DataRequirements,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Self> {
-        let realised = Realised::new(catalog, &config.target)?;
         let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         let side = |side| {
             models.side(side).map(|traded| Level {
@@ -277,7 +273,6 @@ impl Training {
             models,
             levels,
             target: config.target,
-            realised,
         })
     }
 
@@ -423,10 +418,7 @@ impl Training {
         mut rows: Vec<&'a DatasetRow>,
     ) -> anyhow::Result<SideFit<'a>> {
         let side = traded.side();
-        let examples = rows
-            .iter()
-            .map(|row| Example::of_side(row, side, &self.realised))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let examples = rows.iter().map(|row| Example::of_side(row, side)).collect();
         let (model, fitted) = level.fit(at, examples)?;
         let realised: Vec<f64> = fitted.trained.iter().map(Example::realised).collect();
         let payoff = Payoff::of(&realised)?;
@@ -452,8 +444,7 @@ impl Training {
     ///
     /// # Errors
     ///
-    /// Returns an error if a model fails to predict, or a row's stop has no
-    /// worth.
+    /// Returns an error if a model fails to predict.
     fn earned(
         &self,
         surviving: &[SideFit<'_>],
@@ -487,14 +478,11 @@ impl Training {
             .collect();
         let mut trades = vec![];
         for row in held_out {
-            let picked = DecidingModels::pick_among(
-                deciding.iter().copied(),
-                &row.features,
-                self.realised.units(row)?,
-            )?;
+            let picked =
+                DecidingModels::pick_among(deciding.iter().copied(), &row.features, row.units())?;
             for Candidate { side, .. } in &deciding {
                 let taken = picked.is_some_and(|picked| picked.side == *side);
-                trades.push((taken, self.realised.trade(row, *side)));
+                trades.push((taken, row.trade(*side)));
             }
         }
         Ok(Earnings::of(&trades))
@@ -562,7 +550,7 @@ impl Training {
         at: Timestamp,
         rows: &[&DatasetRow],
     ) -> anyhow::Result<Outcome> {
-        let examples = meta::examples(&self.models, rows, &self.realised)?;
+        let examples = meta::examples(&self.models, rows)?;
         let (_, fitted) = level.fit(at, examples)?;
         let trades: Vec<_> = fitted
             .held_out
@@ -840,10 +828,8 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_model::{
         identifiers::InstrumentId,
-        instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Quantity},
     };
-    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -854,9 +840,7 @@ mod tests {
             decide::{DecisionRule, FeatureRow},
             holdout::Trades,
             learner::LearnerConfig,
-            targets::{
-                Distance, Distances, Exit, Outcome as TargetOutcome, Outcomes, Target, TargetRow,
-            },
+            targets::{Distance, Exit, Outcome as TargetOutcome, Outcomes, Target, TargetRow},
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
@@ -936,21 +920,13 @@ mod tests {
         }
     }
 
-    /// The catalog in `dir`, holding AUD/USD, whose stops' worth a train
-    /// reads.
-    fn catalog(dir: &Path) -> std::path::PathBuf {
+    /// The training in `dir`, its catalog and its store side by side: the
+    /// catalog holds no instrument, none being read.
+    fn training(dir: &Path, config: ModelConfig) -> Training {
         let catalog = dir.join("catalog");
         std::fs::create_dir_all(&catalog).unwrap();
-        ParquetDataCatalog::new(&catalog, None, None, None, None)
-            .write_instruments(vec![InstrumentAny::CurrencyPair(audusd_sim())])
-            .unwrap();
-        catalog
-    }
-
-    /// The training in `dir`, its catalog and its store side by side.
-    fn training(dir: &Path, config: ModelConfig) -> Training {
         Training::new(
-            &catalog(dir),
+            &catalog,
             &dir.join("models"),
             StrategyId::from(STRATEGY),
             &features(),
@@ -992,7 +968,7 @@ mod tests {
     }
 
     /// The row of the decision at `time` on `features`, settled `after` it:
-    /// each side 2 from its stop, a side winning 3 USD at its take profit,
+    /// each side's stop worth 2 USD, a side winning 3 USD at its take profit,
     /// losing 2 at its stop, net of 0.2 USD of commission.
     fn row_of(
         time: &str,
@@ -1011,10 +987,7 @@ mod tests {
                 pnl: Money::from(pnl),
                 commission: Money::from("0.2 USD"),
                 exit,
-                distances: Some(Distances {
-                    take_profit: Decimal::from(3),
-                    stop: Decimal::from(2),
-                }),
+                unit: 2.0,
             }
         };
         TargetRow {
@@ -1045,7 +1018,7 @@ mod tests {
     /// At midnight of the 7th: the window is the 6th, the calibration from
     /// 12:00, the holdout from 18:00. Fitted, a win and a loss of the long
     /// (the fake's mean 0.5). Calibrated on, the fake predicting its
-    /// feature, a loss at 0.25 and a win at 0.75, the loss's stop 4 away:
+    /// feature, a loss at 0.25 and a win at 0.75, the loss's stop worth 4 USD:
     /// Platt's targets 1/3 and 2/3, the odds of 1/3 and 3 becoming 1/2 and 2,
     /// so odds `o` become `o^s`, `s` being ln 2 / ln 3. Held out, a win at 0.8
     /// and a loss at 0.3, of odds 4 and 3/7, calibrated 1 / (1 + 4^-s) and
@@ -1080,7 +1053,7 @@ mod tests {
         ];
         let outcomes = &mut rows[4].outcomes;
         for outcome in [&mut outcomes.long, &mut outcomes.short] {
-            outcome.distances.as_mut().unwrap().stop = Decimal::from(4);
+            outcome.unit = 4.0;
         }
         rows
     }
@@ -1092,7 +1065,7 @@ mod tests {
     /// Worked by hand on `rows`: each side fitted on the rows before the
     /// calibration settled at its start, calibrated on those before the
     /// holdout settled at its start, judged on the holdout. The long's
-    /// realised R, its P&L over its stop's worth, 1 AUD/USD 2 or 4 away:
+    /// realised R, its P&L over its stop's worth, 2 or 4 USD:
     /// wins of 1.5R, losses of 1R and 0.5R; the short's wins of 1.5R and
     /// 0.75R, losses of 1R.
     #[test]
@@ -2277,12 +2250,12 @@ mod tests {
         assert_eq!(stored.manifest.baseline, 0.75);
     }
 
-    /// `rows` as a time-only target has them: closed at their time, with
-    /// no distances.
+    /// `rows` as a time-only target has them: closed at their time, of a
+    /// unit of 1.
     fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
         let at_its_time = |outcome| TargetOutcome {
             exit: Exit::Time,
-            distances: None,
+            unit: 1.0,
             ..outcome
         };
         rows.into_iter()
@@ -2329,7 +2302,7 @@ mod tests {
 
     /// A meta example carries the unit of its trade, the worth of the stop
     /// of the side picked: on `meta_rows` with each short's
-    /// stop 4 away, the long's 2, worth 4 and 2 USD on one AUD/USD, the
+    /// stop worth 4 USD, the long's 2, the
     /// four buys of the models valid from 06:00 carry 2 and the two sells
     /// of those valid from 17:00 carry 4, the short still expecting less
     /// than its margin in the morning and more in the evening.
@@ -2338,25 +2311,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta(24);
         publish_baselines(dir.path(), &config);
-        let realised = Realised::new(&catalog(dir.path()), &config.target).unwrap();
         let rows: Vec<DatasetRow> = meta_rows()
             .into_iter()
             .map(|mut row| {
-                row.outcomes.short.distances.as_mut().unwrap().stop = Decimal::from(4);
-                DatasetRow {
-                    features: row.decision.features.clone(),
-                    targets: row.values(),
-                    settled_at: row.settled_at,
-                    ts_event: row.decision.ts_event,
-                    ts_init: row.decision.ts_init,
-                }
+                row.outcomes.short.unit = 4.0;
+                DatasetRow::of(&row)
             })
             .collect();
 
         let examples = meta::examples(
             &models(dir.path(), &config),
             &rows.iter().collect::<Vec<_>>(),
-            &realised,
         )
         .unwrap();
 
@@ -2386,9 +2351,8 @@ mod tests {
         let config = with_meta(24);
         publish_baselines(dir.path(), &config);
         store(dir.path(), &config, Side::Short).break_listing();
-        let realised = Realised::new(&catalog(dir.path()), &config.target).unwrap();
 
-        let examples = meta::examples(&models(dir.path(), &config), &[], &realised);
+        let examples = meta::examples(&models(dir.path(), &config), &[]);
 
         assert!(examples.is_err());
     }

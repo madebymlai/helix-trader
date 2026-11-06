@@ -2,10 +2,12 @@
 //! whose coverage is the day cache.
 //!
 //! A dataset is the settled rows of one strategy (`TargetRow`, from a
-//! dataset run), each its decision's features and the values of its
-//! target, stored as Nautilus custom data, `DatasetRow`, one type for
-//! every strategy. Features and target values are list columns, so each strategy
-//! has the width of its own, and its rows are stored under an identifier
+//! dataset run), stored as Nautilus custom data, `DatasetRow`, one type for
+//! every strategy and target. A row holds everything needed to read its
+//! trades, so that training, scoring and the meta's examples read nothing
+//! else: each side's P&L, commission, exit and unit, beside its decision's
+//! features. The features are a list column, so each strategy has the width
+//! of its own, and its rows are stored under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
 //! `targets::fingerprint`, the venue settings of its dataset runs,
 //! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
@@ -65,9 +67,8 @@
 //! intervals, the cache: it is never consolidated.
 //!
 //! Beside the files, each dataset has a manifest, `manifest.json`: its
-//! strategy, fingerprint, feature names in order, target spec and value names,
-//! and the days it holds, rewritten whole (write, then rename) at each
-//! write.
+//! strategy, fingerprint, feature names in order, target spec and the days it
+//! holds, rewritten whole (write, then rename) at each write.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -94,7 +95,8 @@ use serde_json::json;
 use super::{
     decide::{self, DecisionRule},
     features::{FeatureSet, Fingerprint},
-    targets::{self, TargetConfig, TargetRow},
+    holdout::Trade,
+    targets::{self, PerSide, Side, TargetConfig, TargetRow},
 };
 use crate::strategy::{DataRequirements, warmup};
 
@@ -107,7 +109,7 @@ use crate::strategy::{DataRequirements, warmup};
 /// rebuilds every dataset and model. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
 /// without a bump.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -121,9 +123,24 @@ const MANIFEST: &str = "manifest.json";
 pub struct DatasetRow {
     /// The value of each feature, in the order of the dataset's names.
     pub features: Vec<f64>,
-    /// Each value of its target, in the order of the dataset's target
-    /// names (`TargetConfig::target_names`).
-    pub targets: Vec<f64>,
+    /// The long's realised P&L, net of its commission, in the target's P&L
+    /// currency.
+    pub long_pnl: f64,
+    /// The commission the long's P&L is net of.
+    pub long_commission: f64,
+    /// How the long closed (`targets::Exit::value`).
+    pub long_exit: f64,
+    /// The unit of the long's payoff, as its decision set it
+    /// (`targets::SideTarget::unit`).
+    pub long_unit: f64,
+    /// The short's realised P&L, as the long's.
+    pub short_pnl: f64,
+    /// The commission the short's P&L is net of.
+    pub short_commission: f64,
+    /// How the short closed.
+    pub short_exit: f64,
+    /// The unit of the short's payoff, as the long's.
+    pub short_unit: f64,
     /// When the last of the decision's positions closed.
     pub settled_at: UnixNanos,
     /// The time of the decision.
@@ -133,8 +150,7 @@ pub struct DatasetRow {
 }
 
 /// The error of a dataset holding rows that do not match its schema: other
-/// feature names, or a row of another width than its feature or target
-/// names.
+/// feature names, or a row of another width than its feature names.
 #[derive(Debug)]
 pub struct SchemaMismatch(String);
 
@@ -153,10 +169,8 @@ pub struct Manifest {
     /// The fingerprint of the features, the decision rule, the target and
     /// the venue of its dataset runs.
     pub fingerprint: String,
-    /// The names of the features, in the order of a row's values.
+    /// The names of the features, in the order of a row's features.
     pub feature_names: Vec<String>,
-    /// The names of the target's values, in the order of a row's values.
-    pub target_names: Vec<String>,
     /// The target spec.
     pub target: TargetConfig,
     /// The days stored, in runs of consecutive days.
@@ -459,13 +473,10 @@ impl Dataset {
                     .downcast_ref::<DatasetRow>()
                     .cloned()
                     .with_context(|| format!("the dataset {identifier} holds {custom:?}"))?;
-                let targets = self.target.target_names().len();
-                if row.features.len() != self.feature_names.len() || row.targets.len() != targets {
+                if row.features.len() != self.feature_names.len() {
                     bail!(SchemaMismatch(format!(
-                        "the dataset {identifier} holds a row of {} features and {} targets, \
-                         not {} and {targets}",
+                        "the dataset {identifier} holds a row of {} features, not {}",
                         row.features.len(),
-                        row.targets.len(),
                         self.feature_names.len()
                     )));
                 }
@@ -525,7 +536,6 @@ impl Dataset {
             strategy_id: self.strategy_id,
             fingerprint: self.fingerprint.to_string(),
             feature_names: self.feature_names.clone(),
-            target_names: self.target.target_names(),
             target: self.target.clone(),
             days,
         };
@@ -571,13 +581,52 @@ impl Dataset {
 
 impl DatasetRow {
     /// The row storing `row`.
-    fn of(row: &TargetRow) -> Self {
+    #[must_use]
+    pub fn of(row: &TargetRow) -> Self {
+        let (long, short) = (row.outcomes.long, row.outcomes.short);
         Self {
             features: row.decision.features.clone(),
-            targets: row.values(),
+            long_pnl: long.pnl.as_f64(),
+            long_commission: long.commission.as_f64(),
+            long_exit: long.exit.value(),
+            long_unit: long.unit,
+            short_pnl: short.pnl.as_f64(),
+            short_commission: short.commission.as_f64(),
+            short_exit: short.exit.value(),
+            short_unit: short.unit,
             settled_at: row.settled_at,
             ts_event: row.decision.ts_event,
             ts_init: row.decision.ts_init,
+        }
+    }
+
+    /// Whether `side`'s trade gained after its costs: the label of its model.
+    #[must_use]
+    pub fn gained(&self, side: Side) -> bool {
+        self.trade(side).pnl > 0.0
+    }
+
+    /// `side`'s trade: its net P&L and its commission.
+    #[must_use]
+    pub const fn trade(&self, side: Side) -> Trade {
+        match side {
+            Side::Long => Trade {
+                pnl: self.long_pnl,
+                commission: self.long_commission,
+            },
+            Side::Short => Trade {
+                pnl: self.short_pnl,
+                commission: self.short_commission,
+            },
+        }
+    }
+
+    /// The unit of each side's payoff.
+    #[must_use]
+    pub const fn units(&self) -> PerSide<f64> {
+        PerSide {
+            long: self.long_unit,
+            short: self.short_unit,
         }
     }
 }
@@ -664,7 +713,7 @@ mod tests {
     use crate::{
         model::{
             decide::FeatureRow,
-            targets::{Distance, Distances, Exit, Outcome, Outcomes, Target},
+            targets::{Distance, Exit, Outcome, Outcomes, Target},
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
@@ -760,19 +809,15 @@ mod tests {
 
     /// The row of the decision at `time`, settled an hour later: its
     /// features, a long winning `pnl` at its take profit and a short losing
-    /// as much at its stop, each 3 from its take profit and 2 from its stop.
+    /// as much at its stop, each stop worth 2.
     fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let loss = format!("-{pnl}");
-        let distances = Some(Distances {
-            take_profit: Decimal::from(3),
-            stop: Decimal::from(2),
-        });
         let outcome = |pnl: &str, exit| Outcome {
             pnl: Money::from(&*format!("{pnl} USD")),
             commission: Money::from("0.1 USD"),
             exit,
-            distances,
+            unit: 2.0,
         };
         TargetRow {
             decision: FeatureRow {
@@ -794,7 +839,14 @@ mod tests {
         let ns = UnixNanos::from(at(time));
         DatasetRow {
             features,
-            targets: vec![pnl, 0.1, 1.0, 3.0, 2.0, -pnl, 0.1, -1.0, 3.0, 2.0],
+            long_pnl: pnl,
+            long_commission: 0.1,
+            long_exit: 1.0,
+            long_unit: 2.0,
+            short_pnl: -pnl,
+            short_commission: 0.1,
+            short_exit: -1.0,
+            short_unit: 2.0,
             settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
             ts_event: ns,
             ts_init: ns,
@@ -809,7 +861,16 @@ mod tests {
                     let values = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
                     (
                         values(&row.features),
-                        values(&row.targets),
+                        values(&[
+                            row.long_pnl,
+                            row.long_commission,
+                            row.long_exit,
+                            row.long_unit,
+                            row.short_pnl,
+                            row.short_commission,
+                            row.short_exit,
+                            row.short_unit,
+                        ]),
                         row.settled_at,
                         row.ts_event,
                         row.ts_init,
@@ -818,6 +879,76 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(bits(got), bits(want), "{got:#?}");
+    }
+
+    /// A row of a long at its take profit and a short at its time, worked by
+    /// hand: every value of a side under that side's names, whatever the
+    /// target, each side's its own.
+    #[test]
+    fn a_row_stores_each_sides_pnl_commission_exit_and_unit_under_its_names() {
+        let mut settled = row("2026-01-05T09:00:00Z", vec![1.5], "2.5");
+        settled.outcomes.short = Outcome {
+            pnl: Money::from("-3.5 USD"),
+            commission: Money::from("0.12 USD"),
+            exit: Exit::Time,
+            unit: 4.5,
+        };
+
+        let stored = DatasetRow::of(&settled);
+
+        assert_eq!(
+            stored,
+            DatasetRow {
+                long_pnl: 2.5,
+                long_commission: 0.1,
+                long_exit: 1.0,
+                long_unit: 2.0,
+                short_pnl: -3.5,
+                short_commission: 0.12,
+                short_exit: 0.0,
+                short_unit: 4.5,
+                ..self::stored("2026-01-05T09:00:00Z", vec![1.5], 0.0)
+            }
+        );
+    }
+
+    /// A long gaining 0.25 net of 0.75 and a short at nought: the long gained,
+    /// the short did not, and each answers its own trade and unit.
+    #[test]
+    fn a_row_answers_each_sides_gain_trade_and_unit() {
+        let row = DatasetRow {
+            long_pnl: 0.25,
+            long_commission: 0.75,
+            long_unit: 3.0,
+            short_pnl: 0.0,
+            short_commission: 0.5,
+            short_unit: 1.5,
+            ..stored("2026-01-05T09:00:00Z", vec![], 0.0)
+        };
+
+        assert!(row.gained(Side::Long));
+        assert!(!row.gained(Side::Short));
+        assert_eq!(
+            row.trade(Side::Long),
+            Trade {
+                pnl: 0.25,
+                commission: 0.75
+            }
+        );
+        assert_eq!(
+            row.trade(Side::Short),
+            Trade {
+                pnl: 0.0,
+                commission: 0.5
+            }
+        );
+        assert_eq!(
+            row.units(),
+            PerSide {
+                long: 3.0,
+                short: 1.5
+            }
+        );
     }
 
     #[test]
@@ -1069,7 +1200,7 @@ mod tests {
         }
     }
     #[test]
-    fn the_manifest_names_the_features_the_targets_the_days_and_the_fingerprint() {
+    fn the_manifest_names_the_features_the_target_the_days_and_the_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 2);
         for (time, from, to) in [
@@ -1099,21 +1230,6 @@ mod tests {
         assert_eq!(manifest.strategy_id, StrategyId::from(STRATEGY));
         assert_eq!(manifest.feature_names, ["mid_0", "mid_1"]);
         assert_eq!(manifest.target, target());
-        assert_eq!(
-            manifest.target_names,
-            [
-                "long_pnl",
-                "long_commission",
-                "long_exit",
-                "long_take_profit",
-                "long_stop",
-                "short_pnl",
-                "short_commission",
-                "short_exit",
-                "short_take_profit",
-                "short_stop",
-            ]
-        );
         assert_eq!(
             manifest.days,
             [

@@ -656,7 +656,6 @@ mod tests {
             config.target.settles_within(),
             SignedDuration::from_mins(30)
         );
-        assert_eq!(config.target.target_names().len(), 6);
         assert!(
             config
                 .target
