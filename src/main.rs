@@ -131,7 +131,7 @@ struct BacktestArgs {
     /// from: at each decision, the latest valid then. The backtest first
     /// trains at each retrain time of its span the models the store lacks;
     /// never retrained, at its start alone, and refuses to run if its
-    /// primary or its meta then has no model in use there.
+    /// sides or its meta then have no model in use there.
     #[arg(long, default_value = "models")]
     models: PathBuf,
     /// Starting balance of the account of the dataset runs that build a
@@ -1261,7 +1261,7 @@ mod tests {
         assert!(reported(&trained).is_ok());
     }
 
-    /// The meta of a primary with no model before the train waits: the
+    /// A meta with no side's model before the train waits: the
     /// train fails, saying why.
     #[test]
     fn a_train_whose_meta_waits_fails_saying_so() {
@@ -1277,7 +1277,7 @@ mod tests {
 
         let err = reported(&trained).unwrap_err().to_string();
 
-        assert!(err.contains("waiting for primary decisions"), "{err}");
+        assert!(err.contains("waiting for the sides' decisions"), "{err}");
     }
 
     /// The arguments of a `model_ema` live node retraining at a commission

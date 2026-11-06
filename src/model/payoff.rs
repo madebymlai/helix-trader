@@ -1,6 +1,6 @@
-//! What a model primary's trade on a side is expected to make, and the
-//! side it trades: decisions on expected net P&L, each decision weighing
-//! the costs of its own (Elkan 2001; Bahnsen et al. 2015).
+//! What a side's trade is expected to make, and the side picked:
+//! decisions on expected net P&L, each decision weighing the costs of its
+//! own (Elkan 2001; Bahnsen et al. 2015).
 //!
 //! A side's model is published with its expected win and loss
 //! (`Payoff`): with exits, in R, the multiple of the stop's distance a
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     dataset::DatasetRow,
     holdout::Trade,
-    targets::{self, Side, TargetConfig},
+    targets::{self, PerSide, Side, TargetConfig},
 };
 
 /// The expected win and loss of a side's trade, both positive: in R with
@@ -152,6 +152,18 @@ impl Realised {
             }
             _ => Ok(1.0),
         }
+    }
+
+    /// The unit of each side's payoff in `row` (`unit`).
+    ///
+    /// # Errors
+    ///
+    /// As `unit`.
+    pub fn units(&self, row: &DatasetRow) -> anyhow::Result<PerSide<f64>> {
+        Ok(PerSide {
+            long: self.unit(row, Side::Long)?,
+            short: self.unit(row, Side::Short)?,
+        })
     }
 
     const fn side(&self, side: Side) -> (usize, usize, Option<usize>) {

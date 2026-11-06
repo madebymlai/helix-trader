@@ -15,7 +15,7 @@ use std::{any::Any, cell::RefCell, path::Path, rc::Rc, time::Duration};
 use helix_trader::{
     model::{
         decide::DecisionRule,
-        targets::{Side, SideTarget, Target, TargetConfig, TradedTarget},
+        targets::{SideTarget, Target, TargetConfig, TradedTarget},
     },
     strategy::{
         DataRequirements, TickSeries,
@@ -463,7 +463,7 @@ impl DataActor for Warming {
         }
         if !self.warmup.is_warming() {
             if let Some(traded) = self.traded.clone() {
-                *self.exits.borrow_mut() = traded.at(self, Side::Long)?;
+                *self.exits.borrow_mut() = traded.at(self)?.map(|sides| sides.long);
             }
             self.shutdown_system(Some("the warmup ended".to_string()));
         }

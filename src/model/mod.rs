@@ -13,9 +13,11 @@
 //! side a decision trades;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
-//! dataset and publishing in the `store` each whose `holdout`, what its
-//! decisions would have earned there and its `score`, meets the minimums;
-//! `handle` is
+//! dataset and publishing them together in the `store` if their `holdout`,
+//! each side's `score` and what the decision would have earned there, meets
+//! the minimums;
+//! `deciding` is the decision itself, the side picked among the models
+//! valid at a time, the meta's threshold and the size; `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! target in a dataset run; `schedule` is when a model is retrained, on
@@ -25,8 +27,8 @@
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
-//! trade of the primary, the strategy's side models, trained on the
-//! primary's out-of-sample predictions.
+//! trade of the side picked, trained on the out-of-sample predictions of
+//! the strategy's side models.
 //!
 //! `ModelStrategy` is what a strategy trading on a model gives the
 //! harness: the binary's backtest, live, train and dataset runs are
@@ -38,6 +40,7 @@ pub mod calibration;
 pub mod config;
 pub mod dataset;
 pub mod decide;
+pub mod deciding;
 pub mod features;
 pub mod handle;
 pub mod holdout;
