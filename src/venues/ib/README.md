@@ -28,7 +28,7 @@ The paper and live containers use ports 4002 and 4001 respectively and remain ru
 
 ## Trading and warmup
 
-IB is netting. **IB's execution adapter rejects reduce-only orders:** bracket exits and `close_position` use them. Consequently the EMA crossover and model strategies cannot trade live on IB; backtests on IB data and other venues are unaffected. There is no workaround here.
+IB is netting, which the broker's answer (`LiveBroker::oms_type`) copies from Nautilus' client, a test pinning it. **IB's execution adapter rejects reduce-only orders:** bracket exits and `close_position` use them. Consequently the EMA crossover and model strategies cannot trade live on IB; backtests on IB data and other venues are unaffected. There is no workaround here.
 
 Live bars use full-session IB minute TRADES bars, matching history. Market orders can be priced from cached LAST bars; MID bars alone do not supply that price. Warmup ends at the request time, excluding the partial minute; the live subscription starts there. The data client does not write its historical answer back to the catalog.
 

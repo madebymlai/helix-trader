@@ -667,7 +667,7 @@ mod tests {
                 BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
                 BarType::from("GC.v.0.GLBX-1-MINUTE-MID-INTERNAL"),
             ],
-            venue_oms: crate::backtest::venue_oms_type,
+            venue_oms: crate::venues::oms_type,
             ..backtest(dir.path())
         };
 

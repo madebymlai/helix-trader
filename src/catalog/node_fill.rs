@@ -273,6 +273,15 @@ impl NodeFill {
         }));
     }
 
+    /// What a fill was told to ask, each request with its period.
+    #[cfg(test)]
+    pub(crate) fn asked(&self) -> Vec<(FillRequest, Option<SignedDuration>)> {
+        self.requests
+            .iter()
+            .map(|asked| (asked.request, asked.period))
+            .collect()
+    }
+
     /// Fills the catalog in `catalog_dir` through a live node with the
     /// clients and the catalog, one request at a time, each with
     /// `update_catalog`, so the data engine writes each answer back over

@@ -1,5 +1,5 @@
 //! IC Markets' venue keeps positions as its hedging cTrader account does
-//! (`venue_oms_type`): on IC's gold quotes (`common::ic`), a recorder, its
+//! (`venues::oms_type`): on IC's gold quotes (`common::ic`), a recorder, its
 //! `oms_type` unset, buys 10 oz on the 10:00 bar, at 4006.10, and 10 more
 //! on the 11:00 bar, at 4012.15, and closes neither: two positions, each
 //! at its own price. One node per thread, so one run per test.

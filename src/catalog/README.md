@@ -2,7 +2,7 @@
 
 `fill-catalog` loads the instruments and source series required by the strategy into a Nautilus Parquet catalog. Strategy requirements and bar authoring belong to [strategy](../strategy/README.md); contract transitions belong to [rolls](../rolls/README.md). The backtest consumes the catalog as described in [backtest](../backtest/README.md).
 
-The instrument venue selects the source, in the [routing table](../venues/mod.rs): [OKX](../venues/okx/README.md) for `OKX`, [Databento](../venues/databento/README.md) for `GLBX`, [IC Markets](../venues/ic/README.md) for `ICMARKETS`, [Pepperstone](../venues/pepperstone/README.md) for `PEPPERSTONE`, and [IB](../venues/ib/README.md) for other venues. A run may use several sources. Definitions and the source series, not the internally aggregated strategy bars, are stored.
+The instrument venue selects the source, in the [routing table](../venues/mod.rs): [OKX](../venues/okx/README.md) for `OKX`, [Databento](../venues/databento/README.md) for `GLBX`, [IC Markets](../venues/ic/README.md) for `ICMARKETS`, [Pepperstone](../venues/pepperstone/README.md) for `PEPPERSTONE`, and [IB](../venues/ib/README.md) for other venues. A run may use several sources: `venues::fill_history` gives each its instruments and runs the node's fill, then IB's. Definitions and the source series, not the internally aggregated strategy bars, are stored.
 
 ## Fill paths
 

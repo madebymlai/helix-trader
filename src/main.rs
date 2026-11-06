@@ -18,7 +18,6 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::strategy::gold_scalp::GoldScalp;
 use helix_trader::{
     backtest::{self, Backtest},
-    catalog::{NodeFill, missing},
     live::{Live, Recording},
     model::{
         ModelStrategy, dataset,
@@ -28,17 +27,11 @@ use helix_trader::{
         train::Trained,
     },
     strategy::{
-        DataRequirements, Part, SeriesSlice, StandardConfig,
+        DataRequirements, Part, StandardConfig,
         ema::{EmaCross, EmaParams},
         model_ema::ModelEma,
     },
-    venues::{
-        HistorySource, HistoryVenueArgs, LiveVenueArgs, ctrader_node_client,
-        databento::DatabentoHistory,
-        ic,
-        okx::{self, OkxHistory},
-        pepperstone,
-    },
+    venues::{self, HistoryVenueArgs, LiveVenueArgs},
 };
 use jiff::{Timestamp, civil::Date};
 use nautilus_common::logging::{
@@ -46,13 +39,7 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_execution::models::fee::FeeModelAny;
-use nautilus_model::{
-    data::NautilusDataType,
-    enums::OmsType,
-    identifiers::{TraderId, Venue},
-    types::Money,
-};
-use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
 use rust_decimal::Decimal;
 
 #[derive(Debug, Parser)]
@@ -485,28 +472,18 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Checks everything that needs no gateway, then fills the catalog with the
-/// instruments and the series the strategy reads, those its bars are built
-/// from and its ticks (see `DataRequirements::catalog_series`), each on a
-/// contract over its slice (`DataRequirements::slices`), every source given
-/// its slices: GLBX's, IC's and OKX's fill through a Nautilus node (see
-/// `catalog::NodeFill`), by Databento's data client for GLBX instruments (the
-/// series declared, checked against the dataset's end before the node
-/// starts), the cTrader brokers' for theirs (`add_ctrader_fill`) and OKX's
-/// for OKX instruments (their series and funding, their definitions written
-/// before the node starts); IB (connected only if needed) fills the others,
-/// without a node until its client answers with response envelopes. The
-/// cTrader brokers and IB refuse a series they do not serve.
+/// Fills the catalog with the instruments and the series the strategy reads,
+/// each from its history source (`venues::fill_history`).
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = data_requirements(args.run.strategy, &args.run.config)?;
-    // IB's fill runs no node, so no node installs Nautilus' logger for it:
+    // A fill may run no node, so no node installs Nautilus' logger for it:
     // install it here, as a node would (the fill's node keeps it), so the
     // `log` output of this crate and Nautilus, and the adapters' `tracing`
     // warnings (why a contract did not resolve), reach the console.
     // Configured by NAUTILUS_LOG and RUST_LOG. Temporary until
-    // nautilus_trader#5472 is fixed: IB then fills through the node, which
-    // installs the logger.
+    // nautilus_trader#5472 is fixed: every source then fills through the
+    // node, which installs the logger.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
@@ -517,112 +494,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let catalog_dir = &args.run.catalog;
     fs::create_dir_all(catalog_dir)
         .with_context(|| format!("creating the catalog {}", catalog_dir.display()))?;
-    let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    // The source of an instrument is its venue's (`HistorySource`): OKX for
-    // OKX, Databento for GLBX, cTrader for IC and Pepperstone, IB for every
-    // other venue.
-    let (mut okx_ids, mut databento_ids, mut ic_ids, mut pepperstone_ids, mut ib_ids) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for id in requirements.instrument_ids() {
-        match HistorySource::of(id) {
-            HistorySource::Okx => okx_ids.push(id),
-            HistorySource::Databento => databento_ids.push(id),
-            HistorySource::Ic => ic_ids.push(id),
-            HistorySource::Pepperstone => pepperstone_ids.push(id),
-            HistorySource::Ib => ib_ids.push(id),
-        }
-    }
-    // Every source takes the series slices of its instruments: a rolled
-    // root's series contract by contract, each over its slice.
-    let slices = requirements.slices(start, end);
-    let slices_of = |source: HistorySource| -> Vec<SeriesSlice> {
-        slices
-            .iter()
-            .filter(|slice| HistorySource::of(slice.slice.instrument_id) == source)
-            .cloned()
-            .collect()
-    };
-    let mut node = NodeFill::new();
-    if !databento_ids.is_empty() {
-        let requests = missing(&catalog, &slices_of(HistorySource::Databento))?;
-        if !requests.is_empty() {
-            let api_key =
-                std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
-            let databento = DatabentoHistory::new(&api_key)?;
-            databento.check(&requests).await?;
-            node.add(databento.node_client(), &requests, DatabentoHistory::period);
-        }
-    }
-    if !ic_ids.is_empty() {
-        add_ctrader_fill(
-            &mut node,
-            &catalog,
-            ic::VENUE,
-            ic::connection,
-            &requirements.of_instruments(&ic_ids).catalog_series(),
-            &slices_of(HistorySource::Ic),
-        )?;
-    }
-    if !pepperstone_ids.is_empty() {
-        add_ctrader_fill(
-            &mut node,
-            &catalog,
-            pepperstone::VENUE,
-            pepperstone::connection,
-            &requirements
-                .of_instruments(&pepperstone_ids)
-                .catalog_series(),
-            &slices_of(HistorySource::Pepperstone),
-        )?;
-    }
-    if !okx_ids.is_empty() {
-        let slices = slices_of(HistorySource::Okx);
-        OkxHistory::default()
-            .write_definitions(&mut catalog, &slices)
-            .await?;
-        let requests = okx::requests(&catalog, &slices)?;
-        if !requests.is_empty() {
-            node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
-        }
-    }
-    node.run(catalog_dir).await?;
-    // Temporary until nautilus_trader#5472 is fixed: IB then fills through
-    // the node.
-    if !ib_ids.is_empty() {
-        let ib = args.venues.connect_ib(end, Timestamp::now()).await?;
-        ib.fill(&mut catalog, &slices_of(HistorySource::Ib)).await?;
-    }
-    Ok(())
-}
-
-/// Adds to `node` the fill of `series`, the quotes of the instruments of the
-/// cTrader broker of `venue`, over what the catalog misses of `slices`, a
-/// window holding at most what one tick request spans. The connection is
-/// read only if something is missing, so a complete catalog needs no
-/// credential.
-///
-/// # Errors
-///
-/// Returns an error if a series is not the quotes of an instrument on
-/// `venue`, if the catalog cannot be read, or as `connection`.
-fn add_ctrader_fill(
-    node: &mut NodeFill,
-    catalog: &ParquetDataCatalog,
-    venue: &str,
-    connection: fn() -> anyhow::Result<ctrader::CTraderConnection>,
-    series: &[(NautilusDataType, String)],
-    slices: &[SeriesSlice],
-) -> anyhow::Result<()> {
-    let instrument_ids = ctrader::quoted(Venue::new(venue), series)?;
-    let requests = missing(catalog, slices)?;
-    if !requests.is_empty() {
-        node.add(
-            ctrader_node_client(connection()?, instrument_ids),
-            &requests,
-            |_| ctrader::TICK_REQUEST_SPAN,
-        );
-    }
-    Ok(())
+    venues::fill_history(&requirements, start, end, &args.venues, catalog_dir).await
 }
 
 /// Builds the strategy from its config, runs it over the window of the
@@ -648,7 +520,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         fee_model,
         balance: args.balance,
         leverage: args.leverage,
-        venue_oms: backtest::venue_oms_type,
+        venue_oms: venues::oms_type,
         logging,
     };
     match args.run.strategy {

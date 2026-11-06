@@ -1,5 +1,5 @@
 //! IB's venue keeps positions as its netting account does
-//! (`venue_oms_type`): on SXR8.IBIS, two overlapping trades of a recorder,
+//! (`venues::oms_type`): on SXR8.IBIS, two overlapping trades of a recorder,
 //! its `oms_type` unset (`common::overlap`), add into one position at
 //! their average price. One node per thread, so one run per test.
 

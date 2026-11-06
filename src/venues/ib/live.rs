@@ -116,6 +116,7 @@ impl IbClients {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::venues::{LiveBroker, tests::created_oms_type};
 
     fn gateway() -> IbGateway {
         IbGateway {
@@ -131,6 +132,17 @@ mod tests {
 
     fn sxr8() -> InstrumentId {
         InstrumentId::from("SXR8.IBIS")
+    }
+
+    /// Against the adapter's client: the broker's answer is our copy of it.
+    /// The client needs no credential and connects to nothing.
+    #[test]
+    fn the_execution_client_keeps_positions_as_the_broker_answers() {
+        let clients = configs(&gateway(), &paper(), &[sxr8()]);
+
+        let created = created_oms_type(clients.into_node_clients());
+
+        assert_eq!(created, LiveBroker::Ib.oms_type());
     }
 
     #[test]
