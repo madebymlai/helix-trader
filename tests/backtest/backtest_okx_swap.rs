@@ -10,7 +10,10 @@
 use std::path::Path;
 
 use crate::common::{Ohlc, ohlc, recorder::Recorder, ts};
-use helix_trader::backtest::{Backtest, commission_rate, report, venue_oms_type};
+use helix_trader::{
+    backtest::{Backtest, commission_rate, report},
+    venues,
+};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
@@ -136,7 +139,7 @@ fn backtest(dir: &Path) -> Backtest {
         fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
         balance: Money::from("10000 USDT"),
         leverage: Decimal::ONE,
-        venue_oms: venue_oms_type,
+        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

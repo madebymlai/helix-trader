@@ -2,7 +2,7 @@
 //! (`common::glbx`), the trades on the other, IC's gold (`common::ic`). A
 //! strategy reading gold's book buys 10 oz of XAUUSD on IC's first hour
 //! bar: each venue is simulated, keeping positions as the real one does
-//! (`venue_oms_type`), each with the backtest's balance, and the report
+//! (`venues::oms_type`), each with the backtest's balance, and the report
 //! shows each venue's account. One node per thread, so one run per test.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};

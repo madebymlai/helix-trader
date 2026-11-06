@@ -17,13 +17,11 @@
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use ctrader::{
-    CTraderExecutionClientConfig, CTraderExecutionClientFactory, CTraderSession, TICK_REQUEST_SPAN,
-};
+use clap::{Args, Command, FromArgMatches};
+use ctrader::{CTraderExecutionClientConfig, CTraderExecutionClientFactory, CTraderSession};
 use helix_trader::{
-    catalog::{NodeFill, missing},
     strategy::{DataRequirements, TickSeries},
-    venues::ctrader_node_client,
+    venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::Timestamp;
 use nautilus_common::{
@@ -40,7 +38,7 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
-use crate::demo_broker::{DemoBroker, opted_in};
+use crate::demo_broker::opted_in;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_demo_account_loads_gold_and_euro_dollar_as_currency_pairs() {
@@ -85,10 +83,9 @@ fn stored(catalog: &mut ParquetDataCatalog, instrument_id: InstrumentId) -> Vec<
 }
 
 /// Fills the catalog in `dir` with the quotes of `instrument_id` over
-/// `[start, end]` through the node, as fill-catalog does: the data client of
-/// `broker` on the connection of the environment.
+/// `[start, end]` through the node, as fill-catalog does (`fill_history`):
+/// the data client of its broker on the connection of the environment.
 pub(crate) async fn fill_quotes_through_node(
-    broker: &DemoBroker,
     dir: &std::path::Path,
     instrument_id: InstrumentId,
     start: Timestamp,
@@ -102,15 +99,10 @@ pub(crate) async fn fill_quotes_through_node(
         }],
         warmup: jiff::SignedDuration::ZERO,
     };
-    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let requests = missing(&catalog, &requirements.slices(start, end))?;
-    let mut node = NodeFill::new();
-    node.add(
-        ctrader_node_client(broker.connection(), vec![instrument_id]),
-        &requests,
-        |_| TICK_REQUEST_SPAN,
-    );
-    node.run(dir).await
+    let matches = HistoryVenueArgs::augment_args(Command::new("fill-catalog"))
+        .try_get_matches_from(["fill-catalog"])?;
+    let venues = HistoryVenueArgs::from_arg_matches(&matches)?;
+    fill_history(&requirements, start, end, &venues, dir).await
 }
 
 /// A day of XAU/USD: Wednesday 21 October 2026 UTC, split for the resumed
@@ -129,13 +121,13 @@ async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     let gold = broker.gold();
     let (one_dir, resumed_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
 
-    fill_quotes_through_node(broker, one_dir.path(), gold, start, end)
+    fill_quotes_through_node(one_dir.path(), gold, start, end)
         .await
         .unwrap();
-    fill_quotes_through_node(broker, resumed_dir.path(), gold, start, middle)
+    fill_quotes_through_node(resumed_dir.path(), gold, start, middle)
         .await
         .unwrap();
-    fill_quotes_through_node(broker, resumed_dir.path(), gold, start, end)
+    fill_quotes_through_node(resumed_dir.path(), gold, start, end)
         .await
         .unwrap();
 

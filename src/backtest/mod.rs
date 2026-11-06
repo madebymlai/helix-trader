@@ -69,31 +69,13 @@ pub struct Backtest {
     /// a position locks its value / leverage times the instrument's margin
     /// (Nautilus' default margin model). 1 is no leverage.
     pub leverage: Decimal,
-    /// How each simulated venue keeps positions: as the real venue does,
-    /// `venue_oms_type`. A strategy leaving its `oms_type` unset follows
-    /// it, as it follows the execution client's live.
+    /// How each simulated venue keeps positions: a normal run passes the
+    /// real venue's, `venues::oms_type`, and a dataset run hedging on every
+    /// venue. A strategy leaving its `oms_type` unset follows it, as it
+    /// follows the execution client's live.
     pub venue_oms: fn(Venue) -> OmsType,
     /// The Nautilus logger: the node installs it, so nothing else may.
     pub logging: LoggerConfig,
-}
-
-/// The venues whose accounts hold each trade as a position of its own:
-/// the cTrader brokers, whose accounts are hedging (`venues::ic`,
-/// `venues::pepperstone`).
-const HEDGING_VENUES: &[&str] = &["ICMARKETS", "PEPPERSTONE"];
-
-/// How the accounts of `venue` keep positions, as the live execution
-/// client declares it: `Hedging` for the venues in `HEDGING_VENUES`,
-/// `Netting`, one position per instrument, for the others: IB's venues
-/// (Nautilus' IB execution client nets) and OKX, whose derivatives
-/// Nautilus' OKX client nets, in the net position mode `live` requires.
-#[must_use]
-pub fn venue_oms_type(venue: Venue) -> OmsType {
-    if HEDGING_VENUES.contains(&venue.as_str()) {
-        OmsType::Hedging
-    } else {
-        OmsType::Netting
-    }
 }
 
 impl Backtest {
@@ -301,7 +283,7 @@ mod tests {
             fee_model: commission_rate(Decimal::ZERO).unwrap(),
             balance: Money::from("10000 USDT"),
             leverage: Decimal::ONE,
-            venue_oms: venue_oms_type,
+            venue_oms: crate::venues::oms_type,
             logging: LoggerConfig::default(),
         }
     }
@@ -327,28 +309,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    #[test]
-    fn ib_venues_net_positions() {
-        for venue in ["IBIS", "CME", "NASDAQ", "LSEETF", "IDEALPRO"] {
-            assert_eq!(
-                venue_oms_type(Venue::from(venue)),
-                OmsType::Netting,
-                "{venue}"
-            );
-        }
-    }
-
-    #[test]
-    fn okx_nets_positions() {
-        assert_eq!(venue_oms_type(Venue::from("OKX")), OmsType::Netting);
-    }
-
-    #[test]
-    fn ctrader_brokers_hedge_positions() {
-        assert_eq!(venue_oms_type(Venue::from("ICMARKETS")), OmsType::Hedging);
-        assert_eq!(venue_oms_type(Venue::from("PEPPERSTONE")), OmsType::Hedging);
     }
 
     #[test]

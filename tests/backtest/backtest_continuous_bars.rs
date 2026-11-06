@@ -11,7 +11,10 @@ use crate::common::{
     recorder::Recorder,
     rolls::{self, POST, tuesday, wednesday},
 };
-use helix_trader::backtest::{Backtest, commission_rate, venue_oms_type};
+use helix_trader::{
+    backtest::{Backtest, commission_rate},
+    venues,
+};
 use jiff::Timestamp;
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
@@ -37,7 +40,7 @@ fn backtest(catalog: &TempDir) -> Backtest {
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,
-        venue_oms: venue_oms_type,
+        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

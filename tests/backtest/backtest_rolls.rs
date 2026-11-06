@@ -12,9 +12,10 @@ use crate::common::{
     rolls::{self, NANOSECOND, POST, PRE, ROOT, roll, tuesday, wednesday},
 };
 use helix_trader::{
-    backtest::{Backtest, commission_rate, venue_oms_type},
+    backtest::{Backtest, commission_rate},
     rolls::{Roller, Transition},
     strategy::TickSeries,
+    venues,
 };
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
 use nautilus_core::UnixNanos;
@@ -172,7 +173,7 @@ fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
         fee_model: commission_rate(Decimal::ZERO).unwrap(),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,
-        venue_oms: venue_oms_type,
+        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

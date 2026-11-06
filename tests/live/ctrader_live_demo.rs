@@ -143,7 +143,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let now = jiff::Timestamp::now();
     let catalog_end = now - CATALOG_BEHIND;
     crate::ctrader_demo::fill_quotes_through_node(
-        broker,
         catalog.path(),
         bar_type.instrument_id(),
         now - warmup,

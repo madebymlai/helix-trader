@@ -22,11 +22,12 @@ pub mod rolls;
 use std::{collections::BTreeMap, path::Path};
 
 use helix_trader::{
-    backtest::{Backtest, commission_per_order, venue_oms_type},
+    backtest::{Backtest, commission_per_order},
     strategy::{
         DataConfig, IndicatorsConfig, Part, Series, Session, TradeConfig, TradedInstrument,
         ema::{EmaCross, EmaCrossConfig, EmaParams},
     },
+    venues,
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
 use nautilus_common::logging::logger::LoggerConfig;
@@ -191,7 +192,7 @@ pub fn backtest(catalog: &Path, start: Timestamp, end: Timestamp, commission: &s
         fee_model: commission_per_order(Money::from(commission)).unwrap(),
         balance: Money::from("10000 EUR"),
         leverage: Decimal::ONE,
-        venue_oms: venue_oms_type,
+        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

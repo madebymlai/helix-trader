@@ -341,6 +341,7 @@ mod tests {
     use nautilus_okx::OKXInstrumentType;
 
     use super::*;
+    use crate::venues::{LiveBroker, tests::created_oms_type};
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
@@ -348,6 +349,25 @@ mod tests {
 
     fn swap() -> InstrumentId {
         InstrumentId::from("BTC-USDT-SWAP.OKX")
+    }
+
+    /// Against the adapter's client: the broker's answer is our copy of it.
+    /// Its answer follows the instrument types the config loads, so these
+    /// are the configs of a node. The factory builds no client without
+    /// credentials: made up here, so that the environment's are never read;
+    /// the client connects to nothing.
+    #[test]
+    fn the_execution_client_keeps_positions_as_the_broker_answers() {
+        for ids in [vec![swap()], vec![xperp()], vec![xperp(), swap()]] {
+            let mut clients = configs(&ids, OKXEnvironment::Demo).unwrap();
+            clients.exec.api_key = Some("key".into());
+            clients.exec.api_secret = Some("secret".into());
+            clients.exec.api_passphrase = Some("passphrase".into());
+
+            let created = created_oms_type(clients.into_node_clients());
+
+            assert_eq!(created, LiveBroker::Okx.oms_type(), "{ids:?}");
+        }
     }
 
     #[test]

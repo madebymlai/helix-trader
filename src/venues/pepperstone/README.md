@@ -1,6 +1,6 @@
 # Pepperstone
 
-Pepperstone serves `PEPPERSTONE` instruments, history and live (see the [routing table](../mod.rs)), through the [cTrader adapter](../../../crates/ctrader/README.md), as [IC Markets](../ic/README.md) does: venue `PEPPERSTONE`, clients named `PEPPERSTONE`, account `PEPPERSTONE-DEMO` or `PEPPERSTONE-LIVE`. Forex and metals definitions and quotes fill through the node, and the live clients trade a hedging account on one cTrader session; see the adapter for the session, the tick history, live quotes and the execution client. Only quote series are served. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for startup, routing, reconciliation and recording.
+Pepperstone serves `PEPPERSTONE` instruments, history and live (see the [routing table](../mod.rs), where it is a cTrader broker, a line of `CTRADER_BROKERS`), through the [cTrader adapter](../../../crates/ctrader/README.md), as [IC Markets](../ic/README.md) does: venue `PEPPERSTONE`, clients named `PEPPERSTONE`, account `PEPPERSTONE-DEMO` or `PEPPERSTONE-LIVE`. Forex and metals definitions and quotes fill through the node, and the live clients trade a hedging account on one cTrader session; see the adapter for the session, the tick history, live quotes and the execution client. Only quote series are served. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for startup, routing, reconciliation and recording.
 
 ## Account
 

@@ -27,7 +27,7 @@ Catalogs filled with the old order-book-derived quotes need a fresh directory fo
    use_hyphens_in_client_order_ids = false
    ```
 
-Demo and live can list different contracts, so select an instrument present in the chosen environment rather than assuming the same ID works in both. OKX futures and swaps use netting.
+Demo and live can list different contracts, so select an instrument present in the chosen environment rather than assuming the same ID works in both. OKX futures and swaps use netting, which the broker's answer (`LiveBroker::oms_type`) copies from Nautilus' client, a test pinning it on the configs of a node.
 
 ## Warmup and limits
 

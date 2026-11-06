@@ -6,8 +6,9 @@
 //! `fill_catalog`.
 
 use helix_trader::{
-    backtest::{Backtest, commission_rate, venue_oms_type},
+    backtest::{Backtest, commission_rate},
     catalog::fill_catalog,
+    venues,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
@@ -139,7 +140,7 @@ pub fn store(dir: &Path, quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp)
 }
 
 /// A backtest of the hour bars over `[09:00, 12:00]` on the venue as IC
-/// keeps positions (`venue_oms_type`: hedging), charged IC's Raw
+/// keeps positions (`venues::oms_type`: hedging), charged IC's Raw
 /// commission of 30 USD per million USD traded, unleveraged: IC's leverage
 /// is in the instrument's margin.
 pub fn backtest(catalog: &TempDir) -> Backtest {
@@ -152,7 +153,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
         balance: Money::from("2000000 USD"),
         leverage: Decimal::ONE,
-        venue_oms: venue_oms_type,
+        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }
