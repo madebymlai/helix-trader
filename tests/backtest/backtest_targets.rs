@@ -14,7 +14,9 @@
 //! from the quotes, from the trades alone and from minute bars alone, no
 //! order before the ATR is initialized; deciding on LAST bars the run
 //! builds from the trades alone is deciding on the trades. Orders the
-//! risk engine denies leave their decisions unsettled, without a row.
+//! risk engine denies leave their decisions unsettled, without a row. A
+//! stop from a mid on a half tick settles at its exact worth, and one in the
+//! market the venue rejects, without a row.
 //! Over two days of a random walk the targets are the same
 //! with the execution engine purging closed orders and positions as
 //! without, while the purge keeps the cache to the last minutes' orders.
@@ -124,6 +126,8 @@ struct Record {
     fills: Vec<UnixNanos>,
     /// The client order id of each of its orders filled, in order.
     filled: Vec<String>,
+    /// The client order id of each of its orders the venue rejected, in order.
+    rejected: Vec<String>,
 }
 
 /// Decides every hour on its one feature and opens the targets of each
@@ -199,6 +203,10 @@ nautilus_strategy!(TargetProbe, {
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
+        self.record
+            .borrow_mut()
+            .rejected
+            .push(event.client_order_id.to_string());
         self.targets.on_order_rejected(&event);
     }
 
@@ -441,6 +449,63 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // unsettled, no row.
     ];
     assert_eq!(record.borrow().rows, expected);
+}
+
+/// A run to 09:50, one decision settling, of IC's gold quoted at
+/// 4000.00/4000.01 throughout: the mid, 4000.005, on a half tick.
+fn half_tick_run() -> (tempfile::TempDir, Backtest) {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let quotes = gold_quotes(|_| Some(("4000.00", "4000.01")), &[]);
+    let catalog = ic::catalog_of(quotes, from, to);
+    let backtest = Backtest {
+        end: ic::at("09:50:00"),
+        ..gold_backtest(catalog.path().to_path_buf())
+    };
+    (catalog, backtest)
+}
+
+/// One ounce, exits 7.5 bps of the mid of 4000.005, 3.00000375, on the nearest
+/// cent: the long's take profit 4003.01 and stop 3997.00, the short's the
+/// reverse, each stop 3.005 away and worth 3.005 USD, not the cents around it.
+/// No exit is reached: each side crosses the cent of the spread and closes by
+/// time, -0.01, less two fees of 0.12 USD.
+#[test]
+fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
+    let (_catalog, backtest) = half_tick_run();
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let (probe, record) =
+        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
+
+    backtest.run_dataset(probe).unwrap();
+
+    let expected = [row(
+        decision(ic::at("09:00:00"), 4000.005),
+        with_exits(
+            outcome("-0.25 USD", "0.24 USD", Exit::Time),
+            outcome("-0.25 USD", "0.24 USD", Exit::Time),
+            3.005,
+        ),
+        ic::at("09:45:00.010"),
+    )];
+    assert_eq!(record.borrow().rows, expected);
+}
+
+/// One ounce, exits a hundredth of a basis point of the mid of 4000.005, on the
+/// cents either side: each stop is half a cent from the mid and on the touch,
+/// in the market, so the venue rejects it, and the decision stores no row.
+#[test]
+fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() {
+    let (_catalog, backtest) = half_tick_run();
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let (probe, record) =
+        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(1, 2)));
+
+    backtest.run_dataset(probe).unwrap();
+
+    let record = record.borrow();
+    assert_eq!(record.decisions, 1);
+    assert_eq!(record.rejected, ["D0-L-SL", "D0-S-SL"]);
+    assert_eq!(record.rows, []);
 }
 
 /// One ounce, no exits, on the same quotes: each side enters as a bracket

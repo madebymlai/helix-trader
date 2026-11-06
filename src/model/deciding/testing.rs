@@ -1,14 +1,17 @@
 //! The store and the models of the tests of a decision, the handle's among
 //! them: a strategy on the last mid of AUD/USD, and baselines predicting a
-//! known probability whatever the row, published under a temp dir.
+//! known probability whatever the row, published under a temp dir; and IC's
+//! gold for a target traded on it.
 
 use std::{path::Path, rc::Rc};
 
 use jiff::{SignedDuration, Timestamp};
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::NautilusDataType,
-    identifiers::{InstrumentId, StrategyId},
-    types::{Money, Quantity},
+    identifiers::{InstrumentId, StrategyId, Symbol},
+    instruments::{CurrencyPair, InstrumentAny},
+    types::{Currency, Money, Price, Quantity},
 };
 use rust_decimal::Decimal;
 
@@ -49,6 +52,33 @@ const NO_TRADE: Trades = Trades {
 
 pub const STRATEGY: &str = "HANDLE-001";
 pub const AUD: &str = "AUD/USD.SIM";
+pub const GOLD: &str = "XAUUSD.ICMARKETS";
+
+/// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and
+/// account"): whole ounces quoted in USD on ticks of a cent.
+pub fn gold() -> InstrumentAny {
+    let margin = Decimal::ONE / Decimal::from(30);
+    InstrumentAny::CurrencyPair(
+        CurrencyPair::builder()
+            .instrument_id(InstrumentId::from(GOLD))
+            .raw_symbol(Symbol::from("XAUUSD"))
+            .base_currency(Currency::from("XAU"))
+            .quote_currency(Currency::USD())
+            .price_precision(2)
+            .size_precision(0)
+            .price_increment(Price::from("0.01"))
+            .size_increment(Quantity::from(1))
+            .lot_size(Quantity::from(100))
+            .min_quantity(Quantity::from(1))
+            .max_quantity(Quantity::from(10_000))
+            .margin_init(margin)
+            .margin_maint(margin)
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .unwrap(),
+    )
+}
 
 /// The calibration of every model of the tests, the odds `o` of a
 /// prediction becoming `o^0.9`: c(0.5) = 0.5, c(0.6) = 0.590231, c(0.7)

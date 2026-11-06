@@ -108,9 +108,9 @@ use crate::strategy::{DataRequirements, warmup};
 /// what that code makes of the same data and config changes, a Nautilus pin
 /// bump changing indicators or fills included, or that manifest does, which
 /// then rebuilds every dataset and model. The golden rows
-/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of the rows
-/// made without a bump.
-pub const VERSION: u32 = 4;
+/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows
+/// made without a bump; a change reaching none of them is bumped all the same.
+pub const VERSION: u32 = 5;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";

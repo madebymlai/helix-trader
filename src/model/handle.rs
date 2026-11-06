@@ -579,8 +579,8 @@ mod tests {
     use crate::model::{
         config::{Margins, Sizing},
         deciding::testing::{
-            AUD, STRATEGY, at, baseline, baseline_for, c, config, features, meta, meta_baseline,
-            model_set, requirements, side_store, store, venue, with_meta,
+            AUD, GOLD, STRATEGY, at, baseline, baseline_for, c, config, features, gold, meta,
+            meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
         },
         features::testing::last_mid,
         schedule::Retrain,
@@ -1000,6 +1000,92 @@ mod tests {
                 take_profit: Price::from("0.69860"),
                 stop_loss: Price::from("0.70070"),
             })
+        );
+    }
+
+    /// `config` trading one ounce of IC's gold, each exit a hundredth of a
+    /// basis point from the decision's price.
+    fn half_tick_config() -> ModelConfig {
+        let bps = Distance::BasisPoints(Decimal::new(1, 2));
+        let mut config = config();
+        config.target = TargetConfig::builder()
+            .instrument_id(InstrumentId::from(GOLD))
+            .quantity(Quantity::from(1))
+            .spec(Target {
+                bracket: Some(BracketSpec {
+                    take_profit: bps,
+                    stop: bps,
+                    atr: None,
+                }),
+                limit: SignedDuration::from_hours(1),
+            })
+            .build();
+        config
+    }
+
+    /// `registered`, IC's gold in the cache quoted at 4000.00/4000.01 at
+    /// `now`: the mid, 4000.005, on a half tick, and each exit of
+    /// `half_tick_config` on the tick half a cent from it, a stop worth 0.005
+    /// USD on one ounce.
+    fn on_a_half_tick(now: Timestamp) -> (Decider, Rc<RefCell<VirtualClock>>) {
+        let (probe, clock) = registered(now);
+        let cache = probe.cache_rc();
+        cache.borrow_mut().add_instrument(gold()).unwrap();
+        cache
+            .borrow_mut()
+            .add_quote(QuoteTick::new(
+                InstrumentId::from(GOLD),
+                Price::from("4000.00"),
+                Price::from("4000.01"),
+                Quantity::from(1),
+                Quantity::from(1),
+                UnixNanos::from(now),
+                UnixNanos::from(now),
+            ))
+            .unwrap();
+        (probe, clock)
+    }
+
+    /// The long of 0.2 expects a loss whatever its stop is worth, and a stop
+    /// worth half a cent makes it a loss in money: it does not clear a margin
+    /// of nought.
+    #[test]
+    fn a_side_expected_to_lose_on_a_half_tick_stop_does_not_clear_a_margin_of_nought() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = on_a_half_tick(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(&probe, models.path(), &half_tick_config(), (Some(2), None));
+
+        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+    }
+
+    /// Worked by hand. The short of 0.8 expects `2 c(0.8) - 1`, 0.553790R,
+    /// 0.002769 USD on a stop worth 0.005 USD, and the long of 0.2 a loss, so
+    /// the short trades from a margin of nought, its stop on the ask.
+    #[test]
+    fn a_side_expected_to_gain_on_a_half_tick_stop_trades_its_stop_in_the_market() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = on_a_half_tick(at("2026-10-22T12:00:00Z"));
+        let handle = sides_handle(
+            &probe,
+            models.path(),
+            &half_tick_config(),
+            (Some(2), Some(8)),
+        );
+
+        let decision = handle.decide(&mut probe).unwrap().unwrap();
+
+        assert_eq!(decision.side, OrderSide::Sell);
+        assert_eq!(
+            decision.bracket,
+            Some(Bracket {
+                take_profit: Price::from("4000.00"),
+                stop_loss: Price::from("4000.01"),
+            })
+        );
+        assert!(
+            (decision.expected_pnl - 0.002_769).abs() < 1e-6,
+            "{}",
+            decision.expected_pnl
         );
     }
 
