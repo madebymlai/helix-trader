@@ -464,7 +464,7 @@ fn half_tick_run() -> (tempfile::TempDir, Backtest) {
     (catalog, backtest)
 }
 
-/// One ounce, exits 7.5 bps of the mid of 4000.005, 3.0000375, on the nearest
+/// One ounce, exits 7.5 bps of the mid of 4000.005, 3.00000375, on the nearest
 /// cent: the long's take profit 4003.01 and stop 3997.00, the short's the
 /// reverse, each stop 3.005 away and worth 3.005 USD, not the cents around it.
 /// No exit is reached: each side crosses the cent of the spread and closes by
