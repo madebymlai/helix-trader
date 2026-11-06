@@ -110,7 +110,7 @@ use nautilus_model::{
     identifiers::{ClientOrderId, InstrumentId, StrategyId},
     instruments::{Instrument, InstrumentAny},
     orders::Order,
-    types::{Money, Price, Quantity, fixed::FIXED_PRECISION},
+    types::{Money, Price, Quantity},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -847,11 +847,7 @@ impl TargetSetter {
         };
         let target = |bracket: Bracket| -> anyhow::Result<SideTarget> {
             let distance = (bracket.stop_loss.as_decimal() - reference.as_decimal()).abs();
-            let unit = stop_worth(
-                &instrument,
-                self.quantity,
-                distance.to_f64().unwrap_or(f64::NAN),
-            )?;
+            let unit = stop_worth(&instrument, self.quantity, distance)?;
             Ok(SideTarget {
                 reference,
                 bracket: Some(bracket),
@@ -875,34 +871,45 @@ impl Debug for TargetSetter {
 }
 
 /// What a stop `distance` in price away is worth on `quantity` of
-/// `instrument`, rounded to its sizes, in its P&L currency: Nautilus'
-/// `calculate_notional_value` of the distance.
+/// `instrument`, made in its sizes, in its P&L currency: exactly quantity times
+/// multiplier times distance, not rounded to the currency's precision, the
+/// money made as Nautilus' `Position` makes its P&L. Nautilus' notional value
+/// of the distance is rounded to that precision, and it has no call on an
+/// instrument returning one unrounded, so this one product is ours, written as
+/// it writes it.
 ///
 /// # Errors
 ///
-/// Returns an error if `instrument` is inverse (see `ensure_linear`), or
-/// `quantity` or `distance` cannot be made in the instrument's sizes and
-/// prices.
+/// Returns an error if `instrument` is inverse (see `ensure_linear`),
+/// `quantity` cannot be made in the instrument's sizes, or the worth overflows
+/// or is more money than Nautilus holds.
 fn stop_worth(
     instrument: &InstrumentAny,
     quantity: Quantity,
-    distance: f64,
+    distance: Decimal,
 ) -> anyhow::Result<f64> {
     ensure_linear(instrument)?;
     let size = quantity.as_decimal();
     let quantity = instrument
         .try_make_qty_from_decimal(size, None)
         .map_err(|e| anyhow::anyhow!("ordering {size} of {}: {e}", instrument.id()))?;
-    let distance = Price::new_checked(distance, FIXED_PRECISION)?;
-    Ok(instrument
-        .try_calculate_notional_value(quantity, distance, None)?
-        .as_f64())
+    let worth = quantity
+        .as_decimal()
+        .checked_mul(instrument.multiplier().as_decimal())
+        .and_then(|value| value.checked_mul(distance))
+        .with_context(|| {
+            format!(
+                "the worth of a stop {distance} away on {size} of {} overflows",
+                instrument.id()
+            )
+        })?;
+    Ok(Money::from_decimal_native(worth, instrument.cost_currency())?.as_f64())
 }
 
 /// Checks that a target's stops on `instrument` have a worth
-/// (`stop_worth`): Nautilus' notional value of an inverse instrument's
-/// distance divides by it as a price, which is not what the stop risks. A
-/// time-only target has no stop to weigh, and works on it.
+/// (`stop_worth`): an inverse instrument's P&L is no multiple of a distance,
+/// as Nautilus' notional value on one divides by its price. A time-only target
+/// has no stop to weigh, and works on it.
 ///
 /// # Errors
 ///

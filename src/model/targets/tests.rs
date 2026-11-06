@@ -22,9 +22,15 @@ use nautilus_trading::{
 };
 
 use super::*;
-use crate::{model::features::testing::last_mid, strategy::TickSeries};
-
-const GOLD: &str = "XAUUSD.ICMARKETS";
+use crate::{
+    model::{
+        dataset::DatasetRow,
+        deciding::testing::{GOLD, gold},
+        features::testing::last_mid,
+        holdout::Example,
+    },
+    strategy::TickSeries,
+};
 
 /// Deciding every `minutes` minutes.
 fn every(minutes: i64) -> DecisionRule {
@@ -823,9 +829,17 @@ fn an_outcome_has_the_sign_of_its_pnl() {
 fn a_stop_is_worth_its_distance_on_the_targets_quantity() {
     let instrument = InstrumentAny::CurrencyPair(nautilus_model::instruments::stubs::audusd_sim());
 
-    let worth = stop_worth(&instrument, Quantity::from(1000), 0.001).unwrap();
+    let worth = stop_worth(&instrument, Quantity::from(1000), Decimal::new(1, 3)).unwrap();
 
     assert!((worth - 1.0).abs() < 1e-9, "{worth}");
+}
+
+/// A worth past what a `Decimal` holds is an error, not a panic.
+#[test]
+fn a_stop_worth_more_than_a_decimal_holds_is_an_error() {
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+
+    assert!(stop_worth(&instrument, Quantity::from(1000), Decimal::MAX).is_err());
 }
 
 /// Bybit's inverse BTCUSD: Nautilus' notional value of a distance on it
@@ -835,7 +849,7 @@ fn a_stop_on_an_inverse_instrument_is_refused() {
     let instrument =
         InstrumentAny::CryptoPerpetual(nautilus_model::instruments::stubs::btcusd_bybit());
 
-    let err = stop_worth(&instrument, Quantity::from(1), 10.0).unwrap_err();
+    let err = stop_worth(&instrument, Quantity::from(1), Decimal::from(10)).unwrap_err();
 
     assert!(err.to_string().contains("inverse"), "{err}");
 }
@@ -885,13 +899,21 @@ impl Probe {
     fn quoted(&self, instrument_id: InstrumentId, mid: &str) {
         let mid = Decimal::from_str_exact(mid).unwrap();
         let tick = Decimal::new(1, 5);
-        let price = |value: Decimal| Price::from(value.to_string().as_str());
+        self.quoted_at(
+            instrument_id,
+            &(mid - tick).to_string(),
+            &(mid + tick).to_string(),
+        );
+    }
+
+    /// Adds a quote of `instrument_id` at `bid` and `ask` to its cache.
+    fn quoted_at(&self, instrument_id: InstrumentId, bid: &str, ask: &str) {
         self.cache_rc()
             .borrow_mut()
             .add_quote(QuoteTick::new(
                 instrument_id,
-                price(mid - tick),
-                price(mid + tick),
+                Price::from(bid),
+                Price::from(ask),
                 Quantity::from(1),
                 Quantity::from(1),
                 UnixNanos::default(),
@@ -1001,6 +1023,60 @@ fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop() {
     );
     for unit in [set.long.unit, set.short.unit] {
         assert!((unit - 0.70).abs() < 1e-9, "{unit}");
+    }
+}
+
+/// One ounce of gold at 4000.00/4000.01: the mid, 4000.005, is on a half tick,
+/// and exits a hundredth of a basis point from it, 0.004, are on the ticks
+/// either side, half a cent away. Each stop is worth 0.005 USD, under the
+/// currency's cents.
+#[test]
+fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_worth_exactly_that() {
+    let probe = Probe::holding(Some(gold()));
+    probe.quoted_at(InstrumentId::from(GOLD), "4000.00", "4000.01");
+    let exits = exiting(BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::new(1, 2)),
+        stop: Distance::BasisPoints(Decimal::new(1, 2)),
+        atr: None,
+    });
+
+    let set = setter(&of(exits)).at(&probe).unwrap().unwrap();
+
+    assert_eq!(set.long.unit, 0.005);
+    assert_eq!(set.short.unit, 0.005);
+}
+
+/// 10 AUD/USD at 0.70000/0.70001: 3 bps of the mid of 0.700005 is 0.00021, and
+/// the nearest ticks put each stop 0.000215 from the mid, outside the spread,
+/// worth 0.00215 USD. A trade losing 0.0043 USD on it realised -2R.
+#[test]
+fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
+    let probe = Probe::holding(aud());
+    let aud = InstrumentId::from(AUD);
+    probe.quoted_at(aud, "0.70000", "0.70001");
+
+    let set = setter(&trading(in_bps(20, 3), aud, 10))
+        .at(&probe)
+        .unwrap()
+        .unwrap();
+
+    let outcome = |unit| Outcome {
+        pnl: Money::from_str_exact("-0.0043 USD").unwrap(),
+        commission: Money::from("0 USD"),
+        exit: Exit::Stop,
+        unit,
+    };
+    let row = DatasetRow::of(&TargetRow {
+        decision: decision(),
+        outcomes: Outcomes {
+            long: outcome(set.long.unit),
+            short: outcome(set.short.unit),
+        },
+        settled_at: UnixNanos::from(2),
+    });
+    for side in [Side::Long, Side::Short] {
+        let realised = Example::of_side(&row, side).realised();
+        assert!((realised + 2.0).abs() < 1e-12, "{side:?}: {realised}");
     }
 }
 
