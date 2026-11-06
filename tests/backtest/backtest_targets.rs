@@ -32,8 +32,8 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
         targets::{
-            DEFAULT_ATR, Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow,
-            Targets,
+            BracketSpec, DEFAULT_ATR, Distance, Exit, Outcome, Outcomes, Target, TargetConfig,
+            TargetRow, Targets,
         },
     },
     strategy::{AtrArgs, DataRequirements, Declared, TickSeries, orders},
@@ -265,8 +265,11 @@ fn trading(spec: Target, instrument_id: &str, quantity: &str) -> TargetConfig {
 /// `instrument_id`.
 fn bracket(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetConfig {
     let spec = Target::builder()
-        .take_profit(Distance::BasisPoints(bps))
-        .stop(Distance::BasisPoints(bps))
+        .bracket(BracketSpec {
+            take_profit: Distance::BasisPoints(bps),
+            stop: Distance::BasisPoints(bps),
+            atr: None,
+        })
         .limit(SignedDuration::from_mins(45))
         .build();
     trading(spec, instrument_id, quantity)
@@ -857,13 +860,15 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         ..gold_backtest(catalog.path().to_path_buf())
     };
     let spec = Target {
-        take_profit: Some(Distance::Atr(Decimal::from(2))),
-        stop: Some(Distance::Atr(Decimal::new(15, 1))),
-        limit: SignedDuration::from_mins(45),
-        atr: Some(AtrArgs {
-            period: 2,
-            ..DEFAULT_ATR
+        bracket: Some(BracketSpec {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(15, 1)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         }),
+        limit: SignedDuration::from_mins(45),
     };
     let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -913,13 +918,15 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
         ..gold_backtest(catalog.path().to_path_buf())
     };
     let spec = Target {
-        take_profit: Some(Distance::Atr(Decimal::from(2))),
-        stop: Some(Distance::Atr(Decimal::new(1, 2))),
-        limit: SignedDuration::from_mins(45),
-        atr: Some(AtrArgs {
-            period: 2,
-            ..DEFAULT_ATR
+        bracket: Some(BracketSpec {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(1, 2)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         }),
+        limit: SignedDuration::from_mins(45),
     };
     let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -937,13 +944,15 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
 /// decision, of one contract.
 fn btc_atr_targets() -> TargetConfig {
     let spec = Target {
-        take_profit: Some(Distance::Atr(Decimal::from(2))),
-        stop: Some(Distance::Atr(Decimal::new(15, 1))),
-        limit: SignedDuration::from_mins(45),
-        atr: Some(AtrArgs {
-            period: 2,
-            ..DEFAULT_ATR
+        bracket: Some(BracketSpec {
+            take_profit: Distance::Atr(Decimal::from(2)),
+            stop: Distance::Atr(Decimal::new(15, 1)),
+            atr: Some(AtrArgs {
+                period: 2,
+                ..DEFAULT_ATR
+            }),
         }),
+        limit: SignedDuration::from_mins(45),
     };
     trading(spec, BTC, "1.00")
 }
@@ -1167,8 +1176,11 @@ fn walk_run(
             ..gold_backtest(catalog)
         };
         let spec = Target::builder()
-            .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
-            .stop(Distance::BasisPoints(Decimal::new(75, 1)))
+            .bracket(BracketSpec {
+                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                stop: Distance::BasisPoints(Decimal::new(75, 1)),
+                atr: None,
+            })
             .limit(SignedDuration::from_hours(2))
             .build();
         let config = trading(spec, ic::INSTRUMENT_ID, "1");

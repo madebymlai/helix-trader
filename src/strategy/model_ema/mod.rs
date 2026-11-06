@@ -324,7 +324,7 @@ mod tests {
     fn quotes_the_target_atr_is_built_of_load() {
         let toml = with_quotes().replace(
             r#"target = { limit = "30m" }"#,
-            r#"target = { take_profit = { atr = 2 }, stop = { atr = 1 }, limit = "45m" }"#,
+            r#"target = { bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#,
         );
 
         ModelEmaConfig::load(&toml).unwrap();
@@ -503,8 +503,7 @@ mod tests {
             side: OrderSide::Buy,
             quantity: Quantity::from(100_000),
             exits: Exits {
-                take_profit: None,
-                stop_loss: None,
+                bracket: None,
                 time_limit: Some(SignedDuration::from_mins(30)),
             },
         };

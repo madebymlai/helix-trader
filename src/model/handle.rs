@@ -137,7 +137,7 @@ use crate::{
     rolls::Roller,
     strategy::{
         DataRequirements,
-        orders::{Exits, Trade},
+        orders::{Bracket, Exits, Trade},
         warmup::{self, BookIndicator, CustomDataIndicator, Warmup},
     },
 };
@@ -195,8 +195,7 @@ pub struct Decision {
     pub reference: Price,
     /// With exits, its take profit and stop on the instrument's ticks; none
     /// on a time-only target.
-    pub take_profit: Option<Price>,
-    pub stop: Option<Price>,
+    pub bracket: Option<Bracket>,
     /// When the target ends after its send: its limit.
     pub time_limit: SignedDuration,
 }
@@ -212,8 +211,7 @@ impl Decision {
             side: self.side,
             quantity: self.quantity,
             exits: Exits {
-                take_profit: self.take_profit,
-                stop_loss: self.stop,
+                bracket: self.bracket,
                 time_limit: Some(self.time_limit),
             },
         }
@@ -537,8 +535,7 @@ impl Deciding {
             probability: taken.probability,
             expected_pnl: taken.expected_pnl,
             reference: target.reference,
-            take_profit: target.take_profit,
-            stop: target.stop,
+            bracket: target.bracket,
             time_limit: target.time_limit,
         }))
     }
@@ -587,7 +584,7 @@ mod tests {
         },
         features::testing::last_mid,
         schedule::Retrain,
-        targets::{DEFAULT_ATR, Distance, Side, Target},
+        targets::{BracketSpec, DEFAULT_ATR, Distance, Side, Target},
     };
     use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
     use rust_decimal::Decimal;
@@ -914,8 +911,7 @@ mod tests {
                 probability: c(0.6),
                 expected_pnl: 2.0 * c(0.6) - 1.0,
                 reference: Price::from("0.70000"),
-                take_profit: None,
-                stop: None,
+                bracket: None,
                 time_limit: SignedDuration::from_hours(1),
             })
         );
@@ -926,10 +922,12 @@ mod tests {
     fn bracket_config(stop: i64) -> ModelConfig {
         let mut config = config();
         config.target.spec = Target {
-            take_profit: Some(Distance::BasisPoints(Decimal::from(20))),
-            stop: Some(Distance::BasisPoints(Decimal::from(stop))),
+            bracket: Some(BracketSpec {
+                take_profit: Distance::BasisPoints(Decimal::from(20)),
+                stop: Distance::BasisPoints(Decimal::from(stop)),
+                atr: None,
+            }),
             limit: SignedDuration::from_hours(2),
-            atr: None,
         };
         config.margins = Margins {
             long: Some(0.3),
@@ -959,8 +957,10 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
                 exits: Exits {
-                    take_profit: Some(Price::from("0.70140")),
-                    stop_loss: Some(Price::from("0.69930")),
+                    bracket: Some(Bracket {
+                        take_profit: Price::from("0.70140"),
+                        stop_loss: Price::from("0.69930"),
+                    }),
                     time_limit: Some(SignedDuration::from_hours(2)),
                 },
             }
@@ -994,8 +994,13 @@ mod tests {
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
         assert_eq!(decision.side, OrderSide::Sell);
-        assert_eq!(decision.take_profit, Some(Price::from("0.69860")));
-        assert_eq!(decision.stop, Some(Price::from("0.70070")));
+        assert_eq!(
+            decision.bracket,
+            Some(Bracket {
+                take_profit: Price::from("0.69860"),
+                stop_loss: Price::from("0.70070"),
+            })
+        );
     }
 
     /// Worked by hand. `config`'s target is a limit alone, in money: the
@@ -1018,8 +1023,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
                 exits: Exits {
-                    take_profit: None,
-                    stop_loss: None,
+                    bracket: None,
                     time_limit: Some(SignedDuration::from_hours(1)),
                 },
             }
@@ -1033,13 +1037,15 @@ mod tests {
     fn atr_config() -> ModelConfig {
         let mut config = bracket_config(10);
         config.target.spec = Target {
-            take_profit: Some(Distance::Atr(Decimal::from(2))),
-            stop: Some(Distance::Atr(Decimal::ONE)),
-            limit: SignedDuration::from_hours(2),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
+            bracket: Some(BracketSpec {
+                take_profit: Distance::Atr(Decimal::from(2)),
+                stop: Distance::Atr(Decimal::ONE),
+                atr: Some(AtrArgs {
+                    period: 2,
+                    ..DEFAULT_ATR
+                }),
             }),
+            limit: SignedDuration::from_hours(2),
         };
         config
     }
@@ -1158,10 +1164,12 @@ mod tests {
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
         assert_eq!(
-            (decision.take_profit, decision.stop, decision.time_limit),
+            (decision.bracket, decision.time_limit),
             (
-                Some(Price::from("0.70200")),
-                Some(Price::from("0.69900")),
+                Some(Bracket {
+                    take_profit: Price::from("0.70200"),
+                    stop_loss: Price::from("0.69900"),
+                }),
                 SignedDuration::from_hours(2),
             )
         );
@@ -1467,8 +1475,7 @@ mod tests {
                 // The side's model's, its long of 0.6.
                 expected_pnl: 2.0 * c(0.6) - 1.0,
                 reference: Price::from("0.70000"),
-                take_profit: None,
-                stop: None,
+                bracket: None,
                 time_limit: SignedDuration::from_hours(1),
             })
         );

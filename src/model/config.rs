@@ -30,7 +30,7 @@ use crate::strategy::{DataRequirements, TradedInstrument};
 /// ```toml
 /// [model]
 /// decision = { every = "1h" }
-/// target = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, limit = "45m" }
+/// target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 } }, limit = "45m" }
 /// retrain = "168h"
 /// window = "720h"
 /// holdout = "120h"
@@ -371,7 +371,7 @@ fn validate_decisions(
         errors.check(
             warms.is_some_and(|warms| warms <= requirements.warmup),
             ConfigError::invalid_value(
-                "model.target.atr",
+                "model.target.bracket.atr",
                 format!(
                     "the target's ATR of {} bars of {} warms over longer than the warmup {:#}",
                     atr.args.period, atr.bar_type, requirements.warmup
@@ -454,7 +454,10 @@ mod tests {
     use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Quantity};
 
     use super::*;
-    use crate::strategy::TickSeries;
+    use crate::{
+        model::targets::{BracketSpec, DEFAULT_ATR, Distance},
+        strategy::{AtrArgs, TickSeries},
+    };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
@@ -462,7 +465,7 @@ mod tests {
     /// minutes, on a window of 48 hours, 12 of them held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
-        target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }
+        target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "45m" }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
@@ -518,6 +521,14 @@ mod tests {
 
     fn refused(toml: &str) -> String {
         format!("{:#}", load(toml).unwrap_err())
+    }
+
+    /// The message of the parse error refusing `toml`, no config error, so
+    /// that nothing else of the section was looked at.
+    fn refused_parsing(toml: &str) -> String {
+        let err = load(toml).unwrap_err();
+        assert!(err.downcast_ref::<ConfigError>().is_none(), "{err:#}");
+        format!("{err:#}")
     }
 
     /// The fields of the config errors refusing `toml`.
@@ -603,7 +614,7 @@ mod tests {
     fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit() {
         for target in [
             r#"target = { limit = "48h" }"#,
-            r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "49h" }"#,
+            r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "49h" }"#,
         ] {
             let toml = section(target).replace(r#"every = "1h""#, r#"every = "72h""#);
 
@@ -627,7 +638,7 @@ mod tests {
     fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
         for (target, named) in [
             (
-                r#"take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "1h""#,
+                r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#,
                 "limit 1h",
             ),
             (r#"limit = "90m""#, "limit 1h 30m"),
@@ -651,7 +662,7 @@ mod tests {
         let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
 
         config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
-        assert_eq!(config.target.spec.bracket(), None);
+        assert_eq!(config.target.spec.bracket, None);
         assert_eq!(
             config.target.settles_within(),
             SignedDuration::from_mins(30)
@@ -665,25 +676,38 @@ mod tests {
         );
     }
 
-    /// `Trade::send_as` has both exits or neither: one alone would refuse
-    /// every order, so the load refuses it, beside the section's others.
+    /// A bracket has both exits: one alone is refused as the section is
+    /// parsed, on its own, a minimum of no trade beside it not reported.
     #[test]
-    fn a_take_profit_or_a_stop_alone_is_refused_under_the_target() {
+    fn a_take_profit_or_a_stop_alone_is_refused_at_parsing_on_its_own() {
+        for (bracket, missing) in [
+            ("take_profit = { bps = 7.5 }", "stop"),
+            ("stop = { bps = 5 }", "take_profit"),
+        ] {
+            let toml = section(&format!(
+                r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
+            ))
+            .replace("min_trades = 30", "min_trades = 0");
+
+            let err = refused_parsing(&toml);
+
+            assert!(err.contains(&format!("missing field `{missing}`")), "{err}");
+            assert!(!err.contains("min_trades"), "{err}");
+        }
+    }
+
+    /// A target's exits are in its bracket or nowhere: beside the limit,
+    /// together or one alone, they are unknown fields of the target.
+    #[test]
+    fn exits_beside_the_limit_are_refused_as_unknown() {
         for target in [
+            r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
             r#"target = { take_profit = { bps = 7.5 }, limit = "45m" }"#,
             r#"target = { stop = { bps = 5 }, limit = "45m" }"#,
         ] {
-            let toml = section(target);
+            let err = refused_parsing(&section(target));
 
-            assert_eq!(refused_fields(&toml), ["model.target"], "{target}");
-
-            let with_another = toml.replace("min_trades = 30", "min_trades = 0");
-            let fields = refused_fields(&with_another);
-            assert!(
-                fields.iter().any(|field| field == "model.target")
-                    && fields.iter().any(|field| field == "model.min_trades"),
-                "{target}: {fields:?}"
-            );
+            assert!(err.contains("unknown field"), "{target}: {err}");
         }
     }
 
@@ -713,7 +737,9 @@ mod tests {
 
     #[test]
     fn a_target_without_a_limit_is_refused() {
-        let toml = section(r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }"#);
+        let toml = section(
+            r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } } }"#,
+        );
 
         let err = refused(&toml);
 
@@ -795,7 +821,7 @@ mod tests {
     fn atr_section(atr: Option<&str>) -> String {
         let atr = atr.map(|atr| format!(", atr = {atr}")).unwrap_or_default();
         section(&format!(
-            r#"target = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}, limit = "45m"{atr} }}"#
+            r#"target = {{ bracket = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}{atr} }}, limit = "45m" }}"#
         ))
     }
 
@@ -823,6 +849,7 @@ mod tests {
                 config.validate(&reading_gold_for(shorter)).unwrap_err()
             );
             assert!(err.contains("warmup"), "{atr:?}: {err}");
+            assert!(err.contains("model.target.bracket.atr"), "{atr:?}: {err}");
 
             let warmup = SignedDuration::from_hours(hours);
             assert!(
@@ -856,8 +883,7 @@ mod tests {
     }
 
     /// A time-only target has no distance to warm an ATR for, whatever the
-    /// warmup, and an `atr` table is refused on it as on any target with
-    /// no distance in ATRs.
+    /// warmup, and an `atr` table, a bracket's, is an unknown field of it.
     #[test]
     fn a_time_only_target_has_no_atr_to_warm_and_refuses_an_atr_table() {
         let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
@@ -867,7 +893,62 @@ mod tests {
 
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
-        assert_eq!(refused_fields(&toml), ["model.target.atr"]);
+        let err = refused_parsing(&toml);
+
+        assert!(err.contains("unknown field `atr`"), "{err}");
+    }
+
+    /// A bracket in basis points may be written with an `atr` table, so the
+    /// load refuses it, beside the section's others.
+    #[test]
+    fn an_atr_table_no_distance_uses_is_refused_under_the_bracket() {
+        let toml = section(
+            r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, atr = { period = 3 } }, limit = "45m" }"#,
+        )
+        .replace("min_trades = 30", "min_trades = 0");
+
+        assert_eq!(
+            refused_fields(&toml),
+            ["model.target.bracket.atr", "model.min_trades"]
+        );
+    }
+
+    /// One distance in ATRs, of its table, the other in basis points.
+    #[test]
+    fn a_bracket_mixing_atrs_and_basis_points_loads() {
+        let config = parse(&section(
+            r#"target = { bracket = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, atr = { period = 3 } }, limit = "45m" }"#,
+        ))
+        .unwrap();
+
+        config
+            .validate(&reading_gold_for(SignedDuration::from_hours(3)))
+            .unwrap();
+        assert_eq!(
+            config.target.spec.bracket,
+            Some(BracketSpec {
+                take_profit: Distance::Atr(Decimal::new(15, 1)),
+                stop: Distance::BasisPoints(Decimal::new(75, 1)),
+                atr: Some(AtrArgs {
+                    period: 3,
+                    ..DEFAULT_ATR
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn a_distance_not_positive_is_refused_under_the_bracket() {
+        for bracket in [
+            "take_profit = { bps = 0 }, stop = { bps = 5 }",
+            "take_profit = { bps = 7.5 }, stop = { bps = -1 }",
+        ] {
+            let toml = section(&format!(
+                r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
+            ));
+
+            assert_eq!(refused_fields(&toml), ["model.target.bracket"], "{bracket}");
+        }
     }
 
     /// Without quotes, the ATR's bars are built from the trades, or from
@@ -901,6 +982,7 @@ mod tests {
         );
 
         assert!(err.contains("ATR") && err.contains(GOLD), "{err}");
+        assert!(err.contains("model.target.bracket.atr"), "{err}");
     }
 
     /// A meta model on the section's target, held out its last 12 hours.
@@ -954,7 +1036,7 @@ mod tests {
 
         let config = load(&format!("{toml}\n{META}")).unwrap();
 
-        assert_eq!(config.target.spec.bracket(), None);
+        assert_eq!(config.target.spec.bracket, None);
         assert!(config.meta.is_some());
     }
 

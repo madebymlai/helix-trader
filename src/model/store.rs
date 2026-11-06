@@ -88,7 +88,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).

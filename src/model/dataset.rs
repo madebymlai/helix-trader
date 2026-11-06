@@ -103,13 +103,14 @@ use crate::strategy::{DataRequirements, warmup};
 /// The version of the code that makes every strategy's rows: the
 /// decisions (`decide`), the target's (`targets`), the shared feature code
 /// (`features`), and the Nautilus they run on, its indicators, matching
-/// engine and fill model. In every dataset's fingerprint: bumped by hand
-/// whenever what that code makes of the same data and config changes,
-/// a Nautilus pin bump changing indicators or fills included, which then
-/// rebuilds every dataset and model. The golden rows
-/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
-/// without a bump.
-pub const VERSION: u32 = 3;
+/// engine and fill model; and of what a dataset's manifest holds
+/// (`Manifest`). In every dataset's fingerprint: bumped by hand whenever
+/// what that code makes of the same data and config changes, a Nautilus pin
+/// bump changing indicators or fills included, or that manifest does, which
+/// then rebuilds every dataset and model. The golden rows
+/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of the rows
+/// made without a bump.
+pub const VERSION: u32 = 4;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -713,7 +714,7 @@ mod tests {
     use crate::{
         model::{
             decide::FeatureRow,
-            targets::{Distance, Exit, Outcome, Outcomes, Target},
+            targets::{BracketSpec, Distance, Exit, Outcome, Outcomes, Target},
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
@@ -760,8 +761,11 @@ mod tests {
             .quantity(Quantity::from(1))
             .spec(
                 Target::builder()
-                    .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
-                    .stop(Distance::BasisPoints(Decimal::from(5)))
+                    .bracket(BracketSpec {
+                        take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                        stop: Distance::BasisPoints(Decimal::from(5)),
+                        atr: None,
+                    })
                     .limit(SignedDuration::from_hours(2))
                     .build(),
             )

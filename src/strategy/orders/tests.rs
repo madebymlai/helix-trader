@@ -119,8 +119,10 @@ fn buy(exits: Exits) -> Trade {
 /// A take profit at 0.70700 and a stop loss at 0.69650, held `hours`.
 fn bracket(hours: i64) -> Exits {
     Exits {
-        take_profit: Some(Price::from("0.70700")),
-        stop_loss: Some(Price::from("0.69650")),
+        bracket: Some(Bracket {
+            take_profit: Price::from("0.70700"),
+            stop_loss: Price::from("0.69650"),
+        }),
         time_limit: Some(SignedDuration::from_hours(hours)),
     }
 }
@@ -128,8 +130,7 @@ fn bracket(hours: i64) -> Exits {
 /// No exit but a time limit of `hours`.
 fn held(hours: i64) -> Exits {
     Exits {
-        take_profit: None,
-        stop_loss: None,
+        bracket: None,
         time_limit: Some(SignedDuration::from_hours(hours)),
     }
 }
@@ -211,7 +212,7 @@ fn fill_of(
 fn sent(probe: &mut Probe, entry: &str, trade: Trade) {
     trade.send_as(probe, ids(entry)).unwrap();
     accept(probe, entry);
-    if trade.exits.take_profit.is_some() {
+    if trade.exits.bracket.is_some() {
         accept(probe, &format!("{entry}-TP"));
         accept(probe, &format!("{entry}-SL"));
     }
@@ -337,25 +338,6 @@ fn a_trade_without_exits_is_one_market_entry() {
             Quantity::from(100_000),
             false
         )
-    );
-}
-
-#[test]
-fn a_take_profit_without_a_stop_loss_is_refused_and_nothing_sent() {
-    let (mut probe, _) = registered();
-    let trade = buy(Exits {
-        stop_loss: None,
-        ..bracket(1)
-    });
-
-    let err = trade.send(&mut probe).unwrap_err();
-
-    assert!(err.to_string().contains("alone"), "{err}");
-    assert!(
-        probe
-            .cache()
-            .orders(None, None, None, None, None)
-            .is_empty()
     );
 }
 

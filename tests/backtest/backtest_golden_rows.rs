@@ -52,7 +52,7 @@ const CONFIG: &str = r#"
 
     [model]
     decision = { every = "1h" }
-    target = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, limit = "45m", atr = { period = 3 } }
+    target = { bracket = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, atr = { period = 3 } }, limit = "45m" }
     retrain = "24h"
     window = "46h"
     holdout = "12h"

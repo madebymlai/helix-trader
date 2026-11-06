@@ -27,7 +27,7 @@ use helix_trader::model::{
     config::{Margins, ModelConfig},
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
     store::{ModelSet, ModelStore, Probe},
-    targets::{Distance, Side, Target, TargetConfig},
+    targets::{BracketSpec, Distance, Side, Target, TargetConfig},
 };
 use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
@@ -226,8 +226,11 @@ fn hand_worked(side: Side) -> ModelConfig {
     ModelConfig {
         target: TargetConfig {
             spec: Target::builder()
-                .take_profit(bps)
-                .stop(bps)
+                .bracket(BracketSpec {
+                    take_profit: bps,
+                    stop: bps,
+                    atr: None,
+                })
                 .limit(SignedDuration::from_mins(45))
                 .build(),
             ..target()

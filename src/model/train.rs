@@ -840,7 +840,9 @@ mod tests {
             decide::{DecisionRule, FeatureRow},
             holdout::Trades,
             learner::LearnerConfig,
-            targets::{Distance, Exit, Outcome as TargetOutcome, Outcomes, Target, TargetRow},
+            targets::{
+                BracketSpec, Distance, Exit, Outcome as TargetOutcome, Outcomes, Target, TargetRow,
+            },
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
     };
@@ -878,8 +880,11 @@ mod tests {
                     .quantity(Quantity::from(1))
                     .spec(
                         Target::builder()
-                            .take_profit(Distance::BasisPoints(Decimal::new(75, 1)))
-                            .stop(Distance::BasisPoints(Decimal::from(5)))
+                            .bracket(BracketSpec {
+                                take_profit: Distance::BasisPoints(Decimal::new(75, 1)),
+                                stop: Distance::BasisPoints(Decimal::from(5)),
+                                atr: None,
+                            })
                             .limit(SignedDuration::from_hours(2))
                             .build(),
                     )
@@ -2297,7 +2302,7 @@ mod tests {
         );
         let manifest = meta_store(dir.path(), &config).read(t).unwrap().manifest;
         assert_eq!(manifest.baseline, 0.75);
-        assert_eq!(manifest.target.spec.bracket(), None);
+        assert_eq!(manifest.target.spec.bracket, None);
     }
 
     /// A meta example carries the unit of its trade, the worth of the stop
