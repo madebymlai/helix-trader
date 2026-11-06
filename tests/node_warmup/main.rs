@@ -15,7 +15,7 @@ use std::{any::Any, cell::RefCell, path::Path, rc::Rc, time::Duration};
 use helix_trader::{
     model::{
         decide::DecisionRule,
-        targets::{SideTarget, Target, TargetConfig, TradedTarget},
+        targets::{SideTarget, Target, TargetConfig, TargetSetter},
     },
     strategy::{
         DataRequirements, TickSeries,
@@ -435,7 +435,7 @@ struct Warming {
     warmup: Rc<Warmup>,
     /// The target, started as a model handle does, and read for the long
     /// side when the warmup ends.
-    traded: Option<Rc<TradedTarget>>,
+    traded: Option<Rc<TargetSetter>>,
     exits: Rc<RefCell<Option<SideTarget>>>,
     failure: Rc<RefCell<Option<String>>>,
 }
@@ -463,7 +463,7 @@ impl DataActor for Warming {
         }
         if !self.warmup.is_warming() {
             if let Some(traded) = self.traded.clone() {
-                *self.exits.borrow_mut() = traded.at(self)?.map(|sides| sides.long);
+                *self.exits.borrow_mut() = traded.at(self)?.ok().map(|sides| sides.long);
             }
             self.shutdown_system(Some("the warmup ended".to_string()));
         }
@@ -509,7 +509,7 @@ fn run(
     venue: &Rc<RefCell<FakeVenue>>,
     requirements: &DataRequirements,
     warmup: Warmup,
-    traded: Option<Rc<TradedTarget>>,
+    traded: Option<Rc<TargetSetter>>,
 ) -> (Option<String>, Option<SideTarget>) {
     let warmup = Rc::new(warmup);
     let config = LiveNodeConfig {
@@ -762,7 +762,7 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
         spec,
     };
     let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
-    let traded = Rc::new(TradedTarget::new(&target, hourly, &requirements).unwrap());
+    let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements).unwrap());
     let warmup = traded.warmed(Warmup::live(&requirements));
     let (failure, exits) = run(dir.path(), &venue, &requirements, warmup, Some(traded));
     assert_eq!(failure, None);

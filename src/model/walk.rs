@@ -67,7 +67,6 @@ use super::{
     features::FeatureSet,
     holdout::{Earnings, Example, STRESS, Threshold},
     meta,
-    payoff::Realised,
     schedule::{Models, Schedule},
     score,
     store::{Baselined, ModelSet, Swap},
@@ -78,8 +77,6 @@ use crate::strategy::DataRequirements;
 /// The retrains and scores of one strategy's backtests.
 #[derive(Debug)]
 pub struct WalkForward {
-    /// How the rows' trades read: their labels and payoffs.
-    realised: Realised,
     dataset: Dataset,
     /// When the models are trained, and what each train does.
     schedule: Schedule,
@@ -144,8 +141,7 @@ impl WalkForward {
     ///
     /// # Errors
     ///
-    /// Returns an error if the target is invalid, the instrument of its
-    /// exits is not in the catalog or is inverse, or a store cannot be keyed.
+    /// Returns an error if the target is invalid, or a store cannot be keyed.
     pub fn new(
         catalog: &Path,
         models: &Path,
@@ -157,7 +153,6 @@ impl WalkForward {
     ) -> anyhow::Result<Self> {
         let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         Ok(Self {
-            realised: Realised::new(catalog, &config.target)?,
             dataset: Dataset::new(
                 catalog,
                 strategy_id,
@@ -220,8 +215,7 @@ impl WalkForward {
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset lacks a day of
-    /// it, a model fails to predict, a row's stop has no worth, or the
-    /// dataset or a store cannot be read.
+    /// it, a model fails to predict, or the dataset or a store cannot be read.
     pub fn scores(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Scores> {
         let times = self.schedule.times(start, end)?;
         let (first, last) = dataset::days(start, end);
@@ -240,10 +234,8 @@ impl WalkForward {
         };
         for level in self.models.sides() {
             let side = level.side();
-            let examples = rows
-                .iter()
-                .map(|row| Example::of_side(row, side, &self.realised))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            let examples: Vec<Example> =
+                rows.iter().map(|row| Example::of_side(row, side)).collect();
             let side_scores = score(
                 &times,
                 start,
@@ -261,11 +253,7 @@ impl WalkForward {
         }
         if let Some(level) = self.models.meta() {
             let threshold = Threshold(level.config().threshold);
-            let examples = meta::examples(
-                &self.models,
-                &rows.iter().collect::<Vec<_>>(),
-                &self.realised,
-            )?;
+            let examples = meta::examples(&self.models, &rows.iter().collect::<Vec<_>>())?;
             scores.meta = Some(score(
                 &times,
                 start,
@@ -288,11 +276,8 @@ impl WalkForward {
         let mut models = DecidingModels::new(&self.models)?;
         rows.iter()
             .map(|row| {
-                let picked = models.pick(
-                    Timestamp::from(row.ts_event),
-                    &row.features,
-                    self.realised.units(row)?,
-                )?;
+                let picked =
+                    models.pick(Timestamp::from(row.ts_event), &row.features, row.units())?;
                 Ok(picked.map(|picked| picked.side))
             })
             .collect()
@@ -462,10 +447,8 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_model::{
         identifiers::InstrumentId,
-        instruments::{InstrumentAny, stubs::audusd_sim},
         types::{Money, Quantity},
     };
-    use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -480,7 +463,7 @@ mod tests {
         payoff::Payoff,
         schedule::Retrain,
         store::{ModelManifest, ModelStore, StoredModel},
-        targets::{Distance, Distances, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow},
+        targets::{Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -567,14 +550,14 @@ mod tests {
 
     /// The row of the decision at `time` on `feature`, its long gaining 1
     /// USD if `wins`, else losing 1, the short the reverse, each net of 0.1
-    /// USD of commission, settled an hour later.
+    /// USD of commission and of a unit of 1, settled an hour later.
     fn row(time: &str, feature: f64, wins: bool) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let outcome = |pnl: &str| Outcome {
             pnl: Money::from(pnl),
             commission: Money::from("0.1 USD"),
             exit: Exit::Time,
-            distances: None,
+            unit: 1.0,
         };
         let (long, short) = if wins {
             ("1 USD", "-1 USD")
@@ -1085,8 +1068,7 @@ mod tests {
         trades_are(short.periods[1].earnings.taken, 1, -1.0);
     }
 
-    /// `config`, on a target with exits on AUD/USD, whose stops' worth the
-    /// scores read.
+    /// `config`, on a target with exits on AUD/USD.
     fn with_exits() -> ModelConfig {
         ModelConfig {
             target: TargetConfig::builder()
@@ -1104,41 +1086,30 @@ mod tests {
         }
     }
 
-    /// The row of `row`, a win of the long at 0.8, each side's stop as far as
-    /// `(long, short)` say.
-    fn row_of_stops(time: &str, (long, short): (i64, i64)) -> TargetRow {
-        let distances = |stop| {
-            Some(Distances {
-                take_profit: Decimal::from(3),
-                stop: Decimal::from(stop),
-            })
-        };
+    /// The row of `row`, a win of the long at 0.8, each side's stop worth
+    /// what `(long, short)` say.
+    fn row_of_stops(time: &str, (long, short): (f64, f64)) -> TargetRow {
         let mut row = row(time, 0.8, true);
-        row.outcomes.long.distances = distances(long);
-        row.outcomes.short.distances = distances(short);
+        row.outcomes.long.unit = long;
+        row.outcomes.short.unit = short;
         row
     }
 
     /// The models of both sides alike, expecting the same in R, which each
-    /// row's stops then make money: 2 and 4 away are worth 2 and 4 USD on one
-    /// AUD/USD. At 04:00 the short's is the further and it is picked, its
-    /// trade a loss; at 08:00 the long's, its trade a win. On equal units
-    /// they would tie.
+    /// row's units then make money: stops worth 2 and 4 USD. At 04:00 the
+    /// short's is worth more and it is picked, its trade a loss; at 08:00 the
+    /// long's, its trade a win. On equal units they would tie.
     #[test]
     fn a_row_is_picked_on_each_sides_own_unit() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_exits();
-        std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
-        ParquetDataCatalog::new(&dir.path().join("catalog"), None, None, None, None)
-            .write_instruments(vec![InstrumentAny::CurrencyPair(audusd_sim())])
-            .unwrap();
         let walk = walk_of(dir.path(), config.clone());
         let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
         dataset(dir.path(), &config)
             .write(
                 &[
-                    row_of_stops("2026-01-07T04:00:00Z", (2, 4)),
-                    row_of_stops("2026-01-07T08:00:00Z", (4, 2)),
+                    row_of_stops("2026-01-07T04:00:00Z", (2.0, 4.0)),
+                    row_of_stops("2026-01-07T08:00:00Z", (4.0, 2.0)),
                 ],
                 seventh,
                 eighth + SignedDuration::from_hours(1),

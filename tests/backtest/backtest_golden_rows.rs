@@ -1,8 +1,7 @@
 //! The golden rows: the dataset of the `model_ema` strategy built over
 //! three days of the fixture's random walk of IC's gold, its rows (their
-//! times, features and every target value: P&L, commission, exit and the
-//! exits' distances) printed exactly and compared with the committed
-//! snapshot `golden_rows.csv`.
+//! times, features and each side's P&L, commission, exit and unit) printed
+//! exactly and compared with the committed snapshot `golden_rows.csv`.
 //!
 //! The fingerprint a dataset and its models are stored under reads the
 //! config by value and the code by version: the dataset version
@@ -104,9 +103,8 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
         .unwrap();
     let manifest = dataset.manifest().unwrap();
     let rows = dataset.read(from, to).unwrap();
-    let names = manifest.feature_names.iter().chain(&manifest.target_names);
 
-    let printed = print(names, &rows);
+    let printed = print(&manifest.feature_names, &rows);
 
     if std::env::var_os(WRITE).is_some_and(|value| value == "write") {
         fs::write(SNAPSHOT, &printed).unwrap();
@@ -115,13 +113,18 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     compare(&printed, Path::new(SNAPSHOT));
 }
 
-/// The rows as CSV, a header of the times and `names`, then each row's
-/// decision and settling times and its values, printed exactly: Rust's
-/// shortest representation reading back to the same `f64`.
-fn print<'a>(names: impl Iterator<Item = &'a String>, rows: &[DatasetRow]) -> String {
+/// The rows as CSV, a header of the times, `features` and each side's values,
+/// then each row's decision and settling times and its values, printed
+/// exactly: Rust's shortest representation reading back to the same `f64`.
+fn print(features: &[String], rows: &[DatasetRow]) -> String {
     let mut out = String::from("ts_event,settled_at");
-    names.for_each(|name| write!(out, ",{name}").unwrap());
-    out.push('\n');
+    features
+        .iter()
+        .for_each(|name| write!(out, ",{name}").unwrap());
+    out.push_str(
+        ",long_pnl,long_commission,long_exit,long_unit,short_pnl,short_commission,short_exit,\
+         short_unit\n",
+    );
     for row in rows {
         write!(
             out,
@@ -130,7 +133,17 @@ fn print<'a>(names: impl Iterator<Item = &'a String>, rows: &[DatasetRow]) -> St
             Timestamp::from(row.settled_at)
         )
         .unwrap();
-        for value in row.features.iter().chain(&row.targets) {
+        let sides = [
+            row.long_pnl,
+            row.long_commission,
+            row.long_exit,
+            row.long_unit,
+            row.short_pnl,
+            row.short_commission,
+            row.short_exit,
+            row.short_unit,
+        ];
+        for value in row.features.iter().chain(&sides) {
             write!(out, ",{value}").unwrap();
         }
         out.push('\n');

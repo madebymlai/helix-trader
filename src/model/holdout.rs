@@ -31,7 +31,7 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{dataset::DatasetRow, payoff::Realised, targets::Side};
+use super::{dataset::DatasetRow, targets::Side};
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -54,7 +54,7 @@ pub(super) struct Example {
     /// The trade whose gain the label is: of a side model's side, or of the
     /// side picked for a meta.
     pub trade: Trade,
-    /// The unit of the trade's payoff in the row (`Realised::unit`).
+    /// The unit of the trade's payoff in the row (`DatasetRow::units`).
     pub unit: f64,
     pub ts_event: UnixNanos,
     pub settled_at: UnixNanos,
@@ -217,26 +217,17 @@ impl Holdout {
 }
 
 impl Example {
-    /// The example of `row` on `side`'s trade, the rows' trades read by
-    /// `realised`: whether the trade gained, the trade, and its payoff's
-    /// unit.
-    ///
-    /// # Errors
-    ///
-    /// As `Realised::unit`.
-    pub(super) fn of_side(
-        row: &DatasetRow,
-        side: Side,
-        realised: &Realised,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    /// The example of `row` on `side`'s trade: whether the trade gained, the
+    /// trade, and its payoff's unit.
+    pub(super) fn of_side(row: &DatasetRow, side: Side) -> Self {
+        Self {
             features: row.features.clone(),
-            label: realised.gained(row, side),
-            trade: realised.trade(row, side),
-            unit: realised.unit(row, side)?,
+            label: row.gained(side),
+            trade: row.trade(side),
+            unit: *row.units().of(side),
             ts_event: row.ts_event,
             settled_at: row.settled_at,
-        })
+        }
     }
 
     /// The realised value of its trade: its net P&L over its unit.

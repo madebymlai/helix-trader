@@ -7,8 +7,8 @@
 //! A caller resolves first what a decision reads: the time, the feature row
 //! and each side's unit, the worth of a stop with exits, one without
 //! (`store::SideModel::expected_pnl`). The handle reads them from the target
-//! it sets at the decision (`targets::TradedTarget`), the meta's examples from
-//! each row (`payoff::Realised::units`).
+//! it sets at the decision (`targets::TargetSetter`), the meta's examples from
+//! each row (`dataset::DatasetRow::units`).
 //!
 //! `new` lists every store once and fails on a read error, so no decision
 //! runs unlisted. `list` lists them again, when the caller chooses, and what a

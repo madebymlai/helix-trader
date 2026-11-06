@@ -1,11 +1,24 @@
 use std::str::FromStr;
 
+use nautilus_common::{
+    cache::Cache,
+    clock::{Clock, VirtualClock},
+    timer::{TimeEvent, TimeEventCallback},
+};
 use nautilus_indicators::average::MovingAverageType;
 use nautilus_model::{
     data::NautilusDataType,
-    identifiers::Symbol,
-    instruments::{CryptoPerpetual, InstrumentAny},
+    identifiers::{Symbol, TraderId},
+    instruments::{
+        CryptoPerpetual, InstrumentAny,
+        stubs::{audusd_sim, btcusd_bybit},
+    },
     types::Currency,
+};
+use nautilus_portfolio::portfolio::Portfolio;
+use nautilus_trading::{
+    nautilus_strategy,
+    strategy::{StrategyConfig, StrategyCore},
 };
 
 use super::*;
@@ -516,8 +529,7 @@ fn half_point() -> InstrumentAny {
 /// at `reference` with `atr`, as text.
 fn exits(target: Target, reference: &str, atr: Option<f64>) -> Vec<(String, String)> {
     let reference = Decimal::from_str_exact(reference).unwrap();
-    target
-        .exits(&half_point(), reference, atr)
+    super::exits(target.bracket().unwrap(), &half_point(), reference, atr)
         .unwrap()
         .expect("exits off the reference")
         .into_iter()
@@ -589,29 +601,13 @@ fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
 #[test]
 fn an_exit_rounding_onto_the_reference_gives_no_exits() {
     let exits_of = |take_profit: Decimal, stop: Decimal| {
-        Target {
-            take_profit: Some(Distance::Atr(take_profit)),
-            stop: Some(Distance::Atr(stop)),
-            ..bracket()
-        }
-        .exits(&half_point(), Decimal::from(1000), Some(0.1))
-        .unwrap()
+        let bracket = (Distance::Atr(take_profit), Distance::Atr(stop));
+        super::exits(bracket, &half_point(), Decimal::from(1000), Some(0.1)).unwrap()
     };
 
     assert_eq!(exits_of(Decimal::from(10), Decimal::ONE), None);
     assert_eq!(exits_of(Decimal::new(15, 1), Decimal::from(10)), None);
     assert!(exits_of(Decimal::from(10), Decimal::from(10)).is_some());
-}
-
-/// A time-only target sets no exit, and so rounds none onto the reference.
-#[test]
-fn a_time_only_target_has_no_exits() {
-    let target = time_only(SignedDuration::from_hours(1)).spec;
-
-    assert_eq!(
-        exits(target, "1000.0", None),
-        Vec::<(String, String)>::new()
-    );
 }
 
 #[test]
@@ -787,86 +783,6 @@ fn a_decision_settles_within_its_limit() {
     assert_eq!(time.settles_within(), SignedDuration::from_hours(1));
 }
 
-/// The row of `outcomes`.
-fn row_of(outcomes: Outcomes) -> TargetRow {
-    TargetRow {
-        decision: FeatureRow {
-            strategy_id: StrategyId::from("S-001"),
-            features: vec![1.0],
-            ts_event: UnixNanos::from(1),
-            ts_init: UnixNanos::from(1),
-        },
-        outcomes,
-        settled_at: UnixNanos::from(2),
-    }
-}
-
-/// The outcome of a position closed by `exit` with `pnl`, net of 0.12 USD,
-/// its `distances`.
-fn outcome(pnl: &str, exit: Exit, distances: Option<Distances>) -> Outcome {
-    Outcome {
-        pnl: Money::from(pnl),
-        commission: Money::from("0.12 USD"),
-        exit,
-        distances,
-    }
-}
-
-#[test]
-fn a_bracket_has_a_column_per_value_of_each_side_its_distances_among_them() {
-    let distances = |take_profit, stop| {
-        Some(Distances {
-            take_profit: Decimal::new(take_profit, 2),
-            stop: Decimal::new(stop, 2),
-        })
-    };
-    let row = row_of(Outcomes {
-        long: outcome("2.5 USD", Exit::TakeProfit, distances(300, 150)),
-        short: outcome("-3.5 USD", Exit::Stop, distances(325, 175)),
-    });
-
-    assert_eq!(
-        config().target_names(),
-        [
-            "long_pnl",
-            "long_commission",
-            "long_exit",
-            "long_take_profit",
-            "long_stop",
-            "short_pnl",
-            "short_commission",
-            "short_exit",
-            "short_take_profit",
-            "short_stop",
-        ]
-    );
-    assert_eq!(
-        row.values(),
-        [2.5, 0.12, 1.0, 3.0, 1.5, -3.5, 0.12, -1.0, 3.25, 1.75]
-    );
-}
-
-#[test]
-fn a_time_only_target_has_the_pnl_commission_and_exit_columns_of_each_side() {
-    let row = row_of(Outcomes {
-        long: outcome("-0.25 USD", Exit::Time, None),
-        short: outcome("0.25 USD", Exit::Time, None),
-    });
-
-    assert_eq!(
-        time_only(SignedDuration::from_hours(1)).target_names(),
-        [
-            "long_pnl",
-            "long_commission",
-            "long_exit",
-            "short_pnl",
-            "short_commission",
-            "short_exit",
-        ]
-    );
-    assert_eq!(row.values(), [-0.25, 0.12, 0.0, 0.25, 0.12, 0.0]);
-}
-
 #[test]
 fn an_outcome_has_the_sign_of_its_pnl() {
     let sign = |pnl: &str| {
@@ -874,7 +790,7 @@ fn an_outcome_has_the_sign_of_its_pnl() {
             pnl: Money::from(pnl),
             commission: Money::from("0.1 USD"),
             exit: Exit::Time,
-            distances: None,
+            unit: 1.0,
         }
         .sign()
     };
@@ -882,25 +798,6 @@ fn an_outcome_has_the_sign_of_its_pnl() {
     assert_eq!(sign("0.0005 USDT"), 1);
     assert_eq!(sign("-0.44 USD"), -1);
     assert_eq!(sign("0 USD"), 0);
-}
-
-#[test]
-fn a_sides_pnl_commission_and_stop_are_its_target_names_among_a_rows_values() {
-    let names = config().target_names();
-    let pnl = |side| names[config().pnl_index(side)].clone();
-    let commission = |side| names[config().commission_index(side)].clone();
-    let stop = |side| names[config().stop_index(side).unwrap()].clone();
-    let time = time_only(SignedDuration::from_hours(1));
-
-    assert_eq!(pnl(Side::Long), "long_pnl");
-    assert_eq!(pnl(Side::Short), "short_pnl");
-    assert_eq!(commission(Side::Short), "short_commission");
-    assert_eq!(commission(Side::Long), "long_commission");
-    assert_eq!(stop(Side::Short), "short_stop");
-    assert_eq!(time.stop_index(Side::Long), None);
-    assert_eq!(time.pnl_index(Side::Long), 0);
-    assert_eq!(time.pnl_index(Side::Short), 3);
-    assert_eq!(time.commission_index(Side::Short), 4);
 }
 
 /// 1000 AUD/USD with a stop 10 pips away: 1 USD at risk.
@@ -923,4 +820,310 @@ fn a_stop_on_an_inverse_instrument_is_refused() {
     let err = stop_worth(&instrument, Quantity::from(1), 10.0).unwrap_err();
 
     assert!(err.to_string().contains("inverse"), "{err}");
+}
+
+/// A strategy registered without a node, as the handle's tests do.
+#[derive(Debug)]
+struct Probe {
+    core: StrategyCore,
+}
+
+nautilus_strategy!(Probe);
+
+impl DataActor for Probe {}
+
+impl Probe {
+    /// The probe, `instrument` in its cache if given, and no price yet.
+    fn holding(instrument: Option<InstrumentAny>) -> Self {
+        let mut probe = Self {
+            core: StrategyCore::new(StrategyConfig {
+                strategy_id: Some(StrategyId::from("S-001")),
+                order_id_tag: Some("001".to_string()),
+                ..Default::default()
+            }),
+        };
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        clock
+            .borrow_mut()
+            .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        if let Some(instrument) = instrument {
+            cache.borrow_mut().add_instrument(instrument).unwrap();
+        }
+        let portfolio = Rc::new(RefCell::new(Portfolio::new(
+            clock.clone(),
+            cache.clone(),
+            None,
+        )));
+        probe
+            .core
+            .register(TraderId::from("HELIX-001"), clock, cache, portfolio)
+            .unwrap();
+        probe
+    }
+
+    /// Adds a quote of `instrument_id` of the mid `mid` to its cache, a tick
+    /// either side on five places.
+    fn quoted(&self, instrument_id: InstrumentId, mid: &str) {
+        let mid = Decimal::from_str_exact(mid).unwrap();
+        let tick = Decimal::new(1, 5);
+        let price = |value: Decimal| Price::from(value.to_string().as_str());
+        self.cache_rc()
+            .borrow_mut()
+            .add_quote(QuoteTick::new(
+                instrument_id,
+                price(mid - tick),
+                price(mid + tick),
+                Quantity::from(1),
+                Quantity::from(1),
+                UnixNanos::default(),
+                UnixNanos::default(),
+            ))
+            .unwrap();
+    }
+
+    /// The client order ids of the orders it sent, in their order.
+    fn orders(&self) -> Vec<String> {
+        let cache = self.cache();
+        let mut orders: Vec<String> = cache
+            .orders(None, None, None, None, None)
+            .iter()
+            .map(|order| order.client_order_id().to_string())
+            .collect();
+        orders.sort();
+        orders
+    }
+}
+
+const AUD: &str = "AUD/USD.SIM";
+
+/// AUD/USD, which `Probe::holding` takes.
+fn aud() -> Option<InstrumentAny> {
+    Some(InstrumentAny::CurrencyPair(audusd_sim()))
+}
+
+/// Bybit's inverse BTCUSD, settled in BTC.
+fn inverse() -> InstrumentAny {
+    InstrumentAny::CryptoPerpetual(btcusd_bybit())
+}
+
+/// `spec`, of `quantity` of `instrument_id`.
+fn trading(spec: Target, instrument_id: InstrumentId, quantity: u64) -> TargetConfig {
+    TargetConfig::builder()
+        .instrument_id(instrument_id)
+        .quantity(Quantity::from(quantity))
+        .spec(spec)
+        .build()
+}
+
+/// `spec` of 1000 AUD/USD.
+fn on_aud(spec: Target) -> TargetConfig {
+    trading(spec, InstrumentId::from(AUD), 1000)
+}
+
+/// A target closed after an hour, with no exits.
+fn no_exits() -> Target {
+    Target::builder()
+        .limit(SignedDuration::from_hours(1))
+        .build()
+}
+
+/// A take profit 20 bps away and a stop a tenth of a basis point away: on
+/// AUD/USD's ticks of 0.00001, a tick from 0.70000, none from 0.07000.
+fn tight_stop() -> Target {
+    Target {
+        stop: Some(Distance::BasisPoints(Decimal::new(1, 1))),
+        ..in_bps(20, 1)
+    }
+}
+
+fn setter(config: &TargetConfig) -> TargetSetter {
+    TargetSetter::new(config, rule(), &quotes()).unwrap()
+}
+
+fn targets(config: TargetConfig) -> Rc<Targets> {
+    Targets::new(config, rule(), &quotes()).unwrap()
+}
+
+/// A decision of the probe, as `decide` publishes it.
+fn decision() -> FeatureRow {
+    FeatureRow {
+        strategy_id: StrategyId::from("S-001"),
+        features: vec![1.0],
+        ts_event: UnixNanos::from(1),
+        ts_init: UnixNanos::from(1),
+    }
+}
+
+/// From the mid of 0.70000, 10 bps is 0.0007, and on 1000 AUD/USD that stop
+/// is worth 0.70 USD; 20 bps is 0.0014. The long's stop is below the price, its
+/// take profit above; the short's the reverse.
+#[test]
+fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop() {
+    let probe = Probe::holding(aud());
+    probe.quoted(InstrumentId::from(AUD), "0.70000");
+
+    let set = setter(&on_aud(in_bps(20, 10))).at(&probe).unwrap().unwrap();
+
+    assert_eq!(set.long.reference, Price::from("0.70000"));
+    assert_eq!(set.long.take_profit, Some(Price::from("0.70140")));
+    assert_eq!(set.long.stop, Some(Price::from("0.69930")));
+    assert_eq!(set.short.take_profit, Some(Price::from("0.69860")));
+    assert_eq!(set.short.stop, Some(Price::from("0.70070")));
+    for unit in [set.long.unit, set.short.unit] {
+        assert!((unit - 0.70).abs() < 1e-9, "{unit}");
+    }
+}
+
+/// With no exits there is no stop to weigh: the unit is 1, and no instrument
+/// is read, so one missing from the cache refuses nothing.
+#[test]
+fn a_time_only_target_is_set_with_a_unit_of_one_and_reads_no_instrument() {
+    let probe = Probe::holding(None);
+    probe.quoted(InstrumentId::from(AUD), "0.70000");
+
+    let set = setter(&on_aud(no_exits())).at(&probe).unwrap().unwrap();
+
+    assert_eq!(set.long.unit, 1.0);
+    assert_eq!(set.short.unit, 1.0);
+    assert_eq!(set.long.take_profit, None);
+    assert_eq!(set.short.stop, None);
+    assert_eq!(set.long.reference, Price::from("0.70000"));
+}
+
+#[test]
+fn a_target_with_no_price_to_set_it_from_says_so() {
+    let probe = Probe::holding(aud());
+
+    for spec in [in_bps(20, 10), no_exits()] {
+        let set = setter(&on_aud(spec)).at(&probe).unwrap();
+
+        assert_eq!(set, Err(NoTarget::NoPrice), "{spec:?}");
+    }
+}
+
+#[test]
+fn a_target_on_a_cold_atr_says_so_and_names_its_bars() {
+    let probe = Probe::holding(None);
+
+    let set = setter(&config()).at(&probe).unwrap();
+
+    assert_eq!(
+        set,
+        Err(NoTarget::ColdAtr(BarType::from(
+            "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+        )))
+    );
+}
+
+/// From 0.07000, the stop's 0.0000007 rounds onto the price.
+#[test]
+fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
+    let probe = Probe::holding(aud());
+    probe.quoted(InstrumentId::from(AUD), "0.07000");
+
+    let set = setter(&on_aud(tight_stop())).at(&probe).unwrap();
+
+    assert_eq!(set, Err(NoTarget::ExitOnPrice(Price::from("0.07000"))));
+}
+
+/// Nautilus' notional value of an inverse instrument divides by the price, so
+/// a stop's distance has no worth in R on it.
+#[test]
+fn a_bracket_on_an_inverse_instrument_is_refused_as_the_targets_start() {
+    let instrument = inverse();
+    let mut probe = Probe::holding(Some(instrument.clone()));
+    let bracket = trading(in_bps(20, 10), instrument.id(), 1);
+
+    let err = targets(bracket).start(&mut probe).unwrap_err();
+
+    assert!(format!("{err:#}").contains("inverse"), "{err:#}");
+}
+
+/// In money, a time-only target has no stop to weigh, and works on an inverse
+/// instrument.
+#[test]
+fn a_time_only_target_on_an_inverse_instrument_starts() {
+    let instrument = inverse();
+    let mut probe = Probe::holding(Some(instrument.clone()));
+    let time_only = trading(no_exits(), instrument.id(), 1);
+
+    targets(time_only).start(&mut probe).unwrap();
+}
+
+/// Only an instrument seen to be inverse is refused: one missing from the cache
+/// is the error of each decision, as `TargetSetter::at` has it.
+#[test]
+fn a_bracket_on_an_instrument_not_in_the_cache_starts() {
+    let mut probe = Probe::holding(None);
+
+    targets(on_aud(in_bps(20, 10))).start(&mut probe).unwrap();
+}
+
+#[test]
+fn a_bracket_on_a_linear_instrument_starts() {
+    let mut probe = Probe::holding(aud());
+
+    targets(on_aud(in_bps(20, 10))).start(&mut probe).unwrap();
+}
+
+/// Past the start's refusal, a stop's worth failing is still an error before
+/// any order, as an exit outside the instrument's prices is: no order sent.
+#[test]
+fn a_stop_with_no_worth_at_a_decision_is_an_error_before_any_order() {
+    let instrument = inverse();
+    let mut probe = Probe::holding(Some(instrument.clone()));
+    probe.quoted(instrument.id(), "100000.00000");
+    let targets = targets(trading(in_bps(20, 10), instrument.id(), 1));
+
+    let err = targets.open(&mut probe, decision()).unwrap_err();
+
+    assert!(format!("{err:#}").contains("inverse"), "{err:#}");
+    assert_eq!(probe.orders(), Vec::<String>::new());
+}
+
+/// A time-only target reads no instrument to be set, so one missing surfaces
+/// as the error of sending its orders, which takes the decision's number: the
+/// next decision, the instrument there, is the second.
+#[test]
+fn a_time_only_target_missing_its_instrument_errs_as_it_sends_its_orders() {
+    let mut probe = Probe::holding(None);
+    probe.quoted(InstrumentId::from(AUD), "0.70000");
+    let targets = targets(on_aud(no_exits()));
+
+    let err = targets.open(&mut probe, decision()).unwrap_err();
+
+    assert!(format!("{err:#}").contains("not in cache"), "{err:#}");
+    probe
+        .cache_rc()
+        .borrow_mut()
+        .add_instrument(aud().unwrap())
+        .unwrap();
+    targets.open(&mut probe, decision()).unwrap();
+    assert_eq!(probe.orders(), ["D1-L-E", "D1-S-E"]);
+}
+
+/// A decision with no price is unsettled, its number taken; one with an exit on
+/// the price is none, as on cold features, and takes no number: the first
+/// orders are of the decision after the first.
+#[test]
+fn a_decision_with_no_price_takes_a_number_and_one_with_an_exit_on_the_price_none() {
+    let mut probe = Probe::holding(aud());
+    let aud = InstrumentId::from(AUD);
+    let targets = targets(on_aud(tight_stop()));
+
+    targets.open(&mut probe, decision()).unwrap();
+    assert_eq!(probe.orders(), Vec::<String>::new());
+    probe.quoted(aud, "0.07000");
+    targets.open(&mut probe, decision()).unwrap();
+    assert_eq!(probe.orders(), Vec::<String>::new());
+    probe.quoted(aud, "0.70000");
+    targets.open(&mut probe, decision()).unwrap();
+
+    assert_eq!(
+        probe.orders(),
+        [
+            "D1-L-E", "D1-L-SL", "D1-L-TP", "D1-S-E", "D1-S-SL", "D1-S-TP"
+        ]
+    );
 }

@@ -8,9 +8,9 @@
 //! decides only when a side is picked, on the sides' features with the
 //! side picked and its probability after them (`PICKED_FEATURES`), and
 //! learns whether the trade of the side picked, the target on that side,
-//! with exits or time only, wins after its costs, read as the side models
-//! read their trades (`payoff::Realised`): a dataset row opens a long and
-//! a short at every decision, so the row has the trade of either side, and
+//! with exits or time only, wins after its costs, read from its row as the
+//! side models read their trades (`dataset::DatasetRow`): a dataset row opens a
+//! long and a short at every decision, so the row has the trade of either side, and
 //! the meta's rows need no replay of their own.
 //!
 //! The sides' rows are their dataset's, each decided by the models of
@@ -19,7 +19,7 @@
 //! (`store::ModelSet`) as its stores are when the rows are made, listed
 //! once, a read error failing them: the latest valid then, trained on
 //! rows settled by its valid-from, so every decision is out of sample; the
-//! worth of each side's stop is the row's own (`payoff::Realised::unit`).
+//! worth of each side's stop is the row's own (`dataset::DatasetRow::units`).
 //! A row before the sides' first model has no decision: the meta's rows
 //! start there at the earliest, and with no side's model before a train
 //! the meta waits (`schedule::Schedule::plan`). Never retrained, with
@@ -35,39 +35,31 @@ use jiff::Timestamp;
 
 use super::{
     dataset::DatasetRow, deciding::DecidingModels, features::meta_row, holdout::Example,
-    payoff::Realised, store::ModelSet,
+    store::ModelSet,
 };
 
 /// The meta's examples of the dataset `rows` of the sides, in time order:
 /// each row a side is picked on, its features with that side and its
-/// probability, its label whether the trade on that side, as `realised` reads
-/// it, won, with the trade and its unit. The side picked on a row is the one
+/// probability, its label whether the trade on that side won, with the trade
+/// and its unit. The side picked on a row is the one
 /// `DecidingModels` picks, on the row's units, among the models of `models` in
 /// use then, as its stores list them now, none before the first.
 ///
 /// # Errors
 ///
-/// Returns an error if a store cannot be read, a model fails to predict, or a
-/// row's stop has no worth.
-pub(super) fn examples(
-    models: &ModelSet,
-    rows: &[&DatasetRow],
-    realised: &Realised,
-) -> anyhow::Result<Vec<Example>> {
+/// Returns an error if a store cannot be read, or a model fails to predict.
+pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Result<Vec<Example>> {
     let mut models = DecidingModels::new(models)?;
     let mut examples = vec![];
     for row in rows {
-        let Some(picked) = models.pick(
-            Timestamp::from(row.ts_event),
-            &row.features,
-            realised.units(row)?,
-        )?
+        let Some(picked) =
+            models.pick(Timestamp::from(row.ts_event), &row.features, row.units())?
         else {
             continue;
         };
         examples.push(Example {
             features: meta_row(&row.features, picked.side.order_side(), picked.probability),
-            ..Example::of_side(row, picked.side, realised)?
+            ..Example::of_side(row, picked.side)
         });
     }
     Ok(examples)
