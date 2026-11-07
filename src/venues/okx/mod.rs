@@ -5,8 +5,8 @@
 //! The node asks Nautilus' `OKXDataClient` for the bars of OKX swaps and
 //! X-Perps and for their funding over what the catalog lacks of them
 //! (`requests`), and the data engine writes back the windows the client
-//! answers in full. The client's answer to a definition request is not
-//! written back, so `OkxHistory` writes the definitions, from OKX's public
+//! answers in full. The definitions are not asked of the node, for their
+//! margins (see `README.md`): `OkxHistory` writes them, from OKX's public
 //! REST API through the adapter's `OKXRawHttpClient` and
 //! `parse_instrument_any`, with margins of 1 (see `instrument_from`).
 
@@ -132,7 +132,8 @@ async fn write_definitions(
 /// What `catalog` lacks of `slices`, series of OKX instruments
 /// (`DataRequirements::slices`), and of the funding of each slice's
 /// instrument over the slice, the funding first (see `catalog::missing`),
-/// without the definitions, which `OkxHistory::write_definitions` writes.
+/// without the definitions, which `OkxHistory::write_definitions` writes
+/// rather than the node (see the module doc).
 ///
 /// # Errors
 ///
