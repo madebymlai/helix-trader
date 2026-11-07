@@ -10,7 +10,13 @@
 //! cargo test --test node_warmup
 //! ```
 
-use std::{any::Any, cell::RefCell, path::Path, rc::Rc, time::Duration};
+use std::{
+    any::Any,
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
+};
 
 use helix_trader::{
     model::{
@@ -721,6 +727,47 @@ fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
 
     let warmed = warm(
         dir.path(),
+        &second,
+        MID_MINUTES,
+        SignedDuration::from_hours(30),
+    );
+
+    assert_eq!(warmed.failure, None);
+    let asked = second.borrow().asked.clone();
+    assert!(
+        asked.iter().all(|&(from, _)| from > first_end),
+        "{asked:?} after {first_end}"
+    );
+    assert!(warmed.bars.len() >= 29 * 60, "{} bars", warmed.bars.len());
+    assert!(one_every(&warmed.bars, MINUTE_NS));
+}
+
+/// `dir` by a path relative to the working directory: up to the root, then
+/// down to it.
+fn relative(dir: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let mut relative: PathBuf = std::iter::repeat_n("..", cwd.components().count() - 1).collect();
+    relative.push(dir.strip_prefix("/").unwrap());
+    relative
+}
+
+/// So it does with the catalog given by a path relative to the working
+/// directory, as `live --catalog` takes one and `Live` hands it to the node.
+#[test]
+fn a_warmup_reads_what_a_catalog_given_relative_to_the_working_directory_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = FakeVenue::new(Answer::Envelope);
+    warm(
+        dir.path(),
+        &first,
+        MID_MINUTES,
+        SignedDuration::from_hours(30),
+    );
+    let first_end = first.borrow().asked.last().unwrap().1;
+    let second = FakeVenue::new(Answer::Envelope);
+
+    let warmed = warm(
+        &relative(dir.path()),
         &second,
         MID_MINUTES,
         SignedDuration::from_hours(30),

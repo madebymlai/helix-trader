@@ -19,7 +19,10 @@ pub mod ic;
 pub mod recorder;
 pub mod rolls;
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use helix_trader::{
     backtest::{Backtest, commission_per_order},
@@ -178,6 +181,15 @@ pub fn catalog(quotes: &[QuoteTick], from: Timestamp, to: Timestamp) -> TempDir 
         .write_to_parquet(quotes, Some(from.into()), Some(to.into()), None)
         .unwrap();
     dir
+}
+
+/// `dir` by a path relative to the working directory: up to the root, then
+/// down to it.
+pub fn relative(dir: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let mut relative: PathBuf = std::iter::repeat_n("..", cwd.components().count() - 1).collect();
+    relative.push(dir.strip_prefix("/").unwrap());
+    relative
 }
 
 /// A backtest of the instrument's hour MID bars over `[start, end]`, with
