@@ -41,7 +41,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{Backtest, report::Outcome};
 use crate::{
-    catalog::catalog_path,
+    catalog::catalog_config,
     strategy::{SeriesSlice, warmup},
 };
 
@@ -115,7 +115,7 @@ fn config(
     // A root's contracts are on its venue.
     let venues: BTreeSet<Venue> = backtest.declared().iter().map(|id| id.venue).collect();
     ensure!(!venues.is_empty(), "no instruments");
-    let catalog = DataCatalogConfig::new(catalog_path(&backtest.catalog)?, None, None);
+    let catalog = catalog_config(&backtest.catalog)?;
     let venues = venues
         .into_iter()
         .map(|venue| venue_config(backtest, venue))
@@ -353,7 +353,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use jiff::Timestamp;
     use nautilus_common::logging::logger::LoggerConfig;
@@ -534,26 +534,6 @@ mod tests {
         };
         assert_eq!(delay(run_config(&backtest).unwrap()), 5_000_000);
         assert_eq!(delay(dataset_run_config(&backtest).unwrap()), 5_000_000);
-    }
-
-    /// The temp dir's catalog, by a path relative to the working directory:
-    /// up to the root, then down to it. Opening a catalog needs its
-    /// directory, and no other is read.
-    #[test]
-    fn a_relative_catalog_is_made_absolute() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = std::env::current_dir().unwrap();
-        let mut relative: PathBuf =
-            std::iter::repeat_n("..", cwd.components().count() - 1).collect();
-        relative.push(dir.path().strip_prefix("/").unwrap());
-        let backtest = Backtest {
-            catalog: relative.clone(),
-            ..backtest(dir.path())
-        };
-        let config = run_config(&backtest).unwrap();
-        let absolute = cwd.join(&relative);
-        let absolute = absolute.to_str().unwrap();
-        assert_eq!(config.data()[0].catalog().path(), absolute);
     }
 
     /// Its data comes from the data configs alone: no catalog serves a

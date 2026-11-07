@@ -24,19 +24,17 @@
 //! streamed: the catalog holds market data, and the strategies' custom data
 //! has a store of its own.
 
-use std::{
-    io::ErrorKind,
-    path::{Path, PathBuf},
-};
+use std::{io::ErrorKind, path::PathBuf};
 
 use anyhow::{Context, anyhow, ensure};
 use jiff::SignedDuration;
 use nautilus_core::UUID4;
 use nautilus_live::node::LiveNode;
 use nautilus_model::{data::NautilusDataType, identifiers::TraderId};
-use nautilus_persistence::config::{DataCatalogConfig, RotationConfig, StreamingConfig};
-
-use crate::catalog::catalog_path;
+use nautilus_persistence::{
+    common::storage::normalize_storage_location,
+    config::{DataCatalogConfig, RotationConfig, StreamingConfig},
+};
 
 /// Where the live node stages the data it streams; it promotes it into the
 /// catalog daily (`PROMOTION_INTERVAL`).
@@ -48,25 +46,35 @@ pub struct Recording {
 }
 
 impl Recording {
-    /// The streaming config of the node registering `catalog`, an absolute
-    /// path: staged under `staging`, promoted into `catalog` daily and on a
-    /// clean stop, staging files deleted once promoted.
+    /// The streaming config of the node registering `catalog`: staged under
+    /// `staging`, promoted into `catalog` daily and on a clean stop, staging
+    /// files deleted once promoted. Each directory goes to Nautilus by its
+    /// path as given, which it resolves against the working directory.
     ///
     /// # Errors
     ///
-    /// Returns an error if the staging directory is inside the catalog or
-    /// its path is not UTF-8.
+    /// Returns an error if the staging directory is inside the catalog,
+    /// either cannot be resolved, or the staging path is not UTF-8.
     pub fn streaming(&self, catalog: &DataCatalogConfig) -> anyhow::Result<StreamingConfig> {
-        let staging = catalog_path(&self.staging)?;
+        let staging = self
+            .staging
+            .to_str()
+            .with_context(|| format!("staging path {} is not UTF-8", self.staging.display()))?;
         // Apart, so that readers and maintenance of the catalog never meet
-        // unpromoted files.
+        // unpromoted files. Compared where Nautilus finds them, however
+        // each is given: against the working directory, `..` and symlinks
+        // resolved.
+        let staged = normalize_storage_location(staging)
+            .with_context(|| format!("resolving the staging directory {staging}"))?;
+        let promoted = normalize_storage_location(&catalog.connect_config().uri)
+            .with_context(|| format!("resolving the catalog {}", catalog.path()))?;
         ensure!(
-            !Path::new(&staging).starts_with(catalog.path()),
+            staged != promoted && !staged.starts_with(&format!("{promoted}/")),
             "the staging directory {staging} is inside the catalog {}: give one outside it",
             catalog.path()
         );
         let mut streaming = StreamingConfig::new(
-            staging,
+            staging.to_owned(),
             Some(catalog.clone()),
             FLUSH_INTERVAL_MS,
             false,
@@ -180,7 +188,7 @@ const STREAMED: [NautilusDataType; 9] = [
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, path::Path};
 
     use super::*;
 
@@ -188,7 +196,7 @@ mod tests {
         Recording { staging }
     }
 
-    fn catalog(dir: &std::path::Path) -> DataCatalogConfig {
+    fn catalog(dir: &Path) -> DataCatalogConfig {
         DataCatalogConfig::new(dir.to_str().unwrap().to_string(), None, None)
     }
 
@@ -256,6 +264,48 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("inside the catalog"), "{err}");
+    }
+
+    /// `dir` by a path relative to the working directory: up to the root,
+    /// then down to it.
+    fn relative(dir: &Path) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative: PathBuf =
+            std::iter::repeat_n("..", cwd.components().count() - 1).collect();
+        relative.push(dir.strip_prefix("/").unwrap());
+        relative
+    }
+
+    /// Either directory by a path relative to the working directory, as
+    /// `--catalog` and `--staging` take them, the other absolute or
+    /// relative too.
+    #[test]
+    fn a_staging_directory_inside_the_catalog_is_refused_however_either_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_dir = dir.path().join("catalog");
+        std::fs::create_dir(&catalog_dir).unwrap();
+        let staging = catalog_dir.join("staging");
+        for (catalog_dir, staging) in [
+            (relative(&catalog_dir), staging.clone()),
+            (catalog_dir.clone(), relative(&staging)),
+            (relative(&catalog_dir), relative(&staging)),
+        ] {
+            let err = recording(staging)
+                .streaming(&catalog(&catalog_dir))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("inside the catalog"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_staging_directory_beside_the_catalog_named_after_it_is_outside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_dir = dir.path().join("catalog");
+        std::fs::create_dir(&catalog_dir).unwrap();
+        recording(dir.path().join("catalog-staging"))
+            .streaming(&catalog(&catalog_dir))
+            .unwrap();
     }
 
     #[test]

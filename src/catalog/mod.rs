@@ -16,19 +16,18 @@ pub use node_fill::{FillData, FillRequest, NodeClient, NodeFill, missing};
 use std::path::Path;
 
 use anyhow::Context;
+use nautilus_persistence::config::DataCatalogConfig;
 
-/// The path of the catalog directory `dir` as a node takes it: absolute,
-/// since the node's DataFusion reader finds no object store for a relative
-/// path ("file://catalog/...").
+/// The config a node takes of the catalog in directory `dir`, by its path
+/// as given: Nautilus resolves a relative one against the working
+/// directory when it opens the catalog.
 ///
 /// # Errors
 ///
-/// Returns an error if the working directory is unknown or the path is not
-/// UTF-8.
-pub(crate) fn catalog_path(dir: &Path) -> anyhow::Result<String> {
-    let absolute = std::path::absolute(dir)?;
-    absolute
+/// Returns an error if the path is not UTF-8.
+pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
+    let path = dir
         .to_str()
-        .map(str::to_owned)
-        .with_context(|| format!("catalog path {} is not UTF-8", absolute.display()))
+        .with_context(|| format!("catalog path {} is not UTF-8", dir.display()))?;
+    Ok(DataCatalogConfig::new(path.to_owned(), None, None))
 }

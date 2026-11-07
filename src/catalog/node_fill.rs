@@ -48,12 +48,10 @@ use nautilus_model::{
     identifiers::{InstrumentId, TraderId},
     instruments::Instrument,
 };
-use nautilus_persistence::{
-    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
-};
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
 
-use super::catalog_path;
+use super::catalog_config;
 use crate::{strategy::SeriesSlice, time_range};
 
 /// The book depth of an `OrderBookDepth` request: MBP-10's.
@@ -312,11 +310,7 @@ impl NodeFill {
             trader_id: TraderId::from("FILL-001"),
             load_state: false,
             save_state: false,
-            catalogs: vec![DataCatalogConfig::new(
-                catalog_path(catalog_dir)?,
-                None,
-                None,
-            )],
+            catalogs: vec![catalog_config(catalog_dir)?],
             ..Default::default()
         };
         let mut builder = LiveNodeBuilder::from_config(config)?

@@ -29,12 +29,11 @@ use nautilus_common::{
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
-use nautilus_persistence::config::DataCatalogConfig;
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 use crate::{
-    catalog::catalog_path,
+    catalog::catalog_config,
     model::launcher::RetrainActor,
     rolls::Transition,
     strategy::{
@@ -108,7 +107,7 @@ impl Live {
         let cache = warmup.cache_config()?;
         std::fs::create_dir_all(&self.catalog)
             .with_context(|| format!("creating the catalog {}", self.catalog.display()))?;
-        let catalog = DataCatalogConfig::new(catalog_path(&self.catalog)?, None, None);
+        let catalog = catalog_config(&self.catalog)?;
         let streaming = self.recording.streaming(&catalog)?;
         let instance_id = self.recording.instance_id(self.trader_id)?;
         let data_engine = warmup::live_data_engine_config(&requirements.bar_types);
