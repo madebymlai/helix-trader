@@ -16,9 +16,7 @@
 //! The strategy hands its time events to the order module
 //! (`orders::on_time_event`), which at a trade's time limit cancels its
 //! orders still open and closes its position if still open, tagged as a
-//! time close (`orders::is_time_close`). Nautilus' IB execution client denies the
-//! reduce-only orders a bracket's legs and `close_position` are (see
-//! `venues/ib/README.md`): a model strategy cannot trade live on IB.
+//! time close (`orders::is_time_close`).
 //!
 //! The exits (`BracketSpec`) are `take_profit` and `stop` away from the
 //! decision's price (`reference`): the mid of the instrument's last quote,

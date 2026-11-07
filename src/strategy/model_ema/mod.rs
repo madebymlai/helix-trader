@@ -13,9 +13,7 @@
 //! The target closes before the next decision (`ModelConfig::validate`),
 //! so trades do not overlap, on a hedging venue as on a netting one. It
 //! decides only once its indicators are initialized: warm from the replay
-//! in a backtest or a dataset run, from its warmup request live. Nautilus'
-//! IB execution client denies the reduce-only orders a bracket's legs and
-//! a time close are: it cannot trade live on IB (`venues/ib/README.md`).
+//! in a backtest or a dataset run, from its warmup request live.
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
 //! or leaves each trade of the model (`model::meta`), and may size it.
