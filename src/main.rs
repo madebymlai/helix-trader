@@ -10,6 +10,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
+    str::FromStr,
 };
 
 use anyhow::{Context, bail, ensure};
@@ -266,8 +267,10 @@ struct LiveArgs {
     #[arg(long, default_value = "1")]
     leverage: Decimal,
     /// The node's trader: its cache in Redis is the trader's, which each run
-    /// loads. Live processes running at once each need their own.
-    #[arg(long, default_value = "HELIX-001", value_parser = parse_trader_id)]
+    /// loads. Live processes running at once each need their own. Parsed by
+    /// Nautilus' checked `FromStr`, since clap would otherwise pick
+    /// `TraderId: From<&str>`, which panics.
+    #[arg(long, default_value = "HELIX-001", value_parser = TraderId::from_str)]
     trader_id: TraderId,
     /// The catalog directory, fill-catalog's and the backtests': the warmup
     /// is read from it first, and a cTrader broker's history is written
@@ -381,12 +384,6 @@ fn parse_time(s: &str) -> Result<Timestamp, String> {
     s.parse::<UnixNanos>()
         .map(Timestamp::from)
         .map_err(|e| e.to_string())
-}
-
-/// A Nautilus trader id, a name and a tag joined by a hyphen, checked by
-/// Nautilus.
-fn parse_trader_id(s: &str) -> Result<TraderId, String> {
-    TraderId::new_checked(s).map_err(|e| e.to_string())
 }
 
 /// An amount and a currency code, for example "3 EUR". Explicit, since
