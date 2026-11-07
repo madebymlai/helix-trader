@@ -125,7 +125,6 @@ redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"]
 nautilus-model = { workspace = true, features = ["test-support"] }
 # Nautilus' portfolio, to register a strategy in a unit test.
 nautilus-portfolio.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
 
 # Line tables only for the workspace's crates, enough for file:line in
 # backtraces, and no debug info for dependencies: Nautilus and DataFusion's full debug info made

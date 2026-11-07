@@ -24,7 +24,7 @@ Set a bare account ID with `--account` or `NAUTILUS_IB_ACCOUNT_ID`. A paper ID b
 docker pull ghcr.io/gnzsnz/ib-gateway:stable
 ```
 
-The paper and live containers use ports 4002 and 4001 respectively and remain running for reuse. The gateway login takes over an existing session of the same IB user; close any manual gateway occupying the port. Start concurrent commands sequentially until the first gateway has logged in, to avoid a container-start race. Distinct processes need distinct client IDs. The gateway API is not read-only because even its initial execution connection requires write access. After a gateway restart, periodic checks run but the node does not repeat full startup reconciliation.
+The paper and live containers use ports 4002 and 4001 respectively and remain running for reuse. The gateway login takes over an existing session of the same IB user; close any manual gateway occupying the port. Concurrent commands share the container, each waiting for its login, but the adapter replaces a container it finds created and not yet started, which can fail the command starting it at that moment: start the second command once the first's container is running. Distinct processes need distinct client IDs. The gateway API is not read-only because even its initial execution connection requires write access. After a gateway restart, periodic checks run but the node does not repeat full startup reconciliation.
 
 ## Trading and warmup
 
