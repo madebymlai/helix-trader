@@ -6,10 +6,12 @@
 //! `Trade::send` rounds the quantity to the instrument's sizes and sends,
 //! with a `Bracket`, a Nautilus bracket (`OrderFactory::bracket`: a market
 //! entry, a take-profit limit and a stop-market, one-updates-the-other,
-//! the legs reduce-only), without one a market entry. A time limit sets a
-//! time alert named after the entry, `TIME_ALERT` and its client order id,
-//! the time limit after the send, and tags the entry with it
-//! (`TIME_LIMIT_TAG`), where the cache, persisted live, keeps it.
+//! the legs reduce-only and the take profit post-only where the
+//! instrument's live broker takes such orders, in a backtest as live:
+//! `venues::takes_reduce_only_and_post_only`), without one a market entry.
+//! A time limit sets a time alert named after the entry, `TIME_ALERT` and
+//! its client order id, the time limit after the send, and tags the entry
+//! with it (`TIME_LIMIT_TAG`), where the cache, persisted live, keeps it.
 //!
 //! The time limit runs from the send, the entry's creation (its
 //! `ts_init`), not from its fill: a dataset run labels a decision's target
@@ -19,11 +21,13 @@
 //! Nautilus delivers time events to the strategy alone: the strategy hands
 //! each to `on_time_event`, which at a trade's alert cancels its orders
 //! still open, the entry and its legs, and, if the trade is still open,
-//! closes its position (`close_position`, tagged `TIME_CLOSE_TAG`, see
-//! `is_time_close`). A trade is open while an open position holds its
-//! entry's fill and no leg of the entry (an order Nautilus names it the
-//! parent of) is filled whole (`OrderStatus::Filled`): a leg partly filled
-//! leaves the rest of the trade open, which its time closes. On a hedging
+//! closes its position (`close_position`, reduce-only as the legs are,
+//! tagged `TIME_CLOSE_TAG`, see `is_time_close`), not waiting for the
+//! cancels (see `venues/ib/README.md` for what that risks on IB). A trade
+//! is open while an open position holds its entry's fill and no leg of the
+//! entry (an order Nautilus names it the parent of) is filled whole
+//! (`OrderStatus::Filled`): a leg partly filled leaves the rest of the
+//! trade open, which its time closes. On a hedging
 //! venue the position is the one its entry opened; on a netting venue the
 //! venue's one position, which a later entry adds into, so closing a
 //! trade there closes the trades it holds with it, a later trade's alert
@@ -62,6 +66,8 @@ use nautilus_model::{
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use ustr::Ustr;
+
+use crate::venues;
 
 /// The prefix of a trade's time alert, followed by its entry's client
 /// order id.
@@ -163,6 +169,7 @@ impl Trade {
                 take_profit,
                 stop_loss,
             }) => {
+                let takes = venues::takes_reduce_only_and_post_only(instrument_id.venue);
                 let orders = strategy
                     .order()
                     .bracket()
@@ -179,7 +186,10 @@ impl Trade {
                     .maybe_tp_client_order_id(ids.map(|ids| ids.take_profit))
                     .maybe_sl_client_order_id(ids.map(|ids| ids.stop_loss))
                     .tp_price(take_profit)
+                    .tp_post_only(takes)
+                    .tp_reduce_only(takes)
                     .sl_trigger_price(stop_loss)
+                    .sl_reduce_only(takes)
                     .call();
                 // Nautilus' bracket is the entry, then its legs.
                 let entry = orders[0].client_order_id();
@@ -257,7 +267,8 @@ where
     }
     if let Some(position) = position {
         let tags = Some(vec![Ustr::from(TIME_CLOSE_TAG)]);
-        strategy.close_position(&position, None, tags, None, None, None, None)?;
+        let reduce_only = venues::takes_reduce_only_and_post_only(position.instrument_id.venue);
+        strategy.close_position(&position, None, tags, None, Some(reduce_only), None, None)?;
     }
     Ok(true)
 }

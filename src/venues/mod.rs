@@ -4,7 +4,9 @@
 //! trades it live (`LiveBroker`), both by its venue. Everything else asks
 //! here and names no venue: fill-catalog for its fill (`fill_history`), the
 //! live runner for its node's clients (`live_clients`), a backtest for how a
-//! venue keeps positions (`oms_type`, its broker's answer); venue code checks
+//! venue keeps positions (`oms_type`, its broker's answer), a trade whether
+//! its orders may be reduce-only and post-only
+//! (`takes_reduce_only_and_post_only`, its broker's answer); venue code checks
 //! its own instruments against the table. The settings each command takes of
 //! the venues are composed here, `LiveVenueArgs` for live and
 //! `HistoryVenueArgs` for fill-catalog, which the commands flatten.
@@ -151,6 +153,23 @@ impl LiveBroker {
             Self::Okx | Self::Ib => OmsType::Netting,
         }
     }
+
+    /// Whether the broker's execution client takes reduce-only and
+    /// post-only orders, which Nautilus' bracket makes of its exits and take
+    /// profit and `close_position` of its close unless told otherwise. A
+    /// copy of IB's adapter (`crates/adapters/interactive_brokers/src/
+    /// execution`): `core.rs` `validate_order` denies a reduce-only order,
+    /// and a list holding one whole, and `commands.rs` `prepare_submit_order`
+    /// a post-only order sent alone, one in a list going to IB as a plain
+    /// order. Unlike `oms_type` no test pins this copy by building the
+    /// client: Nautilus' `ExecutionClient` gives no such answer.
+    #[must_use]
+    pub(crate) fn takes_reduce_only_and_post_only(self) -> bool {
+        match self {
+            Self::CTrader(_) | Self::Okx => true,
+            Self::Ib => false,
+        }
+    }
 }
 
 /// The routing table's row of `venue`: its history source and its live
@@ -180,6 +199,15 @@ fn row(venue: Venue) -> (HistorySource, LiveBroker) {
 #[must_use]
 pub fn oms_type(venue: Venue) -> OmsType {
     row(venue).1.oms_type()
+}
+
+/// Whether the live broker of `venue` takes reduce-only and post-only
+/// orders (`LiveBroker::takes_reduce_only_and_post_only`), so every venue
+/// without a row of its own as IB. A trade asks it in a backtest as live,
+/// so that a backtest sends the orders live sends.
+#[must_use]
+pub fn takes_reduce_only_and_post_only(venue: Venue) -> bool {
+    row(venue).1.takes_reduce_only_and_post_only()
 }
 
 /// The venues' settings of a live node, the live command's flags, each
@@ -1116,6 +1144,26 @@ mod tests {
             ("BINANCE", OmsType::Netting),
         ] {
             assert_eq!(oms_type(Venue::new(venue)), kept, "{venue}");
+        }
+    }
+
+    /// IB's execution client denies reduce-only and post-only orders, GLBX's
+    /// and every venue's without a row of its own.
+    #[test]
+    fn each_venue_takes_reduce_only_and_post_only_orders_as_its_live_broker_does() {
+        for (venue, takes) in [
+            ("ICMARKETS", true),
+            ("PEPPERSTONE", true),
+            ("OKX", true),
+            ("GLBX", false),
+            ("IBIS", false),
+            ("IDEALPRO", false),
+        ] {
+            assert_eq!(
+                takes_reduce_only_and_post_only(Venue::new(venue)),
+                takes,
+                "{venue}"
+            );
         }
     }
 

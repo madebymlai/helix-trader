@@ -26,7 +26,11 @@ use nautilus_trading::{
 use super::*;
 
 const STRATEGY: &str = "ORDERS-001";
-const AUD: &str = "AUD/USD.SIM";
+/// AUD/USD at Pepperstone, whose live broker takes reduce-only and
+/// post-only orders.
+const AUD: &str = "AUDUSD.PEPPERSTONE";
+/// AUD/USD on IDEALPRO, IB's venue, whose execution client takes neither.
+const IB_AUD: &str = "AUD/USD.IDEALPRO";
 
 /// 2026-10-26T10:00:00Z.
 const NOW: u64 = 1_792_922_400_000_000_000;
@@ -77,15 +81,21 @@ fn registered_on(
     (probe, clock)
 }
 
-/// A cache holding AUD/USD, on 5 decimals and whole units.
+/// A cache holding AUD/USD at Pepperstone and on IDEALPRO.
 fn cache() -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
-    cache.borrow_mut().add_instrument(aud()).unwrap();
+    for id in [AUD, IB_AUD] {
+        let aud = aud(InstrumentId::from(id));
+        cache.borrow_mut().add_instrument(aud).unwrap();
+    }
     cache
 }
 
-fn aud() -> InstrumentAny {
-    InstrumentAny::CurrencyPair(audusd_sim())
+/// AUD/USD as `id`, on 5 decimals and whole units.
+fn aud(id: InstrumentId) -> InstrumentAny {
+    let mut pair = audusd_sim();
+    pair.id = id;
+    InstrumentAny::CurrencyPair(pair)
 }
 
 /// The strategy on a cache of AUD/USD at `NOW`, and its clock.
@@ -172,9 +182,10 @@ fn fill_of(
 ) {
     let cache = probe.cache_rc();
     let order = cache.borrow().order_owned(&id(order)).unwrap();
+    let instrument = aud(order.instrument_id());
     let filled = TestOrderEventStubs::filled(
         &order,
-        &aud(),
+        &instrument,
         Some(TradeId::from(order.client_order_id().as_str())),
         Some(PositionId::from(position)),
         Some(Price::from("0.70000")),
@@ -193,7 +204,7 @@ fn fill_of(
     cache
         .add_position_id(
             &position,
-            &aud().id().venue,
+            &event.instrument_id.venue,
             &event.client_order_id,
             &event.strategy_id,
         )
@@ -203,7 +214,7 @@ fn fill_of(
             cache.update_position_from_fill(position, event).unwrap();
         }
         _ => cache
-            .add_position(&Position::new(&aud(), event.clone()), oms)
+            .add_position(&Position::new(&instrument, event.clone()), oms)
             .unwrap(),
     }
 }
@@ -285,12 +296,14 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
             take_profit.order_side(),
             take_profit.price(),
             take_profit.is_reduce_only(),
+            take_profit.is_post_only(),
             take_profit.parent_order_id()
         ),
         (
             OrderType::Limit,
             OrderSide::Sell,
             Some(Price::from("0.70700")),
+            true,
             true,
             Some(id("T-1"))
         )
@@ -312,6 +325,25 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
             Some(id("T-1"))
         )
     );
+}
+
+/// IB's execution client denies a reduce-only or post-only order.
+#[test]
+fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
+    let (mut probe, _) = registered();
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..buy(bracket(4))
+    };
+
+    trade.send_as(&mut probe, ids("T-1")).unwrap();
+
+    let cache = probe.cache();
+    let flags = |of: &str| {
+        let order = cache.order(&id(of)).unwrap();
+        (order.is_reduce_only(), order.is_post_only())
+    };
+    assert_eq!([flags("T-1-TP"), flags("T-1-SL")], [(false, false); 2]);
 }
 
 #[test]
@@ -353,7 +385,7 @@ fn a_quantity_rounding_to_no_size_is_refused() {
     let err = trade.send(&mut probe).unwrap_err();
 
     assert!(
-        err.to_string().contains("ordering 0.4 of AUD/USD.SIM"),
+        err.to_string().contains(&format!("ordering 0.4 of {AUD}")),
         "{err}"
     );
 }
@@ -408,6 +440,26 @@ fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled() {
     assert_eq!(status(&probe, "T-1-TP"), OrderStatus::PendingCancel);
     assert_eq!(status(&probe, "T-1-SL"), OrderStatus::PendingCancel);
     assert_eq!(closes(&probe), [close()]);
+}
+
+/// On IB, whose execution client denies a reduce-only order, the time
+/// close is not one.
+#[test]
+fn at_its_time_a_trade_on_ib_is_closed_by_an_order_not_reduce_only() {
+    let (mut probe, clock) = registered();
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..buy(bracket(4))
+    };
+    sent(&mut probe, "T-1", trade);
+    fill(&probe, "T-1", "P-NET", NOW, OmsType::Netting);
+
+    advance(&mut probe, &clock, NOW + 240 * MINUTE);
+
+    assert_eq!(
+        closes(&probe),
+        [(OrderSide::Sell, Quantity::from(100_000), false, true)]
+    );
 }
 
 /// A dataset run purges closed orders a minute after they close (Nautilus'
