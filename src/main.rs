@@ -622,7 +622,7 @@ impl Children {
     fn dataset(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<()> {
         self.run(
             "dataset",
-            &["--start", &from.to_string(), "--end", &to.to_string()],
+            &span_args(from, to).each_ref().map(String::as_str),
         )
     }
 
@@ -700,6 +700,17 @@ impl Children {
         );
         args
     }
+}
+
+/// The window flags of `dataset` over `[from, to)`, as `Children::dataset`
+/// hands them.
+fn span_args(from: Timestamp, to: Timestamp) -> [String; 4] {
+    [
+        "--start".to_string(),
+        from.to_string(),
+        "--end".to_string(),
+        to.to_string(),
+    ]
 }
 
 /// Builds the strategy from its config and runs it live until Ctrl-C. A
@@ -1602,6 +1613,54 @@ mod tests {
             ]
             .map(std::ffi::OsString::from)
         );
+    }
+
+    /// The command lines a backtest hands its children parse as the
+    /// subcommands they run, into what the backtest was given: a flag
+    /// renamed in the children or in a subcommand alone fails here. The
+    /// train's `--at` is the launcher's (`Launcher::process`), given here
+    /// as it gives it.
+    #[test]
+    fn the_children_command_lines_parse_as_their_subcommands() {
+        let mut argv = backtest_required();
+        argv[0] = "model_ema";
+        argv[2] = "model_ema.toml";
+        argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
+        argv.extend(["--dataset-balance", "10000000 EUR", "--leverage", "2"]);
+        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
+        let parsed = |args: Vec<std::ffi::OsString>| {
+            let argv = std::iter::once("helix-trader".into()).chain(args);
+            Cli::try_parse_from(argv).unwrap().command
+        };
+        let from: Timestamp = "2026-10-20T00:00:00Z".parse().unwrap();
+        let to: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
+
+        let mut train = children.train_args();
+        train.extend(["--at".into(), to.to_string().into()]);
+        let Command::Train(train) = parsed(train) else {
+            panic!("not a train");
+        };
+        assert_eq!(train.strategy, children.strategy);
+        assert_eq!(train.config, children.config);
+        assert_eq!(train.catalog, children.catalog);
+        assert_eq!(train.models, children.models);
+        assert_eq!(train.at, to);
+        assert_eq!(train.commission.normalized(), children.venue.commission);
+        assert_eq!(train.balance, children.venue.balance);
+        assert_eq!(train.leverage, children.venue.leverage);
+
+        let mut dataset = children.args("dataset");
+        dataset.extend(span_args(from, to).map(std::ffi::OsString::from));
+        let Command::Dataset(dataset) = parsed(dataset) else {
+            panic!("not a dataset");
+        };
+        assert_eq!(dataset.run.strategy, children.strategy);
+        assert_eq!(dataset.run.config, children.config);
+        assert_eq!(dataset.run.catalog, children.catalog);
+        assert_eq!((dataset.run.start, dataset.run.end), (from, to));
+        assert_eq!(dataset.commission.normalized(), children.venue.commission);
+        assert_eq!(dataset.balance, children.venue.balance);
+        assert_eq!(dataset.leverage, children.venue.leverage);
     }
 
     /// Every subcommand takes the strategy first, by its command-line
