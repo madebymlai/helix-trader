@@ -15,7 +15,7 @@
 //!
 //! A meta model's store sits in a `meta/` directory beside its sides,
 //! under their training settings, keyed by its own (its learner and
-//! settings, window, holdout, threshold and minimums) and the sides'
+//! settings, window, holdout, margin and minimums) and the sides'
 //! margins, which make its rows. A meta model is only ever listed beside
 //! meta models of the same sides.
 //!
@@ -49,14 +49,14 @@
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
 //! target spec and side, the learner, the calibration of its predictions (a
-//! side's its pair's, a meta's Platt's, `ModelCalibration`), its baseline
-//! (the training mean of what it learned on the rows it was fitted and
-//! calibrated on: a side's R, a meta's labels), its holdout
-//! (`holdout::Holdout`) and probe rows with the predictions the model made
-//! on them when fitted, before any calibration, and the model as its
-//! adapter saved it. A side's model predicts R (`SideModel`), its pair
-//! calibrating both sides' predictions at once (`Pair::expect`); a meta's
-//! every prediction is calibrated (`LoadedModel`); each carries its
+//! side's its pair's, a meta's its own level line, `ModelCalibration`), its
+//! baseline (the training mean of the R it learned on the rows it was fitted
+//! and calibrated on), its holdout (`holdout::Holdout`) and probe rows with
+//! the predictions the model made on them when fitted, before any
+//! calibration, and the model as its adapter saved it. A side's model
+//! predicts R (`SideModel`), its pair calibrating both sides' predictions at
+//! once (`Pair::expect`); a meta's predicts the R of the trade of the side
+//! picked, every prediction calibrated (`LoadedModel`); each carries its
 //! baseline (`Baselined`). A model whose manifest has the other level's
 //! calibration is refused at load. A reloaded model is checked by
 //! predicting the probes, never by its bytes. The file is written beside
@@ -76,7 +76,7 @@ use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    calibration::{Expected, Ksplit, Platt},
+    calibration::{Expected, Ksplit, Line},
     config::{Margins, MetaConfig, ModelConfig},
     dataset::{self, DatasetVenue},
     deciding::SideRow,
@@ -105,7 +105,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -189,8 +189,8 @@ pub struct ModelManifest {
     /// The calibration of the model's predictions.
     pub calibration: ModelCalibration,
     /// The model's baseline, the constant model its scores are read
-    /// beside: the training mean of what it learned, a side's R and a
-    /// meta's labels, on the rows it was fitted and calibrated on.
+    /// beside: the training mean of the R it learned on the rows it was
+    /// fitted and calibrated on.
     pub baseline: f64,
     /// The model's holdout, as its publication read it.
     pub holdout: Holdout,
@@ -205,8 +205,9 @@ pub struct ModelManifest {
 pub enum ModelCalibration {
     /// A side model's: its pair's, one copy in each side's manifest.
     Pair(PairCalibration),
-    /// A meta model's: Platt's curve on its probabilities.
-    Platt(Platt),
+    /// A meta model's: the level line of its predictions of R, as a
+    /// one-sided pair's (`Ksplit`).
+    Meta(Line),
 }
 
 /// A pair's calibration as each side's manifest holds it, naming the pair it
@@ -230,20 +231,20 @@ pub struct Probe {
 }
 
 impl StoredModel {
-    /// The meta model, loaded by its manifest's learner with its Platt
-    /// calibration and checked as `checked` does.
+    /// The meta model, loaded by its manifest's learner with its level line
+    /// and checked as `checked` does.
     ///
     /// # Errors
     ///
     /// Returns an error if the model cannot be loaded, fails a check, or its
     /// manifest has a side's calibration.
     pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<LoadedModel> {
-        let ModelCalibration::Platt(platt) = self.manifest.calibration else {
+        let ModelCalibration::Meta(calibration) = self.manifest.calibration else {
             anyhow::bail!("its manifest has a pair's calibration, which no meta model has");
         };
         Ok(LoadedModel {
             model: self.checked(feature_names, fingerprint)?,
-            platt,
+            calibration,
             baseline: self.manifest.baseline,
         })
     }
@@ -311,14 +312,15 @@ impl StoredModel {
     }
 }
 
-/// A meta model as a strategy and a score use it: loaded, every prediction
-/// calibrated, with its baseline.
+/// A meta model as a strategy and a score use it: loaded, predicting the
+/// realised R of the trade of the side picked, every prediction calibrated
+/// by its level line, with its baseline.
 #[derive(Debug)]
 pub struct LoadedModel {
     model: Model,
-    platt: Platt,
-    /// The training mean of the labels of the rows it was fitted and
-    /// calibrated on (`ModelManifest::baseline`).
+    calibration: Line,
+    /// The training mean of R on the rows it was fitted and calibrated on
+    /// (`ModelManifest::baseline`).
     baseline: f64,
 }
 
@@ -332,24 +334,24 @@ pub(super) trait Baselined {
 }
 
 impl LoadedModel {
-    /// The meta model `model` fitted, its predictions calibrated by
-    /// `platt`, its baseline `baseline`.
+    /// The meta model `model` fitted, its predictions calibrated by the
+    /// line `calibration`, its baseline `baseline`.
     #[must_use]
-    pub const fn new(model: Model, platt: Platt, baseline: f64) -> Self {
+    pub const fn new(model: Model, calibration: Line, baseline: f64) -> Self {
         Self {
             model,
-            platt,
+            calibration,
             baseline,
         }
     }
 
-    /// The calibrated probability that the label of `row` is true.
+    /// The calibrated expected R of the trade of `row`.
     ///
     /// # Errors
     ///
     /// As `Model::predict`.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
-        Ok(self.platt.apply(self.model.predict(row)?))
+        Ok(self.calibration.apply(self.model.predict(row)?))
     }
 }
 
@@ -835,14 +837,14 @@ fn margins_text(margins: Margins) -> String {
 }
 
 /// The training settings of `meta`: its learner, window, holdout, and
-/// the threshold deciding the trades its holdout is judged on, and the
+/// the margin deciding the trades its holdout is judged on, and the
 /// minimums of its holdout.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
-        .with(&meta.threshold.to_le_bytes())
+        .with(&meta.margin.to_le_bytes())
         .with(&meta.min_pnl.to_le_bytes())
         .with(&meta.min_trades.to_le_bytes()))
 }
@@ -1381,17 +1383,17 @@ mod tests {
             .clone()
     }
 
-    /// A meta model published under one threshold and minimums may fall
-    /// short of others, and the sides' margins make its rows: a meta
-    /// of another threshold, minimums or margins lists none of them.
+    /// A meta model published under one margin and minimums may fall
+    /// short of others, and the sides' margins make its rows: a meta of
+    /// another margin, minimums or sides' margins lists none of them.
     #[test]
-    fn a_meta_model_of_another_threshold_minimums_or_margins_is_not_listed() {
+    fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = |threshold, min_pnl| {
+        let meta = |margin, min_pnl| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(12))
-                .threshold(threshold)
+                .margin(margin)
                 .min_pnl(min_pnl)
                 .min_trades(20)
                 .learner(LearnerConfig::Fake {})
@@ -1423,13 +1425,13 @@ mod tests {
         }
     }
 
-    /// A meta model taking the trades of the side picked from a probability
-    /// of 0.55.
+    /// A meta model taking the trades of the side picked from an expected
+    /// net P&L of 0.55 USD.
     fn meta_config() -> MetaConfig {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
-            .threshold(0.55)
+            .margin(0.55)
             .min_pnl(1.0)
             .min_trades(20)
             .learner(LearnerConfig::Fake {})
@@ -1530,15 +1532,18 @@ mod tests {
         assert!(short.valid_froms().unwrap().is_empty());
     }
 
-    /// A meta model's every prediction is calibrated by its Platt curve, and
-    /// its probes are its predictions before it: the fake predicts the first
-    /// feature, 0.25, of odds 1/3, calibrated by a = -0.9 and b = 0 to 1 / (1
-    /// + 3^0.9).
+    /// A meta model's every prediction of R is calibrated by its level line,
+    /// and its probes are its predictions before it: the fake predicts the
+    /// first feature, 0.25, calibrated by the line `0.1 + 0.5 E` to an
+    /// expected R of 0.225.
     #[test]
     fn a_loaded_meta_model_predicts_through_its_calibration() {
         let mut stored = model("2026-10-22T00:00:00Z", &[vec![0.75]]);
         stored.manifest.side = None;
-        stored.manifest.calibration = ModelCalibration::Platt(Platt { a: -0.9, b: 0.0 });
+        stored.manifest.calibration = ModelCalibration::Meta(Line {
+            alpha: 0.1,
+            beta: 0.5,
+        });
 
         let loaded = stored
             .load(&stored.manifest.feature_names, &stored.manifest.fingerprint)
@@ -1546,19 +1551,19 @@ mod tests {
 
         assert_eq!(stored.manifest.probes[0].prediction, 0.75);
         let prediction = loaded.predict(&[0.25]).unwrap();
-        assert!(
-            (prediction - 1.0 / (1.0 + 3_f64.powf(0.9))).abs() < 1e-12,
-            "{prediction}"
-        );
+        assert!((prediction - 0.225).abs() < 1e-12, "{prediction}");
     }
 
-    /// A side's model has its pair's calibration and a meta's Platt's: each
-    /// loaded as the other's level is refused.
+    /// A side's model has its pair's calibration and a meta's its own level
+    /// line: each loaded as the other's level is refused.
     #[test]
     fn a_model_is_refused_at_the_other_levels_load() {
         let side = model("2026-10-22T00:00:00Z", &[]);
         let mut meta = side.clone();
-        meta.manifest.calibration = ModelCalibration::Platt(Platt { a: -1.0, b: 0.0 });
+        meta.manifest.calibration = ModelCalibration::Meta(Line {
+            alpha: 0.0,
+            beta: 1.0,
+        });
         let (names, fingerprint) = (&side.manifest.feature_names, &side.manifest.fingerprint);
 
         assert!(side.load(names, fingerprint).is_err());
@@ -1614,15 +1619,17 @@ mod tests {
         }
     }
 
-    /// The manifest of the earlier store version, its side's Platt
-    /// calibration and payoff record, is no model of this one: read, it is
-    /// refused, naming its file.
+    /// The manifests of earlier store versions are no models of this one: a
+    /// side's of Platt's calibration and a payoff record, and a meta's of
+    /// Platt's calibration and its probabilities' log loss and AUC. Read,
+    /// each is refused, naming its file.
     #[test]
-    fn a_model_of_the_earlier_manifest_is_refused_naming_its_file() {
+    fn a_model_of_an_earlier_manifest_is_refused_naming_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
-        let mut earlier = serde_json::to_value(model("2026-10-22T00:00:00Z", &[])).unwrap();
-        let manifest = earlier["manifest"].as_object_mut().unwrap();
+        let current = serde_json::to_value(model("2026-10-22T00:00:00Z", &[])).unwrap();
+        let mut side = current.clone();
+        let manifest = side["manifest"].as_object_mut().unwrap();
         manifest.insert(
             "calibration".to_string(),
             serde_json::json!({"a": -0.9, "b": 0.0}),
@@ -1631,14 +1638,32 @@ mod tests {
             "payoff".to_string(),
             serde_json::json!({"win": 1.5, "loss": 1.25}),
         );
+        let mut meta = current;
+        let manifest = meta["manifest"].as_object_mut().unwrap();
+        manifest.insert("side".to_string(), serde_json::Value::Null);
+        manifest.insert(
+            "calibration".to_string(),
+            serde_json::json!({"platt": {"a": -0.9, "b": 0.0}}),
+        );
+        manifest["holdout"]["score"] = serde_json::json!({"probability": {
+            "log_loss": 0.6,
+            "baseline_log_loss": 0.69,
+            "auc": 0.6
+        }});
         std::fs::create_dir_all(&store.directory).unwrap();
-        let path = store.path(at("2026-10-22T00:00:00Z"));
-        std::fs::write(&path, earlier.to_string()).unwrap();
 
-        let refused = store.read(at("2026-10-22T00:00:00Z")).unwrap_err();
+        for (earlier, valid_from) in [
+            (side, "2026-10-22T00:00:00Z"),
+            (meta, "2026-10-23T00:00:00Z"),
+        ] {
+            let path = store.path(at(valid_from));
+            std::fs::write(&path, earlier.to_string()).unwrap();
 
-        let message = format!("{refused:#}");
-        assert!(message.contains(&path.display().to_string()), "{message}");
+            let refused = store.read(at(valid_from)).unwrap_err();
+
+            let message = format!("{refused:#}");
+            assert!(message.contains(&path.display().to_string()), "{message}");
+        }
     }
 
     /// A model learned targets net of its dataset run's commission: one of

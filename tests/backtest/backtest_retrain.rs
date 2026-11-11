@@ -26,10 +26,9 @@ use helix_trader::model::{
     dataset::{self, Dataset},
     features::FeatureSet,
     schedule::Retrain,
-    score::ExpectedScore,
     store::{ModelSet, ModelStore},
     targets::Side,
-    walk::{Score, WalkForward},
+    walk::WalkForward,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -269,24 +268,12 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
         let mean = realised.iter().sum::<f64>() / realised.len() as f64;
         assert_eq!(period.models, [from]);
         assert!(!realised.is_empty(), "{period:?}");
-        let score = expected(period.score);
+        let score = period.score;
         assert_eq!(score.rows, realised.len());
         assert_eq!((score.skill, score.slope), (Some(0.0), None), "{period:?}");
         let error = score.mean_error.unwrap() - (mean - predicts(&store, from));
         assert!(error.abs() < 1e-12, "{period:?}: {mean}");
     }
-    let rows: usize = long
-        .periods
-        .iter()
-        .map(|period| expected(period.score).rows)
-        .sum();
-    assert_eq!(expected(long.score).rows, rows);
-}
-
-/// A side's score of `score`.
-fn expected(score: Score) -> ExpectedScore {
-    let Score::Expected(score) = score else {
-        panic!("{score:?}");
-    };
-    score
+    let rows: usize = long.periods.iter().map(|period| period.score.rows).sum();
+    assert_eq!(long.score.rows, rows);
 }

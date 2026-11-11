@@ -1648,8 +1648,8 @@ mod tests {
         }
 
         /// The meta model's violations are reported under `[model.meta]`'s
-        /// fields: a threshold of 1.5 is no probability, and it requires no
-        /// trade on its holdout.
+        /// fields: its margin is not a number, and it requires no trade on
+        /// its holdout.
         #[test]
         fn reports_the_meta_models_violations_under_its_fields() {
             let toml = with_meta(
@@ -1657,7 +1657,7 @@ mod tests {
                 [model.meta]
                 window = "48h"
                 holdout = "12h"
-                threshold = 1.5
+                margin = nan
                 min_pnl = 0.5
                 min_trades = 0
                 learner = { kind = "baseline" }
@@ -1667,7 +1667,7 @@ mod tests {
             let mut fields = error_fields(&toml);
             fields.sort();
 
-            assert_eq!(fields, ["model.meta.min_trades", "model.meta.threshold"]);
+            assert_eq!(fields, ["model.meta.margin", "model.meta.min_trades"]);
         }
 
         /// A meta model is a `[model.meta]` table, and no more: a meta of
@@ -1680,7 +1680,7 @@ mod tests {
                 [model.meta]
                 window = "48h"
                 holdout = "12h"
-                threshold = 0.55
+                margin = 0.25
                 min_pnl = 0.5
                 min_trades = 30
                 learner = { kind = "baseline" }
@@ -1688,9 +1688,9 @@ mod tests {
             );
 
             let config = load(&toml).unwrap();
-            assert_eq!(config.model().meta.unwrap().threshold, 0.55);
+            assert_eq!(config.model().meta.unwrap().margin, 0.25);
 
-            let nested = format!("{toml}\n[model.meta.meta]\nthreshold = 0.5\n");
+            let nested = format!("{toml}\n[model.meta.meta]\nmargin = 0.5\n");
             let err = shape_error(&nested);
             assert!(err.contains("unknown field `meta`"), "{err}");
         }

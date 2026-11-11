@@ -82,11 +82,12 @@
 //! that of a train at two times, valid from the window's start, used
 //! throughout it; and should the sides of such a train publish none, the
 //! meta waits for the sides' decisions (`Plan::meta_after_sides`). The meta
-//! learns whether the trade of the side picked gains, calibrated by Platt
-//! scaling (`calibration::Platt`) on its own calibration's rows, and is
-//! judged alone, on its own holdout, by its log loss and the trades of the
-//! side picked taken from its threshold (`MetaConfig::threshold`), and
-//! published in its own store.
+//! is a regression of the realised net R of the trade of the side picked,
+//! calibrated by its level line alone (`calibration::Ksplit` of one side) on
+//! its own calibration's rows, and is judged alone, on its own holdout, by
+//! its skill, as a side is, and by the trades of the side picked its margin
+//! takes (`MetaConfig::margin`, `holdout::MetaMargin`), its calibrated
+//! expected R times the trade's unit, and published in its own store.
 //!
 //! A train never errors: what goes wrong is an outcome, the current model
 //! kept with the reason (`Kept`), for each model trained. It succeeds when
@@ -100,16 +101,16 @@ use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
 
 use super::{
-    calibration::{Ksplit, Platt},
+    calibration::Ksplit,
     config::ModelConfig,
     dataset::{Dataset, DatasetRow, DatasetVenue, SchemaMismatch},
     deciding::DecidingModels,
     features::FeatureSet,
-    holdout::{Earnings, Example, Holdout, Minimums, Refusal, Score, Threshold},
+    holdout::{Earnings, Example, Holdout, MetaMargin, Minimums, Refusal},
     learner::{LearnerConfig, SavedModel, TrainingSet},
     meta,
     schedule::{Models, Retrain, Schedule, Step},
-    score::{self, ExpectedScore},
+    score::ExpectedScore,
     store::{
         Baselined, MetaLevel, ModelCalibration, ModelManifest, ModelSet, ModelStore, Pair,
         PairCalibration, Probe, SideLevel, SideModel, StoredModel,
@@ -182,9 +183,9 @@ struct SideFit<'a> {
 struct MetaFit {
     fitted: Fitted,
     held_out: Vec<Example>,
-    /// Its calibrated probability on each row held out.
-    probabilities: Vec<f64>,
-    score: Score,
+    /// Its calibrated expected R on each row held out.
+    expected: Vec<f64>,
+    score: ExpectedScore,
 }
 
 /// What a step comes to on the replay's rows.
@@ -321,7 +322,7 @@ impl Training {
         let sides = self.sides(plan.steps(), &rows);
         let meta = || {
             let level = self.levels.meta.as_ref()?;
-            let threshold = Threshold(self.models.meta()?.config().threshold);
+            let margin = MetaMargin(self.models.meta()?.config().margin);
             let step = match self.models.valid_froms() {
                 Ok(valid_froms) => plan.meta_after_sides(&valid_froms)?,
                 Err(e) => return Some(kept(&e)),
@@ -329,7 +330,7 @@ impl Training {
             Some(match self.planned(step, &rows) {
                 Planned::Done(outcome) => outcome,
                 Planned::Fit { at, rows } => self
-                    .fit_meta(level, threshold, at, &rows)
+                    .fit_meta(level, margin, at, &rows)
                     .unwrap_or_else(|e| kept(&e)),
             })
         };
@@ -474,7 +475,7 @@ impl Training {
             .iter()
             .map(|rows| Holdout {
                 earnings,
-                score: Score::Expected(ExpectedScore::of(rows)),
+                score: ExpectedScore::of(rows),
             })
             .collect();
         let refusal = holdouts
@@ -561,11 +562,12 @@ impl Training {
 
     /// Fits the meta model of `level` as of `at` on the examples of `rows`, in
     /// time order, and publishes it, or keeps the current one with the reason,
-    /// the trades of the side picked taken from `threshold`.
+    /// the trades of the side picked taken by `margin` on the net P&L the
+    /// meta expects of each, its calibrated expected R times the trade's unit.
     fn fit_meta(
         &self,
         level: &Level,
-        threshold: Threshold,
+        margin: MetaMargin,
         at: Timestamp,
         rows: &[&DatasetRow],
     ) -> anyhow::Result<Outcome> {
@@ -573,13 +575,13 @@ impl Training {
         let MetaFit {
             fitted,
             held_out,
-            probabilities,
+            expected,
             score,
         } = level.fit(at, examples)?;
         let trades: Vec<_> = held_out
             .iter()
-            .zip(&probabilities)
-            .map(|(row, &probability)| (threshold.takes(probability), row.trade))
+            .zip(&expected)
+            .map(|(row, &expected)| (margin.takes(expected * row.unit), row.trade))
             .collect();
         let holdout = Holdout {
             earnings: Earnings::of(&trades),
@@ -625,8 +627,8 @@ impl Training {
 }
 
 impl Level {
-    /// The level of `meta`: it learns whether the target on the side picked
-    /// wins.
+    /// The level of `meta`: it learns the realised R of the target on the
+    /// side picked.
     fn of_meta(meta: &MetaLevel) -> Self {
         let config = meta.config();
         Self {
@@ -638,61 +640,60 @@ impl Level {
         }
     }
 
-    /// The meta model fitted as of `at` on `examples`, in time order, on
-    /// whether each trade gained, calibrated by Platt (`Platt`), and scored
-    /// on its holdout by its probabilities alone (`split`).
+    /// The meta model fitted as of `at` on `examples`, in time order, a
+    /// regression of each trade's realised R (`split`), calibrated by its
+    /// level line alone (`Ksplit` of one side), and scored on its holdout,
+    /// its calibrated expected R against the trades' R beside its baseline,
+    /// the training mean of R on the rows it was fitted and calibrated on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no row to fit on, to calibrate on or to
+    /// judge on, a label is no finite number, or the learner fails.
     fn fit(&self, at: Timestamp, examples: Vec<Example>) -> anyhow::Result<MetaFit> {
         let holdout = at - self.holdout;
         let (fitted, calibrating, held_out) =
             split(examples, (holdout - self.holdout, holdout), |row| {
                 (row.ts_event, row.settled_at)
             });
-        let set = TrainingSet::new(
-            self.feature_names.len(),
-            fitted.iter().flat_map(|row| row.features.clone()).collect(),
-            fitted.iter().map(|row| row.label).collect(),
-        )
-        .context("fitting on the window before the calibration")?;
-        let model = self.learner.fit(&set)?;
-        let platt = Platt::fit(
+        let set = |rows: &[&Example]| {
+            TrainingSet::regression(
+                self.feature_names.len(),
+                rows.iter().flat_map(|row| row.features.clone()).collect(),
+                rows.iter().map(|row| row.realised()).collect(),
+            )
+        };
+        let model = self.learner.fit(
+            &set(&fitted.iter().collect::<Vec<_>>())
+                .context("fitting on the window before the calibration")?,
+        )?;
+        let line = Ksplit::fit(
             &calibrating
                 .iter()
-                .map(|row| Ok((model.predict(&row.features)?, row.label)))
+                .map(|row| Ok(vec![(model.predict(&row.features)?, row.realised())]))
                 .collect::<anyhow::Result<Vec<_>>>()?,
         )
-        .context("calibrating on the window before the holdout")?;
+        .context("calibrating on the window before the holdout")?
+        .level;
+        anyhow::ensure!(
+            !held_out.is_empty(),
+            "no row in the holdout to judge the model on"
+        );
         let trained: Vec<&Example> = fitted.iter().chain(&calibrating).collect();
-        let baseline = baseline(
-            &TrainingSet::new(
-                self.feature_names.len(),
-                trained
-                    .iter()
-                    .flat_map(|row| row.features.clone())
-                    .collect(),
-                trained.iter().map(|row| row.label).collect(),
-            )?,
-            &trained[0].features,
-        )?;
+        let baseline = baseline(&set(&trained)?, &trained[0].features)?;
         let saved = model.save()?;
         let predictions = held_out
             .iter()
             .map(|row| model.predict(&row.features))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let probabilities: Vec<f64> = predictions.iter().map(|&p| platt.apply(p)).collect();
-        let by_model: Vec<(f64, bool)> = probabilities
-            .iter()
-            .zip(&held_out)
-            .map(|(&probability, row)| (probability, row.label))
-            .collect();
-        let by_baseline: Vec<(f64, bool)> =
-            held_out.iter().map(|row| (baseline, row.label)).collect();
-        let score = Score::Probability {
-            log_loss: score::log_loss(&by_model)
-                .context("no row in the holdout to judge the model on")?,
-            baseline_log_loss: score::log_loss(&by_baseline)
-                .context("no row in the holdout to judge the model on")?,
-            auc: score::auc(&by_model),
-        };
+        let expected: Vec<f64> = predictions.iter().map(|&p| line.apply(p)).collect();
+        let score = ExpectedScore::of(
+            &expected
+                .iter()
+                .zip(&held_out)
+                .map(|(&expected, row)| (expected, row.realised(), baseline))
+                .collect::<Vec<_>>(),
+        );
         let probes = spread(held_out.len())
             .map(|i| Probe {
                 row: held_out[i].features.clone(),
@@ -703,12 +704,12 @@ impl Level {
             fitted: Fitted {
                 saved,
                 side: None,
-                calibration: ModelCalibration::Platt(platt),
+                calibration: ModelCalibration::Meta(line),
                 baseline,
                 probes,
             },
             held_out,
-            probabilities,
+            expected,
             score,
         })
     }
@@ -1297,21 +1298,13 @@ mod tests {
             close_to(every.win_rate, 0.5);
             close_to(taken_stressed.expectancy, 2.9);
             close_to(every_stressed.expectancy, 0.4);
-            let score = expected(holdout);
+            let score = holdout.score;
             assert_eq!(score.rows, 2);
             close_to(score.skill, skill);
             close_to(score.mean_error, mean_error);
             close_to(score.slope, slope);
             close_to(score.top_decile_gap, gap);
         }
-    }
-
-    /// A side's score of `holdout`.
-    fn expected(holdout: Holdout) -> ExpectedScore {
-        let Score::Expected(score) = holdout.score else {
-            panic!("{holdout:?}");
-        };
-        score
     }
 
     /// Worked by hand on `rows`'s holdout, as
@@ -1491,7 +1484,7 @@ mod tests {
                 .holdout;
             let Earnings { taken, every, .. } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{side:?}");
-            let score = expected(holdout);
+            let score = holdout.score;
             close_to(score.skill, skill);
             close_to(score.mean_error, mean_error);
             let reported = outcome.as_ref().unwrap().to_string();
@@ -1533,7 +1526,7 @@ mod tests {
                 panic!("{why:?}");
             };
             close_to(skill, long_skill);
-            close_to(expected(**holdout).skill, own);
+            close_to(holdout.score.skill, own);
             let Earnings { taken, every, .. } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
             close_to(taken.expectancy, -2.0);
@@ -2011,7 +2004,7 @@ mod tests {
                 panic!("{why:?}");
             };
             close_to(skill, short_skill);
-            close_to(expected(**holdout).skill, own);
+            close_to(holdout.score.skill, own);
             let Earnings { taken, every, .. } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
             close_to(taken.expectancy, -2.0);
@@ -2073,7 +2066,7 @@ mod tests {
         let Some(Outcome::Kept(Kept::Refused { why, holdout })) = outcome else {
             panic!("{outcome:?}");
         };
-        assert_eq!(expected(*holdout).slope, None);
+        assert_eq!(holdout.score.slope, None);
         assert_eq!(
             why,
             Refusal::Every {
@@ -2143,13 +2136,13 @@ mod tests {
                 taken_stressed: trades(3, 1.125),
                 every_stressed: trades(8, 0.3),
             },
-            score: Score::Expected(ExpectedScore {
+            score: ExpectedScore {
                 rows: 8,
                 skill: Some(0.61),
                 mean_error: Some(-0.69),
                 slope: Some(0.9),
                 top_decile_gap: Some(0.625),
-            }),
+            },
         }
     }
 
@@ -2196,8 +2189,8 @@ mod tests {
     }
 
     /// The section of `config` with a meta model on the fake learner, on a
-    /// window of `window` hours, the last 6 held out, taking a trade from
-    /// 0.5, published from 0 USD per trade over a trade.
+    /// window of `window` hours, the last 6 held out, taking a trade from an
+    /// expected 1 USD, published from 0 USD per trade over a trade.
     fn with_meta(window: i64) -> ModelConfig {
         ModelConfig {
             meta: Some(meta(window)),
@@ -2209,7 +2202,7 @@ mod tests {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(window))
             .holdout(SignedDuration::from_hours(6))
-            .threshold(0.5)
+            .margin(1.0)
             .min_pnl(0.0)
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
@@ -2264,16 +2257,16 @@ mod tests {
             .unwrap();
     }
 
-    /// The decisions of the 6th, the short's trade the reverse of the long's:
+    /// The decisions of the 6th, the short's trade the reverse of the long's,
+    /// each side's stop worth 2 USD, winning 3 USD (1.5R) or losing 2 (-1R):
     /// one before the sides' first models (a win of the long), four long
     /// trades of the models valid from 06:00, the long's predicting 0.6R and
-    /// the short's -0.6R: fitted on, a win and a loss of the long (meta labels
-    /// true, false); calibrated on, the meta's fake predicting their first
-    /// feature, a loss at 0.25 and a win at 0.75. Two short trades of the
-    /// models valid from 17:00, the long's -0.6R and the short's 0.6R, held
-    /// out: a win and a loss of the long (the short's labels false, true), the
-    /// meta's fake predicting 0.3 and 0.7. Each decision's level is nought and
-    /// its side call 1.2 or -1.2.
+    /// the short's -0.6R: fitted on, a win and a loss of the long; calibrated
+    /// on, the meta's fake predicting their first feature, a loss at 0.25 and
+    /// a win at 0.75. Two short trades of the models valid from 17:00, the
+    /// long's -0.6R and the short's 0.6R, held out: a win and a loss of the
+    /// long (the short's -1R and 1.5R), the meta's fake predicting 0.3 and
+    /// 0.9. Each decision's level is nought and its side call 1.2 or -1.2.
     fn meta_rows() -> Vec<TargetRow> {
         vec![
             row("2026-01-06T05:00:00Z", vec![0.5], true, hour()),
@@ -2282,7 +2275,7 @@ mod tests {
             row("2026-01-06T13:00:00Z", vec![0.25], false, hour()),
             row("2026-01-06T15:00:00Z", vec![0.75], true, hour()),
             row("2026-01-06T19:00:00Z", vec![0.3], true, hour()),
-            row("2026-01-06T20:00:00Z", vec![0.7], false, hour()),
+            row("2026-01-06T20:00:00Z", vec![0.9], false, hour()),
         ]
     }
 
@@ -2304,8 +2297,25 @@ mod tests {
         }
     }
 
+    /// The meta's calibration on `meta_rows`, worked by hand: its fake
+    /// predicting 0.25 and 0.75 on the calibration's rows, against R of -1
+    /// and 1.5, means 0.5 and 0.25, a slope of 0.625 / 0.125 = 5, clipped to
+    /// 1.5, and `alpha` 0.25 - 1.5 x 0.5 = -0.5: the meta expects `-0.5 +
+    /// 1.5p` on the feature `p`, -0.05R at 0.3 and 0.85R at 0.9. Fitted on
+    /// the holdout's rows, `alpha` would be 0.25 - 1.5 x 0.6 = -0.65.
+    const META_LINE: Line = Line {
+        alpha: -0.5,
+        beta: 1.5,
+    };
+
+    /// Worked by hand on `meta_rows`: the meta fitted on the R of the side
+    /// picked of the rows before its calibration, the long's 1.5 and -1, of
+    /// a mean of 0.25, which the fake predicts where its feature is missing,
+    /// the decision before the sides' first model no row; calibrated by its
+    /// level line on the calibration's rows (`META_LINE`); its probes the
+    /// holdout's shorts and its predictions on them, before the calibration.
     #[test]
-    fn a_meta_model_learns_the_side_picked_from_its_out_of_sample_decisions() {
+    fn a_meta_model_learns_the_r_of_the_side_picked_from_its_out_of_sample_decisions() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
         publish_baselines(dir.path(), &with_meta(24));
@@ -2313,40 +2323,148 @@ mod tests {
 
         let trained = training.train_at(t, |_, _| Ok(meta_rows()));
 
-        let Some(Outcome::Published {
-            valid_from,
-            holdout,
-        }) = trained.meta
-        else {
-            panic!("{trained:?}");
-        };
-        let Score::Probability { auc, .. } = holdout.score else {
-            panic!("{holdout:?}");
-        };
-        assert_eq!((valid_from, auc), (t, Some(1.0)));
+        assert!(
+            matches!(trained.meta, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
+            "{trained:?}"
+        );
         let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
         assert_eq!(
             stored.manifest.feature_names,
             ["mid_0", "picked_side", "level", "side_call"]
         );
         assert_eq!(stored.manifest.side, None);
-        let probes: Vec<&Vec<f64>> = stored.manifest.probes.iter().map(|p| &p.row).collect();
+        assert_eq!(
+            stored.manifest.calibration,
+            ModelCalibration::Meta(META_LINE)
+        );
+        let probes: Vec<(&Vec<f64>, f64)> = stored
+            .manifest
+            .probes
+            .iter()
+            .map(|p| (&p.row, p.prediction))
+            .collect();
         assert_eq!(
             probes,
-            [&vec![0.3, -1.0, 0.0, -1.2], &vec![0.7, -1.0, 0.0, -1.2]]
+            [
+                (&vec![0.3, -1.0, 0.0, -1.2], 0.3),
+                (&vec![0.9, -1.0, 0.0, -1.2], 0.9)
+            ]
         );
-        // Fitted on the two long trades, a win and a loss: the decision
-        // before the sides' first model is no row.
         let model = LearnerConfig::Fake {}.load(&stored.model).unwrap();
-        assert_eq!(model.predict(&[f64::NAN, 1.0, 0.0, 1.2]).unwrap(), 0.5);
+        assert_eq!(model.predict(&[f64::NAN, 1.0, 0.0, 1.2]).unwrap(), 0.25);
+    }
+
+    /// Worked by hand on `meta_rows`'s holdout, the meta expecting -0.05R and
+    /// 0.85R (`META_LINE`) of the shorts at 19:00 and 20:00, each on a stop
+    /// worth 2 USD, their R -1 and 1.5, its baseline the mean R of the rows
+    /// fitted and calibrated on, 0.25. Errors -0.95 and 0.65, squared 1.325,
+    /// the baseline's 1.5625 twice, 3.125: a skill of 1 - 1.325 / 3.125; a
+    /// mean R - E' of -0.15; deviations from the means 0.4 and 0.25 of -0.45
+    /// and 0.45 against -1.25 and 1.25, a slope of 1.125 / 0.405; the top
+    /// decile, the row expected 0.85R, a gap of 0.65. Its margin of 1 USD
+    /// takes the trade at 20:00, 0.85R of 2 USD, 1.7 USD, a win of 3 USD, and
+    /// leaves the one at 19:00, -0.1 USD: one trade of 3 beside every trade's
+    /// 0.5, and at 1.5 times the commission of 0.2 each makes 0.1 less.
+    #[test]
+    fn a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes_in_money() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(24));
+        publish_baselines(dir.path(), &with_meta(24));
+
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(meta_rows()));
+
+        let holdout = holdout_of(trained.meta);
+        let Earnings {
+            taken,
+            every,
+            taken_stressed,
+            every_stressed,
+        } = holdout.earnings;
+        assert_eq!((taken.count, every.count), (1, 2), "{holdout:?}");
+        close_to(taken.expectancy, 3.0);
+        close_to(every.expectancy, 0.5);
+        close_to(taken_stressed.expectancy, 2.9);
+        close_to(every_stressed.expectancy, 0.4);
+        let score = holdout.score;
+        assert_eq!(score.rows, 2);
+        close_to(score.skill, 1.0 - 1.325 / 3.125);
+        close_to(score.mean_error, -0.15);
+        close_to(score.slope, 1.125 / 0.405);
+        close_to(score.top_decile_gap, 0.65);
+    }
+
+    /// `meta_rows` with the holdout's features swapped: the meta expects
+    /// 0.85R of the short at 19:00, which loses 1R, and -0.05R of the one at
+    /// 20:00, which gains 1.5R, errors of -1.85 and 1.55, squared 5.825
+    /// against the baseline's 3.125: a skill of 1 - 5.825 / 3.125, refused
+    /// whatever its trades earned, and no meta model published.
+    #[test]
+    fn a_meta_model_whose_skill_is_not_above_nought_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), with_meta(24));
+        publish_baselines(dir.path(), &with_meta(24));
+        let t = at("2026-01-07T00:00:00Z");
+        let mut rows = meta_rows();
+        rows[5].decision.features = vec![0.9];
+        rows[6].decision.features = vec![0.3];
+
+        let trained = training.train_at(t, |_, _| Ok(rows));
+
+        let Some(Outcome::Kept(Kept::Refused {
+            why: Refusal::Skill { skill },
+            ..
+        })) = trained.meta
+        else {
+            panic!("{trained:?}");
+        };
+        close_to(skill, 1.0 - 5.825 / 3.125);
+        assert!(
+            meta_store(dir.path(), &with_meta(24))
+                .valid_froms()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A meta of a skill above nought whose margin takes one trade of
+    /// `meta_rows`'s holdout (`a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes_in_money`)
+    /// is refused under a minimum of two trades.
+    #[test]
+    fn a_meta_model_whose_trades_taken_miss_the_minimums_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let two = ModelConfig {
+            meta: Some(MetaConfig {
+                min_trades: 2,
+                ..meta(24)
+            }),
+            ..config()
+        };
+        let training = training(dir.path(), two.clone());
+        publish_baselines(dir.path(), &two);
+
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(meta_rows()));
+
+        assert!(
+            matches!(
+                trained.meta,
+                Some(Outcome::Kept(Kept::Refused {
+                    why: Refusal::Trades {
+                        trades: 1,
+                        min_trades: 2
+                    },
+                    ..
+                }))
+            ),
+            "{trained:?}"
+        );
     }
 
     /// `meta_rows` with the long's loss at 10:00 a win: the meta, on the
-    /// longs of the sides' models valid from 06:00, is fitted on the
-    /// wins at 08:00 and 10:00 and calibrated on the loss at 13:00 and the
-    /// win at 15:00, three wins in four, 3/4; not on the decision at 05:00,
-    /// before the sides' first model, a win, nor on the holdout's shorts,
-    /// a loss and a win.
+    /// longs of the sides' models valid from 06:00, is fitted on the R of the
+    /// wins at 08:00 and 10:00, 1.5 each, and calibrated on the loss at 13:00
+    /// and the win at 15:00, -1 and 1.5, a mean of 0.875; not on the decision
+    /// at 05:00, before the sides' first model, a win, nor on the holdout's
+    /// shorts, a loss and a win.
     #[test]
     fn a_published_metas_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
     {
@@ -2364,7 +2482,7 @@ mod tests {
             "{trained:?}"
         );
         let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
-        assert_eq!(stored.manifest.baseline, 0.75);
+        assert_eq!(stored.manifest.baseline, 0.875);
     }
 
     /// `rows` as a time-only target has them: closed at their time, of a
@@ -2390,17 +2508,26 @@ mod tests {
             .collect()
     }
 
-    /// A meta model learns the trade of the side picked, on a target with
-    /// no exits too. `meta_rows` with the long's loss at 10:00 a win, each
-    /// closed at its time: the long picked at each of the four morning
-    /// rows expects 0.6 USD, a unit of 1 in money and no stop to weigh,
+    /// A meta model learns the R of the trade of the side picked, on a target
+    /// with no exits too. `meta_rows` with the long's loss at 10:00 a win,
+    /// each closed at its time, of a unit of 1 USD, a win 3R and a loss -2R:
+    /// the long picked at each of the four morning rows expects 0.6 USD,
     /// above its margin of 0.5; so the meta is fitted on the wins at 08:00
-    /// and 10:00 and calibrated on the loss at 13:00 and the win at 15:00,
-    /// three wins in four, 3/4.
+    /// and 10:00 and calibrated on the loss at 13:00 and the win at 15:00, a
+    /// mean R of 1.75. Its calibration, a slope of 1.25 / 0.125 clipped to
+    /// 1.5, and `alpha` 0.5 - 0.75, expects 1.1R of the short at 20:00, 1.1
+    /// USD, which its margin of 0.5 USD takes, a win of 3, and 0.2R of the one
+    /// at 19:00, which it leaves.
     #[test]
     fn a_meta_model_on_a_time_only_target_learns_from_its_trades() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = with_meta(24);
+        let mut config = ModelConfig {
+            meta: Some(MetaConfig {
+                margin: 0.5,
+                ..meta(24)
+            }),
+            ..config()
+        };
         config.target.spec = Target::builder()
             .limit(SignedDuration::from_hours(1))
             .atr(crate::model::targets::DEFAULT_ATR)
@@ -2413,12 +2540,13 @@ mod tests {
 
         let trained = training.train_at(t, |_, _| Ok(at_their_time(rows)));
 
-        assert!(
-            matches!(trained.meta, Some(Outcome::Published { .. })),
-            "{trained:?}"
-        );
+        let Some(Outcome::Published { holdout, .. }) = trained.meta else {
+            panic!("{trained:?}");
+        };
+        assert_eq!(holdout.earnings.taken.count, 1, "{holdout:?}");
+        close_to(holdout.earnings.taken.expectancy, 3.0);
         let manifest = meta_store(dir.path(), &config).read(t).unwrap().manifest;
-        assert_eq!(manifest.baseline, 0.75);
+        assert_eq!(manifest.baseline, 1.75);
         assert_eq!(manifest.target.spec.bracket, None);
     }
 
@@ -2481,8 +2609,9 @@ mod tests {
 
     /// Margins of the long alone: the short's models are never asked, and
     /// the meta's rows are the long's trades, the holdout's a loss at 0.3 and
-    /// a win at 0.7, which the meta, taking the win, publishes on, each of
-    /// the level of the long of 17:00, 0.2R, and no side call.
+    /// a win at 0.7, which the meta, taking the win, 0.55R on a stop worth 2
+    /// USD, publishes on, each of the level of the long of 17:00, 0.2R, and
+    /// no side call.
     #[test]
     fn a_long_only_strategy_gives_its_meta_model_buys_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -2640,12 +2769,14 @@ mod tests {
     /// each side expecting `-0.25 + 1.5p` R on the feature `p` (`LINES`),
     /// trading from an expected 0.5 USD, the side whose stop is worth more
     /// picked, its stop worth 4 USD unless said, the other's 2. Fitted on, two
-    /// shorts at 0.5 (2 USD expected), a win and a loss (meta labels true,
-    /// false); calibrated on, a short at 0.25 on a stop worth 8 USD (1 USD)
-    /// losing and a long at 0.75 (3.5 USD) winning, the meta's fake predicting
-    /// their first feature; held out, a short at 0.3 (0.8 USD) losing and a
-    /// long at 0.7 (3.2 USD) winning, of the levels 0.2 and 0.8 and no side
-    /// call.
+    /// shorts at 0.5 (2 USD expected), a win and a loss (0.75R and -0.5R);
+    /// calibrated on, a short at 0.25 on a stop worth 8 USD (1 USD) losing
+    /// (-0.25R) and a long at 0.75 (3.5 USD) winning (0.75R), the meta's fake
+    /// predicting their first feature, its line `-0.5 + 1.5p`; held out, a
+    /// short at 0.3 (0.8 USD) losing (-0.5R) and a long at 0.7 (3.2 USD)
+    /// winning (0.75R), of the levels 0.2 and 0.8 and no side call, the meta
+    /// expecting -0.05R and 0.55R, -0.2 and 2.2 USD, its margin of 1 USD
+    /// taking the long.
     fn decisions_of_the_seventh() -> Vec<TargetRow> {
         let picked = |time, p, side, unit, wins| {
             let mut row = row_of(time, vec![p], (wins, wins), hour());

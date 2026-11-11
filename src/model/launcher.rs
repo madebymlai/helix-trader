@@ -420,7 +420,7 @@ mod tests {
     use super::*;
     use crate::{
         model::{
-            holdout::{Earnings, Holdout, Refusal, Score},
+            holdout::{Earnings, Holdout, Refusal},
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
@@ -435,11 +435,11 @@ mod tests {
     fn holdout() -> Holdout {
         Holdout {
             earnings: Earnings::default(),
-            score: Score::Expected(ExpectedScore {
+            score: ExpectedScore {
                 rows: 2,
                 skill: Some(0.1),
                 ..ExpectedScore::default()
-            }),
+            },
         }
     }
 

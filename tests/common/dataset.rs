@@ -16,13 +16,13 @@ use crate::common::{
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
-        calibration::{Ksplit, Line, Platt},
+        calibration::{Ksplit, Line},
         config::{Margins, ModelConfig},
         dataset::{self, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES, side_names},
         handle::{Decision, Mode, ModelHandle, SettledRows},
-        holdout::{Earnings, Holdout, Score},
+        holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
         score::ExpectedScore,
         store::{ModelCalibration, ModelManifest, PairCalibration, Probe, StoredModel},
@@ -440,9 +440,12 @@ pub fn missing() -> FeatureSetBuilder {
     )
 }
 
-/// The calibration of the baseline meta models, the odds `o` of a
-/// prediction becoming `o^0.9`, increasing: c(0.5) = 0.5.
-pub const CALIBRATION: Platt = Platt { a: -0.9, b: 0.0 };
+/// The calibration of the baseline meta models, their level line `0.1 +
+/// 0.5 E`: a meta predicting an R of 0.1 expects 0.15.
+pub const CALIBRATION: Line = Line {
+    alpha: 0.1,
+    beta: 0.5,
+};
 
 /// The R a side's baseline of `tenths` predicts: `tenths` less 5, over 10,
 /// so above 5 a gain, below a loss and 5 nought.
@@ -491,13 +494,13 @@ pub fn baseline_of(
 
 /// A baseline meta model of the sides deciding on `features` as `config`
 /// says (the side picked, the decision's level and side call after their
-/// features), valid from `valid_from`, predicting `trues` tenths whatever
-/// the row, calibrated by `CALIBRATION`.
+/// features), valid from `valid_from`, predicting an R of `r(tenths)`
+/// whatever the row, calibrated by `CALIBRATION`.
 pub fn meta_baseline_of(
     features: &FeatureSet,
     config: &ModelConfig,
     valid_from: Timestamp,
-    trues: usize,
+    tenths: usize,
 ) -> StoredModel {
     let names: Vec<String> = features
         .names()
@@ -506,8 +509,7 @@ pub fn meta_baseline_of(
         .chain(PICKED_FEATURES.map(String::from))
         .collect();
     let width = names.len();
-    let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(width, vec![0.5; 10 * width], labels).unwrap();
+    let set = TrainingSet::regression(width, vec![0.5; width], vec![r(tenths)]).unwrap();
     stored_baseline(features, config, names, None, valid_from, &set)
 }
 
@@ -544,8 +546,8 @@ fn stored_baseline(
 /// `fingerprint`, decided as `config` says, of `side` for a side's model
 /// and none for a meta, valid from `valid_from`, fitted on `set`, predicting
 /// the mean of its labels whatever the row, its manifest's baseline that
-/// mean: a meta's calibrated by `CALIBRATION`, a side's by its pair's
-/// calibration leaving it as it is (`unchanged`).
+/// mean, its holdout's skill 0.1: a meta's calibrated by `CALIBRATION`, a
+/// side's by its pair's calibration leaving it as it is (`unchanged`).
 pub fn baseline_stored(
     strategy_id: StrategyId,
     fingerprint: String,
@@ -559,23 +561,9 @@ pub fn baseline_stored(
     let model = LearnerConfig::Baseline {}.fit(set).unwrap();
     let probe = vec![0.5; width];
     let prediction = model.predict(&probe).unwrap();
-    let (calibration, score) = match side {
-        Some(_) => (
-            unchanged(config, valid_from),
-            Score::Expected(ExpectedScore {
-                rows: 2,
-                skill: Some(0.1),
-                ..ExpectedScore::default()
-            }),
-        ),
-        None => (
-            ModelCalibration::Platt(CALIBRATION),
-            Score::Probability {
-                log_loss: 0.6,
-                baseline_log_loss: 0.69,
-                auc: Some(0.5),
-            },
-        ),
+    let calibration = match side {
+        Some(_) => unchanged(config, valid_from),
+        None => ModelCalibration::Meta(CALIBRATION),
     };
     StoredModel {
         manifest: ModelManifest {
@@ -590,7 +578,11 @@ pub fn baseline_stored(
             baseline: prediction,
             holdout: Holdout {
                 earnings: Earnings::default(),
-                score,
+                score: ExpectedScore {
+                    rows: 2,
+                    skill: Some(0.1),
+                    ..ExpectedScore::default()
+                },
             },
             probes: vec![Probe {
                 prediction,

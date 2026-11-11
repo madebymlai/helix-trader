@@ -1,5 +1,5 @@
 //! Meta-labeling: the side models pick the side of a trade, and a meta
-//! model decides whether to take it, and optionally its size.
+//! model decides whether to take it, the trade of the target's size.
 //!
 //! The side picked is the one the decision picks (`deciding`) among the
 //! side models of a `ModelConfig` with a meta section, on the expected net
@@ -8,12 +8,14 @@
 //! when a side is picked, on the decision's features, the strategy's
 //! without either side's payoff features, with the side picked and the
 //! decision's calibrated level and side call after them (`PICKED_FEATURES`),
-//! and
-//! learns whether the trade of the side picked, the target on that side,
-//! with exits or time only, wins after its costs, read from its row as the
-//! side models read their trades (`dataset::DatasetRow`): a dataset row opens a
-//! long and a short at every decision, so the row has the trade of either side, and
-//! the meta's rows need no replay of their own.
+//! and learns, as a regression, the realised net R of the trade of the side
+//! picked, the target on that side, with exits or time only, its net P&L
+//! over its unit, read from its row as the side models read their trades
+//! (`dataset::DatasetRow`): a dataset row opens a long and a short at every
+//! decision, so the row has the trade of either side, and the meta's rows
+//! need no replay of their own. It takes the trade when the net P&L it
+//! expects of it, its calibrated expected R times the side's unit, clears
+//! its margin, in money (`holdout::MetaMargin`).
 //!
 //! The sides' rows are their dataset's, each decided by the pair of the
 //! sides in use at it through the code a strategy decides through
@@ -43,8 +45,8 @@ use super::{
 
 /// The meta's examples of the dataset `rows` of the sides, in time order:
 /// each row a side is picked on, its features with that side and the
-/// decision's level and side call, its label whether the trade on that side
-/// won, with the trade and its unit. The side picked on a row is the one
+/// decision's level and side call, with the trade on that side and its unit,
+/// whose realised R the meta learns. The side picked on a row is the one
 /// `DecidingModels` picks, on each side's row (`DatasetRow::sides`), among the
 /// sides of the pair of `models` in use then, as its stores list them now,
 /// none before the first.

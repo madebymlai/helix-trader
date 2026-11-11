@@ -18,7 +18,7 @@
 //! (`model_data_hooks!`).
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
-//! or leaves each trade of the model (`model::meta`), and may size it.
+//! or leaves each trade of the model (`model::meta`).
 //!
 //! In a dataset run (`Mode::Dataset`, the replay of its dataset and its
 //! training, `model::ModelStrategy`) it places no trade of its own: the

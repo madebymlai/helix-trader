@@ -23,7 +23,7 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         dataset,
         features::{Feature, FeatureSet, side_names},
-        holdout::{Holdout, Refusal, Score},
+        holdout::{Holdout, Refusal},
         learner::{LearnerConfig, LightGbmConfig},
         store::{ModelCalibration, ModelSet, ModelStore},
         targets::Side,
@@ -264,10 +264,10 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
             earnings.every_stressed.expectancy,
             (12.0 * 2.54 - 12.0 * 3.46) / 24.0,
         );
-        let Score::Expected(score) = holdout.score else {
-            panic!("{holdout:?}");
-        };
-        assert!(score.skill.is_some_and(|skill| skill > 0.0), "{holdout:?}");
+        assert!(
+            holdout.score.skill.is_some_and(|skill| skill > 0.0),
+            "{holdout:?}"
+        );
     }
     let fingerprint =
         dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())

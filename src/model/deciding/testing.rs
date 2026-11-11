@@ -1,7 +1,7 @@
 //! The store and the models of the tests of a decision, the handle's among
 //! them: a strategy on the last mid of AUD/USD, and baselines predicting a
-//! known R, or a meta's a known probability, whatever the row, published
-//! under a temp dir; and IC's gold for a target traded on it.
+//! known R, a side's or a meta's, whatever the row, published under a temp
+//! dir; and IC's gold for a target traded on it.
 
 use std::{path::Path, rc::Rc};
 
@@ -18,12 +18,12 @@ use rust_decimal::Decimal;
 use crate::{
     backtest::Commission,
     model::{
-        calibration::{Ksplit, Line, Platt},
-        config::{Margins, MetaConfig, ModelConfig, Sizing},
+        calibration::{Ksplit, Line},
+        config::{Margins, MetaConfig, ModelConfig},
         dataset::{self, DatasetVenue},
         decide::DecisionRule,
         features::{FeatureSet, meta_names, side_names, testing::last_mid},
-        holdout::{Earnings, Holdout, Score, Trades},
+        holdout::{Earnings, Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
         score::ExpectedScore,
         store::{
@@ -44,13 +44,13 @@ pub const HOLDOUT: Holdout = Holdout {
         taken_stressed: NO_TRADE,
         every_stressed: NO_TRADE,
     },
-    score: Score::Expected(ExpectedScore {
+    score: ExpectedScore {
         rows: 2,
         skill: Some(0.1),
         mean_error: Some(0.0),
         slope: None,
         top_decile_gap: Some(0.0),
-    }),
+    },
 };
 
 const NO_TRADE: Trades = Trades {
@@ -89,15 +89,13 @@ pub fn gold() -> InstrumentAny {
     )
 }
 
-/// The calibration of every meta model of the tests, the odds `o` of a
-/// prediction becoming `o^0.9`: c(0.5) = 0.5, c(0.6) = 0.590231, c(0.7)
-/// = 0.681909, c(0.8) = 0.776895, c(0.9) = 0.878415.
-pub const CALIBRATION: Platt = Platt { a: -0.9, b: 0.0 };
-
-/// The calibrated probability of a meta's prediction of `p`.
-pub fn c(p: f64) -> f64 {
-    CALIBRATION.apply(p)
-}
+/// The calibration of every meta model of the tests, its level line `0.1 +
+/// 0.5 E`: a meta predicting an R of 0.3 expects 0.25, one predicting nought
+/// 0.1.
+pub const CALIBRATION: Line = Line {
+    alpha: 0.1,
+    beta: 0.5,
+};
 
 /// The R a side's baseline of `tenths` predicts: `tenths` less 5, over 10,
 /// so above 5 a gain, below a loss and 5 nought.
@@ -177,16 +175,15 @@ pub fn both_sides() -> ModelConfig {
     }
 }
 
-/// The meta model taking a trade from 0.6, sizing it if `size`.
-pub fn meta(size: Option<Sizing>) -> MetaConfig {
+/// The meta model taking a trade from an expected net P&L of 0.15 USD.
+pub fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
         holdout: SignedDuration::from_hours(12),
-        threshold: 0.6,
+        margin: 0.15,
         min_pnl: 0.0,
         min_trades: 1,
         learner: LearnerConfig::Baseline {},
-        size,
     }
 }
 
@@ -314,28 +311,22 @@ pub fn baseline_for(
     }
 }
 
-/// A baseline meta model of `config` valid from `valid_from` predicting
-/// `trues` tenths whatever the row, calibrated by `CALIBRATION`, on the
-/// meta's features of `features`, with no probe.
+/// A baseline meta model of `config` valid from `valid_from` predicting an
+/// R of `r(tenths)` whatever the row, calibrated by `CALIBRATION`, on the
+/// meta's features of `features`, its baseline that R, with no probe.
 pub fn meta_baseline(
     features: &FeatureSet,
     config: &ModelConfig,
     valid_from: &str,
-    trues: usize,
+    tenths: usize,
 ) -> StoredModel {
     let names = meta_names(features.names());
-    let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(names.len(), vec![0.5; 10 * names.len()], labels).unwrap();
-    let mut meta = baseline_for(features, config, Side::Long, valid_from, trues);
+    let set =
+        TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![r(tenths)]).unwrap();
+    let mut meta = baseline_for(features, config, Side::Long, valid_from, tenths);
     meta.manifest.side = None;
     meta.manifest.feature_names = names;
-    meta.manifest.calibration = ModelCalibration::Platt(CALIBRATION);
-    meta.manifest.baseline = trues as f64 / 10.0;
-    meta.manifest.holdout.score = Score::Probability {
-        log_loss: 0.6,
-        baseline_log_loss: 0.69,
-        auc: Some(0.6),
-    };
+    meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);
     meta.manifest.probes.clear();
     meta.model = LearnerConfig::Baseline {}
         .fit(&set)

@@ -9,11 +9,13 @@
 //! the other moving. A decision's expected R of each side is its calibrated
 //! level plus or less half its calibrated side call (`Expected`). A
 //! one-sided strategy's calibration is the level line alone, on its one
-//! side's prediction. Least squares on so few parameters has a closed form:
-//! a calibration refitted on the same rows is the same to the bit.
+//! side's prediction, and so is a meta model's, on its prediction of the R
+//! of the trade of the side picked (`Line`). Least squares on so few
+//! parameters has a closed form: a calibration refitted on the same rows is
+//! the same to the bit.
 //!
-//! A meta model's probabilities are calibrated by Platt scaling on their
-//! log-odds (`Platt`): a logistic curve, `1 / (1 + exp(a x + b))`, `x`
+//! A probability is calibrated by Platt scaling on its log-odds (`Platt`):
+//! a logistic curve, `1 / (1 + exp(a x + b))`, `x`
 //! being `ln(p / (1 - p))`, fitted by maximum likelihood to the labels of
 //! rows it was not fitted on. So `a = -1, b = 0` leaves a prediction as it
 //! is, a slope between -1 and 0 says the model was too sure of itself, and
@@ -169,6 +171,14 @@ pub struct Line {
     pub beta: f64,
 }
 
+impl Line {
+    /// The line at `x`.
+    #[must_use]
+    pub fn apply(&self, x: f64) -> f64 {
+        self.beta.mul_add(x, self.alpha)
+    }
+}
+
 /// The calibration of the predictions of R of a pair's sides, fitted on
 /// both together (Ksplit): the level `C`, the mean of the sides'
 /// predictions, and the side call `D`, the long's prediction less the
@@ -267,10 +277,7 @@ impl Ksplit {
     /// pair, the long first, one or two as fitted.
     #[must_use]
     pub fn apply(&self, predictions: &[f64]) -> Expected {
-        let level = self
-            .level
-            .beta
-            .mul_add(mean(predictions.iter().copied()), self.level.alpha);
+        let level = self.level.apply(mean(predictions.iter().copied()));
         let side_call = match (self.side_call, predictions) {
             (Some(beta), &[long, short]) => beta * (long - short),
             _ => 0.0,
