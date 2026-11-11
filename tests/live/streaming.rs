@@ -555,13 +555,14 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
 
 /// The `model_ema` strategy on the stub's AUD/USD: a decision every two
 /// seconds on its averages of 10 and 30 of its 1-second bars, each target
-/// held a second, closed before the next.
+/// held a second, closed before the next, its unit measured in the ATR of
+/// one bar of two seconds, the warmup's.
 const MODEL_EMA_CONFIG: &str = r#"
     [data]
     series = [
         { data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "SECOND", price_type = "MID" } },
     ]
-    warmup = "1s"
+    warmup = "2s"
 
     [indicators.fast]
     period = 10
@@ -574,7 +575,7 @@ const MODEL_EMA_CONFIG: &str = r#"
 
     [model]
     decision = { every = "2s" }
-    target = { limit = "1s" }
+    target = { limit = "1s", atr = { period = 1 } }
     retrain = "24h"
     window = "46h"
     holdout = "12h"

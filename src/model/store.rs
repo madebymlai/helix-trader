@@ -330,10 +330,10 @@ impl SideModel {
     }
 
     /// The expected net P&L of a trade of the side won with `probability`,
-    /// in money, its payoff's unit worth `unit` (with exits the worth of
-    /// the trade's stop, the payoff being in R; one without): the
-    /// payoff's expectation at the probability (`Payoff::expected`) times
-    /// the unit.
+    /// in money, its payoff's unit, the payoff being in R, worth `unit`
+    /// (with exits the worth of the trade's stop; without, of a stop as far
+    /// as the target's ATR): the payoff's expectation at the probability
+    /// (`Payoff::expected`) times the unit.
     #[must_use]
     pub fn expected_pnl(&self, probability: f64, unit: f64) -> f64 {
         self.payoff.expected(probability) * unit
@@ -898,6 +898,7 @@ mod tests {
                     .spec(
                         Target::builder()
                             .limit(SignedDuration::from_hours(1))
+                            .atr(crate::model::targets::DEFAULT_ATR)
                             .build(),
                     )
                     .build(),

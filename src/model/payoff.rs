@@ -3,18 +3,17 @@
 //! own (Elkan 2001; Bahnsen et al. 2015).
 //!
 //! A side's model is published with its expected win and loss
-//! (`Payoff`): with exits, in R, the multiple of the stop's distance a
-//! trade realised, its net P&L (fees and slippage included) over its own
-//! stop's worth, the unit of its row (`dataset::DatasetRow::units`), so a
+//! (`Payoff`), in R, the multiple of its unit a trade realised, its net P&L
+//! (fees and slippage included) over the unit its decision set
+//! (`targets::SideTarget::unit`): with exits its own stop's worth, so a
 //! stop-out with slippage can be below -1R; on a time-only target, which has
-//! no stop, in money, its unit 1. They
+//! no stop, the worth of a stop as far as its ATR at the decision. They
 //! are the means of the training rows' wins and of their losses, Nautilus'
 //! `AvgWinner` and `AvgLoser` of their realised values. At a decision a
 //! side's expected net P&L is its calibrated probability `p` times the
-//! win, less `1 - p` times the loss (`Payoff::expected`), with exits times
-//! the worth of the stop the decision sets: the costs, in the
-//! realised R, scale with each decision's stop, and a fixed cost weighs
-//! more against a tight ATR stop. A side trades if that is at or above its
+//! win, less `1 - p` times the loss (`Payoff::expected`), times the unit
+//! the decision sets: the costs, in the realised R, scale with each
+//! decision's unit, and a fixed cost weighs more against a tight ATR stop. A side trades if that is at or above its
 //! margin (`ModelConfig::margins`); of two, the larger, none at a tie
 //! (`pick`).
 
@@ -25,8 +24,7 @@ use nautilus_analysis::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The expected win and loss of a side's trade, both positive: in R with
-/// exits, in the target's P&L currency on a time-only target.
+/// The expected win and loss of a side's trade, both positive, in R.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Payoff {
     pub win: f64,

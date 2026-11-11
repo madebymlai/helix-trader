@@ -64,6 +64,7 @@ fn config() -> TargetConfig {
         .spec(Target {
             bracket: Some(exits_of_config()),
             limit: SignedDuration::from_hours(2),
+            atr: None,
         })
         .build()
 }
@@ -87,9 +88,17 @@ fn exiting(exits: BracketSpec) -> Target {
 }
 
 /// The time-only target of `config`'s instrument and size, closed after
-/// `limit`.
+/// `limit`, its unit measured in Wilder's ATR of 14 bars.
 fn time_only(limit: SignedDuration) -> TargetConfig {
-    of(Target::builder().limit(limit).build())
+    of(Target::builder().limit(limit).atr(DEFAULT_ATR).build())
+}
+
+/// The ATR of `period` bars, Nautilus' defaults besides.
+fn atr_of(period: usize) -> AtrArgs {
+    AtrArgs {
+        period,
+        ..DEFAULT_ATR
+    }
 }
 
 /// The target of `config` with both distances in basis points and no
@@ -328,11 +337,9 @@ fn an_atr_on_an_instrument_the_strategy_reads_no_prices_of_is_refused() {
 
     assert!(err.contains(GOLD), "{err}");
     assert!(of(in_bps(20, 10)).validate(rule(), &elsewhere).is_ok());
-    assert!(
-        time_only(SignedDuration::from_hours(1))
-            .validate(rule(), &elsewhere)
-            .is_ok()
-    );
+    let time = time_only(SignedDuration::from_hours(1));
+    let err = format!("{:#}", time.validate(rule(), &elsewhere).unwrap_err());
+    assert!(err.contains(GOLD), "{err}");
 }
 
 /// Wilder's period: an `atr` distance without an `atr` table has an ATR of
@@ -355,10 +362,64 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     assert_eq!(atr_bars(&default, rule()).unwrap().1, 14);
     assert_eq!(atr_bars(&overridden, rule()).unwrap().1, 20);
     assert_eq!(atr_bars(&of(in_bps(20, 10)), rule()), None);
+}
+
+/// A time-only target runs the ATR of its table, on the bars a bracket's
+/// runs on: the cadence's, of the mids of the quotes the strategy reads.
+#[test]
+fn a_time_only_targets_atr_is_its_tables_on_the_cadences_bars() {
+    let config = of(Target::builder()
+        .limit(SignedDuration::from_hours(1))
+        .atr(atr_of(3))
+        .build());
+
+    assert!(config.validate(rule(), &quotes()).is_ok());
     assert_eq!(
-        atr_bars(&time_only(SignedDuration::from_hours(1)), rule()),
-        None
+        atr_bars(&config, rule()),
+        Some(("XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL".to_string(), 3))
     );
+}
+
+/// The ConfigError refusing `config` on `rule()` for a strategy reading the
+/// quotes of gold, one alone: its field and its reason.
+fn refused_alone(config: &TargetConfig) -> (String, String) {
+    match config.validate(rule(), &quotes()).unwrap_err() {
+        ConfigError::InvalidValue { field, reason } => (field, reason),
+        err => panic!("not one invalid value: {err:?}"),
+    }
+}
+
+/// A time-only target's unit is the worth of its ATR: one without an `atr`
+/// table has none, and is refused under it, saying so.
+#[test]
+fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
+    let config = of(Target::builder()
+        .limit(SignedDuration::from_hours(1))
+        .build());
+
+    let (field, reason) = refused_alone(&config);
+
+    assert_eq!(field, "model.target.atr");
+    assert!(
+        reason.contains("ATR") && reason.contains("unit"),
+        "{reason}"
+    );
+    assert!(Targets::new(config, rule(), &quotes(), commission()).is_err());
+}
+
+/// A bracket's ATR is its own `atr` table's: one on the target beside it
+/// would be a second, and is refused under the target's.
+#[test]
+fn an_atr_table_beside_a_bracket_is_refused_under_the_targets() {
+    let config = of(Target {
+        atr: Some(DEFAULT_ATR),
+        ..bracket()
+    });
+
+    let (field, reason) = refused_alone(&config);
+
+    assert_eq!(field, "model.target.atr");
+    assert!(reason.contains("bracket"), "{reason}");
 }
 
 /// Nautilus builds only bars whose step divides the next unit
@@ -777,9 +838,25 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
     );
 }
 
+/// A time-only target's ATR is its unit's: another period keys another
+/// target, whose rows realise their P&L over another unit.
+#[test]
+fn a_time_only_targets_atr_changes_the_fingerprint() {
+    let keyed = |period| {
+        let time = of(Target::builder()
+            .limit(SignedDuration::from_hours(1))
+            .atr(atr_of(period))
+            .build());
+        fingerprint(Fingerprint::default(), &time, rule(), &quotes()).unwrap()
+    };
+
+    assert_ne!(keyed(14), keyed(15));
+}
+
 /// The ATR's bars are built from what the strategy reads: the same config
-/// on quotes, on trades and on bars keys three targets, whose rows differ.
-/// A target without an ATR is keyed alike whatever the strategy reads.
+/// on quotes, on trades and on bars keys three targets, whose rows differ,
+/// a time-only target's ATR as a bracket's. A target without an ATR, a
+/// bracket in basis points, is keyed alike whatever the strategy reads.
 #[test]
 fn the_source_of_the_atrs_bars_changes_the_fingerprint() {
     let base = Fingerprint::default();
@@ -798,7 +875,7 @@ fn the_source_of_the_atrs_bars_changes_the_fingerprint() {
     let bps = of(in_bps(20, 10));
     assert_eq!(keyed(&bps, &quotes()), keyed(&bps, &trades));
     let time = time_only(SignedDuration::from_hours(1));
-    assert_eq!(keyed(&time, &quotes()), keyed(&time, &trades));
+    assert_ne!(keyed(&time, &quotes()), keyed(&time, &trades));
 }
 
 #[test]
@@ -963,10 +1040,12 @@ fn on_aud(spec: Target) -> TargetConfig {
     trading(spec, InstrumentId::from(AUD), 1000)
 }
 
-/// A target closed after an hour, with no exits.
+/// A target closed after an hour, with no exits, its unit measured in the ATR
+/// of one bar: the true range of the last bar of the cadence.
 fn no_exits() -> Target {
     Target::builder()
         .limit(SignedDuration::from_hours(1))
+        .atr(atr_of(1))
         .build()
 }
 
@@ -985,12 +1064,49 @@ fn commission() -> Commission {
     Commission::Rate(Decimal::new(3, 5))
 }
 
+/// What a strategy trading `config` reads: the quotes of its instrument.
+fn reading_its_quotes(config: &TargetConfig) -> DataRequirements {
+    DataRequirements {
+        bar_types: vec![],
+        ticks: vec![TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: config.instrument_id,
+        }],
+        warmup: SignedDuration::ZERO,
+    }
+}
+
 fn setter(config: &TargetConfig) -> TargetSetter {
-    TargetSetter::new(config, rule(), &quotes(), commission()).unwrap()
+    TargetSetter::new(config, rule(), &reading_its_quotes(config), commission()).unwrap()
 }
 
 fn targets(config: TargetConfig) -> Rc<Targets> {
-    Targets::new(config, rule(), &quotes(), commission()).unwrap()
+    let requirements = reading_its_quotes(&config);
+    Targets::new(config, rule(), &requirements, commission()).unwrap()
+}
+
+/// `setter` started on `probe` and handed `bar`, a bar of its ATR's, if it
+/// has one.
+fn warmed(setter: TargetSetter, probe: &mut Probe, bar: &Bar) -> TargetSetter {
+    setter.start(probe);
+    probe.handle_bar(bar);
+    setter
+}
+
+/// A 15-minute bar of the mids of `instrument_id`, of `open`, `high`, `low`
+/// and `close`: the bars its target's ATR runs on deciding every 15 minutes
+/// on its quotes.
+fn quarter(instrument_id: &str, [open, high, low, close]: [&str; 4]) -> Bar {
+    Bar::new(
+        BarType::from(format!("{instrument_id}-15-MINUTE-MID-INTERNAL").as_str()),
+        Price::from(open),
+        Price::from(high),
+        Price::from(low),
+        Price::from(close),
+        Quantity::from(1),
+        UnixNanos::default(),
+        UnixNanos::default(),
+    )
 }
 
 /// A decision of the probe, as `decide` publishes it.
@@ -1091,27 +1207,93 @@ fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
     }
 }
 
-/// With no exits there is no stop to weigh: the unit is 1.
+const SWAP: &str = "BTC-USDT-SWAP.OKX";
+
+/// BTC-USDT-SWAP as OKX defines it: 0.01 BTC a contract, settled in USDT, on
+/// ticks of 0.1 and lots of 0.01 contracts.
+fn swap() -> InstrumentAny {
+    InstrumentAny::CryptoPerpetual(
+        CryptoPerpetual::builder()
+            .instrument_id(InstrumentId::from(SWAP))
+            .raw_symbol(Symbol::from("BTC-USDT-SWAP"))
+            .base_currency(Currency::BTC())
+            .quote_currency(Currency::USDT())
+            .settlement_currency(Currency::USDT())
+            .is_inverse(false)
+            .price_precision(1)
+            .size_precision(2)
+            .price_increment(Price::from("0.1"))
+            .size_increment(Quantity::from("0.01"))
+            .multiplier(Quantity::from("0.01"))
+            .lot_size(Quantity::from("0.01"))
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .unwrap(),
+    )
+}
+
+/// Worked by hand. With no exits, the unit is the worth of the target's ATR
+/// as a stop's distance: 3 contracts of BTC-USDT-SWAP, its ATR of one bar
+/// from 99,925 to 100,075, 150, on 0.03 BTC through the multiplier of 0.01 a
+/// contract, 4.5 USDT on either side. The trade is a market entry from the
+/// mid of 99,999.9/100,000.1, closed after its hour.
 #[test]
-fn a_time_only_target_is_set_with_a_unit_of_one() {
-    let probe = Probe::holding(aud());
-    probe.quoted(InstrumentId::from(AUD), "0.70000");
+fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() {
+    let mut probe = Probe::holding(Some(swap()));
+    probe.quoted_at(InstrumentId::from(SWAP), "99999.9", "100000.1");
+    let config = trading(no_exits(), InstrumentId::from(SWAP), 3);
+    let bar = quarter(SWAP, ["100000.0", "100075.0", "99925.0", "100000.0"]);
+    let setter = warmed(setter(&config), &mut probe, &bar);
 
-    let set = setter(&on_aud(no_exits())).at(&probe).unwrap().unwrap();
+    let set = setter.at(&probe).unwrap().unwrap();
 
-    assert_eq!(set.long.unit, 1.0);
-    assert_eq!(set.short.unit, 1.0);
-    assert_eq!(set.long.bracket, None);
-    assert_eq!(set.short.bracket, None);
-    assert_eq!(set.long.reference, Price::from("0.70000"));
+    for side in [&set.long, &set.short] {
+        assert_eq!(side.unit, 4.5);
+        assert_eq!(side.bracket, None);
+        assert_eq!(side.reference, Price::from("100000.00"));
+        assert_eq!(side.time_limit, SignedDuration::from_hours(1));
+    }
+}
+
+/// The ATR of a target, a time-only target's as a bracket's in ATRs, of one
+/// bar going nowhere, 4000 throughout, is nought: no distance in ATRs and no
+/// worth of a time-only target's unit, so no target, which names the ATR's
+/// bars.
+#[test]
+fn a_target_on_an_atr_of_nought_says_so_and_names_its_bars() {
+    let mut probe = Probe::holding(Some(gold()));
+    probe.quoted_at(InstrumentId::from(GOLD), "3999.90", "4000.10");
+    let flat = quarter(GOLD, ["4000.00"; 4]);
+    let in_atrs = exiting(BracketSpec {
+        take_profit: Distance::Atr(Decimal::from(2)),
+        stop: Distance::Atr(Decimal::ONE),
+        atr: Some(atr_of(1)),
+    });
+
+    for spec in [no_exits(), in_atrs] {
+        let set = warmed(setter(&of(spec)), &mut probe, &flat)
+            .at(&probe)
+            .unwrap();
+
+        assert_eq!(
+            set,
+            Err(NoTarget::FlatAtr(BarType::from(
+                "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+            ))),
+            "{spec:?}"
+        );
+    }
 }
 
 #[test]
 fn a_target_with_no_price_to_set_it_from_says_so() {
-    let probe = Probe::holding(aud());
+    let mut probe = Probe::holding(Some(gold()));
 
     for spec in [in_bps(20, 10), no_exits()] {
-        let set = setter(&on_aud(spec)).at(&probe).unwrap();
+        let set = warmed(setter(&of(spec)), &mut probe, &gold_bar())
+            .at(&probe)
+            .unwrap();
 
         assert_eq!(set, Err(NoTarget::NoPrice), "{spec:?}");
     }
@@ -1131,6 +1313,7 @@ fn symmetric() -> TargetConfig {
             }),
         }),
         limit: SignedDuration::from_mins(5),
+        atr: None,
     })
 }
 
@@ -1291,9 +1474,9 @@ fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
 }
 
 /// Nautilus' notional value of an inverse instrument divides by the price, so
-/// neither a stop's distance nor a spread has a worth in R or in money on it:
-/// a bracket and a time-only target, whose entry cost is its spread's worth,
-/// are refused alike.
+/// neither a stop's distance, an ATR nor a spread has a worth on it: a
+/// bracket, whose unit is its stop's worth, and a time-only target, whose
+/// unit is its ATR's, are refused alike, saying so.
 #[test]
 fn a_target_on_an_inverse_instrument_is_refused_as_the_targets_start() {
     let instrument = inverse();
@@ -1302,9 +1485,10 @@ fn a_target_on_an_inverse_instrument_is_refused_as_the_targets_start() {
     for spec in [in_bps(20, 10), no_exits()] {
         let target = trading(spec, instrument.id(), 1);
 
-        let err = targets(target).start(&mut probe).unwrap_err();
+        let err = format!("{:#}", targets(target).start(&mut probe).unwrap_err());
 
-        assert!(format!("{err:#}").contains("inverse"), "{spec:?}: {err:#}");
+        assert!(err.contains("inverse"), "{spec:?}: {err}");
+        assert!(err.contains("unit"), "{spec:?}: {err}");
     }
 }
 
@@ -1339,15 +1523,17 @@ fn a_stop_with_no_worth_at_a_decision_is_an_error_before_any_order() {
     assert_eq!(probe.orders(), Vec::<String>::new());
 }
 
-/// A time-only target reads its instrument to be set, its entry cost costing
-/// its fills, as a bracket does: one missing is the setter's error, before any
-/// order, and takes no number, so the next decision, the instrument there, is
-/// the first.
+/// A time-only target reads its instrument to be set, its unit the worth of
+/// its ATR on it and its entry cost costing its fills, as a bracket does: one
+/// missing is the setter's error, its ATR warm, before any order, and takes no
+/// number, so the next decision, the instrument there, is the first.
 #[test]
 fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
     let mut probe = Probe::holding(None);
     probe.quoted(InstrumentId::from(AUD), "0.70000");
     let targets = targets(on_aud(no_exits()));
+    targets.start(&mut probe).unwrap();
+    probe.handle_bar(&quarter(AUD, ["0.70000", "0.70050", "0.69950", "0.70000"]));
 
     let err = targets.open(&mut probe, decision()).unwrap_err();
 
@@ -1390,10 +1576,10 @@ fn per_ounce() -> Commission {
 }
 
 /// The payoff features of each side of a lot of `spec` at `commission`, on
-/// `probe`.
-fn payoff_on(probe: &Probe, spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
-    TargetSetter::new(&lot(spec), rule(), &quotes(), commission)
-        .unwrap()
+/// `probe`, its ATR, if any, of the bar `gold_bar` alone: a true range of 2.
+fn payoff_on(probe: &mut Probe, spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
+    let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), commission).unwrap();
+    warmed(setter, probe, &gold_bar())
         .at(probe)
         .unwrap()
         .unwrap()
@@ -1403,9 +1589,9 @@ fn payoff_on(probe: &Probe, spec: Target, commission: Commission) -> PerSide<Vec
 /// The payoff features of each side of a lot of `spec` at `commission`,
 /// gold quoted at 4001.50/4001.70.
 fn payoff_quoted(spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
-    let probe = Probe::holding(Some(gold()));
+    let mut probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
-    payoff_on(&probe, spec, commission)
+    payoff_on(&mut probe, spec, commission)
 }
 
 /// Each of `got` within 1e-12 of `want`'s, as many.
@@ -1488,12 +1674,12 @@ fn a_brackets_payoff_at_a_commission_per_quantity_is_worked_out_by_hand_on_each_
     );
 }
 
-/// The quote of the bracket's tests and no exits: no stop to weigh, a unit of
-/// 1, so the entry cost is in money, the spread's 20 USD and the entry's
-/// commission: at IC's rate 12.01 at the long's ask and 12.00 at the short's
-/// bid; 3 an order; 3.50 a lot.
+/// The quote of the bracket's tests and no exits: the unit is the worth of
+/// the ATR of 2, 200 USD on a lot, and the entry cost the spread's 20 USD and
+/// the entry's commission over it: at IC's rate 12.01 at the long's ask and
+/// 12.00 at the short's bid; 3 an order; 3.50 a lot.
 #[test]
-fn a_time_only_targets_entry_cost_is_in_money_on_each_side() {
+fn a_time_only_targets_entry_cost_is_over_the_worth_of_its_atr_on_each_side() {
     for (commission, long, short) in [
         (commission(), 32.01, 32.00),
         (per_order(), 23.0, 23.0),
@@ -1504,8 +1690,8 @@ fn a_time_only_targets_entry_cost_is_in_money_on_each_side() {
         assert_near(
             &payoff,
             &PerSide {
-                long: vec![long],
-                short: vec![short],
+                long: vec![long / 200.0],
+                short: vec![short / 200.0],
             },
         );
     }
@@ -1519,7 +1705,7 @@ fn a_time_only_targets_entry_cost_is_in_money_on_each_side() {
 /// alone, 12.00 at 4001.60.
 #[test]
 fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread() {
-    let probe = Probe::holding(Some(gold()));
+    let mut probe = Probe::holding(Some(gold()));
     probe
         .cache_rc()
         .borrow_mut()
@@ -1534,7 +1720,7 @@ fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread
         ))
         .unwrap();
 
-    let payoff = payoff_on(&probe, wide_take_profit(), commission());
+    let payoff = payoff_on(&mut probe, wide_take_profit(), commission());
 
     assert_near(
         &payoff,
@@ -1546,10 +1732,11 @@ fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread
 }
 
 /// A bar of gold closing at 4001.60 and no quote: a time-only target's sides
-/// enter at the close, no spread, the entry costing its 3 USD alone.
+/// enter at the close, no spread, the entry costing its 3 USD alone, over the
+/// worth of the ATR of 2 on a lot, 200 USD.
 #[test]
 fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no_spread() {
-    let probe = Probe::holding(Some(gold()));
+    let mut probe = Probe::holding(Some(gold()));
     probe
         .cache_rc()
         .borrow_mut()
@@ -1559,13 +1746,13 @@ fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no
         })
         .unwrap();
 
-    let payoff = payoff_on(&probe, no_exits(), per_order());
+    let payoff = payoff_on(&mut probe, no_exits(), per_order());
 
     assert_near(
         &payoff,
         &PerSide {
-            long: vec![3.0],
-            short: vec![3.0],
+            long: vec![3.0 / 200.0],
+            short: vec![3.0 / 200.0],
         },
     );
 }
@@ -1590,12 +1777,12 @@ fn a_commission_in_another_currency_than_the_targets_pnl_is_refused_as_the_targe
 /// commission at each decision instead.
 #[test]
 fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decision() {
-    let probe = Probe::holding(Some(gold()));
+    let mut probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
 
     for spec in [wide_take_profit(), no_exits()] {
-        let err = TargetSetter::new(&lot(spec), rule(), &quotes(), in_euros())
-            .unwrap()
+        let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), in_euros()).unwrap();
+        let err = warmed(setter, &mut probe, &gold_bar())
             .at(&probe)
             .unwrap_err();
 
