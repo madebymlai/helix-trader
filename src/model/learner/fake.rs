@@ -1,10 +1,10 @@
-//! The fake, for tests: the row's first feature is the probability, so a
+//! The fake, for tests: the row's first feature is the prediction, so a
 //! test steers the model through its features.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use super::{Learner, Predictor, SavedModel, TrainingSet};
+use super::{Learner, Objective, Predictor, SavedModel, TrainingSet};
 
 pub(super) struct Fake;
 
@@ -13,6 +13,7 @@ impl Learner for Fake {
         Ok(Box::new(Saved::Fake {
             width: set.width(),
             mean: set.mean(),
+            objective: set.objective(),
         }))
     }
 
@@ -25,11 +26,16 @@ impl Learner for Fake {
 
 /// The model and its saved text, JSON named by the adapter, so that no
 /// other adapter loads it. `mean` is that of the training labels, the
-/// prediction where the first feature is missing.
+/// prediction where the first feature is missing; under the binary
+/// `objective` the first feature is clamped to a probability.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {
-    Fake { width: usize, mean: f64 },
+    Fake {
+        width: usize,
+        mean: f64,
+        objective: Objective,
+    },
 }
 
 impl Predictor for Saved {
@@ -39,12 +45,17 @@ impl Predictor for Saved {
     }
 
     fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
-        let Self::Fake { mean, .. } = self;
+        let Self::Fake {
+            mean, objective, ..
+        } = self;
         let first = row[0];
         Ok(if first.is_nan() {
             *mean
         } else {
-            first.clamp(0.0, 1.0)
+            match objective {
+                Objective::Binary => first.clamp(0.0, 1.0),
+                Objective::Regression => first,
+            }
         })
     }
 
@@ -76,6 +87,31 @@ mod tests {
     #[test]
     fn predicts_the_training_mean_where_the_first_feature_is_missing() {
         assert_eq!(model().predict(&[f64::NAN, 0.5]).unwrap(), 0.75);
+    }
+
+    /// Fitted on real labels whose mean is (2.5 - 1.0 + 3.5 + 2.0) / 4 =
+    /// 1.75.
+    fn regression() -> crate::model::learner::Model {
+        let set = TrainingSet::regression(2, vec![0.9; 8], vec![2.5, -1.0, 3.5, 2.0]).unwrap();
+        LearnerConfig::Fake {}.fit(&set).unwrap()
+    }
+
+    #[test]
+    fn predicts_the_first_feature_unclamped_on_real_labels() {
+        assert_eq!(regression().predict(&[-2.0, 0.5]).unwrap(), -2.0);
+        assert_eq!(regression().predict(&[1.5, 0.5]).unwrap(), 1.5);
+    }
+
+    #[test]
+    fn predicts_the_mean_of_real_labels_where_the_first_feature_is_missing() {
+        assert_eq!(regression().predict(&[f64::NAN, 0.5]).unwrap(), 1.75);
+    }
+
+    #[test]
+    fn a_reloaded_model_of_real_labels_predicts_unclamped() {
+        let model = regression();
+        let reloaded = LearnerConfig::Fake {}.load(&model.save().unwrap()).unwrap();
+        assert_eq!(reloaded.predict(&[-2.0, 0.5]).unwrap(), -2.0);
     }
 
     #[test]
