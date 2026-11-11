@@ -1,13 +1,16 @@
 //! PerpetualBooster: gradient-boosted trees that stop by a budget instead
-//! of tuned settings, with the log-loss objective.
+//! of tuned settings, with the log-loss objective or squared loss. Its
+//! budget stands in for LightGBM's settings, which it has no equivalent
+//! of. A saved model names its objective, which its predictions follow
+//! when loaded.
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::{Context, anyhow, bail, ensure};
 use perpetual::booster::config::BoosterIO;
-use perpetual::objective::Objective;
+use perpetual::objective::Objective as Loss;
 use perpetual::{Matrix, PerpetualBooster};
 use serde::{Deserialize, Serialize};
 
-use super::{Learner, Predictor, SavedModel, TrainingSet};
+use super::{Learner, Objective, Predictor, SavedModel, TrainingSet};
 
 /// PerpetualBooster's settings, each named and meant as in the library.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
@@ -43,13 +46,18 @@ const fn default_seed() -> u64 {
 const WIDTH: &str = "width";
 
 impl PerpetualConfig {
-    /// A booster with these settings. It fits on one thread, as LightGBM
-    /// does, so its results do not depend on the machine's cores, and its
-    /// splits give missing values a branch of their own, so a missing
-    /// feature is learned apart from every value, as in LightGBM.
-    fn booster(&self) -> PerpetualBooster {
+    /// A booster with these settings, fitting `objective`: log loss for
+    /// the binary one, squared loss for regression. It fits on one thread,
+    /// as LightGBM does, so its results do not depend on the machine's
+    /// cores, and its splits give missing values a branch of their own, so
+    /// a missing feature is learned apart from every value, as in LightGBM.
+    fn booster(&self, objective: Objective) -> PerpetualBooster {
+        let loss = match objective {
+            Objective::Binary => Loss::LogLoss,
+            Objective::Regression => Loss::SquaredLoss,
+        };
         PerpetualBooster::default()
-            .set_objective(Objective::LogLoss)
+            .set_objective(loss)
             .set_budget(self.budget)
             .set_memory_limit(Some(self.memory_limit))
             .set_iteration_limit(self.iteration_limit)
@@ -72,15 +80,10 @@ impl Learner for PerpetualConfig {
         let columns: Vec<f64> = (0..width)
             .flat_map(|column| rows.iter().map(move |row| row[column]))
             .collect();
-        let labels: Vec<f64> = set
-            .labels()
-            .iter()
-            .map(|&label| f64::from(u8::from(label)))
-            .collect();
-        let mut booster = self.booster();
+        let mut booster = self.booster(set.objective());
         booster.fit(
             &Matrix::new(&columns, rows.len(), width),
-            &labels,
+            set.labels(),
             None,
             None,
         )?;
@@ -95,10 +98,12 @@ impl Learner for PerpetualConfig {
     }
 }
 
-/// A PerpetualBooster and the width of its rows.
+/// A PerpetualBooster, the width of its rows and the objective it was
+/// fitted by.
 struct Perpetual {
     booster: PerpetualBooster,
     width: usize,
+    objective: Objective,
 }
 
 impl Perpetual {
@@ -110,7 +115,16 @@ impl Perpetual {
             .parse()
             .context("the width of a PerpetualBooster model")?;
         ensure!(width > 0, "a PerpetualBooster model without features");
-        Ok(Self { booster, width })
+        let objective = match booster.cfg.objective {
+            Loss::LogLoss => Objective::Binary,
+            Loss::SquaredLoss => Objective::Regression,
+            _ => bail!("a PerpetualBooster model of a loss other than log or squared loss"),
+        };
+        Ok(Self {
+            booster,
+            width,
+            objective,
+        })
     }
 }
 
@@ -121,7 +135,10 @@ impl Predictor for Perpetual {
 
     fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         let matrix = Matrix::new(row, 1, self.width);
-        Ok(self.booster.predict_proba(&matrix, false, false)[0])
+        Ok(match self.objective {
+            Objective::Binary => self.booster.predict_proba(&matrix, false, false)[0],
+            Objective::Regression => self.booster.predict(&matrix, false)[0],
+        })
     }
 
     fn save(&self) -> anyhow::Result<SavedModel> {
@@ -165,6 +182,26 @@ mod tests {
         assert!(model.predict(&[f64::NAN, 4.0]).unwrap() > 0.9);
         for value in [0.0, 0.5, 1.0] {
             assert!(model.predict(&[value, 4.0]).unwrap() < 0.1, "{value}");
+        }
+    }
+
+    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labelled 2 below 0.5
+    /// and -1 from it.
+    fn step() -> TrainingSet {
+        let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();
+        let labels = features
+            .iter()
+            .map(|&value| if value < 0.5 { 2.0 } else { -1.0 })
+            .collect();
+        TrainingSet::regression(1, features, labels).unwrap()
+    }
+
+    #[test]
+    fn a_step_of_real_labels_is_learned_on_its_squared_loss() {
+        let model = LearnerConfig::Perpetual(config()).fit(&step()).unwrap();
+        for (value, expected) in [(0.2, 2.0), (0.7, -1.0)] {
+            let predicted = model.predict(&[value]).unwrap();
+            assert!((predicted - expected).abs() < 0.01, "{value}: {predicted}");
         }
     }
 

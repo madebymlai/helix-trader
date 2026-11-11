@@ -455,7 +455,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::targets::{BracketSpec, DEFAULT_ATR, Distance},
+        model::{
+            learner::LightGbmConfig,
+            targets::{BracketSpec, DEFAULT_ATR, Distance},
+        },
         strategy::{AtrArgs, TickSeries},
     };
 
@@ -787,6 +790,28 @@ mod tests {
         assert!(load(&section("min_pnl = -0.5")).is_ok());
     }
 
+    #[test]
+    fn a_strategy_sets_each_of_lightgbms_settings() {
+        let config = load(&section(
+            r#"learner = { kind = "lightgbm", num_iterations = 300, learning_rate = 0.02, num_leaves = 15, min_data_in_leaf = 50 }"#,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            config.learner,
+            LearnerConfig::LightGbm(
+                LightGbmConfig::builder()
+                    .num_iterations(300)
+                    .learning_rate(0.02)
+                    .num_leaves(15)
+                    .min_data_in_leaf(50)
+                    .build()
+            )
+        );
+    }
+
+    /// The floor is the adapter's dataset's, 20 rows, not the default of
+    /// 200 rows a leaf: 20 and 50 load.
     #[test]
     fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
         let lightgbm = |rows: u32| {
