@@ -2,14 +2,14 @@
 //! catalog: the probe of `common::dataset` decides every hour on one
 //! feature, missing (NaN) from the first quote. Before the run, the
 //! dataset is built and, at each daily retrain time of the span, a long
-//! model published as a train would: a baseline of its own probability,
-//! calibrated (`common::dataset::baseline_of`), which names it. The walk
-//! has no edge for a train to earn on, so its trains would publish none
-//! (`backtest_train` trains on one). In the run, every decision of a
-//! period trades on the model published at its start. A second backtest
-//! of the span builds and publishes nothing, and the scores of each period
-//! are its model's, a constant ranking no row above another, beside its
-//! own baseline, the training mean its manifest has.
+//! model published as a train would: a baseline of its own R, its
+//! calibration leaving it as it is (`common::dataset::baseline_of`), which
+//! names it. The walk has no edge for a train to earn on, so its trains
+//! would publish none (`backtest_train` trains on one). In the run, every
+//! decision of a period trades on the model published at its start. A
+//! second backtest of the span builds and publishes nothing, and the scores
+//! of each period are its model's, a constant, beside its own baseline, the
+//! training mean its manifest has.
 //! One node per thread: each build, train and run on a thread of its own.
 
 use std::{path::Path, rc::Rc};
@@ -24,11 +24,12 @@ use crate::common::{
 use helix_trader::model::{
     config::{Margins, ModelConfig},
     dataset::{self, Dataset},
-    features::{FeatureSet, side_names},
+    features::FeatureSet,
     schedule::Retrain,
+    score::ExpectedScore,
     store::{ModelSet, ModelStore},
     targets::Side,
-    walk::WalkForward,
+    walk::{Score, WalkForward},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -40,7 +41,7 @@ fn features() -> Rc<FeatureSet> {
 }
 
 /// The probe's, of the long alone, retrained every day; every decision a
-/// long, to record its probability.
+/// long, to record its level.
 fn config_daily() -> ModelConfig {
     ModelConfig {
         retrain: Retrain::Every(SignedDuration::from_hours(24)),
@@ -135,13 +136,13 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
             },
             |at| {
                 trained.push(at);
-                let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+                let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
                 long_store(models).publish(&baseline_of(
                     &features(),
                     &config_daily(),
                     Side::Long,
                     at,
-                    trues,
+                    tenths,
                 ))
             },
         )
@@ -188,16 +189,16 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
 
     for (period, (&from, mean)) in retrains.iter().zip(&means).enumerate() {
         let (from, to) = (UnixNanos::from(from), UnixNanos::from(from + day));
-        let probabilities: Vec<f64> = record
+        let levels: Vec<f64> = record
             .trades
             .iter()
             .filter(|(time, _)| from <= *time && *time < to)
-            .map(|(_, trade)| trade.probability)
+            .map(|(_, trade)| trade.level)
             .collect();
-        assert_eq!(probabilities.len(), 24, "period {period}");
+        assert_eq!(levels.len(), 24, "period {period}");
         assert!(
-            probabilities.iter().all(|p| p == mean),
-            "period {period}: {probabilities:?}, not {mean}"
+            levels.iter().all(|level| level == mean),
+            "period {period}: {levels:?}, not {mean}"
         );
     }
     assert_eq!(record.trades.len(), 72);
@@ -205,34 +206,28 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
     assert_eq!(prepare(&catalog, models.path()), (vec![], vec![]));
 }
 
-/// The calibrated probability of the long model of `store` valid from
-/// `at` on the missing feature, then the bracket's payoff features, which
-/// the fake does not read: the same on every row.
+/// The R the long model of `store` valid from `at` predicts on the missing
+/// feature, then the bracket's payoff features, which the baseline does not
+/// read: the same on every row, its calibration, of the strategy's one side,
+/// leaving it as it is.
 fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
-    let fingerprint =
-        dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
-            .unwrap()
-            .to_string();
-    store
-        .read(at)
-        .unwrap()
-        .load(
-            &side_names(features().names(), &target().payoff_names()),
-            &fingerprint,
-        )
+    let stored = store.read(at).unwrap();
+    stored
+        .manifest
+        .learner
+        .load(&stored.model)
         .unwrap()
         .predict(&[f64::NAN, 0.0, 0.0, 0.0])
         .unwrap()
 }
 
-/// The model of each period predicts one probability on every decision of
-/// the period, its calibrated constant, beside its own baseline, the
-/// training mean of the labels it was fitted on, which its manifest has
-/// (`common::dataset::baseline_of`): `trues` tenths, uncalibrated, 0.3,
-/// 0.4 and 0.5 from the first period on (`prepare`). Neither ranks a row
-/// above another (AUC 0.5), both are scored on the same rows, and each
-/// log loss is that of its constant against the longs' outcomes of the
-/// period, read from the dataset.
+/// The model of each period expects one R on every decision of the period,
+/// its constant, which its own baseline, the training mean its manifest has
+/// (`common::dataset::baseline_of`), is too: -0.2, -0.1 and nought from the
+/// first period on (`prepare`). On the same rows, the model errs as its
+/// baseline does, a skill of nought, its expectation never varies, no
+/// slope, and its mean R - E' is the mean R of the period's longs, read from
+/// the dataset, less its constant.
 #[test]
 fn each_period_scores_its_model_beside_that_models_own_baseline() {
     let catalog = catalog();
@@ -266,39 +261,32 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
             UnixNanos::from(from),
             UnixNanos::from(from + SignedDuration::from_hours(24)),
         );
-        let gained: Vec<bool> = rows
+        let realised: Vec<f64> = rows
             .iter()
             .filter(|row| from_ns <= row.ts_event && row.ts_event < to_ns)
-            .map(|row| row.gained(Side::Long))
+            .map(|row| row.long_pnl / row.long_unit)
             .collect();
-        // The log loss of a constant `p` on the period's longs.
-        let loss = |p: f64| {
-            -gained
-                .iter()
-                .map(|&gained| if gained { p.ln() } else { (1.0 - p).ln() })
-                .sum::<f64>()
-                / gained.len() as f64
-        };
-        let baseline = (3 + day) as f64 / 10.0;
+        let mean = realised.iter().sum::<f64>() / realised.len() as f64;
         assert_eq!(period.models, [from]);
-        assert!(!gained.is_empty(), "{period:?}");
-        assert_eq!(
-            (period.model.rows, period.baseline.rows),
-            (gained.len(), gained.len())
-        );
-        assert_eq!(
-            (period.model.auc, period.baseline.auc),
-            (Some(0.5), Some(0.5)),
-            "{period:?}"
-        );
-        for (score, p) in [
-            (period.model, predicts(&store, from)),
-            (period.baseline, baseline),
-        ] {
-            let (log_loss, loss) = (score.log_loss.unwrap(), loss(p));
-            assert!((log_loss - loss).abs() < 1e-12, "{log_loss} != {loss}");
-        }
+        assert!(!realised.is_empty(), "{period:?}");
+        let score = expected(period.score);
+        assert_eq!(score.rows, realised.len());
+        assert_eq!((score.skill, score.slope), (Some(0.0), None), "{period:?}");
+        let error = score.mean_error.unwrap() - (mean - predicts(&store, from));
+        assert!(error.abs() < 1e-12, "{period:?}: {mean}");
     }
-    let rows: usize = long.periods.iter().map(|period| period.model.rows).sum();
-    assert_eq!((long.model.rows, long.baseline.rows), (rows, rows));
+    let rows: usize = long
+        .periods
+        .iter()
+        .map(|period| expected(period.score).rows)
+        .sum();
+    assert_eq!(expected(long.score).rows, rows);
+}
+
+/// A side's score of `score`.
+fn expected(score: Score) -> ExpectedScore {
+    let Score::Expected(score) = score else {
+        panic!("{score:?}");
+    };
+    score
 }

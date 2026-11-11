@@ -49,7 +49,7 @@ pub struct ModelConfig<T = TargetConfig> {
     /// When the strategy decides.
     pub decision: DecisionRule,
     /// The target of each decision, read from orders in a dataset run: the
-    /// models learn whether each side of it gains.
+    /// side models learn the net R of each side of it.
     pub target: T,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
@@ -81,9 +81,9 @@ pub struct ModelConfig<T = TargetConfig> {
 
 /// A meta model: on each decision that picks a side, whether that side's
 /// trade, the target on it, wins, learned from the sides' features, the
-/// side picked and its probability. It is retrained on the sides'
-/// schedule, right after them, or, the sides never retrained, trained
-/// once and kept.
+/// side picked and the decision's calibrated level and side call. It is
+/// retrained on the sides' schedule, right after them, or, the sides never
+/// retrained, trained once and kept.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct MetaConfig {

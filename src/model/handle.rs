@@ -14,20 +14,22 @@
 //!
 //! - deciding (`Mode::Backtest`, `Mode::Live`): takes the latest pair of
 //!   the sides of the config's margins valid at the decision, the sides
-//!   one train published (`store::Pair`), and of each side its model's
-//!   calibrated probability on the side's row, the decision's features then
-//!   the side's payoff features as the target sets them, which a dataset row
-//!   of the decision holds alike (`deciding::SideRow`), and expected net P&L
-//!   (`payoff`): the
-//!   expected R times the unit the decision sets (`targets::TargetSetter`):
-//!   with exits the worth of the stop it sets from the decision's price and
-//!   the target's ATR, which the handle runs, and on a time-only target the
-//!   worth of a stop as far as that ATR. It
-//!   returns the `Decision` of the side clearing its margin, the larger of
-//!   two (`payoff::pick`), as plain data: the side, the target's size, the
-//!   probability and expected net P&L, and the target as the decision sets
-//!   it on that side, its reference price, take profit, stop and time
-//!   limit. The handle sends no order and handles no
+//!   one train published (`store::Pair`), each side's model predicting its
+//!   R on the side's row, the decision's features then the side's payoff
+//!   features as the target sets them, which a dataset row of the decision
+//!   holds alike (`deciding::SideRow`), the pair calibrating both
+//!   predictions together into the decision's level and side call and each
+//!   side's expected R (`calibration::Ksplit`), and each side's expected
+//!   net P&L that R times the unit the decision sets
+//!   (`targets::TargetSetter`, `payoff`): with exits the worth of the stop
+//!   it sets from the decision's price and the target's ATR, which the
+//!   handle runs, and on a time-only target the worth of a stop as far as
+//!   that ATR. It returns the `Decision` of the side clearing its margin,
+//!   the larger of two (`payoff::pick`), as plain data: the side, the
+//!   target's size, the expected net P&L and the level and side call behind
+//!   it, and the target as the decision sets it on that side, its reference
+//!   price, take profit, stop and time limit. The handle sends no order and
+//!   handles no
 //!   trade's time: the strategy trades the decision, as given
 //!   (`Decision::trade`, sent through `strategy::orders` as a dataset run
 //!   sends its targets) or otherwise, and closes its trades through the
@@ -44,10 +46,10 @@
 //!   the targets settle are collected for the caller of the run.
 //!
 //! With a meta model (`model::meta`), the trade of the side picked is
-//! taken only if the meta model in use, on the row with that side and its
-//! probability, predicts at least its threshold, sized from that
-//! probability if the meta sizes (`MetaConfig::size`); no meta model valid
-//! yet is no trade.
+//! taken only if the meta model in use, on the row with that side and the
+//! decision's level and side call, predicts a probability of at least its
+//! threshold, sized from that probability if the meta sizes
+//! (`MetaConfig::size`); no meta model valid yet is no trade.
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
 //! talks to the strategy. A model is swapped in only inside `decide`, before
@@ -56,8 +58,9 @@
 //! the same store, which must be readable when the handle is built, and is
 //! listed again at each decision, a failure logged and the previous lists
 //! kept, so a model published meanwhile is used from the first decision at or
-//! after its valid-from. Every probability is calibrated
-//! (`store::LoadedModel`). Before use a model is checked against the strategy:
+//! after its valid-from. Every prediction is calibrated, the sides' by their
+//! pair (`store::Pair`), the meta's on its own (`store::LoadedModel`). Before
+//! use a model is checked against the strategy:
 //! its feature names and their
 //! order, its fingerprint (`dataset::fingerprint`), its width, and its
 //! probes, each of which the reloaded model must predict to the bit as it
@@ -198,12 +201,13 @@ pub enum Mode {
 /// The rows a dataset run settled, shared with its caller.
 pub type SettledRows = Rc<RefCell<Vec<TargetRow>>>;
 
-/// A decision to trade, as plain data: the side the model picks, of the
-/// target's size and instrument, its calibrated probability and expected
-/// net P&L, and the target its model learned as the decision sets it on
-/// that side, the prices a dataset run sets there. The handle sends
-/// nothing: a strategy trades it as given (`trade`), or otherwise, and then
-/// the model's holdout figures describe the target's trade, not its own.
+/// A decision to trade, as plain data: the side the models pick, of the
+/// target's size and instrument, its expected net P&L and the calibrated
+/// level and side call it is of, the meta's probability if a meta took it,
+/// and the target its models learned as the decision sets it on that side,
+/// the prices a dataset run sets there. The handle sends nothing: a strategy
+/// trades it as given (`trade`), or otherwise, and then the models' holdout
+/// figures describe the target's trade, not its own.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decision {
     /// The target's instrument.
@@ -211,12 +215,18 @@ pub struct Decision {
     pub side: OrderSide,
     /// The target's size, or, with a meta model sizing, its multiple of it.
     pub quantity: Quantity,
-    /// The calibrated probability that the trade gains, of the model
-    /// deciding: the meta model's, if any, else that of the side's model.
-    pub probability: f64,
-    /// The net P&L the side's model expects, in the instrument's P&L
-    /// currency, on the target's size.
+    /// The net P&L the pair expects of the side's trade, in the instrument's
+    /// P&L currency, on the target's size: its calibrated expected R, `E'`,
+    /// times the decision's unit.
     pub expected_pnl: f64,
+    /// The decision's calibrated level, `C'`, in R.
+    pub level: f64,
+    /// The decision's calibrated side call, `D'`, in R: nought of a
+    /// one-sided strategy.
+    pub side_call: f64,
+    /// The meta model's calibrated probability that the trade gains, if a
+    /// meta took it.
+    pub meta_probability: Option<f64>,
     /// The price the target is set from (`targets::TargetSetter`): the mid
     /// of the instrument's last quote, else its last trade, else its last
     /// close.
@@ -658,8 +668,10 @@ impl Deciding {
             instrument_id: self.instrument_id,
             side: taken.side.order_side(),
             quantity: taken.quantity,
-            probability: taken.probability,
             expected_pnl: taken.expected_pnl,
+            level: taken.expected.level,
+            side_call: taken.expected.side_call,
+            meta_probability: taken.meta_probability,
             reference: target.reference,
             bracket: target.bracket,
             time_limit: target.time_limit,
@@ -708,7 +720,7 @@ mod tests {
         decide::FeatureRow,
         deciding::testing::{
             AUD, GOLD, STRATEGY, at, baseline, baseline_for, both_sides, c, config, features, gold,
-            meta, meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
+            meta, meta_baseline, model_set, r, requirements, side_store, store, venue, with_meta,
         },
         features::testing::{last_mid, mid_over},
         schedule::Retrain,
@@ -870,8 +882,10 @@ mod tests {
         .unwrap()
     }
 
-    fn probability(decision: Option<Decision>) -> Option<f64> {
-        decision.map(|decision| decision.probability)
+    /// The level of `decision`: of the tests' one side, its model's R, which
+    /// names the model, whatever the decision's unit.
+    fn level(decision: Option<Decision>) -> Option<f64> {
+        decision.map(|decision| decision.level)
     }
 
     #[test]
@@ -914,7 +928,7 @@ mod tests {
 
     /// No feature reads AUD/USD, which it trades: its quote in the cache,
     /// made at the decision, the harness's, makes the decision fresh, and
-    /// the long model of these features trades at 0.8 calibrated.
+    /// the long model of these features trades, expecting 0.3R.
     #[test]
     fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
@@ -953,10 +967,7 @@ mod tests {
         .unwrap();
         started(&handle, &mut probe);
 
-        assert_eq!(
-            probability(handle.decide(&mut probe).unwrap()),
-            Some(c(0.8))
-        );
+        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
     /// A strategy reading AUD/USD, which it trades, as trades alone, its
@@ -1058,8 +1069,9 @@ mod tests {
         .unwrap()
     }
 
-    /// A long expecting `2 c(0.6) - 1`, 0.180 USD on a unit of 1 USD,
-    /// clearing its margin of nought; the short is not traded.
+    /// A long expecting 0.1R, 0.1 USD on a unit of 1 USD, clearing its
+    /// margin of nought; the short is not traded. The decision carries its
+    /// level and, of one side, no side call.
     #[test]
     fn a_side_expected_to_clear_its_margin_trades_the_targets_size() {
         let models = tempfile::tempdir().unwrap();
@@ -1073,8 +1085,10 @@ mod tests {
                 instrument_id: InstrumentId::from(AUD),
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
-                probability: c(0.6),
-                expected_pnl: 2.0 * c(0.6) - 1.0,
+                expected_pnl: 0.1,
+                level: 0.1,
+                side_call: 0.0,
+                meta_probability: None,
                 reference: Price::from("0.70000"),
                 bracket: None,
                 time_limit: SignedDuration::from_hours(1),
@@ -1105,13 +1119,13 @@ mod tests {
     /// Worked by hand. From the mid of 0.70000, the long's take profit 20
     /// bps above, 0.00140, and its stop 10 bps below, 0.00070: the
     /// prices a dataset run's long sets there, closed 2 hours later. The
-    /// stop is worth 0.70 USD on 1000 AUD/USD, so the long's `2 c(0.8) - 1`,
-    /// 0.553790R, expects 0.387653 USD.
+    /// stop is worth 0.70 USD on 1000 AUD/USD, so the long's 0.5R expects
+    /// 0.35 USD.
     #[test]
     fn a_bracket_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle(&probe, models.path(), &bracket_config(10), (Some(8), None));
+        let handle = sides_handle(&probe, models.path(), &bracket_config(10), (Some(10), None));
         handle.start(&mut probe).unwrap();
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
@@ -1133,16 +1147,16 @@ mod tests {
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
         assert!(
-            (decision.expected_pnl - 0.387_653).abs() < 1e-5,
+            (decision.expected_pnl - 0.35).abs() < 1e-9,
             "{}",
             decision.expected_pnl
         );
     }
 
-    /// Worked by hand. Both sides traded from 0.30 USD: the long of 0.6
-    /// expects 0.180R, 0.126 USD on a stop worth 0.70 USD, and the short of
-    /// 0.8 expects 0.554R, 0.388 USD. From the mid of 0.70000, the short's
-    /// take profit is 0.00140 below and its stop 0.00070 above.
+    /// Worked by hand. Both sides traded from 0.30 USD: the long of 0.1R
+    /// expects 0.07 USD on a stop worth 0.70 USD, and the short of 0.5R
+    /// expects 0.35 USD. From the mid of 0.70000, the short's take profit is
+    /// 0.00140 below and its stop 0.00070 above.
     #[test]
     fn a_short_trade_is_on_the_exits_its_decision_sets_on_the_short() {
         let models = tempfile::tempdir().unwrap();
@@ -1154,7 +1168,7 @@ mod tests {
             },
             ..bracket_config(10)
         };
-        let handle = sides_handle(&probe, models.path(), &config, (Some(6), Some(8)));
+        let handle = sides_handle(&probe, models.path(), &config, (Some(6), Some(10)));
         handle.start(&mut probe).unwrap();
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
@@ -1213,7 +1227,7 @@ mod tests {
         (probe, clock)
     }
 
-    /// The long of 0.2 expects a loss whatever its stop is worth, and a stop
+    /// The long of -0.3R expects a loss whatever its stop is worth, and a stop
     /// worth half a cent makes it a loss in money: it does not clear a margin
     /// of nought.
     #[test]
@@ -1225,9 +1239,9 @@ mod tests {
         assert_eq!(handle.decide(&mut probe).unwrap(), None);
     }
 
-    /// Worked by hand. The short of 0.8 expects `2 c(0.8) - 1`, 0.553790R,
-    /// 0.002769 USD on a stop worth 0.005 USD, and the long of 0.2 a loss, so
-    /// the short trades from a margin of nought, its stop on the ask.
+    /// Worked by hand. The short of 0.3R expects 0.0015 USD on a stop worth
+    /// 0.005 USD, and the long of -0.3R a loss, so the short trades from a
+    /// margin of nought, its stop on the ask.
     #[test]
     fn a_side_expected_to_gain_on_a_half_tick_stop_trades_its_stop_in_the_market() {
         let models = tempfile::tempdir().unwrap();
@@ -1249,7 +1263,7 @@ mod tests {
             })
         );
         assert!(
-            (decision.expected_pnl - 0.002_769).abs() < 1e-6,
+            (decision.expected_pnl - 0.0015).abs() < 1e-12,
             "{}",
             decision.expected_pnl
         );
@@ -1257,9 +1271,9 @@ mod tests {
 
     /// Worked by hand. `config`'s target is a limit alone, its unit the
     /// worth of its ATR of one hourly bar: a bar from 0.69900 to 0.70100
-    /// ranges 0.00200, worth 2 USD on 1000 AUD/USD, so the long of 0.6, its
-    /// win and loss of 1R at c(0.6), expects twice `2 c(0.6) - 1`. Its trade
-    /// is a market entry closed an hour later, no exit set from the mid of
+    /// ranges 0.00200, worth 2 USD on 1000 AUD/USD, so the long of 0.1R
+    /// expects 0.2 USD. Its trade is a market entry closed an hour later, no
+    /// exit set from the mid of
     /// 0.70000, what `Trade::send_as` sends without them.
     #[test]
     fn a_time_only_trade_has_no_exits_and_closes_at_its_limit() {
@@ -1287,7 +1301,11 @@ mod tests {
             }
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
-        assert_eq!(decision.expected_pnl, 2.0 * (2.0 * c(0.6) - 1.0));
+        assert!(
+            (decision.expected_pnl - 0.2).abs() < 1e-12,
+            "{}",
+            decision.expected_pnl
+        );
     }
 
     /// `bracket_config` with a take profit 2 and a stop 1 average true
@@ -1412,8 +1430,9 @@ mod tests {
     /// seeded by their mean, is 0.00100, as a dataset run replaying those
     /// bars has it at 12:00: from the mid of 0.70000, the long's take
     /// profit 0.00200 above, 0.70200, and its stop 0.00100 below, 0.69900,
-    /// worth 1 USD on 1000 AUD/USD, 0.537 USD expected, above the margin.
-    /// Without the warmup the ATR is cold and the decision no trade.
+    /// worth 1 USD on 1000 AUD/USD, the long's 0.4R 0.4 USD expected, above
+    /// the margin. Without the warmup the ATR is cold and the decision no
+    /// trade.
     #[test]
     fn a_live_warmup_sets_the_first_decisions_stop_from_the_targets_atr() {
         let models = tempfile::tempdir().unwrap();
@@ -1423,7 +1442,7 @@ mod tests {
             &probe,
             models.path(),
             &atr_config(),
-            (Some(8), None),
+            (Some(9), None),
         );
         handle.start(&mut probe).unwrap();
         probe
@@ -1488,7 +1507,7 @@ mod tests {
     /// hands its warmup reach none of its features. Worked by hand: at
     /// 12:00 the last hourly close is cold, a quote of AUD/USD handed over
     /// leaves it cold, and the bar closing at 12:00, which Nautilus hands
-    /// it, warms it: the long model of 0.8 trades.
+    /// it, warms it: the long model expecting 0.3R trades.
     #[test]
     fn features_reading_no_ticks_warm_on_their_bars_through_nautilus_as_before() {
         let models = tempfile::tempdir().unwrap();
@@ -1535,8 +1554,8 @@ mod tests {
         let barred = handle.decide(&mut probe).unwrap();
 
         assert_eq!(
-            (probability(cold), probability(quoted), probability(barred)),
-            (None, None, Some(c(0.8)))
+            (level(cold), level(quoted), level(barred)),
+            (None, None, Some(r(8)))
         );
     }
 
@@ -1965,10 +1984,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
         let handle = live_handle(&mut probe, models.path(), features());
 
-        assert_eq!(
-            probability(handle.decide(&mut probe).unwrap()),
-            Some(c(0.8))
-        );
+        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
     /// A warmup reaches the features window by window with the node running
@@ -1983,14 +1999,11 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
         let handle = warming_handle(&mut probe, models.path(), features());
 
-        let warming = probability(handle.decide(&mut probe).unwrap());
+        let warming = level(handle.decide(&mut probe).unwrap());
         handle.warmup().complete(&probe).unwrap();
 
         assert_eq!(warming, None);
-        assert_eq!(
-            probability(handle.decide(&mut probe).unwrap()),
-            Some(c(0.8))
-        );
+        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
     /// Live, a model is published while the node runs, by a retrain or by
@@ -2006,20 +2019,17 @@ mod tests {
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let features = features();
         let handle = live_handle(&mut probe, models.path(), Rc::clone(&features));
-        let before = probability(handle.decide(&mut probe).unwrap());
+        let before = level(handle.decide(&mut probe).unwrap());
 
         store.publish(&baseline("2026-10-22T23:00:00Z", 9)).unwrap();
         advance(&features, &clock, "2026-10-23T01:00:00Z");
 
-        assert_eq!(before, Some(c(0.7)));
-        assert_eq!(
-            probability(handle.decide(&mut probe).unwrap()),
-            Some(c(0.9))
-        );
+        assert_eq!(before, Some(r(7)));
+        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(9)));
     }
 
     /// The handle trading in a backtest on the models under `models` as
-    /// `config` says, its long a model of 0.6 from midnight (expecting 0.180
+    /// `config` says, its long a model of 0.1R from midnight (expecting 0.1
     /// USD, above its margin of nought), its meta model predicting
     /// `meta_trues` tenths from midnight, its features warm by a quote at noon
     /// of the 22nd.
@@ -2064,9 +2074,11 @@ mod tests {
                 instrument_id: InstrumentId::from(AUD),
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
-                probability: c(0.7),
-                // The side's model's, its long of 0.6.
-                expected_pnl: 2.0 * c(0.6) - 1.0,
+                // The side's model's, its long of 0.1R.
+                expected_pnl: 0.1,
+                level: 0.1,
+                side_call: 0.0,
+                meta_probability: Some(c(0.7)),
                 reference: Price::from("0.70000"),
                 bracket: None,
                 time_limit: SignedDuration::from_hours(1),
@@ -2271,16 +2283,13 @@ mod tests {
         let features = features();
         let handle = handle(&probe, models.path(), Rc::clone(&features));
         started(&handle, &mut probe);
-        let before = probability(handle.decide(&mut probe).unwrap());
+        let before = level(handle.decide(&mut probe).unwrap());
 
         store.break_listing();
         advance(&features, &clock, "2026-10-22T12:00:00Z");
 
-        assert_eq!(before, Some(c(0.7)));
-        assert_eq!(
-            probability(handle.decide(&mut probe).unwrap()),
-            Some(c(0.8))
-        );
+        assert_eq!(before, Some(r(7)));
+        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
     /// The data commands `probe`'s actor sends to the data engine from

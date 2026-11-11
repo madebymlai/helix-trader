@@ -1,14 +1,15 @@
 //! Training at a time (`model::train`) on a fixture catalog with an edge:
 //! the dataset probe (`common::dataset`) replays the days the window lacks
-//! through `Backtest::run_dataset`, and the fake learner fits each side on
-//! the rows. IC's gold rises 4.00 over each even hour and falls back over
-//! each odd one (`edge_quotes`), and the probe's one feature, `cheap`,
-//! marks where the hour starts: 1 at the bottom, 0 at the top. The fake's
-//! prediction is the feature, calibrated increasing for the long, which
-//! wins every even hour, and decreasing for the short, which wins every
-//! odd one: each row picks the side that wins it, and the trades picked earn
-//! more per trade than taking every trade. One node per thread: a test
-//! training twice trains the first time on a thread of its own.
+//! through `Backtest::run_dataset`, and LightGBM fits each side's realised
+//! R on the rows. IC's gold rises 4.00 over each even hour and falls back
+//! over each odd one (`edge_quotes`), and the probe's one feature, `cheap`,
+//! marks where the hour starts: 1 at the bottom, 0 at the top. Each side
+//! learns its R from the feature, the long's high at the bottom, where it
+//! wins, and the short's at the top, and their pair calibrated together
+//! expects each to win where it does: each row picks the side that wins it,
+//! and the trades picked earn more per trade than taking every trade. One
+//! node per thread: a test training twice trains the first time on a thread
+//! of its own.
 
 use std::{path::Path, rc::Rc};
 
@@ -22,9 +23,9 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         dataset,
         features::{Feature, FeatureSet, side_names},
-        holdout::{Holdout, Refusal},
-        learner::LearnerConfig,
-        store::{ModelSet, ModelStore},
+        holdout::{Holdout, Refusal, Score},
+        learner::{LearnerConfig, LightGbmConfig},
+        store::{ModelCalibration, ModelSet, ModelStore},
         targets::Side,
         train::{Kept, Outcome, Trained, Training},
     },
@@ -132,16 +133,17 @@ fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// The probe's decisions on `cheap`, learning whether each side of the
-/// bracket gains, on a window of 46 hours, the last 12 held out and the 12
-/// before them calibrated on; each side traded from an expected net P&L of
+/// The probe's decisions on `cheap`, learning the R of each side of the
+/// bracket by LightGBM, on leaves of 20 rows, on a window of 70 hours, the
+/// last 12 held out and the 12 before them calibrated on, so that the 46
+/// hours fitted on split; each side traded from an expected net P&L of
 /// nought, published from `min_pnl` USD per trade over 5 trades.
 fn config(min_pnl: f64) -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
         .target(target())
         .retrain(SignedDuration::from_hours(24))
-        .window(SignedDuration::from_hours(46))
+        .window(SignedDuration::from_hours(70))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(0.0),
@@ -149,7 +151,9 @@ fn config(min_pnl: f64) -> ModelConfig {
         })
         .min_pnl(min_pnl)
         .min_trades(5)
-        .learner(LearnerConfig::Fake {})
+        .learner(LearnerConfig::LightGbm(
+            LightGbmConfig::builder().min_data_in_leaf(20).build(),
+        ))
         .build()
 }
 
@@ -184,16 +188,16 @@ fn store(models: &Path, min_pnl: f64, side: Side) -> ModelStore {
     .clone()
 }
 
-/// Quotes from 23:00 of the 20th of October 2026 to 03:00 of the 23rd.
+/// Quotes from 23:00 of the 19th of October 2026 to 03:00 of the 23rd.
 fn catalog() -> TempDir {
     let (from, to) = (
-        ic::at("00:00:00") - SignedDuration::from_hours(1),
+        ic::at("00:00:00") - SignedDuration::from_hours(25),
         ic::at("00:00:00") + SignedDuration::from_hours(51),
     );
     ic::catalog_of(edge_quotes(from, to), from, to)
 }
 
-/// Midnight of the 23rd: the window starts at 02:00 of the 21st.
+/// Midnight of the 23rd: the window starts at 02:00 of the 20th.
 fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
@@ -209,7 +213,7 @@ fn published(outcome: Option<Outcome>) -> Holdout {
         Some(Outcome::Published {
             valid_from,
             holdout,
-        }) if valid_from == t() => holdout,
+        }) if valid_from == t() => *holdout,
         outcome => panic!("{outcome:?}"),
     }
 }
@@ -227,7 +231,10 @@ fn published(outcome: Option<Outcome>) -> Holdout {
 /// the bottom and the short at the top: 12 trades of 2.66, beside every trade,
 /// a win and a loss of each row, (12 x 2.66 - 12 x 3.34) / 24. Both sides hold
 /// those earnings. At 1.5 times the commission of 0.24 each trade makes 0.12
-/// less. Every row ranked right: AUC 1.
+/// less. Each side's expected R is nearer its R than its training mean is:
+/// a skill above nought. Both manifests hold the pair's one calibration,
+/// naming it, and each side's model, reloaded by its learner, predicts its
+/// probes to the bit.
 #[test]
 fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_identical_predictions()
 {
@@ -257,8 +264,10 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
             earnings.every_stressed.expectancy,
             (12.0 * 2.54 - 12.0 * 3.46) / 24.0,
         );
-        assert_eq!(holdout.auc, Some(1.0));
-        assert!(holdout.log_loss < holdout.baseline_log_loss, "{holdout:?}");
+        let Score::Expected(score) = holdout.score else {
+            panic!("{holdout:?}");
+        };
+        assert!(score.skill.is_some_and(|skill| skill > 0.0), "{holdout:?}");
     }
     let fingerprint =
         dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
@@ -267,13 +276,27 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
     // A side's model reads the strategy's features, then the bracket's payoff
     // features, the names the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());
-    for side in Side::BOTH {
-        let stored = store(models.path(), 1.0, side).read(t()).unwrap();
+    let [long, short] = Side::BOTH.map(|side| store(models.path(), 1.0, side).read(t()).unwrap());
+    assert_eq!(long.manifest.calibration, short.manifest.calibration);
+    let ModelCalibration::Pair(calibration) = &long.manifest.calibration else {
+        panic!("{:?}", long.manifest.calibration);
+    };
+    assert_eq!(
+        (calibration.valid_from, &calibration.sides[..]),
+        (t(), &Side::BOTH[..])
+    );
+    for (side, stored) in Side::BOTH.into_iter().zip([long, short]) {
+        assert_eq!(
+            (&stored.manifest.feature_names, &stored.manifest.fingerprint),
+            (&names, &fingerprint),
+            "{side:?}"
+        );
         let model = stored
-            .load(&names, &fingerprint)
+            .manifest
+            .learner
+            .load(&stored.model)
             .unwrap_or_else(|e| panic!("{side:?}: {e:#}"));
         assert!(!stored.manifest.probes.is_empty());
-        assert!(stored.manifest.payoff.is_some(), "{side:?}");
         for probe in &stored.manifest.probes {
             assert_eq!(
                 model.predict(&probe.row).unwrap().to_bits(),

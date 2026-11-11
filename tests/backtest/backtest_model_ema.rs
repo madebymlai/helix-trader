@@ -3,8 +3,8 @@
 //! at a time, replaying the strategy's dataset run, and a backtest of the
 //! strategy then trades on the store. Its features are averages of 1-minute
 //! bars, warm from the bars replayed; the fake learner predicts the first,
-//! the gold price clamped to 1, the same on every row, which earns no more
-//! than taking every trade: `train` refuses it, failing with the reason
+//! taking every trade, which earns no more than taking every trade: `train`
+//! refuses it, failing with the reason
 //! and the holdout's figures, as does a live node's launcher
 //! (`model::launcher`) starting that `train` as its child. A model
 //! published straight to the store, a baseline (`common::dataset`), trades
@@ -20,7 +20,7 @@ use std::{
 };
 
 use crate::common::{
-    dataset::{baseline_stored, venue, walk},
+    dataset::{baseline_stored, r, venue, walk},
     ic,
 };
 use helix_trader::{
@@ -30,6 +30,7 @@ use helix_trader::{
         features::side_names,
         handle::Mode,
         launcher::{Launcher, Retrained},
+        learner::TrainingSet,
         store::ModelSet,
         targets::Side,
     },
@@ -40,9 +41,9 @@ use nautilus_model::types::Money;
 use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
-/// 30 of them, warmed up an hour, learning whether the long of a 30-minute
-/// time-only target gains, its unit the worth of the ATR of one hourly bar,
-/// warm over the hour, its trades, on
+/// 30 of them, warmed up an hour, learning the net P&L of the long of a
+/// 30-minute time-only target, its unit the worth of the ATR of one hourly
+/// bar, warm over the hour, its trades, on
 /// a window of 46 hours, the last 12 held out and the 12 before them
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
@@ -108,23 +109,25 @@ fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) ->
 
 /// Whether `text` reports a long model kept with its holdout's figures:
 /// its trades taken and every trade, at the commission and at 1.5 times
-/// it, its log loss and the baseline's, its AUC.
+/// it, its skill, its mean R - E', its calibration slope and its top-decile
+/// gap.
 fn kept_with_its_figures(text: &str) -> bool {
     [
         "kept the current model: ",
         "taken ",
         "every trade ",
         "at 1.5x the commission",
-        "log loss ",
-        "baseline ",
-        "AUC ",
+        "skill ",
+        "mean R - E' ",
+        "calibration slope ",
+        "top-decile gap ",
     ]
     .iter()
     .all(|figure| text.contains(figure))
 }
 
 /// Publishes straight to the store under `models` a long model valid from
-/// `at`, a baseline of 0.6 on a side's features, the strategy's then the
+/// `at`, a baseline of 0.1R on a side's features, the strategy's then the
 /// target's payoff features, as the dataset the `train` subcommand built in
 /// `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
@@ -133,14 +136,16 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         .unwrap()
         .manifest()
         .unwrap();
+    let names = side_names(&dataset.feature_names, &dataset.payoff_names);
+    let set = TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![r(6)]).unwrap();
     let model = baseline_stored(
         dataset.strategy_id,
         dataset.fingerprint,
-        side_names(&dataset.feature_names, &dataset.payoff_names),
+        names,
         &config.model(),
         Some(Side::Long),
         at,
-        6,
+        &set,
     );
     ModelSet::new(
         models,
