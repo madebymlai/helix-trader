@@ -55,9 +55,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ustr = "1"
 
 [features]
-# The unit tests of the strategies themselves (ema, model_ema and, where it
-# exists, gold_scalp): off by default, so that `cargo test` runs the harness
-# alone; `cargo test --features strategy-tests` runs them too.
+# The unit tests of the strategies themselves: off by default, so that
+# `cargo test` runs the harness alone; `cargo test --features
+# strategy-tests` runs them too.
 strategy-tests = []
 
 [dependencies]
