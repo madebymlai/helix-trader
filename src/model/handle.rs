@@ -12,10 +12,10 @@
 //! target's instrument since the previous) and every feature is
 //! initialized, and publishes their row (`decide::decide`), then:
 //!
-//! - deciding (`Mode::Backtest`, `Mode::Live`): takes, for each side of
-//!   the config's margins, the latest model of its store
-//!   (`store::ModelStore`) valid at the decision, its calibrated
-//!   probability on the row, and its expected net P&L (`payoff`): with
+//! - deciding (`Mode::Backtest`, `Mode::Live`): takes the latest pair of
+//!   the sides of the config's margins valid at the decision, the sides
+//!   one train published (`store::Pair`), and of each side its model's
+//!   calibrated probability on the row and expected net P&L (`payoff`): with
 //!   exits, the expected R times the worth of the stop the decision sets
 //!   (`targets::TargetSetter`, from the decision's price and the target's
 //!   ATR, which the handle runs), on a time-only target in money. It
@@ -27,7 +27,7 @@
 //!   trade's time: the strategy trades the decision, as given
 //!   (`Decision::trade`, sent through `strategy::orders` as a dataset run
 //!   sends its targets) or otherwise, and closes its trades through the
-//!   same module. A side with no model valid yet never trades; a stale
+//!   same module. With no pair valid yet no side trades; a stale
 //!   decision, cold features, a target's ATR not yet initialized, no side
 //!   clearing its margin or two tied are no decision, never an error. The
 //!   target is set before the models are asked, so with exits and the
@@ -47,7 +47,8 @@
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
 //! talks to the strategy. A model is swapped in only inside `decide`, before
-//! it predicts: no decision mixes two models. A backtest and a live node read
+//! it predicts, the sides' as a pair: no decision mixes two models, nor the
+//! sides of two trains. A backtest and a live node read
 //! the same store, which must be readable when the handle is built, and is
 //! listed again at each decision, a failure logged and the previous lists
 //! kept, so a model published meanwhile is used from the first decision at or
@@ -57,7 +58,8 @@
 //! order, its fingerprint (`dataset::fingerprint`), its width, and its
 //! probes, each of which the reloaded model must predict to the bit as it
 //! did when fitted. A model failing a check is refused, logged as an
-//! error, and the current one kept; it is not read again (`store::Swap`).
+//! error, a side's with its pair, and the current one kept; it is not read
+//! again (`store::Swap`).
 //!
 //! The handle owns a `rolls::Roller` of the features' tick series
 //! (`FeatureSet::ticks`, custom data among them) and of the tick series of
@@ -697,8 +699,8 @@ mod tests {
         config::{Margins, Sizing},
         decide::FeatureRow,
         deciding::testing::{
-            AUD, GOLD, STRATEGY, at, baseline, baseline_for, c, config, features, gold, meta,
-            meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
+            AUD, GOLD, STRATEGY, at, baseline, baseline_for, both_sides, c, config, features, gold,
+            meta, meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
         },
         features::testing::{last_mid, mid_over},
         schedule::Retrain,
@@ -1048,7 +1050,7 @@ mod tests {
     }
 
     /// A long expecting `2 c(0.6) - 1`, 0.180 USD, clearing its margin of
-    /// nought; the short has no model yet, and never trades.
+    /// nought; the short is not traded.
     #[test]
     fn a_side_expected_to_clear_its_margin_trades_the_targets_size() {
         let models = tempfile::tempdir().unwrap();
@@ -1218,12 +1220,11 @@ mod tests {
     fn a_side_expected_to_gain_on_a_half_tick_stop_trades_its_stop_in_the_market() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = on_a_half_tick(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle(
-            &probe,
-            models.path(),
-            &half_tick_config(),
-            (Some(2), Some(8)),
-        );
+        let config = ModelConfig {
+            margins: both_sides().margins,
+            ..half_tick_config()
+        };
+        let handle = sides_handle(&probe, models.path(), &config, (Some(2), Some(8)));
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
