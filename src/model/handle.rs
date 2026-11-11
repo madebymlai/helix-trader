@@ -47,9 +47,10 @@
 //!
 //! With a meta model (`model::meta`), the trade of the side picked is
 //! taken only if the meta model in use, on the row with that side and the
-//! decision's level and side call, predicts a probability of at least its
-//! threshold, sized from that probability if the meta sizes
-//! (`MetaConfig::size`); no meta model valid yet is no trade.
+//! decision's level and side call, expects of it a net P&L, its calibrated
+//! expected R times the side's unit, of at least its margin
+//! (`MetaConfig::margin`), the trade of the target's size; no meta model
+//! valid yet is no trade.
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
 //! talks to the strategy. A model is swapped in only inside `decide`, before
@@ -203,7 +204,7 @@ pub type SettledRows = Rc<RefCell<Vec<TargetRow>>>;
 
 /// A decision to trade, as plain data: the side the models pick, of the
 /// target's size and instrument, its expected net P&L and the calibrated
-/// level and side call it is of, the meta's probability if a meta took it,
+/// level and side call it is of, the meta's expected R if a meta took it,
 /// and the target its models learned as the decision sets it on that side,
 /// the prices a dataset run sets there. The handle sends nothing: a strategy
 /// trades it as given (`trade`), or otherwise, and then the models' holdout
@@ -213,7 +214,7 @@ pub struct Decision {
     /// The target's instrument.
     pub instrument_id: InstrumentId,
     pub side: OrderSide,
-    /// The target's size, or, with a meta model sizing, its multiple of it.
+    /// The target's size.
     pub quantity: Quantity,
     /// The net P&L the pair expects of the side's trade, in the instrument's
     /// P&L currency, on the target's size: its calibrated expected R, `E'`,
@@ -224,9 +225,10 @@ pub struct Decision {
     /// The decision's calibrated side call, `D'`, in R: nought of a
     /// one-sided strategy.
     pub side_call: f64,
-    /// The meta model's calibrated probability that the trade gains, if a
-    /// meta took it.
-    pub meta_probability: Option<f64>,
+    /// The meta model's calibrated expected R of the trade, if a meta took
+    /// it: its expected net P&L, which the meta's margin is held to, is that
+    /// times the decision's unit.
+    pub meta_expected_r: Option<f64>,
     /// The price the target is set from (`targets::TargetSetter`): the mid
     /// of the instrument's last quote, else its last trade, else its last
     /// close.
@@ -660,18 +662,18 @@ impl Deciding {
         let sides = targets
             .as_ref()
             .map(|target| SideRow::new(features, &target.payoff, target.unit));
-        let Some(taken) = models.decide(now, features, &sides, self.quantity)? else {
+        let Some(taken) = models.decide(now, features, &sides)? else {
             return Ok(None);
         };
         let target = targets.of(taken.side);
         Ok(Some(Decision {
             instrument_id: self.instrument_id,
             side: taken.side.order_side(),
-            quantity: taken.quantity,
+            quantity: self.quantity,
             expected_pnl: taken.expected_pnl,
             level: taken.expected.level,
             side_call: taken.expected.side_call,
-            meta_probability: taken.meta_probability,
+            meta_expected_r: taken.meta_expected_r,
             reference: target.reference,
             bracket: target.bracket,
             time_limit: target.time_limit,
@@ -716,10 +718,10 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        config::{Margins, Sizing},
+        config::Margins,
         decide::FeatureRow,
         deciding::testing::{
-            AUD, GOLD, STRATEGY, at, baseline, baseline_for, both_sides, c, config, features, gold,
+            AUD, GOLD, STRATEGY, at, baseline, baseline_for, both_sides, config, features, gold,
             meta, meta_baseline, model_set, r, requirements, side_store, store, venue, with_meta,
         },
         features::testing::{last_mid, mid_over},
@@ -1088,7 +1090,7 @@ mod tests {
                 expected_pnl: 0.1,
                 level: 0.1,
                 side_call: 0.0,
-                meta_probability: None,
+                meta_expected_r: None,
                 reference: Price::from("0.70000"),
                 bracket: None,
                 time_limit: SignedDuration::from_hours(1),
@@ -2030,10 +2032,10 @@ mod tests {
 
     /// The handle trading in a backtest on the models under `models` as
     /// `config` says, its long a model of 0.1R from midnight (expecting 0.1
-    /// USD, above its margin of nought), its meta model predicting
-    /// `meta_trues` tenths from midnight, its features warm by a quote at noon
-    /// of the 22nd.
-    fn meta_handle(models: &Path, config: &ModelConfig, meta_trues: usize) -> Rc<ModelHandle> {
+    /// USD, above its margin of nought), its meta model predicting an R of
+    /// `r(meta_tenths)` from midnight, its features warm by a quote at noon of
+    /// the 22nd.
+    fn meta_handle(models: &Path, config: &ModelConfig, meta_tenths: usize) -> Rc<ModelHandle> {
         let features = features();
         let set = model_set(models, &features, config);
         let midnight = "2026-10-22T00:00:00Z";
@@ -2045,7 +2047,7 @@ mod tests {
         set.meta()
             .unwrap()
             .store()
-            .publish(&meta_baseline(&features, config, midnight, meta_trues))
+            .publish(&meta_baseline(&features, config, midnight, meta_tenths))
             .unwrap();
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(
@@ -2061,10 +2063,13 @@ mod tests {
         .unwrap()
     }
 
+    /// The meta predicting an R of 0.3 expects 0.25R, `0.1 + 0.5 E`, 0.25
+    /// USD on the unit of 1 USD, at or above its margin of 0.15: the
+    /// decision carries the meta's expected R beside the side's.
     #[test]
-    fn a_meta_model_from_its_threshold_takes_the_trade_of_the_side_picked() {
+    fn a_meta_model_from_its_margin_takes_the_trade_of_the_side_picked() {
         let models = tempfile::tempdir().unwrap();
-        let handle = meta_handle(models.path(), &with_meta(meta(None)), 7);
+        let handle = meta_handle(models.path(), &with_meta(meta()), 8);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         started(&handle, &mut probe);
 
@@ -2078,32 +2083,12 @@ mod tests {
                 expected_pnl: 0.1,
                 level: 0.1,
                 side_call: 0.0,
-                meta_probability: Some(c(0.7)),
+                meta_expected_r: Some(0.25),
                 reference: Price::from("0.70000"),
                 bracket: None,
                 time_limit: SignedDuration::from_hours(1),
             })
         );
-    }
-
-    /// The size a meta model gives reaches the decision. From the threshold
-    /// 0.6 to 1, 0.5 to 2 times the size: the meta's c(0.8), 0.776895, is
-    /// 1.163358 times 1000.
-    #[test]
-    fn a_sizing_meta_model_sizes_the_decision() {
-        let models = tempfile::tempdir().unwrap();
-        let sizing = Sizing {
-            min: Decimal::new(5, 1),
-            max: Decimal::from(2),
-        };
-        let handle = meta_handle(models.path(), &with_meta(meta(Some(sizing))), 8);
-        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        started(&handle, &mut probe);
-
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
-
-        let quantity = decision.quantity.as_f64();
-        assert!((quantity - 1_163.357_700).abs() < 1e-6, "{quantity}");
     }
 
     /// A file where the store's root should be has no store to list.

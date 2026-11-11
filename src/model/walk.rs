@@ -42,15 +42,16 @@
 //! slope and top-decile gap (`score::ExpectedScore`) are given per retrain
 //! period and over the span, on all the side's rows with a pair, and what was
 //! earned there (`holdout::Earnings`), beside every trade of those rows, its
-//! own, at the commission and at 1.5 times it; the meta's probabilities' AUC
-//! and log loss beside its baselines' (`score`). A side's trades taken are those
-//! picked for it on each row by the decision itself
+//! own, at the commission and at 1.5 times it; and the same of the meta, its
+//! calibrated expected R against the R of the trade of the side picked, on
+//! the rows a side is picked on with a meta model. A side's trades taken are
+//! those picked for it on each row by the decision itself
 //! (`deciding::DecidingModels::pick`), the picks a train's gate reads (`train`),
 //! before any meta: a row where both sides clear counts one trade, for the side
 //! expected the most, a tie none, so with no meta the sides' trades add up to
-//! the decisions returned. A meta's are the trades of the side picked from its
-//! threshold (`holdout::Threshold`), the figures its holdout is judged on, out
-//! of sample. All this judges the decision the handle returns, on the target's
+//! the decisions returned. A meta's are the trades of the side picked its
+//! margin takes (`holdout::MetaMargin`), the figures its holdout is judged on,
+//! out of sample. All this judges the decision the handle returns, on the target's
 //! trade: no section adds the sides up, as the backtest's report gives what the
 //! strategy actually traded, which can differ whenever it filters its decisions.
 
@@ -66,10 +67,10 @@ use super::{
     dataset::{self, Dataset, DatasetRow, DatasetVenue},
     deciding::DecidingModels,
     features::FeatureSet,
-    holdout::{Earnings, Example, STRESS, Threshold},
+    holdout::{Earnings, Example, MetaMargin, STRESS},
     meta,
     schedule::{Models, Schedule},
-    score::{self, ExpectedScore},
+    score::ExpectedScore,
     store::{Baselined, ModelSet, Swap},
     targets::Side,
 };
@@ -97,7 +98,7 @@ pub struct ModelScores {
     pub periods: Vec<Period>,
     /// The model's over the span, its rows with a model, beside the
     /// baselines', each row's its model's.
-    pub score: Score,
+    pub score: ExpectedScore,
     /// What was earned over the span, as in a period.
     pub earnings: Earnings,
 }
@@ -114,33 +115,10 @@ pub struct Period {
     pub models: Vec<Timestamp>,
     /// The model's, on the rows decided with one, beside the baselines' on
     /// the same rows: each row's that of the model that decided it.
-    pub score: Score,
+    pub score: ExpectedScore,
     /// What was earned on the rows decided with one: the trades taken, a
     /// side's those picked for it, beside every trade of those rows.
     pub earnings: Earnings,
-}
-
-/// How a model does on rows of the dataset, beside its baselines.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Score {
-    /// A side's: its calibrated expected R against its trades' R, its
-    /// skill beside the baselines.
-    Expected(ExpectedScore),
-    /// The meta's: its calibrated probabilities' and its baselines'.
-    Probability {
-        model: Probabilities,
-        baseline: Probabilities,
-    },
-}
-
-/// How probabilities do on rows of the dataset.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Probabilities {
-    pub rows: usize,
-    /// None without a row of each label.
-    pub auc: Option<f64>,
-    /// None without a row.
-    pub log_loss: Option<f64>,
 }
 
 impl WalkForward {
@@ -256,12 +234,11 @@ impl WalkForward {
                 self.models.pairs(),
                 |pair, row, _| {
                     Ok(Judged {
-                        prediction: pair.expect(&rows[row].sides())?.of(side),
+                        expected: pair.expect(&rows[row].sides())?.of(side),
                         baseline: pair.side(side).baseline(),
                         taken: picked[row] == Some(side),
                     })
                 },
-                Score::of_side,
             )?;
             match side {
                 Side::Long => scores.long = Some(side_scores),
@@ -269,7 +246,7 @@ impl WalkForward {
             }
         }
         if let (Some(level), Some(valid_froms)) = (self.models.meta(), &listed.meta) {
-            let threshold = Threshold(level.config().threshold);
+            let margin = MetaMargin(level.config().margin);
             let examples = meta::examples(&self.models, &rows.iter().collect::<Vec<_>>())?;
             scores.meta = Some(score(
                 &times,
@@ -278,14 +255,13 @@ impl WalkForward {
                 valid_froms,
                 level.swap(),
                 |model, _, example| {
-                    let probability = model.predict(&example.features)?;
+                    let expected = model.predict(&example.features)?;
                     Ok(Judged {
-                        prediction: probability,
+                        expected,
                         baseline: model.baseline(),
-                        taken: threshold.takes(probability),
+                        taken: margin.takes(expected * example.unit),
                     })
                 },
-                Score::of_meta,
             )?);
         }
         Ok(scores)
@@ -307,9 +283,8 @@ impl WalkForward {
 
 /// What the model in use on an example says of it.
 struct Judged {
-    /// Its calibrated prediction: a side's expected R, a meta's
-    /// probability.
-    prediction: f64,
+    /// Its calibrated expected R of the example's trade.
+    expected: f64,
     /// Its baseline's (`Baselined`).
     baseline: f64,
     /// Whether the example's trade was taken.
@@ -318,10 +293,10 @@ struct Judged {
 
 /// The scores over `[start, end)`, retrained at `times`, of the models
 /// `models` swaps in on `examples`, in time order, among those valid from
-/// `valid_froms`, each beside its own baseline on the rows it decided.
-/// `judge` gives what the model in use on an example, at its position in
-/// `examples`, says of it, and `scored` the score of the examples judged,
-/// each with its prediction and its baseline's.
+/// `valid_froms`, each beside its own baseline on the rows it decided:
+/// their expected R against the R each example's trade realised. `judge`
+/// gives what the model in use on an example, at its position in
+/// `examples`, says of it.
 fn score<M>(
     times: &[Timestamp],
     (start, end): (Timestamp, Timestamp),
@@ -329,7 +304,6 @@ fn score<M>(
     valid_froms: &[Timestamp],
     mut models: Swap<M>,
     judge: impl Fn(&M, usize, &Example) -> anyhow::Result<Judged>,
-    scored: fn(&[(f64, f64, &Example)]) -> Score,
 ) -> anyhow::Result<ModelScores> {
     let (mut model_rows, mut model_trades) = (vec![], vec![]);
     let mut periods = vec![];
@@ -347,11 +321,11 @@ fn score<M>(
             {
                 period_models.insert(valid_from);
                 let Judged {
-                    prediction,
+                    expected,
                     baseline,
                     taken,
                 } = judge(model, row, example)?;
-                judged.push((prediction, baseline, example));
+                judged.push((expected, example.realised(), baseline));
                 trades.push((taken, example.trade));
             }
         }
@@ -359,7 +333,7 @@ fn score<M>(
             from,
             to,
             models: period_models.into_iter().collect(),
-            score: scored(&judged),
+            score: ExpectedScore::of(&judged),
             earnings: Earnings::of(&trades),
         });
         model_rows.extend(judged);
@@ -367,41 +341,9 @@ fn score<M>(
     }
     Ok(ModelScores {
         periods,
-        score: scored(&model_rows),
+        score: ExpectedScore::of(&model_rows),
         earnings: Earnings::of(&model_trades),
     })
-}
-
-impl Score {
-    /// A side's score of `rows`, each its expected R, its baseline's and
-    /// its example, whose trade realised its R.
-    fn of_side(rows: &[(f64, f64, &Example)]) -> Self {
-        let rows: Vec<(f64, f64, f64)> = rows
-            .iter()
-            .map(|&(expected, baseline, example)| (expected, example.realised(), baseline))
-            .collect();
-        Self::Expected(ExpectedScore::of(&rows))
-    }
-
-    /// The meta's score of `rows`, each its probability, its baseline's and
-    /// its example, whose label it is of.
-    fn of_meta(rows: &[(f64, f64, &Example)]) -> Self {
-        let of = |rows: Vec<(f64, bool)>| Probabilities {
-            rows: rows.len(),
-            auc: score::auc(&rows),
-            log_loss: score::log_loss(&rows),
-        };
-        Self::Probability {
-            model: of(rows
-                .iter()
-                .map(|&(p, _, example)| (p, example.label))
-                .collect()),
-            baseline: of(rows
-                .iter()
-                .map(|&(_, b, example)| (b, example.label))
-                .collect()),
-        }
-    }
 }
 
 /// The scores as text, in the sections of the backtest's report: of each
@@ -445,36 +387,15 @@ fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &ModelScores) -> fm
     earned(f, &scores.earnings)
 }
 
-/// The lines of `score`: a side's skill, mean `R - E'`, calibration slope
-/// and top-decile gap, or the meta's probabilities' and its baselines'.
-fn lines(f: &mut fmt::Formatter<'_>, score: Score) -> fmt::Result {
+/// The lines of `score`: its skill, mean `R - E'`, calibration slope and
+/// top-decile gap.
+fn lines(f: &mut fmt::Formatter<'_>, score: ExpectedScore) -> fmt::Result {
     let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
-    match score {
-        Score::Expected(score) => {
-            writeln!(f, "  Skill: {}", value(score.skill))?;
-            writeln!(f, "  Mean R - E': {}", value(score.mean_error))?;
-            writeln!(f, "  Calibration slope: {}", value(score.slope))?;
-            writeln!(f, "  Top-decile gap: {}", value(score.top_decile_gap))?;
-            writeln!(f, "  Rows: {}", score.rows)
-        }
-        Score::Probability { model, baseline } => {
-            probabilities(f, false, model)?;
-            probabilities(f, true, baseline)
-        }
-    }
-}
-
-/// The lines of `score`, the model's probabilities' or the `baseline`'s.
-fn probabilities(f: &mut fmt::Formatter<'_>, baseline: bool, score: Probabilities) -> fmt::Result {
-    let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
-    let [auc, log_loss, rows] = if baseline {
-        ["Baseline AUC", "Baseline log loss", "Baseline rows"]
-    } else {
-        ["AUC", "Log loss", "Rows"]
-    };
-    writeln!(f, "  {auc}: {}", value(score.auc))?;
-    writeln!(f, "  {log_loss}: {}", value(score.log_loss))?;
-    writeln!(f, "  {rows}: {}", score.rows)
+    writeln!(f, "  Skill: {}", value(score.skill))?;
+    writeln!(f, "  Mean R - E': {}", value(score.mean_error))?;
+    writeln!(f, "  Calibration slope: {}", value(score.slope))?;
+    writeln!(f, "  Top-decile gap: {}", value(score.top_decile_gap))?;
+    writeln!(f, "  Rows: {}", score.rows)
 }
 
 /// The lines of `earnings`: the trades taken, a side's those picked for it,
@@ -525,7 +446,7 @@ mod tests {
     use crate::{
         backtest::Commission,
         model::{
-            calibration::Platt,
+            calibration::Line,
             config::{Margins, MetaConfig},
             decide::{DecisionRule, FeatureRow},
             deciding::testing::{HOLDOUT, unchanged},
@@ -707,9 +628,12 @@ mod tests {
             .unwrap();
     }
 
-    /// The calibration of the meta models of the tests: the odds `o` of a
-    /// prediction become `o^0.9`.
-    const CALIBRATION: Platt = Platt { a: -0.9, b: 0.0 };
+    /// The calibration of the meta models of the tests, its level line `0.1
+    /// + 0.5 E`.
+    const CALIBRATION: Line = Line {
+        alpha: 0.1,
+        beta: 0.5,
+    };
 
     /// A fake side model of `config()` valid from `valid_from`, of
     /// `fingerprint`, its baseline `baseline` (`model_of`).
@@ -862,14 +786,6 @@ mod tests {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
     }
 
-    /// A side's score of `score`.
-    fn expected(score: Score) -> ExpectedScore {
-        let Score::Expected(score) = score else {
-            panic!("{score:?}");
-        };
-        score
-    }
-
     /// Worked by hand, the long's, each model beside its own baseline, the
     /// training mean of R its train fitted (`trained_baseline`), on the rows
     /// it decided, both sides' fakes expecting the row's feature `p` alike.
@@ -908,25 +824,25 @@ mod tests {
                 vec![at("2026-01-07T00:00:00Z")]
             )
         );
-        let first = expected(first.score);
+        let first = first.score;
         assert_eq!(first.rows, 3);
         close(first.skill, 1.0 - 4.29 / 4.0);
         close(first.mean_error, -0.9);
         close(first.slope, 70.0 / 19.0);
         close(first.top_decile_gap, 0.2);
         assert_eq!(second.models, [at("2026-01-08T00:00:00Z")]);
-        let second = expected(second.score);
+        let second = second.score;
         assert_eq!(second.rows, 2);
         close(second.skill, 1.0 - 0.65 * 9.0 / 32.0);
         close(second.mean_error, 0.45);
         close(second.slope, 0.0);
         close(second.top_decile_gap, 0.1);
-        let span = expected(long.score);
+        let span = long.score;
         assert_eq!(span.rows, 5);
         close(span.skill, 1.0 - 4.94 * 9.0 / 68.0);
         close(span.mean_error, -1.8 / 5.0);
         close(span.slope, 0.44 / 0.372);
-        let short = expected(scores.short.as_ref().unwrap().periods[0].score);
+        let short = scores.short.as_ref().unwrap().periods[0].score;
         close(short.skill, 1.0 - 3.89 / 4.0);
         close(short.slope, -70.0 / 19.0);
     }
@@ -1118,18 +1034,12 @@ mod tests {
         let scores = opposed_scores(dir.path());
 
         let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
-        let (first_long, first_short) = (
-            expected(long.periods[0].score),
-            expected(short.periods[0].score),
-        );
+        let (first_long, first_short) = (long.periods[0].score, short.periods[0].score);
         assert_eq!((first_long.rows, first_short.rows), (3, 3));
         close(first_long.skill, 1.0 - 4.29 / 4.0);
         close(first_short.skill, 1.0 - 2.75 / 4.0);
         assert_eq!(first_short.slope, None);
-        assert_eq!(
-            (expected(long.score).rows, expected(short.score).rows),
-            (5, 5)
-        );
+        assert_eq!((long.score.rows, short.score.rows), (5, 5));
     }
 
     /// The models of both sides alike: on every row they expect the same, so
@@ -1148,7 +1058,7 @@ mod tests {
             assert_eq!(side.earnings.taken.count, 0, "{side:?}");
             assert_eq!(side.earnings.taken_stressed.count, 0, "{side:?}");
             assert_eq!(side.earnings.every.count, 5, "{side:?}");
-            assert_eq!(expected(side.score).rows, 5, "{side:?}");
+            assert_eq!(side.score.rows, 5, "{side:?}");
         }
     }
 
@@ -1171,7 +1081,7 @@ mod tests {
         for side in [&long, &short] {
             let first = &side.periods[0];
             assert!(first.models.is_empty(), "{first:?}");
-            assert_eq!(expected(first.score).rows, 0, "{first:?}");
+            assert_eq!(first.score.rows, 0, "{first:?}");
             assert_eq!(first.earnings.taken.count, 0, "{first:?}");
             assert_eq!(first.earnings.every.count, 0, "{first:?}");
         }
@@ -1242,14 +1152,14 @@ mod tests {
     }
 
     /// A fake meta model valid from `valid_from`, of `fingerprint`, on the
-    /// meta's features: its probability that of the row's first feature
-    /// calibrated by `CALIBRATION`.
+    /// meta's features: its R that of the row's first feature calibrated by
+    /// `CALIBRATION`, its baseline 0.5.
     fn meta_model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
         let names = meta_names(features().names());
-        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![true]).unwrap();
+        let set = TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
         let mut meta = model(valid_from, fingerprint, 0.5);
         meta.manifest.side = None;
-        meta.manifest.calibration = ModelCalibration::Platt(CALIBRATION);
+        meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);
         meta.manifest.feature_names = names;
         meta.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
         meta
@@ -1258,17 +1168,24 @@ mod tests {
     /// The scores over the 7th and the 8th of `meta_walk(dir)`, with `rows`,
     /// each side's opposed models (`publish_opposed`) and a meta model
     /// (`meta_model`) valid from the 7th and the 8th, the meta taking a trade
-    /// from 1/2. The sides pick as in `opposed_scores`.
+    /// from an expected 0.3 USD. The sides pick as in `opposed_scores`.
     fn opposed_meta_scores(dir: &Path) -> Scores {
-        let walk = meta_walk(dir);
-        build(dir);
-        let config = with_meta();
-        let fingerprint = dataset(dir, &config).fingerprint().to_string();
+        opposed_meta_scores_of(dir, &with_meta(), &rows())
+    }
+
+    /// The scores of `opposed_meta_scores`, of a walk as `config` says on
+    /// `rows`.
+    fn opposed_meta_scores_of(dir: &Path, config: &ModelConfig, rows: &[TargetRow]) -> Scores {
+        let walk = walk_of(dir, config.clone());
+        dataset(dir, config)
+            .write(rows, at("2026-01-06T00:00:00Z"), at("2026-01-09T01:00:00Z"))
+            .unwrap();
+        let fingerprint = dataset(dir, config).fingerprint().to_string();
         for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
             for side in Side::BOTH {
-                publish_opposed(dir, &config, side, valid_from);
+                publish_opposed(dir, config, side, valid_from);
             }
-            meta_store(dir)
+            meta_store_of(dir, config)
                 .publish(&meta_model(valid_from, fingerprint.clone()))
                 .unwrap();
         }
@@ -1276,27 +1193,77 @@ mod tests {
             .unwrap()
     }
 
-    /// On the five rows the sides pick on, the trade of the side picked, the
-    /// meta taking c(0.8), c(0.6) and c(0.9), not c(0.3) and c(0.2). The 7th: a
-    /// win, the short's win and a loss, 1/3, of which it takes the first and
-    /// the last, nought. The 8th: a win and the short's loss, nought, of which
-    /// it takes the win, 1. The span, 1/3 of three beside 1/5 of five.
+    /// Worked by hand: `rows` with every unit 2 USD, the sides picking as on
+    /// units of 1 USD, and the meta expecting the same R of each trade,
+    /// `0.1 + 0.5p`, its net P&L twice that: 1, 0.5, 0.8, 1.1 and 0.4 USD.
+    /// Its margin of 0.6 USD takes the trades at 0.8, 0.6 and 0.9, 1/3 per
+    /// trade, as one of 0.3 USD does on units of 1 USD, though it expects
+    /// less than 0.6R of each.
     #[test]
-    fn a_metas_earnings_read_the_trades_of_the_side_picked_from_its_threshold() {
+    fn the_metas_margin_weighs_its_expected_r_by_the_unit_of_the_side_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = with_meta();
+        if let Some(meta) = config.meta.as_mut() {
+            meta.margin = 0.6;
+        }
+        let at_two: Vec<TargetRow> = rows()
+            .into_iter()
+            .map(|mut row| {
+                row.outcomes.long.unit = 2.0;
+                row.outcomes.short.unit = 2.0;
+                row
+            })
+            .collect();
+
+        let meta = opposed_meta_scores_of(dir.path(), &config, &at_two)
+            .meta
+            .unwrap();
+
+        trades_are(meta.earnings.taken, 3, 1.0 / 3.0);
+        trades_are(meta.earnings.every, 5, 0.2);
+    }
+
+    /// Worked by hand. On the five rows the sides pick on, the trade of the
+    /// side picked, each of a unit of 1 USD, the meta expecting `0.1 + 0.5p`
+    /// R of the feature `p`: 0.5, 0.25 and 0.4 on the 7th, 0.55 and 0.2 on
+    /// the 8th, so its margin of 0.3 USD takes those at 0.8, 0.6 and 0.9,
+    /// not at 0.3 and 0.2. The 7th: a win, the short's win and a loss, 1/3,
+    /// of which it takes the first and the last, nought. The 8th: a win and
+    /// the short's loss, nought, of which it takes the win, 1. The span, 1/3
+    /// of three beside 1/5 of five.
+    #[test]
+    fn a_metas_earnings_read_the_trades_of_the_side_picked_from_its_margin() {
         let dir = tempfile::tempdir().unwrap();
 
         let meta = opposed_meta_scores(dir.path()).meta.unwrap();
 
-        let Score::Probability { model, .. } = meta.score else {
-            panic!("{meta:?}");
-        };
-        assert_eq!(model.rows, 5);
         trades_are(meta.periods[0].earnings.taken, 2, 0.0);
         trades_are(meta.periods[0].earnings.every, 3, 1.0 / 3.0);
         trades_are(meta.periods[1].earnings.taken, 1, 1.0);
         trades_are(meta.periods[1].earnings.every, 2, 0.0);
         trades_are(meta.earnings.taken, 3, 1.0 / 3.0);
         trades_are(meta.earnings.every, 5, 0.2);
+    }
+
+    /// Worked by hand, the meta's expected R (`0.1 + 0.5p`) of the five rows
+    /// against their R, 1, 1, -1, 1 and -1, beside its baseline of 0.5: errors
+    /// 0.5, 0.75, -1.4, 0.45 and -1.2, squared 4.415, the baseline's 5.25, a
+    /// skill of 1 - 4.415 / 5.25; a mean R - E' of -0.9 / 5; deviations from
+    /// the means 0.38 and 0.2 of 0.12, -0.13, 0.02, 0.17 and -0.18 against 0.8,
+    /// 0.8, -1.2, 0.8 and -1.2, a slope of 0.32 / 0.093; the top decile, the
+    /// row expected 0.55, a gap of 0.45.
+    #[test]
+    fn the_metas_expected_r_is_scored_on_the_trades_of_the_side_picked() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let meta = opposed_meta_scores(dir.path()).meta.unwrap();
+
+        let score = meta.score;
+        assert_eq!(score.rows, 5);
+        close(score.skill, 1.0 - 4.415 / 5.25);
+        close(score.mean_error, -0.9 / 5.0);
+        close(score.slope, 0.32 / 0.093);
+        close(score.top_decile_gap, 0.45);
     }
 
     /// With a meta filtering the side picked, each side still counts every
@@ -1337,7 +1304,7 @@ mod tests {
         for side in [scores.long.unwrap(), scores.short.unwrap()] {
             let second = &side.periods[1];
             assert_eq!(second.models, [at("2026-01-07T00:00:00Z")], "{second:?}");
-            assert_eq!(expected(second.score).rows, 2, "{second:?}");
+            assert_eq!(second.score.rows, 2, "{second:?}");
         }
     }
 
@@ -1358,8 +1325,8 @@ mod tests {
         let long = scores.long.unwrap();
         let first = &long.periods[0];
         assert!(first.models.is_empty(), "{first:?}");
-        assert_eq!(first.score, Score::Expected(ExpectedScore::default()));
-        assert_eq!(expected(long.score).rows, 2);
+        assert_eq!(first.score, ExpectedScore::default());
+        assert_eq!(long.score.rows, 2);
     }
 
     /// A pair published off the schedule, valid from 12:00 of the 7th, its
@@ -1397,7 +1364,7 @@ mod tests {
             first.models,
             [at("2026-01-07T00:00:00Z"), at("2026-01-07T12:00:00Z")]
         );
-        let first = expected(first.score);
+        let first = first.score;
         assert_eq!(first.rows, 3);
         close(first.skill, 1.0 - 4.29 / (20.0 / 9.0 + 25.0 / 16.0));
     }
@@ -1415,13 +1382,13 @@ mod tests {
 
     #[test]
     fn the_scores_read_as_report_sections() {
-        let score = Score::Expected(ExpectedScore {
+        let score = ExpectedScore {
             rows: 3,
             skill: Some(0.75),
             mean_error: Some(-0.25),
             slope: None,
             top_decile_gap: Some(0.5),
-        });
+        };
         let trades = |count, expectancy| Trades {
             count,
             expectancy,
@@ -1443,18 +1410,17 @@ mod tests {
                     score,
                     earnings,
                 }],
-                score: Score::Expected(ExpectedScore::default()),
+                score: ExpectedScore::default(),
                 earnings: Earnings::default(),
             }),
             meta: Some(ModelScores {
                 periods: vec![],
-                score: Score::Probability {
-                    model: Probabilities {
-                        rows: 2,
-                        auc: Some(0.75),
-                        log_loss: None,
-                    },
-                    baseline: Probabilities::default(),
+                score: ExpectedScore {
+                    rows: 2,
+                    skill: Some(0.25),
+                    mean_error: Some(0.125),
+                    slope: Some(1.5),
+                    top_decile_gap: None,
                 },
                 earnings: Earnings::default(),
             }),
@@ -1495,12 +1461,11 @@ Short model scores, out of sample, over the span
   Net P&L per trade, every trade, at 1.5x the commission: n/a
 
 Meta model scores, out of sample, over the span
-  AUC: 0.750000
-  Log loss: n/a
+  Skill: 0.250000
+  Mean R - E': 0.125000
+  Calibration slope: 1.500000
+  Top-decile gap: n/a
   Rows: 2
-  Baseline AUC: n/a
-  Baseline log loss: n/a
-  Baseline rows: 0
   Trades taken: 0
   Net P&L per trade taken: n/a
   Win rate of trades taken: n/a
@@ -1520,7 +1485,7 @@ Meta model scores, out of sample, over the span
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(6))
-                .threshold(0.5)
+                .margin(0.3)
                 .min_pnl(0.0)
                 .min_trades(1)
                 .learner(LearnerConfig::Fake {})
@@ -1731,7 +1696,7 @@ Meta model scores, out of sample, over the span
 
     #[test]
     fn the_long_the_short_then_the_meta_models_scores_follow_in_the_report() {
-        let score = Score::Expected(ExpectedScore::default());
+        let score = ExpectedScore::default();
         let scores = ModelScores {
             periods: vec![Period {
                 from: at("2026-01-07T00:00:00Z"),
@@ -2001,7 +1966,7 @@ Meta model scores, out of sample, over the span
                 vec![at("2026-01-07T00:00:00Z")]
             )
         );
-        assert_eq!(expected(period.score).rows, 5);
+        assert_eq!(period.score.rows, 5);
     }
 
     /// Never retrained, each side's model of the 7th is in use at a
@@ -2048,7 +2013,7 @@ Meta model scores, out of sample, over the span
         let [period] = &long.periods[..] else {
             panic!("{long:?}");
         };
-        let period = expected(period.score);
+        let period = period.score;
         assert_eq!(period.rows, 2);
         close(period.skill, 1.0 - 0.65 * 9.0 / 8.0);
     }
@@ -2102,7 +2067,7 @@ Meta model scores, out of sample, over the span
         let long = scores.long.unwrap();
         let second = &long.periods[1];
         assert_eq!(second.models, [at("2026-01-07T00:00:00Z")]);
-        let second = expected(second.score);
+        let second = second.score;
         assert_eq!(second.rows, 2);
         close(second.skill, 1.0 - 0.65 * 9.0 / 8.0);
     }

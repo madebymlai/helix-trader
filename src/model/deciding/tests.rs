@@ -1,15 +1,14 @@
 //! A decision on stores under a temp dir, with no strategy: the pick between
 //! the sides on their pair's calibrated expected R, swapping, refused models,
-//! the meta's threshold and sizing.
+//! the meta's margin.
 
 use std::path::Path;
 
 use nautilus_model::{enums::OrderSide, identifiers::StrategyId, types::Money};
-use rust_decimal::Decimal;
 
 use super::{
     testing::{
-        STRATEGY, at, baseline, baseline_for, both_sides, c, config, features, meta, meta_baseline,
+        STRATEGY, at, baseline, baseline_for, both_sides, config, features, meta, meta_baseline,
         model_set, r, requirements, side_store, store, venue, with_meta,
     },
     *,
@@ -18,7 +17,7 @@ use crate::{
     backtest::Commission,
     model::{
         calibration::{Ksplit, Line},
-        config::{Margins, ModelConfig, Sizing},
+        config::{Margins, MetaConfig, ModelConfig},
         dataset::DatasetVenue,
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
         store::{ModelCalibration, SideModel, StoredModel},
@@ -71,11 +70,9 @@ fn listed_with(
     listed(models, config)
 }
 
-/// What `models` decide at `time` on `ROW`, in money, of 1000.
+/// What `models` decide at `time` on `ROW`, in money.
 fn decided(models: &mut DecidingModels, time: &str) -> Option<Taken> {
-    models
-        .decide(at(time), &ROW, &in_money(), Quantity::from(1000))
-        .unwrap()
+    models.decide(at(time), &ROW, &in_money()).unwrap()
 }
 
 /// The net P&L the trade `decided` decides expects, in money: on the tests'
@@ -375,7 +372,7 @@ fn a_pair_whose_calibration_names_another_pair_is_refused_and_the_current_pair_k
 #[test]
 fn a_failed_listing_of_the_meta_keeps_the_sides_previous_lists() {
     let root = tempfile::tempdir().unwrap();
-    let config = with_meta(meta(None));
+    let config = with_meta(meta());
     let set = model_set(root.path(), &features(), &config);
     let long = set.side(Side::Long).unwrap().store();
     long.publish(&baseline_for(
@@ -484,7 +481,7 @@ fn a_model_not_predicting_its_probes_is_refused_and_the_current_kept() {
 #[test]
 fn a_side_model_without_its_pairs_calibration_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
-    refused.manifest.calibration = ModelCalibration::Platt(super::testing::CALIBRATION);
+    refused.manifest.calibration = ModelCalibration::Meta(super::testing::CALIBRATION);
 
     kept_over(refused);
 }
@@ -692,10 +689,10 @@ fn a_calibration_of_other_sides_than_its_models_is_no_pair() {
 
 /// `listed`, as `config` says, its long a model of 6 tenths from midnight
 /// (expecting 0.1 USD, above its margin of nought) and its meta model
-/// predicting `trues` tenths, if any, from midnight too.
-fn with_meta_of(models: &Path, config: &ModelConfig, trues: Option<usize>) -> DecidingModels {
+/// predicting an R of `r(tenths)`, if any, from midnight too.
+fn with_meta_of(models: &Path, config: &ModelConfig, tenths: Option<usize>) -> DecidingModels {
     let features = features();
-    let meta = trues.map(|trues| meta_baseline(&features, config, MIDNIGHT, trues));
+    let meta = tenths.map(|tenths| meta_baseline(&features, config, MIDNIGHT, tenths));
     published_with(models, config, (Side::Long, 6), meta.as_ref())
 }
 
@@ -720,39 +717,66 @@ fn published_with(
     DecidingModels::new(&set).unwrap()
 }
 
+/// Worked by hand: the meta predicting an R of 0.3, its level line `0.1 +
+/// 0.5 E` expecting 0.25R, 0.25 USD on the unit of one, at or above its
+/// margin of 0.15 USD, takes the long picked, at its calibrated expected R.
 #[test]
-fn a_meta_model_from_its_threshold_takes_the_side_picked_at_its_probability() {
+fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta(None)), Some(7));
+    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(8));
 
     assert_eq!(
         decided(&mut models, NOON),
         Some(Taken {
             side: Side::Long,
-            quantity: Quantity::from(1000),
             // The side's, its long of 6 tenths.
             expected_pnl: 0.1,
             expected: Expected {
                 level: 0.1,
                 side_call: 0.0
             },
-            meta_probability: Some(c(0.7)),
+            meta_expected_r: Some(0.25),
         })
     );
 }
 
+/// The meta predicting nought expects 0.1R, 0.1 USD on the unit of one,
+/// below its margin of 0.15 USD.
 #[test]
-fn a_meta_model_below_its_threshold_takes_no_trade() {
+fn a_meta_model_below_its_margin_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta(None)), Some(5));
+    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
 
     assert_eq!(decided(&mut models, NOON), None);
+}
+
+/// Worked by hand: the meta expecting 0.1R leaves the long on a unit worth 1
+/// USD, 0.1 USD below its margin of 0.15, and takes it on one worth 2 USD,
+/// 0.2 USD.
+#[test]
+fn a_meta_models_expected_r_is_weighed_by_the_unit_of_the_side_picked() {
+    let root = tempfile::tempdir().unwrap();
+    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
+    let mut decided_at = |long| {
+        models
+            .decide(at(NOON), &ROW, &rows(PerSide { long, short: 1.0 }))
+            .unwrap()
+    };
+
+    let at_one = decided_at(1.0);
+    let at_two = decided_at(2.0).unwrap();
+
+    assert_eq!(at_one, None);
+    assert_eq!(
+        (at_two.side, at_two.meta_expected_r),
+        (Side::Long, Some(0.1))
+    );
 }
 
 #[test]
 fn no_meta_model_valid_yet_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta(None)), None);
+    let mut models = with_meta_of(root.path(), &with_meta(meta()), None);
 
     assert_eq!(decided(&mut models, NOON), None);
 }
@@ -762,77 +786,46 @@ fn no_meta_model_valid_yet_takes_no_trade() {
 #[test]
 fn a_pick_is_the_side_before_any_meta() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta(None)), Some(5));
+    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
 
     assert_eq!(side_picked(&mut models, IN_MONEY), Some(Side::Long));
 }
 
-/// From the threshold 0.6 to 1, 0.5 to 2 times the size: the meta's
-/// c(0.8), 0.776895, is 1.163358 times 1000.
-#[test]
-fn a_sizing_meta_model_sizes_the_trade_from_its_probability() {
-    let root = tempfile::tempdir().unwrap();
-    let sizing = Sizing {
-        min: Decimal::new(5, 1),
-        max: Decimal::from(2),
-    };
-    let mut models = with_meta_of(root.path(), &with_meta(meta(Some(sizing))), Some(8));
-
-    let taken = decided(&mut models, NOON).unwrap();
-
-    let quantity = taken.quantity.as_f64();
-    assert!((quantity - 1_163.357_700).abs() < 1e-6, "{quantity}");
-    assert_eq!(taken.meta_probability, Some(c(0.8)));
-}
-
-/// A size of one decimal stays of one decimal, as sizing it would not.
-#[test]
-fn a_meta_model_not_sizing_keeps_the_sizes_precision() {
-    let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta(None)), Some(7));
-    let size = Quantity::from("1000.5");
-
-    let taken = models
-        .decide(at(NOON), &ROW, &in_money(), size)
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(
-        (taken.quantity, taken.quantity.precision),
-        (Quantity::from("1000.5"), 1)
-    );
-}
-
-/// The meta model taking a trade from 0.6, learned by LightGBM at its
+/// The meta model taking a trade from 0.15 USD, learned by LightGBM at its
 /// defaults.
 fn lightgbm_meta() -> MetaConfig {
     MetaConfig {
         learner: LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
-        ..meta(None)
+        ..meta()
     }
 }
 
 /// A meta model of `config` valid from midnight of the 22nd, which learned on
 /// rows of its features in their order, the mid, 0.7, then the side picked, 1
 /// a buy and -1 a sell, then the decision's level, nought, and its side call,
-/// that buys win from a side call of 0.5 and sells never: fitted by the
-/// learner of `config`'s meta on ten buys and ten sells at each side call from
-/// 0.20 to 0.79 by 0.01, at least 300 rows on each side of a split where
-/// LightGBM's leaves need 200, so that it predicts near 1 on those wins and
-/// near 0 elsewhere, 0.99 and 0.01 calibrated, either side of the threshold.
+/// that buys realise 1R from a side call of 0.5 and -1R below it, and sells
+/// -1R: fitted by the learner of `config`'s meta on ten buys and ten sells at
+/// each side call from 0.20 to 0.79 by 0.01, at least 300 rows on each side
+/// of a split where LightGBM's leaves need 200, so that it predicts near 1R on
+/// those buys and near -1R elsewhere, near 0.6R and -0.4R calibrated
+/// (`CALIBRATION`), either side of the margin of 0.15 USD on a unit of one.
 fn learned_meta(config: &ModelConfig) -> StoredModel {
     let (mut rows, mut labels) = (vec![], vec![]);
     for side in [1.0, -1.0] {
         for hundredths in 20..80 {
             for _ in 0..10 {
                 rows.extend([0.7, side, 0.0, side * f64::from(hundredths) / 100.0]);
-                labels.push(side > 0.0 && hundredths >= 50);
+                labels.push(if side > 0.0 && hundredths >= 50 {
+                    1.0
+                } else {
+                    -1.0
+                });
             }
         }
     }
     let learner = &config.meta.as_ref().unwrap().learner;
     let fitted = learner
-        .fit(&TrainingSet::new(4, rows, labels).unwrap())
+        .fit(&TrainingSet::regression(4, rows, labels).unwrap())
         .unwrap();
     let mut meta = meta_baseline(&features(), config, MIDNIGHT, 5);
     meta.manifest.learner = learner.clone();
@@ -841,7 +834,7 @@ fn learned_meta(config: &ModelConfig) -> StoredModel {
 }
 
 /// The decision at noon on a pair whose `side` predicts `tenths` and the
-/// other 2, expecting a loss, its trade taken from 0.6 by the meta model
+/// other 2, expecting a loss, its trade taken from 0.15 USD by the meta model
 /// LightGBM learned (`learned_meta`): the side call is the long's R less the
 /// short's, `r(tenths)` less -0.3 picking the long.
 fn learned_meta_decision(side: Side, tenths: usize) -> Option<Taken> {
@@ -862,7 +855,7 @@ fn learned_meta_decision(side: Side, tenths: usize) -> Option<Taken> {
 
 /// The meta model reads the decision's side call from its place in the row,
 /// after its side and level: it takes a buy on a side call of 0.6, a long of
-/// 0.3R beside a short of -0.3R, which it learned wins, and refuses one on
+/// 0.3R beside a short of -0.3R, which it learned gains, and refuses one on
 /// 0.4, a long of 0.1R, which it learned loses.
 #[test]
 fn a_meta_model_decides_on_the_side_call_of_the_decision() {
@@ -874,8 +867,8 @@ fn a_meta_model_decides_on_the_side_call_of_the_decision() {
 }
 
 /// The meta model is given the side picked after its features: on a side
-/// call of 0.6 it takes a buy, which it learned wins, and refuses a sell, its
-/// side call -0.6, which it learned never does.
+/// call of 0.6 it takes a buy, which it learned gains, and refuses a sell,
+/// its side call -0.6, which it learned never does.
 #[test]
 fn a_meta_model_decides_on_the_side_picked() {
     let buy = learned_meta_decision(Side::Long, 8);
@@ -922,7 +915,7 @@ fn predicting_nan(mut meta: StoredModel) -> StoredModel {
 }
 
 #[test]
-fn a_nan_meta_probability_takes_no_trade() {
+fn a_nan_meta_expectation_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let config = with_meta(lightgbm_meta());
     let meta = predicting_nan(learned_meta(&config));

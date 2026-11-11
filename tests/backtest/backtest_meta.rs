@@ -11,8 +11,9 @@
 //! A strategy of the long alone trades long at every decision. Its
 //! meta model's first retrain has no side's model before it, so it waits
 //! for the sides' decisions; the next ones hold out the longs, every one
-//! of which the meta's threshold takes, refused for earning no more than
-//! every trade. With no meta model the first day, no trade.
+//! of which the meta's margin takes, and refuse it, on its skill or for
+//! its trades, every trade, earning no more than every trade. With no meta
+//! model the first day, no trade.
 //!
 //! One node per thread: each build, train and run on a thread of its own.
 
@@ -50,12 +51,12 @@ fn features() -> Rc<FeatureSet> {
 
 /// A meta model on 46 hours, the last 6 held out and the 6 before them
 /// calibrated on, the fake learner, published from nought per trade over
-/// a trade, taking every trade, to record its probability.
+/// a trade, taking every trade, to record its expected R.
 fn meta() -> MetaConfig {
     MetaConfig::builder()
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(6))
-        .threshold(0.0)
+        .margin(f64::MIN)
         .min_pnl(0.0)
         .min_trades(1)
         .learner(LearnerConfig::Fake {})
@@ -101,8 +102,6 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
 }
 
-/// The calibrated prediction of the model of `store` valid from `at` on
-/// `row`, as a strategy of `features` loads it.
 /// The R the long model of `store` valid from `at` predicts on `row`, its
 /// calibration, of the strategy's one side, leaving it as it is: the
 /// decision's level.
@@ -117,6 +116,8 @@ fn expects(store: &ModelStore, at: Timestamp, row: &[f64]) -> f64 {
         .unwrap()
 }
 
+/// The calibrated expected R of the meta model of `store` valid from `at`
+/// on `row`, as a strategy of `features` loads it.
 fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
     let fingerprint = dataset::fingerprint(features, rule(), &target(), &requirements(), &venue())
@@ -222,8 +223,9 @@ fn meta_store(models: &Path) -> ModelStore {
 
 /// The fixture has no edge: a train refuses each model it fits, the
 /// long's and, from the second retrain, when the long has a model
-/// before it, the meta's, whose threshold takes every trade of its
-/// holdout, the longs, and so earns no more than every trade.
+/// before it, the meta's, whose margin takes every trade of its
+/// holdout, the longs, refused on its skill or for earning no more than
+/// every trade.
 /// With meta models published straight, a day's decisions trade only as
 /// the meta model in use takes the trade of the side picked.
 #[test]
@@ -309,7 +311,7 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         assert!(
             trades.iter().all(|trade| trade.side == OrderSide::Buy
                 && trade.level == means[period]
-                && trade.meta_probability == Some(taken)),
+                && trade.meta_expected_r == Some(taken)),
             "period {period}: {trades:?}, not longs at {taken}"
         );
     }

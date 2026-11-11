@@ -9,7 +9,7 @@
 //! catalog, its coverage the cache of the days built;
 //! `learner` is the model port, its learners fitting and loading the
 //! models that predict; `calibration` turns a pair's predictions of R into
-//! each side's expected R, and a meta's into probabilities; `payoff` is the
+//! each side's expected R, and a meta's into its expected R; `payoff` is the
 //! side a decision trades on its expected net P&L;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
@@ -17,7 +17,7 @@
 //! each side's `score` and what the decision would have earned there, meets
 //! the minimums;
 //! `deciding` is the decision itself, the side picked among the models
-//! valid at a time, the meta's threshold and the size; `handle` is
+//! valid at a time and the meta's margin; `handle` is
 //! what the strategy holds and decides through, trading on the latest
 //! model of the store valid at each decision, or opening the decision's
 //! target in a dataset run; `schedule` is when a model is retrained, on
@@ -27,8 +27,8 @@
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
-//! trade of the side picked, trained on the out-of-sample predictions of
-//! the strategy's side models.
+//! trade of the side picked on the net R it expects of it, trained on the
+//! out-of-sample predictions of the strategy's side models.
 //!
 //! `ModelStrategy` is what a strategy trading on a model gives the
 //! harness: the binary's backtest, live, train and dataset runs are

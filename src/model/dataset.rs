@@ -631,13 +631,6 @@ impl DatasetRow {
         }
     }
 
-    /// Whether `side`'s trade gained after its costs: the label of a meta's
-    /// example of it.
-    #[must_use]
-    pub fn gained(&self, side: Side) -> bool {
-        self.trade(side).pnl > 0.0
-    }
-
     /// `side`'s trade: its net P&L and its commission.
     #[must_use]
     pub const fn trade(&self, side: Side) -> Trade {
@@ -972,11 +965,11 @@ mod tests {
         );
     }
 
-    /// A long gaining 0.25 net of 0.75 and a short at nought: the long gained,
-    /// the short did not, and each answers its own trade, and its row, the
-    /// decision's features then its own payoff features, and unit.
+    /// A long gaining 0.25 net of 0.75 and a short at nought: each answers
+    /// its own trade, and its row, the decision's features then its own
+    /// payoff features, and unit.
     #[test]
-    fn a_row_answers_each_sides_gain_trade_row_and_unit() {
+    fn a_row_answers_each_sides_trade_row_and_unit() {
         let row = DatasetRow {
             long_pnl: 0.25,
             long_commission: 0.75,
@@ -987,8 +980,6 @@ mod tests {
             ..stored("2026-01-05T09:00:00Z", vec![4000.5, -2.0], 0.0)
         };
 
-        assert!(row.gained(Side::Long));
-        assert!(!row.gained(Side::Short));
         assert_eq!(
             row.trade(Side::Long),
             Trade {

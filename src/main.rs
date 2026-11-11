@@ -918,7 +918,7 @@ fn build_dataset<S: ModelStrategy>(
 mod tests {
     use super::*;
     use helix_trader::model::{
-        holdout::{Earnings, Holdout, Refusal, Score},
+        holdout::{Earnings, Holdout, Refusal},
         schedule::Retrain,
         score::ExpectedScore,
         train::{Kept, Outcome},
@@ -1279,11 +1279,11 @@ mod tests {
     fn a_train_keeping_the_model_fails_with_the_reason() {
         let holdout = Box::new(Holdout {
             earnings: Earnings::default(),
-            score: Score::Expected(ExpectedScore {
+            score: ExpectedScore {
                 rows: 2,
                 skill: Some(0.1),
                 ..ExpectedScore::default()
-            }),
+            },
         });
         let kept = Outcome::Kept(Kept::Refused {
             why: Refusal::MinPnl {
@@ -1324,11 +1324,11 @@ mod tests {
                 valid_from: t,
                 holdout: Box::new(Holdout {
                     earnings: Earnings::default(),
-                    score: Score::Expected(ExpectedScore {
+                    score: ExpectedScore {
                         rows: 2,
                         skill: Some(0.1),
                         ..ExpectedScore::default()
-                    }),
+                    },
                 }),
             }),
             meta: None,
