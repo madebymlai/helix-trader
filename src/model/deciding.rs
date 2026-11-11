@@ -7,11 +7,12 @@
 //! A caller resolves first what a decision reads: the time, the decision's
 //! features, which a meta reads, and each side's row (`SideRow`), the row its
 //! model reads, those features then the side's payoff features, with its
-//! unit, the worth of a stop with exits, one without, by which its expected
-//! R makes its expected net P&L (`pick_among`). The handle builds them from the target
-//! it sets at the decision (`targets::TargetSetter`), the meta's examples and
-//! a train's from each dataset row (`dataset::DatasetRow::sides`), each
-//! through `SideRow::new`, so a side's row is the same whoever builds it.
+//! unit, the worth of its stop with exits and without them of a stop as far
+//! as the target's ATR, by which its expected R makes its expected net P&L
+//! (`pick_among`). The handle builds them from the target it sets at the
+//! decision (`targets::TargetSetter`), the meta's examples and a train's from
+//! each dataset row (`dataset::DatasetRow::sides`), each through
+//! `SideRow::new`, so a side's row is the same whoever builds it.
 //!
 //! `new` lists every store once and fails on a read error, so no decision
 //! runs unlisted. `list` lists them again, when the caller chooses, and what a

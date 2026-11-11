@@ -132,9 +132,10 @@ fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64
 
 /// Prepares the backtest of the span of `long_only`: the dataset built,
 /// then at each retrain time the long and its meta model trained, and
-/// the long model published straight after, a baseline of `trues` tenths
-/// (3 at the span's start and one more each day), which the train would
-/// keep in use had it been published before; what each train did.
+/// the long model published straight after, a baseline predicting an R of
+/// `r(tenths)` (`tenths` 3 at the span's start and one more each day),
+/// which the train would keep in use had it been published before; what
+/// each train did.
 fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let mut trained = vec![];
@@ -184,13 +185,13 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                 .train_at(at, |from, to| replay_on(catalog, features(), from, to))
             });
             trained.push((at, outcome));
-            let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+            let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
             long_store(models).publish(&baseline_of(
                 &features(),
                 &long_only(),
                 Side::Long,
                 at,
-                trues,
+                tenths,
             ))
         },
     )
@@ -268,8 +269,8 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         // features, which the fake does not read.
         .map(|&at| expects(&long, at, &[f64::NAN, 0.0, 0.0, 0.0]))
         .collect();
-    for (&at, trues) in retrains[1..].iter().zip([6, 8]) {
-        meta.publish(&meta_baseline_of(&features(), &long_only(), at, trues))
+    for (&at, tenths) in retrains[1..].iter().zip([6, 8]) {
+        meta.publish(&meta_baseline_of(&features(), &long_only(), at, tenths))
             .unwrap();
     }
 

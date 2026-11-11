@@ -31,20 +31,21 @@ const NOON: &str = "2026-10-22T12:00:00Z";
 const ROW: [f64; 1] = [0.7];
 
 /// Each side's row of `ROW` on the tests' time-only target, its unit worth
-/// `units`' of its side: the mid, then the side's entry cost, 0.23 USD.
+/// `units`' of its side: the mid, then the side's entry cost, 0.23R.
 fn rows(units: PerSide<f64>) -> PerSide<SideRow> {
     units.map(|unit| SideRow::new(&ROW, &[0.23], unit))
 }
 
-/// The units of a time-only target, its payoffs being in money.
-const IN_MONEY: PerSide<f64> = PerSide {
+/// Units worth 1 USD a side, at which a side's expected R is its expected
+/// net P&L.
+const UNITS_OF_ONE: PerSide<f64> = PerSide {
     long: 1.0,
     short: 1.0,
 };
 
-/// The rows of a time-only target, its payoffs being in money.
-fn in_money() -> PerSide<SideRow> {
-    rows(IN_MONEY)
+/// The rows of `ROW` at `UNITS_OF_ONE`.
+fn rows_of_one() -> PerSide<SideRow> {
+    rows(UNITS_OF_ONE)
 }
 
 /// The models of `config` under `models`, listed now.
@@ -60,23 +61,23 @@ fn listed_with(
     (long, short): (Option<usize>, Option<usize>),
 ) -> DecidingModels {
     let features = features();
-    for (side, trues) in [(Side::Long, long), (Side::Short, short)] {
-        if let Some(trues) = trues {
+    for (side, tenths) in [(Side::Long, long), (Side::Short, short)] {
+        if let Some(tenths) = tenths {
             side_store(models, &features, config, side)
-                .publish(&baseline_for(&features, config, side, MIDNIGHT, trues))
+                .publish(&baseline_for(&features, config, side, MIDNIGHT, tenths))
                 .unwrap();
         }
     }
     listed(models, config)
 }
 
-/// What `models` decide at `time` on `ROW`, in money.
+/// What `models` decide at `time` on `ROW`, at `UNITS_OF_ONE`.
 fn decided(models: &mut DecidingModels, time: &str) -> Option<Taken> {
-    models.decide(at(time), &ROW, &in_money()).unwrap()
+    models.decide(at(time), &ROW, &rows_of_one()).unwrap()
 }
 
-/// The net P&L the trade `decided` decides expects, in money: on the tests'
-/// time-only target, of a unit of one, its expected R.
+/// The net P&L the trade `decided` decides expects, in USD: at a unit of
+/// one, its expected R.
 fn expected(models: &mut DecidingModels, time: &str) -> Option<f64> {
     decided(models, time).map(|taken| taken.expected_pnl)
 }
@@ -151,12 +152,12 @@ fn no_model_valid_yet_gives_no_trade() {
 fn a_decision_uses_the_latest_model_valid_at_or_before_it() {
     let models = tempfile::tempdir().unwrap();
     let store = store(models.path());
-    for (valid_from, trues) in [
+    for (valid_from, tenths) in [
         ("2026-10-22T10:00:00Z", 7),
         ("2026-10-22T12:00:00Z", 8),
         ("2026-10-22T13:00:00Z", 9),
     ] {
-        store.publish(&baseline(valid_from, trues)).unwrap();
+        store.publish(&baseline(valid_from, tenths)).unwrap();
     }
     let mut models = listed(models.path(), &config());
 
@@ -210,10 +211,10 @@ fn an_unreadable_store_fails_the_models_when_built() {
     assert!(built.is_err());
 }
 
-/// The model of `side` of `both_sides` valid from `valid_from`, of `trues`
-/// tenths, as `baseline_for` says.
-fn side_model(side: Side, valid_from: &str, trues: usize) -> StoredModel {
-    baseline_for(&features(), &both_sides(), side, valid_from, trues)
+/// The model of `side` of `both_sides` valid from `valid_from`, predicting
+/// an R of `r(tenths)`, as `baseline_for` says.
+fn side_model(side: Side, valid_from: &str, tenths: usize) -> StoredModel {
+    baseline_for(&features(), &both_sides(), side, valid_from, tenths)
 }
 
 /// Publishes `model`, a side's of `both_sides`, under `models`.
@@ -396,7 +397,7 @@ fn a_failed_listing_of_the_meta_keeps_the_sides_previous_lists() {
     set.meta().unwrap().store().break_listing();
     let listing = models.list();
 
-    let picked = models.pick(at(NOON), &in_money()).unwrap().unwrap();
+    let picked = models.pick(at(NOON), &rows_of_one()).unwrap().unwrap();
     assert!(listing.is_err());
     assert_eq!(picked.expected_pnl, r(7));
 }
@@ -457,7 +458,7 @@ fn a_model_of_another_fingerprint_is_refused_and_the_current_kept() {
 #[test]
 fn a_model_of_another_width_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
-    let set = TrainingSet::new(3, vec![0.5; 6], vec![true, true]).unwrap();
+    let set = TrainingSet::new(3, vec![0.5; 6], vec![r(9); 2]).unwrap();
     refused.model = LearnerConfig::Baseline {}
         .fit(&set)
         .unwrap()
@@ -494,7 +495,7 @@ fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_pnl_level_and
     let mut models = listed_with(root.path(), &config(), (Some(6), None));
 
     assert_eq!(
-        models.pick(at(NOON), &in_money()).unwrap(),
+        models.pick(at(NOON), &rows_of_one()).unwrap(),
         Some(Picked {
             side: Side::Long,
             expected_pnl: 0.1,
@@ -552,8 +553,8 @@ fn a_long_only_model_never_sells() {
     let mut both = listed_with(root.path(), &both_sides(), (Some(3), Some(9)));
     let mut long = listed(root.path(), &config());
 
-    assert_eq!(side_picked(&mut both, IN_MONEY), Some(Side::Short));
-    assert_eq!(side_picked(&mut long, IN_MONEY), None);
+    assert_eq!(side_picked(&mut both, UNITS_OF_ONE), Some(Side::Short));
+    assert_eq!(side_picked(&mut long, UNITS_OF_ONE), None);
 }
 
 /// Worked by hand. The long expects 0.4R, at either unit. A stop worth 0.90
@@ -586,7 +587,7 @@ fn each_side_is_weighed_by_its_own_unit() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(6)));
 
-    assert_eq!(side_picked(&mut models, IN_MONEY), Some(Side::Long));
+    assert_eq!(side_picked(&mut models, UNITS_OF_ONE), Some(Side::Long));
     assert_eq!(
         side_picked(
             &mut models,
@@ -601,7 +602,7 @@ fn each_side_is_weighed_by_its_own_unit() {
 
 /// A side's model predicting an R of `r(tenths)`, in no store.
 fn in_hand(tenths: usize) -> SideModel {
-    let set = TrainingSet::regression(2, vec![0.5; 2], vec![r(tenths)]).unwrap();
+    let set = TrainingSet::new(2, vec![0.5; 2], vec![r(tenths)]).unwrap();
     SideModel::new(LearnerConfig::Baseline {}.fit(&set).unwrap(), r(tenths))
 }
 
@@ -631,7 +632,7 @@ fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     let picked = DecidingModels::pick_among(
         &pair_in_hand(),
         [(Side::Long, 0.0), (Side::Short, 0.0)],
-        &in_money(),
+        &rows_of_one(),
     )
     .unwrap()
     .unwrap();
@@ -653,7 +654,7 @@ fn a_side_of_a_pair_in_hand_is_held_to_its_own_margin() {
     let picked = DecidingModels::pick_among(
         &pair_in_hand(),
         [(Side::Long, 0.0), (Side::Short, 0.35)],
-        &in_money(),
+        &rows_of_one(),
     )
     .unwrap();
 
@@ -696,12 +697,12 @@ fn with_meta_of(models: &Path, config: &ModelConfig, tenths: Option<usize>) -> D
     published_with(models, config, (Side::Long, 6), meta.as_ref())
 }
 
-/// `listed`, as `config` says, its side a model of `side` predicting `trues`
-/// tenths from midnight, and its meta model `meta`, if any.
+/// `listed`, as `config` says, its side a model of `side` predicting an R of
+/// `r(tenths)` from midnight, and its meta model `meta`, if any.
 fn published_with(
     models: &Path,
     config: &ModelConfig,
-    (side, trues): (Side, usize),
+    (side, tenths): (Side, usize),
     meta: Option<&StoredModel>,
 ) -> DecidingModels {
     let features = features();
@@ -709,7 +710,7 @@ fn published_with(
     set.side(side)
         .unwrap()
         .store()
-        .publish(&baseline_for(&features, config, side, MIDNIGHT, trues))
+        .publish(&baseline_for(&features, config, side, MIDNIGHT, tenths))
         .unwrap();
     if let Some(meta) = meta {
         set.meta().unwrap().store().publish(meta).unwrap();
@@ -788,7 +789,7 @@ fn a_pick_is_the_side_before_any_meta() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
 
-    assert_eq!(side_picked(&mut models, IN_MONEY), Some(Side::Long));
+    assert_eq!(side_picked(&mut models, UNITS_OF_ONE), Some(Side::Long));
 }
 
 /// The meta model taking a trade from 0.15 USD, learned by LightGBM at its
@@ -825,7 +826,7 @@ fn learned_meta(config: &ModelConfig) -> StoredModel {
     }
     let learner = &config.meta.as_ref().unwrap().learner;
     let fitted = learner
-        .fit(&TrainingSet::regression(4, rows, labels).unwrap())
+        .fit(&TrainingSet::new(4, rows, labels).unwrap())
         .unwrap();
     let mut meta = meta_baseline(&features(), config, MIDNIGHT, 5);
     meta.manifest.learner = learner.clone();

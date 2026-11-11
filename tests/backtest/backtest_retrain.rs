@@ -100,8 +100,9 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
 
 /// Prepares the backtest of the span, each build and train on a thread of
 /// its own, as a backtest's children each run a node of their own; the
-/// spans built and the times trained at, each publishing a baseline of
-/// `trues` tenths, 3 at the span's start and one more each day.
+/// spans built and the times trained at, each publishing a baseline
+/// predicting an R of `r(tenths)`, `tenths` 3 at the span's start and one
+/// more each day.
 fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
     let (start, end) = span();
     let (mut built, mut trained) = (vec![], vec![]);

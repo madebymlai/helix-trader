@@ -137,7 +137,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         .manifest()
         .unwrap();
     let names = side_names(&dataset.feature_names, &dataset.payoff_names);
-    let set = TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![r(6)]).unwrap();
+    let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r(6)]).unwrap();
     let model = baseline_stored(
         dataset.strategy_id,
         dataset.fingerprint,

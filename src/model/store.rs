@@ -334,17 +334,6 @@ pub(super) trait Baselined {
 }
 
 impl LoadedModel {
-    /// The meta model `model` fitted, its predictions calibrated by the
-    /// line `calibration`, its baseline `baseline`.
-    #[must_use]
-    pub const fn new(model: Model, calibration: Line, baseline: f64) -> Self {
-        Self {
-            model,
-            calibration,
-            baseline,
-        }
-    }
-
     /// The calibrated expected R of the trade of `row`.
     ///
     /// # Errors
@@ -1120,7 +1109,7 @@ mod tests {
     /// valid then (`pair_calibration`), on a feature `mid`, probed on
     /// `rows`, its baseline the mean of its training labels, 1/2.
     fn model(valid_from: &str, rows: &[Vec<f64>]) -> StoredModel {
-        let set = TrainingSet::regression(1, vec![0.2, 0.7], vec![0.0, 1.0]).unwrap();
+        let set = TrainingSet::new(1, vec![0.2, 0.7], vec![0.0, 1.0]).unwrap();
         let fitted = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
@@ -1594,7 +1583,7 @@ mod tests {
             stored.manifest.side = Some(side);
             stored.manifest.fingerprint.clone_from(&fingerprint);
             stored.manifest.feature_names.clone_from(&names);
-            let set = TrainingSet::regression(2, vec![0.2, 0.0], vec![0.0]).unwrap();
+            let set = TrainingSet::new(2, vec![0.2, 0.0], vec![0.0]).unwrap();
             stored.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
             models.side(side).unwrap().store().publish(&stored).unwrap();
         }

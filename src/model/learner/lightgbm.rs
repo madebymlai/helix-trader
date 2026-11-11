@@ -1,12 +1,10 @@
-//! LightGBM: gradient-boosted trees with the binary objective or L2
-//! regression. A saved model names its objective, which its predictions
-//! follow when loaded.
+//! LightGBM: gradient-boosted trees under L2 regression.
 
 use anyhow::{Context, ensure};
 use lightgbm3::{Booster, Dataset};
 use serde::{Deserialize, Serialize};
 
-use super::{Learner, Objective, Predictor, SavedModel, TrainingSet};
+use super::{Learner, Predictor, SavedModel, TrainingSet};
 
 /// LightGBM's settings, each named and meant as in LightGBM's parameters.
 /// The defaults of the rounds, the learning rate, the leaves and the rows a
@@ -89,17 +87,12 @@ impl LightGbmConfig {
         Ok(())
     }
 
-    /// The settings as LightGBM's parameters, fitting `objective`: the
-    /// binary one or L2 regression. LightGBM, built without OpenMP, trains
-    /// on one thread; `deterministic` and `force_row_wise` keep its results
-    /// from depending on the machine.
-    fn parameters(&self, objective: Objective) -> serde_json::Value {
-        let objective = match objective {
-            Objective::Binary => "binary",
-            Objective::Regression => "regression",
-        };
+    /// The settings as LightGBM's parameters, fitting L2 regression.
+    /// LightGBM, built without OpenMP, trains on one thread; `deterministic`
+    /// and `force_row_wise` keep its results from depending on the machine.
+    fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
-            "objective": objective,
+            "objective": "regression",
             "num_iterations": self.num_iterations,
             "learning_rate": self.learning_rate,
             "num_leaves": self.num_leaves,
@@ -122,7 +115,7 @@ impl Learner for LightGbmConfig {
         let dataset = Dataset::from_slice(&features, &labels, i32::try_from(set.width())?, true)?;
         Ok(Box::new(LightGbm::new(Booster::train(
             dataset,
-            &self.parameters(set.objective()),
+            &self.parameters(),
         )?)?))
     }
 
@@ -165,10 +158,10 @@ mod tests {
     use super::*;
     use crate::model::learner::LearnerConfig;
 
-    /// 900 rows of two features whose label is true exactly where the
-    /// first feature is missing, a third of them, enough for leaves of 200
-    /// rows; elsewhere it runs from 0 to 1, zero included.
-    fn missing_is_true() -> TrainingSet {
+    /// 900 rows of two features whose label is 1 exactly where the first
+    /// feature is missing, a third of them, enough for leaves of 200 rows,
+    /// and 0 elsewhere, where the feature runs from 0 to 1, zero included.
+    fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
         for i in 0..900_u32 {
@@ -179,7 +172,7 @@ mod tests {
                 f64::from(i % 7) / 6.0
             });
             features.push(f64::from(i % 11));
-            labels.push(missing);
+            labels.push(if missing { 1.0 } else { 0.0 });
         }
         TrainingSet::new(2, features, labels).unwrap()
     }
@@ -187,23 +180,26 @@ mod tests {
     #[test]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let config = LearnerConfig::LightGbm(LightGbmConfig::builder().build());
-        let model = config.fit(&missing_is_true()).unwrap();
+        let model = config.fit(&missing_is_one()).unwrap();
         assert!(model.predict(&[f64::NAN, 4.0]).unwrap() > 0.9);
         for value in [0.0, 0.5, 1.0] {
             assert!(model.predict(&[value, 4.0]).unwrap() < 0.1, "{value}");
         }
     }
 
-    /// 300 rows of one feature, 0.0 to 0.9 by 0.1, its label true below
-    /// 0.5: the split leaves 150 rows each side.
+    /// 300 rows of one feature, 0.0 to 0.9 by 0.1, its label 1 below 0.5
+    /// and 0 from it: the split leaves 150 rows each side.
     fn halves() -> TrainingSet {
         let features: Vec<f64> = (0..300_u32).map(|i| f64::from(i % 10) / 10.0).collect();
-        let labels = features.iter().map(|&value| value < 0.5).collect();
+        let labels = features
+            .iter()
+            .map(|&value| if value < 0.5 { 1.0 } else { 0.0 })
+            .collect();
         TrainingSet::new(1, features, labels).unwrap()
     }
 
     /// Below 200 rows a side, the split is not made: the model predicts
-    /// the share of true labels, one half, on either side of it.
+    /// the mean label, one half, on either side of it.
     #[test]
     fn a_leaf_holds_200_rows_at_least_by_default() {
         let model = LearnerConfig::LightGbm(LightGbmConfig::builder().build())
@@ -231,7 +227,7 @@ mod tests {
             .iter()
             .map(|&value| if value < 0.5 { 2.0 } else { -1.0 })
             .collect();
-        TrainingSet::regression(1, features, labels).unwrap()
+        TrainingSet::new(1, features, labels).unwrap()
     }
 
     /// Worked by hand: L2 starts every row at the mean label, 0.5, 1.5
@@ -264,7 +260,9 @@ mod tests {
                 (0..6000_u32)
                     .map(|i| f64::from((i * 7919) % 101) / 100.0)
                     .collect(),
-                (0..2000_u32).map(|i| (i * 31) % 7 < 3).collect(),
+                (0..2000_u32)
+                    .map(|i| if (i * 31) % 7 < 3 { 1.0 } else { 0.0 })
+                    .collect(),
             )
             .unwrap();
             let model = LearnerConfig::LightGbm(config).fit(&set).unwrap();

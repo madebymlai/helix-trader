@@ -162,7 +162,7 @@ impl WalkForward {
     /// of its days); then `train` trains at each train time of the span
     /// (`Schedule::times`) whose plan fits a model (`Schedule::plan`,
     /// `Training::train_at`), in time order, each planned after the
-    /// trains before it: a side's model they publish gives the meta its
+    /// trains before it: a pair of the sides they publish gives the meta its
     /// rows from then on. A backtest that could then trade nothing is
     /// refused (`Schedule::ensure_trades`).
     ///
@@ -652,7 +652,7 @@ mod tests {
         baseline: f64,
     ) -> StoredModel {
         let names = side_names(features().names(), &config.target.payoff_names());
-        let set = TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
+        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
@@ -921,7 +921,7 @@ mod tests {
         );
         if side == Side::Short {
             let width = opposed.manifest.feature_names.len();
-            let set = TrainingSet::regression(width, vec![0.0; width], vec![0.5]).unwrap();
+            let set = TrainingSet::new(width, vec![0.0; width], vec![0.5]).unwrap();
             opposed.manifest.learner = LearnerConfig::Baseline {};
             opposed.model = LearnerConfig::Baseline {}
                 .fit(&set)
@@ -1156,7 +1156,7 @@ mod tests {
     /// `CALIBRATION`, its baseline 0.5.
     fn meta_model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
         let names = meta_names(features().names());
-        let set = TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
+        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
         let mut meta = model(valid_from, fingerprint, 0.5);
         meta.manifest.side = None;
         meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);

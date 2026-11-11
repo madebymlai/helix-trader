@@ -6,27 +6,23 @@
 //! names the adapter, its settings sit beside it). Adding a library is one
 //! adapter module and one variant. The adapters:
 //!
-//! - `lightgbm`: LightGBM's gradient-boosted trees, binary objective or L2
-//!   regression, its settings defaulting to ones regularised for a weak
-//!   signal.
-//! - `perpetual`: PerpetualBooster's gradient-boosted trees, log loss or
-//!   squared loss, stopped by a budget instead of tuned settings; its
-//!   settings need a memory limit. It fits far slower than LightGBM and
-//!   saves models many times larger.
+//! - `lightgbm`: LightGBM's gradient-boosted trees under L2 regression, its
+//!   settings defaulting to ones regularised for a weak signal.
+//! - `perpetual`: PerpetualBooster's gradient-boosted trees on squared loss,
+//!   stopped by a budget instead of tuned settings; its settings need a
+//!   memory limit. It fits far slower than LightGBM and saves models many
+//!   times larger.
 //! - `baseline`: the training mean, the benchmark every score is read
 //!   against.
 //! - `fake`: the row's first feature, for tests that need to steer the
 //!   prediction.
 //!
-//! The training set's labels choose the objective: true or false labels
-//! (`TrainingSet::new`) are fitted by the binary objective, and the model
-//! predicts the probability that a row's label is true; real labels
-//! (`TrainingSet::regression`) by their squared error, and the model
-//! predicts a row's expected label. A model predicts from a row of features
-//! in the order it was fitted on. NaN means missing in every adapter, with
-//! no setup. The port, not the adapter, checks the width of a row before
-//! predicting, so a row of the wrong width is an error, never a panic of a
-//! library nor a prediction from shifted columns.
+//! A training set's labels are real values, fitted on their squared error:
+//! the model predicts a row's expected label. A model predicts from a row of
+//! features in the order it was fitted on. NaN means missing in every
+//! adapter, with no setup. The port, not the adapter, checks the width of a
+//! row before predicting, so a row of the wrong width is an error, never a
+//! panic of a library nor a prediction from shifted columns.
 //!
 //! A saved model is the adapter's own text, loaded back by the same learner
 //! config. Some libraries do not save the same bytes twice, so whether a
@@ -63,8 +59,8 @@ pub enum LearnerConfig {
     Perpetual(PerpetualConfig),
     /// The mean of the training labels, whatever the row.
     Baseline {},
-    /// The row's first feature, clamped to [0, 1] on binary labels; the
-    /// mean of the training labels where it is missing. For tests.
+    /// The row's first feature; the mean of the training labels where it is
+    /// missing. For tests.
     Fake {},
 }
 
@@ -120,68 +116,30 @@ impl LearnerConfig {
     }
 }
 
-/// What the labels of a training set are, which is the objective a
-/// learner fits them by and what its model predicts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Objective {
-    /// True or false, fitted as 1 or 0: the model predicts the probability
-    /// that a row's label is true.
-    Binary,
-    /// Real values, fitted on their squared error: the model predicts a
-    /// row's expected label.
-    Regression,
-}
-
 /// The rows a model is fitted on: features row by row, all of one width,
-/// and each row's label, whose kind picks the objective the learner fits.
+/// and each row's label, a real value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingSet {
     width: usize,
     features: Vec<f64>,
-    objective: Objective,
     labels: Vec<f64>,
 }
 
 impl TrainingSet {
     /// A set of `labels.len()` rows of `width` features each, `features`
     /// holding them row after row; NaN marks a missing feature. The labels
-    /// are true or false, fitted by the binary objective: the model
-    /// predicts the probability that a row's label is true.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there is no row, `width` is zero, or `features`
-    /// does not hold `width` features for each label.
-    pub fn new(width: usize, features: Vec<f64>, labels: Vec<bool>) -> anyhow::Result<Self> {
-        let labels = labels
-            .into_iter()
-            .map(|label| f64::from(u8::from(label)))
-            .collect();
-        Self::of(width, features, Objective::Binary, labels)
-    }
-
-    /// A set as `new` makes, of real labels, fitted by the regression
-    /// objective, on their squared error: the model predicts a row's
+    /// are fitted on their squared error: the model predicts a row's
     /// expected label.
     ///
     /// # Errors
     ///
-    /// Returns an error as `new` does, or if a label is not a finite
-    /// number.
-    pub fn regression(width: usize, features: Vec<f64>, labels: Vec<f64>) -> anyhow::Result<Self> {
+    /// Returns an error if there is no row, `width` is zero, `features`
+    /// does not hold `width` features for each label, or a label is not a
+    /// finite number.
+    pub fn new(width: usize, features: Vec<f64>, labels: Vec<f64>) -> anyhow::Result<Self> {
         if let Some(label) = labels.iter().find(|label| !label.is_finite()) {
             bail!("a label of {label} is not a finite number");
         }
-        Self::of(width, features, Objective::Regression, labels)
-    }
-
-    fn of(
-        width: usize,
-        features: Vec<f64>,
-        objective: Objective,
-        labels: Vec<f64>,
-    ) -> anyhow::Result<Self> {
         ensure!(!labels.is_empty(), "a training set needs a row");
         ensure!(width > 0, "a training set needs a feature");
         ensure!(
@@ -193,7 +151,6 @@ impl TrainingSet {
         Ok(Self {
             width,
             features,
-            objective,
             labels,
         })
     }
@@ -209,18 +166,13 @@ impl TrainingSet {
         self.features.chunks_exact(self.width)
     }
 
-    /// The objective the labels are fitted by.
-    const fn objective(&self) -> Objective {
-        self.objective
-    }
-
-    /// Each row's label, in order, a true one 1 and a false one 0.
+    /// Each row's label, in order.
     #[must_use]
     fn labels(&self) -> &[f64] {
         &self.labels
     }
 
-    /// The mean of the labels: the share that are true, of binary ones.
+    /// The mean of the labels.
     #[must_use]
     fn mean(&self) -> f64 {
         self.labels.iter().sum::<f64>() / self.labels.len() as f64
@@ -265,9 +217,7 @@ impl Model {
     }
 
     /// The prediction on `row`, from its features in the order the model
-    /// was fitted on; NaN marks a missing feature. Fitted on binary labels,
-    /// it is the probability that the row's label is true; on real ones,
-    /// the row's expected label.
+    /// was fitted on, the row's expected label; NaN marks a missing feature.
     ///
     /// # Errors
     ///
@@ -352,26 +302,11 @@ mod tests {
     }
 
     /// A fixed synthetic set: `ROWS` rows of `WIDTH` features drawn from a
-    /// seeded generator, labelled by a noisy rule on the first two
-    /// features. The third feature is missing in about a tenth of the rows,
-    /// and a missing third feature makes the label true.
+    /// seeded generator, labelled by a noisy line on the first two
+    /// features, from about -3 to 2.5. The third feature is missing in about
+    /// a tenth of the rows, and a missing third feature raises the label by
+    /// 1.5.
     fn synthetic() -> TrainingSet {
-        let mut uniform = uniform();
-        let mut features = Vec::with_capacity(ROWS * WIDTH);
-        let mut labels = Vec::with_capacity(ROWS);
-        for _ in 0..ROWS {
-            let row: Vec<f64> = (0..WIDTH).map(|_| uniform()).collect();
-            let missing = uniform() < 0.1;
-            labels.push(missing || row[0] + 0.5 * row[1] + 0.3 * uniform() > 0.9);
-            features.extend(with_missing(&row, missing));
-        }
-        TrainingSet::new(WIDTH, features, labels).unwrap()
-    }
-
-    /// A fixed synthetic set as `synthetic`, of real labels: a noisy line
-    /// on the first two features, from about -3 to 2.5, raised by 1.5
-    /// where the third feature is missing.
-    fn synthetic_regression() -> TrainingSet {
         let mut uniform = uniform();
         let mut features = Vec::with_capacity(ROWS * WIDTH);
         let mut labels = Vec::with_capacity(ROWS);
@@ -382,7 +317,7 @@ mod tests {
             labels.push(2.0 * row[0] - 3.0 * row[1] + 0.5 * uniform() + raised);
             features.extend(with_missing(&row, missing));
         }
-        TrainingSet::regression(WIDTH, features, labels).unwrap()
+        TrainingSet::new(WIDTH, features, labels).unwrap()
     }
 
     /// Rows to predict on, the training set's own and some outside it,
@@ -445,35 +380,6 @@ mod tests {
                 }
 
                 #[test]
-                fn a_reloaded_model_of_real_labels_predicts_bit_identically() {
-                    let set = synthetic_regression();
-                    let model = config().fit(&set).unwrap();
-                    let reloaded = config().load(&model.save().unwrap()).unwrap();
-                    let rows = probes(&set);
-                    assert_eq!(predictions(&reloaded, &rows), predictions(&model, &rows));
-                }
-
-                #[test]
-                fn the_same_settings_fit_the_same_predictions_of_real_labels() {
-                    let set = synthetic_regression();
-                    let rows = probes(&set);
-                    assert_eq!(
-                        predictions(&config().fit(&set).unwrap(), &rows),
-                        predictions(&config().fit(&set).unwrap(), &rows)
-                    );
-                }
-
-                #[test]
-                fn predictions_are_probabilities() {
-                    let set = synthetic();
-                    let model = config().fit(&set).unwrap();
-                    for row in probes(&set) {
-                        let probability = model.predict(&row).unwrap();
-                        assert!((0.0..=1.0).contains(&probability), "{row:?}: {probability}");
-                    }
-                }
-
-                #[test]
                 fn a_row_of_the_wrong_width_is_an_error() {
                     let set = synthetic();
                     let model = config().fit(&set).unwrap();
@@ -522,27 +428,19 @@ mod tests {
 
     #[test]
     fn a_set_without_features_is_refused() {
-        assert!(TrainingSet::new(0, vec![], vec![true]).is_err());
+        assert!(TrainingSet::new(0, vec![], vec![1.0]).is_err());
     }
 
     #[test]
     fn a_set_with_a_short_row_is_refused() {
-        assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![true, false]).is_err());
+        assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![1.0, -1.0]).is_err());
     }
 
     #[test]
-    fn a_set_of_real_labels_is_shaped_as_one_of_binary_labels() {
-        assert!(TrainingSet::regression(2, vec![], vec![]).is_err());
-        assert!(TrainingSet::regression(0, vec![], vec![1.0]).is_err());
-        assert!(TrainingSet::regression(2, vec![1.0, 2.0, 3.0], vec![1.0, -1.0]).is_err());
-        assert!(TrainingSet::regression(1, vec![1.0, 2.0], vec![1.0, -1.0]).is_ok());
-    }
-
-    #[test]
-    fn a_real_label_not_a_number_is_refused() {
+    fn a_label_not_a_number_is_refused() {
         for label in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(
-                TrainingSet::regression(1, vec![1.0, 2.0], vec![0.5, label]).is_err(),
+                TrainingSet::new(1, vec![1.0, 2.0], vec![0.5, label]).is_err(),
                 "{label}"
             );
         }
