@@ -5,8 +5,9 @@
 //! side models of a `ModelConfig` with a meta section, on the expected net
 //! P&L of each side's calibrated probability
 //! (`store::SideModel::expected_pnl`, `payoff::pick`). The meta model
-//! decides only when a side is picked, on the sides' features with the
-//! side picked and its probability after them (`PICKED_FEATURES`), and
+//! decides only when a side is picked, on the decision's features, the
+//! strategy's without either side's payoff features, with the side picked
+//! and its probability after them (`PICKED_FEATURES`), and
 //! learns whether the trade of the side picked, the target on that side,
 //! with exits or time only, wins after its costs, read from its row as the
 //! side models read their trades (`dataset::DatasetRow`): a dataset row opens a
@@ -18,8 +19,9 @@
 //! (`deciding::DecidingModels`), of the strategy's model set
 //! (`store::ModelSet`) as its stores are when the rows are made, listed
 //! once, a read error failing them: the latest valid then, trained on
-//! rows settled by its valid-from, so every decision is out of sample; the
-//! worth of each side's stop is the row's own (`dataset::DatasetRow::units`).
+//! rows settled by its valid-from, so every decision is out of sample; each
+//! side's row, its payoff features and the worth of its stop, is the row's
+//! own (`dataset::DatasetRow::sides`).
 //! A row before the sides' first pair has no decision: the meta's rows
 //! start there at the earliest, and with no pair of the sides before a
 //! train the meta waits (`schedule::Schedule::plan`). Never retrained, with
@@ -42,8 +44,9 @@ use super::{
 /// each row a side is picked on, its features with that side and its
 /// probability, its label whether the trade on that side won, with the trade
 /// and its unit. The side picked on a row is the one
-/// `DecidingModels` picks, on the row's units, among the sides of the pair of
-/// `models` in use then, as its stores list them now, none before the first.
+/// `DecidingModels` picks, on each side's row (`DatasetRow::sides`), among the
+/// sides of the pair of `models` in use then, as its stores list them now,
+/// none before the first.
 ///
 /// # Errors
 ///
@@ -52,9 +55,7 @@ pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Resul
     let mut models = DecidingModels::new(models)?;
     let mut examples = vec![];
     for row in rows {
-        let Some(picked) =
-            models.pick(Timestamp::from(row.ts_event), &row.features, row.units())?
-        else {
+        let Some(picked) = models.pick(Timestamp::from(row.ts_event), &row.sides())? else {
             continue;
         };
         examples.push(Example {

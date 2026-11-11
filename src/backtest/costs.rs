@@ -18,8 +18,8 @@ use nautilus_execution::models::fee::{
 };
 use nautilus_model::{
     fees::calculate_maker_taker_commission,
-    instruments::InstrumentAny,
-    types::{Money, Price, Quantity},
+    instruments::{Instrument, InstrumentAny},
+    types::{Currency, Money, Price, Quantity},
 };
 use rust_decimal::Decimal;
 
@@ -102,6 +102,17 @@ impl Commission {
         }
     }
 
+    /// The currency it charges a fill of `instrument` in (see `cost`): an
+    /// amount's own, per order or per quantity; a rate's, the currency of
+    /// the fill's value, the instrument's cost currency.
+    #[must_use]
+    pub fn currency(&self, instrument: &InstrumentAny) -> Currency {
+        match *self {
+            Self::PerOrder(amount) | Self::PerQuantity(amount) => amount.currency,
+            Self::Rate(_) => instrument.cost_currency(),
+        }
+    }
+
     /// The commission's amount, normalized, so that every spelling of one
     /// commission reads the same: a money without trailing zeros and its
     /// currency code, `"3 EUR"` for 3.00 EUR, a rate without trailing
@@ -127,6 +138,7 @@ mod tests {
             Order, OrderAny, OrderTestBuilder,
             stubs::{OrderFilledTestBuilder, TestOrderStubs},
         },
+        types::Currency,
     };
 
     use super::*;
@@ -281,6 +293,22 @@ mod tests {
         ] {
             assert!(commission.fee_model().is_err(), "{commission:?}");
         }
+    }
+
+    /// An amount is charged in its own currency, a rate in the currency of
+    /// the fill's value: gold's USD; an inverse perpetual's BTC, its base.
+    #[test]
+    fn a_commission_is_charged_in_its_amounts_currency_or_the_currency_of_the_value() {
+        let inverse =
+            InstrumentAny::CryptoPerpetual(nautilus_model::instruments::stubs::btcusd_bybit());
+
+        assert_eq!(
+            Commission::PerOrder(Money::from("3 EUR")).currency(&gold()),
+            Currency::EUR()
+        );
+        assert_eq!(per_ounce().currency(&gold()), Currency::USD());
+        assert_eq!(rate().currency(&gold()), Currency::USD());
+        assert_eq!(rate().currency(&inverse), Currency::BTC());
     }
 
     /// Every spelling of one commission reads the same.

@@ -33,7 +33,7 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{dataset::DatasetRow, targets::Side};
+use super::{dataset::DatasetRow, deciding::SideRow, targets::Side};
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -218,14 +218,16 @@ impl Holdout {
 }
 
 impl Example {
-    /// The example of `row` on `side`'s trade: whether the trade gained, the
-    /// trade, and its payoff's unit.
+    /// The example of `row` on `side`'s trade: the side's row
+    /// (`DatasetRow::side`), whether the trade gained, the trade, and its
+    /// payoff's unit.
     pub(super) fn of_side(row: &DatasetRow, side: Side) -> Self {
+        let SideRow { features, unit } = row.side(side);
         Self {
-            features: row.features.clone(),
+            features,
             label: row.gained(side),
             trade: row.trade(side),
-            unit: *row.units().of(side),
+            unit,
             ts_event: row.ts_event,
             settled_at: row.settled_at,
         }

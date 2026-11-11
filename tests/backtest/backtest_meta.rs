@@ -247,7 +247,9 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
     assert!(meta.valid_froms().unwrap().is_empty());
     let means: Vec<f64> = retrains
         .iter()
-        .map(|&at| predicts(&long, &features(), at, &[f64::NAN]))
+        // The long's row: the feature missing, then the bracket's three payoff
+        // features, which the fake does not read.
+        .map(|&at| predicts(&long, &features(), at, &[f64::NAN, 0.0, 0.0, 0.0]))
         .collect();
     for (&at, trues) in retrains[1..].iter().zip([6, 8]) {
         meta.publish(&meta_baseline_of(&features(), &long_only(), at, trues))

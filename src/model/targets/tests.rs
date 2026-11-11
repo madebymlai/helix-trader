@@ -9,7 +9,8 @@ use nautilus_common::{
 use nautilus_indicators::average::MovingAverageType;
 use nautilus_model::{
     data::NautilusDataType,
-    identifiers::{Symbol, TraderId},
+    enums::AggressorSide,
+    identifiers::{Symbol, TradeId, TraderId},
     instruments::{
         CryptoPerpetual, InstrumentAny,
         stubs::{audusd_sim, btcusd_bybit},
@@ -1074,6 +1075,10 @@ fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
     };
     let row = DatasetRow::of(&TargetRow {
         decision: decision(),
+        payoff: PerSide {
+            long: set.long.payoff.clone(),
+            short: set.short.payoff.clone(),
+        },
         outcomes: Outcomes {
             long: outcome(set.long.unit),
             short: outcome(set.short.unit),
@@ -1086,11 +1091,10 @@ fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
     }
 }
 
-/// With no exits there is no stop to weigh: the unit is 1, and no instrument
-/// is read, so one missing from the cache refuses nothing.
+/// With no exits there is no stop to weigh: the unit is 1.
 #[test]
-fn a_time_only_target_is_set_with_a_unit_of_one_and_reads_no_instrument() {
-    let probe = Probe::holding(None);
+fn a_time_only_target_is_set_with_a_unit_of_one() {
+    let probe = Probe::holding(aud());
     probe.quoted(InstrumentId::from(AUD), "0.70000");
 
     let set = setter(&on_aud(no_exits())).at(&probe).unwrap().unwrap();
@@ -1287,27 +1291,21 @@ fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
 }
 
 /// Nautilus' notional value of an inverse instrument divides by the price, so
-/// a stop's distance has no worth in R on it.
+/// neither a stop's distance nor a spread has a worth in R or in money on it:
+/// a bracket and a time-only target, whose entry cost is its spread's worth,
+/// are refused alike.
 #[test]
-fn a_bracket_on_an_inverse_instrument_is_refused_as_the_targets_start() {
+fn a_target_on_an_inverse_instrument_is_refused_as_the_targets_start() {
     let instrument = inverse();
     let mut probe = Probe::holding(Some(instrument.clone()));
-    let bracket = trading(in_bps(20, 10), instrument.id(), 1);
 
-    let err = targets(bracket).start(&mut probe).unwrap_err();
+    for spec in [in_bps(20, 10), no_exits()] {
+        let target = trading(spec, instrument.id(), 1);
 
-    assert!(format!("{err:#}").contains("inverse"), "{err:#}");
-}
+        let err = targets(target).start(&mut probe).unwrap_err();
 
-/// In money, a time-only target has no stop to weigh, and works on an inverse
-/// instrument.
-#[test]
-fn a_time_only_target_on_an_inverse_instrument_starts() {
-    let instrument = inverse();
-    let mut probe = Probe::holding(Some(instrument.clone()));
-    let time_only = trading(no_exits(), instrument.id(), 1);
-
-    targets(time_only).start(&mut probe).unwrap();
+        assert!(format!("{err:#}").contains("inverse"), "{spec:?}: {err:#}");
+    }
 }
 
 /// Only an instrument seen to be inverse is refused: one missing from the cache
@@ -1341,11 +1339,12 @@ fn a_stop_with_no_worth_at_a_decision_is_an_error_before_any_order() {
     assert_eq!(probe.orders(), Vec::<String>::new());
 }
 
-/// A time-only target reads no instrument to be set, so one missing surfaces
-/// as the error of sending its orders, which takes the decision's number: the
-/// next decision, the instrument there, is the second.
+/// A time-only target reads its instrument to be set, its entry cost costing
+/// its fills, as a bracket does: one missing is the setter's error, before any
+/// order, and takes no number, so the next decision, the instrument there, is
+/// the first.
 #[test]
-fn a_time_only_target_missing_its_instrument_errs_as_it_sends_its_orders() {
+fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
     let mut probe = Probe::holding(None);
     probe.quoted(InstrumentId::from(AUD), "0.70000");
     let targets = targets(on_aud(no_exits()));
@@ -1353,13 +1352,255 @@ fn a_time_only_target_missing_its_instrument_errs_as_it_sends_its_orders() {
     let err = targets.open(&mut probe, decision()).unwrap_err();
 
     assert!(format!("{err:#}").contains("not in cache"), "{err:#}");
+    assert_eq!(probe.orders(), Vec::<String>::new());
     probe
         .cache_rc()
         .borrow_mut()
         .add_instrument(aud().unwrap())
         .unwrap();
     targets.open(&mut probe, decision()).unwrap();
-    assert_eq!(probe.orders(), ["D1-L-E", "D1-S-E"]);
+    assert_eq!(probe.orders(), ["D0-L-E", "D0-S-E"]);
+}
+
+/// A lot of gold, 100 oz, of `spec`.
+fn lot(spec: Target) -> TargetConfig {
+    TargetConfig {
+        quantity: Quantity::from(100),
+        ..of(spec)
+    }
+}
+
+/// A take profit 15 bps and a stop 7.5 bps of the decision's price away.
+fn wide_take_profit() -> Target {
+    exiting(BracketSpec {
+        take_profit: Distance::BasisPoints(Decimal::from(15)),
+        stop: Distance::BasisPoints(Decimal::new(75, 1)),
+        atr: None,
+    })
+}
+
+/// 3 USD an order.
+fn per_order() -> Commission {
+    Commission::PerOrder(Money::from("3 USD"))
+}
+
+/// Pepperstone's 0.035 USD an ounce, 3.50 USD a fill of a lot.
+fn per_ounce() -> Commission {
+    Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap())
+}
+
+/// The payoff features of each side of a lot of `spec` at `commission`, on
+/// `probe`.
+fn payoff_on(probe: &Probe, spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
+    TargetSetter::new(&lot(spec), rule(), &quotes(), commission)
+        .unwrap()
+        .at(probe)
+        .unwrap()
+        .unwrap()
+        .map(|target| target.payoff)
+}
+
+/// The payoff features of each side of a lot of `spec` at `commission`,
+/// gold quoted at 4001.50/4001.70.
+fn payoff_quoted(spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
+    let probe = Probe::holding(Some(gold()));
+    probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
+    payoff_on(&probe, spec, commission)
+}
+
+/// Each of `got` within 1e-12 of `want`'s, as many.
+fn assert_near(got: &PerSide<Vec<f64>>, want: &PerSide<Vec<f64>>) {
+    for side in Side::BOTH {
+        let (got, want) = (got.of(side), want.of(side));
+        assert_eq!(got.len(), want.len(), "{side:?}: {got:?}, not {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-12, "{side:?}: {got:?}, not {want:?}");
+        }
+    }
+}
+
+/// A bracket has the take profit's R, the stop's nominal loss and the entry
+/// cost; a time-only target the entry cost alone.
+#[test]
+fn a_target_names_the_payoff_features_of_the_barriers_it_has() {
+    assert_eq!(
+        lot(wide_take_profit()).payoff_names(),
+        ["take_profit_r", "stop_loss_r", "entry_cost"]
+    );
+    assert_eq!(lot(no_exits()).payoff_names(), ["entry_cost"]);
+}
+
+/// Worked by hand. A lot of gold quoted 4001.50/4001.70: the mid, 4001.60;
+/// 15 bps of it, 6.0024, and 7.5 bps, 3.0012, on the nearest cent: the long's
+/// take profit 4007.60 and stop 3998.60, the short's take profit 3995.60 and
+/// stop 4004.60; each stop 3.00 away, worth 300 USD on 100 oz, the unit. The
+/// long enters at the ask, 4001.70, the short at the bid, 4001.50, a spread
+/// of 0.20, 20 USD. At IC's 30 USD per million, a fill of a lot costs 0.003 of
+/// its price, to the cent: 12.01 at 4001.70, 12.00 at 4001.50, 12.02 at
+/// 4007.60, 12.00 at 3998.60, 11.99 at 3995.60, 12.01 at 4004.60. The long's
+/// take profit nets 590 − 12.01 − 12.02, its stop loses 310 + 12.01 + 12.00,
+/// its entry costs 20 + 12.01; the short's take profit nets 590 − 12.00 −
+/// 11.99, its stop loses 310 + 12.00 + 12.01, its entry costs 20 + 12.00.
+#[test]
+fn a_brackets_payoff_at_a_commission_rate_is_worked_out_by_hand_on_each_side() {
+    let payoff = payoff_quoted(wide_take_profit(), commission());
+
+    assert_near(
+        &payoff,
+        &PerSide {
+            long: vec![565.97 / 300.0, 334.01 / 300.0, 32.01 / 300.0],
+            short: vec![566.01 / 300.0, 334.01 / 300.0, 32.00 / 300.0],
+        },
+    );
+}
+
+/// The bracket of the rate's test at 3 USD an order: each fill costs 3, the
+/// take profit nets 590 − 6, the stop loses 310 + 6 and the entry costs 20 +
+/// 3, on either side.
+#[test]
+fn a_brackets_payoff_at_a_commission_per_order_is_worked_out_by_hand_on_each_side() {
+    let payoff = payoff_quoted(wide_take_profit(), per_order());
+
+    let side = vec![584.0 / 300.0, 316.0 / 300.0, 23.0 / 300.0];
+    assert_near(
+        &payoff,
+        &PerSide {
+            long: side.clone(),
+            short: side,
+        },
+    );
+}
+
+/// The bracket of the rate's test at Pepperstone's 0.035 USD an ounce: each
+/// fill of a lot costs 3.50 at any price, the take profit nets 590 − 7, the
+/// stop loses 310 + 7 and the entry costs 20 + 3.50, on either side.
+#[test]
+fn a_brackets_payoff_at_a_commission_per_quantity_is_worked_out_by_hand_on_each_side() {
+    let payoff = payoff_quoted(wide_take_profit(), per_ounce());
+
+    let side = vec![583.0 / 300.0, 317.0 / 300.0, 23.5 / 300.0];
+    assert_near(
+        &payoff,
+        &PerSide {
+            long: side.clone(),
+            short: side,
+        },
+    );
+}
+
+/// The quote of the bracket's tests and no exits: no stop to weigh, a unit of
+/// 1, so the entry cost is in money, the spread's 20 USD and the entry's
+/// commission: at IC's rate 12.01 at the long's ask and 12.00 at the short's
+/// bid; 3 an order; 3.50 a lot.
+#[test]
+fn a_time_only_targets_entry_cost_is_in_money_on_each_side() {
+    for (commission, long, short) in [
+        (commission(), 32.01, 32.00),
+        (per_order(), 23.0, 23.0),
+        (per_ounce(), 23.5, 23.5),
+    ] {
+        let payoff = payoff_quoted(no_exits(), commission);
+
+        assert_near(
+            &payoff,
+            &PerSide {
+                long: vec![long],
+                short: vec![short],
+            },
+        );
+    }
+}
+
+/// A trade of gold at 4001.60, the reference of the bracket's tests: its exits
+/// and unit theirs. With no quote both sides enter at the trade, no spread: the
+/// long's take profit nets 600 − 12.00 − 12.02 and its stop loses
+/// 300 + 12.00 + 12.00, the short's take profit nets 600 − 12.00 − 11.99 and
+/// its stop loses 300 + 12.00 + 12.01, each entry costing its commission
+/// alone, 12.00 at 4001.60.
+#[test]
+fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread() {
+    let probe = Probe::holding(Some(gold()));
+    probe
+        .cache_rc()
+        .borrow_mut()
+        .add_trade(TradeTick::new(
+            InstrumentId::from(GOLD),
+            Price::from("4001.60"),
+            Quantity::from(1),
+            AggressorSide::NoAggressor,
+            TradeId::from("1"),
+            UnixNanos::default(),
+            UnixNanos::default(),
+        ))
+        .unwrap();
+
+    let payoff = payoff_on(&probe, wide_take_profit(), commission());
+
+    assert_near(
+        &payoff,
+        &PerSide {
+            long: vec![575.98 / 300.0, 324.0 / 300.0, 12.0 / 300.0],
+            short: vec![576.01 / 300.0, 324.01 / 300.0, 12.0 / 300.0],
+        },
+    );
+}
+
+/// A bar of gold closing at 4001.60 and no quote: a time-only target's sides
+/// enter at the close, no spread, the entry costing its 3 USD alone.
+#[test]
+fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no_spread() {
+    let probe = Probe::holding(Some(gold()));
+    probe
+        .cache_rc()
+        .borrow_mut()
+        .add_bar(Bar {
+            close: Price::from("4001.60"),
+            ..gold_bar()
+        })
+        .unwrap();
+
+    let payoff = payoff_on(&probe, no_exits(), per_order());
+
+    assert_near(
+        &payoff,
+        &PerSide {
+            long: vec![3.0],
+            short: vec![3.0],
+        },
+    );
+}
+
+/// 3 EUR an order on gold, quoted in USD: the target's P&L, its positions'
+/// realised P&L, is in USD, and the commission is not converted.
+fn in_euros() -> Commission {
+    Commission::PerOrder(Money::from("3 EUR"))
+}
+
+#[test]
+fn a_commission_in_another_currency_than_the_targets_pnl_is_refused_as_the_targets_start() {
+    let mut probe = Probe::holding(Some(gold()));
+    let targets = Targets::new(lot(no_exits()), rule(), &quotes(), in_euros()).unwrap();
+
+    let err = targets.start(&mut probe).unwrap_err();
+
+    assert!(format!("{err:#}").contains("EUR"), "{err:#}");
+}
+
+/// Live, the instrument may come after the start: the setter refuses the
+/// commission at each decision instead.
+#[test]
+fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decision() {
+    let probe = Probe::holding(Some(gold()));
+    probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
+
+    for spec in [wide_take_profit(), no_exits()] {
+        let err = TargetSetter::new(&lot(spec), rule(), &quotes(), in_euros())
+            .unwrap()
+            .at(&probe)
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("EUR"), "{spec:?}: {err:#}");
+    }
 }
 
 /// A decision with no price is unsettled, its number taken; one with an exit on

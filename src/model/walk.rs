@@ -281,14 +281,13 @@ impl WalkForward {
     }
 
     /// The side picked on each of `rows`, in time order, by the decision
-    /// itself, before any meta: on the row's units, among the sides of the
+    /// itself, before any meta: on each side's row, among the sides of the
     /// pair in use then (`DecidingModels::pick`).
     fn picked(&self, rows: &[DatasetRow]) -> anyhow::Result<Vec<Option<Side>>> {
         let mut models = DecidingModels::new(&self.models)?;
         rows.iter()
             .map(|row| {
-                let picked =
-                    models.pick(Timestamp::from(row.ts_event), &row.features, row.units())?;
+                let picked = models.pick(Timestamp::from(row.ts_event), &row.sides())?;
                 Ok(picked.map(|picked| picked.side))
             })
             .collect()
@@ -482,14 +481,15 @@ mod tests {
             calibration::Calibration,
             config::{Margins, MetaConfig},
             decide::{DecisionRule, FeatureRow},
-            features::{meta_names, testing::last_mid},
+            features::{meta_names, side_names, testing::last_mid},
             holdout::{Holdout, Trades},
             learner::{LearnerConfig, TrainingSet},
             payoff::Payoff,
             schedule::Retrain,
             store::{ModelManifest, ModelStore, StoredModel},
             targets::{
-                BracketSpec, Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow,
+                BracketSpec, Distance, Exit, Outcome, Outcomes, PerSide, Target, TargetConfig,
+                TargetRow,
             },
         },
     };
@@ -578,7 +578,9 @@ mod tests {
 
     /// The row of the decision at `time` on `feature`, its long gaining 1
     /// USD if `wins`, else losing 1, the short the reverse, each net of 0.1
-    /// USD of commission and of a unit of 1, settled an hour later.
+    /// USD of commission and of a unit of 1, settled an hour later; each
+    /// side's payoff features a time-only target's, its entry cost, which no
+    /// model of the tests reads.
     fn row(time: &str, feature: f64, wins: bool) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let outcome = |pnl: &str| Outcome {
@@ -598,6 +600,10 @@ mod tests {
                 features: vec![feature],
                 ts_event: ns,
                 ts_init: ns,
+            },
+            payoff: PerSide {
+                long: vec![0.07],
+                short: vec![0.08],
             },
             outcomes: Outcomes {
                 long: outcome(long),
@@ -655,18 +661,33 @@ mod tests {
     /// prediction become `o^0.9`.
     const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
-    /// A fake model valid from `valid_from`, of `fingerprint`, calibrated
-    /// by `CALIBRATION`, its baseline `baseline`.
+    /// A fake side model of `config()` valid from `valid_from`, of
+    /// `fingerprint`, calibrated by `CALIBRATION`, its baseline `baseline`
+    /// (`model_of`).
     fn model(valid_from: Timestamp, fingerprint: String, baseline: f64) -> StoredModel {
-        let set = TrainingSet::new(1, vec![0.5], vec![true]).unwrap();
+        model_of(&config(), valid_from, fingerprint, baseline)
+    }
+
+    /// A fake side model of `config` valid from `valid_from`, of
+    /// `fingerprint`, on the features then the target's payoff names: its
+    /// probability that of the row's first feature calibrated by
+    /// `CALIBRATION`, its baseline `baseline`.
+    fn model_of(
+        config: &ModelConfig,
+        valid_from: Timestamp,
+        fingerprint: String,
+        baseline: f64,
+    ) -> StoredModel {
+        let names = side_names(features().names(), &config.target.payoff_names());
+        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![true]).unwrap();
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
                 strategy_id: StrategyId::from(STRATEGY),
                 valid_from,
                 fingerprint,
-                feature_names: features().names().to_vec(),
-                target: config().target,
+                feature_names: names,
+                target: config.target.clone(),
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
                 calibration: CALIBRATION,
@@ -713,7 +734,7 @@ mod tests {
         for (side, _) in config.margins.sides() {
             let baseline = trained_baseline(side, valid_from);
             store(dir, config, side)
-                .publish(&model(valid_from, fingerprint.clone(), baseline))
+                .publish(&model_of(config, valid_from, fingerprint.clone(), baseline))
                 .unwrap();
         }
     }
@@ -926,7 +947,12 @@ mod tests {
     /// (`OPPOSED`).
     fn publish_opposed(dir: &Path, config: &ModelConfig, side: Side, valid_from: Timestamp) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
-        let mut opposed = model(valid_from, fingerprint, trained_baseline(side, valid_from));
+        let mut opposed = model_of(
+            config,
+            valid_from,
+            fingerprint,
+            trained_baseline(side, valid_from),
+        );
         opposed.manifest.payoff = Some(Payoff {
             win: 3.0,
             loss: 1.0,
@@ -1122,11 +1148,15 @@ mod tests {
     }
 
     /// The row of `row`, a win of the long at 0.8, each side's stop worth
-    /// what `(long, short)` say.
+    /// what `(long, short)` say, its payoff features a bracket's.
     fn row_of_stops(time: &str, (long, short): (f64, f64)) -> TargetRow {
         let mut row = row(time, 0.8, true);
         row.outcomes.long.unit = long;
         row.outcomes.short.unit = short;
+        row.payoff = PerSide {
+            long: vec![1.4, 1.1, 0.07],
+            short: vec![1.3, 1.2, 0.08],
+        };
         row
     }
 

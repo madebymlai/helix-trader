@@ -5,9 +5,13 @@
 //! dataset run), stored as Nautilus custom data, `DatasetRow`, one type for
 //! every strategy and target. A row holds everything needed to read its
 //! trades, so that training, scoring and the meta's examples read nothing
-//! else: each side's P&L, commission, exit and unit, beside its decision's
-//! features. The features are a list column, so each strategy has the width
-//! of its own, and its rows are stored under an identifier
+//! else: each side's payoff features (`targets::SideTarget::payoff`), P&L,
+//! commission, exit and unit, beside its decision's features. A side's model
+//! reads the decision's features, then that side's payoff features, the row
+//! a decision builds alike (`DatasetRow::side`, `deciding::SideRow`). The
+//! features and each side's payoff features are list columns, so each
+//! strategy and target has the widths of its own, and its rows are stored
+//! under an identifier
 //! of its id and its fingerprint (`decide::fingerprint` extended by
 //! `targets::fingerprint`, the venue settings of its dataset runs,
 //! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
@@ -19,9 +23,11 @@
 //! config is read by value, the code by version: the dataset's for the
 //! code making every strategy's rows, the strategy's own for its features
 //! (`FeatureSetBuilder::version`), each bumped by hand.
-//! The feature names are in the metadata of the rows' data type, which
-//! the catalog stores with each file and gives back with each row, so the
-//! rows do not repeat them; `read` checks them.
+//! The feature names and the target's payoff names
+//! (`TargetConfig::payoff_names`) are in the metadata of the rows' data
+//! type, which the catalog stores with each file and gives back with each
+//! row, so the rows do not repeat them; `read` checks them, and each row's
+//! widths.
 //!
 //! The catalog's intervals of the rows are the cache: `missing` asks the
 //! catalog for the days of a span it does not cover, and `build` replays
@@ -67,8 +73,9 @@
 //! intervals, the cache: it is never consolidated.
 //!
 //! Beside the files, each dataset has a manifest, `manifest.json`: its
-//! strategy, fingerprint, feature names in order, target spec and the days it
-//! holds, rewritten whole (write, then rename) at each write.
+//! strategy, fingerprint, feature names and payoff names in order, target
+//! spec and the days it holds, rewritten whole (write, then rename) at each
+//! write.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -94,6 +101,7 @@ use serde_json::json;
 
 use super::{
     decide::{self, DecisionRule},
+    deciding::SideRow,
     features::{FeatureSet, Fingerprint},
     holdout::Trade,
     targets::{self, PerSide, Side, TargetConfig, TargetRow},
@@ -113,10 +121,13 @@ use crate::{
 /// then rebuilds every dataset and model. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows
 /// made without a bump; a change reaching none of them is bumped all the same.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
+
+/// The key of the payoff names in the metadata of the rows' data type.
+const PAYOFF_NAMES: &str = "payoff_names";
 
 /// The name of the manifest file in the directory of a dataset's rows.
 const MANIFEST: &str = "manifest.json";
@@ -127,6 +138,10 @@ const MANIFEST: &str = "manifest.json";
 pub struct DatasetRow {
     /// The value of each feature, in the order of the dataset's names.
     pub features: Vec<f64>,
+    /// The long's payoff features, as its decision set them
+    /// (`targets::SideTarget::payoff`), in the order of the dataset's payoff
+    /// names.
+    pub long_payoff: Vec<f64>,
     /// The long's realised P&L, net of its commission, in the target's P&L
     /// currency.
     pub long_pnl: f64,
@@ -137,6 +152,8 @@ pub struct DatasetRow {
     /// The unit of the long's payoff, as its decision set it
     /// (`targets::SideTarget::unit`).
     pub long_unit: f64,
+    /// The short's payoff features, as the long's.
+    pub short_payoff: Vec<f64>,
     /// The short's realised P&L, as the long's.
     pub short_pnl: f64,
     /// The commission the short's P&L is net of.
@@ -154,7 +171,7 @@ pub struct DatasetRow {
 }
 
 /// The error of a dataset holding rows that do not match its schema: other
-/// feature names, or a row of another width than its feature names.
+/// feature or payoff names, or a row of another width than its names.
 #[derive(Debug)]
 pub struct SchemaMismatch(String);
 
@@ -175,6 +192,9 @@ pub struct Manifest {
     pub fingerprint: String,
     /// The names of the features, in the order of a row's features.
     pub feature_names: Vec<String>,
+    /// The names of the payoff features of each side, the target's, in the
+    /// order of a row's side's payoff features.
+    pub payoff_names: Vec<String>,
     /// The target spec.
     pub target: TargetConfig,
     /// The days stored, in runs of consecutive days.
@@ -228,6 +248,8 @@ pub struct Dataset {
     strategy_id: StrategyId,
     fingerprint: Fingerprint,
     feature_names: Vec<String>,
+    /// The target's payoff names (`TargetConfig::payoff_names`).
+    payoff_names: Vec<String>,
     /// How much a replay runs before its first day: the features' warmup.
     warmup: SignedDuration,
     target: TargetConfig,
@@ -260,6 +282,7 @@ impl Dataset {
             fingerprint: fingerprint(features, rule, &target, requirements, venue)?,
             warmup: features.warmup(),
             feature_names: features.names().to_vec(),
+            payoff_names: target.payoff_names(),
             target,
         })
     }
@@ -428,7 +451,8 @@ impl Dataset {
     /// # Errors
     ///
     /// Returns an error if the catalog cannot be read, or a
-    /// `SchemaMismatch` if it holds rows of other feature names or widths.
+    /// `SchemaMismatch` if it holds rows of other feature or payoff names or
+    /// widths.
     pub fn read(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<DatasetRow>> {
         let identifier = self.identifier();
         let data = self
@@ -451,9 +475,11 @@ impl Dataset {
                 };
                 if custom.data_type.metadata() != want.metadata() {
                     bail!(SchemaMismatch(format!(
-                        "the dataset {identifier} holds rows of the features {:?}, not {:?}",
+                        "the dataset {identifier} holds rows of the features {:?}, not {:?} and \
+                         the payoff {:?}",
                         custom.data_type.metadata(),
-                        self.feature_names
+                        self.feature_names,
+                        self.payoff_names
                     )));
                 }
                 let row = custom
@@ -468,6 +494,15 @@ impl Dataset {
                         row.features.len(),
                         self.feature_names.len()
                     )));
+                }
+                for payoff in [&row.long_payoff, &row.short_payoff] {
+                    if payoff.len() != self.payoff_names.len() {
+                        bail!(SchemaMismatch(format!(
+                            "the dataset {identifier} holds a row of {} payoff features, not {}",
+                            payoff.len(),
+                            self.payoff_names.len()
+                        )));
+                    }
                 }
                 Ok(row)
             })
@@ -525,6 +560,7 @@ impl Dataset {
             strategy_id: self.strategy_id,
             fingerprint: self.fingerprint.to_string(),
             feature_names: self.feature_names.clone(),
+            payoff_names: self.payoff_names.clone(),
             target: self.target.clone(),
             days,
         };
@@ -553,9 +589,13 @@ impl Dataset {
         format!("{}-{}", self.strategy_id, self.fingerprint)
     }
 
-    /// The data type of the rows, the feature names in its metadata.
+    /// The data type of the rows, the feature and payoff names in its
+    /// metadata.
     fn data_type(&self) -> anyhow::Result<DataType> {
-        let metadata = serde_json::from_value(json!({ FEATURE_NAMES: self.feature_names }))?;
+        let metadata = serde_json::from_value(json!({
+            FEATURE_NAMES: self.feature_names,
+            PAYOFF_NAMES: self.payoff_names,
+        }))?;
         Ok(DataType::new(
             DatasetRow::type_name_static(),
             Some(metadata),
@@ -575,10 +615,12 @@ impl DatasetRow {
         let (long, short) = (row.outcomes.long, row.outcomes.short);
         Self {
             features: row.decision.features.clone(),
+            long_payoff: row.payoff.long.clone(),
             long_pnl: long.pnl.as_f64(),
             long_commission: long.commission.as_f64(),
             long_exit: long.exit.value(),
             long_unit: long.unit,
+            short_payoff: row.payoff.short.clone(),
             short_pnl: short.pnl.as_f64(),
             short_commission: short.commission.as_f64(),
             short_exit: short.exit.value(),
@@ -610,12 +652,22 @@ impl DatasetRow {
         }
     }
 
-    /// The unit of each side's payoff.
+    /// `side`'s row, the row its model reads, and its unit
+    /// (`deciding::SideRow`).
     #[must_use]
-    pub const fn units(&self) -> PerSide<f64> {
+    pub fn side(&self, side: Side) -> SideRow {
+        match side {
+            Side::Long => SideRow::new(&self.features, &self.long_payoff, self.long_unit),
+            Side::Short => SideRow::new(&self.features, &self.short_payoff, self.short_unit),
+        }
+    }
+
+    /// Each side's row (`side`).
+    #[must_use]
+    pub fn sides(&self) -> PerSide<SideRow> {
         PerSide {
-            long: self.long_unit,
-            short: self.short_unit,
+            long: self.side(Side::Long),
+            short: self.side(Side::Short),
         }
     }
 }
@@ -799,9 +851,19 @@ mod tests {
         time.parse().unwrap()
     }
 
+    /// The payoff features of each side of the rows of `row`: the take
+    /// profit's R, the stop's nominal loss and the entry cost.
+    fn payoff() -> PerSide<Vec<f64>> {
+        PerSide {
+            long: vec![1.4, 1.1, 0.07],
+            short: vec![1.3, 1.2, 0.08],
+        }
+    }
+
     /// The row of the decision at `time`, settled an hour later: its
     /// features, a long winning `pnl` at its take profit and a short losing
-    /// as much at its stop, each stop worth 2.
+    /// as much at its stop, each stop worth 2, each side's payoff features
+    /// `payoff`'s.
     fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let loss = format!("-{pnl}");
@@ -818,6 +880,7 @@ mod tests {
                 ts_event: ns,
                 ts_init: ns,
             },
+            payoff: payoff(),
             outcomes: Outcomes {
                 long: outcome(pnl, Exit::TakeProfit),
                 short: outcome(&loss, Exit::Stop),
@@ -831,10 +894,12 @@ mod tests {
         let ns = UnixNanos::from(at(time));
         DatasetRow {
             features,
+            long_payoff: payoff().long,
             long_pnl: pnl,
             long_commission: 0.1,
             long_exit: 1.0,
             long_unit: 2.0,
+            short_payoff: payoff().short,
             short_pnl: -pnl,
             short_commission: 0.1,
             short_exit: -1.0,
@@ -853,6 +918,8 @@ mod tests {
                     let values = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
                     (
                         values(&row.features),
+                        values(&row.long_payoff),
+                        values(&row.short_payoff),
                         values(&[
                             row.long_pnl,
                             row.long_commission,
@@ -877,7 +944,7 @@ mod tests {
     /// hand: every value of a side under that side's names, whatever the
     /// target, each side's its own.
     #[test]
-    fn a_row_stores_each_sides_pnl_commission_exit_and_unit_under_its_names() {
+    fn a_row_stores_each_sides_payoff_pnl_commission_exit_and_unit_under_its_names() {
         let mut settled = row("2026-01-05T09:00:00Z", vec![1.5], "2.5");
         settled.outcomes.short = Outcome {
             pnl: Money::from("-3.5 USD"),
@@ -905,9 +972,10 @@ mod tests {
     }
 
     /// A long gaining 0.25 net of 0.75 and a short at nought: the long gained,
-    /// the short did not, and each answers its own trade and unit.
+    /// the short did not, and each answers its own trade, and its row, the
+    /// decision's features then its own payoff features, and unit.
     #[test]
-    fn a_row_answers_each_sides_gain_trade_and_unit() {
+    fn a_row_answers_each_sides_gain_trade_row_and_unit() {
         let row = DatasetRow {
             long_pnl: 0.25,
             long_commission: 0.75,
@@ -915,7 +983,7 @@ mod tests {
             short_pnl: 0.0,
             short_commission: 0.5,
             short_unit: 1.5,
-            ..stored("2026-01-05T09:00:00Z", vec![], 0.0)
+            ..stored("2026-01-05T09:00:00Z", vec![4000.5, -2.0], 0.0)
         };
 
         assert!(row.gained(Side::Long));
@@ -935,12 +1003,37 @@ mod tests {
             }
         );
         assert_eq!(
-            row.units(),
+            row.sides(),
             PerSide {
-                long: 3.0,
-                short: 1.5
+                long: SideRow {
+                    features: vec![4000.5, -2.0, 1.4, 1.1, 0.07],
+                    unit: 3.0
+                },
+                short: SideRow {
+                    features: vec![4000.5, -2.0, 1.3, 1.2, 0.08],
+                    unit: 1.5
+                },
             }
         );
+    }
+
+    /// The target's payoff names are three, a bracket's: a row of a payoff
+    /// of one under them is refused as read.
+    #[test]
+    fn a_row_of_another_payoff_width_is_a_schema_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dataset(dir.path(), STRATEGY, 1);
+        let mut narrow = row("2026-01-05T09:00:00Z", vec![1.0], "1");
+        narrow.payoff = PerSide {
+            long: vec![0.1],
+            short: vec![0.2],
+        };
+        let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
+        dataset.write(&[narrow], from, to).unwrap();
+
+        let err = dataset.read(from, to).unwrap_err();
+
+        assert!(err.downcast_ref::<SchemaMismatch>().is_some(), "{err:#}");
     }
 
     #[test]
@@ -1197,7 +1290,7 @@ mod tests {
         }
     }
     #[test]
-    fn the_manifest_names_the_features_the_target_the_days_and_the_fingerprint() {
+    fn the_manifest_names_the_features_the_payoff_the_target_the_days_and_the_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 2);
         for (time, from, to) in [
@@ -1226,6 +1319,10 @@ mod tests {
 
         assert_eq!(manifest.strategy_id, StrategyId::from(STRATEGY));
         assert_eq!(manifest.feature_names, ["mid_0", "mid_1"]);
+        assert_eq!(
+            manifest.payoff_names,
+            ["take_profit_r", "stop_loss_r", "entry_cost"]
+        );
         assert_eq!(manifest.target, target());
         assert_eq!(
             manifest.days,

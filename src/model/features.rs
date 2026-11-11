@@ -55,7 +55,10 @@
 //! last price of a quote) is logged and the update goes on.
 //!
 //! The names and their order are fixed when the set is built; `values`
-//! snapshots the features in that order, once every one is initialized.
+//! snapshots the features in that order, once every one is initialized. A
+//! side model reads them, then its side's payoff features, which the target
+//! names (`side_names`, `side_row`); a meta model reads them, then the side
+//! picked and its probability (`meta_names`, `meta_row`).
 //! A feature exposes its current value through `Feature`, which every
 //! Nautilus moving average has with no extra code. Custom data of an
 //! instrument, which Nautilus' `Indicator` does not handle, feeds a raw
@@ -127,6 +130,21 @@ use crate::{
         warmup::{BookIndicator, CustomDataIndicator},
     },
 };
+
+/// The names of a side model's features: the strategy's `names`, then the
+/// target's `payoff` names (`targets::TargetConfig::payoff_names`), in the
+/// order of `side_row`.
+#[must_use]
+pub fn side_names(names: &[String], payoff: &[String]) -> Vec<String> {
+    names.iter().chain(payoff).cloned().collect()
+}
+
+/// A side model's row: the decision's `features`, then its side's `payoff`
+/// features (`targets::SideTarget::payoff`), in the order of `side_names`.
+#[must_use]
+pub fn side_row(features: &[f64], payoff: &[f64]) -> Vec<f64> {
+    features.iter().chain(payoff).copied().collect()
+}
 
 /// The names of the side picked and its probability, the last values of
 /// a meta model's rows.

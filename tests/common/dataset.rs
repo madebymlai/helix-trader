@@ -20,7 +20,7 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         dataset::{self, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
-        features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES},
+        features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES, side_names},
         handle::{Decision, Mode, ModelHandle, SettledRows},
         holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
@@ -445,9 +445,10 @@ pub fn missing() -> FeatureSetBuilder {
 pub const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
 
 /// A baseline long or short model of the probe deciding on `features` as
-/// `config` says, valid from `valid_from`, predicting `trues` tenths
-/// whatever the row, calibrated by `CALIBRATION`, expecting a win and a
-/// loss of 1R, as a train publishes one: above 0.5 a trade expected to
+/// `config` says, its rows the features then the target's payoff features
+/// (`features::side_names`), valid from `valid_from`, predicting `trues`
+/// tenths whatever the row, calibrated by `CALIBRATION`, expecting a win and
+/// a loss of 1R, as a train publishes one: above 0.5 a trade expected to
 /// gain. For a test whose models come from no train: the fixture's walk
 /// has no edge for a train to publish on (`backtest_train` trains on one).
 pub fn baseline_of(
@@ -460,7 +461,7 @@ pub fn baseline_of(
     stored_baseline(
         features,
         config,
-        features.names().to_vec(),
+        side_names(features.names(), &config.target.payoff_names()),
         Some(side),
         valid_from,
         trues,

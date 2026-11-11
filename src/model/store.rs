@@ -21,11 +21,14 @@
 //!
 //! A strategy's stores are built together, as its model set (`ModelSet`),
 //! and only there: the fingerprint is computed once and keys them all. The
-//! model set holds each side the margins trade, with its margin and its
-//! store, and the meta level, if any, with its config, its feature names
-//! and its store; it hands out the swap of the sides' pairs and of the
-//! meta's models, checked against the level's feature names and the
-//! fingerprint, and lists when each model was published.
+//! model set holds each side the margins trade, with its margin, its feature
+//! names (the strategy's, then the target's payoff names,
+//! `features::side_names`) and its store, and the meta level, if any, with
+//! its config, its feature names and its store; it hands out the swap of the
+//! sides' pairs and of the meta's models, checked against the level's
+//! feature names and the fingerprint, and lists when each model was
+//! published. A train reads a level's feature names from it, so the names a
+//! model is published with are those it is checked against.
 //!
 //! The sides' models are used as pairs (`Pair`), the sides one train
 //! published, valid from one time: a pair's valid-from is a time every side
@@ -70,7 +73,7 @@ use super::{
     calibration::Calibration,
     config::{Margins, MetaConfig, ModelConfig},
     dataset::{self, DatasetVenue},
-    features::{FeatureSet, Fingerprint, meta_names},
+    features::{FeatureSet, Fingerprint, meta_names, side_names},
     holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
     payoff::Payoff,
@@ -379,6 +382,7 @@ impl ModelSet {
         )?;
         let training = training_directory(root, strategy_id, fingerprint, config, VERSION)?;
         let fingerprint = fingerprint.to_string();
+        let side_names = side_names(features.names(), &config.target.payoff_names());
         let sides = config
             .margins
             .sides()
@@ -387,7 +391,7 @@ impl ModelSet {
                 margin,
                 models: CheckedStore {
                     store: ModelStore::new(&training, side, config.margins),
-                    feature_names: features.names().to_vec(),
+                    feature_names: side_names.clone(),
                     fingerprint: fingerprint.clone(),
                 },
             })
@@ -491,6 +495,14 @@ impl SideLevel {
     #[must_use]
     pub const fn store(&self) -> &ModelStore {
         &self.models.store
+    }
+
+    /// The names of the side model's features, in the order of its rows
+    /// (`features::side_names`): the strategy's, then the target's payoff
+    /// names.
+    #[must_use]
+    pub fn feature_names(&self) -> &[String] {
+        &self.models.feature_names
     }
 }
 

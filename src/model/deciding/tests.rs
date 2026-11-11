@@ -27,14 +27,25 @@ use crate::{
 const MIDNIGHT: &str = "2026-10-22T00:00:00Z";
 const NOON: &str = "2026-10-22T12:00:00Z";
 
-/// The row decided on: the mid of 0.7, which a baseline does not read.
+/// The decision's features: the mid of 0.7, which a baseline does not read.
 const ROW: [f64; 1] = [0.7];
+
+/// Each side's row of `ROW` on the tests' time-only target, its unit worth
+/// `units`' of its side: the mid, then the side's entry cost, 0.23 USD.
+fn rows(units: PerSide<f64>) -> PerSide<SideRow> {
+    units.map(|unit| SideRow::new(&ROW, &[0.23], unit))
+}
 
 /// The units of a time-only target, its payoffs being in money.
 const IN_MONEY: PerSide<f64> = PerSide {
     long: 1.0,
     short: 1.0,
 };
+
+/// The rows of a time-only target, its payoffs being in money.
+fn in_money() -> PerSide<SideRow> {
+    rows(IN_MONEY)
+}
 
 /// The models of `config` under `models`, listed now.
 fn listed(models: &Path, config: &ModelConfig) -> DecidingModels {
@@ -62,7 +73,7 @@ fn listed_with(
 /// What `models` decide at `time` on `ROW`, in money, of 1000.
 fn decided(models: &mut DecidingModels, time: &str) -> Option<Taken> {
     models
-        .decide(at(time), &ROW, IN_MONEY, Quantity::from(1000))
+        .decide(at(time), &ROW, &in_money(), Quantity::from(1000))
         .unwrap()
 }
 
@@ -74,7 +85,7 @@ fn probability(models: &mut DecidingModels, time: &str) -> Option<f64> {
 /// The side `models` pick at noon on `ROW`, the units being `units`.
 fn side_picked(models: &mut DecidingModels, units: PerSide<f64>) -> Option<Side> {
     models
-        .pick(at(NOON), &ROW, units)
+        .pick(at(NOON), &rows(units))
         .unwrap()
         .map(|picked| picked.side)
 }
@@ -334,7 +345,7 @@ fn a_failed_listing_of_the_meta_keeps_the_sides_previous_lists() {
     set.meta().unwrap().store().break_listing();
     let listing = models.list();
 
-    let picked = models.pick(at(NOON), &ROW, IN_MONEY).unwrap().unwrap();
+    let picked = models.pick(at(NOON), &in_money()).unwrap().unwrap();
     assert!(listing.is_err());
     assert_eq!(picked.probability, c(0.7));
 }
@@ -390,10 +401,12 @@ fn a_model_of_another_fingerprint_is_refused_and_the_current_kept() {
     kept_over(refused);
 }
 
+/// A side's rows are two wide, the mid and the entry cost: a model of three
+/// is refused.
 #[test]
 fn a_model_of_another_width_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
-    let set = TrainingSet::new(2, vec![0.5; 4], vec![true, true]).unwrap();
+    let set = TrainingSet::new(3, vec![0.5; 6], vec![true, true]).unwrap();
     refused.model = LearnerConfig::Baseline {}
         .fit(&set)
         .unwrap()
@@ -430,7 +443,7 @@ fn a_side_expected_to_clear_its_margin_is_picked_with_its_probability_and_expect
     let mut models = listed_with(root.path(), &config(), (Some(6), None));
 
     assert_eq!(
-        models.pick(at(NOON), &ROW, IN_MONEY).unwrap(),
+        models.pick(at(NOON), &in_money()).unwrap(),
         Some(Picked {
             side: Side::Long,
             probability: c(0.6),
@@ -504,7 +517,7 @@ fn an_expected_r_is_weighed_by_the_unit_of_the_side() {
     let mut models = listed_with(root.path(), &config, (Some(8), None));
     let worth = |long| PerSide { long, short: 1.0 };
 
-    let picked = models.pick(at(NOON), &ROW, worth(0.70)).unwrap().unwrap();
+    let picked = models.pick(at(NOON), &rows(worth(0.70))).unwrap().unwrap();
 
     assert!((picked.expected_pnl - 0.387_653).abs() < 1e-5, "{picked:?}");
     assert_eq!(side_picked(&mut models, worth(0.14)), None);
@@ -534,7 +547,7 @@ fn each_side_is_weighed_by_its_own_unit() {
 /// A side's model predicting `trues` tenths, in no store.
 fn in_hand(trues: usize) -> SideModel {
     let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
+    let set = TrainingSet::new(2, vec![0.5; 20], labels).unwrap();
     let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
     SideModel::new(
         LoadedModel::new(model, CALIBRATION, trues as f64 / 10.0),
@@ -564,8 +577,7 @@ fn models_in_hand_are_picked_among_with_no_store() {
                 model: &short,
             },
         ],
-        &ROW,
-        IN_MONEY,
+        &in_money(),
     )
     .unwrap();
 
@@ -598,8 +610,7 @@ fn a_model_in_hand_is_held_to_its_own_margin() {
                 model: &short,
             },
         ],
-        &ROW,
-        IN_MONEY,
+        &in_money(),
     )
     .unwrap();
 
@@ -705,7 +716,7 @@ fn a_meta_model_not_sizing_keeps_the_sizes_precision() {
     let size = Quantity::from("1000.5");
 
     let taken = models
-        .decide(at(NOON), &ROW, IN_MONEY, size)
+        .decide(at(NOON), &ROW, &in_money(), size)
         .unwrap()
         .unwrap();
 

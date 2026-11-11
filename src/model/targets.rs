@@ -19,7 +19,7 @@
 //! time close (`orders::is_time_close`).
 //!
 //! The exits (`BracketSpec`) are `take_profit` and `stop` away from the
-//! decision's price (`reference`): the mid of the instrument's last quote,
+//! decision's price (`EntryQuote`): the mid of the instrument's last quote,
 //! else its last trade, else the close of its last bar. Each distance is
 //! relative (`Distance`): basis points of that price, or multiples of an
 //! average true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR`
@@ -64,10 +64,25 @@
 //! fills and which the setter is handed in every mode, so what a fill of
 //! the target costs (`Commission::cost`) is what a row is net of.
 //!
+//! The setter gives each side, as it sets the target, its payoff features
+//! (`PayoffFeature`, `SideTarget::payoff`): what the target knows of the
+//! side's payoff at the decision, from its exits, the entry quote (the ask a
+//! long's, the bid a short's, of the instrument's last quote; without a
+//! quote, on trades or bars alone, the price the target is set from, with no
+//! spread) and what the commission charges each fill (`Commission::cost`),
+//! over the side's unit: with a bracket, the take profit's R and the stop's
+//! nominal loss; on every target, the entry cost, the spread and the entry's
+//! commission. Their names are written here alone and handed out by the
+//! target (`TargetConfig::payoff_names`), in the order of the values: a
+//! dataset's rows, a train, a store's manifests and a decision read them from
+//! there, and every side model reads the strategy's features, then its own
+//! side's payoff features (`features::side_names`).
+//!
 //! Once both sides of a decision have an outcome, the decision is settled
 //! and its row, a `TargetRow`, published on the message bus, custom data
-//! keyed by the strategy's id (`TargetRow::data_type`), each outcome with the
-//! unit its decision set on its side (`SideTarget::unit`). A decision whose
+//! keyed by the strategy's id (`TargetRow::data_type`), with each side's
+//! payoff features and each outcome with the unit its decision set on its
+//! side (`SideTarget::unit`). A decision whose
 //! order the risk engine denies or the venue rejects, or whose entry has not
 //! filled by its time limit (the module cancels it then, and the strategy
 //! hands the targets the cancel, `on_order_canceled`), is unsettled: logged,
@@ -77,11 +92,13 @@
 //! One function sets a target, `TargetSetter::at`, for a dataset run's
 //! decisions and for those of a strategy trading on a model of the target; it
 //! says why it set none, which a dataset run logs and a trading decision does
-//! not need. `Targets` adds only sending the orders and settling. A time-only
-//! target reads no instrument on either path, so a dataset run finds one
-//! missing from the cache only as it sends the orders. `Targets::start`
-//! refuses a bracket on an inverse instrument; live, the setter errors at each
-//! decision.
+//! not need. `Targets` adds only sending the orders and settling. Every target
+//! reads its instrument, its payoff features costing its fills, so one
+//! missing from the cache is the setter's error, before any order. A payoff
+//! has a worth only on a linear instrument, at a commission charged in the
+//! instrument's P&L currency, which is not converted: `Targets::start`
+//! refuses an inverse instrument and a commission in another currency, on
+//! every target; live, the setter errors at each decision.
 //!
 //! A quote at the same nanosecond as a time alert reaches the venue first,
 //! so an exit hit at the time limit counts as inside the window. On bars
@@ -264,12 +281,16 @@ pub struct Outcomes {
     pub short: Outcome,
 }
 
-/// A settled decision: its features and the outcome of its target on each
-/// side, published on the message bus.
+/// A settled decision: its features, the payoff features of its target on
+/// each side and the outcome of its target on each side, published on the
+/// message bus.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TargetRow {
     /// The decision, as `decide` published it.
     pub decision: FeatureRow,
+    /// The payoff features of each side's target, as the decision set them
+    /// (`SideTarget::payoff`).
+    pub payoff: PerSide<Vec<f64>>,
     /// The target's outcomes.
     pub outcomes: Outcomes,
     /// When the last of its positions closed.
@@ -299,6 +320,8 @@ struct State {
 /// An open decision.
 struct Decision {
     row: FeatureRow,
+    /// The payoff features set on each side.
+    payoff: PerSide<Vec<f64>>,
     /// The unit set on each side.
     units: PerSide<f64>,
     outcomes: BTreeMap<Side, Outcome>,
@@ -321,7 +344,7 @@ pub enum Side {
 }
 
 /// A value for each side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PerSide<T> {
     pub long: T,
     pub short: T,
@@ -344,19 +367,56 @@ impl<T> PerSide<T> {
             short: f(self.short),
         }
     }
+
+    /// A reference to each side's value.
+    #[must_use]
+    pub const fn as_ref(&self) -> PerSide<&T> {
+        PerSide {
+            long: &self.long,
+            short: &self.short,
+        }
+    }
 }
 
 /// A target as a decision sets it on one side (`TargetSetter::at`): the
 /// price it is set from, its exits on the instrument's ticks if it has
-/// them, when it ends after its send, and what the unit of its side's
-/// payoff is worth in money: the stop's worth (`stop_worth`), the payoff
-/// being in R, or 1 without exits, the payoff being in money.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// them, when it ends after its send, what the unit of its side's payoff
+/// is worth in money: the stop's worth (`stop_worth`), the payoff being in
+/// R, or 1 without exits, the payoff being in money; and its payoff
+/// features, in the order of the target's (`TargetConfig::payoff_names`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct SideTarget {
     pub reference: Price,
     pub bracket: Option<Bracket>,
     pub time_limit: SignedDuration,
     pub unit: f64,
+    pub payoff: Vec<f64>,
+}
+
+/// A payoff feature of a side's target, what the target knows of the
+/// side's payoff as a decision sets it (`SideTarget::payoff`), each named
+/// here alone (`name`). Each is money over the side's unit
+/// (`SideTarget::unit`): the side enters at its entry, the ask a long and
+/// the bid a short, of the instrument's last quote, or at the price the
+/// target is set from where there is no quote, with no spread; `c(p)` is
+/// what a fill of the target's size at `p` costs (`Commission::cost`), and
+/// each price difference is worth its distance on the target's size
+/// (`worth`). For a long of take profit `up` and stop `down`:
+///
+/// - `TakeProfit`, the take profit's R: (up − ask − c(ask) − c(up)) / unit;
+/// - `StopLoss`, the stop's nominal loss, before any overshoot:
+///   (ask − down + c(ask) + c(down)) / unit;
+/// - `EntryCost`, the spread plus the entry's commission:
+///   (ask − bid + c(ask)) / unit.
+///
+/// A short mirrors them: its take profit below, its stop above, entering at
+/// the bid. A target has the features of the barriers it has
+/// (`Target::payoff_features`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoffFeature {
+    TakeProfit,
+    StopLoss,
+    EntryCost,
 }
 
 /// Why a decision sets no target (`TargetSetter::at`).
@@ -560,6 +620,18 @@ impl TargetConfig {
         ))
     }
 
+    /// The names of its payoff features (`PayoffFeature::name`), in the
+    /// order of a side's values (`SideTarget::payoff`): the one place a
+    /// dataset, a train, a store and a decision read them from.
+    #[must_use]
+    pub fn payoff_names(&self) -> Vec<String> {
+        self.spec
+            .payoff_features()
+            .iter()
+            .map(|feature| feature.name().to_string())
+            .collect()
+    }
+
     /// The longest time a decision's target stays open: its limit. A
     /// decision is settled by then: a time close fills at once, on the
     /// venue's last quote at the alert's own time.
@@ -618,6 +690,32 @@ impl Target {
         self.bracket
             .filter(BracketSpec::uses_atr)
             .map(|bracket| bracket.atr.unwrap_or(DEFAULT_ATR))
+    }
+
+    /// The payoff features of the barriers it has, in order: with a
+    /// bracket, the take profit's R and the stop's nominal loss; then the
+    /// entry cost, which every target has.
+    const fn payoff_features(&self) -> &'static [PayoffFeature] {
+        match self.bracket {
+            Some(_) => &[
+                PayoffFeature::TakeProfit,
+                PayoffFeature::StopLoss,
+                PayoffFeature::EntryCost,
+            ],
+            None => &[PayoffFeature::EntryCost],
+        }
+    }
+}
+
+impl PayoffFeature {
+    /// Its name, in a dataset's and a model's feature names.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TakeProfit => "take_profit_r",
+            Self::StopLoss => "stop_loss_r",
+            Self::EntryCost => "entry_cost",
+        }
     }
 }
 
@@ -865,19 +963,16 @@ impl Debug for BracketWidth {
 
 /// What sets the target of a decision on each side, of a dataset run and of
 /// a trading strategy alike: its exits, if it has them, from the decision's
-/// price (`reference`) and the target's ATR, on the instrument's ticks, and
-/// the worth of the unit an expected P&L is weighed by and a row's trades are
-/// read over. It holds the run's commission, what a fill of the target
-/// costs (`Commission::cost`), the one its dataset runs' fills are charged.
+/// price (`EntryQuote`) and the target's ATR, on the instrument's ticks, the
+/// worth of the unit an expected P&L is weighed by and a row's trades are
+/// read over, and the side's payoff features (`PayoffFeature`). It holds the
+/// run's commission, what a fill of the target costs (`Commission::cost`),
+/// the one its dataset runs' fills are charged.
 pub struct TargetSetter {
     instrument_id: InstrumentId,
     quantity: Quantity,
     spec: Target,
     atr: Option<Rc<TargetAtr>>,
-    #[expect(
-        dead_code,
-        reason = "held for the payoff features a target computes at a decision"
-    )]
     commission: Commission,
 }
 
@@ -973,14 +1068,15 @@ impl TargetSetter {
 
     /// The target of each side at a decision of `strategy` now, or why none
     /// is set: the ATR not yet initialized, no price of the instrument yet or
-    /// an exit on the decision's price (`NoTarget`). Without exits, the
-    /// instrument itself is not read, so nothing of it can refuse the target.
+    /// an exit on the decision's price (`NoTarget`). Every target reads the
+    /// instrument, its payoff features costing its fills (`payoff`).
     ///
     /// # Errors
     ///
-    /// Returns an error if, with exits, the instrument is not in the cache,
-    /// or an exit is outside its prices or a stop has no worth (on an
-    /// inverse instrument, see `ensure_linear`).
+    /// Returns an error if the instrument is not in the cache, or its payoff
+    /// has no worth (`ensure_payable`: an inverse instrument, or the
+    /// commission in another currency than its P&L's), or an exit is outside
+    /// its prices.
     pub fn at<S>(&self, strategy: &S) -> anyhow::Result<Result<PerSide<SideTarget>, NoTarget>>
     where
         S: DataActor + DataActorNative,
@@ -994,45 +1090,121 @@ impl TargetSetter {
         };
         let instrument_id = self.instrument_id;
         let cache = strategy.cache();
-        let time_limit = self.spec.limit;
-        let Some(bracket) = self.spec.bracket else {
-            let target = reference(&cache, &instrument_id).ok_or(NoTarget::NoPrice);
-            return Ok(target.map(|reference| {
-                let target = SideTarget {
-                    reference,
-                    bracket: None,
-                    time_limit,
-                    unit: 1.0,
-                };
-                PerSide {
-                    long: target,
-                    short: target,
-                }
-            }));
-        };
         let instrument = cache
             .instrument(&instrument_id)
             .with_context(|| format!("instrument {instrument_id} not in cache"))?;
-        let Some(reference) = reference(&cache, &instrument_id) else {
+        self.ensure_payable(&instrument)?;
+        let Some(quote) = EntryQuote::last(&cache, &instrument_id) else {
             return Ok(Err(NoTarget::NoPrice));
         };
-        let Some(exits) = exits(bracket, &instrument, reference.as_decimal(), atr)? else {
-            return Ok(Err(NoTarget::ExitOnPrice(reference)));
+        let reference = quote.reference;
+        let exits = match self.spec.bracket {
+            None => None,
+            Some(bracket) => match exits(bracket, &instrument, reference.as_decimal(), atr)? {
+                Some(exits) => Some(exits),
+                None => return Ok(Err(NoTarget::ExitOnPrice(reference))),
+            },
         };
-        let target = |bracket: Bracket| -> anyhow::Result<SideTarget> {
-            let distance = (bracket.stop_loss.as_decimal() - reference.as_decimal()).abs();
-            let unit = stop_worth(&instrument, self.quantity, distance)?;
+        let target = |side: Side| -> anyhow::Result<SideTarget> {
+            let bracket = exits.map(|exits| *exits.of(side));
+            let unit = match bracket {
+                Some(bracket) => {
+                    let distance = (bracket.stop_loss.as_decimal() - reference.as_decimal()).abs();
+                    stop_worth(&instrument, self.quantity, distance)?
+                }
+                None => 1.0,
+            };
             Ok(SideTarget {
                 reference,
-                bracket: Some(bracket),
-                time_limit,
+                bracket,
+                time_limit: self.spec.limit,
                 unit,
+                payoff: self.payoff(&instrument, side, quote, bracket, unit)?,
             })
         };
         Ok(Ok(PerSide {
-            long: target(exits.long)?,
-            short: target(exits.short)?,
+            long: target(Side::Long)?,
+            short: target(Side::Short)?,
         }))
+    }
+
+    /// The payoff features of `side`'s target on `instrument`
+    /// (`PayoffFeature`), in the order of the target's: entering on `quote`,
+    /// its exits `bracket`, if any, its unit worth `unit`. The take profit's R
+    /// is the net P&L of the trade filled at its take profit, the stop's
+    /// nominal loss the net loss of the trade filled at its stop, each over
+    /// the unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the size cannot be made in the instrument's sizes,
+    /// a fill's cost cannot be computed (`Commission::cost`), or a worth
+    /// overflows.
+    fn payoff(
+        &self,
+        instrument: &InstrumentAny,
+        side: Side,
+        quote: EntryQuote,
+        bracket: Option<Bracket>,
+        unit: f64,
+    ) -> anyhow::Result<Vec<f64>> {
+        let quantity = made(instrument, self.quantity)?;
+        let entry = quote.entry(side);
+        let cost = |price: Price| -> anyhow::Result<Decimal> {
+            Ok(self
+                .commission
+                .cost(quantity, price, instrument)?
+                .as_decimal())
+        };
+        let net = |exit: Price| -> anyhow::Result<Decimal> {
+            let gross = side.sign() * (exit.as_decimal() - entry.as_decimal());
+            Ok(worth(instrument, quantity, gross)? - cost(entry)? - cost(exit)?)
+        };
+        let exit_prices = || bracket.expect("a target with the features of exits has a bracket");
+        self.spec
+            .payoff_features()
+            .iter()
+            .map(|feature| {
+                let money = match feature {
+                    PayoffFeature::TakeProfit => net(exit_prices().take_profit)?,
+                    PayoffFeature::StopLoss => -net(exit_prices().stop_loss)?,
+                    PayoffFeature::EntryCost => {
+                        let spread = quote.ask.as_decimal() - quote.bid.as_decimal();
+                        worth(instrument, quantity, spread)? + cost(entry)?
+                    }
+                };
+                let money = money
+                    .to_f64()
+                    .with_context(|| format!("the payoff {money} in f64"))?;
+                Ok(money / unit)
+            })
+            .collect()
+    }
+
+    /// Checks that the target's payoff on `instrument` has a worth: the
+    /// instrument linear (`ensure_linear`), and the commission charged in its
+    /// P&L currency, its cost currency, which Nautilus nets a position's
+    /// realised P&L of alone: a commission in another currency is not
+    /// converted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `instrument` is inverse, or the commission is
+    /// charged in another currency.
+    fn ensure_payable(&self, instrument: &InstrumentAny) -> anyhow::Result<()> {
+        ensure_linear(instrument)?;
+        let (charged, pnl) = (
+            self.commission.currency(instrument),
+            instrument.cost_currency(),
+        );
+        ensure!(
+            charged == pnl,
+            "the commission {} is charged in {charged}, not in {pnl}, the currency of the P&L \
+             of {}: a target's costs are not converted",
+            self.commission.normalized(),
+            instrument.id()
+        );
+        Ok(())
     }
 }
 
@@ -1045,12 +1217,7 @@ impl Debug for TargetSetter {
 }
 
 /// What a stop `distance` in price away is worth on `quantity` of
-/// `instrument`, made in its sizes, in its P&L currency: exactly quantity times
-/// multiplier times distance, not rounded to the currency's precision, the
-/// money made as Nautilus' `Position` makes its P&L. Nautilus' notional value
-/// of the distance is rounded to that precision, and it has no call on an
-/// instrument returning one unrounded, so this one product is ours, written as
-/// it writes it.
+/// `instrument`, made in its sizes (`made`), as money (`worth`).
 ///
 /// # Errors
 ///
@@ -1063,27 +1230,53 @@ fn stop_worth(
     distance: Decimal,
 ) -> anyhow::Result<f64> {
     ensure_linear(instrument)?;
+    let worth = worth(instrument, made(instrument, quantity)?, distance)?;
+    Ok(Money::from_decimal_native(worth, instrument.cost_currency())?.as_f64())
+}
+
+/// `quantity` made in `instrument`'s sizes, as its orders are.
+///
+/// # Errors
+///
+/// Returns an error if it cannot be.
+fn made(instrument: &InstrumentAny, quantity: Quantity) -> anyhow::Result<Quantity> {
     let size = quantity.as_decimal();
-    let quantity = instrument
+    instrument
         .try_make_qty_from_decimal(size, None)
-        .map_err(|e| anyhow::anyhow!("ordering {size} of {}: {e}", instrument.id()))?;
-    let worth = quantity
+        .map_err(|e| anyhow::anyhow!("ordering {size} of {}: {e}", instrument.id()))
+}
+
+/// What a `distance` in price is worth on `quantity` of linear `instrument`,
+/// in its sizes, in its P&L currency: exactly quantity times multiplier times
+/// distance, not rounded to the currency's precision, the money made as
+/// Nautilus' `Position` makes its P&L. Nautilus' notional value of the
+/// distance is rounded to that precision, and it has no call on an instrument
+/// returning one unrounded, so this one product is ours, written as it writes
+/// it.
+///
+/// # Errors
+///
+/// Returns an error if the worth overflows.
+fn worth(
+    instrument: &InstrumentAny,
+    quantity: Quantity,
+    distance: Decimal,
+) -> anyhow::Result<Decimal> {
+    quantity
         .as_decimal()
         .checked_mul(instrument.multiplier().as_decimal())
         .and_then(|value| value.checked_mul(distance))
         .with_context(|| {
             format!(
-                "the worth of a stop {distance} away on {size} of {} overflows",
+                "the worth of {distance} on {quantity} of {} overflows",
                 instrument.id()
             )
-        })?;
-    Ok(Money::from_decimal_native(worth, instrument.cost_currency())?.as_f64())
+        })
 }
 
-/// Checks that a target's stops on `instrument` have a worth
-/// (`stop_worth`): an inverse instrument's P&L is no multiple of a distance,
-/// as Nautilus' notional value on one divides by its price. A time-only target
-/// has no stop to weigh, and works on it.
+/// Checks that a target's payoff on `instrument` has a worth (`worth`): an
+/// inverse instrument's P&L is no multiple of a distance, as Nautilus'
+/// notional value on one divides by its price.
 ///
 /// # Errors
 ///
@@ -1091,7 +1284,7 @@ fn stop_worth(
 fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
     ensure!(
         !instrument.is_inverse(),
-        "{} is inverse: a target's stop on it has no worth in R",
+        "{} is inverse: a target's payoff on it is no multiple of a distance in price",
         instrument.id()
     );
     Ok(())
@@ -1209,27 +1402,26 @@ impl Targets {
         }))
     }
 
-    /// Starts the targets on `actor`, from its `on_start`: refuses a bracket
-    /// on an inverse instrument, then starts the target's ATR, if any
-    /// (`TargetSetter::start`). The refusal is here because a failed `on_start`
-    /// ends the node's run with its error, while an error at a decision is only
-    /// logged by Nautilus and would leave an empty dataset. A time-only target
-    /// has no stop to weigh, and works on an inverse instrument. A bracket's
-    /// instrument not in the cache is not refused here: it errs at each
+    /// Starts the targets on `actor`, from its `on_start`: refuses a target
+    /// whose payoff has no worth, on an inverse instrument or at a commission
+    /// charged in another currency than its P&L's
+    /// (`TargetSetter::ensure_payable`), then starts the target's ATR, if any
+    /// (`TargetSetter::start`). The refusal is here because a failed
+    /// `on_start` ends the node's run with its error, while an error at a
+    /// decision is only logged by Nautilus and would leave an empty dataset.
+    /// An instrument not in the cache is not refused here: it errs at each
     /// decision (`TargetSetter::at`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the target has exits and its instrument in the
-    /// cache is inverse (`ensure_linear`).
+    /// Returns an error if the target's instrument in the cache is inverse,
+    /// or the commission is charged in another currency than its P&L's.
     pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        if self.config.spec.bracket.is_some()
-            && let Some(instrument) = actor.cache().instrument(&self.config.instrument_id)
-        {
-            ensure_linear(&instrument)?;
+        if let Some(instrument) = actor.cache().instrument(&self.config.instrument_id) {
+            self.setter.ensure_payable(&instrument)?;
         }
         self.setter.start(actor);
         Ok(())
@@ -1291,10 +1483,10 @@ impl Targets {
             }
         };
         let decision = next_decision();
-        self.state.borrow_mut().open.insert(
-            decision,
-            Decision::new(row, targets.map(|target| target.unit)),
-        );
+        self.state
+            .borrow_mut()
+            .open
+            .insert(decision, Decision::new(row, &targets));
         let sent = self.send(strategy, decision, &targets);
         if let Err(e) = &sent {
             self.unsettle(decision, format_args!("sending its orders: {e}"));
@@ -1415,6 +1607,7 @@ impl Targets {
             };
             let row = TargetRow {
                 decision: decision.row.clone(),
+                payoff: decision.payoff.clone(),
                 outcomes,
                 settled_at: event.ts_event,
             };
@@ -1471,11 +1664,12 @@ impl Debug for Targets {
 }
 
 impl Decision {
-    /// The decision of `row`, `units` set on its sides.
-    fn new(row: FeatureRow, units: PerSide<f64>) -> Self {
+    /// The decision of `row`, its sides' targets set as `targets`.
+    fn new(row: FeatureRow, targets: &PerSide<SideTarget>) -> Self {
         Self {
             row,
-            units,
+            payoff: targets.as_ref().map(|target| target.payoff.clone()),
+            units: targets.as_ref().map(|target| target.unit),
             outcomes: BTreeMap::new(),
         }
     }
@@ -1600,21 +1794,50 @@ fn exit<S: DataActor + DataActorNative>(
     }
 }
 
-/// The price a decision's exits are set from: the mid of the instrument's
-/// last quote, else its last trade, else the close of its last bar, of any
-/// bar type.
-fn reference(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Price> {
-    cache
-        .price(instrument_id, PriceType::Mid)
-        .or_else(|| cache.price(instrument_id, PriceType::Last))
-        .or_else(|| {
+/// The prices a decision's sides enter at, and the price its exits are set
+/// from (`reference`): the instrument's last quote, its mid the reference;
+/// without one, its last trade, else the close of its last bar, of any bar
+/// type, which each side enters at, with no spread.
+#[derive(Debug, Clone, Copy)]
+struct EntryQuote {
+    reference: Price,
+    bid: Price,
+    ask: Price,
+}
+
+impl EntryQuote {
+    /// The entry quote of the instrument of `instrument_id` in `cache`, if it
+    /// has a price.
+    fn last(cache: &CacheApi, instrument_id: &InstrumentId) -> Option<Self> {
+        if let Some(mid) = cache.price(instrument_id, PriceType::Mid) {
+            return Some(Self {
+                reference: mid,
+                bid: cache.price(instrument_id, PriceType::Bid)?,
+                ask: cache.price(instrument_id, PriceType::Ask)?,
+            });
+        }
+        let reference = cache.price(instrument_id, PriceType::Last).or_else(|| {
             [AggregationSource::External, AggregationSource::Internal]
                 .into_iter()
                 .flat_map(|source| cache.bar_types(Some(instrument_id), None, source))
                 .filter_map(|bar_type| cache.bar(&bar_type))
                 .max_by_key(|bar| bar.ts_init)
                 .map(|bar| bar.close)
+        })?;
+        Some(Self {
+            reference,
+            bid: reference,
+            ask: reference,
         })
+    }
+
+    /// The price `side` enters at: the ask a long, the bid a short.
+    const fn entry(&self, side: Side) -> Price {
+        match side {
+            Side::Long => self.ask,
+            Side::Short => self.bid,
+        }
+    }
 }
 
 impl TargetRow {

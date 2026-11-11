@@ -24,7 +24,7 @@ use crate::common::{
 use helix_trader::model::{
     config::{Margins, ModelConfig},
     dataset::{self, Dataset},
-    features::FeatureSet,
+    features::{FeatureSet, side_names},
     schedule::Retrain,
     store::{ModelSet, ModelStore},
     targets::Side,
@@ -206,7 +206,8 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
 }
 
 /// The calibrated probability of the long model of `store` valid from
-/// `at` on the missing feature: the same on every row.
+/// `at` on the missing feature, then the bracket's payoff features, which
+/// the fake does not read: the same on every row.
 fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
     let fingerprint =
         dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
@@ -215,9 +216,12 @@ fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
     store
         .read(at)
         .unwrap()
-        .load(features().names(), &fingerprint)
+        .load(
+            &side_names(features().names(), &target().payoff_names()),
+            &fingerprint,
+        )
         .unwrap()
-        .predict(&[f64::NAN])
+        .predict(&[f64::NAN, 0.0, 0.0, 0.0])
         .unwrap()
 }
 
