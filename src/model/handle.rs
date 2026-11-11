@@ -1047,15 +1047,15 @@ mod tests {
         (long, short): (Option<usize>, Option<usize>),
     ) -> Rc<ModelHandle> {
         let features = features();
-        for (side, trues) in [(Side::Long, long), (Side::Short, short)] {
-            if let Some(trues) = trues {
+        for (side, tenths) in [(Side::Long, long), (Side::Short, short)] {
+            if let Some(tenths) = tenths {
                 side_store(models, &features, config, side)
                     .publish(&baseline_for(
                         &features,
                         config,
                         side,
                         "2026-10-22T00:00:00Z",
-                        trues,
+                        tenths,
                     ))
                     .unwrap();
             }

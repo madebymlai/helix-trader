@@ -488,7 +488,7 @@ pub fn baseline_of(
 ) -> StoredModel {
     let names = side_names(features.names(), &config.target.payoff_names());
     let width = names.len();
-    let set = TrainingSet::regression(width, vec![0.5; width], vec![r(tenths)]).unwrap();
+    let set = TrainingSet::new(width, vec![0.5; width], vec![r(tenths)]).unwrap();
     stored_baseline(features, config, names, Some(side), valid_from, &set)
 }
 
@@ -509,7 +509,7 @@ pub fn meta_baseline_of(
         .chain(PICKED_FEATURES.map(String::from))
         .collect();
     let width = names.len();
-    let set = TrainingSet::regression(width, vec![0.5; width], vec![r(tenths)]).unwrap();
+    let set = TrainingSet::new(width, vec![0.5; width], vec![r(tenths)]).unwrap();
     stored_baseline(features, config, names, None, valid_from, &set)
 }
 

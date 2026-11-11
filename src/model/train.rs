@@ -67,7 +67,7 @@
 //! calibration naming the pair, its baseline, which its out-of-sample scores
 //! are read beside (`walk::WalkForward::scores`), that holdout, its mean
 //! `R - E'` among it, and its manifest probing it on rows of the holdout. A
-//! publish stays a rename per side, the long first: one failing keeps every
+//! publish is a rename per side, the long first: one failing keeps every
 //! side, failed, and the sides published before it, as those a crash
 //! between the renames leaves, have no other side beside them at their
 //! valid-from, so are in no pair: no decision uses them, and the next train
@@ -657,7 +657,7 @@ impl Level {
                 (row.ts_event, row.settled_at)
             });
         let set = |rows: &[&Example]| {
-            TrainingSet::regression(
+            TrainingSet::new(
                 self.feature_names.len(),
                 rows.iter().flat_map(|row| row.features.clone()).collect(),
                 rows.iter().map(|row| row.realised()).collect(),
@@ -761,7 +761,7 @@ fn fit_side<'a>(
 ) -> anyhow::Result<SideFit<'a>> {
     let width = level.feature_names.len();
     let set = |rows: &[Example]| {
-        TrainingSet::regression(
+        TrainingSet::new(
             width,
             rows.iter().flat_map(|row| row.features.clone()).collect(),
             rows.iter().map(Example::realised).collect(),
@@ -908,7 +908,7 @@ impl fmt::Display for Kept {
             Self::SchemaMismatch(why) => write!(f, "schema mismatch: {why}"),
             Self::Waiting => write!(
                 f,
-                "waiting for the sides' decisions: no side's model is valid before the train"
+                "waiting for the sides' decisions: no pair of the sides is valid before the train"
             ),
         }
     }
@@ -2227,7 +2227,7 @@ mod tests {
         r: f64,
     ) {
         let names = side_names(features().names(), &config.target.payoff_names());
-        let set = TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![r]).unwrap();
+        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r]).unwrap();
         let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
         store
             .publish(&StoredModel {
@@ -2485,8 +2485,9 @@ mod tests {
         assert_eq!(stored.manifest.baseline, 0.875);
     }
 
-    /// `rows` as a time-only target has them: closed at their time, of a
-    /// unit of 1, each side's payoff features its entry cost alone.
+    /// `rows` as a time-only target has them: closed at their time, each
+    /// side's payoff features its entry cost alone, their unit the worth of
+    /// its ATR, here 1 USD.
     fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
         let at_its_time = |outcome| TargetOutcome {
             exit: Exit::Time,

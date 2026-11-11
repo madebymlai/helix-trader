@@ -1,16 +1,14 @@
-//! PerpetualBooster: gradient-boosted trees that stop by a budget instead
-//! of tuned settings, with the log-loss objective or squared loss. Its
-//! budget stands in for LightGBM's settings, which it has no equivalent
-//! of. A saved model names its objective, which its predictions follow
-//! when loaded.
+//! PerpetualBooster: gradient-boosted trees on squared loss that stop by a
+//! budget instead of tuned settings. Its budget stands in for LightGBM's
+//! settings, which it has no equivalent of.
 
-use anyhow::{Context, anyhow, bail, ensure};
+use anyhow::{Context, anyhow, ensure};
 use perpetual::booster::config::BoosterIO;
-use perpetual::objective::Objective as Loss;
+use perpetual::objective::Objective;
 use perpetual::{Matrix, PerpetualBooster};
 use serde::{Deserialize, Serialize};
 
-use super::{Learner, Objective, Predictor, SavedModel, TrainingSet};
+use super::{Learner, Predictor, SavedModel, TrainingSet};
 
 /// PerpetualBooster's settings, each named and meant as in the library.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
@@ -46,18 +44,14 @@ const fn default_seed() -> u64 {
 const WIDTH: &str = "width";
 
 impl PerpetualConfig {
-    /// A booster with these settings, fitting `objective`: log loss for
-    /// the binary one, squared loss for regression. It fits on one thread,
-    /// as LightGBM does, so its results do not depend on the machine's
-    /// cores, and its splits give missing values a branch of their own, so
-    /// a missing feature is learned apart from every value, as in LightGBM.
-    fn booster(&self, objective: Objective) -> PerpetualBooster {
-        let loss = match objective {
-            Objective::Binary => Loss::LogLoss,
-            Objective::Regression => Loss::SquaredLoss,
-        };
+    /// A booster with these settings, fitting squared loss. It fits on one
+    /// thread, as LightGBM does, so its results do not depend on the
+    /// machine's cores, and its splits give missing values a branch of their
+    /// own, so a missing feature is learned apart from every value, as in
+    /// LightGBM.
+    fn booster(&self) -> PerpetualBooster {
         PerpetualBooster::default()
-            .set_objective(loss)
+            .set_objective(Objective::SquaredLoss)
             .set_budget(self.budget)
             .set_memory_limit(Some(self.memory_limit))
             .set_iteration_limit(self.iteration_limit)
@@ -80,7 +74,7 @@ impl Learner for PerpetualConfig {
         let columns: Vec<f64> = (0..width)
             .flat_map(|column| rows.iter().map(move |row| row[column]))
             .collect();
-        let mut booster = self.booster(set.objective());
+        let mut booster = self.booster();
         booster.fit(
             &Matrix::new(&columns, rows.len(), width),
             set.labels(),
@@ -98,12 +92,10 @@ impl Learner for PerpetualConfig {
     }
 }
 
-/// A PerpetualBooster, the width of its rows and the objective it was
-/// fitted by.
+/// A PerpetualBooster of squared loss and the width of its rows.
 struct Perpetual {
     booster: PerpetualBooster,
     width: usize,
-    objective: Objective,
 }
 
 impl Perpetual {
@@ -115,16 +107,11 @@ impl Perpetual {
             .parse()
             .context("the width of a PerpetualBooster model")?;
         ensure!(width > 0, "a PerpetualBooster model without features");
-        let objective = match booster.cfg.objective {
-            Loss::LogLoss => Objective::Binary,
-            Loss::SquaredLoss => Objective::Regression,
-            _ => bail!("a PerpetualBooster model of a loss other than log or squared loss"),
-        };
-        Ok(Self {
-            booster,
-            width,
-            objective,
-        })
+        ensure!(
+            matches!(booster.cfg.objective, Objective::SquaredLoss),
+            "a PerpetualBooster model of a loss other than squared loss"
+        );
+        Ok(Self { booster, width })
     }
 }
 
@@ -135,10 +122,7 @@ impl Predictor for Perpetual {
 
     fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         let matrix = Matrix::new(row, 1, self.width);
-        Ok(match self.objective {
-            Objective::Binary => self.booster.predict_proba(&matrix, false, false)[0],
-            Objective::Regression => self.booster.predict(&matrix, false)[0],
-        })
+        Ok(self.booster.predict(&matrix, false)[0])
     }
 
     fn save(&self) -> anyhow::Result<SavedModel> {
@@ -155,10 +139,10 @@ mod tests {
         PerpetualConfig::builder().memory_limit(1.0).build()
     }
 
-    /// 300 rows of two features whose label is true exactly where the
-    /// first feature is missing; elsewhere it runs from 0 to 1, zero
-    /// included.
-    fn missing_is_true() -> TrainingSet {
+    /// 300 rows of two features whose label is 1 exactly where the first
+    /// feature is missing, and 0 elsewhere, where the feature runs from 0 to
+    /// 1, zero included.
+    fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
         for i in 0..300_u32 {
@@ -169,19 +153,24 @@ mod tests {
                 f64::from(i % 7) / 6.0
             });
             features.push(f64::from(i % 11));
-            labels.push(missing);
+            labels.push(if missing { 1.0 } else { 0.0 });
         }
         TrainingSet::new(2, features, labels).unwrap()
     }
 
+    /// A model that cannot tell the missing feature from a value predicts
+    /// the training mean of `missing_is_one`'s labels, a third, throughout:
+    /// learned apart, the missing feature is predicted above it, toward its
+    /// label of 1, and every value below it, toward their 0.
     #[test]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let model = LearnerConfig::Perpetual(config())
-            .fit(&missing_is_true())
+            .fit(&missing_is_one())
             .unwrap();
-        assert!(model.predict(&[f64::NAN, 4.0]).unwrap() > 0.9);
+        let mean = 1.0 / 3.0;
+        assert!(model.predict(&[f64::NAN, 4.0]).unwrap() > mean);
         for value in [0.0, 0.5, 1.0] {
-            assert!(model.predict(&[value, 4.0]).unwrap() < 0.1, "{value}");
+            assert!(model.predict(&[value, 4.0]).unwrap() < mean, "{value}");
         }
     }
 
@@ -193,7 +182,7 @@ mod tests {
             .iter()
             .map(|&value| if value < 0.5 { 2.0 } else { -1.0 })
             .collect();
-        TrainingSet::regression(1, features, labels).unwrap()
+        TrainingSet::new(1, features, labels).unwrap()
     }
 
     #[test]
@@ -213,7 +202,7 @@ mod tests {
                 .build();
             assert!(
                 LearnerConfig::Perpetual(config)
-                    .fit(&missing_is_true())
+                    .fit(&missing_is_one())
                     .is_err(),
                 "{memory_limit}"
             );
@@ -229,7 +218,9 @@ mod tests {
             (0..300_000_u32)
                 .map(|i| f64::from((i * 7919) % 101) / 100.0)
                 .collect(),
-            (0..50_000_u32).map(|i| (i * 31) % 7 < 3).collect(),
+            (0..50_000_u32)
+                .map(|i| if (i * 31) % 7 < 3 { 1.0 } else { 0.0 })
+                .collect(),
         )
         .unwrap();
         let fit = |seed| {

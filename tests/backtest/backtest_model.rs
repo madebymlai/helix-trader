@@ -75,7 +75,7 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
         ..config()
     };
     let store = store(models.path(), &config, Side::Long);
-    for (valid_from, trues) in [
+    for (valid_from, tenths) in [
         ("02:00:00", 7),
         ("04:00:00", 8),
         ("04:30:00", 9),
@@ -87,7 +87,7 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
                 &config,
                 Side::Long,
                 ic::at(valid_from),
-                trues,
+                tenths,
             ))
             .unwrap();
     }
@@ -171,7 +171,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         .map(DatasetRow::of)
         .partition(|row| row.ts_event < UnixNanos::from(holdout));
     let long = |row: &DatasetRow| row.side(Side::Long).features;
-    let set = TrainingSet::regression(
+    let set = TrainingSet::new(
         4,
         fitted.iter().flat_map(long).collect(),
         fitted
@@ -275,7 +275,7 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let mut take_profits: Vec<f64> = long_rows.iter().map(|row| row[1]).collect();
     take_profits.sort_by(f64::total_cmp);
     let median = take_profits[take_profits.len() / 2];
-    let set = TrainingSet::regression(
+    let set = TrainingSet::new(
         4,
         long_rows
             .iter()

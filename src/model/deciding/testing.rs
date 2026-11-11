@@ -270,7 +270,7 @@ pub fn baseline_for(
 ) -> StoredModel {
     let names = side_names(features.names(), &config.target.payoff_names());
     let width = names.len();
-    let set = TrainingSet::regression(width, vec![0.5; width], vec![r(tenths)]).unwrap();
+    let set = TrainingSet::new(width, vec![0.5; width], vec![r(tenths)]).unwrap();
     let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
     let probe = vec![0.7; width];
     let config = config.clone();
@@ -321,8 +321,7 @@ pub fn meta_baseline(
     tenths: usize,
 ) -> StoredModel {
     let names = meta_names(features.names());
-    let set =
-        TrainingSet::regression(names.len(), vec![0.5; names.len()], vec![r(tenths)]).unwrap();
+    let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r(tenths)]).unwrap();
     let mut meta = baseline_for(features, config, Side::Long, valid_from, tenths);
     meta.manifest.side = None;
     meta.manifest.feature_names = names;
