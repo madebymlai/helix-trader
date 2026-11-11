@@ -78,9 +78,10 @@ impl Ksplit {
     /// first, one or two, each its model's prediction and its trade's
     /// realised R. `beta_C` is the least squares slope of the sides' mean
     /// R on `C`, `beta_D` that of the long's R less the short's on `D`,
-    /// through nought; each is clipped to `[0, 1.5]`, a part whose
-    /// predictions never vary having none, and `alpha_C` is the mean R less
-    /// `beta_C` times the mean `C`, after the clip.
+    /// through nought, each clipped to `[0, 1.5]`, and nought where its
+    /// part's predictions never vary, the same to the bit on every row;
+    /// `alpha_C` is the mean R less `beta_C` times the mean `C`, after the
+    /// clip. A side call that never varies so leaves the sides tied.
     ///
     /// # Errors
     ///
@@ -111,18 +112,27 @@ impl Ksplit {
         });
         // Their mean rounded, levels that never vary would have a variance
         // of rounding, and a slope of noise.
-        let varies = levels.iter().any(|level| level.0 != levels[0].0);
-        let beta = if varies {
+        let beta = if varies(levels.iter().map(|level| level.0)) {
             slope(covariance, variance)
         } else {
             0.0
         };
         let side_call = pair.then(|| {
-            let (product, square) = rows.iter().fold((0.0, 0.0), |(product, square), sides| {
-                let (d, t) = (sides[0].0 - sides[1].0, sides[0].1 - sides[1].1);
-                (d.mul_add(t, product), d.mul_add(d, square))
-            });
-            slope(product, square)
+            let calls: Vec<(f64, f64)> = rows
+                .iter()
+                .map(|sides| (sides[0].0 - sides[1].0, sides[0].1 - sides[1].1))
+                .collect();
+            // A side call that never varies would fit a slope of the mean
+            // R long less R short over it, the calibration's means alone.
+            if varies(calls.iter().map(|call| call.0)) {
+                let (product, square) =
+                    calls.iter().fold((0.0, 0.0), |(product, square), &(d, t)| {
+                        (d.mul_add(t, product), d.mul_add(d, square))
+                    });
+                slope(product, square)
+            } else {
+                0.0
+            }
         });
         Ok(Self {
             level: Line {
@@ -152,12 +162,15 @@ fn mean(values: impl ExactSizeIterator<Item = f64>) -> f64 {
     values.sum::<f64>() / count
 }
 
-/// The slope `numerator / denominator` clipped to `SLOPES`: nought where
-/// the predictions never vary, the denominator nought.
+/// Whether `predictions` vary: any is not the first, to the bit.
+fn varies(mut predictions: impl Iterator<Item = f64>) -> bool {
+    let first = predictions.next();
+    predictions.any(|prediction| Some(prediction) != first)
+}
+
+/// The slope `numerator / denominator` of predictions that vary, the
+/// denominator their spread, clipped to `SLOPES`.
 fn slope(numerator: f64, denominator: f64) -> f64 {
-    if denominator == 0.0 {
-        return 0.0;
-    }
     (numerator / denominator).clamp(SLOPES.0, SLOPES.1)
 }
 
@@ -294,11 +307,14 @@ mod tests {
         near(fit.level.alpha, 0.5);
     }
 
-    /// Predictions that never vary show no signal: no slope, the level the
-    /// mean R, 0.5, and no side call.
+    /// Predictions that never vary show no signal, though the long's R
+    /// exceeds the short's by 1 on every row, as the long's prediction
+    /// exceeds the short's: no slope, the level the mean R, 0.5, and no
+    /// side call, each side's E' the level. Least squares through nought
+    /// would give the side call 0.2 / 0.02, clipped to 1.5.
     #[test]
     fn predictions_that_never_vary_fit_no_slope() {
-        let rows: Vec<Vec<(f64, f64)>> = [(0.0, 1.0), (1.0, 0.0)]
+        let rows: Vec<Vec<(f64, f64)>> = [(0.5, -0.5), (1.5, 0.5)]
             .into_iter()
             .map(|(long, short)| vec![(0.2, long), (0.1, short)])
             .collect();
@@ -307,6 +323,9 @@ mod tests {
 
         assert_eq!((fit.level.beta, fit.side_call), (0.0, Some(0.0)));
         near(fit.level.alpha, 0.5);
+        let expected = fit.apply(&[0.2, 0.1]);
+        near(expected.of(Side::Long), 0.5);
+        near(expected.of(Side::Short), 0.5);
     }
 
     /// Many rows of one level, 0.1 a side, whose mean in floating point is
