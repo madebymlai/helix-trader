@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::common::{recorder::Recorder, ts};
 use helix_trader::{
-    backtest::{Backtest, commission_rate},
+    backtest::{Backtest, Commission},
     venues,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -141,7 +141,7 @@ fn backtest(dir: &Path, end: &str) -> Backtest {
         start: at("06:30"),
         end: at(end),
         ticks: vec![],
-        fee_model: commission_rate(Decimal::ZERO).unwrap(),
+        commission: Commission::Rate(Decimal::ZERO),
         balance: Money::from("10000 USDT"),
         leverage: Decimal::ONE,
         venue_oms: venues::oms_type,

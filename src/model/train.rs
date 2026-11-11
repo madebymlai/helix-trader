@@ -816,9 +816,9 @@ mod tests {
 
     use super::*;
     use crate::{
+        backtest::Commission,
         model::{
             config::{Margins, MetaConfig},
-            dataset::Commission,
             decide::{DecisionRule, FeatureRow},
             holdout::Trades,
             learner::LearnerConfig,
@@ -901,7 +901,7 @@ mod tests {
     /// 10 million USD, no leverage.
     fn venue() -> DatasetVenue {
         DatasetVenue {
-            commission: Commission::Rate("0.00003".to_string()),
+            commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
             leverage: Decimal::ONE,
         }

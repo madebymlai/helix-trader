@@ -151,6 +151,7 @@ use super::{
     targets::{TargetConfig, TargetRow, TargetSetter, Targets},
 };
 use crate::{
+    backtest::Commission,
     rolls::Roller,
     strategy::{
         DataRequirements,
@@ -163,13 +164,15 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum Mode {
     /// Trades in a backtest on the models of the store under `models`
-    /// whose target is that of its dataset runs, on `venue`.
+    /// whose target is that of its dataset runs, on `venue`, the target at
+    /// its commission.
     Backtest {
         models: PathBuf,
         venue: DatasetVenue,
     },
     /// Trades live on the models of the store under `models` whose target
-    /// is that of the dataset runs of its trains, on `venue`, deciding
+    /// is that of the dataset runs of its trains, on `venue`, the target at
+    /// its commission, deciding
     /// the live node's bar build delay late, as a backtest does; apart from
     /// `Backtest` for its warmup, which requests the history up to now
     /// (`Warmup::live`), and its roller, which loads each post contract
@@ -179,9 +182,13 @@ pub enum Mode {
         models: PathBuf,
         venue: DatasetVenue,
     },
-    /// Opens each decision's target, for a dataset run, and collects the
-    /// rows it settles in `rows`.
-    Dataset { rows: SettledRows },
+    /// Opens each decision's target, for a dataset run at `commission`,
+    /// the one its venue charges, and collects the rows it settles in
+    /// `rows`.
+    Dataset {
+        rows: SettledRows,
+        commission: Commission,
+    },
 }
 
 /// The rows a dataset run settled, shared with its caller.
@@ -303,6 +310,7 @@ impl ModelHandle {
                     &config.target,
                     config.decision,
                     requirements,
+                    venue.commission,
                     features.bracket_width(),
                 )?,
                 instrument_id: config.target.instrument_id,
@@ -362,11 +370,12 @@ impl ModelHandle {
             Mode::Backtest { models, venue } | Mode::Live { models, venue } => {
                 Serving::Deciding(Box::new(deciding(&models, &venue)?))
             }
-            Mode::Dataset { rows } => Serving::Dataset {
+            Mode::Dataset { rows, commission } => Serving::Dataset {
                 targets: Targets::sharing(
                     target.clone(),
                     rule,
                     requirements,
+                    commission,
                     features.bracket_width(),
                 )?,
                 rows,
@@ -1747,6 +1756,7 @@ mod tests {
             &requirements(),
             Mode::Dataset {
                 rows: SettledRows::default(),
+                commission: venue().commission,
             },
         )
         .unwrap();
@@ -1762,6 +1772,7 @@ mod tests {
     fn a_dataset_runs_cadence_waits_for_composite_bars() {
         let dataset = Mode::Dataset {
             rows: SettledRows::default(),
+            commission: venue().commission,
         };
 
         assert_eq!(
@@ -1788,6 +1799,7 @@ mod tests {
                 "dataset",
                 Mode::Dataset {
                     rows: SettledRows::default(),
+                    commission: venue().commission,
                 },
             ),
             ("live", live(models)),
@@ -2080,6 +2092,7 @@ mod tests {
             &requirements(),
             Mode::Dataset {
                 rows: SettledRows::default(),
+                commission: venue().commission,
             },
         )
         .unwrap();

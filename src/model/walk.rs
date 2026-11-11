@@ -476,19 +476,21 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::model::{
-        calibration::Calibration,
-        config::{Margins, MetaConfig},
-        dataset::Commission,
-        decide::{DecisionRule, FeatureRow},
-        features::{meta_names, testing::last_mid},
-        holdout::{Holdout, Trades},
-        learner::{LearnerConfig, TrainingSet},
-        payoff::Payoff,
-        schedule::Retrain,
-        store::{ModelManifest, ModelStore, StoredModel},
-        targets::{
-            BracketSpec, Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow,
+    use crate::{
+        backtest::Commission,
+        model::{
+            calibration::Calibration,
+            config::{Margins, MetaConfig},
+            decide::{DecisionRule, FeatureRow},
+            features::{meta_names, testing::last_mid},
+            holdout::{Holdout, Trades},
+            learner::{LearnerConfig, TrainingSet},
+            payoff::Payoff,
+            schedule::Retrain,
+            store::{ModelManifest, ModelStore, StoredModel},
+            targets::{
+                BracketSpec, Distance, Exit, Outcome, Outcomes, Target, TargetConfig, TargetRow,
+            },
         },
     };
 
@@ -545,7 +547,7 @@ mod tests {
     /// 10 million USD, no leverage.
     fn venue() -> DatasetVenue {
         DatasetVenue {
-            commission: Commission::Rate("0.00003".to_string()),
+            commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
             leverage: Decimal::ONE,
         }

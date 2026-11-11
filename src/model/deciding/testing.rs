@@ -16,10 +16,11 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use crate::{
+    backtest::Commission,
     model::{
         calibration::Calibration,
         config::{Margins, MetaConfig, ModelConfig, Sizing},
-        dataset::{self, Commission, DatasetVenue},
+        dataset::{self, DatasetVenue},
         decide::DecisionRule,
         features::{FeatureSet, meta_names, testing::last_mid},
         holdout::{Earnings, Holdout, Trades},
@@ -176,7 +177,7 @@ pub fn requirements() -> DataRequirements {
 /// 10 million USD, no leverage.
 pub fn venue() -> DatasetVenue {
     DatasetVenue {
-        commission: Commission::Rate("0.00003".to_string()),
+        commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
         leverage: Decimal::ONE,
     }

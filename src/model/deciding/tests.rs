@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
+use nautilus_model::{enums::OrderSide, identifiers::StrategyId, types::Money};
 use rust_decimal::Decimal;
 
 use super::{
@@ -13,12 +13,15 @@ use super::{
     },
     *,
 };
-use crate::model::{
-    config::{Margins, ModelConfig, Sizing},
-    dataset::{Commission, DatasetVenue},
-    learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-    payoff::Payoff,
-    store::StoredModel,
+use crate::{
+    backtest::Commission,
+    model::{
+        config::{Margins, ModelConfig, Sizing},
+        dataset::DatasetVenue,
+        learner::{LearnerConfig, LightGbmConfig, TrainingSet},
+        payoff::Payoff,
+        store::StoredModel,
+    },
 };
 
 const MIDNIGHT: &str = "2026-10-22T00:00:00Z";
@@ -98,7 +101,7 @@ fn a_model_of_another_commission_gives_no_trade() {
         &config(),
         &requirements(),
         &DatasetVenue {
-            commission: Commission::PerOrder("3 USD".to_string()),
+            commission: Commission::PerOrder(Money::from("3 USD")),
             ..venue()
         },
     )
@@ -724,17 +727,19 @@ fn lightgbm_meta() -> MetaConfig {
 /// A meta model of `config` valid from midnight of the 22nd, which learned on
 /// rows of its features in their order, the mid, 0.7, then the side picked, 1
 /// a buy and -1 a sell, then its probability, that buys win from a probability
-/// of 0.7 and sells never: fitted by the learner of `config`'s meta on a buy
-/// and a sell at each probability from 0.40 to 0.99 by 0.01, at least 30 rows
-/// on each side of a split where LightGBM's leaves need 20, so that it
-/// predicts near 1 on those wins and near 0 elsewhere, 0.88 and 0.12
+/// of 0.7 and sells never: fitted by the learner of `config`'s meta on ten
+/// buys and ten sells at each probability from 0.40 to 0.99 by 0.01, at least
+/// 300 rows on each side of a split where LightGBM's leaves need 200, so that
+/// it predicts near 1 on those wins and near 0 elsewhere, 0.99 and 0.01
 /// calibrated, either side of the threshold.
 fn learned_meta(config: &ModelConfig) -> StoredModel {
     let (mut rows, mut labels) = (vec![], vec![]);
     for side in [1.0, -1.0] {
         for hundredths in 40..100 {
-            rows.extend([0.7, side, f64::from(hundredths) / 100.0]);
-            labels.push(side > 0.0 && hundredths >= 70);
+            for _ in 0..10 {
+                rows.extend([0.7, side, f64::from(hundredths) / 100.0]);
+                labels.push(side > 0.0 && hundredths >= 70);
+            }
         }
     }
     let learner = &config.meta.as_ref().unwrap().learner;

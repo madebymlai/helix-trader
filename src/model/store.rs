@@ -858,13 +858,15 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::model::{
-        dataset::Commission,
-        decide::DecisionRule,
-        features::testing::last_mid,
-        holdout::Earnings,
-        learner::{LearnerConfig, TrainingSet},
-        targets::Target,
+    use crate::{
+        backtest::Commission,
+        model::{
+            decide::DecisionRule,
+            features::testing::last_mid,
+            holdout::Earnings,
+            learner::{LearnerConfig, TrainingSet},
+            targets::Target,
+        },
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -952,7 +954,7 @@ mod tests {
     /// 10 million USD, no leverage.
     fn venue() -> DatasetVenue {
         DatasetVenue {
-            commission: Commission::Rate("0.00003".to_string()),
+            commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
             leverage: Decimal::ONE,
         }
@@ -1437,15 +1439,16 @@ mod tests {
             .unwrap();
 
         for other in [
-            Commission::Rate("0.00004".to_string()),
-            Commission::PerOrder("3 USD".to_string()),
+            Commission::Rate(Decimal::new(4, 5)),
+            Commission::PerOrder(Money::from("3 USD")),
+            Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
         ] {
             assert!(
                 store_net_of(
                     dir.path(),
                     &config(),
                     &DatasetVenue {
-                        commission: other.clone(),
+                        commission: other,
                         ..venue()
                     }
                 )

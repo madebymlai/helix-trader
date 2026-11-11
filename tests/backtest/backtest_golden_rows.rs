@@ -91,6 +91,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
             let rows = SettledRows::default();
             let mode = Mode::Dataset {
                 rows: Rc::clone(&rows),
+                commission: venue().commission,
             };
             let backtest = Backtest {
                 bar_types: requirements.bar_types,

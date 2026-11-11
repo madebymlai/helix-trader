@@ -136,7 +136,12 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     );
     let models = tempfile::tempdir().unwrap();
     let t = ic::at("00:00:00") + SignedDuration::from_hours(112);
-    let learner = LearnerConfig::LightGbm(LightGbmConfig::builder().num_iterations(20).build());
+    let learner = LearnerConfig::LightGbm(
+        LightGbmConfig::builder()
+            .num_iterations(20)
+            .min_data_in_leaf(20)
+            .build(),
+    );
     let config = ModelConfig {
         learner: learner.clone(),
         window: SignedDuration::from_hours(72),
