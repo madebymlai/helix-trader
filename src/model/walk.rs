@@ -502,8 +502,9 @@ mod tests {
     }
 
     /// The fake learner on hourly decisions, learning whether the long of
-    /// a time-only target of 1 hour gains, trading each side from an expected 0,
-    /// retrained every day on the day before, its last 6 hours held out.
+    /// a time-only target of 1 hour gains, its unit measured in Wilder's ATR
+    /// of 14 hourly bars, trading each side from an expected 0, retrained
+    /// every day on the day before, its last 6 hours held out.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -514,6 +515,7 @@ mod tests {
                     .spec(
                         Target::builder()
                             .limit(SignedDuration::from_hours(1))
+                            .atr(crate::model::targets::DEFAULT_ATR)
                             .build(),
                     )
                     .build(),

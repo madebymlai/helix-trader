@@ -12,8 +12,9 @@
 //! side's payoff features worked out by hand on quotes, on bars and on
 //! trades alone, exits in basis points and in average true ranges of hourly
 //! bars, the cadence's, which the targets subscribe to themselves, built
-//! from the quotes, from the trades alone and from minute bars alone, no
-//! order before the ATR is initialized; deciding on LAST bars the run
+//! from the quotes, from the trades alone and from minute bars alone, a
+//! time-only target's unit the worth of such an ATR on quotes and on minute
+//! bars, no order before the ATR is initialized; deciding on LAST bars the run
 //! builds from the trades alone is deciding on the trades. Orders the
 //! risk engine denies leave their decisions unsettled, without a row. A
 //! stop from a mid on a half tick settles at its exact worth, and one in the
@@ -314,10 +315,15 @@ fn bracket(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetConfig {
 }
 
 /// A trade with no exits, closed 30 minutes after its decision, of
-/// `quantity` of `instrument_id`.
+/// `quantity` of `instrument_id`, its unit the worth of the average true
+/// range of 2 hourly bars, the cadence's, which the targets subscribe to.
 fn time_only(instrument_id: &str, quantity: &str) -> TargetConfig {
     let spec = Target::builder()
         .limit(SignedDuration::from_mins(30))
+        .atr(AtrArgs {
+            period: 2,
+            ..DEFAULT_ATR
+        })
         .build();
     trading(spec, instrument_id, quantity)
 }
@@ -334,7 +340,7 @@ fn decision(at: Timestamp, features: f64) -> FeatureRow {
 }
 
 /// The outcome of a position closed by `exit` with `pnl`, net of
-/// `commission`, of a unit of 1: no stop.
+/// `commission`, of a unit of 1 until `of_unit` gives it its target's.
 fn outcome(pnl: &str, commission: &str, exit: Exit) -> Outcome {
     Outcome {
         pnl: Money::from(pnl),
@@ -348,8 +354,9 @@ fn outcomes(long: Outcome, short: Outcome) -> Outcomes {
     Outcomes { long, short }
 }
 
-/// A bracket's outcomes `long` and `short`, each side's stop worth `unit`.
-fn with_exits(long: Outcome, short: Outcome, unit: f64) -> Outcomes {
+/// The outcomes `long` and `short`, each side's unit worth `unit`: a
+/// bracket's stop's worth, a time-only target's ATR's.
+fn of_unit(long: Outcome, short: Outcome, unit: f64) -> Outcomes {
     Outcomes {
         long: Outcome { unit, ..long },
         short: Outcome { unit, ..short },
@@ -473,7 +480,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 3997.10 (+2.90 - 0.24). Both on that quote, which settles the row.
         row(
             decision(at("09:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("-3.64 USD", "0.24 USD", Exit::Stop),
                 outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
                 3.0,
@@ -485,7 +492,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 4003.10, the short's stop at the ask, 4003.40.
         row(
             decision(at("10:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
                 outcome("-3.64 USD", "0.24 USD", Exit::Stop),
                 3.0,
@@ -496,7 +503,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // long +0.80, the short -1.20, less the fees.
         row(
             decision(at("11:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("0.56 USD", "0.24 USD", Exit::Time),
                 outcome("-1.44 USD", "0.24 USD", Exit::Time),
                 3.0,
@@ -575,7 +582,7 @@ fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
     let expected = [
         row(
             decision(at("09:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("-3.48 USD", "0.08 USD", Exit::Stop),
                 outcome("2.82 USD", "0.08 USD", Exit::TakeProfit),
                 3.0,
@@ -584,7 +591,7 @@ fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
         ),
         row(
             decision(at("10:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("2.82 USD", "0.08 USD", Exit::TakeProfit),
                 outcome("-3.48 USD", "0.08 USD", Exit::Stop),
                 3.0,
@@ -593,7 +600,7 @@ fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
         ),
         row(
             decision(at("11:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("0.72 USD", "0.08 USD", Exit::Time),
                 outcome("-1.28 USD", "0.08 USD", Exit::Time),
                 3.0,
@@ -640,7 +647,7 @@ fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
 
     let expected = [row(
         decision(ic::at("09:00:00"), 4000.005),
-        with_exits(
+        of_unit(
             outcome("-0.25 USD", "0.24 USD", Exit::Time),
             outcome("-0.25 USD", "0.24 USD", Exit::Time),
             3.005,
@@ -674,8 +681,14 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() 
 /// One ounce, no exits, on the same quotes: each side enters as a bracket
 /// does, its position closed 30 minutes after its send on the quote then,
 /// each fill paying 0.12 USD. The dip at 09:20 and the spike at 10:45 pass
-/// by it. Each side's entry costs the spread and a fee, 0.20 + 0.12 USD, in
-/// money: a unit of 1.
+/// by it. Its unit is the worth of the ATR of 2 hourly bars of the mids on
+/// one ounce: the bar closing 09:00, from the run's start, ranges nought;
+/// the one closing 10:00 from 3996.90 (09:20) to 4000.10, 3.20, an ATR of
+/// 1.60, Wilder's seeded by the mean of the two; the one closing 11:00 from
+/// 4000.10 to 4003.30 (10:45), 3.20, an ATR of (1.60 + 3.20) / 2 = 2.40. The
+/// ATR has one bar at 09:00: that decision opens no target and takes no
+/// number. Each side's entry costs the spread and a fee, 0.20 + 0.12 USD,
+/// over its unit.
 #[test]
 fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -687,31 +700,25 @@ fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     backtest.run_dataset(probe).unwrap();
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
-    let flat = || {
-        // 4000.20 to 4000.00 and back: 0.20 lost and two fees.
-        outcomes(
-            outcome("-0.44 USD", "0.24 USD", Exit::Time),
-            outcome("-0.44 USD", "0.24 USD", Exit::Time),
-        )
-    };
     let expected = [
-        row(
-            decision(at("09:00"), 4000.10),
-            flat(),
-            ic::at("09:30:00.010"),
-        ),
+        // 4000.20 to 4000.00 and back: 0.20 lost and two fees.
         row(
             decision(at("10:00"), 4000.10),
-            flat(),
+            of_unit(
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
+                1.6,
+            ),
             ic::at("10:30:00.010"),
         ),
         // Closed on 4001.00/4001.20, the long +0.80, the short -1.20, less
         // the fees.
         row(
             decision(at("11:00"), 4000.10),
-            outcomes(
+            of_unit(
                 outcome("0.56 USD", "0.24 USD", Exit::Time),
                 outcome("-1.44 USD", "0.24 USD", Exit::Time),
+                2.4,
             ),
             ic::at("11:30:00.010"),
         ),
@@ -720,7 +727,10 @@ fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     ];
     let record = record.borrow();
     assert_eq!(settled(&record.rows), expected);
-    assert_payoff(&record.rows, &[0.32], &[0.32]);
+    for (row, unit) in record.rows.iter().zip([1.6, 2.4]) {
+        assert_payoff(std::slice::from_ref(row), &[0.32 / unit], &[0.32 / unit]);
+    }
+    assert!(record.filled[0].starts_with("D0-"), "{:?}", record.filled);
 }
 
 /// Each order's id is its decision's number, its side and its leg, so the
@@ -895,7 +905,7 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // It opens at 09:10 and is replayed at its close.
         row(
             decision(at("09:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("-0.0005 USDT", "1.0005 USDT", Exit::TakeProfit),
                 outcome("-2.0005 USDT", "1.0005 USDT", Exit::Stop),
                 1.0,
@@ -907,7 +917,7 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // at 10:20 and is replayed at its close.
         row(
             decision(at("10:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("-1.9995 USDT", "0.9995 USDT", Exit::Stop),
                 outcome("0.0005 USDT", "0.9995 USDT", Exit::TakeProfit),
                 1.0,
@@ -916,7 +926,7 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         ),
         row(
             decision(at("11:00"), 100_000.0),
-            with_exits(flat().long, flat().short, 1.0),
+            of_unit(flat().long, flat().short, 1.0),
             ic::at("11:45:00.010"),
         ),
     ];
@@ -936,7 +946,15 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
 /// One contract, no exits, on the same bars: each side enters at the last
 /// close, 100,000, and closes 30 minutes after its send at the last close,
 /// 100,000 still, the bars touching 100,150 and 99,850 passing by it: its
-/// two fees of 0.5 USDT lost.
+/// two fees of 0.5 USDT lost. Its unit is the worth of the ATR of 2 of
+/// Nautilus' hourly bars built from the minute bars,
+/// `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`: the hour
+/// closing 09:00, from the run's start, ranges nought; the one closing 10:00,
+/// from 99,850 to 100,150 (09:10), 300, an ATR of 150, Wilder's seeded by the
+/// mean of the two; the one closing 11:00, from 99,850 (10:20) to 100,000,
+/// 150, an ATR of (150 + 150) / 2 = 150; on 0.01 BTC, the contract's
+/// multiplier, 1.5 USDT. The ATR has one bar at 09:00: that decision opens
+/// no target and takes no number.
 #[test]
 fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
@@ -948,17 +966,13 @@ fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let flat = || {
-        outcomes(
+        of_unit(
             outcome("-1 USDT", "1 USDT", Exit::Time),
             outcome("-1 USDT", "1 USDT", Exit::Time),
+            1.5,
         )
     };
     let expected = [
-        row(
-            decision(at("09:00"), 100_000.0),
-            flat(),
-            ic::at("09:30:00.010"),
-        ),
         row(
             decision(at("10:00"), 100_000.0),
             flat(),
@@ -972,8 +986,12 @@ fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     ];
     let record = record.borrow();
     assert_eq!(settled(&record.rows), expected);
-    // On bars, no spread: each entry costs its fee alone, in money.
-    assert_payoff(&record.rows, &[0.5], &[0.5]);
+    // On bars, no spread: each entry costs its fee alone, over the unit.
+    assert_payoff(&record.rows, &[0.5 / 1.5], &[0.5 / 1.5]);
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
 }
 
 // --------------------------------------------------------------- inverse
@@ -1022,8 +1040,8 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
 /// Refused as the targets start, the run ends with the refusal before any
 /// decision, where an error at a decision would only be logged by Nautilus and
 /// leave an empty dataset. A time-only target is refused as a bracket is: its
-/// entry cost, a spread's worth, is no multiple of a distance in price on an
-/// inverse instrument, as a stop's is not.
+/// unit, its ATR's worth, is no multiple of a distance in price on an inverse
+/// instrument, as a stop's is not.
 #[test]
 fn a_target_on_an_inverse_instrument_fails_the_dataset_run() {
     for target in [
@@ -1094,6 +1112,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
             }),
         }),
         limit: SignedDuration::from_mins(45),
+        atr: None,
     };
     let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -1110,7 +1129,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         // quote, which settles the row.
         row(
             decision(ic::at("10:00:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("0.46 USD", "0.24 USD", Exit::TakeProfit),
                 outcome("-1.34 USD", "0.24 USD", Exit::Stop),
                 0.6,
@@ -1152,6 +1171,7 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
             }),
         }),
         limit: SignedDuration::from_mins(45),
+        atr: None,
     };
     let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -1178,6 +1198,7 @@ fn btc_atr_targets() -> TargetConfig {
             }),
         }),
         limit: SignedDuration::from_mins(45),
+        atr: None,
     };
     trading(spec, BTC, "1.00")
 }
@@ -1304,7 +1325,7 @@ fn btc_trades_atr_rows() -> [Settled; 1] {
         // 100,120 (-1.20 - 0.5 - 0.5006), which settles the row.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
                 outcome("-2.2006 USDT", "1.0006 USDT", Exit::Stop),
                 0.825,
@@ -1364,7 +1385,7 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         // 0.5 - 0.5004125), the minute replayed at its close, 10:21.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
                 outcome("-1.8254125 USDT", "1.0004125 USDT", Exit::Stop),
                 0.825,

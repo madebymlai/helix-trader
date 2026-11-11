@@ -11,7 +11,8 @@
 //! - with one: a market entry, a take-profit limit and a stop, the two exits
 //!   one-updates-the-other, closed at the limit after its send;
 //! - without one, time only: a market entry closed at the limit after its
-//!   send.
+//!   send, beside the limit the average true range its unit is measured in
+//!   (`Target::atr`).
 //!
 //! The strategy hands its time events to the order module
 //! (`orders::on_time_event`), which at a trade's time limit cancels its
@@ -23,7 +24,10 @@
 //! else its last trade, else the close of its last bar. Each distance is
 //! relative (`Distance`): basis points of that price, or multiples of an
 //! average true range, Nautilus' `AverageTrueRange`, of `DEFAULT_ATR`
-//! unless the bracket gives its arguments, built by
+//! unless the bracket gives its arguments. A time-only target has no
+//! distance and declares its ATR beside its limit, by the arguments a
+//! bracket's takes: its unit is that ATR's worth as a stop's distance. Either
+//! ATR is built by
 //! Nautilus' `AverageTrueRange::new` as the config is validated, so that
 //! an argument Nautilus refuses panics at load. Its bars are Nautilus' bars of
 //! the instrument at the decision cadence, so a decision reads the bar
@@ -38,9 +42,8 @@
 //! decision on cold features is none. Each exit is on the instrument's
 //! nearest tick (Nautilus' tick grid), a tie away from the decision's
 //! price; an exit on the decision's price, no distance (a stop worth
-//! nothing, a P&L in R of none), opens no target either. A time-only target
-//! has no distance, so no ATR: nothing of it is built, checked or
-//! subscribed to.
+//! nothing, a P&L in R of none), opens no target either, nor does an ATR of
+//! nought, a time-only target's unit worth nothing.
 //!
 //! A feature formed over the bracket (`model::features::OverBracket`) reads
 //! its width (`BracketWidth`, of `TargetConfig::width`): the distance of a
@@ -93,9 +96,10 @@
 //! decisions and for those of a strategy trading on a model of the target; it
 //! says why it set none, which a dataset run logs and a trading decision does
 //! not need. `Targets` adds only sending the orders and settling. Every target
-//! reads its instrument, its payoff features costing its fills, so one
-//! missing from the cache is the setter's error, before any order. A payoff
-//! has a worth only on a linear instrument, at a commission charged in the
+//! reads its instrument, its unit the worth of a distance on it and its payoff
+//! features costing its fills, so one missing from the cache is the setter's
+//! error, before any order. A unit and a payoff have a worth only on a linear
+//! instrument, through its multiplier, at a commission charged in the
 //! instrument's P&L currency, which is not converted: `Targets::start`
 //! refuses an inverse instrument and a commission in another currency, on
 //! every target; live, the setter errors at each decision.
@@ -178,7 +182,8 @@ pub struct TargetConfig {
 /// A bracket and its time limit, such as `{ bracket = { take_profit = { atr =
 /// 2.0 }, stop = { bps = 20 } }, limit = "2h" }`, or with the ATR's arguments
 /// given, `{ bracket = { .., atr = { period = 20, ma_type = "WILDER" } }, .. }`;
-/// a time-only target the limit alone, `{ limit = "2h" }`.
+/// a time-only target the limit and the ATR its unit is measured in, `{ limit
+/// = "2h", atr = { period = 14 } }`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
@@ -187,6 +192,12 @@ pub struct Target {
     pub bracket: Option<BracketSpec>,
     /// How long after the decision what is still open is closed.
     pub limit: SignedDuration,
+    /// The average true range of a time-only target, whose worth as a stop's
+    /// distance is the unit of its sides' payoffs: on every time-only target,
+    /// on none with a bracket, whose ATR is the bracket's
+    /// (`TargetConfig::validate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atr: Option<AtrArgs>,
 }
 
 /// A target's exits, each a distance from the decision's price, and the
@@ -380,10 +391,11 @@ impl<T> PerSide<T> {
 
 /// A target as a decision sets it on one side (`TargetSetter::at`): the
 /// price it is set from, its exits on the instrument's ticks if it has
-/// them, when it ends after its send, what the unit of its side's payoff
-/// is worth in money: the stop's worth (`stop_worth`), the payoff being in
-/// R, or 1 without exits, the payoff being in money; and its payoff
-/// features, in the order of the target's (`TargetConfig::payoff_names`).
+/// them, when it ends after its send, what the unit of its side's payoff,
+/// in R, is worth in money (`stop_worth`): the stop's worth, or without
+/// exits the worth of a stop as far as the target's ATR at the decision;
+/// and its payoff features, in the order of the target's
+/// (`TargetConfig::payoff_names`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideTarget {
     pub reference: Price,
@@ -424,6 +436,9 @@ pub enum PayoffFeature {
 pub enum NoTarget {
     /// The target's ATR, on bars of this type, is not yet initialized.
     ColdAtr(BarType),
+    /// The target's ATR, on bars of this type, is nought: no distance in
+    /// ATRs, and a time-only target's unit worth nothing, a P&L in R of none.
+    FlatAtr(BarType),
     /// The instrument has no price yet to set it from.
     NoPrice,
     /// An exit is on the decision's price, this one: no distance, a stop worth
@@ -446,8 +461,10 @@ impl TargetConfig {
     /// field of `[model]` (`model.target…`), as one
     /// `ConfigError::Multiple` if there are several: the size not positive,
     /// a distance or the limit not positive, an `atr` table no distance uses,
-    /// or an ATR without bars at the cadence of `rule` built from what a
-    /// strategy of `requirements` reads (see `atr_bars`).
+    /// a time-only target without an `atr` table or a bracket beside one, or
+    /// an ATR without bars at the cadence of `rule` built from what a strategy
+    /// of `requirements` reads (see `atr_bars`), each ATR's under its own
+    /// table's field (`Target::atr_field`).
     ///
     /// # Panics
     ///
@@ -488,10 +505,23 @@ impl TargetConfig {
                 "the target has an ATR no distance uses",
             ),
         );
+        errors.check(
+            spec.bracket.is_some() || spec.atr.is_some(),
+            ConfigError::invalid_value(
+                "model.target.atr",
+                "the time-only target declares no ATR, `atr = { period = 14 }`: its unit, \
+                 which its trades' P&L is read over, is its ATR's worth as a stop's distance",
+            ),
+        );
+        errors.check(
+            spec.bracket.is_none() || spec.atr.is_none(),
+            ConfigError::invalid_value(
+                "model.target.atr",
+                "the target has a bracket, whose ATR is its own, `model.target.bracket.atr`",
+            ),
+        );
         let atr = |result: anyhow::Result<()>| {
-            result.map_err(|e| {
-                ConfigError::invalid_value("model.target.bracket.atr", format!("{e:#}"))
-            })
+            result.map_err(|e| ConfigError::invalid_value(spec.atr_field(), format!("{e:#}")))
         };
         if let Some(args) = spec.atr_args() {
             // Nautilus checks the arguments as it builds the ATR.
@@ -502,10 +532,10 @@ impl TargetConfig {
     }
 
     /// The target's average true range deciding on `rule`, for a strategy
-    /// of `requirements`, if a distance is in ATRs: its period, and its
-    /// bars, Nautilus' internal bars of the target's instrument at the
-    /// decision cadence, built from what the strategy reads of it, the
-    /// first of:
+    /// of `requirements`, if it has one, a bracket with a distance in ATRs or
+    /// a time-only target: its period, and its bars, Nautilus' internal bars
+    /// of the target's instrument at the decision cadence, built from what
+    /// the strategy reads of it, the first of:
     ///
     /// - its quotes: their mids, `XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL`
     ///   every 15 minutes;
@@ -684,12 +714,26 @@ impl Target {
         }
     }
 
-    /// Its ATR, if a distance is in ATRs: its `atr` table's, else
-    /// `DEFAULT_ATR`.
+    /// Its ATR: with a bracket, if a distance is in ATRs, the bracket's `atr`
+    /// table's, else `DEFAULT_ATR`; time only, its own `atr` table's.
     fn atr_args(&self) -> Option<AtrArgs> {
-        self.bracket
-            .filter(BracketSpec::uses_atr)
-            .map(|bracket| bracket.atr.unwrap_or(DEFAULT_ATR))
+        match self.bracket {
+            Some(bracket) => bracket
+                .uses_atr()
+                .then(|| bracket.atr.unwrap_or(DEFAULT_ATR)),
+            None => self.atr,
+        }
+    }
+
+    /// The field of `[model]` its ATR is declared under, which its
+    /// violations are reported under: the bracket's `atr` table, or a
+    /// time-only target's own.
+    #[must_use]
+    pub const fn atr_field(&self) -> &'static str {
+        match self.bracket {
+            Some(_) => "model.target.bracket.atr",
+            None => "model.target.atr",
+        }
     }
 
     /// The payoff features of the barriers it has, in order: with a
@@ -1067,9 +1111,11 @@ impl TargetSetter {
     }
 
     /// The target of each side at a decision of `strategy` now, or why none
-    /// is set: the ATR not yet initialized, no price of the instrument yet or
-    /// an exit on the decision's price (`NoTarget`). Every target reads the
-    /// instrument, its payoff features costing its fills (`payoff`).
+    /// is set: the ATR not yet initialized or nought, no price of the
+    /// instrument yet or an exit on the decision's price (`NoTarget`). Every
+    /// target reads the instrument, its unit worth a distance on it and its
+    /// payoff features costing its fills (`payoff`): with exits, the unit is
+    /// the stop's worth; time only, the ATR's worth as a stop's distance.
     ///
     /// # Errors
     ///
@@ -1077,6 +1123,11 @@ impl TargetSetter {
     /// has no worth (`ensure_payable`: an inverse instrument, or the
     /// commission in another currency than its P&L's), or an exit is outside
     /// its prices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a time-only target has no ATR, which `TargetConfig::validate`
+    /// refuses.
     pub fn at<S>(&self, strategy: &S) -> anyhow::Result<Result<PerSide<SideTarget>, NoTarget>>
     where
         S: DataActor + DataActorNative,
@@ -1084,8 +1135,9 @@ impl TargetSetter {
         let atr = match &self.atr {
             None => None,
             Some(atr) => match atr.value() {
-                Some(value) => Some(value),
                 None => return Ok(Err(NoTarget::ColdAtr(atr.bars.bar_type))),
+                Some(0.0) => return Ok(Err(NoTarget::FlatAtr(atr.bars.bar_type))),
+                Some(value) => Some(value),
             },
         };
         let instrument_id = self.instrument_id;
@@ -1107,13 +1159,11 @@ impl TargetSetter {
         };
         let target = |side: Side| -> anyhow::Result<SideTarget> {
             let bracket = exits.map(|exits| *exits.of(side));
-            let unit = match bracket {
-                Some(bracket) => {
-                    let distance = (bracket.stop_loss.as_decimal() - reference.as_decimal()).abs();
-                    stop_worth(&instrument, self.quantity, distance)?
-                }
-                None => 1.0,
+            let distance = match bracket {
+                Some(bracket) => (bracket.stop_loss.as_decimal() - reference.as_decimal()).abs(),
+                None => atr_decimal(atr.expect("a validated time-only target has its ATR"))?,
             };
+            let unit = stop_worth(&instrument, self.quantity, distance)?;
             Ok(SideTarget {
                 reference,
                 bracket,
@@ -1274,9 +1324,9 @@ fn worth(
         })
 }
 
-/// Checks that a target's payoff on `instrument` has a worth (`worth`): an
-/// inverse instrument's P&L is no multiple of a distance, as Nautilus'
-/// notional value on one divides by its price.
+/// Checks that a target's unit and payoff on `instrument` have a worth
+/// (`worth`): an inverse instrument's P&L is no multiple of a distance, as
+/// Nautilus' notional value on one divides by its price.
 ///
 /// # Errors
 ///
@@ -1284,7 +1334,8 @@ fn worth(
 fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
     ensure!(
         !instrument.is_inverse(),
-        "{} is inverse: a target's payoff on it is no multiple of a distance in price",
+        "{} is inverse: a target's unit and payoff on it, the worth of a stop's distance, an \
+         ATR's or a spread's, are no multiple of a distance in price",
         instrument.id()
     );
     Ok(())
@@ -1437,9 +1488,9 @@ impl Targets {
     /// Opens the target of the decision of `row`, as the setter sets it
     /// (`TargetSetter::at`): on each side, its orders, from `strategy`, and its
     /// time alert. With no price of the instrument yet, the decision is
-    /// unsettled, its number taken; with the target's ATR not yet initialized,
-    /// or an exit of the target on the decision's price, it opens nothing and
-    /// takes no number, as a decision on cold features is none.
+    /// unsettled, its number taken; with the target's ATR not yet initialized
+    /// or nought, or an exit of the target on the decision's price, it opens
+    /// nothing and takes no number, as a decision on cold features is none.
     ///
     /// # Errors
     ///
@@ -1464,6 +1515,10 @@ impl Targets {
                 log::debug!(
                     "decision at {time}: the ATR of {bar_type} is not initialized; no targets"
                 );
+                return Ok(());
+            }
+            Err(NoTarget::FlatAtr(bar_type)) => {
+                log::debug!("decision at {time}: the ATR of {bar_type} is nought; no targets");
                 return Ok(());
             }
             Err(NoTarget::NoPrice) => {

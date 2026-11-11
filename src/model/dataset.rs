@@ -121,7 +121,7 @@ use crate::{
 /// then rebuilds every dataset and model. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows
 /// made without a bump; a change reaching none of them is bumped all the same.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";

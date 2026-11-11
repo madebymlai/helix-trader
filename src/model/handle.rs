@@ -18,10 +18,11 @@
 //!   calibrated probability on the side's row, the decision's features then
 //!   the side's payoff features as the target sets them, which a dataset row
 //!   of the decision holds alike (`deciding::SideRow`), and expected net P&L
-//!   (`payoff`): with
-//!   exits, the expected R times the worth of the stop the decision sets
-//!   (`targets::TargetSetter`, from the decision's price and the target's
-//!   ATR, which the handle runs), on a time-only target in money. It
+//!   (`payoff`): the
+//!   expected R times the unit the decision sets (`targets::TargetSetter`):
+//!   with exits the worth of the stop it sets from the decision's price and
+//!   the target's ATR, which the handle runs, and on a time-only target the
+//!   worth of a stop as far as that ATR. It
 //!   returns the `Decision` of the side clearing its margin, the larger of
 //!   two (`payoff::pick`), as plain data: the side, the target's size, the
 //!   probability and expected net P&L, and the target as the decision sets
@@ -105,8 +106,8 @@
 //! no feature. It warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
 //! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
-//! response to both, so the first decision after a start sets the stop a
-//! dataset run sets there. A live node sizes its cache from the same
+//! response to both, so the first decision after a start sets the stop and
+//! the unit a dataset run sets there. A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
 //!
 //! Features over the bracket's width (`features::OverBracket`) read the
@@ -950,6 +951,7 @@ mod tests {
             },
         )
         .unwrap();
+        started(&handle, &mut probe);
 
         assert_eq!(
             probability(handle.decide(&mut probe).unwrap()),
@@ -1056,13 +1058,14 @@ mod tests {
         .unwrap()
     }
 
-    /// A long expecting `2 c(0.6) - 1`, 0.180 USD, clearing its margin of
-    /// nought; the short is not traded.
+    /// A long expecting `2 c(0.6) - 1`, 0.180 USD on a unit of 1 USD,
+    /// clearing its margin of nought; the short is not traded.
     #[test]
     fn a_side_expected_to_clear_its_margin_trades_the_targets_size() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle(&probe, models.path(), &config(), (Some(6), None));
+        started(&handle, &mut probe);
 
         assert_eq!(
             handle.decide(&mut probe).unwrap(),
@@ -1090,6 +1093,7 @@ mod tests {
                 atr: None,
             }),
             limit: SignedDuration::from_hours(2),
+            atr: None,
         };
         config.margins = Margins {
             long: Some(0.3),
@@ -1180,6 +1184,7 @@ mod tests {
                     atr: None,
                 }),
                 limit: SignedDuration::from_hours(1),
+                atr: None,
             })
             .build();
         config
@@ -1250,9 +1255,11 @@ mod tests {
         );
     }
 
-    /// Worked by hand. `config`'s target is a limit alone, in money: the
-    /// long of 0.6 expects its win and loss of 1 at c(0.6), and its trade is
-    /// a market entry closed an hour later, no exit set from the mid of
+    /// Worked by hand. `config`'s target is a limit alone, its unit the
+    /// worth of its ATR of one hourly bar: a bar from 0.69900 to 0.70100
+    /// ranges 0.00200, worth 2 USD on 1000 AUD/USD, so the long of 0.6, its
+    /// win and loss of 1R at c(0.6), expects twice `2 c(0.6) - 1`. Its trade
+    /// is a market entry closed an hour later, no exit set from the mid of
     /// 0.70000, what `Trade::send_as` sends without them.
     #[test]
     fn a_time_only_trade_has_no_exits_and_closes_at_its_limit() {
@@ -1260,6 +1267,10 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle(&probe, models.path(), &config(), (Some(6), None));
         handle.start(&mut probe).unwrap();
+        probe.handle_bar(&hour_bar(
+            "2026-10-22T12:00:00Z",
+            ["0.70000", "0.70100", "0.69900", "0.70000"],
+        ));
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
@@ -1276,7 +1287,7 @@ mod tests {
             }
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
-        assert_eq!(decision.expected_pnl, 2.0 * c(0.6) - 1.0);
+        assert_eq!(decision.expected_pnl, 2.0 * (2.0 * c(0.6) - 1.0));
     }
 
     /// `bracket_config` with a take profit 2 and a stop 1 average true
@@ -1293,6 +1304,7 @@ mod tests {
                 }),
             }),
             limit: SignedDuration::from_hours(2),
+            atr: None,
         };
         config
     }
@@ -1310,6 +1322,23 @@ mod tests {
             ts,
             ts,
         )
+    }
+
+    /// The hourly mid bar of AUD/USD closing at noon of the 22nd, from
+    /// 0.69950 to 0.70050: `config`'s target's ATR of one bar of it is
+    /// 0.00100, its unit worth 1 USD on 1000 AUD/USD.
+    fn unit_bar() -> Bar {
+        hour_bar(
+            "2026-10-22T12:00:00Z",
+            ["0.70000", "0.70050", "0.69950", "0.70000"],
+        )
+    }
+
+    /// Starts `handle` on `probe` in a backtest and hands it `unit_bar`,
+    /// which the ATR of `config`'s target reads: its unit is 1 USD.
+    fn started(handle: &ModelHandle, probe: &mut Decider) {
+        handle.start(probe).unwrap();
+        probe.handle_bar(&unit_bar());
     }
 
     /// The handle trading live on `config` for a strategy reading the
@@ -1359,16 +1388,20 @@ mod tests {
         assert_eq!(cache.bar_capacity, 10_000 + 25);
     }
 
-    /// A time-only target has no ATR at all: as with `bracket_config`, the
-    /// live cache holds the warmup of the strategy's bars alone.
+    /// A time-only target's ATR runs on the cadence's bars as a bracket's
+    /// does: deciding every minute, the live cache holds the day's 1,440
+    /// minute bars of its ATR, and one spanning the start, on top of
+    /// Nautilus' default 10,000, not the 25 hourly bars alone.
     #[test]
-    fn a_live_cache_of_a_time_only_target_holds_the_warmup_of_the_strategys_bars() {
+    fn a_live_cache_holds_the_warmup_of_a_time_only_targets_atr() {
         let models = tempfile::tempdir().unwrap();
-        let handle = hourly_live_handle(&config(), models.path());
+        let mut config = config();
+        config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+        let handle = hourly_live_handle(&config, models.path());
 
         let cache = handle.warmup().cache_config().unwrap();
 
-        assert_eq!(cache.bar_capacity, 10_000 + 25);
+        assert_eq!(cache.bar_capacity, 10_000 + 1_441);
     }
 
     /// Worked by hand. The warmup's response arrives at 12:00, Nautilus
@@ -1885,7 +1918,9 @@ mod tests {
         handle
     }
 
-    /// `live_handle`, its warmup not answered yet.
+    /// `live_handle`, its warmup not answered yet, `unit_bar` built into
+    /// the cache as Nautilus builds a response's bars: the warmup hands it
+    /// to the target's ATR as it ends.
     fn warming_handle(
         probe: &mut Decider,
         models: &Path,
@@ -1901,6 +1936,7 @@ mod tests {
         )
         .unwrap();
         handle.start(probe).unwrap();
+        probe.cache_rc().borrow_mut().add_bar(unit_bar()).unwrap();
         handle
     }
 
@@ -2020,6 +2056,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let handle = meta_handle(models.path(), &with_meta(meta(None)), 7);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        started(&handle, &mut probe);
 
         assert_eq!(
             handle.decide(&mut probe).unwrap(),
@@ -2049,6 +2086,7 @@ mod tests {
         };
         let handle = meta_handle(models.path(), &with_meta(meta(Some(sizing))), 8);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        started(&handle, &mut probe);
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
@@ -2121,6 +2159,17 @@ mod tests {
         )
     }
 
+    /// What a strategy reading the quotes of `eur` alone reads.
+    fn reading_eur(eur: InstrumentId) -> DataRequirements {
+        DataRequirements {
+            ticks: vec![TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: eur,
+            }],
+            ..requirements()
+        }
+    }
+
     /// `eur`, which `registered`'s cache does not hold as an instrument, its
     /// quotes read by the features of the returned handle in a backtest on
     /// `config` under `models`, warm at noon.
@@ -2135,13 +2184,7 @@ mod tests {
             StrategyId::from(STRATEGY),
             features,
             config,
-            &DataRequirements {
-                ticks: vec![TickSeries {
-                    data: NautilusDataType::QuoteTick,
-                    instrument_id: eur,
-                }],
-                ..requirements()
-            },
+            &reading_eur(eur),
             Mode::Backtest {
                 models: models.to_path_buf(),
                 venue: venue(),
@@ -2166,9 +2209,10 @@ mod tests {
         assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
 
-    /// A time-only target reads the instrument as a bracket does, its entry
-    /// cost costing its fills: missing from the cache, it is an error, though
-    /// the long of 0.8 is valid and the instrument quoted.
+    /// A time-only target reads the instrument as a bracket does, its unit
+    /// the worth of its ATR on it and its entry cost costing its fills:
+    /// missing from the cache, it is an error, though the long of 0.8 is
+    /// valid, the instrument quoted and the ATR warm.
     #[test]
     fn a_time_only_target_with_the_instrument_missing_from_the_cache_is_an_error() {
         let models = tempfile::tempdir().unwrap();
@@ -2176,15 +2220,27 @@ mod tests {
         let mut config = config();
         config.target.instrument_id = eur;
         let features = last_mid(eur).build().unwrap();
-        side_store(models.path(), &features, &config, Side::Long)
-            .publish(&baseline_for(
-                &features,
-                &config,
-                Side::Long,
-                "2026-10-22T00:00:00Z",
-                8,
-            ))
-            .unwrap();
+        // The target's ATR, on the quotes of EUR/USD, keys its store.
+        ModelSet::new(
+            models.path(),
+            StrategyId::from(STRATEGY),
+            &features,
+            &config,
+            &reading_eur(eur),
+            &venue(),
+        )
+        .unwrap()
+        .side(Side::Long)
+        .unwrap()
+        .store()
+        .publish(&baseline_for(
+            &features,
+            &config,
+            Side::Long,
+            "2026-10-22T00:00:00Z",
+            8,
+        ))
+        .unwrap();
         let handle = handle_on_an_instrument_not_in_the_cache(models.path(), &config, eur);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         probe
@@ -2192,6 +2248,11 @@ mod tests {
             .borrow_mut()
             .add_quote(eur_quote(eur))
             .unwrap();
+        handle.start(&mut probe).unwrap();
+        probe.handle_bar(&Bar {
+            bar_type: BarType::from("EUR/USD.SIM-1-HOUR-MID-INTERNAL"),
+            ..unit_bar()
+        });
 
         let err = handle.decide(&mut probe).unwrap_err();
 
@@ -2209,6 +2270,7 @@ mod tests {
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
         let features = features();
         let handle = handle(&probe, models.path(), Rc::clone(&features));
+        started(&handle, &mut probe);
         let before = probability(handle.decide(&mut probe).unwrap());
 
         store.break_listing();
@@ -2343,10 +2405,10 @@ mod tests {
     /// subscribes to them from now, so the live stream starts where the
     /// warmup ends, and loads GCG27, the post contract of the next roll;
     /// the traded AUD/USD's quotes, which no feature reads, are subscribed
-    /// with no warmup. The response's two trades, which Nautilus hands to
-    /// the strategy's `on_historical_trades` and that to the warmup, make
-    /// the features initialized: the first decision after the warmup is
-    /// warm.
+    /// with no warmup, the target, `bracket_config`'s, having no ATR to warm.
+    /// The response's two trades, which Nautilus hands to the strategy's
+    /// `on_historical_trades` and that to the warmup, make the features
+    /// initialized: the first decision after the warmup is warm.
     #[test]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
         let models = tempfile::tempdir().unwrap();
@@ -2369,7 +2431,7 @@ mod tests {
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
             Rc::clone(&features),
-            &config(),
+            &bracket_config(10),
             &requirements,
             live(models.path().to_path_buf()),
         )
@@ -2414,9 +2476,9 @@ mod tests {
     }
 
     /// The model strategy of `features`, on the hourly decisions of
-    /// `config`, reading `bar_types` and `ticks`, started live on
-    /// 2026-08-10 at 14:30 with an hour of warmup: the data commands its
-    /// start sent.
+    /// `bracket_config`, whose target has no ATR to warm, reading `bar_types`
+    /// and `ticks`, started live on 2026-08-10 at 14:30 with an hour of
+    /// warmup: the data commands its start sent.
     fn started_live(
         features: Rc<FeatureSet>,
         bar_types: Vec<BarType>,
@@ -2432,7 +2494,7 @@ mod tests {
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
             features,
-            &config(),
+            &bracket_config(10),
             &requirements,
             live(models.path().to_path_buf()),
         )
@@ -2549,9 +2611,10 @@ mod tests {
     }
 
     /// Live on 2026-08-10 at 14:30, with an hour of warmup, the model
-    /// strategy of `features` reading `ticks`, its warmup handed its
-    /// historical custom data, started: the probe, the handle and the
-    /// data commands the start sent.
+    /// strategy of `features` reading `ticks`, on `bracket_config`, whose
+    /// target has no ATR to warm, its warmup handed its historical custom
+    /// data, started: the probe, the handle and the data commands the start
+    /// sent.
     fn started_live_reading(
         features: Rc<FeatureSet>,
         ticks: Vec<TickSeries>,
@@ -2566,7 +2629,7 @@ mod tests {
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
             features,
-            &config(),
+            &bracket_config(10),
             &requirements,
             live(models.path().to_path_buf()),
         )

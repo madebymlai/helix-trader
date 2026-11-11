@@ -224,8 +224,9 @@ mod tests {
         strategy::orders::{Exits, Trade},
     };
 
-    /// Trades AUD/USD on a time-only target of 30 minutes, deciding hourly on
-    /// its averages of 10 and 30 hourly bars.
+    /// Trades AUD/USD on a time-only target of 30 minutes, its unit measured
+    /// in the ATR of 14 hourly bars, deciding hourly on its averages of 10 and
+    /// 30 hourly bars.
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -244,7 +245,7 @@ mod tests {
 
         [model]
         decision = { every = "1h" }
-        target = { limit = "30m" }
+        target = { limit = "30m", atr = { period = 14 } }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
@@ -278,10 +279,15 @@ mod tests {
     }
 
     /// Its features read bars alone: the quotes of the AUD/USD traded, which
-    /// a time-only target has no ATR to run on, are read by none.
+    /// a bracket in basis points has no ATR to run on, are read by none.
     #[test]
     fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
-        let err = ModelEmaConfig::load(&with_quotes()).unwrap_err();
+        let toml = with_quotes().replace(
+            r#"target = { limit = "30m", atr = { period = 14 } }"#,
+            r#"target = { bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#,
+        );
+
+        let err = ModelEmaConfig::load(&toml).unwrap_err();
 
         let Some(ConfigError::InvalidValue { field, reason }) = err.downcast_ref::<ConfigError>()
         else {
@@ -291,16 +297,18 @@ mod tests {
         assert!(reason.contains("QuoteTick of AUD/USD.SIM"), "{reason}");
     }
 
-    /// On a bracket 2 and 1 ATRs out, the target's ATR is built of the
-    /// quotes of the AUD/USD traded: it reads them.
+    /// The target's ATR, its time-only target's or that of a bracket 2 and
+    /// 1 ATRs out, is built of the quotes of the AUD/USD traded: it reads
+    /// them.
     #[test]
     fn quotes_the_target_atr_is_built_of_load() {
-        let toml = with_quotes().replace(
-            r#"target = { limit = "30m" }"#,
+        let bracket = with_quotes().replace(
+            r#"target = { limit = "30m", atr = { period = 14 } }"#,
             r#"target = { bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#,
         );
 
-        ModelEmaConfig::load(&toml).unwrap();
+        ModelEmaConfig::load(&with_quotes()).unwrap();
+        ModelEmaConfig::load(&bracket).unwrap();
     }
 
     /// Its features average each bars series once: listed again, it is
