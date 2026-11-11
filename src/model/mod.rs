@@ -8,27 +8,27 @@
 //! `dataset` is the settled rows of a strategy stored by day in the
 //! catalog, its coverage the cache of the days built;
 //! `learner` is the model port, its learners fitting and loading the
-//! models that predict; `calibration` turns their predictions into win
-//! rates; `payoff` is what a side's trade is expected to make and the
-//! side a decision trades;
+//! models that predict; `calibration` turns a pair's predictions of R into
+//! each side's expected R, and a meta's into its expected R; `payoff` is the
+//! side a decision trades on its expected net P&L;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset and publishing them together in the `store` if their `holdout`,
 //! each side's `score` and what the decision would have earned there, meets
 //! the minimums;
 //! `deciding` is the decision itself, the side picked among the models
-//! valid at a time, the meta's threshold and the size; `handle` is
-//! what the strategy holds and decides through, trading on the latest
-//! model of the store valid at each decision, or opening the decision's
-//! target in a dataset run; `schedule` is when a model is retrained, on
-//! a fixed UTC grid, or that it never is, and what each train does to
-//! each model; `launcher`
+//! valid at a time and the meta's margin; `handle` is
+//! what the strategy holds and decides through, trading on the sides'
+//! latest pair and the meta's latest model valid at each decision, or
+//! opening the decision's target in a dataset run; `schedule` is when a
+//! model is retrained, on a fixed UTC grid, or that it never is, and what
+//! each train does to each model; `launcher`
 //! starts a live strategy's retrains, one
 //! at a time, in a child process; `walk` is a backtest retraining on the
 //! schedule before its run and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
-//! trade of the side picked, trained on the out-of-sample predictions of
-//! the strategy's side models.
+//! trade of the side picked on the net R it expects of it, trained on the
+//! out-of-sample predictions of the strategy's side models.
 //!
 //! `ModelStrategy` is what a strategy trading on a model gives the
 //! harness: the binary's backtest, live, train and dataset runs are
@@ -424,10 +424,15 @@ mod tests {
         ))
     }
 
-    const TIME_ONLY: &str = r#"{ limit = "30m" }"#;
+    /// A time-only target, its unit measured in Nautilus' ATR of 14 hourly
+    /// bars of gold.
+    const TIME_ONLY: &str = r#"{ limit = "30m", atr = { period = 14 } }"#;
     /// A bracket in ATRs: Nautilus' ATR of 14 hourly bars of gold.
     const BRACKET: &str =
         r#"{ bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#;
+    /// A bracket in basis points, which has no ATR.
+    const IN_BPS: &str =
+        r#"{ bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#;
 
     /// Each config error refusing the probe's config of `features`,
     /// `series` and `target` (see `load`): its field and its message.
@@ -522,15 +527,17 @@ mod tests {
         assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
     }
 
-    /// The features read GC's trades alone; the target's ATR is built of
-    /// the quotes of the gold traded, which `[data]` lists for it; a
-    /// time-only target has no ATR to read them.
+    /// The features read GC's trades alone; the target's ATR, a bracket's
+    /// or a time-only target's, is built of the quotes of the gold traded,
+    /// which `[data]` lists for it; a bracket in basis points has no ATR to
+    /// read them.
     #[test]
     fn ticks_the_target_atr_reads_alone_are_read() {
         let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
         load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BRACKET).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY);
+        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], IN_BPS);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -541,15 +548,16 @@ mod tests {
         );
     }
 
-    /// Deciding hourly, the target's ATR runs on gold's hourly bars of
-    /// mids, which `[data]` lists and no feature reads; a time-only target
-    /// has no ATR to read them.
+    /// Deciding hourly, the target's ATR, a bracket's or a time-only
+    /// target's, runs on gold's hourly bars of mids, which `[data]` lists and
+    /// no feature reads; a bracket in basis points has no ATR to read them.
     #[test]
     fn bars_the_target_atr_runs_on_alone_are_read() {
         let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
 
         load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BRACKET).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY);
+        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], IN_BPS);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -576,11 +584,14 @@ mod tests {
     /// both reported, each under its field.
     #[test]
     fn the_series_refusals_are_reported_with_the_other_violations() {
-        let mut fields: Vec<String> =
-            refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], r#"{ limit = "1h" }"#)
-                .into_iter()
-                .map(|(field, _)| field)
-                .collect();
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GC_TRADES],
+            r#"{ limit = "1h", atr = { period = 14 } }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
         fields.sort();
 
         assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
@@ -612,11 +623,14 @@ mod tests {
     /// are both reported, each under its field.
     #[test]
     fn a_series_listed_twice_is_reported_with_the_other_violations() {
-        let mut fields: Vec<String> =
-            refusals(&[GOLD_BARS], &[GOLD_BARS, GOLD_BARS], r#"{ limit = "1h" }"#)
-                .into_iter()
-                .map(|(field, _)| field)
-                .collect();
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GOLD_BARS],
+            r#"{ limit = "1h", atr = { period = 14 } }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
         fields.sort();
 
         assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
@@ -688,7 +702,13 @@ mod tests {
             .replace(r#""15m""#, r#""0s""#)
             .replace("[indicators.filter]\n        period = 5\n", "");
 
-        let err = load_of(&[GOLD_BARS], &[GOLD_BARS], r#"{ limit = "1h" }"#, &tables).unwrap_err();
+        let err = load_of(
+            &[GOLD_BARS],
+            &[GOLD_BARS],
+            r#"{ limit = "1h", atr = { period = 14 } }"#,
+            &tables,
+        )
+        .unwrap_err();
 
         let Some(ConfigError::Multiple { errors }) = err.downcast_ref::<ConfigError>() else {
             panic!("not several config errors: {err}");

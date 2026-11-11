@@ -50,17 +50,18 @@ impl Predictor for Saved {
 mod tests {
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
+    /// (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
     #[test]
-    fn predicts_the_share_of_true_labels_whatever_the_row() {
+    fn predicts_the_mean_of_the_labels_whatever_the_row() {
         let set = TrainingSet::new(
             2,
             vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
-            vec![true, false, false, false],
+            vec![2.5, -1.0, 3.5, 2.0],
         )
         .unwrap();
         let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
         for row in [[0.0, 1.0], [100.0, -5.0], [f64::NAN, f64::NAN]] {
-            assert_eq!(model.predict(&row).unwrap(), 0.25, "{row:?}");
+            assert_eq!(model.predict(&row).unwrap(), 1.75, "{row:?}");
         }
     }
 }

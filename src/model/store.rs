@@ -15,40 +15,57 @@
 //!
 //! A meta model's store sits in a `meta/` directory beside its sides,
 //! under their training settings, keyed by its own (its learner and
-//! settings, window, holdout, threshold and minimums) and the sides'
+//! settings, window, holdout, margin and minimums) and the sides'
 //! margins, which make its rows. A meta model is only ever listed beside
 //! meta models of the same sides.
 //!
 //! A strategy's stores are built together, as its model set (`ModelSet`),
 //! and only there: the fingerprint is computed once and keys them all. The
-//! model set holds each side the margins trade, with its margin and its
-//! store, and the meta level, if any, with its config, its feature names
-//! and its store; it hands out the swap of each, checked against the
-//! level's feature names and the fingerprint, and lists when each model
-//! was published.
+//! model set holds each side the margins trade, with its margin, its feature
+//! names (the strategy's, then the target's payoff names,
+//! `features::side_names`) and its store, and the meta level, if any, with
+//! its config, its feature names and its store; it hands out the swap of the
+//! sides' pairs and of the meta's models, checked against the level's
+//! feature names and the fingerprint, and lists when each model was
+//! published. A train reads a level's feature names from it, so the names a
+//! model is published with are those it is checked against.
+//!
+//! The sides' models are used as pairs (`Pair`), the sides one train
+//! published, valid from one time: a pair's valid-from is a time every side
+//! traded has a model valid from (`Models::pairs`), so a side's model with
+//! no other side's beside it, as a train stopped between its sides'
+//! publishes leaves, is in no pair and never used. A one-sided strategy's
+//! pairs are its one side's models. A pair is calibrated as one
+//! (`calibration::Ksplit`), its calibration fitted on that pair and written
+//! into each side's manifest, the same values naming the pair it was fitted
+//! on, its valid-from and its sides (`PairCalibration`): a pair whose sides'
+//! copies differ, or name another pair, is refused.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
-//! the latest valid then, checked before use, a model failing a check
-//! refused and the current one kept.
+//! the latest valid then, the sides' pair or the meta's model, checked
+//! before use, one failing a check refused, a pair whole, and the current
+//! one kept.
 //!
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
-//! target spec and side, the learner, the calibration of its
-//! predictions, its baseline (the training mean of the labels of the rows
-//! it was fitted and calibrated on), a side's expected payoff, its holdout
-//! (`holdout::Holdout`) and probe rows with the calibrated predictions the
-//! model made on them when fitted, and the model as its adapter saved it.
-//! A loaded model's every prediction is calibrated (`LoadedModel`), it
-//! carries its baseline (`Baselined`), and a side's carries its payoff
-//! (`SideModel`), which gives its expected net P&L: one whose manifest has
-//! none is refused at load. A reloaded model is checked by predicting
-//! the probes, never by its bytes. The file is written beside its name, then
-//! renamed onto it, so a reader sees a whole model or none. A missing
-//! feature, NaN, has no JSON number: a probe row writes NaN and the
-//! infinities as strings.
+//! target spec and side, the learner, the calibration of its predictions (a
+//! side's its pair's, a meta's its own level line, `ModelCalibration`), its
+//! baseline (the training mean of the R it learned on the rows it was fitted
+//! and calibrated on), its holdout (`holdout::Holdout`) and probe rows with
+//! the predictions the model made on them when fitted, before any
+//! calibration, and the model as its adapter saved it. A side's model
+//! predicts R (`SideModel`), its pair calibrating both sides' predictions at
+//! once (`Pair::expect`); a meta's predicts the R of the trade of the side
+//! picked, every prediction calibrated (`LoadedModel`); each carries its
+//! baseline (`Baselined`). A model whose manifest has the other level's
+//! calibration is refused at load. A reloaded model is checked by
+//! predicting the probes, never by its bytes. The file is written beside
+//! its name, then renamed onto it, so a reader sees a whole model or none.
+//! A missing feature, NaN, has no JSON number: a probe row writes NaN and
+//! the infinities as strings, and so does a probe's prediction.
 
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -59,15 +76,15 @@ use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    calibration::Calibration,
+    calibration::{Expected, Ksplit, Line},
     config::{Margins, MetaConfig, ModelConfig},
     dataset::{self, DatasetVenue},
-    features::{FeatureSet, Fingerprint, meta_names},
+    deciding::SideRow,
+    features::{FeatureSet, Fingerprint, meta_names, side_names},
     holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
-    payoff::Payoff,
     schedule::{Models, Retrain},
-    targets::{Side, TargetConfig},
+    targets::{PerSide, Side, TargetConfig},
 };
 use crate::strategy::DataRequirements;
 
@@ -88,7 +105,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 5;
+const VERSION: u32 = 7;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -113,6 +130,17 @@ pub struct SideLevel {
     side: Side,
     margin: f64,
     models: CheckedStore,
+}
+
+/// The models of the sides a strategy trades valid from one time, one of
+/// each: the pair one train published, loaded and checked together
+/// (`ModelSet::pairs`), or a train holds before publishing it, with the
+/// calibration fitted on it.
+#[derive(Debug)]
+pub struct Pair {
+    /// Each side traded, the long first, and its model.
+    models: Vec<(Side, SideModel)>,
+    calibration: Ksplit,
 }
 
 /// The meta level of a model set: the meta model's config and its models.
@@ -159,39 +187,100 @@ pub struct ModelManifest {
     pub side: Option<Side>,
     pub learner: LearnerConfig,
     /// The calibration of the model's predictions.
-    pub calibration: Calibration,
+    pub calibration: ModelCalibration,
     /// The model's baseline, the constant model its scores are read
-    /// beside: the training mean of the labels of the rows it was fitted
-    /// and calibrated on.
+    /// beside: the training mean of the R it learned on the rows it was
+    /// fitted and calibrated on.
     pub baseline: f64,
-    /// A side model's expected win and loss of a trade of its side, without
-    /// which it is refused at load (`SideModel`); none for a meta model.
-    pub payoff: Option<Payoff>,
     /// The model's holdout, as its publication read it.
     pub holdout: Holdout,
-    /// Rows of the holdout and the model's calibrated predictions on them.
+    /// Rows of the holdout and the model's predictions on them, before any
+    /// calibration.
     pub probes: Vec<Probe>,
 }
 
-/// A row and the prediction of a model on it when it was fitted.
+/// How a published model's predictions are calibrated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCalibration {
+    /// A side model's: its pair's, one copy in each side's manifest.
+    Pair(PairCalibration),
+    /// A meta model's: the level line of its predictions of R, as a
+    /// one-sided pair's (`Ksplit`).
+    Meta(Line),
+}
+
+/// A pair's calibration as each side's manifest holds it, naming the pair it
+/// was fitted on: its valid-from and its sides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairCalibration {
+    pub valid_from: Timestamp,
+    /// The sides of the pair, the long first.
+    pub sides: Vec<Side>,
+    pub lines: Ksplit,
+}
+
+/// A row and the prediction of a model on it when it was fitted, before
+/// any calibration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
     #[serde(with = "values")]
     pub row: Vec<f64>,
+    #[serde(with = "values::one")]
     pub prediction: f64,
 }
 
 impl StoredModel {
-    /// The model, loaded by its manifest's learner with its calibration
-    /// and checked against a strategy of `feature_names` and
-    /// `fingerprint`: the manifest's feature names in order and
-    /// fingerprint are the strategy's, the model takes as many features,
-    /// and it predicts each probe to the bit as when fitted.
+    /// The meta model, loaded by its manifest's learner with its level line
+    /// and checked as `checked` does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot be loaded, fails a check, or its
+    /// manifest has a side's calibration.
+    pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<LoadedModel> {
+        let ModelCalibration::Meta(calibration) = self.manifest.calibration else {
+            anyhow::bail!("its manifest has a pair's calibration, which no meta model has");
+        };
+        Ok(LoadedModel {
+            model: self.checked(feature_names, fingerprint)?,
+            calibration,
+            baseline: self.manifest.baseline,
+        })
+    }
+
+    /// The side model, loaded and checked as `checked` does, with the
+    /// calibration of its pair its manifest holds, which the pair checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error as `load` does, or if its manifest has no pair's
+    /// calibration.
+    fn load_side(
+        &self,
+        feature_names: &[String],
+        fingerprint: &str,
+    ) -> anyhow::Result<(SideModel, PairCalibration)> {
+        let ModelCalibration::Pair(calibration) = &self.manifest.calibration else {
+            anyhow::bail!("its manifest has no pair's calibration, which a side model trades by");
+        };
+        let model = SideModel::new(
+            self.checked(feature_names, fingerprint)?,
+            self.manifest.baseline,
+        );
+        Ok((model, calibration.clone()))
+    }
+
+    /// The model, loaded by its manifest's learner and checked against a
+    /// strategy of `feature_names` and `fingerprint`: the manifest's
+    /// feature names in order and fingerprint are the strategy's, the model
+    /// takes as many features, and it predicts each probe to the bit as
+    /// when fitted.
     ///
     /// # Errors
     ///
     /// Returns an error if the model cannot be loaded or fails a check.
-    pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<LoadedModel> {
+    fn checked(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<Model> {
         let manifest = &self.manifest;
         ensure!(
             manifest.feature_names == feature_names,
@@ -203,12 +292,8 @@ impl StoredModel {
             "its fingerprint {} is not the strategy's {fingerprint}",
             manifest.fingerprint
         );
-        let model = LoadedModel {
-            model: manifest.learner.load(&self.model)?,
-            calibration: manifest.calibration,
-            baseline: manifest.baseline,
-        };
-        let width = model.model.width();
+        let model = manifest.learner.load(&self.model)?;
+        let width = model.width();
         ensure!(
             width == manifest.feature_names.len(),
             "it takes {width} features, its manifest names {}",
@@ -225,31 +310,17 @@ impl StoredModel {
         }
         Ok(model)
     }
-
-    /// The side model, loaded and checked as `load` does, with the
-    /// expected payoff of its manifest.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error as `load` does, or if its manifest has no payoff.
-    fn load_side(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<SideModel> {
-        let model = self.load(feature_names, fingerprint)?;
-        let payoff = self
-            .manifest
-            .payoff
-            .context("its manifest has no payoff, which a side model trades by")?;
-        Ok(SideModel::new(model, payoff))
-    }
 }
 
-/// A model as a strategy and a score use it: loaded, every prediction
-/// calibrated, with its baseline.
+/// A meta model as a strategy and a score use it: loaded, predicting the
+/// realised R of the trade of the side picked, every prediction calibrated
+/// by its level line, with its baseline.
 #[derive(Debug)]
 pub struct LoadedModel {
     model: Model,
-    calibration: Calibration,
-    /// The training mean of the labels of the rows it was fitted and
-    /// calibrated on (`ModelManifest::baseline`).
+    calibration: Line,
+    /// The training mean of R on the rows it was fitted and calibrated on
+    /// (`ModelManifest::baseline`).
     baseline: f64,
 }
 
@@ -257,24 +328,13 @@ pub struct LoadedModel {
 /// (`ModelManifest::baseline`), which its scores are read beside: a
 /// meta's (`LoadedModel`) and a side's (`SideModel`) alike.
 pub(super) trait Baselined {
-    /// The training mean of the labels of the rows the model was fitted
-    /// and calibrated on.
+    /// The training mean of what the model learned on the rows it was
+    /// fitted and calibrated on.
     fn baseline(&self) -> f64;
 }
 
 impl LoadedModel {
-    /// The model `model` fitted, its predictions calibrated by
-    /// `calibration`, its baseline `baseline`.
-    #[must_use]
-    pub const fn new(model: Model, calibration: Calibration, baseline: f64) -> Self {
-        Self {
-            model,
-            calibration,
-            baseline,
-        }
-    }
-
-    /// The calibrated probability that the label of `row` is true.
+    /// The calibrated expected R of the trade of `row`.
     ///
     /// # Errors
     ///
@@ -284,39 +344,30 @@ impl LoadedModel {
     }
 }
 
-/// A side's model as a strategy and a score use it: loaded, every
-/// prediction calibrated, and the expected win and loss of a trade of its
-/// side, which it is traded by.
+/// A side's model as a strategy and a score use it: loaded, predicting the
+/// realised R of its side's trade, which its pair calibrates
+/// (`Pair::expect`), with its baseline, the training mean of R.
 #[derive(Debug)]
 pub struct SideModel {
-    model: LoadedModel,
-    payoff: Payoff,
+    model: Model,
+    baseline: f64,
 }
 
 impl SideModel {
-    /// The model `model` of a side, expecting `payoff` of a trade of it.
+    /// The side's model `model` fitted, its baseline `baseline`.
     #[must_use]
-    pub const fn new(model: LoadedModel, payoff: Payoff) -> Self {
-        Self { model, payoff }
+    pub const fn new(model: Model, baseline: f64) -> Self {
+        Self { model, baseline }
     }
 
-    /// The calibrated probability that the side's trade of `row` gains.
+    /// The R of the side's trade of `row` the model predicts, before its
+    /// pair's calibration.
     ///
     /// # Errors
     ///
-    /// As `LoadedModel::predict`.
+    /// As `Model::predict`.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         self.model.predict(row)
-    }
-
-    /// The expected net P&L of a trade of the side won with `probability`,
-    /// in money, its payoff's unit worth `unit` (with exits the worth of
-    /// the trade's stop, the payoff being in R; one without): the
-    /// payoff's expectation at the probability (`Payoff::expected`) times
-    /// the unit.
-    #[must_use]
-    pub fn expected_pnl(&self, probability: f64, unit: f64) -> f64 {
-        self.payoff.expected(probability) * unit
     }
 }
 
@@ -326,10 +377,9 @@ impl Baselined for LoadedModel {
     }
 }
 
-/// A side model's baseline is its loaded model's.
 impl Baselined for SideModel {
     fn baseline(&self) -> f64 {
-        self.model.baseline()
+        self.baseline
     }
 }
 
@@ -362,6 +412,7 @@ impl ModelSet {
         )?;
         let training = training_directory(root, strategy_id, fingerprint, config, VERSION)?;
         let fingerprint = fingerprint.to_string();
+        let side_names = side_names(features.names(), &config.target.payoff_names());
         let sides = config
             .margins
             .sides()
@@ -370,7 +421,7 @@ impl ModelSet {
                 margin,
                 models: CheckedStore {
                     store: ModelStore::new(&training, side, config.margins),
-                    feature_names: features.names().to_vec(),
+                    feature_names: side_names.clone(),
                     fingerprint: fingerprint.clone(),
                 },
             })
@@ -409,8 +460,46 @@ impl ModelSet {
         self.meta.as_ref()
     }
 
+    /// The sides' pairs as a strategy swaps them in, valid from the
+    /// stores' pairs (`Models::pairs` of `valid_froms`): each side's model
+    /// of a pair loaded and checked against the side models' feature names
+    /// and the fingerprint (`StoredModel::load_side`), with the calibration
+    /// its manifest holds, which must be the same in every side's and name
+    /// this pair, its valid-from and its sides; a pair with a side failing
+    /// refused whole; none in use yet.
+    #[must_use]
+    pub fn pairs(&self) -> Swap<Pair> {
+        let sides = self.sides.clone();
+        Swap::new(move |valid_from| {
+            let mut models = vec![];
+            let mut calibrations: Vec<PairCalibration> = vec![];
+            for level in &sides {
+                let (model, calibration) = level
+                    .models
+                    .read(valid_from, StoredModel::load_side)
+                    .with_context(|| format!("the {} model", level.side.name()))?;
+                models.push((level.side, model));
+                calibrations.push(calibration);
+            }
+            let calibration = calibrations.swap_remove(0);
+            ensure!(
+                calibrations.iter().all(|other| *other == calibration),
+                "its sides hold different calibrations: {calibration:?} beside {calibrations:?}"
+            );
+            let traded: Vec<Side> = sides.iter().map(|level| level.side).collect();
+            ensure!(
+                calibration.valid_from == valid_from && calibration.sides == traded,
+                "its calibration was fitted on the pair of {:?} valid from {}, not on its {traded:?} valid from {valid_from}",
+                calibration.sides,
+                calibration.valid_from
+            );
+            Pair::new(models, calibration.lines)
+        })
+    }
+
     /// The valid-froms of the store of each model: of each side traded,
-    /// and of the meta model, if any.
+    /// whose pairs are the times every side has a model valid from
+    /// (`Models::pairs`), and of the meta model, if any.
     ///
     /// # Errors
     ///
@@ -452,12 +541,67 @@ impl SideLevel {
         &self.models.store
     }
 
-    /// The side's models as a strategy swaps them in, checked against the
-    /// side models' feature names and the fingerprint, each with its
-    /// payoff (`StoredModel::load_side`); none in use yet.
+    /// The names of the side model's features, in the order of its rows
+    /// (`features::side_names`): the strategy's, then the target's payoff
+    /// names.
     #[must_use]
-    pub fn swap(&self) -> Swap<SideModel> {
-        self.models.swap(StoredModel::load_side)
+    pub fn feature_names(&self) -> &[String] {
+        &self.models.feature_names
+    }
+}
+
+impl Pair {
+    /// The pair of `models`, each side traded, the long first, and its
+    /// model, calibrated by `calibration`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `calibration` is not of as many sides: a side
+    /// call of two, none of one.
+    pub fn new(models: Vec<(Side, SideModel)>, calibration: Ksplit) -> anyhow::Result<Self> {
+        ensure!(
+            calibration.side_call.is_some() == (models.len() == 2),
+            "a calibration of {} sides for a pair of {}",
+            if calibration.side_call.is_some() {
+                2
+            } else {
+                1
+            },
+            models.len()
+        );
+        Ok(Self {
+            models,
+            calibration,
+        })
+    }
+
+    /// The calibrated expectation of the decision of each side's row `rows`:
+    /// each side's model's prediction on its row, calibrated together.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a model fails to predict.
+    pub fn expect(&self, rows: &PerSide<SideRow>) -> anyhow::Result<Expected> {
+        let predictions = self
+            .models
+            .iter()
+            .map(|(side, model)| model.predict(&rows.of(*side).features))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(self.calibration.apply(&predictions))
+    }
+
+    /// The model of `side`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pair's model set does not trade `side`.
+    #[must_use]
+    pub fn side(&self, side: Side) -> &SideModel {
+        self.models
+            .iter()
+            .find(|(traded, _)| *traded == side)
+            .map(|(_, model)| model)
+            .unwrap_or_else(|| panic!("the pair holds no {} model", side.name()))
     }
 }
 
@@ -484,21 +628,22 @@ impl MetaLevel {
     /// meta's feature names and the fingerprint; none in use yet.
     #[must_use]
     pub fn swap(&self) -> Swap<LoadedModel> {
-        self.models.swap(StoredModel::load)
+        let models = self.models.clone();
+        Swap::new(move |valid_from| models.read(valid_from, StoredModel::load))
     }
 }
 
 impl CheckedStore {
-    /// The store's models as a strategy swaps them in, each loaded and
-    /// checked against its feature names and fingerprint by `load`; none
-    /// in use yet.
-    fn swap<M>(&self, load: Load<M>) -> Swap<M> {
-        Swap::new(
-            self.store.clone(),
-            self.feature_names.clone(),
-            self.fingerprint.clone(),
-            load,
-        )
+    /// The store's model valid from `valid_from`, loaded and checked
+    /// against its feature names and fingerprint by `load`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is none, its file cannot be read, or as
+    /// `load` does.
+    fn read<M>(&self, valid_from: Timestamp, load: Load<M>) -> anyhow::Result<M> {
+        let stored = self.store.read(valid_from)?;
+        load(&stored, &self.feature_names, &self.fingerprint)
     }
 }
 
@@ -681,39 +826,33 @@ fn margins_text(margins: Margins) -> String {
 }
 
 /// The training settings of `meta`: its learner, window, holdout, and
-/// the threshold deciding the trades its holdout is judged on, and the
+/// the margin deciding the trades its holdout is judged on, and the
 /// minimums of its holdout.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
-        .with(&meta.threshold.to_le_bytes())
+        .with(&meta.margin.to_le_bytes())
         .with(&meta.min_pnl.to_le_bytes())
         .with(&meta.min_trades.to_le_bytes()))
 }
 
 /// How a level's model is loaded from its file and checked against a
 /// strategy of feature names and a fingerprint, as a model `M`: a side's
-/// with its payoff (`StoredModel::load_side`), a meta's as it is
-/// (`StoredModel::load`).
+/// with its pair's calibration (`StoredModel::load_side`), a meta's with its
+/// own (`StoredModel::load`).
 type Load<M> = fn(&StoredModel, &[String], &str) -> anyhow::Result<M>;
 
-/// The models of a store as a strategy swaps them in, decision by decision
-/// in time order: at each, the latest valid then, loaded as an `M` and
-/// checked against the strategy before use. One failing a check is
-/// refused, logged as an error, and the current one kept; it is not read
-/// again. A model set's levels hand it out (`SideLevel::swap`,
-/// `MetaLevel::swap`).
-#[derive(Debug)]
+/// The models of a level as a strategy swaps them in, decision by decision
+/// in time order: at each, the latest valid then, read from its stores as an
+/// `M` and checked against the strategy before use, the meta's model or the
+/// sides' pair. One failing a check is refused, logged as an error, and the
+/// current one kept; it is not read again. A model set hands it out
+/// (`ModelSet::pairs`, `MetaLevel::swap`).
 pub struct Swap<M> {
-    store: ModelStore,
-    /// The feature names a model must carry, in order.
-    feature_names: Vec<String>,
-    /// The fingerprint a model must carry.
-    fingerprint: String,
-    /// How a model is loaded and checked.
-    load: Load<M>,
+    /// The model valid from a time, read and checked.
+    read_at: Box<dyn Fn(Timestamp) -> anyhow::Result<M>>,
     /// The model in use, and its valid-from.
     current: Option<(Timestamp, M)>,
     /// The valid-from of the last model read, in use or refused.
@@ -721,42 +860,24 @@ pub struct Swap<M> {
 }
 
 impl<M> Swap<M> {
-    /// Swaps in the models of `store` for a strategy of `feature_names`
-    /// and `fingerprint`, each loaded and checked by `load`; none in use
-    /// yet.
-    const fn new(
-        store: ModelStore,
-        feature_names: Vec<String>,
-        fingerprint: String,
-        load: Load<M>,
-    ) -> Self {
+    /// Swaps in the models `read_at` reads and checks, by their valid-from;
+    /// none in use yet.
+    fn new(read_at: impl Fn(Timestamp) -> anyhow::Result<M> + 'static) -> Self {
         Self {
-            store,
-            feature_names,
-            fingerprint,
-            load,
+            read_at: Box::new(read_at),
             current: None,
             read: None,
         }
     }
 
-    #[must_use]
-    pub const fn store(&self) -> &ModelStore {
-        &self.store
-    }
-
     /// The model in use at `now`, and its valid-from, among the models
-    /// valid from `valid_froms`, the store's list in order: the latest
+    /// valid from `valid_froms`, the stores' list in order: the latest
     /// valid then, swapped in if not read yet, unless it fails its checks.
     pub fn at(&mut self, now: Timestamp, valid_froms: &[Timestamp]) -> Option<(Timestamp, &M)> {
         let latest = valid_froms.iter().rfind(|&&time| time <= now).copied();
         if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
             self.read = Some(latest);
-            match self
-                .store
-                .read(latest)
-                .and_then(|stored| (self.load)(&stored, &self.feature_names, &self.fingerprint))
-            {
+            match (self.read_at)(latest) {
                 Ok(model) => {
                     log::info!("the model valid from {latest} in use from {now}");
                     self.current = Some((latest, model));
@@ -772,8 +893,19 @@ impl<M> Swap<M> {
     }
 }
 
+/// A swap reads as the model in use and the valid-from last read.
+impl<M: fmt::Debug> fmt::Debug for Swap<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Swap")
+            .field("current", &self.current)
+            .field("read", &self.read)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A row of values as JSON: a number each, NaN and the infinities, which
-/// JSON has no number for, as `"NaN"`, `"inf"` and `"-inf"`.
+/// JSON has no number for, as `"NaN"`, `"inf"` and `"-inf"`; and one value
+/// alike (`one`).
 mod values {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -784,14 +916,34 @@ mod values {
         Name(String),
     }
 
+    impl From<f64> for Value {
+        fn from(value: f64) -> Self {
+            match value {
+                v if v.is_finite() => Self::Number(v),
+                v if v.is_nan() => Self::Name("NaN".to_string()),
+                v if v > 0.0 => Self::Name("inf".to_string()),
+                _ => Self::Name("-inf".to_string()),
+            }
+        }
+    }
+
+    impl Value {
+        fn read<E: de::Error>(self) -> Result<f64, E> {
+            match self {
+                Self::Number(v) => Ok(v),
+                Self::Name(name) => match name.as_str() {
+                    "NaN" => Ok(f64::NAN),
+                    "inf" => Ok(f64::INFINITY),
+                    "-inf" => Ok(f64::NEG_INFINITY),
+                    _ => Err(E::custom(format!("{name} is not a value"))),
+                },
+            }
+        }
+    }
+
     pub fn serialize<S: Serializer>(row: &[f64], serializer: S) -> Result<S::Ok, S::Error> {
         row.iter()
-            .map(|&value| match value {
-                v if v.is_finite() => Value::Number(v),
-                v if v.is_nan() => Value::Name("NaN".to_string()),
-                v if v > 0.0 => Value::Name("inf".to_string()),
-                _ => Value::Name("-inf".to_string()),
-            })
+            .map(|&value| Value::from(value))
             .collect::<Vec<_>>()
             .serialize(serializer)
     }
@@ -799,16 +951,23 @@ mod values {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f64>, D::Error> {
         Vec::<Value>::deserialize(deserializer)?
             .into_iter()
-            .map(|value| match value {
-                Value::Number(v) => Ok(v),
-                Value::Name(name) => match name.as_str() {
-                    "NaN" => Ok(f64::NAN),
-                    "inf" => Ok(f64::INFINITY),
-                    "-inf" => Ok(f64::NEG_INFINITY),
-                    _ => Err(de::Error::custom(format!("{name} is not a value"))),
-                },
-            })
+            .map(Value::read)
             .collect()
+    }
+
+    /// One value as JSON, as a row's are.
+    pub mod one {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        use super::Value;
+
+        pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+            Value::from(*value).serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+            Value::deserialize(deserializer)?.read()
+        }
     }
 }
 
@@ -822,13 +981,16 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::model::{
-        dataset::Commission,
-        decide::DecisionRule,
-        features::testing::last_mid,
-        holdout::Earnings,
-        learner::{LearnerConfig, TrainingSet},
-        targets::Target,
+    use crate::{
+        backtest::Commission,
+        model::{
+            calibration::Line,
+            decide::DecisionRule,
+            deciding::testing::HOLDOUT,
+            features::testing::last_mid,
+            learner::{LearnerConfig, TrainingSet},
+            targets::Target,
+        },
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -848,6 +1010,7 @@ mod tests {
                     .spec(
                         Target::builder()
                             .limit(SignedDuration::from_hours(1))
+                            .atr(crate::model::targets::DEFAULT_ATR)
                             .build(),
                     )
                     .build(),
@@ -916,7 +1079,7 @@ mod tests {
     /// 10 million USD, no leverage.
     fn venue() -> DatasetVenue {
         DatasetVenue {
-            commission: Commission::Rate("0.00003".to_string()),
+            commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
             leverage: Decimal::ONE,
         }
@@ -926,10 +1089,27 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// A fake model valid from `valid_from`, probed on `rows`, its
-    /// baseline the mean of its training labels, 1/2.
+    /// The calibration of a pair of both sides valid from `valid_from`, its
+    /// level line `0.1 + 0.5 C` and its side call's slope 1.5.
+    fn pair_calibration(valid_from: &str) -> ModelCalibration {
+        ModelCalibration::Pair(PairCalibration {
+            valid_from: at(valid_from),
+            sides: vec![Side::Long, Side::Short],
+            lines: Ksplit {
+                level: Line {
+                    alpha: 0.1,
+                    beta: 0.5,
+                },
+                side_call: Some(1.5),
+            },
+        })
+    }
+
+    /// A fake long model valid from `valid_from`, of the pair of both sides
+    /// valid then (`pair_calibration`), on a feature `mid`, probed on
+    /// `rows`, its baseline the mean of its training labels, 1/2.
     fn model(valid_from: &str, rows: &[Vec<f64>]) -> StoredModel {
-        let set = TrainingSet::new(1, vec![0.2, 0.7], vec![false, true]).unwrap();
+        let set = TrainingSet::new(1, vec![0.2, 0.7], vec![0.0, 1.0]).unwrap();
         let fitted = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
@@ -940,18 +1120,9 @@ mod tests {
                 target: config().target,
                 side: Some(Side::Long),
                 learner: LearnerConfig::Fake {},
-                calibration: Calibration { a: -0.9, b: 0.0 },
+                calibration: pair_calibration(valid_from),
                 baseline: 0.5,
-                payoff: Some(Payoff {
-                    win: 1.5,
-                    loss: 1.25,
-                }),
-                holdout: Holdout {
-                    earnings: Earnings::default(),
-                    log_loss: 0.6,
-                    baseline_log_loss: 0.69,
-                    auc: Some(0.625),
-                },
+                holdout: HOLDOUT,
                 probes: rows
                     .iter()
                     .map(|row| Probe {
@@ -1201,17 +1372,17 @@ mod tests {
             .clone()
     }
 
-    /// A meta model published under one threshold and minimums may fall
-    /// short of others, and the sides' margins make its rows: a meta
-    /// of another threshold, minimums or margins lists none of them.
+    /// A meta model published under one margin and minimums may fall
+    /// short of others, and the sides' margins make its rows: a meta of
+    /// another margin, minimums or sides' margins lists none of them.
     #[test]
-    fn a_meta_model_of_another_threshold_minimums_or_margins_is_not_listed() {
+    fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = |threshold, min_pnl| {
+        let meta = |margin, min_pnl| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(12))
-                .threshold(threshold)
+                .margin(margin)
                 .min_pnl(min_pnl)
                 .min_trades(20)
                 .learner(LearnerConfig::Fake {})
@@ -1243,13 +1414,13 @@ mod tests {
         }
     }
 
-    /// A meta model taking the trades of the side picked from a probability
-    /// of 0.55.
+    /// A meta model taking the trades of the side picked from an expected
+    /// net P&L of 0.55 USD.
     fn meta_config() -> MetaConfig {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
-            .threshold(0.55)
+            .margin(0.55)
             .min_pnl(1.0)
             .min_trades(20)
             .learner(LearnerConfig::Fake {})
@@ -1350,44 +1521,137 @@ mod tests {
         assert!(short.valid_froms().unwrap().is_empty());
     }
 
-    /// Every prediction of a loaded model is calibrated, its probes too:
-    /// the fake predicts the first feature, 0.75, of odds 3, calibrated by
-    /// a = -0.9 and b = 0 to 1 / (1 + 3^-0.9).
+    /// A meta model's every prediction of R is calibrated by its level line,
+    /// and its probes are its predictions before it: the fake predicts the
+    /// first feature, 0.25, calibrated by the line `0.1 + 0.5 E` to an
+    /// expected R of 0.225.
     #[test]
-    fn a_loaded_model_predicts_through_its_calibration() {
-        let mut stored = model("2026-10-22T00:00:00Z", &[]);
-        stored.manifest.probes = vec![Probe {
-            row: vec![0.75],
-            prediction: 1.0 / (1.0 + (-0.9 * 3_f64.ln()).exp()),
-        }];
+    fn a_loaded_meta_model_predicts_through_its_calibration() {
+        let mut stored = model("2026-10-22T00:00:00Z", &[vec![0.75]]);
+        stored.manifest.side = None;
+        stored.manifest.calibration = ModelCalibration::Meta(Line {
+            alpha: 0.1,
+            beta: 0.5,
+        });
 
         let loaded = stored
             .load(&stored.manifest.feature_names, &stored.manifest.fingerprint)
             .unwrap();
 
+        assert_eq!(stored.manifest.probes[0].prediction, 0.75);
         let prediction = loaded.predict(&[0.25]).unwrap();
-        assert!(
-            (prediction - 1.0 / (1.0 + 3_f64.powf(0.9))).abs() < 1e-12,
-            "{prediction}"
-        );
+        assert!((prediction - 0.225).abs() < 1e-12, "{prediction}");
     }
 
-    /// A side model expects its payoff's net P&L times the unit: loaded
-    /// with its manifest's payoff, a win of 1.5 and a loss of 1.25, on
-    /// stops worth 2 it expects (0.6 x 1.5 - 0.4 x 1.25) x 2 = 0.8 of a
-    /// trade won with 0.6, 3 of one sure to win, and -2.5 of one sure to
-    /// lose.
+    /// A side's model has its pair's calibration and a meta's its own level
+    /// line: each loaded as the other's level is refused.
     #[test]
-    fn a_side_model_expects_its_payoffs_net_pnl_times_the_unit() {
-        let stored = model("2026-10-22T00:00:00Z", &[]);
+    fn a_model_is_refused_at_the_other_levels_load() {
+        let side = model("2026-10-22T00:00:00Z", &[]);
+        let mut meta = side.clone();
+        meta.manifest.calibration = ModelCalibration::Meta(Line {
+            alpha: 0.0,
+            beta: 1.0,
+        });
+        let (names, fingerprint) = (&side.manifest.feature_names, &side.manifest.fingerprint);
 
-        let side = stored
-            .load_side(&stored.manifest.feature_names, &stored.manifest.fingerprint)
+        assert!(side.load(names, fingerprint).is_err());
+        assert!(meta.load_side(names, fingerprint).is_err());
+    }
+
+    /// The fake long and short of a pair valid from midnight, on a feature
+    /// `mid`, then the entry cost of the time-only target, each predicting
+    /// its row's mid: the long's 0.4 and the short's 0.1 are C = 0.25 and D =
+    /// 0.3, calibrated by the pair's line `0.1 + 0.5 C` and slope 1.5 to C' =
+    /// 0.225 and D' = 0.45, the long expecting 0.45R and the short nought.
+    #[test]
+    fn a_pair_expects_each_sides_r_through_its_calibration() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = models(dir.path(), &config(), &venue());
+        let fingerprint = dataset::fingerprint(
+            &features(),
+            config().decision,
+            &config().target,
+            &requirements(),
+            &venue(),
+        )
+        .unwrap()
+        .to_string();
+        let names = models.side(Side::Long).unwrap().feature_names().to_vec();
+        for side in Side::BOTH {
+            let mut stored = model("2026-10-22T00:00:00Z", &[]);
+            stored.manifest.side = Some(side);
+            stored.manifest.fingerprint.clone_from(&fingerprint);
+            stored.manifest.feature_names.clone_from(&names);
+            let set = TrainingSet::new(2, vec![0.2, 0.0], vec![0.0]).unwrap();
+            stored.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
+            models.side(side).unwrap().store().publish(&stored).unwrap();
+        }
+        let mut pairs = models.pairs();
+        let midnight = at("2026-10-22T00:00:00Z");
+
+        let (_, pair) = pairs.at(midnight, &[midnight]).unwrap();
+        let expected = pair
+            .expect(&PerSide {
+                long: SideRow::new(&[0.4], &[0.02], 1.0),
+                short: SideRow::new(&[0.1], &[0.02], 1.0),
+            })
             .unwrap();
 
-        for (probability, expected) in [(0.6, 0.8), (1.0, 3.0), (0.0, -2.5)] {
-            let pnl = side.expected_pnl(probability, 2.0);
-            assert!((pnl - expected).abs() < 1e-12, "{probability}: {pnl}");
+        for (actual, by_hand) in [
+            (expected.level, 0.225),
+            (expected.side_call, 0.45),
+            (expected.of(Side::Long), 0.45),
+            (expected.of(Side::Short), 0.0),
+        ] {
+            assert!((actual - by_hand).abs() < 1e-12, "{expected:?}");
+        }
+    }
+
+    /// The manifests of earlier store versions are no models of this one: a
+    /// side's of Platt's calibration and a payoff record, and a meta's of
+    /// Platt's calibration and its probabilities' log loss and AUC. Read,
+    /// each is refused, naming its file.
+    #[test]
+    fn a_model_of_an_earlier_manifest_is_refused_naming_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), &config());
+        let current = serde_json::to_value(model("2026-10-22T00:00:00Z", &[])).unwrap();
+        let mut side = current.clone();
+        let manifest = side["manifest"].as_object_mut().unwrap();
+        manifest.insert(
+            "calibration".to_string(),
+            serde_json::json!({"a": -0.9, "b": 0.0}),
+        );
+        manifest.insert(
+            "payoff".to_string(),
+            serde_json::json!({"win": 1.5, "loss": 1.25}),
+        );
+        let mut meta = current;
+        let manifest = meta["manifest"].as_object_mut().unwrap();
+        manifest.insert("side".to_string(), serde_json::Value::Null);
+        manifest.insert(
+            "calibration".to_string(),
+            serde_json::json!({"platt": {"a": -0.9, "b": 0.0}}),
+        );
+        manifest["holdout"]["score"] = serde_json::json!({"probability": {
+            "log_loss": 0.6,
+            "baseline_log_loss": 0.69,
+            "auc": 0.6
+        }});
+        std::fs::create_dir_all(&store.directory).unwrap();
+
+        for (earlier, valid_from) in [
+            (side, "2026-10-22T00:00:00Z"),
+            (meta, "2026-10-23T00:00:00Z"),
+        ] {
+            let path = store.path(at(valid_from));
+            std::fs::write(&path, earlier.to_string()).unwrap();
+
+            let refused = store.read(at(valid_from)).unwrap_err();
+
+            let message = format!("{refused:#}");
+            assert!(message.contains(&path.display().to_string()), "{message}");
         }
     }
 
@@ -1401,15 +1665,16 @@ mod tests {
             .unwrap();
 
         for other in [
-            Commission::Rate("0.00004".to_string()),
-            Commission::PerOrder("3 USD".to_string()),
+            Commission::Rate(Decimal::new(4, 5)),
+            Commission::PerOrder(Money::from("3 USD")),
+            Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
         ] {
             assert!(
                 store_net_of(
                     dir.path(),
                     &config(),
                     &DatasetVenue {
-                        commission: other.clone(),
+                        commission: other,
                         ..venue()
                     }
                 )

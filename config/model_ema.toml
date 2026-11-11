@@ -56,8 +56,9 @@ decision = { every = "1h" }
 # sends: a bracket, its take profit 2 and its stop 1 average true ranges
 # from the decision's price (Nautilus' AverageTrueRange of the hourly bars,
 # by its arguments), closed 45 minutes after its send if neither is reached,
-# before the next decision. Without its bracket, `{ limit = "45m" }` is a
-# trade closed at its time alone.
+# before the next decision. Without its bracket, `{ limit = "45m", atr = {
+# period = 14 } }` is a trade closed at its time alone, its P&L read over the
+# worth of its ATR, declared beside the limit, as a stop's distance.
 target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, atr = { period = 14, ma_type = "WILDER" } }, limit = "45m" }
 # Retrained weekly on the last 30 days, the last 5 held out to score it.
 retrain = "168h"
@@ -69,4 +70,9 @@ margins = { long = 0.5, short = 0.5 }
 # earn at least 1 USD a trade over at least 30 trades of the holdout.
 min_pnl = 1.0
 min_trades = 30
-learner = { kind = "lightgbm" }
+# LightGBM, its trees of up to 31 leaves of 20 rows at least, over 100
+# rounds at a rate of 0.1: each side's model is fitted on the window less
+# the holdout and the calibration before it, as long, 20 days of which 14
+# or 15 are weekdays, 320 to 345 hourly decisions, too few for the
+# learner's default leaves of 200 rows to split.
+learner = { kind = "lightgbm", num_iterations = 100, learning_rate = 0.1, num_leaves = 31, min_data_in_leaf = 20 }

@@ -6,18 +6,20 @@
 //! names the adapter, its settings sit beside it). Adding a library is one
 //! adapter module and one variant. The adapters:
 //!
-//! - `lightgbm`: LightGBM's gradient-boosted trees, binary objective.
-//! - `perpetual`: PerpetualBooster's gradient-boosted trees, log-loss
-//!   objective, stopped by a budget instead of tuned settings; its
-//!   settings need a memory limit. It fits far slower than LightGBM and
-//!   saves models many times larger.
+//! - `lightgbm`: LightGBM's gradient-boosted trees under L2 regression, its
+//!   settings defaulting to ones regularised for a weak signal.
+//! - `perpetual`: PerpetualBooster's gradient-boosted trees on squared loss,
+//!   stopped by a budget instead of tuned settings; its settings need a
+//!   memory limit. It fits far slower than LightGBM and saves models many
+//!   times larger.
 //! - `baseline`: the training mean, the benchmark every score is read
 //!   against.
 //! - `fake`: the row's first feature, for tests that need to steer the
-//!   probability.
+//!   prediction.
 //!
-//! A model predicts the probability that a row's label is true, from a row
-//! of features in the order it was fitted on. NaN means missing in every
+//! A training set's labels are real values, fitted on their squared error:
+//! the model predicts a row's expected label. A model predicts from a row of
+//! features in the order it was fitted on. NaN means missing in every
 //! adapter, with no setup. The port, not the adapter, checks the width of a
 //! row before predicting, so a row of the wrong width is an error, never a
 //! panic of a library nor a prediction from shifted columns.
@@ -39,7 +41,7 @@ mod perpetual;
 
 use std::fmt;
 
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use serde::{Deserialize, Serialize};
 
 pub use lightgbm::LightGbmConfig;
@@ -57,8 +59,8 @@ pub enum LearnerConfig {
     Perpetual(PerpetualConfig),
     /// The mean of the training labels, whatever the row.
     Baseline {},
-    /// The row's first feature, clamped to [0, 1]; the mean of the training
-    /// labels where it is missing. For tests.
+    /// The row's first feature; the mean of the training labels where it is
+    /// missing. For tests.
     Fake {},
 }
 
@@ -115,23 +117,29 @@ impl LearnerConfig {
 }
 
 /// The rows a model is fitted on: features row by row, all of one width,
-/// and each row's label.
+/// and each row's label, a real value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingSet {
     width: usize,
     features: Vec<f64>,
-    labels: Vec<bool>,
+    labels: Vec<f64>,
 }
 
 impl TrainingSet {
     /// A set of `labels.len()` rows of `width` features each, `features`
-    /// holding them row after row; NaN marks a missing feature.
+    /// holding them row after row; NaN marks a missing feature. The labels
+    /// are fitted on their squared error: the model predicts a row's
+    /// expected label.
     ///
     /// # Errors
     ///
-    /// Returns an error if there is no row, `width` is zero, or `features`
-    /// does not hold `width` features for each label.
-    pub fn new(width: usize, features: Vec<f64>, labels: Vec<bool>) -> anyhow::Result<Self> {
+    /// Returns an error if there is no row, `width` is zero, `features`
+    /// does not hold `width` features for each label, or a label is not a
+    /// finite number.
+    pub fn new(width: usize, features: Vec<f64>, labels: Vec<f64>) -> anyhow::Result<Self> {
+        if let Some(label) = labels.iter().find(|label| !label.is_finite()) {
+            bail!("a label of {label} is not a finite number");
+        }
         ensure!(!labels.is_empty(), "a training set needs a row");
         ensure!(width > 0, "a training set needs a feature");
         ensure!(
@@ -160,15 +168,14 @@ impl TrainingSet {
 
     /// Each row's label, in order.
     #[must_use]
-    fn labels(&self) -> &[bool] {
+    fn labels(&self) -> &[f64] {
         &self.labels
     }
 
-    /// The share of labels that are true.
+    /// The mean of the labels.
     #[must_use]
     fn mean(&self) -> f64 {
-        let trues = self.labels.iter().filter(|&&label| label).count();
-        trues as f64 / self.labels.len() as f64
+        self.labels.iter().sum::<f64>() / self.labels.len() as f64
     }
 }
 
@@ -209,8 +216,8 @@ impl Model {
         self.predictor.width()
     }
 
-    /// The probability that the label of `row` is true, from its features
-    /// in the order the model was fitted on; NaN marks a missing feature.
+    /// The prediction on `row`, from its features in the order the model
+    /// was fitted on, the row's expected label; NaN marks a missing feature.
     ///
     /// # Errors
     ///
@@ -267,35 +274,48 @@ trait Predictor {
 mod tests {
     use super::*;
 
-    /// A fixed synthetic set: `ROWS` rows of `WIDTH` features drawn from a
-    /// seeded generator, labelled by a noisy rule on the first two
-    /// features. The third feature is missing in about a tenth of the rows,
-    /// and a missing third feature makes the label true.
-    fn synthetic() -> TrainingSet {
-        const ROWS: usize = 600;
-        const WIDTH: usize = 4;
+    const ROWS: usize = 600;
+    const WIDTH: usize = 4;
+
+    /// Draws uniform on [0, 1] from a fixed seed.
+    fn uniform() -> impl FnMut() -> f64 {
         let mut state = 0x5eed_u64;
-        let mut uniform = move || {
+        move || {
             // splitmix64: a known, dependency-free generator.
             state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             (z ^ (z >> 31)) as f64 / u64::MAX as f64
-        };
+        }
+    }
+
+    /// `row`, its third feature missing if `missing`.
+    fn with_missing(row: &[f64], missing: bool) -> impl Iterator<Item = f64> + '_ {
+        row.iter().enumerate().map(move |(column, &value)| {
+            if column == 2 && missing {
+                f64::NAN
+            } else {
+                value
+            }
+        })
+    }
+
+    /// A fixed synthetic set: `ROWS` rows of `WIDTH` features drawn from a
+    /// seeded generator, labelled by a noisy line on the first two
+    /// features, from about -3 to 2.5. The third feature is missing in about
+    /// a tenth of the rows, and a missing third feature raises the label by
+    /// 1.5.
+    fn synthetic() -> TrainingSet {
+        let mut uniform = uniform();
         let mut features = Vec::with_capacity(ROWS * WIDTH);
         let mut labels = Vec::with_capacity(ROWS);
         for _ in 0..ROWS {
             let row: Vec<f64> = (0..WIDTH).map(|_| uniform()).collect();
             let missing = uniform() < 0.1;
-            labels.push(missing || row[0] + 0.5 * row[1] + 0.3 * uniform() > 0.9);
-            features.extend(row.iter().enumerate().map(|(column, &value)| {
-                if column == 2 && missing {
-                    f64::NAN
-                } else {
-                    value
-                }
-            }));
+            let raised = if missing { 1.5 } else { 0.0 };
+            labels.push(2.0 * row[0] - 3.0 * row[1] + 0.5 * uniform() + raised);
+            features.extend(with_missing(&row, missing));
         }
         TrainingSet::new(WIDTH, features, labels).unwrap()
     }
@@ -360,16 +380,6 @@ mod tests {
                 }
 
                 #[test]
-                fn predictions_are_probabilities() {
-                    let set = synthetic();
-                    let model = config().fit(&set).unwrap();
-                    for row in probes(&set) {
-                        let probability = model.predict(&row).unwrap();
-                        assert!((0.0..=1.0).contains(&probability), "{row:?}: {probability}");
-                    }
-                }
-
-                #[test]
                 fn a_row_of_the_wrong_width_is_an_error() {
                     let set = synthetic();
                     let model = config().fit(&set).unwrap();
@@ -418,12 +428,22 @@ mod tests {
 
     #[test]
     fn a_set_without_features_is_refused() {
-        assert!(TrainingSet::new(0, vec![], vec![true]).is_err());
+        assert!(TrainingSet::new(0, vec![], vec![1.0]).is_err());
     }
 
     #[test]
     fn a_set_with_a_short_row_is_refused() {
-        assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![true, false]).is_err());
+        assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![1.0, -1.0]).is_err());
+    }
+
+    #[test]
+    fn a_label_not_a_number_is_refused() {
+        for label in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                TrainingSet::new(1, vec![1.0, 2.0], vec![0.5, label]).is_err(),
+                "{label}"
+            );
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -437,15 +457,15 @@ mod tests {
 
     #[test]
     fn loads_lightgbm_from_toml_with_defaults() {
-        let config = learner(r#"learner = { kind = "lightgbm", num_leaves = 7 }"#).unwrap();
+        let config = learner(r#"learner = { kind = "lightgbm", feature_fraction = 0.5 }"#).unwrap();
         assert_eq!(
             config,
             LearnerConfig::LightGbm(LightGbmConfig {
                 num_iterations: 100,
-                learning_rate: 0.1,
+                learning_rate: 0.05,
                 num_leaves: 7,
-                min_data_in_leaf: 20,
-                feature_fraction: 1.0,
+                min_data_in_leaf: 200,
+                feature_fraction: 0.5,
                 seed: 1,
             })
         );

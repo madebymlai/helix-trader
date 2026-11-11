@@ -1,5 +1,6 @@
-//! PerpetualBooster: gradient-boosted trees that stop by a budget instead
-//! of tuned settings, with the log-loss objective.
+//! PerpetualBooster: gradient-boosted trees on squared loss that stop by a
+//! budget instead of tuned settings. Its budget stands in for LightGBM's
+//! settings, which it has no equivalent of.
 
 use anyhow::{Context, anyhow, ensure};
 use perpetual::booster::config::BoosterIO;
@@ -43,13 +44,14 @@ const fn default_seed() -> u64 {
 const WIDTH: &str = "width";
 
 impl PerpetualConfig {
-    /// A booster with these settings. It fits on one thread, as LightGBM
-    /// does, so its results do not depend on the machine's cores, and its
-    /// splits give missing values a branch of their own, so a missing
-    /// feature is learned apart from every value, as in LightGBM.
+    /// A booster with these settings, fitting squared loss. It fits on one
+    /// thread, as LightGBM does, so its results do not depend on the
+    /// machine's cores, and its splits give missing values a branch of their
+    /// own, so a missing feature is learned apart from every value, as in
+    /// LightGBM.
     fn booster(&self) -> PerpetualBooster {
         PerpetualBooster::default()
-            .set_objective(Objective::LogLoss)
+            .set_objective(Objective::SquaredLoss)
             .set_budget(self.budget)
             .set_memory_limit(Some(self.memory_limit))
             .set_iteration_limit(self.iteration_limit)
@@ -72,15 +74,10 @@ impl Learner for PerpetualConfig {
         let columns: Vec<f64> = (0..width)
             .flat_map(|column| rows.iter().map(move |row| row[column]))
             .collect();
-        let labels: Vec<f64> = set
-            .labels()
-            .iter()
-            .map(|&label| f64::from(u8::from(label)))
-            .collect();
         let mut booster = self.booster();
         booster.fit(
             &Matrix::new(&columns, rows.len(), width),
-            &labels,
+            set.labels(),
             None,
             None,
         )?;
@@ -95,7 +92,7 @@ impl Learner for PerpetualConfig {
     }
 }
 
-/// A PerpetualBooster and the width of its rows.
+/// A PerpetualBooster of squared loss and the width of its rows.
 struct Perpetual {
     booster: PerpetualBooster,
     width: usize,
@@ -110,6 +107,10 @@ impl Perpetual {
             .parse()
             .context("the width of a PerpetualBooster model")?;
         ensure!(width > 0, "a PerpetualBooster model without features");
+        ensure!(
+            matches!(booster.cfg.objective, Objective::SquaredLoss),
+            "a PerpetualBooster model of a loss other than squared loss"
+        );
         Ok(Self { booster, width })
     }
 }
@@ -121,7 +122,7 @@ impl Predictor for Perpetual {
 
     fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         let matrix = Matrix::new(row, 1, self.width);
-        Ok(self.booster.predict_proba(&matrix, false, false)[0])
+        Ok(self.booster.predict(&matrix, false)[0])
     }
 
     fn save(&self) -> anyhow::Result<SavedModel> {
@@ -138,10 +139,10 @@ mod tests {
         PerpetualConfig::builder().memory_limit(1.0).build()
     }
 
-    /// 300 rows of two features whose label is true exactly where the
-    /// first feature is missing; elsewhere it runs from 0 to 1, zero
-    /// included.
-    fn missing_is_true() -> TrainingSet {
+    /// 300 rows of two features whose label is 1 exactly where the first
+    /// feature is missing, and 0 elsewhere, where the feature runs from 0 to
+    /// 1, zero included.
+    fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
         for i in 0..300_u32 {
@@ -152,19 +153,44 @@ mod tests {
                 f64::from(i % 7) / 6.0
             });
             features.push(f64::from(i % 11));
-            labels.push(missing);
+            labels.push(if missing { 1.0 } else { 0.0 });
         }
         TrainingSet::new(2, features, labels).unwrap()
     }
 
+    /// A model that cannot tell the missing feature from a value predicts
+    /// the training mean of `missing_is_one`'s labels, a third, throughout:
+    /// learned apart, the missing feature is predicted above it, toward its
+    /// label of 1, and every value below it, toward their 0.
     #[test]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let model = LearnerConfig::Perpetual(config())
-            .fit(&missing_is_true())
+            .fit(&missing_is_one())
             .unwrap();
-        assert!(model.predict(&[f64::NAN, 4.0]).unwrap() > 0.9);
+        let mean = 1.0 / 3.0;
+        assert!(model.predict(&[f64::NAN, 4.0]).unwrap() > mean);
         for value in [0.0, 0.5, 1.0] {
-            assert!(model.predict(&[value, 4.0]).unwrap() < 0.1, "{value}");
+            assert!(model.predict(&[value, 4.0]).unwrap() < mean, "{value}");
+        }
+    }
+
+    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labelled 2 below 0.5
+    /// and -1 from it.
+    fn step() -> TrainingSet {
+        let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();
+        let labels = features
+            .iter()
+            .map(|&value| if value < 0.5 { 2.0 } else { -1.0 })
+            .collect();
+        TrainingSet::new(1, features, labels).unwrap()
+    }
+
+    #[test]
+    fn a_step_of_real_labels_is_learned_on_its_squared_loss() {
+        let model = LearnerConfig::Perpetual(config()).fit(&step()).unwrap();
+        for (value, expected) in [(0.2, 2.0), (0.7, -1.0)] {
+            let predicted = model.predict(&[value]).unwrap();
+            assert!((predicted - expected).abs() < 0.01, "{value}: {predicted}");
         }
     }
 
@@ -176,7 +202,7 @@ mod tests {
                 .build();
             assert!(
                 LearnerConfig::Perpetual(config)
-                    .fit(&missing_is_true())
+                    .fit(&missing_is_one())
                     .is_err(),
                 "{memory_limit}"
             );
@@ -192,7 +218,9 @@ mod tests {
             (0..300_000_u32)
                 .map(|i| f64::from((i * 7919) % 101) / 100.0)
                 .collect(),
-            (0..50_000_u32).map(|i| (i * 31) % 7 < 3).collect(),
+            (0..50_000_u32)
+                .map(|i| if (i * 31) % 7 < 3 { 1.0 } else { 0.0 })
+                .collect(),
         )
         .unwrap();
         let fit = |seed| {

@@ -18,7 +18,7 @@
 //! (`model_data_hooks!`).
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
-//! or leaves each trade of the model (`model::meta`), and may size it.
+//! or leaves each trade of the model (`model::meta`).
 //!
 //! In a dataset run (`Mode::Dataset`, the replay of its dataset and its
 //! training, `model::ModelStrategy`) it places no trade of its own: the
@@ -219,12 +219,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::dataset::{Commission, DatasetVenue},
+        backtest::Commission,
+        model::{dataset::DatasetVenue, decide::DecisionRule, learner::LearnerConfig},
         strategy::orders::{Exits, Trade},
     };
 
-    /// Trades AUD/USD on a time-only target of 30 minutes, deciding hourly on
-    /// its averages of 10 and 30 hourly bars.
+    /// Trades AUD/USD on a time-only target of 30 minutes, its unit measured
+    /// in the ATR of 14 hourly bars, deciding hourly on its averages of 10 and
+    /// 30 hourly bars.
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -243,7 +245,7 @@ mod tests {
 
         [model]
         decision = { every = "1h" }
-        target = { limit = "30m" }
+        target = { limit = "30m", atr = { period = 14 } }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
@@ -267,6 +269,31 @@ mod tests {
         ModelEmaParams::features(&config).unwrap();
     }
 
+    /// Its side models are fitted on its window less its holdout and the
+    /// calibration before it, as long: 480 hours, 20 days, of which 14 at
+    /// the fewest are weekdays, gold trading 23 hours of each, so 322
+    /// hourly decisions. A split leaves `min_data_in_leaf` rows each side
+    /// at least: its leaves split on those rows.
+    #[test]
+    fn the_example_configs_leaves_split_on_the_rows_its_window_fits_on() {
+        let model = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml"))
+            .unwrap()
+            .model();
+        let LearnerConfig::LightGbm(learner) = &model.learner else {
+            panic!("not LightGBM: {:?}", model.learner);
+        };
+        let DecisionRule::Every(every) = model.decision;
+        let days = (model.window - model.holdout * 2).as_hours() / 24;
+        let weekdays = days / 7 * 5 + (days % 7 - 2).max(0);
+        let rows = weekdays * 23 * 60 / every.as_mins();
+
+        assert!(
+            2 * i64::from(learner.min_data_in_leaf) <= rows,
+            "leaves of {} rows on {rows} rows",
+            learner.min_data_in_leaf
+        );
+    }
+
     /// `CONFIG` listing the quotes of the AUD/USD traded before its bars.
     fn with_quotes() -> String {
         CONFIG.replace(
@@ -277,10 +304,15 @@ mod tests {
     }
 
     /// Its features read bars alone: the quotes of the AUD/USD traded, which
-    /// a time-only target has no ATR to run on, are read by none.
+    /// a bracket in basis points has no ATR to run on, are read by none.
     #[test]
     fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
-        let err = ModelEmaConfig::load(&with_quotes()).unwrap_err();
+        let toml = with_quotes().replace(
+            r#"target = { limit = "30m", atr = { period = 14 } }"#,
+            r#"target = { bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#,
+        );
+
+        let err = ModelEmaConfig::load(&toml).unwrap_err();
 
         let Some(ConfigError::InvalidValue { field, reason }) = err.downcast_ref::<ConfigError>()
         else {
@@ -290,16 +322,18 @@ mod tests {
         assert!(reason.contains("QuoteTick of AUD/USD.SIM"), "{reason}");
     }
 
-    /// On a bracket 2 and 1 ATRs out, the target's ATR is built of the
-    /// quotes of the AUD/USD traded: it reads them.
+    /// The target's ATR, its time-only target's or that of a bracket 2 and
+    /// 1 ATRs out, is built of the quotes of the AUD/USD traded: it reads
+    /// them.
     #[test]
     fn quotes_the_target_atr_is_built_of_load() {
-        let toml = with_quotes().replace(
-            r#"target = { limit = "30m" }"#,
+        let bracket = with_quotes().replace(
+            r#"target = { limit = "30m", atr = { period = 14 } }"#,
             r#"target = { bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#,
         );
 
-        ModelEmaConfig::load(&toml).unwrap();
+        ModelEmaConfig::load(&with_quotes()).unwrap();
+        ModelEmaConfig::load(&bracket).unwrap();
     }
 
     /// Its features average each bars series once: listed again, it is
@@ -430,7 +464,7 @@ mod tests {
         let mode = Mode::Backtest {
             models: models.to_path_buf(),
             venue: DatasetVenue {
-                commission: Commission::Rate("0.00003".to_string()),
+                commission: Commission::Rate(Decimal::new(3, 5)),
                 balance: Money::from("10000000 USD"),
                 leverage: Decimal::ONE,
             },

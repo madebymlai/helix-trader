@@ -19,6 +19,7 @@ use std::{
 };
 
 use helix_trader::{
+    backtest::Commission,
     model::{
         decide::DecisionRule,
         targets::{SideTarget, Target, TargetConfig, TargetSetter},
@@ -65,7 +66,7 @@ use nautilus_model::{
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{InstrumentAny, stubs::futures_contract_es},
     orderbook::OrderBook,
-    types::{Price, Quantity},
+    types::{Money, Price, Quantity},
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
@@ -733,7 +734,7 @@ fn run(
         node.dispose();
     });
     let failure = failure.borrow().clone();
-    let exits = *exits.borrow();
+    let exits = exits.take();
     (failure, exits)
 }
 
@@ -973,7 +974,9 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
         spec,
     };
     let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
-    let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements).unwrap());
+    // No order is sent: nothing is charged.
+    let commission = Commission::PerOrder(Money::from("0 USD"));
+    let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements, commission).unwrap());
     let warmup = traded.warmed(Warmup::live(&requirements));
     let (failure, exits) = run(
         dir.path(),

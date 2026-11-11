@@ -6,7 +6,7 @@
 //! `fill_catalog`.
 
 use helix_trader::{
-    backtest::{Backtest, commission_rate},
+    backtest::{Backtest, Commission},
     catalog::fill_catalog,
     venues,
 };
@@ -150,7 +150,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         start: at("09:00:00"),
         end: at("12:00:00"),
         ticks: vec![],
-        fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
+        commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("2000000 USD"),
         leverage: Decimal::ONE,
         venue_oms: venues::oms_type,

@@ -3,15 +3,17 @@
 //! Over a span of three days retrained every midnight, the dataset is
 //! built and the models trained; the fixture's walk has no edge, so a
 //! train refuses each model, and the models traded on are published
-//! straight, baselines whose probabilities name them
+//! straight, baselines whose predictions name them
 //! (`common::dataset::baseline_of`). In the run, a decision trades only if
-//! the meta model in use takes the trade of the side picked.
+//! the meta model in use takes the trade of the side picked, on the
+//! decision's level and side call.
 //!
 //! A strategy of the long alone trades long at every decision. Its
 //! meta model's first retrain has no side's model before it, so it waits
 //! for the sides' decisions; the next ones hold out the longs, every one
-//! of which the meta's threshold takes, refused for earning no more than
-//! every trade. With no meta model the first day, no trade.
+//! of which the meta's margin takes, and refuse it, on its skill or for
+//! its trades, every trade, earning no more than every trade. With no meta
+//! model the first day, no trade.
 //!
 //! One node per thread: each build, train and run on a thread of its own.
 
@@ -49,12 +51,12 @@ fn features() -> Rc<FeatureSet> {
 
 /// A meta model on 46 hours, the last 6 held out and the 6 before them
 /// calibrated on, the fake learner, published from nought per trade over
-/// a trade, taking every trade, to record its probability.
+/// a trade, taking every trade, to record its expected R.
 fn meta() -> MetaConfig {
     MetaConfig::builder()
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(6))
-        .threshold(0.0)
+        .margin(f64::MIN)
         .min_pnl(0.0)
         .min_trades(1)
         .learner(LearnerConfig::Fake {})
@@ -100,8 +102,22 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
 }
 
-/// The calibrated prediction of the model of `store` valid from `at` on
-/// `row`, as a strategy of `features` loads it.
+/// The R the long model of `store` valid from `at` predicts on `row`, its
+/// calibration, of the strategy's one side, leaving it as it is: the
+/// decision's level.
+fn expects(store: &ModelStore, at: Timestamp, row: &[f64]) -> f64 {
+    let stored = store.read(at).unwrap();
+    stored
+        .manifest
+        .learner
+        .load(&stored.model)
+        .unwrap()
+        .predict(row)
+        .unwrap()
+}
+
+/// The calibrated expected R of the meta model of `store` valid from `at`
+/// on `row`, as a strategy of `features` loads it.
 fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
     let fingerprint = dataset::fingerprint(features, rule(), &target(), &requirements(), &venue())
@@ -116,9 +132,10 @@ fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64
 
 /// Prepares the backtest of the span of `long_only`: the dataset built,
 /// then at each retrain time the long and its meta model trained, and
-/// the long model published straight after, a baseline of `trues` tenths
-/// (3 at the span's start and one more each day), which the train would
-/// keep in use had it been published before; what each train did.
+/// the long model published straight after, a baseline predicting an R of
+/// `r(tenths)` (`tenths` 3 at the span's start and one more each day),
+/// which the train would keep in use had it been published before; what
+/// each train did.
 fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let mut trained = vec![];
@@ -168,13 +185,13 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
                 .train_at(at, |from, to| replay_on(catalog, features(), from, to))
             });
             trained.push((at, outcome));
-            let trues = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+            let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
             long_store(models).publish(&baseline_of(
                 &features(),
                 &long_only(),
                 Side::Long,
                 at,
-                trues,
+                tenths,
             ))
         },
     )
@@ -207,8 +224,9 @@ fn meta_store(models: &Path) -> ModelStore {
 
 /// The fixture has no edge: a train refuses each model it fits, the
 /// long's and, from the second retrain, when the long has a model
-/// before it, the meta's, whose threshold takes every trade of its
-/// holdout, the longs, and so earns no more than every trade.
+/// before it, the meta's, whose margin takes every trade of its
+/// holdout, the longs, refused on its skill or for earning no more than
+/// every trade.
 /// With meta models published straight, a day's decisions trade only as
 /// the meta model in use takes the trade of the side picked.
 #[test]
@@ -235,7 +253,7 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         trained[0].1
     );
     for (at, trained) in &trained[1..] {
-        let Some(Outcome::Kept(Kept::Refused { holdout, .. })) = trained.meta else {
+        let Some(Outcome::Kept(Kept::Refused { holdout, .. })) = &trained.meta else {
             panic!("{at}: {trained:?}");
         };
         let Earnings { taken, every, .. } = holdout.earnings;
@@ -247,10 +265,12 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
     assert!(meta.valid_froms().unwrap().is_empty());
     let means: Vec<f64> = retrains
         .iter()
-        .map(|&at| predicts(&long, &features(), at, &[f64::NAN]))
+        // The long's row: the feature missing, then the bracket's three payoff
+        // features, which the fake does not read.
+        .map(|&at| expects(&long, at, &[f64::NAN, 0.0, 0.0, 0.0]))
         .collect();
-    for (&at, trues) in retrains[1..].iter().zip([6, 8]) {
-        meta.publish(&meta_baseline_of(&features(), &long_only(), at, trues))
+    for (&at, tenths) in retrains[1..].iter().zip([6, 8]) {
+        meta.publish(&meta_baseline_of(&features(), &long_only(), at, tenths))
             .unwrap();
     }
 
@@ -280,12 +300,19 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
             );
             continue;
         }
-        let taken = predicts(&meta, &features(), from, &[f64::NAN, 1.0, means[period]]);
+        // The meta's row: the feature missing, the long picked, the
+        // decision's level and no side call.
+        let taken = predicts(
+            &meta,
+            &features(),
+            from,
+            &[f64::NAN, 1.0, means[period], 0.0],
+        );
         assert_eq!(trades.len(), 24, "period {period}");
         assert!(
-            trades
-                .iter()
-                .all(|trade| trade.side == OrderSide::Buy && trade.probability == taken),
+            trades.iter().all(|trade| trade.side == OrderSide::Buy
+                && trade.level == means[period]
+                && trade.meta_expected_r == Some(taken)),
             "period {period}: {trades:?}, not longs at {taken}"
         );
     }

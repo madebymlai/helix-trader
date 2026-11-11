@@ -1,14 +1,18 @@
 //! A strategy's decision, made in one place: `DecidingModels` lists the stores
-//! of its model set, swaps each model in, picks a side, and applies the meta's
-//! threshold and size. It sees no strategy, cache or clock, so the model
+//! of its model set, swaps the models in, picks a side, and applies the meta's
+//! margin. It sees no strategy, cache or clock, so the model
 //! handle and the meta's examples decide through the same code, and the meta
 //! learns from the decisions the handle would make.
 //!
-//! A caller resolves first what a decision reads: the time, the feature row
-//! and each side's unit, the worth of a stop with exits, one without
-//! (`store::SideModel::expected_pnl`). The handle reads them from the target
-//! it sets at the decision (`targets::TargetSetter`), the meta's examples from
-//! each row (`dataset::DatasetRow::units`).
+//! A caller resolves first what a decision reads: the time, the decision's
+//! features, which a meta reads, and each side's row (`SideRow`), the row its
+//! model reads, those features then the side's payoff features, with its
+//! unit, the worth of its stop with exits and without them of a stop as far
+//! as the target's ATR, by which its expected R makes its expected net P&L
+//! (`pick_among`). The handle builds them from the target it sets at the
+//! decision (`targets::TargetSetter`), the meta's examples and a train's from
+//! each dataset row (`dataset::DatasetRow::sides`), each through
+//! `SideRow::new`, so a side's row is the same whoever builds it.
 //!
 //! `new` lists every store once and fails on a read error, so no decision
 //! runs unlisted. `list` lists them again, when the caller chooses, and what a
@@ -19,86 +23,98 @@
 //! model already listed can still swap in once its valid-from passes.
 //!
 //! A model is swapped in only inside a decision, before it predicts
-//! (`store::Swap`), so no decision mixes two models. `pick` picks among the
-//! sides with a model valid at the time, by `pick_among`, the rule for models
-//! already in hand, on `payoff::pick`, which a train's gate also judges its
-//! candidates by, being in no store yet. `decide` takes the side picked if the
-//! meta model valid then predicts at least its threshold (`holdout::Threshold`)
-//! on the row with that side and its probability (`features::meta_row`), sized
-//! from that probability if the meta sizes (`MetaConfig::size`). The meta's
-//! model is read only once a side is picked, and no meta model valid yet is no
-//! trade.
+//! (`store::Swap`), so no decision mixes two models. The sides are swapped
+//! in as a pair (`store::Pair`), the sides one train published, valid from
+//! one time, so no decision uses a long and a short of different trains, and
+//! a side's model with no other beside it is never used. `pick` picks among
+//! the sides of the pair valid at the time, by `pick_among`, the rule for a
+//! pair already in hand, which a train's gate also judges its pair by, being
+//! in no store yet: the pair's calibrated expectation of the decision, its
+//! level `C'` and side call `D'` (`store::Pair::expect`), each side's `E'`
+//! times its row's unit its expected net P&L, picked on by `payoff::pick`.
+//! `decide` takes the side picked if the meta model valid then, on the
+//! features with that side and the decision's `C'` and `D'`
+//! (`features::meta_row`), expects of its trade a net P&L, its calibrated
+//! expected R times the side's unit, of at least its margin
+//! (`holdout::MetaMargin`), the trade of the target's size whatever the meta
+//! expects. The meta's model is read only once a side is picked, and no meta
+//! model valid yet is no trade.
 
 use jiff::Timestamp;
-use nautilus_model::types::{Quantity, fixed::FIXED_PRECISION};
 
 use super::{
-    config::MetaConfig,
-    features::meta_row,
-    holdout::Threshold,
+    calibration::Expected,
+    features::{meta_row, side_row},
+    holdout::MetaMargin,
     payoff,
     schedule::Models,
-    store::{LoadedModel, ModelSet, SideModel, Swap},
+    store::{LoadedModel, ModelSet, Pair, Swap},
     targets::{PerSide, Side},
 };
 
 /// A strategy's models as they decide: its model set's stores as last listed,
-/// and the model of each swapped in so far.
+/// and the sides' pair and the meta's model swapped in so far.
 #[derive(Debug)]
 pub struct DecidingModels {
+    /// The model set: each side traded, the long first, with its margin.
     models: ModelSet,
     /// When the models of each store are valid from, as last listed.
     listed: Models<Vec<Timestamp>>,
-    /// Each side traded, the long first.
-    sides: Vec<SideSwap>,
+    /// The sides' pairs, swapped in decision by decision.
+    pairs: Swap<Pair>,
     meta: Option<MetaSwap>,
 }
 
-/// A side traded: its margin and its models, swapped in decision by decision.
-#[derive(Debug)]
-struct SideSwap {
-    side: Side,
-    margin: f64,
-    swap: Swap<SideModel>,
-}
-
-/// The meta level: its config and its models, swapped in decision by decision.
+/// The meta level: its margin and its models, swapped in decision by
+/// decision.
 #[derive(Debug)]
 struct MetaSwap {
-    config: MetaConfig,
+    margin: MetaMargin,
     swap: Swap<LoadedModel>,
 }
 
-/// A side's model in hand, for `DecidingModels::pick_among`, with what the pick
-/// needs of it: its side and its margin.
-#[derive(Debug, Clone, Copy)]
-pub struct Candidate<'a> {
-    pub side: Side,
-    pub margin: f64,
-    pub model: &'a SideModel,
+/// What a decision reads of a side: the row its model reads, the decision's
+/// features then the side's payoff features (`features::side_row`), and the
+/// worth of the unit its payoff is weighed by.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SideRow {
+    pub features: Vec<f64>,
+    pub unit: f64,
+}
+
+impl SideRow {
+    /// The row of a side of a decision of `features`, its target's `payoff`
+    /// features and its unit worth `unit`.
+    #[must_use]
+    pub fn new(features: &[f64], payoff: &[f64], unit: f64) -> Self {
+        Self {
+            features: side_row(features, payoff),
+            unit,
+        }
+    }
 }
 
 /// The side a decision picks, before any meta.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Picked {
     pub side: Side,
-    /// The calibrated probability its model gives its trade.
-    pub probability: f64,
-    /// The net P&L its model expects of its trade, in money.
+    /// The net P&L the pair expects of its trade, in money: its `E'` times
+    /// its row's unit.
     pub expected_pnl: f64,
+    /// The decision's calibrated level and side call.
+    pub expected: Expected,
 }
 
 /// A decision to trade: the side picked, taken by the meta if there is one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Taken {
     pub side: Side,
-    /// The target's size, or, with a meta model sizing, its multiple of it.
-    pub quantity: Quantity,
-    /// The calibrated probability of the model deciding: the meta model's,
-    /// if any, else the side's.
-    pub probability: f64,
-    /// The net P&L the side's model expects of the trade, in money.
+    /// The net P&L the pair expects of the trade, in money.
     pub expected_pnl: f64,
+    /// The decision's calibrated level and side call.
+    pub expected: Expected,
+    /// The meta model's calibrated expected R of the trade, if one took it.
+    pub meta_expected_r: Option<f64>,
 }
 
 impl DecidingModels {
@@ -110,16 +126,9 @@ impl DecidingModels {
     pub fn new(models: &ModelSet) -> anyhow::Result<Self> {
         Ok(Self {
             listed: models.valid_froms()?,
-            sides: models
-                .sides()
-                .map(|level| SideSwap {
-                    side: level.side(),
-                    margin: level.margin(),
-                    swap: level.swap(),
-                })
-                .collect(),
+            pairs: models.pairs(),
             meta: models.meta().map(|level| MetaSwap {
-                config: level.config().clone(),
+                margin: MetaMargin(level.config().margin),
                 swap: level.swap(),
             }),
             models: models.clone(),
@@ -137,9 +146,9 @@ impl DecidingModels {
         Ok(())
     }
 
-    /// The side picked at `now` on `row`, the units being `units`, among the
-    /// latest model of each side valid then, swapped in (`pick_among`); none
-    /// without a model valid, no side clearing its margin, or two tied.
+    /// The side picked at `now` on each side's row `sides`, among the sides
+    /// of the latest pair valid then, swapped in (`pick_among`); none without
+    /// a pair valid, no side clearing its margin, or two tied.
     ///
     /// # Errors
     ///
@@ -147,110 +156,88 @@ impl DecidingModels {
     pub fn pick(
         &mut self,
         now: Timestamp,
-        row: &[f64],
-        units: PerSide<f64>,
+        sides: &PerSide<SideRow>,
     ) -> anyhow::Result<Option<Picked>> {
-        let listed = &self.listed;
-        let in_use = self.sides.iter_mut().filter_map(|traded| {
-            let (_, model) = traded.swap.at(now, listed.side(traded.side)?)?;
-            Some(Candidate {
-                side: traded.side,
-                margin: traded.margin,
-                model,
-            })
-        });
-        Self::pick_among(in_use, row, units)
+        let Some((_, pair)) = self.pairs.at(now, &self.listed.pairs()) else {
+            return Ok(None);
+        };
+        let margins = self
+            .models
+            .sides()
+            .map(|traded| (traded.side(), traded.margin()));
+        Self::pick_among(pair, margins, sides)
     }
 
-    /// The trade decided at `now` on `row`, the units being `units`, of `size`:
-    /// the side picked (`pick`), of that size, if there is no meta; with one,
-    /// taken if the meta model valid then, swapped in, predicts at least its
-    /// threshold on the row with that side and its probability, at the meta
-    /// model's probability and sized from it if the meta sizes. None if no side
-    /// is picked, no meta model is valid yet or the threshold is not met.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a model fails to predict, or the size is no
-    /// quantity.
-    pub fn decide(
-        &mut self,
-        now: Timestamp,
-        row: &[f64],
-        units: PerSide<f64>,
-        size: Quantity,
-    ) -> anyhow::Result<Option<Taken>> {
-        let Some(picked) = self.pick(now, row, units)? else {
-            return Ok(None);
-        };
-        let taken = |quantity, probability| Taken {
-            side: picked.side,
-            quantity,
-            probability,
-            expected_pnl: picked.expected_pnl,
-        };
-        let (Some(meta), Some(valid_froms)) = (&mut self.meta, &self.listed.meta) else {
-            return Ok(Some(taken(size, picked.probability)));
-        };
-        let Some((_, model)) = meta.swap.at(now, valid_froms) else {
-            return Ok(None);
-        };
-        let probability =
-            model.predict(&meta_row(row, picked.side.order_side(), picked.probability))?;
-        if !Threshold(meta.config.threshold).takes(probability) {
-            return Ok(None);
-        }
-        Ok(Some(taken(
-            sized(&meta.config, size, probability)?,
-            probability,
-        )))
-    }
-
-    /// The side picked among `candidates` on `row`, the units being `units`:
-    /// of those whose expected net P&L at their calibrated probability and
-    /// their side's unit clears their margin, the one expected the most; none
-    /// if none clears it, or two tie (`payoff::pick`).
+    /// The trade decided at `now` on the decision's `features` and each side's
+    /// row `sides`: the side picked (`pick`), if there is no meta; with one,
+    /// taken if the meta model valid then, swapped in, on the features with
+    /// that side and the decision's level and side call, expects of it a net
+    /// P&L, its calibrated expected R times the side's unit, of at least its
+    /// margin, at the meta model's expected R. None if no side is picked, no
+    /// meta model is valid yet or the margin is not met.
     ///
     /// # Errors
     ///
     /// Returns an error if a model fails to predict.
-    pub fn pick_among<'a>(
-        candidates: impl IntoIterator<Item = Candidate<'a>>,
-        row: &[f64],
-        units: PerSide<f64>,
-    ) -> anyhow::Result<Option<Picked>> {
-        let sides = candidates
-            .into_iter()
-            .map(
-                |Candidate {
-                     side,
-                     margin,
-                     model,
-                 }| {
-                    let probability = model.predict(row)?;
-                    let expected_pnl = model.expected_pnl(probability, *units.of(side));
-                    let picked = Picked {
-                        side,
-                        probability,
-                        expected_pnl,
-                    };
-                    Ok((picked, expected_pnl, margin))
-                },
-            )
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(payoff::pick(sides))
+    pub fn decide(
+        &mut self,
+        now: Timestamp,
+        features: &[f64],
+        sides: &PerSide<SideRow>,
+    ) -> anyhow::Result<Option<Taken>> {
+        let Some(picked) = self.pick(now, sides)? else {
+            return Ok(None);
+        };
+        let taken = |meta_expected_r| Taken {
+            side: picked.side,
+            expected_pnl: picked.expected_pnl,
+            expected: picked.expected,
+            meta_expected_r,
+        };
+        let (Some(meta), Some(valid_froms)) = (&mut self.meta, &self.listed.meta) else {
+            return Ok(Some(taken(None)));
+        };
+        let Some((_, model)) = meta.swap.at(now, valid_froms) else {
+            return Ok(None);
+        };
+        let expected_r = model.predict(&meta_row(
+            features,
+            picked.side.order_side(),
+            picked.expected,
+        ))?;
+        let expected_pnl = expected_r * sides.of(picked.side).unit;
+        Ok(meta
+            .margin
+            .takes(expected_pnl)
+            .then(|| taken(Some(expected_r))))
     }
-}
 
-/// `size` as `meta` sizes a trade taken at `probability`: untouched if it does
-/// not size, which keeps the size's precision.
-fn sized(meta: &MetaConfig, size: Quantity, probability: f64) -> anyhow::Result<Quantity> {
-    if meta.size.is_none() {
-        return Ok(size);
+    /// The side picked by `pair` on each side's row `sides`, each side
+    /// traded held to its margin of `margins`: of the sides whose expected
+    /// net P&L, their `E'` of the pair's calibrated expectation
+    /// (`Pair::expect`) times their row's unit, clears their margin, the one
+    /// expected the most; none if none clears it, or two tie
+    /// (`payoff::pick`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a model fails to predict.
+    pub fn pick_among(
+        pair: &Pair,
+        margins: impl IntoIterator<Item = (Side, f64)>,
+        sides: &PerSide<SideRow>,
+    ) -> anyhow::Result<Option<Picked>> {
+        let expected = pair.expect(sides)?;
+        Ok(payoff::pick(margins.into_iter().map(|(side, margin)| {
+            let expected_pnl = expected.of(side) * sides.of(side).unit;
+            let picked = Picked {
+                side,
+                expected_pnl,
+                expected,
+            };
+            (picked, expected_pnl, margin)
+        })))
     }
-    let sized = size.as_decimal() * meta.size(probability);
-    Quantity::from_decimal_dp(sized, FIXED_PRECISION)
-        .map_err(|e| anyhow::anyhow!("sizing {sized}: {e}"))
 }
 
 #[cfg(test)]

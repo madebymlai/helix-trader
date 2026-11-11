@@ -10,7 +10,7 @@ The app and the token pair are the cTrader login's, shared with every broker: se
 
 The maintained account is the *Pepperstone - Europe* demo, in USD at 1:30. Instrument margins are the broker's: the lower of the account's leverage and the symbol's first dynamic-leverage tier, so 1:20 on gold (its tier, under the account's) and 1:30 on EUR/USD. Both catalog and live instruments use these margins; backtests use leverage 1. Gold's maximum order, and so its synthetic quote size, is 5,000 oz.
 
-Commissions are per lot, not per million as at IC: 3.5 USD per lot per side on gold (a lot is 100 oz) and 3 USD on EUR/USD, charged in the account's currency and rounded to its cents, so a side of 1 oz of gold costs 0.04 USD (checked by `tests/live/ctrader_orders_demo.rs`). A backtest's `--commission-rate` is a share of value, so it only approximates them: 3.5 USD on 100 oz at 4,000 USD is `0.00000875`, moving with the price.
+Commissions are per lot, not per million as at IC: 3.5 USD per lot per side on gold (a lot is 100 oz) and 3 USD on EUR/USD (a lot is 100,000 EUR), charged in the account's currency and rounded to its cents, so a side of 1 oz of gold costs 0.04 USD (checked by `tests/live/ctrader_orders_demo.rs`). A backtest charges them as such with `--commission-per-quantity`, the amount on each unit of a fill's quantity: `0.035 USD` on gold, an ounce a unit, and `0.00003 USD` on EUR/USD, a euro a unit. Each fill's charge is rounded to the cent as Nautilus rounds money, a half cent to the even cent (0.10 USD on 3 oz of gold); the demo test bounds a side of 1 oz between 0.03 and 0.04 USD, so how the account rounds a half cent is not checked.
 
 ## Tests
 

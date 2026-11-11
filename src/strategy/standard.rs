@@ -1282,7 +1282,7 @@ mod tests {
 
             [model]
             decision = { every = "1h" }
-            target = { limit = "30m" }
+            target = { limit = "30m", atr = { period = 1 } }
             retrain = "24h"
             window = "48h"
             holdout = "12h"
@@ -1325,7 +1325,7 @@ mod tests {
         /// warmed up over the 3 hourly bars an ATR of 3 bars needs.
         fn with_atr(atr: &str) -> String {
             TOML.replace(r#"warmup = "1h""#, r#"warmup = "3h""#).replace(
-                r#"target = { limit = "30m" }"#,
+                r#"target = { limit = "30m", atr = { period = 1 } }"#,
                 &format!(
                     r#"target = {{ bracket = {{ take_profit = {{ atr = 2 }}, stop = {{ atr = 1.5 }}{atr} }}, limit = "45m" }}"#
                 ),
@@ -1575,6 +1575,7 @@ mod tests {
                         }),
                     }),
                     limit: SignedDuration::from_mins(45),
+                    atr: None,
                 }
             );
         }
@@ -1595,9 +1596,11 @@ mod tests {
             let _ = load(&with_atr(r#", atr = { period = 0 }"#));
         }
 
-        /// The model's violation is its limit of an hour, decided every
-        /// hour, reported under the limit's field, `model.target.limit`,
-        /// after the standard ones and the strategy id's.
+        /// The model's violations are its target's ATR of an hourly bar
+        /// warming over longer than the warmup of nought, and its limit of
+        /// an hour, decided every hour, reported under their fields,
+        /// `model.target.atr` and `model.target.limit`, after the standard
+        /// ones and the strategy id's.
         #[test]
         fn reports_the_models_violations_with_the_standard_ones() {
             let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
@@ -1605,7 +1608,12 @@ mod tests {
                 .replace(r#"limit = "30m""#, r#"limit = "1h""#);
             assert_eq!(
                 error_fields(&toml),
-                ["data.warmup", "base.strategy_id", "model.target.limit"]
+                [
+                    "data.warmup",
+                    "base.strategy_id",
+                    "model.target.atr",
+                    "model.target.limit"
+                ]
             );
         }
 
@@ -1633,15 +1641,15 @@ mod tests {
             format!(
                 "{}\n{meta}",
                 TOML.replace(
-                    r#"target = { limit = "30m" }"#,
+                    r#"target = { limit = "30m", atr = { period = 1 } }"#,
                     r#"target = { bracket = { take_profit = { bps = 10 }, stop = { bps = 10 } }, limit = "45m" }"#,
                 )
             )
         }
 
         /// The meta model's violations are reported under `[model.meta]`'s
-        /// fields: a threshold of 1.5 is no probability, and it requires no
-        /// trade on its holdout.
+        /// fields: its margin is not a number, and it requires no trade on
+        /// its holdout.
         #[test]
         fn reports_the_meta_models_violations_under_its_fields() {
             let toml = with_meta(
@@ -1649,7 +1657,7 @@ mod tests {
                 [model.meta]
                 window = "48h"
                 holdout = "12h"
-                threshold = 1.5
+                margin = nan
                 min_pnl = 0.5
                 min_trades = 0
                 learner = { kind = "baseline" }
@@ -1659,7 +1667,7 @@ mod tests {
             let mut fields = error_fields(&toml);
             fields.sort();
 
-            assert_eq!(fields, ["model.meta.min_trades", "model.meta.threshold"]);
+            assert_eq!(fields, ["model.meta.margin", "model.meta.min_trades"]);
         }
 
         /// A meta model is a `[model.meta]` table, and no more: a meta of
@@ -1672,7 +1680,7 @@ mod tests {
                 [model.meta]
                 window = "48h"
                 holdout = "12h"
-                threshold = 0.55
+                margin = 0.25
                 min_pnl = 0.5
                 min_trades = 30
                 learner = { kind = "baseline" }
@@ -1680,9 +1688,9 @@ mod tests {
             );
 
             let config = load(&toml).unwrap();
-            assert_eq!(config.model().meta.unwrap().threshold, 0.55);
+            assert_eq!(config.model().meta.unwrap().margin, 0.25);
 
-            let nested = format!("{toml}\n[model.meta.meta]\nthreshold = 0.5\n");
+            let nested = format!("{toml}\n[model.meta.meta]\nmargin = 0.5\n");
             let err = shape_error(&nested);
             assert!(err.contains("unknown field `meta`"), "{err}");
         }

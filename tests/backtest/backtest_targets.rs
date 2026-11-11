@@ -8,15 +8,20 @@
 //! nanosecond of the time limit (inside the window), exits left alone
 //! (closed by time), a bar touching both exits (the venue replays its
 //! high before its low), the last decision unsettled at the end of data,
-//! a bracket on an inverse instrument refused and a time-only target on one
-//! settled, exits in basis points and in average true ranges of hourly
+//! a bracket and a time-only target on an inverse instrument refused, each
+//! side's payoff features worked out by hand on quotes, on bars and on
+//! trades alone, exits in basis points and in average true ranges of hourly
 //! bars, the cadence's, which the targets subscribe to themselves, built
-//! from the quotes, from the trades alone and from minute bars alone, no
-//! order before the ATR is initialized; deciding on LAST bars the run
+//! from the quotes, from the trades alone and from minute bars alone, a
+//! time-only target's unit the worth of such an ATR on quotes and on minute
+//! bars, no order before the ATR is initialized; deciding on LAST bars the run
 //! builds from the trades alone is deciding on the trades. Orders the
 //! risk engine denies leave their decisions unsettled, without a row. A
 //! stop from a mid on a half tick settles at its exact worth, and one in the
-//! market the venue rejects, without a row.
+//! market the venue rejects, without a row. The probe opens its targets at
+//! its run's commission: at one per quantity, a backtest of it charges each
+//! fill what the commission says it costs, and a dataset run settles the
+//! rows the backtest does, net of that cost.
 //! Over two days of a random walk the targets are the same
 //! with the execution engine purging closed orders and positions as
 //! without, while the purge keeps the cache to the last minutes' orders.
@@ -29,7 +34,7 @@ use crate::common::{
     ic,
 };
 use helix_trader::{
-    backtest::{Backtest, commission_rate},
+    backtest::{Backtest, Commission},
     model::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
@@ -126,6 +131,8 @@ struct Record {
     fills: Vec<UnixNanos>,
     /// The client order id of each of its orders filled, in order.
     filled: Vec<String>,
+    /// The commission of each fill, in order.
+    commissions: Vec<Money>,
     /// The client order id of each of its orders the venue rejected, in order.
     rejected: Vec<String>,
 }
@@ -143,17 +150,24 @@ struct TargetProbe {
 }
 
 impl TargetProbe {
-    /// The probe deciding every hour on `source`, opening `targets`.
-    fn new(source: Source, targets: TargetConfig) -> (Self, Rc<RefCell<Record>>) {
-        Self::every(source, targets, SignedDuration::from_hours(1))
+    /// The probe deciding every hour on `source`, opening `targets` at the
+    /// commission of `backtest`, the run it runs in.
+    fn new(
+        source: Source,
+        targets: TargetConfig,
+        backtest: &Backtest,
+    ) -> (Self, Rc<RefCell<Record>>) {
+        Self::every(source, targets, SignedDuration::from_hours(1), backtest)
     }
 
-    /// The probe deciding every `every` on `source`, opening `targets`,
-    /// whose ATR, if any, is on bars of `every`.
+    /// The probe deciding every `every` on `source`, opening `targets` at
+    /// the commission of `backtest`, whose ATR, if any, is on bars of
+    /// `every`.
     fn every(
         source: Source,
         targets: TargetConfig,
         every: SignedDuration,
+        backtest: &Backtest,
     ) -> (Self, Rc<RefCell<Record>>) {
         let tables = tables(
             r#"
@@ -179,8 +193,13 @@ impl TargetProbe {
             source,
             every,
             features,
-            targets: Targets::new(targets, DecisionRule::Every(every), &source.requirements())
-                .unwrap(),
+            targets: Targets::new(
+                targets,
+                DecisionRule::Every(every),
+                &source.requirements(),
+                backtest.commission,
+            )
+            .unwrap(),
             record: Rc::clone(&record),
         };
         (probe, record)
@@ -192,6 +211,7 @@ nautilus_strategy!(TargetProbe, {
         let mut record = self.record.borrow_mut();
         record.fills.push(event.ts_event);
         record.filled.push(event.client_order_id.to_string());
+        record.commissions.extend(event.commission);
     }
 
     fn on_order_canceled(&mut self, event: &OrderCanceled) {
@@ -295,10 +315,15 @@ fn bracket(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetConfig {
 }
 
 /// A trade with no exits, closed 30 minutes after its decision, of
-/// `quantity` of `instrument_id`.
+/// `quantity` of `instrument_id`, its unit the worth of the average true
+/// range of 2 hourly bars, the cadence's, which the targets subscribe to.
 fn time_only(instrument_id: &str, quantity: &str) -> TargetConfig {
     let spec = Target::builder()
         .limit(SignedDuration::from_mins(30))
+        .atr(AtrArgs {
+            period: 2,
+            ..DEFAULT_ATR
+        })
         .build();
     trading(spec, instrument_id, quantity)
 }
@@ -315,7 +340,7 @@ fn decision(at: Timestamp, features: f64) -> FeatureRow {
 }
 
 /// The outcome of a position closed by `exit` with `pnl`, net of
-/// `commission`, of a unit of 1: no stop.
+/// `commission`, of a unit of 1 until `of_unit` gives it its target's.
 fn outcome(pnl: &str, commission: &str, exit: Exit) -> Outcome {
     Outcome {
         pnl: Money::from(pnl),
@@ -329,20 +354,44 @@ fn outcomes(long: Outcome, short: Outcome) -> Outcomes {
     Outcomes { long, short }
 }
 
-/// A bracket's outcomes `long` and `short`, each side's stop worth `unit`.
-fn with_exits(long: Outcome, short: Outcome, unit: f64) -> Outcomes {
+/// The outcomes `long` and `short`, each side's unit worth `unit`: a
+/// bracket's stop's worth, a time-only target's ATR's.
+fn of_unit(long: Outcome, short: Outcome, unit: f64) -> Outcomes {
     Outcomes {
         long: Outcome { unit, ..long },
         short: Outcome { unit, ..short },
     }
 }
 
+/// A target row as the tests compare it: its decision, its outcomes and
+/// when it settled; its payoff features are compared apart, to 1e-12
+/// (`assert_payoff`).
+type Settled = (FeatureRow, Outcomes, UnixNanos);
+
 /// The row of `decision`, its target's `outcomes`, settled at `settled_at`.
-fn row(decision: FeatureRow, outcomes: Outcomes, settled_at: Timestamp) -> TargetRow {
-    TargetRow {
-        decision,
-        outcomes,
-        settled_at: UnixNanos::from(settled_at),
+fn row(decision: FeatureRow, outcomes: Outcomes, settled_at: Timestamp) -> Settled {
+    (decision, outcomes, UnixNanos::from(settled_at))
+}
+
+/// `rows` as the tests compare them (`Settled`).
+fn settled(rows: &[TargetRow]) -> Vec<Settled> {
+    rows.iter()
+        .map(|row| (row.decision.clone(), row.outcomes, row.settled_at))
+        .collect()
+}
+
+/// Asserts that each of `rows` has the payoff features `long` and `short`
+/// on its sides, each within 1e-12, as many: a bracket's take profit's R,
+/// stop's nominal loss and entry cost, a time-only target's entry cost.
+fn assert_payoff(rows: &[TargetRow], long: &[f64], short: &[f64]) {
+    assert!(!rows.is_empty());
+    for row in rows {
+        for (got, want) in [(&row.payoff.long, long), (&row.payoff.short, short)] {
+            assert_eq!(got.len(), want.len(), "{got:?}, not {want:?}");
+            for (g, w) in got.iter().zip(want) {
+                assert!((g - w).abs() < 1e-12, "{got:?}, not {want:?}");
+            }
+        }
     }
 }
 
@@ -378,7 +427,7 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
         }],
         start: ic::at("08:30:00"),
         end: ic::at("12:30:00"),
-        fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
+        commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
         leverage: Decimal::ONE,
         venue_oms: |_| OmsType::Hedging,
@@ -406,18 +455,23 @@ pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
 /// a short enters at the bid,
 /// 4000.00, and exits on the ask. Each stop, 3.00 away on one ounce, is worth
 /// 3 USD. Each fill pays 30 USD per million of its value, 0.12 USD at these
-/// prices.
+/// prices. At each decision, on 4000.00/4000.20, the long's take profit would
+/// net 2.90 − 0.24 and its stop lose 3.10 + 0.24, the short's the same, and
+/// either's entry costs the spread and a fee, 0.20 + 0.12: in R, over 3 USD,
+/// its payoff features. A take profit realises its R.
 #[test]
 fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) =
-        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
+    let backtest = gold_backtest(catalog.path().to_path_buf());
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+        &backtest,
+    );
 
-    gold_backtest(catalog.path().to_path_buf())
-        .run_dataset(probe)
-        .unwrap();
+    backtest.run_dataset(probe).unwrap();
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let expected = [
@@ -426,7 +480,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 3997.10 (+2.90 - 0.24). Both on that quote, which settles the row.
         row(
             decision(at("09:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("-3.64 USD", "0.24 USD", Exit::Stop),
                 outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
                 3.0,
@@ -438,7 +492,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // 4003.10, the short's stop at the ask, 4003.40.
         row(
             decision(at("10:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("2.66 USD", "0.24 USD", Exit::TakeProfit),
                 outcome("-3.64 USD", "0.24 USD", Exit::Stop),
                 3.0,
@@ -449,7 +503,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // long +0.80, the short -1.20, less the fees.
         row(
             decision(at("11:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("0.56 USD", "0.24 USD", Exit::Time),
                 outcome("-1.44 USD", "0.24 USD", Exit::Time),
                 3.0,
@@ -459,7 +513,106 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
         // The 12:00 decision's positions are open at the end, 12:30:
         // unsettled, no row.
     ];
-    assert_eq!(record.borrow().rows, expected);
+    let record = record.borrow();
+    assert_eq!(settled(&record.rows), expected);
+    let side = [2.66 / 3.0, 3.34 / 3.0, 0.32 / 3.0];
+    assert_payoff(&record.rows, &side, &side);
+    let take_profit = record.rows[1].outcomes.long;
+    assert!((take_profit.pnl.as_f64() / take_profit.unit - side[0]).abs() < 1e-12);
+}
+
+/// Pepperstone's commission on gold, 3.5 USD per lot of 100 oz: 0.035 USD
+/// an ounce.
+fn per_ounce() -> Commission {
+    Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap())
+}
+
+/// The hand-worked targets' probe at `commission`, over `[08:30, 12:30]`,
+/// in a dataset run or a backtest, and what it recorded: on a thread of its
+/// own, one node per thread.
+fn hand_worked_run(commission: Commission, dataset: bool) -> Record {
+    thread::spawn(move || {
+        let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+        let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
+        let backtest = Backtest {
+            commission,
+            ..gold_backtest(catalog.path().to_path_buf())
+        };
+        let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+        let (probe, record) = TargetProbe::new(
+            source,
+            bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+            &backtest,
+        );
+        if dataset {
+            backtest.run_dataset(probe).unwrap();
+        } else {
+            backtest.run(probe).unwrap();
+        }
+        record.take()
+    })
+    .join()
+    .unwrap()
+}
+
+/// The hand-worked targets at Pepperstone's commission: a fill of an ounce
+/// costs 0.035 USD, to the cent 0.04 USD, at any price, so each side's
+/// trade 0.08 USD. A backtest of the probe charges each of its 14 fills that
+/// cost, the entries and exits of the three decisions settling and the
+/// entries of the 12:00 one, and a dataset run of it settles the rows the
+/// backtest does, net of it: the long stopped -3.48 USD (-3.40 less 0.08),
+/// taking profit 2.82 (2.90 less 0.08) and closed by time 0.72 (0.80 less
+/// 0.08), the short the reverse but closed by time -1.28 (-1.20 less 0.08).
+/// Each side's payoff features are of that cost: a take profit netting 2.90 −
+/// 0.08, a stop losing 3.10 + 0.08 and an entry costing 0.20 + 0.04, over the
+/// stop's 3 USD.
+#[test]
+fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
+    let cost = per_ounce()
+        .cost(Quantity::from(1), Price::from("4000.20"), &ic::instrument())
+        .unwrap();
+
+    let backtest = hand_worked_run(per_ounce(), false);
+    let dataset = hand_worked_run(per_ounce(), true);
+
+    assert_eq!(cost, Money::from("0.04 USD"));
+    assert_eq!(backtest.commissions, [cost; 14]);
+    assert_eq!(dataset.commissions, [cost; 14]);
+    let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
+    let expected = [
+        row(
+            decision(at("09:00"), 4000.10),
+            of_unit(
+                outcome("-3.48 USD", "0.08 USD", Exit::Stop),
+                outcome("2.82 USD", "0.08 USD", Exit::TakeProfit),
+                3.0,
+            ),
+            ic::at("09:20:00"),
+        ),
+        row(
+            decision(at("10:00"), 4000.10),
+            of_unit(
+                outcome("2.82 USD", "0.08 USD", Exit::TakeProfit),
+                outcome("-3.48 USD", "0.08 USD", Exit::Stop),
+                3.0,
+            ),
+            ic::at("10:45:00.010"),
+        ),
+        row(
+            decision(at("11:00"), 4000.10),
+            of_unit(
+                outcome("0.72 USD", "0.08 USD", Exit::Time),
+                outcome("-1.28 USD", "0.08 USD", Exit::Time),
+                3.0,
+            ),
+            ic::at("11:45:00.010"),
+        ),
+    ];
+    assert_eq!(settled(&dataset.rows), expected);
+    assert_eq!(settled(&backtest.rows), expected);
+    let side = [2.82 / 3.0, 3.18 / 3.0, 0.24 / 3.0];
+    assert_payoff(&dataset.rows, &side, &side);
+    assert_payoff(&backtest.rows, &side, &side);
 }
 
 /// A run to 09:50, one decision settling, of IC's gold quoted at
@@ -484,21 +637,24 @@ fn half_tick_run() -> (tempfile::TempDir, Backtest) {
 fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
     let (_catalog, backtest) = half_tick_run();
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) =
-        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+        &backtest,
+    );
 
     backtest.run_dataset(probe).unwrap();
 
     let expected = [row(
         decision(ic::at("09:00:00"), 4000.005),
-        with_exits(
+        of_unit(
             outcome("-0.25 USD", "0.24 USD", Exit::Time),
             outcome("-0.25 USD", "0.24 USD", Exit::Time),
             3.005,
         ),
         ic::at("09:45:00.010"),
     )];
-    assert_eq!(record.borrow().rows, expected);
+    assert_eq!(settled(&record.borrow().rows), expected);
 }
 
 /// One ounce, exits a hundredth of a basis point of the mid of 4000.005, on the
@@ -508,8 +664,11 @@ fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
 fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() {
     let (_catalog, backtest) = half_tick_run();
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) =
-        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(1, 2)));
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(1, 2)),
+        &backtest,
+    );
 
     backtest.run_dataset(probe).unwrap();
 
@@ -522,51 +681,56 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() 
 /// One ounce, no exits, on the same quotes: each side enters as a bracket
 /// does, its position closed 30 minutes after its send on the quote then,
 /// each fill paying 0.12 USD. The dip at 09:20 and the spike at 10:45 pass
-/// by it.
+/// by it. Its unit is the worth of the ATR of 2 hourly bars of the mids on
+/// one ounce: the bar closing 09:00, from the run's start, ranges nought;
+/// the one closing 10:00 from 3996.90 (09:20) to 4000.10, 3.20, an ATR of
+/// 1.60, Wilder's seeded by the mean of the two; the one closing 11:00 from
+/// 4000.10 to 4003.30 (10:45), 3.20, an ATR of (1.60 + 3.20) / 2 = 2.40. The
+/// ATR has one bar at 09:00: that decision opens no target and takes no
+/// number. Each side's entry costs the spread and a fee, 0.20 + 0.12 USD,
+/// over its unit.
 #[test]
 fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) = TargetProbe::new(source, time_only(ic::INSTRUMENT_ID, "1"));
+    let backtest = gold_backtest(catalog.path().to_path_buf());
+    let (probe, record) = TargetProbe::new(source, time_only(ic::INSTRUMENT_ID, "1"), &backtest);
 
-    gold_backtest(catalog.path().to_path_buf())
-        .run_dataset(probe)
-        .unwrap();
+    backtest.run_dataset(probe).unwrap();
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
-    let flat = || {
-        // 4000.20 to 4000.00 and back: 0.20 lost and two fees.
-        outcomes(
-            outcome("-0.44 USD", "0.24 USD", Exit::Time),
-            outcome("-0.44 USD", "0.24 USD", Exit::Time),
-        )
-    };
     let expected = [
-        row(
-            decision(at("09:00"), 4000.10),
-            flat(),
-            ic::at("09:30:00.010"),
-        ),
+        // 4000.20 to 4000.00 and back: 0.20 lost and two fees.
         row(
             decision(at("10:00"), 4000.10),
-            flat(),
+            of_unit(
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
+                outcome("-0.44 USD", "0.24 USD", Exit::Time),
+                1.6,
+            ),
             ic::at("10:30:00.010"),
         ),
         // Closed on 4001.00/4001.20, the long +0.80, the short -1.20, less
         // the fees.
         row(
             decision(at("11:00"), 4000.10),
-            outcomes(
+            of_unit(
                 outcome("0.56 USD", "0.24 USD", Exit::Time),
                 outcome("-1.44 USD", "0.24 USD", Exit::Time),
+                2.4,
             ),
             ic::at("11:30:00.010"),
         ),
         // The 12:00 decision closes 10 ms after the end, 12:30: unsettled,
         // no row.
     ];
-    assert_eq!(record.borrow().rows, expected);
+    let record = record.borrow();
+    assert_eq!(settled(&record.rows), expected);
+    for (row, unit) in record.rows.iter().zip([1.6, 2.4]) {
+        assert_payoff(std::slice::from_ref(row), &[0.32 / unit], &[0.32 / unit]);
+    }
+    assert!(record.filled[0].starts_with("D0-"), "{:?}", record.filled);
 }
 
 /// Each order's id is its decision's number, its side and its leg, so the
@@ -578,12 +742,15 @@ fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) =
-        TargetProbe::new(source, bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)));
     let backtest = Backtest {
         end: ic::at("09:25:00"),
         ..gold_backtest(catalog.path().to_path_buf())
     };
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+        &backtest,
+    );
 
     backtest.run_dataset(probe).unwrap();
 
@@ -600,14 +767,15 @@ fn denied_orders_leave_their_decisions_unsettled() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) = TargetProbe::new(
-        source,
-        bracket(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
-    );
     let backtest = Backtest {
         end: ic::at("09:20:00"),
         ..gold_backtest(catalog.path().to_path_buf())
     };
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
+        &backtest,
+    );
 
     backtest.run_dataset(probe).unwrap();
 
@@ -696,7 +864,7 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
         catalog: catalog.path().to_path_buf(),
         bar_types: vec![BarType::from(BTC_MINUTE)],
         ticks: vec![],
-        fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
+        commission: Commission::Rate(Decimal::new(5, 4)),
         balance: Money::from("10000000 USDT"),
         ..gold_backtest(PathBuf::new())
     }
@@ -707,14 +875,21 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
 /// last close, a take profit at its limit and a stop at its trigger, and
 /// replays each bar's open, high, low and close in that order. Each stop,
 /// 100 away on 0.01 BTC, is worth 1 USDT. Each fill pays OKX's 0.05% of its
-/// value: 0.5 USDT at 100,000, 0.5005 at 100,100, 0.4995 at 99,900.
+/// value: 0.5 USDT at 100,000, 0.5005 at 100,100, 0.4995 at 99,900. With no
+/// quote, both sides enter at the close, no spread: the long's take profit
+/// would net 1 − 0.5 − 0.5005 and its stop lose 1 + 0.5 + 0.4995, the
+/// short's take profit net 1 − 0.5 − 0.4995 and its stop lose 1 + 0.5 +
+/// 0.5005, each entry costing its fee alone, 0.5, all over 1 USDT: the
+/// payoffs the bars realise.
 #[test]
 fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
-    let (probe, record) = TargetProbe::new(source, bracket(BTC, "1.00", Decimal::from(10)));
+    let backtest = btc_backtest(&catalog);
+    let (probe, record) =
+        TargetProbe::new(source, bracket(BTC, "1.00", Decimal::from(10)), &backtest);
 
-    btc_backtest(&catalog).run_dataset(probe).unwrap();
+    backtest.run_dataset(probe).unwrap();
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let flat = || {
@@ -730,7 +905,7 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // It opens at 09:10 and is replayed at its close.
         row(
             decision(at("09:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("-0.0005 USDT", "1.0005 USDT", Exit::TakeProfit),
                 outcome("-2.0005 USDT", "1.0005 USDT", Exit::Stop),
                 1.0,
@@ -742,7 +917,7 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         // at 10:20 and is replayed at its close.
         row(
             decision(at("10:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("-1.9995 USDT", "0.9995 USDT", Exit::Stop),
                 outcome("0.0005 USDT", "0.9995 USDT", Exit::TakeProfit),
                 1.0,
@@ -751,12 +926,17 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         ),
         row(
             decision(at("11:00"), 100_000.0),
-            with_exits(flat().long, flat().short, 1.0),
+            of_unit(flat().long, flat().short, 1.0),
             ic::at("11:45:00.010"),
         ),
     ];
     let record = record.borrow();
-    assert_eq!(record.rows, expected);
+    assert_eq!(settled(&record.rows), expected);
+    assert_payoff(
+        &record.rows,
+        &[-0.0005, 1.9995, 0.5],
+        &[0.0005, 2.0005, 0.5],
+    );
     // A take profit can lose net of fees: its sign is the P&L's.
     let outcomes = record.rows[0].outcomes;
     assert_eq!((outcomes.long.sign(), outcomes.short.sign()), (-1, -1));
@@ -766,28 +946,33 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
 /// One contract, no exits, on the same bars: each side enters at the last
 /// close, 100,000, and closes 30 minutes after its send at the last close,
 /// 100,000 still, the bars touching 100,150 and 99,850 passing by it: its
-/// two fees of 0.5 USDT lost.
+/// two fees of 0.5 USDT lost. Its unit is the worth of the ATR of 2 of
+/// Nautilus' hourly bars built from the minute bars,
+/// `BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`: the hour
+/// closing 09:00, from the run's start, ranges nought; the one closing 10:00,
+/// from 99,850 to 100,150 (09:10), 300, an ATR of 150, Wilder's seeded by the
+/// mean of the two; the one closing 11:00, from 99,850 (10:20) to 100,000,
+/// 150, an ATR of (150 + 150) / 2 = 150; on 0.01 BTC, the contract's
+/// multiplier, 1.5 USDT. The ATR has one bar at 09:00: that decision opens
+/// no target and takes no number.
 #[test]
 fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
-    let (probe, record) = TargetProbe::new(source, time_only(BTC, "1.00"));
+    let backtest = btc_backtest(&catalog);
+    let (probe, record) = TargetProbe::new(source, time_only(BTC, "1.00"), &backtest);
 
-    btc_backtest(&catalog).run_dataset(probe).unwrap();
+    backtest.run_dataset(probe).unwrap();
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let flat = || {
-        outcomes(
+        of_unit(
             outcome("-1 USDT", "1 USDT", Exit::Time),
             outcome("-1 USDT", "1 USDT", Exit::Time),
+            1.5,
         )
     };
     let expected = [
-        row(
-            decision(at("09:00"), 100_000.0),
-            flat(),
-            ic::at("09:30:00.010"),
-        ),
         row(
             decision(at("10:00"), 100_000.0),
             flat(),
@@ -799,7 +984,14 @@ fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
             ic::at("11:30:00.010"),
         ),
     ];
-    assert_eq!(record.borrow().rows, expected);
+    let record = record.borrow();
+    assert_eq!(settled(&record.rows), expected);
+    // On bars, no spread: each entry costs its fee alone, over the unit.
+    assert_payoff(&record.rows, &[0.5 / 1.5], &[0.5 / 1.5]);
+    assert_eq!(
+        record.fills.first(),
+        Some(&UnixNanos::from(ic::at("10:00:00.010")))
+    );
 }
 
 // --------------------------------------------------------------- inverse
@@ -838,7 +1030,7 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
         catalog: dir.path().to_path_buf(),
         bar_types: vec![BarType::from(INVERSE_MINUTE)],
         ticks: vec![],
-        fee_model: commission_rate(Decimal::new(5, 4)).unwrap(),
+        commission: Commission::Rate(Decimal::new(5, 4)),
         balance: Money::from("10 BTC"),
         ..gold_backtest(PathBuf::new())
     };
@@ -847,55 +1039,30 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
 
 /// Refused as the targets start, the run ends with the refusal before any
 /// decision, where an error at a decision would only be logged by Nautilus and
-/// leave an empty dataset.
+/// leave an empty dataset. A time-only target is refused as a bracket is: its
+/// unit, its ATR's worth, is no multiple of a distance in price on an inverse
+/// instrument, as a stop's is not.
 #[test]
-fn a_bracket_on_an_inverse_instrument_fails_the_dataset_run() {
-    let (_catalog, backtest) = inverse_run();
-    let source = Source::Bars(BarType::from(INVERSE_MINUTE));
-    let (probe, record) = TargetProbe::new(source, bracket(INVERSE, "1000", Decimal::from(10)));
+fn a_target_on_an_inverse_instrument_fails_the_dataset_run() {
+    for target in [
+        bracket(INVERSE, "1000", Decimal::from(10)),
+        time_only(INVERSE, "1000"),
+    ] {
+        let spec = target.spec;
+        // One node per thread.
+        let (err, decisions) = thread::spawn(move || {
+            let (_catalog, backtest) = inverse_run();
+            let source = Source::Bars(BarType::from(INVERSE_MINUTE));
+            let (probe, record) = TargetProbe::new(source, target, &backtest);
+            let err = backtest.run_dataset(probe).unwrap_err();
+            (format!("{err:#}"), record.borrow().decisions)
+        })
+        .join()
+        .unwrap();
 
-    let err = backtest.run_dataset(probe).unwrap_err();
-
-    assert!(format!("{err:#}").contains("inverse"), "{err:#}");
-    assert_eq!(record.borrow().decisions, 0);
-}
-
-/// 1000 USD of the inverse perpetual at 100,000 is 0.01 BTC: each side enters
-/// and closes at the last close, 100,000 still, its two fees of 0.05% of 0.01
-/// BTC lost, in BTC. A time-only target has no stop to weigh: its unit is 1.
-#[test]
-fn time_only_targets_on_an_inverse_instrument_are_the_outcomes_worked_out_by_hand() {
-    let (_catalog, backtest) = inverse_run();
-    let source = Source::Bars(BarType::from(INVERSE_MINUTE));
-    let (probe, record) = TargetProbe::new(source, time_only(INVERSE, "1000"));
-
-    backtest.run_dataset(probe).unwrap();
-
-    let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
-    let flat = || {
-        outcomes(
-            outcome("-0.00001 BTC", "0.00001 BTC", Exit::Time),
-            outcome("-0.00001 BTC", "0.00001 BTC", Exit::Time),
-        )
-    };
-    let expected = [
-        row(
-            decision(at("09:00"), 100_000.0),
-            flat(),
-            ic::at("09:30:00.010"),
-        ),
-        row(
-            decision(at("10:00"), 100_000.0),
-            flat(),
-            ic::at("10:30:00.010"),
-        ),
-        row(
-            decision(at("11:00"), 100_000.0),
-            flat(),
-            ic::at("11:30:00.010"),
-        ),
-    ];
-    assert_eq!(record.borrow().rows, expected);
+        assert!(err.contains("inverse"), "{spec:?}: {err}");
+        assert_eq!(decisions, 0, "{spec:?}");
+    }
 }
 
 // ------------------------------------------------------------------- atr
@@ -945,10 +1112,11 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
             }),
         }),
         limit: SignedDuration::from_mins(45),
+        atr: None,
     };
     let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) = TargetProbe::new(source, config);
+    let (probe, record) = TargetProbe::new(source, config, &backtest);
 
     backtest.run_dataset(probe).unwrap();
 
@@ -961,7 +1129,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         // quote, which settles the row.
         row(
             decision(ic::at("10:00:00"), 4000.10),
-            with_exits(
+            of_unit(
                 outcome("0.46 USD", "0.24 USD", Exit::TakeProfit),
                 outcome("-1.34 USD", "0.24 USD", Exit::Stop),
                 0.6,
@@ -970,7 +1138,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         ),
     ];
     let record = record.borrow();
-    assert_eq!(record.rows, expected);
+    assert_eq!(settled(&record.rows), expected);
     // The 09:00 decision sent no order: the first fill is the 10:00 one's,
     // the first decision numbered.
     assert_eq!(
@@ -1003,10 +1171,11 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
             }),
         }),
         limit: SignedDuration::from_mins(45),
+        atr: None,
     };
     let config = trading(spec, ic::INSTRUMENT_ID, "1");
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-    let (probe, record) = TargetProbe::new(source, config);
+    let (probe, record) = TargetProbe::new(source, config, &backtest);
 
     backtest.run_dataset(probe).unwrap();
 
@@ -1029,6 +1198,7 @@ fn btc_atr_targets() -> TargetConfig {
             }),
         }),
         limit: SignedDuration::from_mins(45),
+        atr: None,
     };
     trading(spec, BTC, "1.00")
 }
@@ -1099,12 +1269,22 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
         ..btc_backtest(&catalog)
     };
     let source = Source::Trades(InstrumentId::from(BTC));
-    let (probe, record) = TargetProbe::new(source, btc_atr_targets());
+    let (probe, record) = TargetProbe::new(source, btc_atr_targets(), &backtest);
 
     backtest.run_dataset(probe).unwrap();
 
     let record = record.borrow();
-    assert_eq!(record.rows, btc_trades_atr_rows());
+    assert_eq!(settled(&record.rows), btc_trades_atr_rows());
+    // With no quote both sides enter at the last trade, 100,000, no spread:
+    // the long's take profit, 110 away, would net 1.10 − 0.5 − 0.50055, as it
+    // did, and its stop, 82.5 away, lose 0.825 + 0.5 + 0.4995875; the short's
+    // take profit would net 1.10 − 0.5 − 0.49945 and its stop lose 0.825 + 0.5
+    // + 0.5004125; each entry costs its fee alone, 0.5; all over 0.825 USDT.
+    assert_payoff(
+        &record.rows,
+        &[0.09945 / 0.825, 1.8245875 / 0.825, 0.5 / 0.825],
+        &[0.10055 / 0.825, 1.8254125 / 0.825, 0.5 / 0.825],
+    );
     // The 09:00 decision sent no order: the first fill is the 10:00 one's.
     assert_eq!(
         record.fills.first(),
@@ -1127,15 +1307,15 @@ fn targets_on_last_bars_of_trades_are_those_on_the_trades() {
         end: ic::at("10:50:00"),
         ..btc_backtest(&catalog)
     };
-    let (probe, record) = TargetProbe::new(Source::Bars(hour_last), btc_atr_targets());
+    let (probe, record) = TargetProbe::new(Source::Bars(hour_last), btc_atr_targets(), &backtest);
 
     backtest.run_dataset(probe).unwrap();
 
-    assert_eq!(record.borrow().rows, btc_trades_atr_rows());
+    assert_eq!(settled(&record.borrow().rows), btc_trades_atr_rows());
 }
 
 /// The rows of the probe on BTC's trades, an ATR of 55 at 10:00.
-fn btc_trades_atr_rows() -> [TargetRow; 1] {
+fn btc_trades_atr_rows() -> [Settled; 1] {
     [
         // Both enter at the last trade, 100,000: the long's take profit a
         // sell limit at 100,110, its stop at 99,917.5; the short's take
@@ -1145,7 +1325,7 @@ fn btc_trades_atr_rows() -> [TargetRow; 1] {
         // 100,120 (-1.20 - 0.5 - 0.5006), which settles the row.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
                 outcome("-2.2006 USDT", "1.0006 USDT", Exit::Stop),
                 0.825,
@@ -1193,7 +1373,7 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         ..btc_backtest(&catalog)
     };
     let source = Source::Bars(BarType::from(BTC_MINUTE));
-    let (probe, record) = TargetProbe::new(source, btc_atr_targets());
+    let (probe, record) = TargetProbe::new(source, btc_atr_targets(), &backtest);
 
     backtest.run_dataset(probe).unwrap();
 
@@ -1205,7 +1385,7 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         // 0.5 - 0.5004125), the minute replayed at its close, 10:21.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
-            with_exits(
+            of_unit(
                 outcome("0.09945 USDT", "1.00055 USDT", Exit::TakeProfit),
                 outcome("-1.8254125 USDT", "1.0004125 USDT", Exit::Stop),
                 0.825,
@@ -1214,7 +1394,7 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
         ),
     ];
     let record = record.borrow();
-    assert_eq!(record.rows, expected);
+    assert_eq!(settled(&record.rows), expected);
     assert_eq!(
         record.fills.first(),
         Some(&UnixNanos::from(ic::at("10:00:00.010")))
@@ -1261,7 +1441,8 @@ fn walk_run(
             .build();
         let config = trading(spec, ic::INSTRUMENT_ID, "1");
         let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
-        let (probe, record) = TargetProbe::every(source, config, SignedDuration::from_mins(15));
+        let (probe, record) =
+            TargetProbe::every(source, config, SignedDuration::from_mins(15), &backtest);
         if dataset {
             backtest.run_dataset(probe).unwrap();
         } else {

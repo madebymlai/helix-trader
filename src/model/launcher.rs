@@ -421,6 +421,7 @@ mod tests {
     use crate::{
         model::{
             holdout::{Earnings, Holdout, Refusal},
+            score::ExpectedScore,
             train::{Kept, Outcome},
         },
         strategy::TickSeries,
@@ -434,16 +435,18 @@ mod tests {
     fn holdout() -> Holdout {
         Holdout {
             earnings: Earnings::default(),
-            log_loss: 0.6,
-            baseline_log_loss: 0.69,
-            auc: Some(0.6),
+            score: ExpectedScore {
+                rows: 2,
+                skill: Some(0.1),
+                ..ExpectedScore::default()
+            },
         }
     }
 
     fn published(at: Timestamp) -> Trained {
         Outcome::Published {
             valid_from: at,
-            holdout: holdout(),
+            holdout: Box::new(holdout()),
         }
         .into()
     }
@@ -621,7 +624,7 @@ mod tests {
                     pnl: 0.25,
                     min_pnl: 0.5,
                 },
-                holdout: holdout(),
+                holdout: Box::new(holdout()),
             })
             .into()
         })

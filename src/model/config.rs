@@ -13,8 +13,7 @@
 
 use jiff::SignedDuration;
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
-use rust_decimal::{Decimal, prelude::FromPrimitive};
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 
 use super::{
     decide::DecisionRule,
@@ -49,7 +48,7 @@ pub struct ModelConfig<T = TargetConfig> {
     /// When the strategy decides.
     pub decision: DecisionRule,
     /// The target of each decision, read from orders in a dataset run: the
-    /// models learn whether each side of it gains.
+    /// side models learn the net R of each side of it.
     pub target: T,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
@@ -79,13 +78,16 @@ pub struct ModelConfig<T = TargetConfig> {
     pub meta: Option<MetaConfig>,
 }
 
-/// A meta model: on each decision that picks a side, whether that side's
-/// trade, the target on it, wins, learned from the sides' features, the
-/// side picked and its probability. It is retrained on the sides'
-/// schedule, right after them, or, the sides never retrained, trained
-/// once and kept.
+/// A meta model: on each decision that picks a side, the realised net R of
+/// that side's trade, the target on it, learned from the sides' features,
+/// the side picked and the decision's calibrated level and side call. It is
+/// retrained on the sides' schedule, right after them, or, the sides never
+/// retrained, trained once and kept.
+///
+/// In the TOML, a probability `threshold` or a `size` is refused as the
+/// section is parsed, saying what takes its place (`MetaFields`).
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "MetaFields")]
 pub struct MetaConfig {
     /// How far back from a retrain its rows go; never before the
     /// sides' first model, whose predictions the rows need. Never
@@ -96,8 +98,10 @@ pub struct MetaConfig {
     /// The last part of the window the model is scored on and not fitted
     /// on.
     pub holdout: SignedDuration,
-    /// The probability from which the trade of the side picked is taken.
-    pub threshold: f64,
+    /// The net P&L the meta expects of the trade of the side picked, its
+    /// calibrated expected R times the trade's unit, in the target's P&L
+    /// currency, from which the trade is taken (`holdout::MetaMargin`).
+    pub margin: f64,
     /// The least net P&L per trade the meta's decisions earn on the
     /// holdout for its model to be published, in the target's P&L
     /// currency (`holdout`).
@@ -107,19 +111,62 @@ pub struct MetaConfig {
     pub min_trades: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
-    /// How a trade taken is sized from the probability; none trades the
-    /// target's size.
-    pub size: Option<Sizing>,
 }
 
-/// A trade's size from the meta model's probability: a multiple of the
-/// target's size, `min` at the threshold, `max` at a probability of 1,
-/// linear between, such as `size = { min = 0.5, max = 2 }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// The keys of a meta section as the TOML has them: a `MetaConfig`'s, and
+/// those of a meta deciding on a probability, `threshold` and `size`, each
+/// refused naming what takes its place, before a margin is looked for.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Sizing {
-    pub min: Decimal,
-    pub max: Decimal,
+struct MetaFields {
+    window: SignedDuration,
+    holdout: SignedDuration,
+    margin: Option<f64>,
+    min_pnl: f64,
+    min_trades: usize,
+    learner: LearnerConfig,
+    threshold: Option<IgnoredAny>,
+    size: Option<IgnoredAny>,
+}
+
+impl TryFrom<MetaFields> for MetaConfig {
+    type Error = String;
+
+    fn try_from(fields: MetaFields) -> Result<Self, String> {
+        let MetaFields {
+            window,
+            holdout,
+            margin,
+            min_pnl,
+            min_trades,
+            learner,
+            threshold,
+            size,
+        } = fields;
+        if threshold.is_some() {
+            return Err(
+                "a meta has no probability `threshold`: it takes the trade of the side \
+                 picked from `margin`, the net P&L it expects of the trade, its expected R \
+                 times the trade's unit, in the target's P&L currency"
+                    .to_string(),
+            );
+        }
+        if size.is_some() {
+            return Err(
+                "a meta has no `size`: the trade it takes is of the target's size, the \
+                 instrument's `trade_size` in `[trade]`"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            window,
+            holdout,
+            margin: margin.ok_or("missing field `margin`")?,
+            min_pnl,
+            min_trades,
+            learner,
+        })
+    }
 }
 
 /// The sides a strategy trades, each with its margin: the expected
@@ -281,10 +328,8 @@ impl MetaConfig {
     /// sides' `target`, each under its field of `[model.meta]`
     /// (`model.meta.…`): the learner invalid (see
     /// `LearnerConfig::validate`), the target's limit not shorter than the
-    /// window, the holdout not positive or leaving no fitted row, the
-    /// threshold not a probability, the minimums invalid (see `validate_minimums`), or the
-    /// sizing's multiples not positive with the minimum not above the
-    /// maximum.
+    /// window, the holdout not positive or leaving no fitted row, the margin
+    /// not a number, or the minimums invalid (see `validate_minimums`).
     pub fn validate(&self, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
         errors.collect(learner(&self.learner, "model.meta.learner"));
         validate_window(
@@ -296,25 +341,13 @@ impl MetaConfig {
             errors,
         );
         errors.check(
-            (0.0..=1.0).contains(&self.threshold),
+            self.margin.is_finite(),
             ConfigError::invalid_value(
-                "model.meta.threshold",
-                format!("the meta threshold {} is not a probability", self.threshold),
+                "model.meta.margin",
+                format!("the meta margin {} is not a number", self.margin),
             ),
         );
         validate_minimums(self.minimums(), "model.meta", errors);
-        if let Some(Sizing { min, max }) = self.size {
-            errors.check(
-                min.is_sign_positive() && !min.is_zero() && min <= max,
-                ConfigError::invalid_value(
-                    "model.meta.size",
-                    format!(
-                        "the meta sizing's multiples min {min} and max {max} are not positive \
-                         with the min not above the max"
-                    ),
-                ),
-            );
-        }
     }
 
     /// The least a meta model is published with, on its holdout.
@@ -324,23 +357,6 @@ impl MetaConfig {
             min_pnl: self.min_pnl,
             min_trades: self.min_trades,
         }
-    }
-
-    /// The multiple of the target's size a trade taken at `probability`
-    /// is: one without sizing; with it, `min` at the threshold, `max` at a
-    /// probability of 1, linear between.
-    #[must_use]
-    pub fn size(&self, probability: f64) -> Decimal {
-        let Some(Sizing { min, max }) = self.size else {
-            return Decimal::ONE;
-        };
-        let span = 1.0 - self.threshold;
-        let along = if span > 0.0 {
-            ((probability - self.threshold) / span).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        min + (max - min) * Decimal::from_f64(along).unwrap_or(Decimal::ONE)
     }
 }
 
@@ -371,7 +387,7 @@ fn validate_decisions(
         errors.check(
             warms.is_some_and(|warms| warms <= requirements.warmup),
             ConfigError::invalid_value(
-                "model.target.bracket.atr",
+                target.spec.atr_field(),
                 format!(
                     "the target's ATR of {} bars of {} warms over longer than the warmup {:#}",
                     atr.args.period, atr.bar_type, requirements.warmup
@@ -452,10 +468,14 @@ fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigError
 #[cfg(test)]
 mod tests {
     use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Quantity};
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::{
-        model::targets::{BracketSpec, DEFAULT_ATR, Distance},
+        model::{
+            learner::LightGbmConfig,
+            targets::{BracketSpec, DEFAULT_ATR, Distance},
+        },
         strategy::{AtrArgs, TickSeries},
     };
 
@@ -514,8 +534,13 @@ mod tests {
 
     /// The error of loading `toml` for a strategy reading gold, if any.
     fn load(toml: &str) -> anyhow::Result<ModelConfig> {
+        load_warming(toml, SignedDuration::ZERO)
+    }
+
+    /// `load`, the strategy warming for `warmup`.
+    fn load_warming(toml: &str, warmup: SignedDuration) -> anyhow::Result<ModelConfig> {
         let config = parse(toml)?;
-        config.validate(&reading(GOLD))?;
+        config.validate(&reading_gold_for(warmup))?;
         Ok(config)
     }
 
@@ -533,7 +558,12 @@ mod tests {
 
     /// The fields of the config errors refusing `toml`.
     fn refused_fields(toml: &str) -> Vec<String> {
-        let err = load(toml).unwrap_err();
+        refused_fields_warming(toml, SignedDuration::ZERO)
+    }
+
+    /// `refused_fields`, the strategy warming for `warmup`.
+    fn refused_fields_warming(toml: &str, warmup: SignedDuration) -> Vec<String> {
+        let err = load_warming(toml, warmup).unwrap_err();
         let errors = match err.downcast_ref::<ConfigError>() {
             Some(ConfigError::Multiple { errors }) => errors.clone(),
             Some(err) => vec![err.clone()],
@@ -609,22 +639,22 @@ mod tests {
 
     /// Time only, or a bracket: the target closes after its limit at the
     /// latest, which the window must hold. Deciding every 72 hours, so that
-    /// the cadence holds these limits and the window alone refuses them.
+    /// the cadence holds these limits and the window alone refuses them, the
+    /// time-only target's ATR of one bar of 72 hours warm over a warmup as
+    /// long.
     #[test]
     fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit() {
+        let warmup = SignedDuration::from_hours(72);
         for target in [
-            r#"target = { limit = "48h" }"#,
+            r#"target = { limit = "48h", atr = { period = 1 } }"#,
             r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "49h" }"#,
         ] {
             let toml = section(target).replace(r#"every = "1h""#, r#"every = "72h""#);
 
-            assert!(
-                refused(&toml).contains("not shorter than the window"),
-                "{}",
-                refused(&toml)
-            );
+            let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
+            assert!(err.contains("not shorter than the window"), "{err}");
             assert_eq!(
-                refused_fields(&toml),
+                refused_fields_warming(&toml, warmup),
                 ["model.target.limit", "model.holdout"],
                 "{target}"
             );
@@ -632,47 +662,56 @@ mod tests {
     }
 
     /// Deciding every hour, a bracket closed after an hour, or a time-only
-    /// trade of an hour and a half, would still be open at the next
-    /// decision.
+    /// trade of an hour and a half, its ATR of one hourly bar warm over a
+    /// warmup of an hour, would still be open at the next decision.
     #[test]
     fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
+        let warmup = SignedDuration::from_hours(1);
         for (target, named) in [
             (
                 r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#,
                 "limit 1h",
             ),
-            (r#"limit = "90m""#, "limit 1h 30m"),
+            (r#"limit = "90m", atr = { period = 1 }"#, "limit 1h 30m"),
         ] {
             let toml = section(&format!(r#"target = {{ {target} }}"#));
 
-            let err = refused(&toml);
+            let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
 
             assert!(
                 err.contains(named) && err.contains("cadence 1h"),
                 "{named}: {err}"
             );
-            assert_eq!(refused_fields(&toml), ["model.target.limit"], "{named}");
+            assert_eq!(
+                refused_fields_warming(&toml, warmup),
+                ["model.target.limit"],
+                "{named}"
+            );
         }
     }
 
-    /// A trade closed at its time alone: no exit, and no ATR to read a
-    /// price of, warm or subscribe to.
+    /// A trade closed at its time alone: no exit, and the ATR its unit is
+    /// measured in, of its `atr` table on the decision cadence's bars, as a
+    /// bracket's: 3 hourly bars of gold's mids.
     #[test]
-    fn a_target_of_a_limit_alone_loads_with_no_exits() {
-        let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
+    fn a_time_only_target_loads_with_its_atr_and_no_exits() {
+        let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
-        config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
+        let config = load_warming(&toml, SignedDuration::from_hours(3)).unwrap();
+
         assert_eq!(config.target.spec.bracket, None);
         assert_eq!(
             config.target.settles_within(),
             SignedDuration::from_mins(30)
         );
-        assert!(
-            config
-                .target
-                .atr_bars(config.decision, &reading_gold(&["order_book_depths"], &[]))
-                .unwrap()
-                .is_none()
+        let atr = config
+            .target
+            .atr_bars(config.decision, &reading(GOLD))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (atr.bar_type, atr.args.period),
+            (BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"), 3)
         );
     }
 
@@ -788,6 +827,28 @@ mod tests {
     }
 
     #[test]
+    fn a_strategy_sets_each_of_lightgbms_settings() {
+        let config = load(&section(
+            r#"learner = { kind = "lightgbm", num_iterations = 300, learning_rate = 0.02, num_leaves = 15, min_data_in_leaf = 50 }"#,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            config.learner,
+            LearnerConfig::LightGbm(
+                LightGbmConfig::builder()
+                    .num_iterations(300)
+                    .learning_rate(0.02)
+                    .num_leaves(15)
+                    .min_data_in_leaf(50)
+                    .build()
+            )
+        );
+    }
+
+    /// The floor is the adapter's dataset's, 20 rows, not the default of
+    /// 200 rows a leaf: 20 and 50 load.
+    #[test]
     fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
         let lightgbm = |rows: u32| {
             section(&format!(
@@ -882,20 +943,33 @@ mod tests {
         }
     }
 
-    /// A time-only target has no distance to warm an ATR for, whatever the
-    /// warmup, and an `atr` table, a bracket's, is an unknown field of it.
+    /// A time-only target's unit is the worth of its ATR: one without an
+    /// `atr` table is refused under it, beside the section's others, saying
+    /// so.
     #[test]
-    fn a_time_only_target_has_no_atr_to_warm_and_refuses_an_atr_table() {
-        let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
-        config
-            .validate(&reading_gold_for(SignedDuration::ZERO))
-            .unwrap();
+    fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
+        let toml =
+            section(r#"target = { limit = "30m" }"#).replace("min_trades = 30", "min_trades = 0");
 
+        assert_eq!(
+            refused_fields(&toml),
+            ["model.target.atr", "model.min_trades"]
+        );
+        let err = refused(&toml);
+        assert!(err.contains("ATR") && err.contains("unit"), "{err}");
+    }
+
+    /// A time-only target's ATR warms as a bracket's does, its 3 hourly bars
+    /// in 3 hours: over a shorter warmup it is refused under its own table.
+    #[test]
+    fn a_time_only_targets_atr_warming_longer_than_the_warmup_is_refused_under_it() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
-        let err = refused_parsing(&toml);
-
-        assert!(err.contains("unknown field `atr`"), "{err}");
+        assert_eq!(
+            refused_fields_warming(&toml, SignedDuration::from_hours(2)),
+            ["model.target.atr"]
+        );
+        assert!(load_warming(&toml, SignedDuration::from_hours(3)).is_ok());
     }
 
     /// A bracket in basis points may be written with an `atr` table, so the
@@ -990,7 +1064,7 @@ mod tests {
         [meta]
         window = "36h"
         holdout = "12h"
-        threshold = 0.55
+        margin = 0.25
         min_pnl = 0.5
         min_trades = 20
         learner = { kind = "baseline" }
@@ -1003,7 +1077,7 @@ mod tests {
         let meta = config.meta.unwrap();
         assert_eq!(meta.window, SignedDuration::from_hours(36));
         assert_eq!(meta.holdout, SignedDuration::from_hours(12));
-        assert_eq!(meta.threshold, 0.55);
+        assert_eq!(meta.margin, 0.25);
         assert_eq!(
             meta.minimums(),
             Minimums {
@@ -1012,7 +1086,6 @@ mod tests {
             }
         );
         assert_eq!(meta.learner, LearnerConfig::Baseline {});
-        assert_eq!(meta.size, None);
     }
 
     /// Two levels at most: a meta section has no meta section of its own.
@@ -1032,27 +1105,55 @@ mod tests {
     /// no exit being needed.
     #[test]
     fn a_meta_model_on_a_time_only_target_is_loaded() {
-        let toml = section(r#"target = { limit = "30m" }"#);
+        let toml = section(r#"target = { limit = "30m", atr = { period = 1 } }"#);
 
-        let config = load(&format!("{toml}\n{META}")).unwrap();
+        let config =
+            load_warming(&format!("{toml}\n{META}"), SignedDuration::from_hours(1)).unwrap();
 
         assert_eq!(config.target.spec.bracket, None);
         assert!(config.meta.is_some());
     }
 
+    /// A meta takes a trade from a margin in money, not from a probability:
+    /// a threshold, alone as a section of probabilities has it or beside a
+    /// margin, is refused as the section is parsed, saying that the margin
+    /// takes its place, not as any unknown field.
     #[test]
-    fn a_meta_sizing_reads_from_toml() {
-        let config = load(&format!(
-            "{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}"
-        ))
-        .unwrap();
+    fn a_meta_threshold_is_refused_at_parsing_naming_the_margin() {
+        for meta in [
+            META.replace("margin = 0.25", "threshold = 0.55"),
+            format!("{META}\nthreshold = 0.55"),
+        ] {
+            let err = refused_parsing(&format!("{SECTION}\n{meta}"));
 
-        assert_eq!(
-            config.meta.unwrap().size,
-            Some(Sizing {
-                min: Decimal::new(5, 1),
-                max: Decimal::from(2)
-            })
+            assert!(
+                err.contains("threshold") && err.contains("`margin`"),
+                "{err}"
+            );
+            assert!(!err.contains("unknown field"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_meta_without_a_margin_is_refused_at_parsing() {
+        let meta = META.replace("margin = 0.25", "");
+
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+
+        assert!(err.contains("missing field `margin`"), "{err}");
+    }
+
+    /// A meta takes or leaves a trade of the target's size: a size is
+    /// refused as the section is parsed, naming the size the trade is of.
+    #[test]
+    fn a_meta_size_is_refused_at_parsing_naming_the_size_of_the_trade() {
+        let toml = format!("{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}");
+
+        let err = refused_parsing(&toml);
+
+        assert!(
+            err.contains("`size`") && err.contains("trade_size"),
+            "{err}"
         );
     }
 
@@ -1087,10 +1188,10 @@ mod tests {
     }
 
     #[test]
-    fn a_meta_threshold_not_a_probability_is_refused() {
-        let err = meta_refused("threshold = 1.5");
+    fn a_meta_margin_not_a_number_is_refused() {
+        let err = meta_refused("margin = nan");
 
-        assert!(err.contains("model.meta.threshold"), "{err}");
+        assert!(err.contains("model.meta.margin"), "{err}");
     }
 
     #[test]
@@ -1098,38 +1199,5 @@ mod tests {
         let err = meta_refused("min_trades = 0");
 
         assert!(err.contains("model.meta.min_trades"), "{err}");
-    }
-
-    #[test]
-    fn a_meta_sizing_not_positive_or_its_min_above_its_max_is_refused() {
-        for line in ["size = { min = 0, max = 2 }", "size = { min = 2, max = 1 }"] {
-            let err = meta_refused(line);
-
-            assert!(err.contains("model.meta.size"), "{line}: {err}");
-        }
-    }
-
-    /// From the threshold 0.6 to a probability of 1, 0.5 to 2 times the
-    /// target's size: 0.8, half way, is 1.25 times.
-    #[test]
-    fn a_meta_probability_sizes_the_trade_from_the_threshold_to_one() {
-        let meta = MetaConfig::builder()
-            .window(SignedDuration::from_hours(36))
-            .holdout(SignedDuration::from_hours(12))
-            .threshold(0.6)
-            .min_pnl(0.0)
-            .min_trades(1)
-            .learner(LearnerConfig::Fake {})
-            .size(Sizing {
-                min: Decimal::new(5, 1),
-                max: Decimal::from(2),
-            })
-            .build();
-
-        assert_eq!(meta.size(0.6), Decimal::new(5, 1));
-        assert_eq!(meta.size(0.8).round_dp(9), Decimal::new(125, 2));
-        assert_eq!(meta.size(1.0), Decimal::from(2));
-        let unsized_meta = MetaConfig { size: None, ..meta };
-        assert_eq!(unsized_meta.size(0.8), Decimal::ONE);
     }
 }

@@ -1,7 +1,7 @@
 //! The store and the models of the tests of a decision, the handle's among
 //! them: a strategy on the last mid of AUD/USD, and baselines predicting a
-//! known probability whatever the row, published under a temp dir; and IC's
-//! gold for a target traded on it.
+//! known R, a side's or a meta's, whatever the row, published under a temp
+//! dir; and IC's gold for a target traded on it.
 
 use std::{path::Path, rc::Rc};
 
@@ -16,32 +16,41 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use crate::{
+    backtest::Commission,
     model::{
-        calibration::Calibration,
-        config::{Margins, MetaConfig, ModelConfig, Sizing},
-        dataset::{self, Commission, DatasetVenue},
+        calibration::{Ksplit, Line},
+        config::{Margins, MetaConfig, ModelConfig},
+        dataset::{self, DatasetVenue},
         decide::DecisionRule,
-        features::{FeatureSet, meta_names, testing::last_mid},
+        features::{FeatureSet, meta_names, side_names, testing::last_mid},
         holdout::{Earnings, Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
-        payoff::Payoff,
-        store::{ModelManifest, ModelSet, ModelStore, Probe, StoredModel},
-        targets::{Side, Target, TargetConfig},
+        score::ExpectedScore,
+        store::{
+            ModelCalibration, ModelManifest, ModelSet, ModelStore, PairCalibration, Probe,
+            StoredModel,
+        },
+        targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries},
 };
 
-/// The holdout of the models of the tests, as a train publishes it.
-const HOLDOUT: Holdout = Holdout {
+/// The holdout of the models of the tests, as a train publishes it: a
+/// skill of 0.1.
+pub const HOLDOUT: Holdout = Holdout {
     earnings: Earnings {
         taken: NO_TRADE,
         every: NO_TRADE,
         taken_stressed: NO_TRADE,
         every_stressed: NO_TRADE,
     },
-    log_loss: 0.6,
-    baseline_log_loss: 0.69,
-    auc: Some(0.6),
+    score: ExpectedScore {
+        rows: 2,
+        skill: Some(0.1),
+        mean_error: Some(0.0),
+        slope: None,
+        top_decile_gap: Some(0.0),
+    },
 };
 
 const NO_TRADE: Trades = Trades {
@@ -80,14 +89,36 @@ pub fn gold() -> InstrumentAny {
     )
 }
 
-/// The calibration of every model of the tests, the odds `o` of a
-/// prediction becoming `o^0.9`: c(0.5) = 0.5, c(0.6) = 0.590231, c(0.7)
-/// = 0.681909, c(0.8) = 0.776895, c(0.9) = 0.878415.
-pub const CALIBRATION: Calibration = Calibration { a: -0.9, b: 0.0 };
+/// The calibration of every meta model of the tests, its level line `0.1 +
+/// 0.5 E`: a meta predicting an R of 0.3 expects 0.25, one predicting nought
+/// 0.1.
+pub const CALIBRATION: Line = Line {
+    alpha: 0.1,
+    beta: 0.5,
+};
 
-/// The calibrated probability of a prediction of `p`.
-pub fn c(p: f64) -> f64 {
-    CALIBRATION.apply(p)
+/// The R a side's baseline of `tenths` predicts: `tenths` less 5, over 10,
+/// so above 5 a gain, below a loss and 5 nought.
+pub fn r(tenths: usize) -> f64 {
+    (tenths as f64 - 5.0) / 10.0
+}
+
+/// The calibration of the pair of `config`'s sides valid from
+/// `valid_from` leaving each side's prediction as it is, up to rounding:
+/// the level line `C' = C`, and of two sides the side call `D' = D`.
+pub fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
+    let sides: Vec<Side> = config.margins.sides().map(|(side, _)| side).collect();
+    ModelCalibration::Pair(PairCalibration {
+        valid_from,
+        lines: Ksplit {
+            level: Line {
+                alpha: 0.0,
+                beta: 1.0,
+            },
+            side_call: (sides.len() == 2).then_some(1.0),
+        },
+        sides,
+    })
 }
 
 pub fn at(time: &str) -> Timestamp {
@@ -99,8 +130,9 @@ pub fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, each
-/// side traded from an expected net P&L of nought, the baseline learner.
+/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, its
+/// unit the worth of its ATR of one hourly bar of the mids, the long traded
+/// from an expected net P&L of nought, the baseline learner.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -111,6 +143,10 @@ pub fn config() -> ModelConfig {
                 .spec(
                     Target::builder()
                         .limit(SignedDuration::from_hours(1))
+                        .atr(AtrArgs {
+                            period: 1,
+                            ..DEFAULT_ATR
+                        })
                         .build(),
                 )
                 .build(),
@@ -120,7 +156,7 @@ pub fn config() -> ModelConfig {
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(0.0),
-            short: Some(0.0),
+            short: None,
         })
         .min_pnl(0.0)
         .min_trades(1)
@@ -128,16 +164,26 @@ pub fn config() -> ModelConfig {
         .build()
 }
 
-/// The meta model taking a trade from 0.6, sizing it if `size`.
-pub fn meta(size: Option<Sizing>) -> MetaConfig {
+/// `config`, the short traded too, from nought.
+pub fn both_sides() -> ModelConfig {
+    ModelConfig {
+        margins: Margins {
+            long: Some(0.0),
+            short: Some(0.0),
+        },
+        ..config()
+    }
+}
+
+/// The meta model taking a trade from an expected net P&L of 0.15 USD.
+pub fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
         holdout: SignedDuration::from_hours(12),
-        threshold: 0.6,
+        margin: 0.15,
         min_pnl: 0.0,
         min_trades: 1,
         learner: LearnerConfig::Baseline {},
-        size,
     }
 }
 
@@ -165,7 +211,7 @@ pub fn requirements() -> DataRequirements {
 /// 10 million USD, no leverage.
 pub fn venue() -> DatasetVenue {
     DatasetVenue {
-        commission: Commission::Rate("0.00003".to_string()),
+        commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
         leverage: Decimal::ONE,
     }
@@ -204,75 +250,82 @@ pub fn store(models: &Path) -> ModelStore {
     side_store(models, &features(), &config(), Side::Long)
 }
 
-/// A baseline long model of `config` valid from `valid_from` predicting
-/// `trues` tenths whatever the row, calibrated by `CALIBRATION`,
-/// expecting a win and a loss of 1, its baseline the mean of its
-/// training labels, as the store keeps it for the probe's features,
-/// probed on one row.
-pub fn baseline(valid_from: &str, trues: usize) -> StoredModel {
-    baseline_for(&features(), &config(), Side::Long, valid_from, trues)
+/// A baseline long model of `config` valid from `valid_from` predicting an
+/// R of `r(tenths)` whatever the row, as `baseline_for` says.
+pub fn baseline(valid_from: &str, tenths: usize) -> StoredModel {
+    baseline_for(&features(), &config(), Side::Long, valid_from, tenths)
 }
 
-/// The baseline of `baseline`, of `features` and `config`'s `side`.
+/// A baseline model of `config`'s `side` valid from `valid_from`, on the
+/// side's features of `features` and the target's payoff, predicting an R
+/// of `r(tenths)` whatever the row, its pair's calibration leaving it as it
+/// is (`unchanged`), its baseline that R, as the store keeps it, probed on
+/// one row.
 pub fn baseline_for(
     features: &FeatureSet,
     config: &ModelConfig,
     side: Side,
     valid_from: &str,
-    trues: usize,
+    tenths: usize,
 ) -> StoredModel {
-    let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
+    let names = side_names(features.names(), &config.target.payoff_names());
+    let width = names.len();
+    let set = TrainingSet::new(width, vec![0.5; width], vec![r(tenths)]).unwrap();
     let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
+    let probe = vec![0.7; width];
     let config = config.clone();
     StoredModel {
         manifest: ModelManifest {
             strategy_id: StrategyId::from(STRATEGY),
             valid_from: at(valid_from),
+            // Its strategy reads the quotes of what it trades, which the
+            // target's ATR, if any, is built from.
             fingerprint: dataset::fingerprint(
                 features,
                 config.decision,
                 &config.target,
-                &requirements(),
+                &DataRequirements {
+                    ticks: vec![TickSeries {
+                        data: NautilusDataType::QuoteTick,
+                        instrument_id: config.target.instrument_id,
+                    }],
+                    ..requirements()
+                },
                 &venue(),
             )
             .unwrap()
             .to_string(),
-            feature_names: vec!["mid".to_string()],
+            feature_names: names,
+            calibration: unchanged(&config, at(valid_from)),
             target: config.target,
             side: Some(side),
             learner: config.learner,
-            calibration: CALIBRATION,
-            baseline: trues as f64 / 10.0,
-            payoff: Some(Payoff {
-                win: 1.0,
-                loss: 1.0,
-            }),
+            baseline: r(tenths),
             holdout: HOLDOUT,
             probes: vec![Probe {
-                row: vec![0.7],
-                prediction: CALIBRATION.apply(model.predict(&[0.7]).unwrap()),
+                prediction: model.predict(&probe).unwrap(),
+                row: probe,
             }],
         },
         model: model.save().unwrap(),
     }
 }
 
-/// A baseline meta model of `config` valid from `valid_from` predicting
-/// `trues` tenths whatever the row, calibrated by `CALIBRATION`, on the
-/// meta's features of `features`, with no probe.
+/// A baseline meta model of `config` valid from `valid_from` predicting an
+/// R of `r(tenths)` whatever the row, calibrated by `CALIBRATION`, on the
+/// meta's features of `features`, its baseline that R, with no probe.
 pub fn meta_baseline(
     features: &FeatureSet,
     config: &ModelConfig,
     valid_from: &str,
-    trues: usize,
+    tenths: usize,
 ) -> StoredModel {
     let names = meta_names(features.names());
-    let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(names.len(), vec![0.5; 10 * names.len()], labels).unwrap();
-    let mut meta = baseline_for(features, config, Side::Long, valid_from, trues);
+    let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r(tenths)]).unwrap();
+    let mut meta = baseline_for(features, config, Side::Long, valid_from, tenths);
     meta.manifest.side = None;
     meta.manifest.feature_names = names;
+    meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);
     meta.manifest.probes.clear();
     meta.model = LearnerConfig::Baseline {}
         .fit(&set)

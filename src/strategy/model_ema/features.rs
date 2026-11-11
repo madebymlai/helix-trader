@@ -69,7 +69,8 @@ mod tests {
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#;
 
     /// The strategy trading gold on its minute bars, its fast average of
-    /// 2 bars and its slow one of 3, warmed up over 3 hours.
+    /// 2 bars and its slow one of 3, warmed up over 3 hours, on a time-only
+    /// target, its unit measured in the ATR of 3 hourly bars.
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -88,7 +89,7 @@ mod tests {
 
         [model]
         decision = { every = "1h" }
-        target = { limit = "30m" }
+        target = { limit = "30m", atr = { period = 3 } }
         retrain = "24h"
         window = "48h"
         holdout = "12h"
