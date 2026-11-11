@@ -15,7 +15,10 @@
 //! - deciding (`Mode::Backtest`, `Mode::Live`): takes, for each side of
 //!   the config's margins, the latest model of its store
 //!   (`store::ModelStore`) valid at the decision, its calibrated
-//!   probability on the row, and its expected net P&L (`payoff`): with
+//!   probability on the side's row, the decision's features then the side's
+//!   payoff features as the target sets them, which a dataset row of the
+//!   decision holds alike (`deciding::SideRow`), and its expected net P&L
+//!   (`payoff`): with
 //!   exits, the expected R times the worth of the stop the decision sets
 //!   (`targets::TargetSetter`, from the decision's price and the target's
 //!   ATR, which the handle runs), on a time-only target in money. It
@@ -30,8 +33,8 @@
 //!   same module. A side with no model valid yet never trades; a stale
 //!   decision, cold features, a target's ATR not yet initialized, no side
 //!   clearing its margin or two tied are no decision, never an error. The
-//!   target is set before the models are asked, so with exits and the
-//!   instrument missing from the cache `decide` errs, whatever the models.
+//!   target is set before the models are asked, so with the instrument
+//!   missing from the cache `decide` errs, whatever the models.
 //! - in a dataset run (`Mode::Dataset`): opens the decision's target
 //!   (`targets::Targets`, through `strategy::orders`) and returns no
 //!   decision, so the strategy places no trade of its own; the strategy
@@ -143,7 +146,7 @@ use super::{
     config::ModelConfig,
     dataset::DatasetVenue,
     decide::{self, DecisionRule},
-    deciding::DecidingModels,
+    deciding::{DecidingModels, SideRow},
     features::FeatureSet,
     store::ModelSet,
     targets::{TargetConfig, TargetRow, TargetSetter, Targets},
@@ -619,15 +622,17 @@ macro_rules! model_data_hooks {
 }
 
 impl Deciding {
-    /// The decision of `strategy` at `now` on `row`: the stores listed again,
-    /// a failure logged and the previous lists kept; the target set once for
-    /// both sides, no target no decision; and the trade its units decide
-    /// (`DecidingModels::decide`), on the target as set on the side.
+    /// The decision of `strategy` at `now` on the decision's `features`: the
+    /// stores listed again, a failure logged and the previous lists kept; the
+    /// target set once for both sides, no target no decision; and the trade
+    /// its sides' rows decide (`DecidingModels::decide`), each the features
+    /// then its target's payoff features, as a dataset row gives them
+    /// (`SideRow::new`), on the target as set on the side.
     fn decide<S>(
         &self,
         strategy: &S,
         now: Timestamp,
-        row: &[f64],
+        features: &[f64],
     ) -> anyhow::Result<Option<Decision>>
     where
         S: DataActor + DataActorNative,
@@ -639,8 +644,10 @@ impl Deciding {
         let Ok(targets) = self.target.at(strategy)? else {
             return Ok(None);
         };
-        let units = targets.map(|target| target.unit);
-        let Some(taken) = models.decide(now, row, units, self.quantity)? else {
+        let sides = targets
+            .as_ref()
+            .map(|target| SideRow::new(features, &target.payoff, target.unit));
+        let Some(taken) = models.decide(now, features, &sides, self.quantity)? else {
             return Ok(None);
         };
         let target = targets.of(taken.side);
@@ -1456,8 +1463,7 @@ mod tests {
             .bars(hours, HOURLY_CLOSE, &tables())
             .build()
             .unwrap();
-        let mut long = baseline_for(&features, &config(), Side::Long, "2026-10-22T00:00:00Z", 8);
-        long.manifest.feature_names = features.names().to_vec();
+        let long = baseline_for(&features, &config(), Side::Long, "2026-10-22T00:00:00Z", 8);
         side_store(models.path(), &features, &config(), Side::Long)
             .publish(&long)
             .unwrap();
@@ -1700,8 +1706,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (config, width) = width_config();
         let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
-        let mut long = baseline_for(&features, &config, Side::Long, "2026-10-22T00:00:00Z", 8);
-        long.manifest.feature_names = features.names().to_vec();
+        let long = baseline_for(&features, &config, Side::Long, "2026-10-22T00:00:00Z", 8);
         side_store(models.path(), &features, &config, Side::Long)
             .publish(&long)
             .unwrap();
@@ -2160,11 +2165,11 @@ mod tests {
         assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
 
-    /// A time-only target sets no exit, so it never reads the instrument:
-    /// missing from the cache, it refuses nothing, and the long of 0.8 trades
-    /// from the mid of its quote.
+    /// A time-only target reads the instrument as a bracket does, its entry
+    /// cost costing its fills: missing from the cache, it is an error, though
+    /// the long of 0.8 is valid and the instrument quoted.
     #[test]
-    fn a_time_only_target_trades_with_the_instrument_missing_from_the_cache() {
+    fn a_time_only_target_with_the_instrument_missing_from_the_cache_is_an_error() {
         let models = tempfile::tempdir().unwrap();
         let eur = InstrumentId::from("EUR/USD.SIM");
         let mut config = config();
@@ -2187,10 +2192,9 @@ mod tests {
             .add_quote(eur_quote(eur))
             .unwrap();
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let err = handle.decide(&mut probe).unwrap_err();
 
-        assert_eq!(decision.side, OrderSide::Buy);
-        assert_eq!(decision.reference, Price::from("1.00000"));
+        assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
 
     /// The model valid from 12:00, listed by the decision at 11:00, swaps

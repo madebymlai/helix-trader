@@ -27,6 +27,7 @@ use helix_trader::{
     backtest::Backtest,
     model::{
         ModelPart, ModelStrategy,
+        features::side_names,
         handle::Mode,
         launcher::{Launcher, Retrained},
         store::ModelSet,
@@ -122,8 +123,9 @@ fn kept_with_its_figures(text: &str) -> bool {
 }
 
 /// Publishes straight to the store under `models` a long model valid from
-/// `at`, a baseline of 0.6 on the strategy's features, as the dataset the
-/// `train` subcommand built in `catalog` names them.
+/// `at`, a baseline of 0.6 on a side's features, the strategy's then the
+/// target's payoff features, as the dataset the `train` subcommand built in
+/// `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
     let dataset = ModelEma::dataset(&config, catalog.path(), &venue())
@@ -133,7 +135,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     let model = baseline_stored(
         dataset.strategy_id,
         dataset.fingerprint,
-        dataset.feature_names,
+        side_names(&dataset.feature_names, &dataset.payoff_names),
         &config.model(),
         Some(Side::Long),
         at,

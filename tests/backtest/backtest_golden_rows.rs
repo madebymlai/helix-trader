@@ -1,7 +1,8 @@
 //! The golden rows: the dataset of the `model_ema` strategy built over
 //! three days of the fixture's random walk of IC's gold, its rows (their
-//! times, features and each side's P&L, commission, exit and unit) printed
-//! exactly and compared with the committed snapshot `golden_rows.csv`.
+//! times, features and each side's payoff features, P&L, commission, exit
+//! and unit) printed exactly and compared with the committed snapshot
+//! `golden_rows.csv`.
 //!
 //! The fingerprint a dataset and its models are stored under reads the
 //! config by value and the code by version: the dataset version
@@ -105,7 +106,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     let manifest = dataset.manifest().unwrap();
     let rows = dataset.read(from, to).unwrap();
 
-    let printed = print(&manifest.feature_names, &rows);
+    let printed = print(&manifest.feature_names, &manifest.payoff_names, &rows);
 
     if std::env::var_os(WRITE).is_some_and(|value| value == "write") {
         fs::write(SNAPSHOT, &printed).unwrap();
@@ -114,14 +115,20 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     compare(&printed, Path::new(SNAPSHOT));
 }
 
-/// The rows as CSV, a header of the times, `features` and each side's values,
-/// then each row's decision and settling times and its values, printed
-/// exactly: Rust's shortest representation reading back to the same `f64`.
-fn print(features: &[String], rows: &[DatasetRow]) -> String {
+/// The rows as CSV, a header of the times, `features`, each side's `payoff`
+/// features and each side's values, then each row's decision and settling
+/// times and its values, printed exactly: Rust's shortest representation
+/// reading back to the same `f64`.
+fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String {
     let mut out = String::from("ts_event,settled_at");
     features
         .iter()
         .for_each(|name| write!(out, ",{name}").unwrap());
+    for side in ["long", "short"] {
+        payoff
+            .iter()
+            .for_each(|name| write!(out, ",{side}_{name}").unwrap());
+    }
     out.push_str(
         ",long_pnl,long_commission,long_exit,long_unit,short_pnl,short_commission,short_exit,\
          short_unit\n",
@@ -144,7 +151,13 @@ fn print(features: &[String], rows: &[DatasetRow]) -> String {
             row.short_exit,
             row.short_unit,
         ];
-        for value in row.features.iter().chain(&sides) {
+        let values = row
+            .features
+            .iter()
+            .chain(&row.long_payoff)
+            .chain(&row.short_payoff)
+            .chain(&sides);
+        for value in values {
             write!(out, ",{value}").unwrap();
         }
         out.push('\n');

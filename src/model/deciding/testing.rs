@@ -22,7 +22,7 @@ use crate::{
         config::{Margins, MetaConfig, ModelConfig, Sizing},
         dataset::{self, DatasetVenue},
         decide::DecisionRule,
-        features::{FeatureSet, meta_names, testing::last_mid},
+        features::{FeatureSet, meta_names, side_names, testing::last_mid},
         holdout::{Earnings, Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
         payoff::Payoff,
@@ -208,8 +208,8 @@ pub fn store(models: &Path) -> ModelStore {
 /// A baseline long model of `config` valid from `valid_from` predicting
 /// `trues` tenths whatever the row, calibrated by `CALIBRATION`,
 /// expecting a win and a loss of 1, its baseline the mean of its
-/// training labels, as the store keeps it for the probe's features,
-/// probed on one row.
+/// training labels, as the store keeps it for a side of the probe's
+/// features and the target's payoff, probed on one row.
 pub fn baseline(valid_from: &str, trues: usize) -> StoredModel {
     baseline_for(&features(), &config(), Side::Long, valid_from, trues)
 }
@@ -222,9 +222,12 @@ pub fn baseline_for(
     valid_from: &str,
     trues: usize,
 ) -> StoredModel {
+    let names = side_names(features.names(), &config.target.payoff_names());
+    let width = names.len();
     let labels = (0..10).map(|i| i < trues).collect();
-    let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
+    let set = TrainingSet::new(width, vec![0.5; 10 * width], labels).unwrap();
     let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
+    let probe = vec![0.7; width];
     let config = config.clone();
     StoredModel {
         manifest: ModelManifest {
@@ -239,7 +242,7 @@ pub fn baseline_for(
             )
             .unwrap()
             .to_string(),
-            feature_names: vec!["mid".to_string()],
+            feature_names: names,
             target: config.target,
             side: Some(side),
             learner: config.learner,
@@ -251,8 +254,8 @@ pub fn baseline_for(
             }),
             holdout: HOLDOUT,
             probes: vec![Probe {
-                row: vec![0.7],
-                prediction: CALIBRATION.apply(model.predict(&[0.7]).unwrap()),
+                prediction: CALIBRATION.apply(model.predict(&probe).unwrap()),
+                row: probe,
             }],
         },
         model: model.save().unwrap(),

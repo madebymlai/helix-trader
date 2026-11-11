@@ -21,7 +21,7 @@ use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
         dataset,
-        features::{Feature, FeatureSet},
+        features::{Feature, FeatureSet, side_names},
         holdout::{Holdout, Refusal},
         learner::LearnerConfig,
         store::{ModelSet, ModelStore},
@@ -264,10 +264,13 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
         dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
             .unwrap()
             .to_string();
+    // A side's model reads the strategy's features, then the bracket's payoff
+    // features, the names the decision checks it against.
+    let names = side_names(features().names(), &target().payoff_names());
     for side in Side::BOTH {
         let stored = store(models.path(), 1.0, side).read(t()).unwrap();
         let model = stored
-            .load(features().names(), &fingerprint)
+            .load(&names, &fingerprint)
             .unwrap_or_else(|e| panic!("{side:?}: {e:#}"));
         assert!(!stored.manifest.probes.is_empty());
         assert!(stored.manifest.payoff.is_some(), "{side:?}");

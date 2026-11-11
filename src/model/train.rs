@@ -5,8 +5,11 @@
 //! A strategy has a model for each side it trades (the sides of its
 //! margins, `ModelConfig::margins`): the long's learns whether the long of
 //! the target gains after its costs, the short's whether its short does,
-//! both on the same rows, window and holdout. Each is fitted and calibrated
-//! on its own, and the sides are judged and published together.
+//! both on the same rows, window and holdout, each reading a row's features
+//! then its own side's payoff features (`dataset::DatasetRow::side`), under
+//! the names its store checks it against (`store::SideLevel::feature_names`).
+//! Each is fitted and calibrated on its own, and the sides are judged and
+//! published together.
 //!
 //! What a train at `t` does to each model is the schedule's plan
 //! (`schedule::Schedule::plan`), from the stores' valid-froms alone: a
@@ -40,7 +43,7 @@
 //! the training mean of the labels of the rows it was fitted and calibrated on
 //! (`baseline`), drops the side, refused; its AUC is reported. The earnings are
 //! judged on the trades picked over the holdout's rows
-//! (`deciding::DecidingModels::pick_among`), on each row's units, among the
+//! (`deciding::DecidingModels::pick_among`), on each side's row, among the
 //! surviving candidates and, for any other side, the model the handle would
 //! use at `t'`: the latest valid at or before it, as the store lists it, which
 //! the plan cannot tell, a retrained plan marking a side with only an older
@@ -246,7 +249,7 @@ impl Training {
         let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
         let side = |side| {
             models.side(side).map(|traded| Level {
-                feature_names: features.names().to_vec(),
+                feature_names: traded.feature_names().to_vec(),
                 holdout: config.holdout,
                 minimums: config.minimums(),
                 learner: config.learner.clone(),
@@ -478,8 +481,7 @@ impl Training {
             .collect();
         let mut trades = vec![];
         for row in held_out {
-            let picked =
-                DecidingModels::pick_among(deciding.iter().copied(), &row.features, row.units())?;
+            let picked = DecidingModels::pick_among(deciding.iter().copied(), &row.sides())?;
             for Candidate { side, .. } in &deciding {
                 let taken = picked.is_some_and(|picked| picked.side == *side);
                 trades.push((taken, row.trade(*side)));
@@ -838,10 +840,12 @@ mod tests {
         model::{
             config::{Margins, MetaConfig},
             decide::{DecisionRule, FeatureRow},
+            features::side_names,
             holdout::Trades,
             learner::LearnerConfig,
             targets::{
-                BracketSpec, Distance, Exit, Outcome as TargetOutcome, Outcomes, Target, TargetRow,
+                BracketSpec, Distance, Exit, Outcome as TargetOutcome, Outcomes, PerSide, Target,
+                TargetRow,
             },
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
@@ -974,7 +978,8 @@ mod tests {
 
     /// The row of the decision at `time` on `features`, settled `after` it:
     /// each side's stop worth 2 USD, a side winning 3 USD at its take profit,
-    /// losing 2 at its stop, net of 0.2 USD of commission.
+    /// losing 2 at its stop, net of 0.2 USD of commission; each side's payoff
+    /// features `bracket_payoff`'s.
     fn row_of(
         time: &str,
         features: Vec<f64>,
@@ -1002,11 +1007,22 @@ mod tests {
                 ts_event: ns,
                 ts_init: ns,
             },
+            payoff: bracket_payoff(),
             outcomes: Outcomes {
                 long: outcome(long_wins),
                 short: outcome(short_wins),
             },
             settled_at: UnixNanos::from(at(time) + after),
+        }
+    }
+
+    /// The payoff features of each side of a bracket, its take profit's R,
+    /// its stop's nominal loss and its entry cost, which no model of the
+    /// tests reads: the fake reads its first feature, the strategy's.
+    fn bracket_payoff() -> PerSide<Vec<f64>> {
+        PerSide {
+            long: vec![1.4, 1.1, 0.07],
+            short: vec![1.3, 1.2, 0.08],
         }
     }
 
@@ -1090,13 +1106,17 @@ mod tests {
         let long = store(dir.path(), &config(), Side::Long).read(t).unwrap();
         let fake = LearnerConfig::Fake {}.load(&long.model).unwrap();
         // The fake predicts the mean of its training labels where the first
-        // feature is missing.
-        assert_eq!(fake.predict(&[f64::NAN]).unwrap(), 0.5);
+        // feature is missing, on the long's row: the decision's feature, then
+        // the long's payoff features.
+        assert_eq!(fake.predict(&[f64::NAN, 1.4, 1.1, 0.07]).unwrap(), 0.5);
         let calibration = long.manifest.calibration;
         close(calibration.apply(0.25), 1.0 / 3.0);
         close(calibration.apply(0.75), 2.0 / 3.0);
         let probes: Vec<&Vec<f64>> = long.manifest.probes.iter().map(|p| &p.row).collect();
-        assert_eq!(probes, [&vec![0.8], &vec![0.3]]);
+        assert_eq!(
+            probes,
+            [&vec![0.8, 1.4, 1.1, 0.07], &vec![0.3, 1.4, 1.1, 0.07]]
+        );
         let s = 2_f64.ln() / 3_f64.ln();
         close(
             long.manifest.probes[0].prediction,
@@ -1780,7 +1800,11 @@ mod tests {
             .manifest;
         assert_eq!(manifest.strategy_id, StrategyId::from(STRATEGY));
         assert_eq!(manifest.valid_from, t);
-        assert_eq!(manifest.feature_names, ["mid_0"]);
+        // The strategy's feature, then the bracket's payoff features.
+        assert_eq!(
+            manifest.feature_names,
+            ["mid_0", "take_profit_r", "stop_loss_r", "entry_cost"]
+        );
         assert_eq!(
             manifest.fingerprint,
             crate::model::dataset::fingerprint(
@@ -2113,7 +2137,8 @@ mod tests {
     ) {
         let trues = (probability * 10.0).round() as usize;
         let labels = (0..10).map(|i| i < trues).collect();
-        let set = TrainingSet::new(1, vec![0.5; 10], labels).unwrap();
+        let names = side_names(features().names(), &config.target.payoff_names());
+        let set = TrainingSet::new(names.len(), vec![0.5; 10 * names.len()], labels).unwrap();
         let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
         store
             .publish(&StoredModel {
@@ -2129,7 +2154,7 @@ mod tests {
                     )
                     .unwrap()
                     .to_string(),
-                    feature_names: vec!["mid_0".to_string()],
+                    feature_names: names,
                     target: config.target,
                     side: Some(side),
                     learner: LearnerConfig::Baseline {},
@@ -2256,7 +2281,7 @@ mod tests {
     }
 
     /// `rows` as a time-only target has them: closed at their time, of a
-    /// unit of 1.
+    /// unit of 1, each side's payoff features its entry cost alone.
     fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
         let at_its_time = |outcome| TargetOutcome {
             exit: Exit::Time,
@@ -2265,6 +2290,10 @@ mod tests {
         };
         rows.into_iter()
             .map(|row| TargetRow {
+                payoff: PerSide {
+                    long: vec![0.07],
+                    short: vec![0.08],
+                },
                 outcomes: Outcomes {
                     long: at_its_time(row.outcomes.long),
                     short: at_its_time(row.outcomes.short),
@@ -2613,7 +2642,10 @@ mod tests {
 
         close(long.manifest.calibration.apply(0.25), 1.0 / 3.0);
         let probes: Vec<&Vec<f64>> = long.manifest.probes.iter().map(|p| &p.row).collect();
-        assert_eq!(probes, [&vec![0.8], &vec![0.3]]);
+        assert_eq!(
+            probes,
+            [&vec![0.8, 1.4, 1.1, 0.07], &vec![0.3, 1.4, 1.1, 0.07]]
+        );
         let Earnings { taken, every, .. } = long.manifest.holdout.earnings;
         assert_eq!((taken.count, every.count), (2, 4));
     }
