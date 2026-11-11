@@ -424,10 +424,15 @@ mod tests {
         ))
     }
 
-    const TIME_ONLY: &str = r#"{ limit = "30m" }"#;
+    /// A time-only target, its unit measured in Nautilus' ATR of 14 hourly
+    /// bars of gold.
+    const TIME_ONLY: &str = r#"{ limit = "30m", atr = { period = 14 } }"#;
     /// A bracket in ATRs: Nautilus' ATR of 14 hourly bars of gold.
     const BRACKET: &str =
         r#"{ bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#;
+    /// A bracket in basis points, which has no ATR.
+    const IN_BPS: &str =
+        r#"{ bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#;
 
     /// Each config error refusing the probe's config of `features`,
     /// `series` and `target` (see `load`): its field and its message.
@@ -522,15 +527,17 @@ mod tests {
         assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
     }
 
-    /// The features read GC's trades alone; the target's ATR is built of
-    /// the quotes of the gold traded, which `[data]` lists for it; a
-    /// time-only target has no ATR to read them.
+    /// The features read GC's trades alone; the target's ATR, a bracket's
+    /// or a time-only target's, is built of the quotes of the gold traded,
+    /// which `[data]` lists for it; a bracket in basis points has no ATR to
+    /// read them.
     #[test]
     fn ticks_the_target_atr_reads_alone_are_read() {
         let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
         load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BRACKET).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY);
+        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], IN_BPS);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -541,15 +548,16 @@ mod tests {
         );
     }
 
-    /// Deciding hourly, the target's ATR runs on gold's hourly bars of
-    /// mids, which `[data]` lists and no feature reads; a time-only target
-    /// has no ATR to read them.
+    /// Deciding hourly, the target's ATR, a bracket's or a time-only
+    /// target's, runs on gold's hourly bars of mids, which `[data]` lists and
+    /// no feature reads; a bracket in basis points has no ATR to read them.
     #[test]
     fn bars_the_target_atr_runs_on_alone_are_read() {
         let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
 
         load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BRACKET).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY);
+        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], IN_BPS);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
@@ -576,11 +584,14 @@ mod tests {
     /// both reported, each under its field.
     #[test]
     fn the_series_refusals_are_reported_with_the_other_violations() {
-        let mut fields: Vec<String> =
-            refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], r#"{ limit = "1h" }"#)
-                .into_iter()
-                .map(|(field, _)| field)
-                .collect();
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GC_TRADES],
+            r#"{ limit = "1h", atr = { period = 14 } }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
         fields.sort();
 
         assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
@@ -612,11 +623,14 @@ mod tests {
     /// are both reported, each under its field.
     #[test]
     fn a_series_listed_twice_is_reported_with_the_other_violations() {
-        let mut fields: Vec<String> =
-            refusals(&[GOLD_BARS], &[GOLD_BARS, GOLD_BARS], r#"{ limit = "1h" }"#)
-                .into_iter()
-                .map(|(field, _)| field)
-                .collect();
+        let mut fields: Vec<String> = refusals(
+            &[GOLD_BARS],
+            &[GOLD_BARS, GOLD_BARS],
+            r#"{ limit = "1h", atr = { period = 14 } }"#,
+        )
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
         fields.sort();
 
         assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
@@ -688,7 +702,13 @@ mod tests {
             .replace(r#""15m""#, r#""0s""#)
             .replace("[indicators.filter]\n        period = 5\n", "");
 
-        let err = load_of(&[GOLD_BARS], &[GOLD_BARS], r#"{ limit = "1h" }"#, &tables).unwrap_err();
+        let err = load_of(
+            &[GOLD_BARS],
+            &[GOLD_BARS],
+            r#"{ limit = "1h", atr = { period = 14 } }"#,
+            &tables,
+        )
+        .unwrap_err();
 
         let Some(ConfigError::Multiple { errors }) = err.downcast_ref::<ConfigError>() else {
             panic!("not several config errors: {err}");

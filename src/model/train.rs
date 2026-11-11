@@ -2403,6 +2403,7 @@ mod tests {
         let mut config = with_meta(24);
         config.target.spec = Target::builder()
             .limit(SignedDuration::from_hours(1))
+            .atr(crate::model::targets::DEFAULT_ATR)
             .build();
         let training = training(dir.path(), config.clone());
         publish_baselines(dir.path(), &config);

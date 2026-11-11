@@ -42,7 +42,8 @@ use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up an hour, learning the net P&L of the long of a
-/// 30-minute time-only target, its trades, on
+/// 30-minute time-only target, its unit the worth of the ATR of one hourly
+/// bar, warm over the hour, its trades, on
 /// a window of 46 hours, the last 12 held out and the 12 before them
 /// calibrated on; trading the long alone, at every decision, its margin
 /// below any expected P&L.
@@ -64,7 +65,7 @@ const CONFIG: &str = r#"
 
     [model]
     decision = { every = "1h" }
-    target = { limit = "30m" }
+    target = { limit = "30m", atr = { period = 1 } }
     retrain = "24h"
     window = "46h"
     holdout = "12h"

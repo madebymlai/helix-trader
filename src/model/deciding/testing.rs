@@ -30,9 +30,9 @@ use crate::{
             ModelCalibration, ModelManifest, ModelSet, ModelStore, PairCalibration, Probe,
             StoredModel,
         },
-        targets::{Side, Target, TargetConfig},
+        targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
-    strategy::{DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries},
 };
 
 /// The holdout of the models of the tests, as a train publishes it: a
@@ -132,8 +132,9 @@ pub fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, the
-/// long traded from an expected net P&L of nought, the baseline learner.
+/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, its
+/// unit the worth of its ATR of one hourly bar of the mids, the long traded
+/// from an expected net P&L of nought, the baseline learner.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -144,6 +145,10 @@ pub fn config() -> ModelConfig {
                 .spec(
                     Target::builder()
                         .limit(SignedDuration::from_hours(1))
+                        .atr(AtrArgs {
+                            period: 1,
+                            ..DEFAULT_ATR
+                        })
                         .build(),
                 )
                 .build(),
@@ -276,11 +281,19 @@ pub fn baseline_for(
         manifest: ModelManifest {
             strategy_id: StrategyId::from(STRATEGY),
             valid_from: at(valid_from),
+            // Its strategy reads the quotes of what it trades, which the
+            // target's ATR, if any, is built from.
             fingerprint: dataset::fingerprint(
                 features,
                 config.decision,
                 &config.target,
-                &requirements(),
+                &DataRequirements {
+                    ticks: vec![TickSeries {
+                        data: NautilusDataType::QuoteTick,
+                        instrument_id: config.target.instrument_id,
+                    }],
+                    ..requirements()
+                },
                 &venue(),
             )
             .unwrap()

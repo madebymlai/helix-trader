@@ -2,13 +2,15 @@
 //! the costs of its own (Elkan 2001; Bahnsen et al. 2015).
 //!
 //! A side's expected net P&L at a decision is its calibrated expected R
-//! (`calibration::Expected`), the realised value its model learned, net of
-//! the trade's costs, over the unit of its row, times the unit the decision
-//! sets (`deciding::DecidingModels::pick_among`): with exits the worth of
-//! the stop, so the costs, in R, scale with each decision's stop, and a
-//! fixed cost weighs more against a tight ATR stop; on a time-only target
-//! one, its R in money. A side trades if that is at or above its margin
-//! (`ModelConfig::margins`); of two, the larger, none at a tie (`pick`).
+//! (`calibration::Expected`), the realised value its model learned, its net
+//! P&L (fees and slippage included) over the unit of its row, times the unit
+//! the decision sets (`targets::SideTarget::unit`,
+//! `deciding::DecidingModels::pick_among`): with exits its own stop's worth,
+//! on a time-only target, which has no stop, the worth of a stop as far as
+//! its ATR at the decision; so the costs, in R, scale with each decision's
+//! unit, and a fixed cost weighs more against a tight ATR stop. A side
+//! trades if that is at or above its margin (`ModelConfig::margins`); of
+//! two, the larger, none at a tie (`pick`).
 
 /// The side traded of `sides`, each a side (or what the caller has of it,
 /// its expectation say), its expected net P&L and its margin: of those at

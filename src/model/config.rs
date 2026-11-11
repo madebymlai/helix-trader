@@ -371,7 +371,7 @@ fn validate_decisions(
         errors.check(
             warms.is_some_and(|warms| warms <= requirements.warmup),
             ConfigError::invalid_value(
-                "model.target.bracket.atr",
+                target.spec.atr_field(),
                 format!(
                     "the target's ATR of {} bars of {} warms over longer than the warmup {:#}",
                     atr.args.period, atr.bar_type, requirements.warmup
@@ -517,8 +517,13 @@ mod tests {
 
     /// The error of loading `toml` for a strategy reading gold, if any.
     fn load(toml: &str) -> anyhow::Result<ModelConfig> {
+        load_warming(toml, SignedDuration::ZERO)
+    }
+
+    /// `load`, the strategy warming for `warmup`.
+    fn load_warming(toml: &str, warmup: SignedDuration) -> anyhow::Result<ModelConfig> {
         let config = parse(toml)?;
-        config.validate(&reading(GOLD))?;
+        config.validate(&reading_gold_for(warmup))?;
         Ok(config)
     }
 
@@ -536,7 +541,12 @@ mod tests {
 
     /// The fields of the config errors refusing `toml`.
     fn refused_fields(toml: &str) -> Vec<String> {
-        let err = load(toml).unwrap_err();
+        refused_fields_warming(toml, SignedDuration::ZERO)
+    }
+
+    /// `refused_fields`, the strategy warming for `warmup`.
+    fn refused_fields_warming(toml: &str, warmup: SignedDuration) -> Vec<String> {
+        let err = load_warming(toml, warmup).unwrap_err();
         let errors = match err.downcast_ref::<ConfigError>() {
             Some(ConfigError::Multiple { errors }) => errors.clone(),
             Some(err) => vec![err.clone()],
@@ -612,22 +622,22 @@ mod tests {
 
     /// Time only, or a bracket: the target closes after its limit at the
     /// latest, which the window must hold. Deciding every 72 hours, so that
-    /// the cadence holds these limits and the window alone refuses them.
+    /// the cadence holds these limits and the window alone refuses them, the
+    /// time-only target's ATR of one bar of 72 hours warm over a warmup as
+    /// long.
     #[test]
     fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit() {
+        let warmup = SignedDuration::from_hours(72);
         for target in [
-            r#"target = { limit = "48h" }"#,
+            r#"target = { limit = "48h", atr = { period = 1 } }"#,
             r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "49h" }"#,
         ] {
             let toml = section(target).replace(r#"every = "1h""#, r#"every = "72h""#);
 
-            assert!(
-                refused(&toml).contains("not shorter than the window"),
-                "{}",
-                refused(&toml)
-            );
+            let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
+            assert!(err.contains("not shorter than the window"), "{err}");
             assert_eq!(
-                refused_fields(&toml),
+                refused_fields_warming(&toml, warmup),
                 ["model.target.limit", "model.holdout"],
                 "{target}"
             );
@@ -635,47 +645,56 @@ mod tests {
     }
 
     /// Deciding every hour, a bracket closed after an hour, or a time-only
-    /// trade of an hour and a half, would still be open at the next
-    /// decision.
+    /// trade of an hour and a half, its ATR of one hourly bar warm over a
+    /// warmup of an hour, would still be open at the next decision.
     #[test]
     fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
+        let warmup = SignedDuration::from_hours(1);
         for (target, named) in [
             (
                 r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#,
                 "limit 1h",
             ),
-            (r#"limit = "90m""#, "limit 1h 30m"),
+            (r#"limit = "90m", atr = { period = 1 }"#, "limit 1h 30m"),
         ] {
             let toml = section(&format!(r#"target = {{ {target} }}"#));
 
-            let err = refused(&toml);
+            let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
 
             assert!(
                 err.contains(named) && err.contains("cadence 1h"),
                 "{named}: {err}"
             );
-            assert_eq!(refused_fields(&toml), ["model.target.limit"], "{named}");
+            assert_eq!(
+                refused_fields_warming(&toml, warmup),
+                ["model.target.limit"],
+                "{named}"
+            );
         }
     }
 
-    /// A trade closed at its time alone: no exit, and no ATR to read a
-    /// price of, warm or subscribe to.
+    /// A trade closed at its time alone: no exit, and the ATR its unit is
+    /// measured in, of its `atr` table on the decision cadence's bars, as a
+    /// bracket's: 3 hourly bars of gold's mids.
     #[test]
-    fn a_target_of_a_limit_alone_loads_with_no_exits() {
-        let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
+    fn a_time_only_target_loads_with_its_atr_and_no_exits() {
+        let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
-        config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
+        let config = load_warming(&toml, SignedDuration::from_hours(3)).unwrap();
+
         assert_eq!(config.target.spec.bracket, None);
         assert_eq!(
             config.target.settles_within(),
             SignedDuration::from_mins(30)
         );
-        assert!(
-            config
-                .target
-                .atr_bars(config.decision, &reading_gold(&["order_book_depths"], &[]))
-                .unwrap()
-                .is_none()
+        let atr = config
+            .target
+            .atr_bars(config.decision, &reading(GOLD))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (atr.bar_type, atr.args.period),
+            (BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"), 3)
         );
     }
 
@@ -907,20 +926,33 @@ mod tests {
         }
     }
 
-    /// A time-only target has no distance to warm an ATR for, whatever the
-    /// warmup, and an `atr` table, a bracket's, is an unknown field of it.
+    /// A time-only target's unit is the worth of its ATR: one without an
+    /// `atr` table is refused under it, beside the section's others, saying
+    /// so.
     #[test]
-    fn a_time_only_target_has_no_atr_to_warm_and_refuses_an_atr_table() {
-        let config = parse(&section(r#"target = { limit = "30m" }"#)).unwrap();
-        config
-            .validate(&reading_gold_for(SignedDuration::ZERO))
-            .unwrap();
+    fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
+        let toml =
+            section(r#"target = { limit = "30m" }"#).replace("min_trades = 30", "min_trades = 0");
 
+        assert_eq!(
+            refused_fields(&toml),
+            ["model.target.atr", "model.min_trades"]
+        );
+        let err = refused(&toml);
+        assert!(err.contains("ATR") && err.contains("unit"), "{err}");
+    }
+
+    /// A time-only target's ATR warms as a bracket's does, its 3 hourly bars
+    /// in 3 hours: over a shorter warmup it is refused under its own table.
+    #[test]
+    fn a_time_only_targets_atr_warming_longer_than_the_warmup_is_refused_under_it() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
-        let err = refused_parsing(&toml);
-
-        assert!(err.contains("unknown field `atr`"), "{err}");
+        assert_eq!(
+            refused_fields_warming(&toml, SignedDuration::from_hours(2)),
+            ["model.target.atr"]
+        );
+        assert!(load_warming(&toml, SignedDuration::from_hours(3)).is_ok());
     }
 
     /// A bracket in basis points may be written with an `atr` table, so the
@@ -1057,9 +1089,10 @@ mod tests {
     /// no exit being needed.
     #[test]
     fn a_meta_model_on_a_time_only_target_is_loaded() {
-        let toml = section(r#"target = { limit = "30m" }"#);
+        let toml = section(r#"target = { limit = "30m", atr = { period = 1 } }"#);
 
-        let config = load(&format!("{toml}\n{META}")).unwrap();
+        let config =
+            load_warming(&format!("{toml}\n{META}"), SignedDuration::from_hours(1)).unwrap();
 
         assert_eq!(config.target.spec.bracket, None);
         assert!(config.meta.is_some());

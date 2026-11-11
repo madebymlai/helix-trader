@@ -56,8 +56,9 @@ decision = { every = "1h" }
 # sends: a bracket, its take profit 2 and its stop 1 average true ranges
 # from the decision's price (Nautilus' AverageTrueRange of the hourly bars,
 # by its arguments), closed 45 minutes after its send if neither is reached,
-# before the next decision. Without its bracket, `{ limit = "45m" }` is a
-# trade closed at its time alone.
+# before the next decision. Without its bracket, `{ limit = "45m", atr = {
+# period = 14 } }` is a trade closed at its time alone, its P&L read over the
+# worth of its ATR, declared beside the limit, as a stop's distance.
 target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, atr = { period = 14, ma_type = "WILDER" } }, limit = "45m" }
 # Retrained weekly on the last 30 days, the last 5 held out to score it.
 retrain = "168h"

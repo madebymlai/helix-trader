@@ -805,6 +805,7 @@ fn width_of(distance: Distance) -> Rc<BracketWidth> {
                 }),
             }),
             limit: SignedDuration::from_mins(5),
+            atr: None,
         })
         .build();
     let requirements = DataRequirements {

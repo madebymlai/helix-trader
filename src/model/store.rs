@@ -1019,6 +1019,7 @@ mod tests {
                     .spec(
                         Target::builder()
                             .limit(SignedDuration::from_hours(1))
+                            .atr(crate::model::targets::DEFAULT_ATR)
                             .build(),
                     )
                     .build(),
