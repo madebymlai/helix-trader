@@ -20,7 +20,7 @@ use helix_trader::strategy::gold_scalp::GoldScalp;
 #[cfg(gold_scalp_v2)]
 use helix_trader::strategy::gold_scalp_v2::GoldScalpV2;
 use helix_trader::{
-    backtest::{self, Backtest},
+    backtest::{self, Backtest, Commission},
     live::{Live, Recording},
     model::{
         ModelStrategy, dataset,
@@ -41,7 +41,6 @@ use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
 use rust_decimal::Decimal;
 
@@ -63,7 +62,7 @@ enum Command {
     Backtest(Box<BacktestArgs>),
     /// Runs the strategy on a live node with Interactive Brokers, IC
     /// Markets, Pepperstone or OKX; stops on Ctrl-C.
-    Live(LiveArgs),
+    Live(Box<LiveArgs>),
     /// Trains the strategy's models at a time, those without one valid
     /// from it, replaying the days its dataset lacks, and prints each
     /// model published or in use, or fails with why a current one was
@@ -191,7 +190,7 @@ struct TrainArgs {
     leverage: Decimal,
 }
 
-/// The commission of a backtest: exactly one of the flags.
+/// The commission of a run: exactly one of the flags.
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct CommissionArgs {
@@ -202,55 +201,48 @@ struct CommissionArgs {
     /// example 0.0005 (0.05%).
     #[arg(long, value_parser = parse_commission_rate)]
     commission_rate: Option<Commission>,
-}
-
-/// A commission flag's value: normalized, so that every spelling of one
-/// commission keys the same dataset, and handed on as such to a child
-/// process, and its fee model.
-#[derive(Debug, Clone)]
-struct Commission {
-    normalized: String,
-    fee_model: FeeModelAny,
+    /// Commission charged on each unit of the quantity of each fill, each
+    /// fill's charge rounded to the currency's precision, for example
+    /// "0.035 USD" (3.5 USD per 100 oz of gold, Pepperstone's).
+    #[arg(long, value_parser = parse_commission_per_quantity)]
+    commission_per_quantity: Option<Commission>,
 }
 
 impl CommissionArgs {
-    /// The fee model of the one flag given.
-    fn fee_model(&self) -> FeeModelAny {
-        match (&self.commission, &self.commission_rate) {
-            (Some(commission), _) => commission.fee_model.clone(),
-            (None, Some(rate)) => rate.fee_model.clone(),
-            (None, None) => unreachable!("clap requires one commission flag"),
-        }
-    }
-
-    /// The commission of the one flag given, normalized: what a dataset's
-    /// fingerprint reads, and what a child process is given.
-    fn normalized(&self) -> dataset::Commission {
-        match (&self.commission, &self.commission_rate) {
-            (Some(commission), _) => dataset::Commission::PerOrder(commission.normalized.clone()),
-            (None, Some(rate)) => dataset::Commission::Rate(rate.normalized.clone()),
-            (None, None) => unreachable!("clap requires one commission flag"),
-        }
+    /// The commission of the one flag given: the one source of the run's
+    /// costs, its fee model and its targets' (`backtest::Commission`).
+    fn commission(&self) -> Commission {
+        [
+            self.commission,
+            self.commission_rate,
+            self.commission_per_quantity,
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("clap requires one commission flag")
     }
 
     /// The venue of a dataset run at this commission, `balance` and
     /// `leverage`.
     fn venue(&self, balance: Money, leverage: Decimal) -> dataset::DatasetVenue {
         dataset::DatasetVenue {
-            commission: self.normalized(),
+            commission: self.commission(),
             balance,
             leverage,
         }
     }
 }
 
-/// The flag of `commission` and its value, as `dataset` and `train` take
-/// them.
-fn commission_args(commission: &dataset::Commission) -> [&str; 2] {
-    match commission {
-        dataset::Commission::PerOrder(commission) => ["--commission", commission],
-        dataset::Commission::Rate(rate) => ["--commission-rate", rate],
-    }
+/// The flag of `commission` and its value normalized
+/// (`Commission::normalized`), as `dataset` and `train` take them.
+fn commission_args(commission: &Commission) -> [String; 2] {
+    let flag = match commission {
+        Commission::PerOrder(_) => "--commission",
+        Commission::Rate(_) => "--commission-rate",
+        Commission::PerQuantity(_) => "--commission-per-quantity",
+    };
+    [flag.to_string(), commission.normalized()]
 }
 
 #[derive(Debug, Args)]
@@ -295,21 +287,33 @@ struct LiveArgs {
 }
 
 /// The costs of the dataset runs of a live node's retrains, as `train`
-/// takes them (its `--commission` or `--commission-rate`, and
-/// `--balance`), its leverage the node's. Checked as `train` checks them,
-/// the commission kept normalized, for the `train` the node starts
+/// takes them (its `--commission`, `--commission-rate` or
+/// `--commission-per-quantity`, and `--balance`), its leverage the node's.
+/// Checked as `train` checks them, for the `train` the node starts
 /// (`Children::of_live`). Required of a
 /// strategy never retrained too: they key the store its models are read
-/// from (`dataset::fingerprint`).
+/// from (`dataset::fingerprint`), and the commission is its targets'.
 #[derive(Debug, Args)]
 struct RetrainCosts {
     /// Commission charged once per order in a retrain, for example "3 USD".
-    #[arg(long, value_parser = commission_text, conflicts_with = "retrain_commission_rate")]
-    retrain_commission: Option<String>,
+    #[arg(
+        long,
+        value_parser = parse_commission,
+        conflicts_with_all = ["retrain_commission_rate", "retrain_commission_per_quantity"]
+    )]
+    retrain_commission: Option<Commission>,
     /// Commission rate on the value of each fill in a retrain, for example
     /// 0.00003.
-    #[arg(long, value_parser = commission_rate_text)]
-    retrain_commission_rate: Option<String>,
+    #[arg(
+        long,
+        value_parser = parse_commission_rate,
+        conflicts_with = "retrain_commission_per_quantity"
+    )]
+    retrain_commission_rate: Option<Commission>,
+    /// Commission charged on each unit of the quantity of each fill in a
+    /// retrain, for example "0.035 USD".
+    #[arg(long, value_parser = parse_commission_per_quantity)]
+    retrain_commission_per_quantity: Option<Commission>,
     /// Starting balance of a retrain's dataset run, large enough that no
     /// target is denied, for example "10000000 USD".
     #[arg(long, value_parser = parse_money)]
@@ -326,21 +330,25 @@ impl LiveArgs {
 }
 
 impl RetrainCosts {
-    /// The commission of the retrains, normalized.
+    /// The commission of the retrains.
     ///
     /// # Errors
     ///
-    /// Returns an error if neither flag was given.
-    fn commission(&self) -> anyhow::Result<dataset::Commission> {
-        match (&self.retrain_commission, &self.retrain_commission_rate) {
-            (Some(commission), _) => Ok(dataset::Commission::PerOrder(commission.clone())),
-            (None, Some(rate)) => Ok(dataset::Commission::Rate(rate.clone())),
-            (None, None) => bail!(
-                "the costs of a model strategy's dataset runs key the model store it reads its \
-                 models from: give their commission (--retrain-commission or \
-                 --retrain-commission-rate)"
-            ),
-        }
+    /// Returns an error if no commission flag was given.
+    fn commission(&self) -> anyhow::Result<Commission> {
+        [
+            self.retrain_commission,
+            self.retrain_commission_rate,
+            self.retrain_commission_per_quantity,
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .context(
+            "the costs of a model strategy's dataset runs key the model store it reads its \
+             models from: give their commission (--retrain-commission, \
+             --retrain-commission-rate or --retrain-commission-per-quantity)",
+        )
     }
 
     /// The starting balance of the retrains' dataset runs.
@@ -397,35 +405,32 @@ fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
 }
 
-/// A commission per order: an amount and a currency code, not negative;
-/// normalized as the amount without trailing zeros and the code, `"3 EUR"`
-/// for `"3.00 EUR"`.
+/// A commission per order: an amount and a currency code, not negative,
+/// rounded to the currency's precision.
 fn parse_commission(s: &str) -> anyhow::Result<Commission> {
-    let money = parse_money(s).map_err(anyhow::Error::msg)?;
-    Ok(Commission {
-        normalized: format!("{} {}", money.as_decimal().normalize(), money.currency.code),
-        fee_model: backtest::commission_per_order(money)?,
-    })
+    checked(Commission::PerOrder(
+        parse_money(s).map_err(anyhow::Error::msg)?,
+    ))
 }
 
-/// A commission rate: a decimal, not negative; normalized without trailing
-/// zeros, `"0.00003"` for `"0.000030"`.
+/// A commission rate: a decimal, not negative.
 fn parse_commission_rate(s: &str) -> anyhow::Result<Commission> {
-    let rate = s.parse::<Decimal>()?.normalize();
-    Ok(Commission {
-        normalized: rate.to_string(),
-        fee_model: backtest::commission_rate(rate)?,
-    })
+    checked(Commission::Rate(s.parse()?))
 }
 
-/// A commission per order, checked, normalized.
-fn commission_text(s: &str) -> anyhow::Result<String> {
-    parse_commission(s).map(|commission| commission.normalized)
+/// A commission per unit of quantity: an amount and a currency code, not
+/// negative, exact rather than rounded to the currency's precision, so
+/// that "0.035 USD" charges 3.50 USD on 100 units.
+fn parse_commission_per_quantity(s: &str) -> anyhow::Result<Commission> {
+    checked(Commission::PerQuantity(
+        Money::from_str_exact(s).map_err(anyhow::Error::msg)?,
+    ))
 }
 
-/// A commission rate, checked, normalized.
-fn commission_rate_text(s: &str) -> anyhow::Result<String> {
-    parse_commission_rate(s).map(|commission| commission.normalized)
+/// `commission`, if it has a fee model: not negative.
+fn checked(commission: Commission) -> anyhow::Result<Commission> {
+    commission.fee_model()?;
+    Ok(commission)
 }
 
 /// Reads the config of the strategy of part `P` from `path` and validates
@@ -470,7 +475,7 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
         Command::Backtest(args) => run_backtest(*args),
-        Command::Live(args) => run_live(args).await,
+        Command::Live(args) => run_live(*args).await,
         Command::Train(args) => run_train(*args),
         Command::Dataset(args) => run_dataset(*args),
     }
@@ -513,7 +518,6 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
-    let fee_model = args.commission.fee_model();
     // Each simulated venue keeps positions as the real one does.
     let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
@@ -521,7 +525,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         start,
         end,
         ticks: requirements.ticks,
-        fee_model,
+        commission: args.commission.commission(),
         balance: args.balance,
         leverage: args.leverage,
         venue_oms: venues::oms_type,
@@ -776,11 +780,12 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
 }
 
 /// The dataset runs of a process: the strategy over the catalog in
-/// `Mode::Dataset`, on hedging venues (`model::targets`), with the costs,
-/// balance and leverage given; the one node of the process.
+/// `Mode::Dataset`, on hedging venues (`model::targets`), with the
+/// commission, balance and leverage given, the commission the venues' and
+/// the targets'; the one node of the process.
 struct DatasetRun {
     catalog: PathBuf,
-    fee_model: FeeModelAny,
+    commission: Commission,
     balance: Money,
     leverage: Decimal,
     logging: LoggerConfig,
@@ -799,6 +804,7 @@ impl DatasetRun {
         let rows = SettledRows::default();
         let mode = Mode::Dataset {
             rows: Rc::clone(&rows),
+            commission: self.commission,
         };
         let backtest = Backtest {
             catalog: self.catalog.clone(),
@@ -806,7 +812,7 @@ impl DatasetRun {
             ticks: requirements.ticks,
             start,
             end,
-            fee_model: self.fee_model.clone(),
+            commission: self.commission,
             balance: self.balance,
             leverage: self.leverage,
             venue_oms: |_| OmsType::Hedging,
@@ -838,7 +844,7 @@ fn reported(trained: &Trained) -> anyhow::Result<()> {
 fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     let run = DatasetRun {
         catalog: args.catalog.clone(),
-        fee_model: args.commission.fee_model(),
+        commission: args.commission.commission(),
         balance: args.balance,
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
@@ -871,7 +877,7 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let run = DatasetRun {
         catalog: args.run.catalog.clone(),
-        fee_model: args.commission.fee_model(),
+        commission: args.commission.commission(),
         balance: args.balance,
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
@@ -1001,7 +1007,10 @@ mod tests {
             "2024-03-01T12:30:00Z".parse::<Timestamp>().unwrap()
         );
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
-        assert!(matches!(args.commission.fee_model(), FeeModelAny::Fixed(_)));
+        assert_eq!(
+            args.commission.commission(),
+            Commission::PerOrder(Money::from("3 EUR"))
+        );
         assert_eq!(args.balance, Money::from("10000 EUR"));
     }
 
@@ -1026,16 +1035,55 @@ mod tests {
     }
 
     #[test]
-    fn a_backtest_takes_either_the_commission_or_its_rate_not_both() {
-        let both = backtest_with(&["--commission", "3 EUR", "--commission-rate", "0.0005"]);
-        let err = parse_backtest(&both).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            clap::error::ErrorKind::ArgumentConflict,
+    fn a_backtest_takes_one_commission_of_the_three_kinds() {
+        let flags = [
+            ["--commission", "3 EUR"],
+            ["--commission-rate", "0.0005"],
+            ["--commission-per-quantity", "0.035 EUR"],
+        ];
+        for (i, one) in flags.iter().enumerate() {
+            assert!(parse_backtest(&backtest_with(one)).is_ok(), "{one:?}");
+            for other in &flags[i + 1..] {
+                let both = backtest_with(&[one[0], one[1], other[0], other[1]]);
+                let err = parse_backtest(&both).unwrap_err();
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{one:?} {other:?}: {err}"
+                );
+            }
+        }
+        let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
+        assert!(
+            err.contains("--commission-rate") && err.contains("--commission-per-quantity"),
             "{err}"
         );
-        let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
-        assert!(err.contains("--commission-rate"), "{err}");
+    }
+
+    /// Pepperstone's gold: 3.5 USD per 100 oz, so 0.035 USD an ounce, not
+    /// rounded to 0.04 USD.
+    #[test]
+    fn a_commission_per_quantity_is_its_exact_amount_per_unit() {
+        let args =
+            parse_backtest(&backtest_with(&["--commission-per-quantity", "0.035 USD"])).unwrap();
+        let exact = Money::from_str_exact("0.035 USD").unwrap();
+        assert_ne!(exact, Money::from("0.04 USD"));
+        assert_eq!(args.commission.commission(), Commission::PerQuantity(exact));
+    }
+
+    /// Each value joined to its flag, so that clap reads `-0.035 USD` as the
+    /// value, not as a flag of its own.
+    #[test]
+    fn rejects_a_commission_per_quantity_it_cannot_charge() {
+        for amount in ["-0.035 USD", "0.035", "USD", "0.035 XYZ"] {
+            let flag = format!("--commission-per-quantity={amount}");
+            let err = parse_backtest(&backtest_with(&[&flag])).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{amount}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1068,7 +1116,7 @@ mod tests {
 
     fn parse_live(args: &[&str]) -> Result<LiveArgs, clap::Error> {
         parse_command("live", args).map(|command| match command {
-            Command::Live(args) => args,
+            Command::Live(args) => *args,
             command => panic!("{command:?}"),
         })
     }
@@ -1193,10 +1241,10 @@ mod tests {
         );
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.models, PathBuf::from("models"));
-        assert!(matches!(
-            args.commission.fee_model(),
-            FeeModelAny::MakerTaker(_)
-        ));
+        assert_eq!(
+            args.commission.commission(),
+            Commission::Rate(Decimal::new(3, 5))
+        );
         assert_eq!(args.balance, Money::from("10000000 USD"));
     }
 
@@ -1349,7 +1397,7 @@ mod tests {
         assert_eq!(
             train.commission.venue(train.balance, train.leverage),
             dataset::DatasetVenue {
-                commission: dataset::Commission::Rate("0.00003".to_string()),
+                commission: Commission::Rate(Decimal::new(3, 5)),
                 balance: Money::from("10000000 USD"),
                 leverage: Decimal::from(2),
             }
@@ -1361,16 +1409,26 @@ mod tests {
     }
 
     #[test]
-    fn a_live_nodes_retrain_parses_at_a_commission_per_order_too() {
-        let mut argv = LIVE_RETRAINING.to_vec();
-        argv.splice(3..5, ["--retrain-commission", "3 USD"]);
+    fn a_live_nodes_retrain_parses_at_a_commission_per_order_or_per_quantity_too() {
+        for (flag, amount, commission) in [
+            (
+                "--retrain-commission",
+                "3 USD",
+                Commission::PerOrder(Money::from("3 USD")),
+            ),
+            (
+                "--retrain-commission-per-quantity",
+                "0.035 USD",
+                Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap()),
+            ),
+        ] {
+            let mut argv = LIVE_RETRAINING.to_vec();
+            argv.splice(3..5, [flag, amount]);
 
-        let train = started_train(&Children::of_live(&parse_live(&argv).unwrap()).unwrap());
+            let train = started_train(&Children::of_live(&parse_live(&argv).unwrap()).unwrap());
 
-        assert_eq!(
-            train.commission.normalized(),
-            dataset::Commission::PerOrder("3 USD".to_string())
-        );
+            assert_eq!(train.commission.commission(), commission, "{flag}");
+        }
     }
 
     /// A backtest's train is a `train` on the backtest's strategy, config,
@@ -1394,7 +1452,7 @@ mod tests {
         assert_eq!(
             train.commission.venue(train.balance, train.leverage),
             dataset::DatasetVenue {
-                commission: dataset::Commission::PerOrder("3 EUR".to_string()),
+                commission: Commission::PerOrder(Money::from("3 EUR")),
                 balance: Money::from("10000000 EUR"),
                 leverage: Decimal::from(1),
             }
@@ -1452,9 +1510,29 @@ mod tests {
                 "{cost}: {err}"
             );
         }
-        let mut both = LIVE_RETRAINING.to_vec();
-        both.extend(["--retrain-commission", "3 USD"]);
-        let err = parse_live(&both).unwrap_err();
+        for other in [
+            ["--retrain-commission", "3 USD"],
+            ["--retrain-commission-per-quantity", "0.035 USD"],
+        ] {
+            let mut both = LIVE_RETRAINING.to_vec();
+            both.extend(other);
+            let err = parse_live(&both).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{other:?}: {err}"
+            );
+        }
+        let per_order_and_quantity = [
+            "model_ema",
+            "--config",
+            "model_ema.toml",
+            "--retrain-commission",
+            "3 USD",
+            "--retrain-commission-per-quantity",
+            "0.035 USD",
+        ];
+        let err = parse_live(&per_order_and_quantity).unwrap_err();
         assert_eq!(
             err.kind(),
             clap::error::ErrorKind::ArgumentConflict,
@@ -1532,16 +1610,20 @@ mod tests {
 
     #[test]
     fn a_backtest_hands_its_children_the_commission_normalized() {
-        let args = parse_backtest(&backtest_required()).unwrap();
-        assert_eq!(
-            commission_args(&args.commission.normalized()),
-            ["--commission", "3 EUR"]
-        );
-        let args = parse_backtest(&backtest_with(&["--commission-rate", "0.00003"])).unwrap();
-        assert_eq!(
-            commission_args(&args.commission.normalized()),
-            ["--commission-rate", "0.00003"]
-        );
+        for (given, handed) in [
+            (["--commission", "3.00 EUR"], ["--commission", "3 EUR"]),
+            (
+                ["--commission-rate", "0.000030"],
+                ["--commission-rate", "0.00003"],
+            ),
+            (
+                ["--commission-per-quantity", "0.0350 USD"],
+                ["--commission-per-quantity", "0.035 USD"],
+            ),
+        ] {
+            let args = parse_backtest(&backtest_with(&given)).unwrap();
+            assert_eq!(commission_args(&args.commission.commission()), handed);
+        }
     }
 
     /// The commission keys the dataset and its models: two spellings of
@@ -1554,17 +1636,22 @@ mod tests {
                 ["--commission-rate", "0.00003"],
                 ["--commission-rate", "0.000030"],
             ),
+            (
+                ["--commission-per-quantity", "0.035 USD"],
+                ["--commission-per-quantity", "0.0350 USD"],
+            ),
         ] {
             let key = |flags: [&'static str; 2]| {
-                parse_backtest(&backtest_with(&flags))
+                let commission = parse_backtest(&backtest_with(&flags))
                     .unwrap()
                     .commission
-                    .normalized()
+                    .commission();
+                (commission, commission_args(&commission))
             };
             assert_eq!(key(one), key(other), "{one:?} {other:?}");
-            let handed = commission_args(&key(other)).map(String::from);
+            let (_, handed) = key(other);
             let reparsed = parse_backtest(&backtest_with(&[&handed[0], &handed[1]])).unwrap();
-            assert_eq!(reparsed.commission.normalized(), key(one));
+            assert_eq!(reparsed.commission.commission(), key(one).0);
         }
     }
 
@@ -1586,7 +1673,7 @@ mod tests {
         };
         assert_eq!(retrain("0.000030"), retrain("0.00003"));
         let backtest = parse_backtest(&backtest_with(&["--commission-rate", "0.00003"])).unwrap();
-        assert_eq!(retrain("0.000030"), backtest.commission.normalized());
+        assert_eq!(retrain("0.000030"), backtest.commission.commission());
     }
 
     #[test]
@@ -1660,7 +1747,7 @@ mod tests {
         assert_eq!(train.catalog, children.catalog);
         assert_eq!(train.models, children.models);
         assert_eq!(train.at, to);
-        assert_eq!(train.commission.normalized(), children.venue.commission);
+        assert_eq!(train.commission.commission(), children.venue.commission);
         assert_eq!(train.balance, children.venue.balance);
         assert_eq!(train.leverage, children.venue.leverage);
 
@@ -1673,7 +1760,7 @@ mod tests {
         assert_eq!(dataset.run.config, children.config);
         assert_eq!(dataset.run.catalog, children.catalog);
         assert_eq!((dataset.run.start, dataset.run.end), (from, to));
-        assert_eq!(dataset.commission.normalized(), children.venue.commission);
+        assert_eq!(dataset.commission.commission(), children.venue.commission);
         assert_eq!(dataset.balance, children.venue.balance);
         assert_eq!(dataset.leverage, children.venue.leverage);
     }

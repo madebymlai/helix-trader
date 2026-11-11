@@ -14,7 +14,6 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
-use nautilus_execution::models::fee::FeeModelAny;
 use nautilus_model::{
     data::{BarType, NautilusDataType},
     enums::{ContinuousFutureAdjustmentType, OmsType},
@@ -28,7 +27,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
 pub use self::{
-    costs::{commission_per_order, commission_rate},
+    costs::Commission,
     report::{Outcome, report},
 };
 use crate::{
@@ -61,8 +60,9 @@ pub struct Backtest {
     pub ticks: Vec<TickSeries>,
     pub start: Timestamp,
     pub end: Timestamp,
-    /// The commission: `commission_per_order` or `commission_rate`.
-    pub fee_model: FeeModelAny,
+    /// The commission, which the fee model of each venue is made from
+    /// (`Commission::fee_model`).
+    pub commission: Commission,
     /// The starting balance of the account of each venue.
     pub balance: Money,
     /// The leverage of each venue's account on every instrument, positive:
@@ -280,7 +280,7 @@ mod tests {
             start: "2026-09-01T00:00:00Z".parse().unwrap(),
             end: "2026-09-30T00:00:00Z".parse().unwrap(),
             ticks: vec![],
-            fee_model: commission_rate(Decimal::ZERO).unwrap(),
+            commission: Commission::Rate(Decimal::ZERO),
             balance: Money::from("10000 USDT"),
             leverage: Decimal::ONE,
             venue_oms: crate::venues::oms_type,

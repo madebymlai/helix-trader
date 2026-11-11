@@ -14,11 +14,11 @@ use crate::common::{
     ic,
 };
 use helix_trader::{
-    backtest::{Backtest, commission_rate},
+    backtest::{Backtest, Commission},
     model::{
         calibration::Calibration,
         config::{Margins, ModelConfig},
-        dataset::{self, Commission, DatasetVenue},
+        dataset::{self, DatasetVenue},
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES},
         handle::{Decision, Mode, ModelHandle, SettledRows},
@@ -280,7 +280,7 @@ pub fn requirements() -> DataRequirements {
 /// no leverage.
 pub fn venue() -> DatasetVenue {
     DatasetVenue {
-        commission: Commission::Rate("0.00003".to_string()),
+        commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
         leverage: Decimal::ONE,
     }
@@ -295,7 +295,7 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         ticks: requirements().ticks,
         start: from,
         end: to,
-        fee_model: commission_rate(Decimal::new(3, 5)).unwrap(),
+        commission: venue().commission,
         balance: venue().balance,
         leverage: venue().leverage,
         venue_oms: |_| OmsType::Hedging,
@@ -338,6 +338,7 @@ pub fn replay_of(
         config,
         Mode::Dataset {
             rows: Rc::clone(&rows),
+            commission: venue().commission,
         },
     );
     backtest(catalog.path(), from, to).run_dataset(probe)?;

@@ -98,7 +98,10 @@ use super::{
     holdout::Trade,
     targets::{self, PerSide, Side, TargetConfig, TargetRow},
 };
-use crate::strategy::{DataRequirements, warmup};
+use crate::{
+    backtest::Commission,
+    strategy::{DataRequirements, warmup},
+};
 
 /// The version of the code that makes every strategy's rows: the
 /// decisions (`decide`), the target's (`targets`), the shared feature code
@@ -185,27 +188,6 @@ pub struct Days {
     pub last: Date,
 }
 
-/// The commission of a dataset run, which its targets are net of, as the
-/// command line gives it, normalized (`main.rs`: no trailing zeros, so
-/// that every spelling of one commission is one key): per order
-/// (`--commission 3 USD`) or a rate on the value of each fill
-/// (`--commission-rate 0.00003`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Commission {
-    PerOrder(String),
-    Rate(String),
-}
-
-impl Commission {
-    /// The commission as the fingerprint reads it.
-    fn fingerprint_part(&self) -> String {
-        match self {
-            Self::PerOrder(commission) => format!("commission per order {commission}"),
-            Self::Rate(rate) => format!("commission rate {rate}"),
-        }
-    }
-}
-
 /// The venue settings a dataset run takes, each of which its rows depend
 /// on: the commission its targets are net of, and its account's starting
 /// balance and leverage, under which Nautilus' risk engine denies an
@@ -219,13 +201,19 @@ pub struct DatasetVenue {
 }
 
 impl DatasetVenue {
-    /// The settings as the fingerprint reads them: the balance and the
-    /// leverage without trailing zeros, so that every spelling of one is
-    /// one key.
+    /// The settings as the fingerprint reads them: the commission's kind
+    /// and its amount normalized (`Commission::normalized`), and the
+    /// balance and the leverage without trailing zeros, so that every
+    /// spelling of one is one key.
     fn fingerprint_part(&self) -> String {
+        let kind = match self.commission {
+            Commission::PerOrder(_) => "per order",
+            Commission::Rate(_) => "rate",
+            Commission::PerQuantity(_) => "per quantity",
+        };
         format!(
-            "{}, balance {} {}, leverage {}",
-            self.commission.fingerprint_part(),
+            "commission {kind} {}, balance {} {}, leverage {}",
+            self.commission.normalized(),
             self.balance.as_decimal().normalize(),
             self.balance.currency.code,
             self.leverage.normalize()
@@ -788,7 +776,7 @@ mod tests {
     /// 10 million USD, no leverage.
     fn venue() -> DatasetVenue {
         DatasetVenue {
-            commission: Commission::Rate("0.00003".to_string()),
+            commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
             leverage: Decimal::ONE,
         }
@@ -1178,11 +1166,16 @@ mod tests {
                 },
                 venue().commission,
             ),
-            changed(hourly, target(), Commission::Rate("0.00004".to_string())),
+            changed(hourly, target(), Commission::Rate(Decimal::new(4, 5))),
             changed(
                 hourly,
                 target(),
-                Commission::PerOrder("0.00003 USD".to_string()),
+                Commission::PerOrder(Money::from_str_exact("0.00003 USD").unwrap()),
+            ),
+            changed(
+                hourly,
+                target(),
+                Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
             ),
         ];
 
@@ -1336,6 +1329,35 @@ mod tests {
                 leverage: Decimal::new(100, 2),
                 ..venue()
             })
+        );
+    }
+
+    /// The text of the venue settings keys every dataset and model store
+    /// built: a commission reads as its kind and its amount without
+    /// trailing zeros, beside the balance and the leverage.
+    #[test]
+    fn a_dataset_runs_venue_is_keyed_by_its_commissions_kind_and_amount() {
+        let of = |commission| {
+            DatasetVenue {
+                commission,
+                ..venue()
+            }
+            .fingerprint_part()
+        };
+
+        assert_eq!(
+            of(Commission::Rate(Decimal::new(30, 6))),
+            "commission rate 0.00003, balance 10000000 USD, leverage 1"
+        );
+        assert_eq!(
+            of(Commission::PerOrder(Money::from("3.00 USD"))),
+            "commission per order 3 USD, balance 10000000 USD, leverage 1"
+        );
+        assert_eq!(
+            of(Commission::PerQuantity(
+                Money::from_str_exact("0.0350 USD").unwrap()
+            )),
+            "commission per quantity 0.035 USD, balance 10000000 USD, leverage 1"
         );
     }
 

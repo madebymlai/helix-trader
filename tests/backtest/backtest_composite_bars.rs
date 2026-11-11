@@ -176,15 +176,16 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         },
         ..dataset::config()
     };
+    let mut backtest = common::backtest(dir.path(), at("10:30"), at("15:00"), "0 EUR");
     let (probe, record) = dataset::probe_reading(
         features,
         &config,
         &requirements,
         Mode::Dataset {
             rows: SettledRows::default(),
+            commission: backtest.commission,
         },
     );
-    let mut backtest = common::backtest(dir.path(), at("10:30"), at("15:00"), "0 EUR");
     backtest.bar_types = requirements.bar_types.clone();
     backtest.venue_oms = |_| OmsType::Hedging;
 

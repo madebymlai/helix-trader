@@ -145,11 +145,11 @@ fn config(
 }
 
 /// The simulated `venue` of `backtest`: a margin account keeping positions
-/// as `backtest.venue_oms` says, with the run's balance, leverage and fee
-/// model, filling on the top of the book on Nautilus' default fill model:
-/// a market order fills at the quote (a buy at the ask, a sell at the
-/// bid), or on bars at the last price, with no slippage, and a limit order
-/// whenever touched.
+/// as `backtest.venue_oms` says, with the run's balance, leverage and the
+/// fee model of its commission, filling on the top of the book on
+/// Nautilus' default fill model: a market order fills at the quote (a buy
+/// at the ask, a sell at the bid), or on bars at the last price, with no
+/// slippage, and a limit order whenever touched.
 fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVenueConfig> {
     Ok(BacktestVenueConfig::builder()
         .name(venue.as_str())
@@ -158,7 +158,7 @@ fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVen
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![backtest.balance.to_string()])
         .default_leverage(backtest.leverage)
-        .fee_model(backtest.fee_model.clone())
+        .fee_model(backtest.commission.fee_model()?)
         .build()?)
 }
 
@@ -362,7 +362,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::backtest::costs;
+    use crate::backtest::Commission;
 
     /// A backtest on the catalog `catalog`.
     fn backtest(catalog: &Path) -> Backtest {
@@ -375,7 +375,7 @@ mod tests {
                 BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
             ],
             ticks: vec![],
-            fee_model: costs::commission_per_order(Money::from("3 EUR")).unwrap(),
+            commission: Commission::PerOrder(Money::from("3 EUR")),
             balance: Money::from("10000 EUR"),
             leverage: Decimal::ONE,
             venue_oms: |_| OmsType::Netting,

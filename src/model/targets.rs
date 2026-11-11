@@ -59,7 +59,10 @@
 //! names its decision and side, its closing order the exit (a take profit,
 //! a stop, or a time close), and Nautilus reports its realised P&L net of
 //! commission, the position the commissions it is net of. The only state
-//! of our own is the rows being assembled.
+//! of our own is the rows being assembled. The commission is the run's
+//! (`backtest::Commission`), whose fee model charges the dataset run's
+//! fills and which the setter is handed in every mode, so what a fill of
+//! the target costs (`Commission::cost`) is what a row is net of.
 //!
 //! Once both sides of a decision have an outcome, the decision is settled
 //! and its row, a `TargetRow`, published on the message bus, custom data
@@ -129,10 +132,13 @@ use super::{
     decide::{self, DecisionRule, FeatureRow},
     features::Fingerprint,
 };
-use crate::strategy::{
-    AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
-    orders::{self, Bracket, Exits, OrderIds, Trade},
-    warmup::{self, Warmup},
+use crate::{
+    backtest::Commission,
+    strategy::{
+        AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
+        orders::{self, Bracket, Exits, OrderIds, Trade},
+        warmup::{self, Warmup},
+    },
 };
 
 /// The target of each decision, from the strategy's config: on one
@@ -861,17 +867,23 @@ impl Debug for BracketWidth {
 /// a trading strategy alike: its exits, if it has them, from the decision's
 /// price (`reference`) and the target's ATR, on the instrument's ticks, and
 /// the worth of the unit an expected P&L is weighed by and a row's trades are
-/// read over.
+/// read over. It holds the run's commission, what a fill of the target
+/// costs (`Commission::cost`), the one its dataset runs' fills are charged.
 pub struct TargetSetter {
     instrument_id: InstrumentId,
     quantity: Quantity,
     spec: Target,
     atr: Option<Rc<TargetAtr>>,
+    #[expect(
+        dead_code,
+        reason = "held for the payoff features a target computes at a decision"
+    )]
+    commission: Commission,
 }
 
 impl TargetSetter {
     /// The target of `config`, for decisions on `rule` of a strategy of
-    /// `requirements`, on an ATR of its own.
+    /// `requirements`, at `commission`, on an ATR of its own.
     ///
     /// # Errors
     ///
@@ -881,8 +893,9 @@ impl TargetSetter {
         config: &TargetConfig,
         rule: DecisionRule,
         requirements: &DataRequirements,
+        commission: Commission,
     ) -> anyhow::Result<Self> {
-        Self::sharing(config, rule, requirements, None)
+        Self::sharing(config, rule, requirements, commission, None)
     }
 
     /// `new`, on the ATR of `width`, if given, the width of the target's
@@ -898,6 +911,7 @@ impl TargetSetter {
         config: &TargetConfig,
         rule: DecisionRule,
         requirements: &DataRequirements,
+        commission: Commission,
         width: Option<&BracketWidth>,
     ) -> anyhow::Result<Self> {
         let bars = config.atr_bars(rule, requirements)?;
@@ -917,6 +931,7 @@ impl TargetSetter {
             quantity: config.quantity,
             spec: config.spec,
             atr,
+            commission,
         })
     }
 
@@ -1158,7 +1173,7 @@ impl Outcome {
 
 impl Targets {
     /// The targets of `config`, for decisions on `rule` of a strategy of
-    /// `requirements`.
+    /// `requirements`, at `commission`, the dataset run's.
     ///
     /// # Errors
     ///
@@ -1168,8 +1183,9 @@ impl Targets {
         config: TargetConfig,
         rule: DecisionRule,
         requirements: &DataRequirements,
+        commission: Commission,
     ) -> anyhow::Result<Rc<Self>> {
-        Self::sharing(config, rule, requirements, None)
+        Self::sharing(config, rule, requirements, commission, None)
     }
 
     /// `new`, the setter on the ATR of `width`, if given
@@ -1182,11 +1198,12 @@ impl Targets {
         config: TargetConfig,
         rule: DecisionRule,
         requirements: &DataRequirements,
+        commission: Commission,
         width: Option<&BracketWidth>,
     ) -> anyhow::Result<Rc<Self>> {
         config.validate(rule, requirements)?;
         Ok(Rc::new(Self {
-            setter: TargetSetter::sharing(&config, rule, requirements, width)?,
+            setter: TargetSetter::sharing(&config, rule, requirements, commission, width)?,
             config,
             state: RefCell::new(State::default()),
         }))

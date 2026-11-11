@@ -12,7 +12,7 @@ use crate::common::{
     rolls::{self, POST, tuesday, wednesday},
 };
 use helix_trader::{
-    backtest::{Backtest, commission_rate},
+    backtest::{Backtest, Commission},
     venues,
 };
 use jiff::Timestamp;
@@ -37,7 +37,7 @@ fn backtest(catalog: &TempDir) -> Backtest {
         ticks: vec![],
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
-        fee_model: commission_rate(Decimal::ZERO).unwrap(),
+        commission: Commission::Rate(Decimal::ZERO),
         balance: Money::from("1000000 USD"),
         leverage: Decimal::ONE,
         venue_oms: venues::oms_type,

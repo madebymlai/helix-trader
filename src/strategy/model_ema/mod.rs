@@ -219,7 +219,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::dataset::{Commission, DatasetVenue},
+        backtest::Commission,
+        model::dataset::DatasetVenue,
         strategy::orders::{Exits, Trade},
     };
 
@@ -430,7 +431,7 @@ mod tests {
         let mode = Mode::Backtest {
             models: models.to_path_buf(),
             venue: DatasetVenue {
-                commission: Commission::Rate("0.00003".to_string()),
+                commission: Commission::Rate(Decimal::new(3, 5)),
                 balance: Money::from("10000000 USD"),
                 leverage: Decimal::ONE,
             },

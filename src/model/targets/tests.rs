@@ -170,7 +170,7 @@ fn atr_bar_type(rule: DecisionRule, requirements: &DataRequirements) -> String {
 /// The refusal of the ATR of `config()` deciding on `rule`, for a
 /// strategy of `requirements`, by `validate` and by `Targets::new`.
 fn atr_refused(rule: DecisionRule, requirements: &DataRequirements) -> String {
-    assert!(Targets::new(config(), rule, requirements).is_err());
+    assert!(Targets::new(config(), rule, requirements, commission()).is_err());
     format!("{:#}", config().validate(rule, requirements).unwrap_err())
 }
 
@@ -422,7 +422,7 @@ fn sizes_distances_and_times_must_be_positive() {
 
     for config in invalid {
         assert!(config.validate(rule(), &quotes()).is_err(), "{config:?}");
-        assert!(Targets::new(config, rule(), &quotes()).is_err());
+        assert!(Targets::new(config, rule(), &quotes(), commission()).is_err());
     }
 }
 
@@ -516,7 +516,7 @@ fn an_atr_table_is_refused_unless_a_distance_uses_the_atr() {
     }
     let err = format!("{:#}", unused.validate(rule(), &quotes()).unwrap_err());
     assert!(err.contains("no distance uses"), "{err}");
-    assert!(Targets::new(unused, rule(), &quotes()).is_err());
+    assert!(Targets::new(unused, rule(), &quotes(), commission()).is_err());
 }
 
 /// A perpetual priced in half points, 0.5 a tick, as some futures are.
@@ -979,12 +979,17 @@ fn tight_stop() -> Target {
     })
 }
 
+/// IC's commission, 30 USD per million of value.
+fn commission() -> Commission {
+    Commission::Rate(Decimal::new(3, 5))
+}
+
 fn setter(config: &TargetConfig) -> TargetSetter {
-    TargetSetter::new(config, rule(), &quotes()).unwrap()
+    TargetSetter::new(config, rule(), &quotes(), commission()).unwrap()
 }
 
 fn targets(config: TargetConfig) -> Rc<Targets> {
-    Targets::new(config, rule(), &quotes()).unwrap()
+    Targets::new(config, rule(), &quotes(), commission()).unwrap()
 }
 
 /// A decision of the probe, as `decide` publishes it.
@@ -1167,7 +1172,8 @@ fn wide_gold_bar() -> Bar {
 fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
     let config = symmetric();
     let width = config.width(rule(), &quotes()).unwrap();
-    let setter = TargetSetter::sharing(&config, rule(), &quotes(), Some(&width)).unwrap();
+    let setter =
+        TargetSetter::sharing(&config, rule(), &quotes(), commission(), Some(&width)).unwrap();
     let mut probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "3999.99", "4000.01");
     setter.start(&mut probe);
@@ -1205,7 +1211,9 @@ fn a_setter_refuses_to_share_the_atr_of_another_width() {
 
     for other in [fourteen, in_bps(10, 10)] {
         let width = of(other).width(rule(), &quotes()).unwrap();
-        let err = TargetSetter::sharing(&symmetric(), rule(), &quotes(), Some(&width)).unwrap_err();
+        let err =
+            TargetSetter::sharing(&symmetric(), rule(), &quotes(), commission(), Some(&width))
+                .unwrap_err();
 
         assert!(err.to_string().contains("ATR"), "{other:?}: {err}");
     }
