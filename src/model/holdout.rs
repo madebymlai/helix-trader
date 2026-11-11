@@ -18,9 +18,11 @@
 //! its calibrated probabilities' log loss is below the baseline's, the
 //! training mean's (`Holdout::log_loss_refusal`), and the trades taken, at
 //! least the minimum count (`Minimums`), earned per trade at least the minimum
-//! net P&L and more than every trade of the rows did. The log loss and the AUC
-//! are ours (`score`): Nautilus scores trades, not probabilities. The AUC is
-//! reported, never required.
+//! net P&L and more than every trade of the rows did. A side's model is
+//! published only with the other sides of its pair, each below its own
+//! baseline's log loss, on the earnings of the pair's picks (`train`). The
+//! log loss and the AUC are ours (`score`): Nautilus scores trades, not
+//! probabilities. The AUC is reported, never required.
 
 use std::fmt;
 
@@ -88,9 +90,8 @@ pub struct Earnings {
 /// A model's holdout as its publication reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Holdout {
-    /// What was judged: a meta's own, or the picks between the sides, the same
-    /// for each side; none for a side refused on its log loss with no side
-    /// surviving.
+    /// What was judged: a meta's own, or the picks between the sides of a
+    /// pair, the same for each side.
     pub earnings: Earnings,
     /// The log loss of the model's calibrated probabilities.
     pub log_loss: f64,

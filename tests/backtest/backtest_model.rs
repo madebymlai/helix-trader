@@ -1,9 +1,10 @@
 //! A strategy trading on its models (`model::handle`): the probe of
 //! `common::dataset` decides every hour on the last mid of IC's gold,
 //! trading in a backtest on the models of a store. On a fixed list of
-//! baseline long models, each predicting its own probability whatever the
-//! row, calibrated alike, each decision's probability names the model it
-//! used: the latest valid at or before it. A LightGBM model fitted on the
+//! baseline long models of a strategy trading the long alone, each
+//! predicting its own probability whatever the row, calibrated alike, each
+//! decision's probability names the model it used: the latest valid at or
+//! before it. A LightGBM model fitted on the
 //! dataset's long rows and published as a train would, reloaded in the node,
 //! predicts on the decisions of its probe rows exactly as when fitted,
 //! calibrated; and one splitting on the payoff features alone predicts on
@@ -53,10 +54,10 @@ fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
     .clone()
 }
 
-/// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late;
-/// models valid from 02:00 (0.7), 04:00 (0.8), 04:30
-/// (0.9) and 09:00 (after the run), each probability calibrated. Before
-/// 02:00 no model is valid: no trade.
+/// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late,
+/// of a strategy trading the long alone; models valid from 02:00 (0.7),
+/// 04:00 (0.8), 04:30 (0.9) and 09:00 (after the run), each probability
+/// calibrated. Before 02:00 no model is valid: no trade.
 #[test]
 fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let catalog = walk(
@@ -66,6 +67,10 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let models = tempfile::tempdir().unwrap();
     let config = ModelConfig {
         learner: LearnerConfig::Baseline {},
+        margins: Margins {
+            long: Some(0.0),
+            short: None,
+        },
         ..config()
     };
     let store = store(models.path(), &config, Side::Long);

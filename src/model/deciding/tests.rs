@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 
 use super::{
     testing::{
-        CALIBRATION, STRATEGY, at, baseline, baseline_for, c, config, features, meta,
+        CALIBRATION, STRATEGY, at, baseline, baseline_for, both_sides, c, config, features, meta,
         meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
     },
     *,
@@ -207,25 +207,113 @@ fn an_unreadable_store_fails_the_models_when_built() {
     assert!(built.is_err());
 }
 
-/// The long's new model, valid from 10:30, is in a store that lists, but the
-/// short's fails: the failed listing keeps the long's list too, and a decision
-/// uses no fresh list beside a stale one.
+/// The model of `side` of `both_sides` valid from `valid_from`, of `trues`
+/// tenths, as `baseline_for` says.
+fn side_model(side: Side, valid_from: &str, trues: usize) -> StoredModel {
+    baseline_for(&features(), &both_sides(), side, valid_from, trues)
+}
+
+/// Publishes `model`, a side's of `both_sides`, under `models`.
+fn publish_side(models: &Path, side: Side, model: &StoredModel) {
+    side_store(models, &features(), &both_sides(), side)
+        .publish(model)
+        .unwrap();
+}
+
+/// Publishes under `models` a pair of `both_sides` valid from `valid_from`:
+/// a long of `long` tenths, and a short of 3, expecting a loss, never
+/// picked.
+fn publish_pair(models: &Path, valid_from: &str, long: usize) {
+    publish_side(
+        models,
+        Side::Long,
+        &side_model(Side::Long, valid_from, long),
+    );
+    publish_side(models, Side::Short, &side_model(Side::Short, valid_from, 3));
+}
+
+/// The pair valid from 10:30 is in stores of which the long's lists, but
+/// the short's fails: the failed listing keeps the long's list too, and a
+/// decision uses no fresh list beside a stale one.
 #[test]
 fn a_failed_listing_keeps_every_sides_previous_list() {
     let root = tempfile::tempdir().unwrap();
-    let long = store(root.path());
-    let short = side_store(root.path(), &features(), &config(), Side::Short);
-    long.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
-    let mut models = listed(root.path(), &config());
+    publish_pair(root.path(), "2026-10-22T10:00:00Z", 7);
+    let mut models = listed(root.path(), &both_sides());
     let before = probability(&mut models, "2026-10-22T11:00:00Z");
 
-    long.publish(&baseline("2026-10-22T10:30:00Z", 9)).unwrap();
-    short.break_listing();
+    publish_pair(root.path(), "2026-10-22T10:30:00Z", 9);
+    side_store(root.path(), &features(), &both_sides(), Side::Short).break_listing();
     let listing = models.list();
 
     assert!(listing.is_err());
     assert_eq!(before, Some(c(0.7)));
     assert_eq!(probability(&mut models, NOON), Some(c(0.7)));
+}
+
+/// A two-sided strategy decides on a pair, the sides one train published,
+/// valid from one time. The long of 0.9 valid from 11:00 has no short
+/// beside it: at noon the pair of 10:00 decides, its long of 0.7; once the
+/// short of 11:00 is published too, the pair of 11:00 decides.
+#[test]
+fn a_side_published_without_the_other_is_never_used() {
+    let root = tempfile::tempdir().unwrap();
+    publish_pair(root.path(), "2026-10-22T10:00:00Z", 7);
+    let eleven = "2026-10-22T11:00:00Z";
+    publish_side(root.path(), Side::Long, &side_model(Side::Long, eleven, 9));
+    let mut models = listed(root.path(), &both_sides());
+
+    let alone = probability(&mut models, NOON);
+    publish_side(
+        root.path(),
+        Side::Short,
+        &side_model(Side::Short, eleven, 3),
+    );
+    models.list().unwrap();
+
+    assert_eq!(alone, Some(c(0.7)));
+    assert_eq!(
+        probability(&mut models, "2026-10-22T13:00:00Z"),
+        Some(c(0.9))
+    );
+}
+
+/// A long published alone, with no pair before it, is no trade: the
+/// strategy has no pair to decide on.
+#[test]
+fn a_two_sided_strategy_with_no_pair_takes_no_trade() {
+    let root = tempfile::tempdir().unwrap();
+    publish_side(
+        root.path(),
+        Side::Long,
+        &side_model(Side::Long, MIDNIGHT, 9),
+    );
+
+    assert_eq!(decided(&mut listed(root.path(), &both_sides()), NOON), None);
+}
+
+/// The pair valid from noon has a short of another fingerprint, refused as
+/// it loads: the whole pair is, and the pair of 10:00 stays in use, at noon
+/// and after, its long of 0.7, never the noon's long of 0.9 beside the short
+/// of 10:00.
+#[test]
+fn a_pair_with_a_side_failing_its_checks_is_refused_and_the_current_pair_kept() {
+    let root = tempfile::tempdir().unwrap();
+    publish_pair(root.path(), "2026-10-22T10:00:00Z", 7);
+    publish_side(root.path(), Side::Long, &side_model(Side::Long, NOON, 9));
+    let mut refused = side_model(Side::Short, NOON, 3);
+    refused.manifest.fingerprint = "f".repeat(64);
+    publish_side(root.path(), Side::Short, &refused);
+    let mut models = listed(root.path(), &both_sides());
+
+    let probabilities = [
+        "2026-10-22T11:00:00Z",
+        "2026-10-22T12:00:00Z",
+        "2026-10-22T13:00:00Z",
+    ]
+    .map(|time| probability(&mut models, time));
+
+    assert_eq!(probabilities, [Some(c(0.7)), Some(c(0.7)), Some(c(0.7))]);
 }
 
 /// The meta's store is the last listed: its failure keeps the sides' lists,
@@ -348,7 +436,7 @@ fn a_side_model_without_a_payoff_is_refused_and_the_current_kept() {
 }
 
 /// A long expecting `2 c(0.6) - 1`, 0.180 USD, clearing its margin of
-/// nought; the short has no model yet, and is not picked.
+/// nought; the short is not traded.
 #[test]
 fn a_side_expected_to_clear_its_margin_is_picked_with_its_probability_and_expected_pnl() {
     let root = tempfile::tempdir().unwrap();
@@ -369,7 +457,7 @@ fn a_side_expected_to_clear_its_margin_is_picked_with_its_probability_and_expect
 #[test]
 fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = listed_with(root.path(), &config(), (Some(7), Some(8)));
+    let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(8)));
 
     let taken = decided(&mut models, NOON).unwrap();
 
@@ -379,7 +467,7 @@ fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
 #[test]
 fn two_sides_expected_alike_trade_neither() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = listed_with(root.path(), &config(), (Some(7), Some(7)));
+    let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(7)));
 
     assert_eq!(decided(&mut models, NOON), None);
 }
@@ -406,15 +494,8 @@ fn no_side_clearing_its_margin_gives_no_trade() {
 #[test]
 fn a_long_only_model_never_sells() {
     let root = tempfile::tempdir().unwrap();
-    let long_only = ModelConfig {
-        margins: Margins {
-            long: Some(0.0),
-            short: None,
-        },
-        ..config()
-    };
-    let mut both = listed_with(root.path(), &config(), (Some(3), Some(9)));
-    let mut long = listed(root.path(), &long_only);
+    let mut both = listed_with(root.path(), &both_sides(), (Some(3), Some(9)));
+    let mut long = listed(root.path(), &config());
 
     assert_eq!(side_picked(&mut both, IN_MONEY), Some(Side::Short));
     assert_eq!(side_picked(&mut long, IN_MONEY), None);
@@ -448,7 +529,7 @@ fn an_expected_r_is_weighed_by_the_unit_of_the_side() {
 #[test]
 fn each_side_is_weighed_by_its_own_unit() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = listed_with(root.path(), &config(), (Some(7), Some(6)));
+    let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(6)));
 
     assert_eq!(side_picked(&mut models, IN_MONEY), Some(Side::Long));
     assert_eq!(
@@ -682,12 +763,21 @@ fn learned_meta(config: &ModelConfig) -> StoredModel {
     meta
 }
 
-/// The decision at noon on a model of `side` predicting `trues` tenths, its
-/// trade taken from 0.6 by the meta model LightGBM learned (`learned_meta`).
+/// The decision at noon on a pair whose `side` predicts `trues` tenths and
+/// the other 2, expecting a loss, its trade taken from 0.6 by the meta model
+/// LightGBM learned (`learned_meta`).
 fn learned_meta_decision(side: Side, trues: usize) -> Option<Taken> {
     let root = tempfile::tempdir().unwrap();
-    let config = with_meta(lightgbm_meta());
+    let config = ModelConfig {
+        meta: Some(lightgbm_meta()),
+        ..both_sides()
+    };
     let meta = learned_meta(&config);
+    let features = features();
+    let other = Side::BOTH.into_iter().find(|&other| other != side).unwrap();
+    side_store(root.path(), &features, &config, other)
+        .publish(&baseline_for(&features, &config, other, MIDNIGHT, 2))
+        .unwrap();
     let mut models = published_with(root.path(), &config, (side, trues), Some(&meta));
     decided(&mut models, NOON)
 }

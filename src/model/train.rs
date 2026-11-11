@@ -9,17 +9,21 @@
 //! then its own side's payoff features (`dataset::DatasetRow::side`), under
 //! the names its store checks it against (`store::SideLevel::feature_names`).
 //! Each is fitted and calibrated on its own, and the sides are judged and
-//! published together.
+//! published as a pair, or not at all: a pair is the sides one train
+//! published, valid from one time (`Models::pairs`), and a one-sided
+//! strategy's is its one side. A train never judges nor publishes a side
+//! beside another side's older model.
 //!
 //! What a train at `t` does to each model is the schedule's plan
 //! (`schedule::Schedule::plan`), from the stores' valid-froms alone: a
-//! model with a current model at `t` keeps it, in use (retrained, the one
-//! valid from `t`; never retrained, the latest valid by `t`, so each model
-//! is trained once); a meta with no side's model before `t` waits for the
-//! sides' decisions; the others are fitted, as of `t`, or, never retrained,
-//! the sides with neither them nor the meta in use, as of `t` less the
-//! meta's window, the meta at `t` on their decisions. With nothing to fit
-//! the train replays nothing.
+//! model with a current model at `t`, the sides their pair, keeps it, in use
+//! (retrained, the one valid from `t`; never retrained, the latest valid by
+//! `t`, so each model is trained once); a meta with no pair of the sides
+//! before `t` waits for the sides' decisions; the others are fitted, the
+//! sides every one of them, as of `t`, or, never retrained, the sides with
+//! neither them nor the meta in use, as of `t` less the meta's window, the
+//! meta at `t` on their decisions. With nothing to fit the train replays
+//! nothing.
 //!
 //! A model fitted as of `t'`, the train's time or before it, takes the
 //! rows of the window ending at `t'` (`ModelConfig::window`), the days
@@ -38,42 +42,39 @@
 //!
 //! The gate judges the decision the handle returns, on the target's trade;
 //! what a strategy then does with a decision stays outside its figures. Every
-//! side the plan fits is fitted before any publishes. Each side's calibrated
-//! probabilities are judged on their own: a log loss not below the baseline's,
-//! the training mean of the labels of the rows it was fitted and calibrated on
-//! (`baseline`), drops the side, refused; its AUC is reported. The earnings are
-//! judged on the trades picked over the holdout's rows
-//! (`deciding::DecidingModels::pick_among`), on each side's row, among the
-//! surviving candidates and, for any other side, the model the handle would
-//! use at `t'`: the latest valid at or before it, as the store lists it, which
-//! the plan cannot tell, a retrained plan marking a side with only an older
-//! model for fitting. That model is out of sample on these rows: it was fitted
-//! and calibrated on rows before its valid-from less the holdout, which is part
-//! of the store's key. A row where both sides clear their margins counts one
-//! trade, the side expected the most; a tie, none. The minimums
-//! (`ModelConfig::min_pnl`, `ModelConfig::min_trades`, `Holdout::refusal`) read
-//! those picks, beside every trade of the sides traded on the rows, those with
-//! a model among them: a side with neither a candidate nor an older model does
-//! not trade there.
+//! side of the pair is fitted before any publishes; a fit failing keeps every
+//! side, failed, with its error. Each side's calibrated probabilities are
+//! judged on their own: a log loss not below the baseline's, the training mean
+//! of the labels of the rows it was fitted and calibrated on (`baseline`),
+//! refuses the pair; its AUC is reported. The earnings are judged on the
+//! trades picked over the holdout's rows (`deciding::DecidingModels::pick_among`),
+//! on each side's row, among the pair's own sides alone. A row where both
+//! sides clear their margins counts one trade, the side expected the most; a
+//! tie, none. The minimums (`ModelConfig::min_pnl`, `ModelConfig::min_trades`,
+//! `Holdout::refusal`) read those picks, beside every trade of the pair's
+//! sides on the rows.
 //!
-//! The surviving sides publish together, in their sides' stores (`store`),
-//! valid from `t'`, each with its calibration, its baseline, which its
-//! out-of-sample scores are read beside (`walk::WalkForward::scores`), its
-//! payoff, the earnings judged beside its own log loss, the baseline's and its
-//! AUC, and its manifest probing it on rows of the holdout; or none does and
-//! the current models stay. A profitable side paired with a losing one is
-//! refused with it. A side refused on its log loss reports its own log loss and
-//! the earnings of the remaining picks, or none if no side survives. A publish
-//! stays a rename per side: a crash between them leaves one published, which
-//! the next train keeps in use and judges the other beside.
+//! The pair is refused for the first reason found, a side's log loss, the
+//! long's first, then the picks' minimums: every side reports it beside its
+//! own holdout, its own log loss, the baseline's and its AUC, and the earnings
+//! of the pair's picks, and the current pair stays. A profitable side paired
+//! with a losing one is refused with it. Otherwise the sides publish together,
+//! in their sides' stores (`store`), valid from `t'`, each with its
+//! calibration, its baseline, which its out-of-sample scores are read beside
+//! (`walk::WalkForward::scores`), its payoff, that holdout, and its manifest
+//! probing it on rows of the holdout. A publish stays a rename per side, the
+//! long first: one failing keeps every side, failed, and the sides published
+//! before it, as those a crash between the renames leaves, have no other side
+//! beside them at their valid-from, so are in no pair: no decision uses them,
+//! and the next train fits the pair again, its publishes replacing them.
 //!
 //! With a meta model (`model::meta`), the sides train first, then the
 //! meta, on the same rows, of the one replay: the meta's window is its
-//! own (`MetaConfig::window`), from the sides' first model on, and its
+//! own (`MetaConfig::window`), from the sides' first pair on, and its
 //! rows are made from the sides' out-of-sample decisions, those of the
-//! models of the stores in use at each decision, read once the
-//! sides published: the ones just published valid from `t` used by none,
-//! those of a train at two times, valid from the window's start, used
+//! pair of the stores in use at each decision, read once the
+//! sides published: the one just published valid from `t` used by none,
+//! that of a train at two times, valid from the window's start, used
 //! throughout it; and should the sides of such a train publish none, the
 //! meta waits for the sides' decisions (`Plan::meta_after_sides`). Fitting and
 //! calibrating are a side's; the meta is judged alone, on its own holdout, by
@@ -160,7 +161,8 @@ struct Fitted {
     holdout: Holdout,
 }
 
-/// A side's model fitted as of `at`, not published, its candidate at the gate.
+/// A side's model fitted as of `at`, not published, its side of the pair at
+/// the gate.
 #[derive(Debug)]
 struct SideFit<'a> {
     side: Side,
@@ -212,17 +214,19 @@ pub enum Outcome {
 /// Why a train kept the current model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kept {
-    /// The holdout falls short of the minimums; why, and the holdout.
+    /// The holdout falls short of the minimums; why, and the holdout. A
+    /// side's why is its pair's, its own or another side's.
     Refused { why: Refusal, holdout: Holdout },
     /// The replay, the dataset, the fit or the store failed, or the window
     /// had no row to fit, to calibrate on or to expect a payoff from, or
-    /// no holdout to judge; the error.
+    /// no holdout to judge; the error. A side's is its pair's, its own or
+    /// another side's.
     Failed(String),
     /// The dataset holds rows that do not match the strategy's features; the
     /// mismatch.
     SchemaMismatch(String),
-    /// A meta waits for the sides' decisions to learn from: no side's model
-    /// is valid before the train, so none was fitted
+    /// A meta waits for the sides' decisions to learn from: no pair of the
+    /// sides is valid before the train, so none was fitted
     /// (`schedule::Step::Wait`).
     Waiting,
 }
@@ -283,8 +287,8 @@ impl Training {
     /// the stores' valid-froms: `replay` runs the strategy over a span of
     /// the days the dataset lacks and returns the rows it settled (see
     /// `Dataset::settled`), once, from where the plan's fits start, and not
-    /// at all if it fits none. Fits each side's model the plan fits, as of
-    /// its time, and judges the sides together (`sides`), then the meta model
+    /// at all if it fits none. Fits the sides' pair if the plan fits it, as
+    /// of its time, and judges the sides together (`sides`), then the meta model
     /// as the plan has it once the sides are published
     /// (`Plan::meta_after_sides`), its rows the sides' decisions by the
     /// store as the sides left it: each fitted is published, or its current
@@ -304,7 +308,7 @@ impl Training {
             Some(from) => self.dataset.settled(from, at, replay),
             None => Ok(vec![]),
         };
-        let sides = self.sides(plan.steps(), &listed, &rows);
+        let sides = self.sides(plan.steps(), &rows);
         let meta = || {
             let level = self.levels.meta.as_ref()?;
             let threshold = Threshold(self.models.meta()?.config().threshold);
@@ -354,59 +358,43 @@ impl Training {
         }
     }
 
-    /// What a train does to the sides at `steps`, on the replay's `rows`, their
-    /// stores as `listed` before any fit: a side the plan does not fit keeps
-    /// its outcome; each one it does is fitted, unpublished, its failure its
-    /// outcome; a fit failing its log loss drops out, refused; and the
-    /// surviving fits are judged together, on what their picks earn (`earned`),
-    /// and published together (`publish_sides`).
-    fn sides(
-        &self,
-        steps: &Models<Step>,
-        listed: &Models<Vec<Timestamp>>,
-        rows: &anyhow::Result<Vec<DatasetRow>>,
-    ) -> Trained {
+    /// What a train does to the sides at `steps`, on the replay's `rows`: the
+    /// plan keeps the pair, each side its outcome, or fits it, each side the
+    /// plan fits fitted unpublished, the pair (`pair`). A fit failing fails
+    /// every side of the pair with its error.
+    fn sides(&self, steps: &Models<Step>, rows: &anyhow::Result<Vec<DatasetRow>>) -> Trained {
         let mut trained = Trained {
             long: None,
             short: None,
             meta: None,
         };
-        let (mut surviving, mut dropped) = (vec![], vec![]);
+        let (mut fitting, mut fits, mut failed) = (vec![], vec![], None);
         for traded in self.models.sides() {
             let side = traded.side();
             let (Some(level), Some(&step)) = (self.levels.side(side), steps.side(side)) else {
                 continue;
             };
-            let fit = match self.planned(step, rows) {
+            let (at, rows) = match self.planned(step, rows) {
                 Planned::Done(outcome) => {
                     trained.set_side(side, outcome);
                     continue;
                 }
-                Planned::Fit { at, rows } => self.fit_side(traded, level, at, rows),
+                Planned::Fit { at, rows } => (at, rows),
             };
-            match fit {
-                Err(e) => trained.set_side(side, kept(&e)),
-                Ok(fit) => match fit.fitted.holdout.log_loss_refusal() {
-                    Some(why) => dropped.push((side, why, fit.fitted.holdout)),
-                    None => surviving.push(fit),
-                },
-            }
-        }
-        let earned = self.earned(&surviving, listed);
-        for (side, why, holdout) in dropped {
-            let holdout = Holdout {
-                earnings: earned.as_ref().copied().unwrap_or_default(),
-                ..holdout
-            };
-            trained.set_side(side, Outcome::Kept(Kept::Refused { why, holdout }));
-        }
-        match earned {
-            Ok(earnings) => self.publish_sides(surviving, earnings, &mut trained),
-            Err(e) => {
-                for fit in surviving {
-                    trained.set_side(fit.side, kept(&e));
+            fitting.push(side);
+            match self.fit_side(traded, level, at, rows) {
+                Ok(fit) => fits.push(fit),
+                Err(e) => {
+                    failed.get_or_insert(e.context(format!("fitting the {} model", side.name())));
                 }
             }
+        }
+        let outcomes = match failed {
+            Some(e) => fitting.into_iter().map(|side| (side, kept(&e))).collect(),
+            None => self.pair(fits),
+        };
+        for (side, outcome) in outcomes {
+            trained.set_side(side, outcome);
         }
         trained
     }
@@ -439,76 +427,47 @@ impl Training {
         })
     }
 
-    /// What the decision earns on the holdout of the `surviving` fits, the
-    /// sides' one holdout: on each row the side picked among them and, for any
-    /// other side, the latest model of its store, as `listed`, valid at or
-    /// before the fits' time; beside every trade of those sides. None if no
-    /// side survives.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a model fails to predict.
-    fn earned(
-        &self,
-        surviving: &[SideFit<'_>],
-        listed: &Models<Vec<Timestamp>>,
-    ) -> anyhow::Result<Earnings> {
-        let Some(SideFit { at, held_out, .. }) = surviving.first() else {
-            return Ok(Earnings::default());
+    /// The outcome of each side of the pair `fits`, fitted as of one time:
+    /// judged together, each on its own holdout and the earnings of the
+    /// pair's picks (`earned`); refused, every side, for the first reason
+    /// found, a side's log loss, the long's first, then the minimums of the
+    /// picks; else published together (`publish_pair`).
+    fn pair(&self, fits: Vec<SideFit<'_>>) -> Vec<(Side, Outcome)> {
+        let earnings = match earned(&fits) {
+            Ok(earnings) => earnings,
+            Err(e) => return fits.iter().map(|fit| (fit.side, kept(&e))).collect(),
         };
-        let mut others: Vec<_> = self
-            .models
-            .sides()
-            .filter(|traded| surviving.iter().all(|fit| fit.side != traded.side()))
-            .map(|traded| (traded, traded.swap()))
-            .collect();
-        let older = others.iter_mut().filter_map(|(traded, swap)| {
-            let (_, model) = swap.at(*at, listed.side(traded.side())?)?;
-            Some(Candidate {
-                side: traded.side(),
-                margin: traded.margin(),
-                model,
-            })
-        });
-        let deciding: Vec<Candidate<'_>> = surviving
+        let holdout = |fit: &SideFit<'_>| Holdout {
+            earnings,
+            ..fit.fitted.holdout
+        };
+        let refusal = fits
             .iter()
-            .map(|fit| Candidate {
-                side: fit.side,
-                margin: fit.margin,
-                model: &fit.model,
-            })
-            .chain(older)
-            .collect();
-        let mut trades = vec![];
-        for row in held_out {
-            let picked = DecidingModels::pick_among(deciding.iter().copied(), &row.sides())?;
-            for Candidate { side, .. } in &deciding {
-                let taken = picked.is_some_and(|picked| picked.side == *side);
-                trades.push((taken, row.trade(*side)));
-            }
+            .find_map(|fit| fit.fitted.holdout.log_loss_refusal())
+            .or_else(|| {
+                fits.iter()
+                    .find_map(|fit| holdout(fit).refusal(fit.level.minimums))
+            });
+        match refusal {
+            Some(why) => fits
+                .iter()
+                .map(|fit| {
+                    let holdout = holdout(fit);
+                    (fit.side, Outcome::Kept(Kept::Refused { why, holdout }))
+                })
+                .collect(),
+            None => self.publish_pair(fits, earnings),
         }
-        Ok(Earnings::of(&trades))
     }
 
-    /// The outcome of each of the `surviving` fits, each with its own holdout
-    /// and `earnings`, in `trained`: all refused if their minimums refuse them,
-    /// else published, the long first. A publish failing fails those not yet
-    /// published, so none of them publishes.
-    fn publish_sides(
-        &self,
-        surviving: Vec<SideFit<'_>>,
-        earnings: Earnings,
-        trained: &mut Trained,
-    ) {
-        let refusal = surviving.iter().find_map(|fit| {
-            Holdout {
-                earnings,
-                ..fit.fitted.holdout
-            }
-            .refusal(fit.level.minimums)
-        });
-        let mut failed = None;
-        for fit in surviving {
+    /// Publishes each side of the pair `fits`, the long first, valid from
+    /// their time, with its own holdout and `earnings`: each published, or,
+    /// should a publish fail, each kept with its error, the sides published
+    /// before it no pair without the others.
+    fn publish_pair(&self, fits: Vec<SideFit<'_>>, earnings: Earnings) -> Vec<(Side, Outcome)> {
+        let sides: Vec<Side> = fits.iter().map(|fit| fit.side).collect();
+        let mut published = vec![];
+        for fit in fits {
             let SideFit {
                 side,
                 level,
@@ -521,25 +480,18 @@ impl Training {
                 earnings,
                 ..fitted.holdout
             };
-            let outcome = match (refusal, &failed) {
-                (Some(why), _) => Outcome::Kept(Kept::Refused { why, holdout }),
-                (None, Some(e)) => kept(e),
-                (None, None) => {
-                    match self.publish(level, at, fitted, Some((side, payoff)), holdout) {
-                        Ok(()) => Outcome::Published {
-                            valid_from: at,
-                            holdout,
-                        },
-                        Err(e) => {
-                            let outcome = kept(&e);
-                            failed = Some(e);
-                            outcome
-                        }
-                    }
-                }
-            };
-            trained.set_side(side, outcome);
+            if let Err(e) = self.publish(level, at, fitted, Some((side, payoff)), holdout) {
+                return sides.into_iter().map(|side| (side, kept(&e))).collect();
+            }
+            published.push((
+                side,
+                Outcome::Published {
+                    valid_from: at,
+                    holdout,
+                },
+            ));
         }
+        published
     }
 
     /// Fits the meta model of `level` as of `at` on the examples of `rows`, in
@@ -709,6 +661,36 @@ fn kept(e: &anyhow::Error) -> Outcome {
         Some(mismatch) => Kept::SchemaMismatch(mismatch.to_string()),
         None => Kept::Failed(format!("{e:#}")),
     })
+}
+
+/// What the decision earns on the holdout of the pair `fits`, the sides'
+/// one holdout: on each row the side picked among them alone, on each side's
+/// row, beside every trade of their sides. None of no fit.
+///
+/// # Errors
+///
+/// Returns an error if a model fails to predict.
+fn earned(fits: &[SideFit<'_>]) -> anyhow::Result<Earnings> {
+    let Some(SideFit { held_out, .. }) = fits.first() else {
+        return Ok(Earnings::default());
+    };
+    let deciding: Vec<Candidate<'_>> = fits
+        .iter()
+        .map(|fit| Candidate {
+            side: fit.side,
+            margin: fit.margin,
+            model: &fit.model,
+        })
+        .collect();
+    let mut trades = vec![];
+    for row in held_out {
+        let picked = DecidingModels::pick_among(deciding.iter().copied(), &row.sides())?;
+        for Candidate { side, .. } in &deciding {
+            let taken = picked.is_some_and(|picked| picked.side == *side);
+            trades.push((taken, row.trade(*side)));
+        }
+    }
+    Ok(Earnings::of(&trades))
 }
 
 /// `examples` split at the calibration's start, `calibration`, and the
@@ -1241,49 +1223,43 @@ mod tests {
         rows
     }
 
-    /// The short's candidate fails its log loss (`short_showing_no_signal`),
-    /// so what decides beside the long is the short the handle would use at
-    /// the train's time: of its models of the 4th, the 5th and the 8th, that of
-    /// the 5th, which the retrained plan does not tell, marking the short for
-    /// fitting. It expects 2 (2 c(0.8) - 1), 1.1 USD, on every row: below the
-    /// long's 1.68 at 19:00, a win of 3, and picked at 20:00, where the long
-    /// expects 0.16, a loss of 2. So 0.5 USD per trade, below the minimum of
-    /// 1, where the long alone would have earned 3: refused, and nothing
-    /// published. Every trade is the four of the two sides.
+    /// The short's fit fails its log loss (`short_showing_no_signal`), beside
+    /// the pair of the 5th, whose short, of 0.5, expects nought on every row
+    /// and is never picked. The holdout's picks are the train's own sides':
+    /// the long's win of 3 USD at 19:00, and at 20:00, where the long expects
+    /// 0.16 USD, the fitted short's 0.68 and its loss of 2; so 0.5 USD per
+    /// trade, of every trade's four, where the long beside the 5th's short
+    /// would have taken its win alone, 3 USD. Neither side publishes, refused
+    /// for the short's log loss, and the pair of the 5th stays the current one.
     #[test]
-    fn a_surviving_side_is_judged_beside_the_other_sides_older_model() {
+    fn a_side_refused_on_its_log_loss_refuses_the_pair_judged_on_the_trains_own_picks() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
-        let t = at("2026-01-07T00:00:00Z");
-        let short = store(dir.path(), &config(), Side::Short);
-        let models = [
-            ("2026-01-04T00:00:00Z", 0.5),
-            ("2026-01-05T00:00:00Z", 0.8),
-            ("2026-01-08T00:00:00Z", 0.5),
-        ];
-        for (valid_from, probability) in models {
-            publish_baseline(&short, Side::Short, valid_from, probability);
+        let fifth = "2026-01-05T00:00:00Z";
+        for side in Side::BOTH {
+            publish_baseline(&store(dir.path(), &config(), side), side, fifth, 0.5);
         }
 
-        let trained = training.train_at(t, |_, _| Ok(short_showing_no_signal()));
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| {
+            Ok(short_showing_no_signal())
+        });
 
-        let Some(Outcome::Kept(Kept::Refused { why, holdout })) = trained.long else {
-            panic!("{trained:?}");
-        };
-        let Refusal::MinPnl { pnl, min_pnl } = why else {
-            panic!("{why:?}");
-        };
-        close(pnl, 0.5);
-        assert_eq!(min_pnl, 1.0);
-        assert_eq!(holdout.earnings.taken.count, 2, "{holdout:?}");
-        assert_eq!(holdout.earnings.every.count, 4, "{holdout:?}");
-        assert!(
-            store(dir.path(), &config(), Side::Long)
-                .valid_froms()
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(short.valid_froms().unwrap().len(), models.len());
+        for outcome in [&trained.long, &trained.short] {
+            let Some(Outcome::Kept(Kept::Refused { why, holdout })) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert!(matches!(why, Refusal::LogLoss { .. }), "{why:?}");
+            let Earnings { taken, every, .. } = holdout.earnings;
+            assert_eq!((taken.count, every.count), (2, 4), "{holdout:?}");
+            close_to(taken.expectancy, 0.5);
+        }
+        for side in Side::BOTH {
+            assert_eq!(
+                store(dir.path(), &config(), side).valid_froms().unwrap(),
+                [at(fifth)],
+                "{side:?}"
+            );
+        }
     }
 
     /// `rows` with the short's pick at 20:00 a win of 0.1 USD: alone the short
@@ -1402,19 +1378,14 @@ mod tests {
 
     /// `rows` with the holdout's labels reversed: each side wins where it
     /// predicted a loss and loses where it predicted a win, and fails its log
-    /// loss. No side survives, so no earnings are judged, an older model of
-    /// the short notwithstanding; each reports its own log loss, (ln (1 + 4^s)
-    /// + ln (1 + (7/3)^s)) / 2.
+    /// loss, (ln (1 + 4^s) + ln (1 + (7/3)^s)) / 2, which each reports. The
+    /// pair's picks are still judged: the long at 19:00, expecting 1.68 USD,
+    /// and the short at 20:00, 0.68, each a loss of 2, beside every trade,
+    /// two wins of 3 and two losses of 2, 0.5 per trade.
     #[test]
-    fn with_no_side_surviving_each_reports_its_own_log_loss_and_no_earnings() {
+    fn with_both_sides_failing_their_log_loss_each_reports_its_own_and_the_pairs_earnings() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
-        publish_baseline(
-            &store(dir.path(), &config(), Side::Short),
-            Side::Short,
-            "2026-01-05T00:00:00Z",
-            0.8,
-        );
         let mut rows = rows();
         rows[7] = row("2026-01-06T19:00:00Z", vec![0.8], false, hour());
         rows[8] = row("2026-01-06T20:00:00Z", vec![0.3], true, hour());
@@ -1431,50 +1402,24 @@ mod tests {
             };
             assert!(matches!(why, Refusal::LogLoss { .. }), "{why:?}");
             close(holdout.log_loss, log_loss);
-            assert_eq!(holdout.earnings, Earnings::default(), "{holdout:?}");
+            let Earnings { taken, every, .. } = holdout.earnings;
+            assert_eq!((taken.count, every.count), (2, 4), "{holdout:?}");
+            close_to(taken.expectancy, -2.0);
+            close_to(every.expectancy, 0.5);
         }
     }
 
-    /// The long published at the train's time by a train interrupted before
-    /// the short's publish, expecting 1.1 USD on every row: it is kept in use,
-    /// and decides beside the short fitted now, which it outbids at 20:00,
-    /// the long's loss of 2 picked rather than the short's win of 3. So 0.5 USD
-    /// per trade, below the minimum of 1: the short is refused, judged beside
-    /// the model the handle would use.
-    #[test]
-    fn a_side_fitted_is_judged_beside_the_other_sides_model_in_use() {
-        let dir = tempfile::tempdir().unwrap();
-        let training = training(dir.path(), config());
-        let t = at("2026-01-07T00:00:00Z");
-        publish_baseline(
-            &store(dir.path(), &config(), Side::Long),
-            Side::Long,
-            "2026-01-07T00:00:00Z",
-            0.8,
-        );
-
-        let trained = training.train_at(t, |_, _| Ok(rows()));
-
-        assert!(
-            matches!(trained.long, Some(Outcome::InUse { valid_from, .. }) if valid_from == t),
-            "{trained:?}"
-        );
-        let Some(Outcome::Kept(Kept::Refused { why, .. })) = trained.short else {
-            panic!("{trained:?}");
-        };
-        let Refusal::MinPnl { pnl, .. } = why else {
-            panic!("{why:?}");
-        };
-        close(pnl, 0.5);
-    }
-
     /// The short never wins on the rows before the holdout, so it has no
-    /// payoff to expect and its fit fails. The long survives, and with no
-    /// short model to decide beside it is judged alone: its win at 19:00
-    /// picked, beside every trade of the side traded, its two.
+    /// payoff to expect and its fit fails. The long, fitted, publishes
+    /// neither: both are kept, the long for the short's failure, which it
+    /// names, and the pair of the 6th stays the current one.
     #[test]
-    fn a_side_whose_fit_fails_leaves_the_other_judged_without_it() {
+    fn a_side_whose_fit_fails_publishes_neither_side() {
         let dir = tempfile::tempdir().unwrap();
+        let sixth = "2026-01-06T00:00:00Z";
+        for side in Side::BOTH {
+            publish_baseline(&store(dir.path(), &config(), side), side, sixth, 0.5);
+        }
         let mut rows = rows();
         for row in &mut rows[..7] {
             row.outcomes.short.pnl = Money::from("-2 USD");
@@ -1483,13 +1428,49 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        assert!(
-            matches!(trained.short, Some(Outcome::Kept(Kept::Failed(_)))),
-            "{trained:?}"
+        for outcome in [&trained.long, &trained.short] {
+            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert!(why.contains("short") && why.contains("no win"), "{why}");
+        }
+        for side in Side::BOTH {
+            assert_eq!(
+                store(dir.path(), &config(), side).valid_froms().unwrap(),
+                [at(sixth)],
+                "{side:?}"
+            );
+        }
+    }
+
+    /// The short's publish fails after the long's: the long's model is in
+    /// its store, valid from the train's time, but has no short beside it,
+    /// so the sides list no pair from then and both are kept, failed.
+    #[test]
+    fn a_publish_failing_after_the_others_leaves_no_pair_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), config());
+        let t = at("2026-01-07T00:00:00Z");
+        store(dir.path(), &config(), Side::Short).break_publishing();
+
+        let trained = training.train_at(t, |_, _| Ok(rows()));
+
+        for outcome in [&trained.long, &trained.short] {
+            assert!(
+                matches!(outcome, Some(Outcome::Kept(Kept::Failed(_)))),
+                "{trained:?}"
+            );
+        }
+        assert_eq!(
+            store(dir.path(), &config(), Side::Long)
+                .valid_froms()
+                .unwrap(),
+            [t]
         );
-        let holdout = holdout_of(trained.long);
-        assert_eq!(holdout.earnings.taken.count, 1, "{holdout:?}");
-        assert_eq!(holdout.earnings.every.count, 2, "{holdout:?}");
+        assert_eq!(
+            models(dir.path(), &config()).valid_froms().unwrap().pairs(),
+            []
+        );
     }
 
     /// The long's publish fails, and the short, judged with it, publishes
@@ -1671,11 +1652,13 @@ mod tests {
         );
     }
 
-    /// The long's model valid from the train's time, a baseline published
-    /// beforehand, expecting nought and so never picked, is kept in use, not
-    /// fitted again; the short, with none, is fitted and published.
+    /// The long's model valid from the train's time, a baseline published by
+    /// a train stopped before its short's publish, has no short beside it: no
+    /// pair is valid from then, so both sides are fitted again, judged
+    /// together, and published, the long's fitted model in place of the
+    /// baseline.
     #[test]
-    fn a_model_already_published_at_the_trains_time_is_kept_in_use_and_the_other_fitted() {
+    fn a_side_published_at_the_trains_time_without_the_other_is_fitted_again_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
@@ -1683,24 +1666,19 @@ mod tests {
             &store(dir.path(), &config(), Side::Long),
             Side::Long,
             "2026-01-07T00:00:00Z",
-            0.5,
+            0.8,
         );
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
-        assert_eq!(
-            trained.long,
-            Some(Outcome::InUse {
-                valid_from: t,
-                retrain: config().retrain
-            })
-        );
-        assert!(
-            matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
-            "{trained:?}"
-        );
+        for outcome in [&trained.long, &trained.short] {
+            assert!(
+                matches!(outcome, Some(Outcome::Published { valid_from, .. }) if *valid_from == t),
+                "{trained:?}"
+            );
+        }
         let long = store(dir.path(), &config(), Side::Long).read(t).unwrap();
-        assert_eq!(long.manifest.learner, LearnerConfig::Baseline {});
+        assert_eq!(long.manifest.learner, LearnerConfig::Fake {});
     }
 
     /// Both sides have a model valid from the train's time: a rerun of the
@@ -1748,11 +1726,47 @@ mod tests {
         }
     }
 
-    /// Never retrained, the long's model of the 6th, expecting nought and so
-    /// never picked, is current at the train of the 7th: kept in use, not
-    /// fitted again; the short, with none, is fitted and published.
+    /// Never retrained, the pair of the 6th, its long expecting nought and
+    /// so never picked, is current at the train of the 7th: kept in use, not
+    /// fitted again, and nothing replayed.
     #[test]
-    fn never_retrained_a_model_valid_before_the_train_is_kept_in_use_and_the_other_fitted() {
+    fn never_retrained_a_pair_valid_before_the_train_is_kept_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let training = training(dir.path(), never());
+        let sixth = at("2026-01-06T00:00:00Z");
+        for side in Side::BOTH {
+            publish_baseline_of(
+                never(),
+                &store(dir.path(), &never(), side),
+                side,
+                "2026-01-06T00:00:00Z",
+                0.5,
+            );
+        }
+        let mut replays = vec![];
+
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
+            replays.push((from, to));
+            Ok(rows())
+        });
+
+        let in_use = Outcome::InUse {
+            valid_from: sixth,
+            retrain: Retrain::Never,
+        };
+        assert_eq!(
+            (trained.long.as_ref(), trained.short.as_ref()),
+            (Some(&in_use), Some(&in_use))
+        );
+        assert_eq!(replays, []);
+    }
+
+    /// Never retrained, the long's model of the 6th has no short beside it,
+    /// so no pair is current at the train of the 7th: both sides are fitted
+    /// and published as of the 7th, and the long of the 6th stays in its
+    /// store, in no pair.
+    #[test]
+    fn never_retrained_a_side_valid_before_the_train_without_the_other_is_fitted_again_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), never());
         let t = at("2026-01-07T00:00:00Z");
@@ -1767,22 +1781,21 @@ mod tests {
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
-        assert_eq!(
-            trained.long,
-            Some(Outcome::InUse {
-                valid_from: sixth,
-                retrain: Retrain::Never
-            })
-        );
-        assert!(
-            matches!(trained.short, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
-            "{trained:?}"
-        );
+        for outcome in [&trained.long, &trained.short] {
+            assert!(
+                matches!(outcome, Some(Outcome::Published { valid_from, .. }) if *valid_from == t),
+                "{trained:?}"
+            );
+        }
         assert_eq!(
             store(dir.path(), &never(), Side::Long)
                 .valid_froms()
                 .unwrap(),
-            [sixth]
+            [sixth, t]
+        );
+        assert_eq!(
+            models(dir.path(), &never()).valid_froms().unwrap().pairs(),
+            [t]
         );
     }
 
@@ -1879,53 +1892,54 @@ mod tests {
     }
 
     /// The short fails its log loss (`short_showing_no_signal`), with `s` = ln
-    /// 2 / ln 3, against the baseline's ln 2: it publishes nothing, and reports
-    /// its own log loss beside the earnings of the remaining picks, the
-    /// long's. With no short model to decide beside it, the long is judged
-    /// alone: its win of 3 USD at 19:00 picked, beside every trade of the side
-    /// traded, its win of 3 and its loss of 2. It publishes.
+    /// 2 / ln 3, (ln (1 + 4^s) + ln (1 + (7/3)^s)) / 2 against the baseline's
+    /// ln 2, and the long's, (ln (1 + 4^-s) + ln (1 + (3/7)^s)) / 2, is below
+    /// it. Each side reports the short's log loss as the pair's refusal,
+    /// beside its own holdout: its own log loss, and the earnings of the
+    /// pair's picks, the long's win of 3 USD at 19:00 and the short's loss of
+    /// 2 at 20:00, beside every trade of both sides, 0.5 per trade either way.
+    /// Neither publishes.
     #[test]
-    fn a_side_refused_on_its_log_loss_reports_it_and_the_earnings_of_the_remaining_picks() {
+    fn a_side_refused_on_its_log_loss_refuses_the_other_reporting_it_beside_its_own_holdout() {
         let dir = tempfile::tempdir().unwrap();
-        let t = at("2026-01-07T00:00:00Z");
         let training = training(dir.path(), config());
 
-        let trained = training.train_at(t, |_, _| Ok(short_showing_no_signal()));
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| {
+            Ok(short_showing_no_signal())
+        });
 
-        let Some(Outcome::Kept(Kept::Refused { why, holdout })) = trained.short else {
-            panic!("{trained:?}");
-        };
-        let Refusal::LogLoss { log_loss, baseline } = why else {
-            panic!("{why:?}");
-        };
         let s = 2_f64.ln() / 3_f64.ln();
-        close(
-            log_loss,
-            (1.0 + 4_f64.powf(s))
-                .ln()
-                .midpoint((1.0 + (7.0_f64 / 3.0).powf(s)).ln()),
-        );
-        close(baseline, 2_f64.ln());
-        close(holdout.log_loss, log_loss);
-        let Earnings { taken, every, .. } = holdout.earnings;
-        assert_eq!((taken.count, every.count), (1, 2), "{holdout:?}");
-        close_to(taken.expectancy, 3.0);
-        close_to(every.expectancy, 0.5);
-        assert!(
-            store(dir.path(), &config(), Side::Short)
-                .valid_froms()
-                .unwrap()
-                .is_empty()
-        );
-        let Some(Outcome::Published {
-            valid_from,
-            holdout: long,
-        }) = trained.long
-        else {
-            panic!("{trained:?}");
-        };
-        assert_eq!(valid_from, t);
-        assert_eq!(long.earnings, holdout.earnings);
+        let short_log_loss = (1.0 + 4_f64.powf(s))
+            .ln()
+            .midpoint((1.0 + (7.0_f64 / 3.0).powf(s)).ln());
+        let long_log_loss = (1.0 + 4_f64.powf(-s))
+            .ln()
+            .midpoint((1.0 + (3.0_f64 / 7.0).powf(s)).ln());
+        for (side, outcome, own) in [
+            (Side::Long, &trained.long, long_log_loss),
+            (Side::Short, &trained.short, short_log_loss),
+        ] {
+            let Some(Outcome::Kept(Kept::Refused { why, holdout })) = outcome else {
+                panic!("{trained:?}");
+            };
+            let Refusal::LogLoss { log_loss, baseline } = *why else {
+                panic!("{why:?}");
+            };
+            close(log_loss, short_log_loss);
+            close(baseline, 2_f64.ln());
+            close(holdout.log_loss, own);
+            let Earnings { taken, every, .. } = holdout.earnings;
+            assert_eq!((taken.count, every.count), (2, 4), "{holdout:?}");
+            close_to(taken.expectancy, 0.5);
+            close_to(every.expectancy, 0.5);
+            assert!(
+                store(dir.path(), &config(), side)
+                    .valid_froms()
+                    .unwrap()
+                    .is_empty(),
+                "{side:?}"
+            );
+        }
     }
 
     #[test]

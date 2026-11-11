@@ -1,5 +1,5 @@
 //! A strategy's decision, made in one place: `DecidingModels` lists the stores
-//! of its model set, swaps each model in, picks a side, and applies the meta's
+//! of its model set, swaps the models in, picks a side, and applies the meta's
 //! threshold and size. It sees no strategy, cache or clock, so the model
 //! handle and the meta's examples decide through the same code, and the meta
 //! learns from the decisions the handle would make.
@@ -22,15 +22,18 @@
 //! model already listed can still swap in once its valid-from passes.
 //!
 //! A model is swapped in only inside a decision, before it predicts
-//! (`store::Swap`), so no decision mixes two models. `pick` picks among the
-//! sides with a model valid at the time, by `pick_among`, the rule for models
-//! already in hand, on `payoff::pick`, which a train's gate also judges its
-//! candidates by, being in no store yet. `decide` takes the side picked if the
-//! meta model valid then predicts at least its threshold (`holdout::Threshold`)
-//! on the features with that side and its probability (`features::meta_row`),
-//! sized from that probability if the meta sizes (`MetaConfig::size`). The
-//! meta's model is read only once a side is picked, and no meta model valid
-//! yet is no trade.
+//! (`store::Swap`), so no decision mixes two models. The sides are swapped
+//! in as a pair (`store::Pair`), the sides one train published, valid from
+//! one time, so no decision uses a long and a short of different trains, and
+//! a side's model with no other beside it is never used. `pick` picks among
+//! the sides of the pair valid at the time, by `pick_among`, the rule for
+//! models already in hand, on `payoff::pick`, which a train's gate also
+//! judges its pair by, being in no store yet. `decide` takes the side picked
+//! if the meta model valid then predicts at least its threshold
+//! (`holdout::Threshold`) on the features with that side and its probability
+//! (`features::meta_row`), sized from that probability if the meta sizes
+//! (`MetaConfig::size`). The meta's model is read only once a side is
+//! picked, and no meta model valid yet is no trade.
 
 use jiff::Timestamp;
 use nautilus_model::types::{Quantity, fixed::FIXED_PRECISION};
@@ -41,28 +44,21 @@ use super::{
     holdout::Threshold,
     payoff,
     schedule::Models,
-    store::{LoadedModel, ModelSet, SideModel, Swap},
+    store::{LoadedModel, ModelSet, Pair, SideModel, Swap},
     targets::{PerSide, Side},
 };
 
 /// A strategy's models as they decide: its model set's stores as last listed,
-/// and the model of each swapped in so far.
+/// and the sides' pair and the meta's model swapped in so far.
 #[derive(Debug)]
 pub struct DecidingModels {
+    /// The model set: each side traded, the long first, with its margin.
     models: ModelSet,
     /// When the models of each store are valid from, as last listed.
     listed: Models<Vec<Timestamp>>,
-    /// Each side traded, the long first.
-    sides: Vec<SideSwap>,
+    /// The sides' pairs, swapped in decision by decision.
+    pairs: Swap<Pair>,
     meta: Option<MetaSwap>,
-}
-
-/// A side traded: its margin and its models, swapped in decision by decision.
-#[derive(Debug)]
-struct SideSwap {
-    side: Side,
-    margin: f64,
-    swap: Swap<SideModel>,
 }
 
 /// The meta level: its config and its models, swapped in decision by decision.
@@ -134,14 +130,7 @@ impl DecidingModels {
     pub fn new(models: &ModelSet) -> anyhow::Result<Self> {
         Ok(Self {
             listed: models.valid_froms()?,
-            sides: models
-                .sides()
-                .map(|level| SideSwap {
-                    side: level.side(),
-                    margin: level.margin(),
-                    swap: level.swap(),
-                })
-                .collect(),
+            pairs: models.pairs(),
             meta: models.meta().map(|level| MetaSwap {
                 config: level.config().clone(),
                 swap: level.swap(),
@@ -161,9 +150,9 @@ impl DecidingModels {
         Ok(())
     }
 
-    /// The side picked at `now` on each side's row `sides`, among the latest
-    /// model of each side valid then, swapped in (`pick_among`); none without
-    /// a model valid, no side clearing its margin, or two tied.
+    /// The side picked at `now` on each side's row `sides`, among the sides
+    /// of the latest pair valid then, swapped in (`pick_among`); none without
+    /// a pair valid, no side clearing its margin, or two tied.
     ///
     /// # Errors
     ///
@@ -173,14 +162,13 @@ impl DecidingModels {
         now: Timestamp,
         sides: &PerSide<SideRow>,
     ) -> anyhow::Result<Option<Picked>> {
-        let listed = &self.listed;
-        let in_use = self.sides.iter_mut().filter_map(|traded| {
-            let (_, model) = traded.swap.at(now, listed.side(traded.side)?)?;
-            Some(Candidate {
-                side: traded.side,
-                margin: traded.margin,
-                model,
-            })
+        let Some((_, pair)) = self.pairs.at(now, &self.listed.pairs()) else {
+            return Ok(None);
+        };
+        let in_use = self.models.sides().map(|traded| Candidate {
+            side: traded.side(),
+            margin: traded.margin(),
+            model: pair.side(traded.side()),
         });
         Self::pick_among(in_use, sides)
     }

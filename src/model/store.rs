@@ -24,15 +24,23 @@
 //! model set holds each side the margins trade, with its margin, its feature
 //! names (the strategy's, then the target's payoff names,
 //! `features::side_names`) and its store, and the meta level, if any, with
-//! its config, its feature names and its store; it hands out the swap of
-//! each, checked against the level's feature names and the fingerprint, and
-//! lists when each model was published. A train reads a level's feature
-//! names from it, so the names a model is published with are those it is
-//! checked against.
+//! its config, its feature names and its store; it hands out the swap of the
+//! sides' pairs and of the meta's models, checked against the level's
+//! feature names and the fingerprint, and lists when each model was
+//! published. A train reads a level's feature names from it, so the names a
+//! model is published with are those it is checked against.
+//!
+//! The sides' models are used as pairs (`Pair`), the sides one train
+//! published, valid from one time: a pair's valid-from is a time every side
+//! traded has a model valid from (`Models::pairs`), so a side's model with
+//! no other side's beside it, as a train stopped between its sides'
+//! publishes leaves, is in no pair and never used. A one-sided strategy's
+//! pairs are its one side's models.
 //!
 //! `Swap` is how the models are used: at each decision, in time order,
-//! the latest valid then, checked before use, a model failing a check
-//! refused and the current one kept.
+//! the latest valid then, the sides' pair or the meta's model, checked
+//! before use, one failing a check refused, a pair whole, and the current
+//! one kept.
 //!
 //! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
 //! manifest, the schema (the feature names in order, the fingerprint), the
@@ -51,7 +59,7 @@
 //! infinities as strings.
 
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -116,6 +124,15 @@ pub struct SideLevel {
     side: Side,
     margin: f64,
     models: CheckedStore,
+}
+
+/// The models of the sides a strategy trades valid from one time, one of
+/// each: the pair one train published, loaded and checked together
+/// (`ModelSet::pairs`).
+#[derive(Debug)]
+pub struct Pair {
+    /// Each side traded, the long first, and its model.
+    models: Vec<(Side, SideModel)>,
 }
 
 /// The meta level of a model set: the meta model's config and its models.
@@ -413,8 +430,32 @@ impl ModelSet {
         self.meta.as_ref()
     }
 
+    /// The sides' pairs as a strategy swaps them in, valid from the
+    /// stores' pairs (`Models::pairs` of `valid_froms`): each side's model
+    /// of a pair loaded and checked against the side models' feature names
+    /// and the fingerprint, with its payoff (`StoredModel::load_side`), a
+    /// pair with a side failing refused whole; none in use yet.
+    #[must_use]
+    pub fn pairs(&self) -> Swap<Pair> {
+        let sides = self.sides.clone();
+        Swap::new(move |valid_from| {
+            let models = sides
+                .iter()
+                .map(|level| {
+                    let model = level
+                        .models
+                        .read(valid_from, StoredModel::load_side)
+                        .with_context(|| format!("the {} model", level.side.name()))?;
+                    Ok((level.side, model))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            Ok(Pair { models })
+        })
+    }
+
     /// The valid-froms of the store of each model: of each side traded,
-    /// and of the meta model, if any.
+    /// whose pairs are the times every side has a model valid from
+    /// (`Models::pairs`), and of the meta model, if any.
     ///
     /// # Errors
     ///
@@ -463,13 +504,21 @@ impl SideLevel {
     pub fn feature_names(&self) -> &[String] {
         &self.models.feature_names
     }
+}
 
-    /// The side's models as a strategy swaps them in, checked against the
-    /// side models' feature names and the fingerprint, each with its
-    /// payoff (`StoredModel::load_side`); none in use yet.
+impl Pair {
+    /// The model of `side`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pair's model set does not trade `side`.
     #[must_use]
-    pub fn swap(&self) -> Swap<SideModel> {
-        self.models.swap(StoredModel::load_side)
+    pub fn side(&self, side: Side) -> &SideModel {
+        self.models
+            .iter()
+            .find(|(traded, _)| *traded == side)
+            .map(|(_, model)| model)
+            .unwrap_or_else(|| panic!("the pair holds no {} model", side.name()))
     }
 }
 
@@ -496,21 +545,22 @@ impl MetaLevel {
     /// meta's feature names and the fingerprint; none in use yet.
     #[must_use]
     pub fn swap(&self) -> Swap<LoadedModel> {
-        self.models.swap(StoredModel::load)
+        let models = self.models.clone();
+        Swap::new(move |valid_from| models.read(valid_from, StoredModel::load))
     }
 }
 
 impl CheckedStore {
-    /// The store's models as a strategy swaps them in, each loaded and
-    /// checked against its feature names and fingerprint by `load`; none
-    /// in use yet.
-    fn swap<M>(&self, load: Load<M>) -> Swap<M> {
-        Swap::new(
-            self.store.clone(),
-            self.feature_names.clone(),
-            self.fingerprint.clone(),
-            load,
-        )
+    /// The store's model valid from `valid_from`, loaded and checked
+    /// against its feature names and fingerprint by `load`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is none, its file cannot be read, or as
+    /// `load` does.
+    fn read<M>(&self, valid_from: Timestamp, load: Load<M>) -> anyhow::Result<M> {
+        let stored = self.store.read(valid_from)?;
+        load(&stored, &self.feature_names, &self.fingerprint)
     }
 }
 
@@ -711,21 +761,15 @@ fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
 /// (`StoredModel::load`).
 type Load<M> = fn(&StoredModel, &[String], &str) -> anyhow::Result<M>;
 
-/// The models of a store as a strategy swaps them in, decision by decision
-/// in time order: at each, the latest valid then, loaded as an `M` and
-/// checked against the strategy before use. One failing a check is
-/// refused, logged as an error, and the current one kept; it is not read
-/// again. A model set's levels hand it out (`SideLevel::swap`,
-/// `MetaLevel::swap`).
-#[derive(Debug)]
+/// The models of a level as a strategy swaps them in, decision by decision
+/// in time order: at each, the latest valid then, read from its stores as an
+/// `M` and checked against the strategy before use, the meta's model or the
+/// sides' pair. One failing a check is refused, logged as an error, and the
+/// current one kept; it is not read again. A model set hands it out
+/// (`ModelSet::pairs`, `MetaLevel::swap`).
 pub struct Swap<M> {
-    store: ModelStore,
-    /// The feature names a model must carry, in order.
-    feature_names: Vec<String>,
-    /// The fingerprint a model must carry.
-    fingerprint: String,
-    /// How a model is loaded and checked.
-    load: Load<M>,
+    /// The model valid from a time, read and checked.
+    read_at: Box<dyn Fn(Timestamp) -> anyhow::Result<M>>,
     /// The model in use, and its valid-from.
     current: Option<(Timestamp, M)>,
     /// The valid-from of the last model read, in use or refused.
@@ -733,42 +777,24 @@ pub struct Swap<M> {
 }
 
 impl<M> Swap<M> {
-    /// Swaps in the models of `store` for a strategy of `feature_names`
-    /// and `fingerprint`, each loaded and checked by `load`; none in use
-    /// yet.
-    const fn new(
-        store: ModelStore,
-        feature_names: Vec<String>,
-        fingerprint: String,
-        load: Load<M>,
-    ) -> Self {
+    /// Swaps in the models `read_at` reads and checks, by their valid-from;
+    /// none in use yet.
+    fn new(read_at: impl Fn(Timestamp) -> anyhow::Result<M> + 'static) -> Self {
         Self {
-            store,
-            feature_names,
-            fingerprint,
-            load,
+            read_at: Box::new(read_at),
             current: None,
             read: None,
         }
     }
 
-    #[must_use]
-    pub const fn store(&self) -> &ModelStore {
-        &self.store
-    }
-
     /// The model in use at `now`, and its valid-from, among the models
-    /// valid from `valid_froms`, the store's list in order: the latest
+    /// valid from `valid_froms`, the stores' list in order: the latest
     /// valid then, swapped in if not read yet, unless it fails its checks.
     pub fn at(&mut self, now: Timestamp, valid_froms: &[Timestamp]) -> Option<(Timestamp, &M)> {
         let latest = valid_froms.iter().rfind(|&&time| time <= now).copied();
         if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
             self.read = Some(latest);
-            match self
-                .store
-                .read(latest)
-                .and_then(|stored| (self.load)(&stored, &self.feature_names, &self.fingerprint))
-            {
+            match (self.read_at)(latest) {
                 Ok(model) => {
                     log::info!("the model valid from {latest} in use from {now}");
                     self.current = Some((latest, model));
@@ -781,6 +807,16 @@ impl<M> Swap<M> {
         self.current
             .as_ref()
             .map(|(valid_from, model)| (*valid_from, model))
+    }
+}
+
+/// A swap reads as the model in use and the valid-from last read.
+impl<M: fmt::Debug> fmt::Debug for Swap<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Swap")
+            .field("current", &self.current)
+            .field("read", &self.read)
+            .finish_non_exhaustive()
     }
 }
 
