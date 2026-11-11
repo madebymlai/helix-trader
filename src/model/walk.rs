@@ -23,22 +23,22 @@
 //! trains nothing. A train that kept a model's current one published none,
 //! so the next backtest trains at that time again.
 //! The run then trades on the stores as they are: at each decision, the
-//! latest model of each side valid then (`handle`).
+//! latest pair of the sides valid then (`handle`).
 //!
 //! After the run (`WalkForward::scores`), each side's model is scored on
 //! each decision's row of the dataset in the span against its side's
-//! label, with the model the strategy used at it: the latest valid then,
-//! a model failing its checks refused and the current one kept, as the
-//! handle does, its probabilities calibrated. Every model is out of
-//! sample on its rows: trained at its valid-from on rows settled by then.
-//! Beside each, on the very rows it decided, its own baseline, as its
-//! manifest has it (`store::ModelManifest::baseline`): the training mean
-//! of the labels of the rows that model was fitted and calibrated on, at
-//! its valid-from. A period whose train was refused so scores the earlier
-//! model in use beside that model's baseline, a period of models
-//! published off the schedule each row beside the baseline of the model
-//! that decided it, and a row decided with no model, as a side's never
-//! retrained with none in use at the start, has no baseline either. The
+//! label, with the model the strategy used at it: the side's of the latest
+//! pair valid then, a pair with a model failing its checks refused and the
+//! current one kept, as the handle does, its probabilities calibrated. Every
+//! model is out of sample on its rows: trained at its valid-from on rows
+//! settled by then. Beside each, on the very rows it decided, its own
+//! baseline, as its manifest has it (`store::ModelManifest::baseline`): the
+//! training mean of the labels of the rows that model was fitted and
+//! calibrated on, at its valid-from. A period whose train was refused so
+//! scores the earlier model in use beside that model's baseline, a period of
+//! models published off the schedule each row beside the baseline of the
+//! model that decided it, and a row decided with no pair, as before the
+//! sides' first, has no baseline either. The
 //! AUC and log loss (`score`) of both are given per side, per retrain
 //! period and over the span, on all the side's rows with a model, and what was
 //! earned there (`holdout::Earnings`), beside every trade of those rows, its
@@ -226,24 +226,31 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
+        let listed = self.models.valid_froms()?;
         let picked = self.picked(&rows)?;
         let mut scores = Scores {
             long: None,
             short: None,
             meta: None,
         };
+        let pairs = listed.pairs();
         for level in self.models.sides() {
             let side = level.side();
             let examples: Vec<Example> =
                 rows.iter().map(|row| Example::of_side(row, side)).collect();
             let side_scores = score(
                 &times,
-                start,
-                end,
+                (start, end),
                 &examples,
-                level.swap(),
-                |model, row, example| {
-                    Ok((model.predict(&example.features)?, picked[row] == Some(side)))
+                &pairs,
+                self.models.pairs(),
+                |pair, row, example| {
+                    let model = pair.side(side);
+                    Ok(Judged {
+                        probability: model.predict(&example.features)?,
+                        baseline: model.baseline(),
+                        taken: picked[row] == Some(side),
+                    })
                 },
             )?;
             match side {
@@ -251,18 +258,22 @@ impl WalkForward {
                 Side::Short => scores.short = Some(side_scores),
             }
         }
-        if let Some(level) = self.models.meta() {
+        if let (Some(level), Some(valid_froms)) = (self.models.meta(), &listed.meta) {
             let threshold = Threshold(level.config().threshold);
             let examples = meta::examples(&self.models, &rows.iter().collect::<Vec<_>>())?;
             scores.meta = Some(score(
                 &times,
-                start,
-                end,
+                (start, end),
                 &examples,
+                valid_froms,
                 level.swap(),
                 |model, _, example| {
                     let probability = model.predict(&example.features)?;
-                    Ok((probability, threshold.takes(probability)))
+                    Ok(Judged {
+                        probability,
+                        baseline: model.baseline(),
+                        taken: threshold.takes(probability),
+                    })
                 },
             )?);
         }
@@ -270,8 +281,8 @@ impl WalkForward {
     }
 
     /// The side picked on each of `rows`, in time order, by the decision
-    /// itself, before any meta: on the row's units, among the models in use
-    /// then (`DecidingModels::pick`).
+    /// itself, before any meta: on the row's units, among the sides of the
+    /// pair in use then (`DecidingModels::pick`).
     fn picked(&self, rows: &[DatasetRow]) -> anyhow::Result<Vec<Option<Side>>> {
         let mut models = DecidingModels::new(&self.models)?;
         rows.iter()
@@ -284,20 +295,29 @@ impl WalkForward {
     }
 }
 
+/// What the model in use on an example says of it.
+struct Judged {
+    /// Its calibrated probability.
+    probability: f64,
+    /// Its baseline's (`Baselined`).
+    baseline: f64,
+    /// Whether the example's trade was taken.
+    taken: bool,
+}
+
 /// The scores over `[start, end)`, retrained at `times`, of the models
-/// `models` swaps in on `examples`, in time order, each beside its own baseline
-/// on the rows it decided. `judge` gives, of the model in use on an example, at
-/// its position in `examples`, its calibrated probability and whether the
-/// example's trade was taken.
-fn score<M: Baselined>(
+/// `models` swaps in on `examples`, in time order, among those valid from
+/// `valid_froms`, each beside its own baseline on the rows it decided.
+/// `judge` gives what the model in use on an example, at its position in
+/// `examples`, says of it.
+fn score<M>(
     times: &[Timestamp],
-    start: Timestamp,
-    end: Timestamp,
+    (start, end): (Timestamp, Timestamp),
     examples: &[Example],
+    valid_froms: &[Timestamp],
     mut models: Swap<M>,
-    judge: impl Fn(&M, usize, &Example) -> anyhow::Result<(f64, bool)>,
+    judge: impl Fn(&M, usize, &Example) -> anyhow::Result<Judged>,
 ) -> anyhow::Result<ModelScores> {
-    let valid_froms = models.store().valid_froms()?;
     let (mut model_rows, mut baseline_rows, mut model_trades) = (vec![], vec![], vec![]);
     let mut periods = vec![];
     for (i, &at) in times.iter().enumerate() {
@@ -311,12 +331,16 @@ fn score<M: Baselined>(
             .filter(|(_, example)| from_ns <= example.ts_event && example.ts_event < to_ns)
         {
             if let Some((valid_from, model)) =
-                models.at(Timestamp::from(example.ts_event), &valid_froms)
+                models.at(Timestamp::from(example.ts_event), valid_froms)
             {
                 period_models.insert(valid_from);
-                let (probability, taken) = judge(model, row, example)?;
+                let Judged {
+                    probability,
+                    baseline,
+                    taken,
+                } = judge(model, row, example)?;
                 by_model.push((probability, example.label));
-                by_baseline.push((model.baseline(), example.label));
+                by_baseline.push((baseline, example.label));
                 trades.push((taken, example.trade));
             }
         }
@@ -1047,11 +1071,11 @@ mod tests {
         }
     }
 
-    /// The short's first model is the 8th's. On the 7th the long decides alone,
-    /// and all three rows clear: a win and two losses, -1/3. On the 8th the
-    /// models pick as in `opposed_scores`.
+    /// The short's first model is the 8th's, the long's of the 7th having none
+    /// beside it: on the 7th no pair decides, and neither side has a row
+    /// scored or a trade. On the 8th the pair picks as in `opposed_scores`.
     #[test]
-    fn a_side_with_no_model_yet_leaves_the_other_to_decide_alone() {
+    fn a_side_with_no_model_beside_it_decides_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         build(dir.path());
@@ -1063,9 +1087,13 @@ mod tests {
         let scores = walk.scores(seventh, at("2026-01-09T00:00:00Z")).unwrap();
 
         let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
-        trades_are(long.periods[0].earnings.taken, 3, -1.0 / 3.0);
-        assert_eq!(short.periods[0].earnings.taken.count, 0, "{short:?}");
-        assert_eq!(short.periods[0].earnings.every.count, 0, "{short:?}");
+        for side in [&long, &short] {
+            let first = &side.periods[0];
+            assert!(first.models.is_empty(), "{first:?}");
+            assert_eq!(first.model.rows, 0, "{first:?}");
+            assert_eq!(first.earnings.taken.count, 0, "{first:?}");
+            assert_eq!(first.earnings.every.count, 0, "{first:?}");
+        }
         trades_are(long.periods[1].earnings.taken, 1, 1.0);
         trades_are(short.periods[1].earnings.taken, 1, -1.0);
     }
@@ -1196,23 +1224,33 @@ mod tests {
         trades_are(scores.short.unwrap().earnings.taken, 2, 0.0);
     }
 
+    /// The pair of the 8th has a long of another fingerprint, refused as it
+    /// loads: the pair is, and on the 8th the pair of the 7th is scored, its
+    /// short too, never the 8th's short beside the 7th's long.
     #[test]
     fn a_model_failing_its_checks_is_not_scored_and_the_current_one_is() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         build(dir.path());
+        let eighth = at("2026-01-08T00:00:00Z");
         publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
         store(dir.path(), &config(), Side::Long)
-            .publish(&model(at("2026-01-08T00:00:00Z"), "f".repeat(64), 0.5))
+            .publish(&model(eighth, "f".repeat(64), 0.5))
+            .unwrap();
+        let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
+        store(dir.path(), &config(), Side::Short)
+            .publish(&model(eighth, fingerprint, 0.5))
             .unwrap();
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
-        let periods = &scores.long.unwrap().periods;
-        assert_eq!(periods[1].models, [at("2026-01-07T00:00:00Z")]);
-        assert_eq!(periods[1].model.rows, 2);
+        for side in [scores.long.unwrap(), scores.short.unwrap()] {
+            let second = &side.periods[1];
+            assert_eq!(second.models, [at("2026-01-07T00:00:00Z")], "{second:?}");
+            assert_eq!(second.model.rows, 2, "{second:?}");
+        }
     }
 
     /// A baseline is a model's: the 7th's three rows, decided with none,
@@ -1237,11 +1275,11 @@ mod tests {
         assert_eq!((long.model.rows, long.baseline.rows), (2, 2));
     }
 
-    /// A long model published off the schedule, valid from 12:00 of the
-    /// 7th, its baseline 1/4: the period of the 7th uses the 7th's model,
-    /// its baseline 2/3, at 04:00 and 08:00, a win and a loss, and the
-    /// later one at 12:00, a loss, each row scored beside the baseline of
-    /// the model that decided it, `-(ln 2/3 + ln 1/3 + ln 3/4) / 3`.
+    /// A pair published off the schedule, valid from 12:00 of the 7th, its
+    /// long's baseline 1/4: the period of the 7th uses the 7th's long, its
+    /// baseline 2/3, at 04:00 and 08:00, a win and a loss, and the later one
+    /// at 12:00, a loss, each row scored beside the baseline of the model
+    /// that decided it, `-(ln 2/3 + ln 1/3 + ln 3/4) / 3`.
     #[test]
     fn a_period_scores_each_row_beside_the_baseline_of_the_model_that_decided_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1251,9 +1289,15 @@ mod tests {
             publish(dir.path(), &config(), at);
         }
         let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
-        store(dir.path(), &config(), Side::Long)
-            .publish(&model(at("2026-01-07T12:00:00Z"), fingerprint, 0.25))
-            .unwrap();
+        for (side, baseline) in [(Side::Long, 0.25), (Side::Short, 0.75)] {
+            store(dir.path(), &config(), side)
+                .publish(&model(
+                    at("2026-01-07T12:00:00Z"),
+                    fingerprint.clone(),
+                    baseline,
+                ))
+                .unwrap();
+        }
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -1898,11 +1942,12 @@ Short model scores, out of sample, over the span
         close(period.baseline.log_loss, 0.405_465);
     }
 
-    /// Never retrained, the long's model of the 7th is in use at a backtest
-    /// from the 8th, the short has none and its train there is refused:
-    /// with no model, the short's rows have no baseline either.
+    /// Never retrained, the long's model of the 7th has no short beside it,
+    /// so no pair is in use at a backtest from the 8th: its train there is
+    /// refused, and the backtest, which would trade nothing, is refused too,
+    /// naming the sides.
     #[test]
-    fn a_backtest_never_retrained_has_no_baseline_for_a_side_with_no_model_in_use() {
+    fn a_backtest_never_retrained_with_a_side_alone_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), never());
         let fingerprint = dataset(dir.path(), &never()).fingerprint().to_string();
@@ -1914,16 +1959,17 @@ Short model scores, out of sample, over the span
                 trained_baseline(Side::Long, seventh),
             ))
             .unwrap();
-        let span = ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z");
-        let (_, trained) = prepared(dir.path(), &walk, span, None).unwrap();
-        assert_eq!(trained, [at(span.0)]);
 
-        let scores = walk.scores(at(span.0), at(span.1)).unwrap();
+        let err = prepared(
+            dir.path(),
+            &walk,
+            ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
 
-        let short = &scores.short.unwrap().periods[0];
-        assert!(short.models.is_empty(), "{short:?}");
-        assert_eq!((short.model.rows, short.baseline.rows), (0, 0));
-        assert_eq!(short.baseline.log_loss, None);
+        assert!(err.contains("no side has a model in use"), "{err}");
     }
 
     /// Retrained, the models of the 7th are in use over both periods, the

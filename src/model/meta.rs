@@ -13,16 +13,16 @@
 //! long and a short at every decision, so the row has the trade of either side, and
 //! the meta's rows need no replay of their own.
 //!
-//! The sides' rows are their dataset's, each decided by the models of
-//! each side in use at it through the code a strategy decides through
+//! The sides' rows are their dataset's, each decided by the pair of the
+//! sides in use at it through the code a strategy decides through
 //! (`deciding::DecidingModels`), of the strategy's model set
 //! (`store::ModelSet`) as its stores are when the rows are made, listed
 //! once, a read error failing them: the latest valid then, trained on
 //! rows settled by its valid-from, so every decision is out of sample; the
 //! worth of each side's stop is the row's own (`dataset::DatasetRow::units`).
-//! A row before the sides' first model has no decision: the meta's rows
-//! start there at the earliest, and with no side's model before a train
-//! the meta waits (`schedule::Schedule::plan`). Never retrained, with
+//! A row before the sides' first pair has no decision: the meta's rows
+//! start there at the earliest, and with no pair of the sides before a
+//! train the meta waits (`schedule::Schedule::plan`). Never retrained, with
 //! neither in use, one train fits the sides as of the meta's window before
 //! it and the meta at it, on those sides' decisions over the window: the
 //! meta filters the very side models it learned from. A row no side is
@@ -42,8 +42,8 @@ use super::{
 /// each row a side is picked on, its features with that side and its
 /// probability, its label whether the trade on that side won, with the trade
 /// and its unit. The side picked on a row is the one
-/// `DecidingModels` picks, on the row's units, among the models of `models` in
-/// use then, as its stores list them now, none before the first.
+/// `DecidingModels` picks, on the row's units, among the sides of the pair of
+/// `models` in use then, as its stores list them now, none before the first.
 ///
 /// # Errors
 ///

@@ -99,8 +99,8 @@ pub fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, each
-/// side traded from an expected net P&L of nought, the baseline learner.
+/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, the
+/// long traded from an expected net P&L of nought, the baseline learner.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -120,12 +120,23 @@ pub fn config() -> ModelConfig {
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(0.0),
-            short: Some(0.0),
+            short: None,
         })
         .min_pnl(0.0)
         .min_trades(1)
         .learner(LearnerConfig::Baseline {})
         .build()
+}
+
+/// `config`, the short traded too, from nought.
+pub fn both_sides() -> ModelConfig {
+    ModelConfig {
+        margins: Margins {
+            long: Some(0.0),
+            short: Some(0.0),
+        },
+        ..config()
+    }
 }
 
 /// The meta model taking a trade from 0.6, sizing it if `size`.
