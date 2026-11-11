@@ -42,6 +42,16 @@
 //! has no distance, so no ATR: nothing of it is built, checked or
 //! subscribed to.
 //!
+//! A feature formed over the bracket (`model::features::OverBracket`) reads
+//! its width (`BracketWidth`, of `TargetConfig::width`): the distance of a
+//! bracket whose take profit and stop are as far, as the setter computes it
+//! (`Distance::length`) before putting the exits on ticks, on the ATR the
+//! setter runs on (`TargetSetter::sharing`), one ATR read by both; and the
+//! decisions it is read at, of the target's cadence, and its time limit.
+//! The handle reads a decision's features and sets its target in the one
+//! decision event, so the width a feature reads then is the one the
+//! target is set at.
+//!
 //! Each order's client order id names its decision, side and leg,
 //! `D{n}-{L|S}-{E|TP|SL}`: the decision's number in the run, `L` long and
 //! `S` short, the entry, take profit or stop. The outcome of a target is
@@ -116,13 +126,13 @@ use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
 use super::{
-    decide::{DecisionRule, FeatureRow},
+    decide::{self, DecisionRule, FeatureRow},
     features::Fingerprint,
 };
 use crate::strategy::{
     AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
     orders::{self, Bracket, Exits, OrderIds, Trade},
-    warmup::Warmup,
+    warmup::{self, Warmup},
 };
 
 /// The target of each decision, from the strategy's config: on one
@@ -551,6 +561,38 @@ impl TargetConfig {
     pub const fn settles_within(&self) -> SignedDuration {
         self.spec.limit
     }
+
+    /// The width of its bracket at the decisions on `rule` of a strategy
+    /// of `requirements` (see `BracketWidth`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target has no bracket, its take profit and
+    /// stop are not one distance, or its ATR has no bars (see `atr_bars`).
+    pub fn width(
+        &self,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+    ) -> anyhow::Result<BracketWidth> {
+        let Some(bracket) = self.spec.bracket else {
+            bail!("the target has no bracket to have a width");
+        };
+        ensure!(
+            bracket.take_profit == bracket.stop,
+            "the target's take profit, {}, and stop, {}, are not one distance: its bracket has \
+             no one width",
+            bracket.take_profit,
+            bracket.stop
+        );
+        let atr = self.atr_bars(rule, requirements)?;
+        Ok(BracketWidth {
+            distance: bracket.stop,
+            atr: atr.map(TargetAtr::new).transpose()?.map(Rc::new),
+            limit: self.spec.limit,
+            rule,
+            delay: warmup::bar_build_delay(&requirements.bar_types),
+        })
+    }
 }
 
 impl Target {
@@ -627,9 +669,7 @@ fn exits(
     reference: Decimal,
     atr: Option<f64>,
 ) -> anyhow::Result<Option<PerSide<Bracket>>> {
-    let atr = atr
-        .map(|atr| Decimal::try_from(atr).with_context(|| format!("the ATR {atr}")))
-        .transpose()?;
+    let atr = atr.map(atr_decimal).transpose()?;
     let take_profit = bracket.take_profit.length(reference, atr);
     let stop = bracket.stop.length(reference, atr);
     let of = |side: Side| -> anyhow::Result<Bracket> {
@@ -647,6 +687,15 @@ fn exits(
         bracket.take_profit.as_decimal() != reference && bracket.stop_loss.as_decimal() != reference
     });
     Ok(off_reference.then_some(exits))
+}
+
+/// The ATR's value `atr` as the distances take it.
+///
+/// # Errors
+///
+/// Returns an error if it is no decimal (not finite).
+fn atr_decimal(atr: f64) -> anyhow::Result<Decimal> {
+    Decimal::try_from(atr).with_context(|| format!("the ATR {atr}"))
 }
 
 /// Of `sources`, the longest bars whose length `cadence` is a whole
@@ -700,14 +749,14 @@ fn nearest_tick(
 /// The average true range of a target, registered with the strategy's
 /// Nautilus indicators for the bars of its bar type.
 struct TargetAtr {
-    bar_type: BarType,
+    bars: AtrBars,
     indicator: RefCell<AverageTrueRange>,
 }
 
 impl TargetAtr {
     fn new(bars: AtrBars) -> anyhow::Result<Self> {
         Ok(Self {
-            bar_type: bars.bar_type,
+            bars,
             indicator: RefCell::new(bars.args.build()?),
         })
     }
@@ -725,10 +774,86 @@ impl TargetAtr {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let shared = Rc::clone(self) as SharedActorIndicator;
+        let bar_type = self.bars.bar_type;
         actor
             .core_mut()
-            .register_indicator_for_bars(self.bar_type, shared);
-        actor.subscribe_bars(self.bar_type, None, None);
+            .register_indicator_for_bars(bar_type, shared);
+        actor.subscribe_bars(bar_type, None, None);
+    }
+
+    /// `warmup` building its bars and handing them to it (see
+    /// `TargetSetter::warmed`).
+    fn warmed(self: &Rc<Self>, warmup: Warmup) -> Warmup {
+        warmup.building(self.bars.bar_type, Rc::clone(self) as SharedActorIndicator)
+    }
+}
+
+/// The width of a target's bracket whose take profit and stop are one
+/// distance (`TargetConfig::width`), as a feature formed over the bracket
+/// reads it (`model::features::OverBracket`): the distance from the
+/// decision's price as the setter computes it (`Distance::length`), before
+/// the exits go on ticks. Its ATR, if the distance is in ATRs, is the one
+/// the target's setter runs on (`TargetSetter::sharing`), so read at a
+/// decision, from `Feature::value`, it is the width the decision's target
+/// is set at. It is read at the decisions of the target's cadence
+/// (`decision`).
+pub struct BracketWidth {
+    distance: Distance,
+    atr: Option<Rc<TargetAtr>>,
+    /// The target's time limit.
+    limit: SignedDuration,
+    rule: DecisionRule,
+    /// How long after their grid times the decisions fire, before their
+    /// margin: the node's bar build delay of the strategy's bar types.
+    delay: SignedDuration,
+}
+
+impl BracketWidth {
+    /// Whether it has a length: its ATR, if any, initialized.
+    #[must_use]
+    pub fn initialized(&self) -> bool {
+        self.atr.as_ref().is_none_or(|atr| atr.value().is_some())
+    }
+
+    /// The width at `reference`, the decision's price, in prices; none while
+    /// its ATR is not initialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `reference` is not finite.
+    #[must_use]
+    pub fn length(&self, reference: f64) -> Option<f64> {
+        let atr = match &self.atr {
+            None => None,
+            Some(atr) => Some(atr_decimal(atr.value()?).expect("the ATR is finite")),
+        };
+        let reference = Decimal::try_from(reference).expect("a finite reference price");
+        let length = self.distance.length(reference, atr);
+        Some(length.to_f64().expect("a length in f64"))
+    }
+
+    /// The target's time limit: how long after its decision a trade on it
+    /// closes.
+    #[must_use]
+    pub const fn limit(&self) -> SignedDuration {
+        self.limit
+    }
+
+    /// The grid time of the decision that first reads what is made at `ts`
+    /// (`decide::decision_of`), whose width this is then.
+    #[must_use]
+    pub fn decision(&self, ts: UnixNanos) -> UnixNanos {
+        decide::decision_of(self.rule, self.delay, ts)
+    }
+}
+
+impl Debug for BracketWidth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BracketWidth")
+            .field("distance", &self.distance)
+            .field("atr", &self.atr.as_ref().map(|atr| atr.bars))
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
     }
 }
 
@@ -746,7 +871,7 @@ pub struct TargetSetter {
 
 impl TargetSetter {
     /// The target of `config`, for decisions on `rule` of a strategy of
-    /// `requirements`.
+    /// `requirements`, on an ATR of its own.
     ///
     /// # Errors
     ///
@@ -757,12 +882,41 @@ impl TargetSetter {
         rule: DecisionRule,
         requirements: &DataRequirements,
     ) -> anyhow::Result<Self> {
-        let atr = config.atr_bars(rule, requirements)?;
+        Self::sharing(config, rule, requirements, None)
+    }
+
+    /// `new`, on the ATR of `width`, if given, the width of the target's
+    /// bracket the strategy's features read (`TargetConfig::width`): one
+    /// ATR, which `start` and `warmed` feed, read by both.
+    ///
+    /// # Errors
+    ///
+    /// As `new`, or if `width`'s ATR is not the one the target runs: of
+    /// other arguments or bars, or none where the target has one or the
+    /// reverse.
+    pub fn sharing(
+        config: &TargetConfig,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+        width: Option<&BracketWidth>,
+    ) -> anyhow::Result<Self> {
+        let bars = config.atr_bars(rule, requirements)?;
+        let atr = match width {
+            None => bars.map(TargetAtr::new).transpose()?.map(Rc::new),
+            Some(width) => {
+                let shared = width.atr.as_ref().map(|atr| atr.bars);
+                ensure!(
+                    shared == bars,
+                    "the width the features read has the ATR {shared:?}, the target {bars:?}"
+                );
+                width.atr.clone()
+            }
+        };
         Ok(Self {
             instrument_id: config.instrument_id,
             quantity: config.quantity,
             spec: config.spec,
-            atr: atr.map(TargetAtr::new).transpose()?.map(Rc::new),
+            atr,
         })
     }
 
@@ -790,7 +944,7 @@ impl TargetSetter {
     #[must_use]
     pub fn warmed(&self, warmup: Warmup) -> Warmup {
         match &self.atr {
-            Some(atr) => warmup.building(atr.bar_type, Rc::clone(atr) as SharedActorIndicator),
+            Some(atr) => atr.warmed(warmup),
             None => warmup,
         }
     }
@@ -813,7 +967,7 @@ impl TargetSetter {
             None => None,
             Some(atr) => match atr.value() {
                 Some(value) => Some(value),
-                None => return Ok(Err(NoTarget::ColdAtr(atr.bar_type))),
+                None => return Ok(Err(NoTarget::ColdAtr(atr.bars.bar_type))),
             },
         };
         let instrument_id = self.instrument_id;
@@ -947,7 +1101,7 @@ impl ActorIndicator for TargetAtr {
     /// reads the bars of its bar type alone, of the same aggregation
     /// source.
     fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
-        if bar.bar_type.standard() == self.bar_type.standard() {
+        if bar.bar_type.standard() == self.bars.bar_type.standard() {
             self.indicator.borrow_mut().handle_bar(bar);
         }
         Ok(())
@@ -1008,9 +1162,24 @@ impl Targets {
         rule: DecisionRule,
         requirements: &DataRequirements,
     ) -> anyhow::Result<Rc<Self>> {
+        Self::sharing(config, rule, requirements, None)
+    }
+
+    /// `new`, the setter on the ATR of `width`, if given
+    /// (`TargetSetter::sharing`).
+    ///
+    /// # Errors
+    ///
+    /// As `new`, or if the setter refuses `width`.
+    pub fn sharing(
+        config: TargetConfig,
+        rule: DecisionRule,
+        requirements: &DataRequirements,
+        width: Option<&BracketWidth>,
+    ) -> anyhow::Result<Rc<Self>> {
         config.validate(rule, requirements)?;
         Ok(Rc::new(Self {
-            setter: TargetSetter::new(&config, rule, requirements)?,
+            setter: TargetSetter::sharing(&config, rule, requirements, width)?,
             config,
             state: RefCell::new(State::default()),
         }))

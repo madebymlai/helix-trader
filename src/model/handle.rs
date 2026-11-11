@@ -96,6 +96,13 @@
 //! dataset run sets there. A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
 //!
+//! Features over the bracket's width (`features::OverBracket`) read the
+//! width the handle builds the setter on (`FeatureSet::bracket_width`,
+//! `TargetSetter::sharing`): its ATR is the target's, started and warmed
+//! with it, and `decide` reads the features and sets the target in the one
+//! decision event, with no data between, so a row reads the width its
+//! target is set at.
+//!
 //! The handle does not retrain: live, the retrains of a strategy are a
 //! Nautilus actor of their own beside it (`launcher::RetrainActor`), and
 //! the model a retrain publishes, or `train --at`, is the handle's from its
@@ -282,7 +289,12 @@ impl ModelHandle {
                 ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
             Ok(Deciding {
                 models: RefCell::new(DecidingModels::new(&models)?),
-                target: TargetSetter::new(&config.target, config.decision, requirements)?,
+                target: TargetSetter::sharing(
+                    &config.target,
+                    config.decision,
+                    requirements,
+                    features.bracket_width(),
+                )?,
                 instrument_id: config.target.instrument_id,
                 quantity: config.target.quantity,
             })
@@ -340,7 +352,12 @@ impl ModelHandle {
                 Serving::Deciding(Box::new(deciding(&models, &venue)?))
             }
             Mode::Dataset { rows } => Serving::Dataset {
-                targets: Targets::new(target.clone(), rule, requirements)?,
+                targets: Targets::sharing(
+                    target.clone(),
+                    rule,
+                    requirements,
+                    features.bracket_width(),
+                )?,
                 rows,
             },
         };
@@ -578,13 +595,14 @@ mod tests {
     use super::*;
     use crate::model::{
         config::{Margins, Sizing},
+        decide::FeatureRow,
         deciding::testing::{
             AUD, GOLD, STRATEGY, at, baseline, baseline_for, c, config, features, gold, meta,
             meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
         },
-        features::testing::last_mid,
+        features::testing::{last_mid, mid_over},
         schedule::Retrain,
-        targets::{BracketSpec, DEFAULT_ATR, Distance, Side, Target},
+        targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target},
     };
     use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
     use rust_decimal::Decimal;
@@ -1303,6 +1321,123 @@ mod tests {
             first_decision(live, COMPOSITE),
             at("2026-10-22T12:00:05.010Z")
         );
+    }
+
+    /// `config` with a take profit and a stop 1 ATR of one hourly bar away,
+    /// from 0.30 USD on the long, and the width of that bracket.
+    fn width_config() -> (ModelConfig, Rc<BracketWidth>) {
+        let mut config = bracket_config(10);
+        config.target.spec.bracket = Some(BracketSpec {
+            take_profit: Distance::Atr(Decimal::ONE),
+            stop: Distance::Atr(Decimal::ONE),
+            atr: Some(AtrArgs {
+                period: 1,
+                ..DEFAULT_ATR
+            }),
+        });
+        let width = config
+            .target
+            .width(config.decision, &requirements())
+            .unwrap();
+        (config, Rc::new(width))
+    }
+
+    /// The hourly bar of AUD/USD's mids closing at `close_at`, from `low`
+    /// to `high`, opening and closing at 0.70000.
+    fn mid_bar(close_at: &str, low: &str, high: &str) -> Bar {
+        hour_bar(close_at, ["0.70000", high, low, "0.70000"])
+    }
+
+    /// The rows the decisions of `STRATEGY` publish from now on.
+    fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
+        let rows = Rc::new(RefCell::new(vec![]));
+        let sink = Rc::clone(&rows);
+        let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
+            if let Some(row) = data.data.as_any().downcast_ref::<FeatureRow>() {
+                sink.borrow_mut().push(row.clone());
+            }
+        });
+        let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
+        msgbus::subscribe_any(topic.into(), handler, None);
+        rows
+    }
+
+    /// Worked by hand. The features read the mid over the width of the
+    /// bracket, 1 ATR of one hourly bar a side, and the long's model of 0.8
+    /// trades. At 12:00, after a bar from 0.69900 to 0.70100, the ATR is
+    /// 0.00200: the row reads the mid of 0.70000 over it, 350, and the
+    /// long's stop is 0.00200 below the mid, 0.69800. At 13:00, after a bar
+    /// from 0.69800 to 0.70200, it is 0.00400: the row reads 175, the stop
+    /// 0.69600. Each decision's row reads the width its trade is set at.
+    #[test]
+    fn a_decisions_row_reads_the_width_its_trade_is_set_at() {
+        let models = tempfile::tempdir().unwrap();
+        let (config, width) = width_config();
+        let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
+        let mut long = baseline_for(&features, &config, Side::Long, "2026-10-22T00:00:00Z", 8);
+        long.manifest.feature_names = features.names().to_vec();
+        side_store(models.path(), &features, &config, Side::Long)
+            .publish(&long)
+            .unwrap();
+        let (mut probe, clock) = registered(at("2026-10-22T12:00:00Z"));
+        warm(&features, probe.clock().timestamp_ns());
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            Rc::clone(&features),
+            &config,
+            &requirements(),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap();
+        handle.start(&mut probe).unwrap();
+        let rows = published();
+        let stop =
+            |decision: Option<Decision>| decision.and_then(|d| d.bracket).map(|b| b.stop_loss);
+
+        probe.handle_bar(&mid_bar("2026-10-22T12:00:00Z", "0.69900", "0.70100"));
+        let noon = stop(handle.decide(&mut probe).unwrap());
+        advance(&features, &clock, "2026-10-22T13:00:00Z");
+        probe.handle_bar(&mid_bar("2026-10-22T13:00:00Z", "0.69800", "0.70200"));
+        let one = stop(handle.decide(&mut probe).unwrap());
+
+        let read: Vec<f64> = rows.borrow().iter().map(|row| row.features[0]).collect();
+        assert_eq!(read.len(), 2, "{read:?}");
+        assert!((read[0] - 350.0).abs() < 1e-9, "{read:?}");
+        assert!((read[1] - 175.0).abs() < 1e-9, "{read:?}");
+        assert_eq!(
+            (noon, one),
+            (Some(Price::from("0.69800")), Some(Price::from("0.69600")))
+        );
+    }
+
+    /// A dataset run's targets run on the ATR of the width the features
+    /// read: started, the handle has the target's bars, AUD/USD's hourly
+    /// mids, reach it, and nothing else does. One bar from 0.699 to 0.701
+    /// warms an ATR of one bar.
+    #[test]
+    fn a_dataset_runs_targets_run_on_the_atr_of_the_features_width() {
+        let (config, width) = width_config();
+        let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
+        let (mut probe, _) = registered(at("2026-10-22T11:30:00Z"));
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config,
+            &requirements(),
+            Mode::Dataset {
+                rows: SettledRows::default(),
+            },
+        )
+        .unwrap();
+        handle.start(&mut probe).unwrap();
+        assert!(!width.initialized());
+
+        probe.handle_bar(&mid_bar("2026-10-22T11:00:00Z", "0.69900", "0.70100"));
+
+        assert!(width.initialized());
     }
 
     #[test]

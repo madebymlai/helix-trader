@@ -70,6 +70,16 @@
 //! its features read before a decision, such as the strategy's: a dataset
 //! build replays it before its first day (`dataset`).
 //!
+//! A feature over the target's bracket (`OverBracket`, declared with
+//! `FeatureSetBuilder::over_bracket`) reads quotes, and is handed the
+//! bracket's width (`targets::BracketWidth`) as it is built: the width at
+//! the decision its value is for, the decision its quotes are read at, and
+//! the target's time limit. The set's features read one width, which the
+//! model handle has the target's setter run on (`bracket_width`), so the
+//! width's ATR is the target's, with no series of the strategy's. The width
+//! is the target's, in the fingerprint of a dataset beside the set's
+//! (`targets::fingerprint`).
+//!
 //! The fingerprint covers what makes the features what they are: their
 //! names in order, the series each reads (which the name of a feature
 //! named after its table alone, or of a raw feature, does not tell), the
@@ -108,6 +118,7 @@ use nautilus_model::{
 };
 use sha2::{Digest, Sha256};
 
+use super::targets::BracketWidth;
 use crate::{
     rolls::{Transition, front},
     strategy::{
@@ -161,6 +172,14 @@ impl<T: MovingAverage> Feature for T {
     }
 }
 
+/// A feature formed over the target's bracket: its value at a decision is
+/// over the bracket's width there, which it reads from the width it is
+/// handed as it is built (`FeatureSetBuilder::over_bracket`).
+pub trait OverBracket: Feature {
+    /// Reads its values over `width` from now on.
+    fn over(&mut self, width: Rc<BracketWidth>);
+}
+
 /// How a raw feature reads its value from a custom data point.
 type Read = Box<dyn Fn(&CustomData) -> f64>;
 
@@ -190,6 +209,8 @@ struct Reading {
 pub struct FeatureSet {
     names: Vec<String>,
     slots: RefCell<Vec<Slot>>,
+    /// The width the features over the bracket read, if any.
+    width: Option<Rc<BracketWidth>>,
     /// The time of the latest update of each instrument a feature read.
     updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
     warmup: SignedDuration,
@@ -230,6 +251,8 @@ pub struct FeatureSet {
 pub struct FeatureSetBuilder {
     names: Vec<Name>,
     slots: Vec<Slot>,
+    /// The width the features over the bracket read, if any.
+    width: Option<Rc<BracketWidth>>,
     /// The arguments of each table a feature is built from, by its name,
     /// in canonical form (`IndicatorsConfig::canonical_args`).
     arguments: BTreeMap<&'static str, String>,
@@ -257,6 +280,7 @@ impl FeatureSet {
         FeatureSetBuilder {
             names: vec![],
             slots: vec![],
+            width: None,
             arguments: BTreeMap::new(),
             version: 0,
             warmup: SignedDuration::ZERO,
@@ -360,6 +384,12 @@ impl FeatureSet {
             }
         }
         self.register_contracts(actor);
+    }
+
+    /// The width of the target's bracket its features read, if any: the
+    /// one the target's setter is to run on (`TargetSetter::sharing`).
+    pub(super) fn bracket_width(&self) -> Option<&BracketWidth> {
+        self.width.as_deref()
     }
 
     /// Moves the features reading a root rolled by `roll` (those on its
@@ -722,6 +752,45 @@ impl FeatureSetBuilder {
         })
     }
 
+    /// Declares the feature of `declared`, built of its table in
+    /// `indicators`, on the quotes of `instrument_id`, over the bracket of
+    /// `width`, which it is handed (`OverBracket::over`) and the target's
+    /// setter runs on (`FeatureSet::bracket_width`).
+    ///
+    /// # Panics
+    ///
+    /// As `quotes`, or if a feature declared before reads another width:
+    /// the setter runs on one.
+    #[must_use]
+    pub fn over_bracket<A>(
+        mut self,
+        instrument_id: InstrumentId,
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+        width: &Rc<BracketWidth>,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: OverBracket + 'static,
+    {
+        assert!(
+            self.width
+                .as_ref()
+                .is_none_or(|read| Rc::ptr_eq(read, width)),
+            "features over two widths of the target's bracket: its setter runs on one"
+        );
+        self.width = Some(Rc::clone(width));
+        let table = declared.name();
+        self.arguments
+            .insert(table, indicators.canonical_args(declared));
+        let mut feature = indicators.build(declared);
+        feature.over(Rc::clone(width));
+        self.declare(
+            Name::Table(table),
+            Slot::Quotes(Reading::of(instrument_id), Box::new(feature)),
+        )
+    }
+
     /// Declares a raw feature, named `name`, on the custom data
     /// `type_name` of `instrument_id` (see `strategy::TickSeries`): its
     /// value is the last `read` of a data point, initialized by the first.
@@ -824,6 +893,7 @@ impl FeatureSetBuilder {
         Ok(Rc::new(FeatureSet {
             names,
             slots: RefCell::new(self.slots),
+            width: self.width,
             updates: RefCell::default(),
             warmup: self.warmup,
             fingerprint,
