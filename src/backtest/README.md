@@ -1,6 +1,6 @@
 # Backtesting
 
-Backtest runs one strategy in a Nautilus `BacktestNode` over the configured catalog. See the [root quick start](../../README.md), command `--help`, and [architecture](../../docs/ARCHITECTURE.md) for process constraints. A commission (fixed per order or rate per fill) and starting balance are required; choose values appropriate to the venue and instrument. Seed strategy randomness.
+Backtest runs one strategy in a Nautilus `BacktestNode` over the configured catalog. See the [root quick start](../../README.md), command `--help`, and [architecture](../../docs/ARCHITECTURE.md) for process constraints. A commission (fixed per order, a rate on each fill's value, or an amount per unit of each fill's quantity) and starting balance are required; choose values appropriate to the venue and instrument. Seed strategy randomness.
 
 ## Replay and data
 
@@ -16,7 +16,7 @@ The default fill model adds no slippage. External LAST bars, including IB minute
 
 On quotes, buys fill at the ask and sells at the bid of the last quote. Resting orders are checked only on available quotes, so a crossing between quotes can be missed. A gap can leave a stale quote in use; without an earlier quote an order is rejected. Quote sizes may be nominal rather than observed depth, and liquidity is not consumed across orders. Tick quotes give more detail than minute bars but do not remove these limitations.
 
-Fixed commission is charged on an order's first fill; a rate is charged on every fill. Neither combines a rate with a minimum, so choose the approximation carefully for IB orders. Stored OKX funding is settled on open positions; absent funding is not checked or settled. The simulated settlement price and timing can differ from OKX, including orders placed at a funding boundary. See [OKX funding](../venues/okx/README.md#funding-and-margins) for availability.
+Fixed commission is charged on an order's first fill; a rate and an amount per unit of quantity are charged on every fill, the latter rounded to the currency's precision a fill, a half cent to the even cent, as Nautilus rounds money (`--commission-per-quantity`, Pepperstone's per-lot charges: see [Pepperstone](../venues/pepperstone/README.md#margins-and-costs)). None combines a rate with a minimum, so choose the approximation carefully for IB orders. The commission is the run's one cost source (`backtest::Commission`): the venues' fee model is made from it, and a model strategy's dataset runs and target read the same one (see [targets](../model/README.md#targets-and-datasets)). Stored OKX funding is settled on open positions; absent funding is not checked or settled. The simulated settlement price and timing can differ from OKX, including orders placed at a funding boundary. See [OKX funding](../venues/okx/README.md#funding-and-margins) for availability.
 
 ## Leverage and venues
 

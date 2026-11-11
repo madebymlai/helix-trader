@@ -4,7 +4,7 @@
 //! test.
 
 use crate::common::{self, trades};
-use helix_trader::backtest::{commission_rate, report};
+use helix_trader::backtest::{Commission, report};
 use rust_decimal::Decimal;
 
 #[test]
@@ -13,7 +13,7 @@ fn a_commission_rate_charges_the_value_of_every_fill_and_the_report_shows_the_co
     let catalog = trades::catalog(&levels);
     let mut backtest = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR");
     // 2%, so that the commission of each fill is a whole cent.
-    backtest.fee_model = commission_rate(Decimal::new(2, 2)).unwrap();
+    backtest.commission = Commission::Rate(Decimal::new(2, 2));
 
     let outcome = backtest.run(trades::ema_cross()).unwrap();
     let result = &outcome.result;

@@ -25,7 +25,7 @@ use std::{
 };
 
 use helix_trader::{
-    backtest::{Backtest, commission_per_order},
+    backtest::{Backtest, Commission},
     strategy::{
         DataConfig, IndicatorsConfig, Part, Series, Session, TradeConfig, TradedInstrument,
         ema::{EmaCross, EmaCrossConfig, EmaParams},
@@ -201,7 +201,7 @@ pub fn backtest(catalog: &Path, start: Timestamp, end: Timestamp, commission: &s
         start,
         end,
         ticks: vec![],
-        fee_model: commission_per_order(Money::from(commission)).unwrap(),
+        commission: Commission::PerOrder(Money::from(commission)),
         balance: Money::from("10000 EUR"),
         leverage: Decimal::ONE,
         venue_oms: venues::oms_type,

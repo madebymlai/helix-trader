@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
+use nautilus_model::{enums::OrderSide, identifiers::StrategyId, types::Money};
 use rust_decimal::Decimal;
 
 use super::{
@@ -13,12 +13,15 @@ use super::{
     },
     *,
 };
-use crate::model::{
-    config::{Margins, ModelConfig, Sizing},
-    dataset::{Commission, DatasetVenue},
-    learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-    payoff::Payoff,
-    store::StoredModel,
+use crate::{
+    backtest::Commission,
+    model::{
+        config::{Margins, ModelConfig, Sizing},
+        dataset::DatasetVenue,
+        learner::{LearnerConfig, LightGbmConfig, TrainingSet},
+        payoff::Payoff,
+        store::StoredModel,
+    },
 };
 
 const MIDNIGHT: &str = "2026-10-22T00:00:00Z";
@@ -98,7 +101,7 @@ fn a_model_of_another_commission_gives_no_trade() {
         &config(),
         &requirements(),
         &DatasetVenue {
-            commission: Commission::PerOrder("3 USD".to_string()),
+            commission: Commission::PerOrder(Money::from("3 USD")),
             ..venue()
         },
     )
