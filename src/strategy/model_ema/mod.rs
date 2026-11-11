@@ -220,7 +220,7 @@ mod tests {
     use super::*;
     use crate::{
         backtest::Commission,
-        model::dataset::DatasetVenue,
+        model::{dataset::DatasetVenue, decide::DecisionRule, learner::LearnerConfig},
         strategy::orders::{Exits, Trade},
     };
 
@@ -267,6 +267,31 @@ mod tests {
         let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
 
         ModelEmaParams::features(&config).unwrap();
+    }
+
+    /// Its side models are fitted on its window less its holdout and the
+    /// calibration before it, as long: 480 hours, 20 days, of which 14 at
+    /// the fewest are weekdays, gold trading 23 hours of each, so 322
+    /// hourly decisions. A split leaves `min_data_in_leaf` rows each side
+    /// at least: its leaves split on those rows.
+    #[test]
+    fn the_example_configs_leaves_split_on_the_rows_its_window_fits_on() {
+        let model = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml"))
+            .unwrap()
+            .model();
+        let LearnerConfig::LightGbm(learner) = &model.learner else {
+            panic!("not LightGBM: {:?}", model.learner);
+        };
+        let DecisionRule::Every(every) = model.decision;
+        let days = (model.window - model.holdout * 2).as_hours() / 24;
+        let weekdays = days / 7 * 5 + (days % 7 - 2).max(0);
+        let rows = weekdays * 23 * 60 / every.as_mins();
+
+        assert!(
+            2 * i64::from(learner.min_data_in_leaf) <= rows,
+            "leaves of {} rows on {rows} rows",
+            learner.min_data_in_leaf
+        );
     }
 
     /// `CONFIG` listing the quotes of the AUD/USD traded before its bars.
