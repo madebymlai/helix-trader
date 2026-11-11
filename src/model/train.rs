@@ -1339,6 +1339,47 @@ mod tests {
         }
     }
 
+    /// Worked by hand: two baselines, each side's training mean whatever the
+    /// row, fitted on the 6th's rows before 12:00, the long winning 1.5R then
+    /// losing 1R, a mean of 0.25, the short losing 1R twice, -1, so that `C`
+    /// is -0.375 and `D` 1.25 on every row. Calibrated on the long winning
+    /// beside the short losing, 2.5R apart, then both winning: a side call
+    /// that never varies has no slope, each side's `E'` the level, the sides'
+    /// mean R, 0.875, or 1.75 USD on stops worth 2 USD, and the sides tie on
+    /// every row of the holdout, which picks no trade. Each side's R there,
+    /// 1.5 and -1 in either order, has a mean of 0.25: its mean `R - E'` is
+    /// -0.625. A slope fitted on the calibration's means alone, 3.125 /
+    /// 3.125, would expect 1.5R of the long and 0.25R of the short, and pick
+    /// the long on every row.
+    #[test]
+    fn two_sides_whose_predictions_never_vary_pick_no_trade() {
+        let dir = tempfile::tempdir().unwrap();
+        let baselines = ModelConfig {
+            learner: LearnerConfig::Baseline {},
+            ..config()
+        };
+        let rows = [
+            ("2026-01-06T08:00:00Z", (true, false)),
+            ("2026-01-06T10:00:00Z", (false, false)),
+            ("2026-01-06T13:00:00Z", (true, false)),
+            ("2026-01-06T15:00:00Z", (true, true)),
+            ("2026-01-06T19:00:00Z", (true, false)),
+            ("2026-01-06T20:00:00Z", (false, true)),
+        ]
+        .map(|(time, wins)| row_of(time, vec![0.5], wins, hour()));
+
+        let trained = training(dir.path(), baselines)
+            .train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows.to_vec()));
+
+        for outcome in [&trained.long, &trained.short] {
+            let Some(Outcome::Kept(Kept::Refused { holdout, .. })) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert_eq!(holdout.earnings.taken.count, 0, "{holdout:?}");
+            close_to(holdout.score.mean_error, -0.625);
+        }
+    }
+
     /// `rows` but for the holdout: at 19:00 at 0.8 the long wins and the
     /// short, on its stop worth 4 USD, loses, -0.5R; at 20:00 at 0.3 the long
     /// loses and the short wins, 1.5R. The short, expecting 0.95R and 0.2R
