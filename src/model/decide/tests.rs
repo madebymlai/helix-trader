@@ -182,6 +182,35 @@ fn a_delayed_cadence_decides_its_delay_after_the_grid() {
     );
 }
 
+/// What is made up to a decision's firing, its grid time plus the margin,
+/// is that decision's to read first; what comes after, the next one's.
+#[test]
+fn data_is_read_first_by_the_first_decision_firing_at_or_after_it() {
+    let quarter = UnixNanos::from(QUARTER);
+    let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
+
+    assert_eq!(of(QUARTER - 1), quarter);
+    assert_eq!(of(QUARTER), quarter);
+    assert_eq!(of(QUARTER + MARGIN), quarter);
+    assert_eq!(
+        of(QUARTER + MARGIN + 1),
+        UnixNanos::from(QUARTER + 900 * SECOND)
+    );
+}
+
+/// A delayed cadence's decision fires its delay later: it reads first what
+/// is made until then.
+#[test]
+fn data_inside_a_delay_is_read_first_by_the_delayed_decision() {
+    let of = |ns: u64| decision_of(every(15), SignedDuration::from_secs(5), UnixNanos::from(ns));
+
+    assert_eq!(of(QUARTER + 5 * SECOND + MARGIN), UnixNanos::from(QUARTER));
+    assert_eq!(
+        of(QUARTER + 5 * SECOND + MARGIN + 1),
+        UnixNanos::from(QUARTER + 900 * SECOND)
+    );
+}
+
 /// Started between a grid time and its delayed decision: that decision
 /// is still to come.
 #[test]

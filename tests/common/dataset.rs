@@ -108,6 +108,8 @@ impl DataActor for ModelProbe {
         Rc::clone(&self.model).start(self)
     }
 
+    helix_trader::model_data_hooks!(model);
+
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
             if let Some(decision) = Rc::clone(&self.model).decide(self)? {

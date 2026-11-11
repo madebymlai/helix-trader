@@ -11,9 +11,11 @@
 //! events, which close the trades at their time, and the module sets the
 //! time of the trades still open again at start, as after a restart.
 //! The target closes before the next decision (`ModelConfig::validate`),
-//! so trades do not overlap, on a hedging venue as on a netting one. It
-//! decides only once its indicators are initialized: warm from the replay
-//! in a backtest or a dataset run, from its warmup request live.
+//! so trades do not overlap, on a hedging venue as on a netting one. Its
+//! handle decides only once its features and the target's ATR are
+//! initialized: warm from the replay in a backtest or a dataset run, from
+//! its warmup request live. Its data hooks are the handle's
+//! (`model_data_hooks!`).
 //!
 //! A `[model.meta]` table in its config adds a meta model, which takes
 //! or leaves each trade of the model (`model::meta`), and may size it.
@@ -27,13 +29,11 @@
 mod features;
 
 use nautilus_common::{
-    actor::{DataActor, DataActorNative},
+    actor::DataActor,
     config::{ConfigError, ConfigResult},
-    messages::data::DataResponseEnvelope,
     timer::TimeEvent,
 };
 use nautilus_model::{
-    data::{OrderBookDelta, OrderBookDepth},
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
     identifiers::StrategyId,
 };
@@ -42,7 +42,7 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 use serde::Deserialize;
-use std::{any::Any, rc::Rc};
+use std::rc::Rc;
 
 use crate::{
     model::{
@@ -166,43 +166,17 @@ nautilus_strategy!(ModelEma, {
 impl DataActor for ModelEma {
     /// Starts the model handle, which starts the warmup: live, it requests
     /// the warmup of the bars and of the target's ATR, then subscribes to
-    /// them; then the features, registered as its Nautilus indicator, and
-    /// the decisions.
+    /// them; then the features, registered as its Nautilus indicator for
+    /// their bars, and the decisions.
     fn on_start(&mut self) -> anyhow::Result<()> {
         orders::arm_open_trades(self)?;
         Rc::clone(&self.model).start(self)
     }
 
-    /// The warmup's bars reach only the cache: the warmup hands them to
-    /// the features, and logs its end; Nautilus logs a failed one as an error.
-    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        self.model.warmup().on_data_response(self, response)
-    }
-
-    /// Nautilus routes no book or custom data to indicators: the warmup
-    /// hands it to the features.
-    fn on_historical_book_depth(&mut self, depths: &[OrderBookDepth]) -> anyhow::Result<()> {
-        self.model.warmup().on_historical_book_depth(depths);
-        Ok(())
-    }
-
-    fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
-        self.model.warmup().on_historical_book_deltas(deltas);
-        Ok(())
-    }
-
-    fn on_historical_data(&mut self, data: &dyn Any) -> anyhow::Result<()> {
-        self.model.warmup().on_historical_data(data);
-        Ok(())
-    }
+    crate::model_data_hooks!(model);
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            // It decides only once its indicators are initialized: the
-            // features, and in a dataset run the target's ATR.
-            if !self.core().indicators_initialized()? {
-                return Ok(());
-            }
             return match Rc::clone(&self.model).decide(self)? {
                 Some(decision) => decision.trade().send(self),
                 None => Ok(()),

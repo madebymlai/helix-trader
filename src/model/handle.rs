@@ -7,9 +7,10 @@
 //! has one) and starts the decision cadence; `decide`, at a decision
 //! of the cadence (its timer, `decide::is_decision`), snapshots the
 //! features, if no live warmup is still answering (`Warmup::is_warming`),
-//! the decision is fresh (data of the target's instrument
-//! since the previous) and every one is initialized, and publishes their
-//! row (`decide::decide`), then:
+//! the target's ATR, if any, is initialized, as the handle reads it itself,
+//! not Nautilus' registered indicators, the decision is fresh (data of the
+//! target's instrument since the previous) and every feature is
+//! initialized, and publishes their row (`decide::decide`), then:
 //!
 //! - deciding (`Mode::Backtest`, `Mode::Live`): takes, for each side of
 //!   the config's margins, the latest model of its store
@@ -82,19 +83,33 @@
 //!
 //! The handle builds the strategy's warmup (`strategy::warmup::Warmup`)
 //! from its requirements and mode, reading the features' tick series
-//! (`FeatureSet::ticks`), and `start` starts it, the features registered
-//! first; the strategy delegates its historical-data hooks to it
-//! (`warmup`). Live, the warmup requests the history of the features'
-//! ticks, a root's on the contract standing for it, their custom data
-//! from the catalog alone, handed to the features, and the roller's
-//! subscriptions continue from its end, so the first decision after a
-//! start is warm. A series of the traded instrument no feature reads,
-//! custom data among them, has no warmup. It warms the target's ATR from
+//! (`FeatureSet::ticks`) and feeding the features, and `start` starts it,
+//! the features registered first. The strategy's data hooks hand it the
+//! responses and the live quotes and trades: `model_data_hooks!` writes
+//! them, the one place they are written, so that no strategy misses one.
+//! The features are registered with Nautilus for their bars alone: the
+//! warmup hands them the quotes and trades of its responses and the live
+//! ones, held until it ends, so that no live tick reaches them before an
+//! older window of the history (`strategy::warmup`'s `hold`); in a replay
+//! the ticks go straight through. Live, the warmup requests the history of
+//! the features' ticks, a root's on the contract standing for it, their
+//! custom data from the catalog alone, handed to the features, and the
+//! roller's subscriptions continue from its end, so the first decision
+//! after a start is warm. A series of the traded instrument no feature
+//! reads, custom data among them, has no warmup, and its live ticks reach
+//! no feature. It warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
 //! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop a
 //! dataset run sets there. A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
+//!
+//! Features over the bracket's width (`features::OverBracket`) read the
+//! width the handle builds the setter on (`FeatureSet::bracket_width`,
+//! `TargetSetter::sharing`): its ATR is the target's, started and warmed
+//! with it, and `decide` reads the features and sets the target in the one
+//! decision event, with no data between, so a row reads the width its
+//! target is set at.
 //!
 //! The handle does not retrain: live, the retrains of a strategy are a
 //! Nautilus actor of their own beside it (`launcher::RetrainActor`), and
@@ -282,7 +297,12 @@ impl ModelHandle {
                 ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
             Ok(Deciding {
                 models: RefCell::new(DecidingModels::new(&models)?),
-                target: TargetSetter::new(&config.target, config.decision, requirements)?,
+                target: TargetSetter::sharing(
+                    &config.target,
+                    config.decision,
+                    requirements,
+                    features.bracket_width(),
+                )?,
                 instrument_id: config.target.instrument_id,
                 quantity: config.target.quantity,
             })
@@ -328,6 +348,7 @@ impl ModelHandle {
         }
         .reading(features.ticks())
         .feeding(Rc::clone(features) as SharedActorIndicator)
+        .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
         .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>)
         .feeding_custom_data(Rc::clone(features) as Rc<dyn CustomDataIndicator>);
         let roller = match mode {
@@ -340,7 +361,12 @@ impl ModelHandle {
                 Serving::Deciding(Box::new(deciding(&models, &venue)?))
             }
             Mode::Dataset { rows } => Serving::Dataset {
-                targets: Targets::new(target.clone(), rule, requirements)?,
+                targets: Targets::sharing(
+                    target.clone(),
+                    rule,
+                    requirements,
+                    features.bracket_width(),
+                )?,
                 rows,
             },
         };
@@ -362,7 +388,8 @@ impl ModelHandle {
     }
 
     /// Starts the handle on `strategy`, from `on_start`: registers the
-    /// features, starts the strategy's warmup (`Warmup::start`), live
+    /// features for their bars, starts the strategy's warmup
+    /// (`Warmup::start`), holding the live ticks while it is pending, live
     /// requesting the history of the bars and of the features' ticks, then
     /// the roller, which subscribes the features' ticks and the traded
     /// instrument's from now, where the warmup ends, a root's on the
@@ -379,8 +406,8 @@ impl ModelHandle {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
-        // Registered first: Nautilus hands a warmup response's quotes and
-        // trades to the indicators registered by then.
+        // Registered first: it sets the contract each feature reads, which
+        // the warmup's responses are read against.
         self.features.register(strategy);
         self.warmup.start(strategy)?;
         self.roller.start(strategy)?;
@@ -401,17 +428,19 @@ impl ModelHandle {
         decide::start(strategy, self.rule, self.delay)
     }
 
-    /// The strategy's warmup, which the handle builds and starts: its
-    /// strategy delegates `on_data_response`, `on_historical_book_depth`,
-    /// `on_historical_book_deltas` and `on_historical_data` to it, and a
-    /// live node sizes its cache from it.
+    /// The strategy's warmup, which the handle builds and starts: the
+    /// strategy's data hooks hand it the responses and the live quotes and
+    /// trades (`model_data_hooks!`), and a live node sizes its cache from
+    /// it.
     #[must_use]
     pub fn warmup(&self) -> Rc<Warmup> {
         Rc::clone(&self.warmup)
     }
 
     /// Decides now, for `strategy`: the decision to trade, if any; none
-    /// while the warmup is not answered yet (`Warmup::is_warming`).
+    /// while the warmup is not answered yet (`Warmup::is_warming`), the
+    /// target's ATR is not initialized, or `decide::decide` publishes no
+    /// row (a stale decision, a feature not initialized).
     ///
     /// # Errors
     ///
@@ -425,6 +454,10 @@ impl ModelHandle {
             log::debug!("No decision: the warmup is not answered yet");
             return Ok(None);
         }
+        if !self.target_initialized() {
+            log::debug!("No decision: the target's ATR is not initialized");
+            return Ok(None);
+        }
         let Some(row) = decide::decide(strategy, &self.features, self.rule, self.traded) else {
             return Ok(None);
         };
@@ -436,6 +469,18 @@ impl ModelHandle {
                 targets.open(strategy, row)?;
                 Ok(None)
             }
+        }
+    }
+
+    /// Whether the target's ATR, if any, is initialized, read of it, not of
+    /// Nautilus' registered indicators, for which the features are
+    /// registered for their bars alone (`FeatureSet::register`). The
+    /// features are not read here: `decide::decide` publishes no row while
+    /// one is cold.
+    fn target_initialized(&self) -> bool {
+        match &self.serving {
+            Serving::Deciding(deciding) => deciding.target.initialized(),
+            Serving::Dataset { targets, .. } => targets.initialized(),
         }
     }
 
@@ -502,6 +547,68 @@ impl ModelHandle {
     }
 }
 
+/// The data hooks of a model strategy, written once for every one: expanded
+/// in its `DataActor` impl as `model_data_hooks!(model);`, `model` the field
+/// holding its `Rc<ModelHandle>`, they hand its warmup (`ModelHandle::warmup`)
+/// the end of each request (`on_data_response`), the quotes, trades, book
+/// depth, deltas and custom data of each response (`on_historical_*`), and
+/// the live quotes and trades (`on_quote`, `on_trade`), which it holds while
+/// it is pending and then hands to the features (`strategy::warmup`).
+#[macro_export]
+macro_rules! model_data_hooks {
+    ($model:ident) => {
+        fn on_data_response(
+            &mut self,
+            response: &::nautilus_common::messages::data::DataResponseEnvelope,
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_data_response(self, response)
+        }
+
+        fn on_historical_quotes(
+            &mut self,
+            quotes: &[::nautilus_model::data::QuoteTick],
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_historical_quotes(quotes)
+        }
+
+        fn on_historical_trades(
+            &mut self,
+            trades: &[::nautilus_model::data::TradeTick],
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_historical_trades(trades)
+        }
+
+        fn on_historical_book_depth(
+            &mut self,
+            depths: &[::nautilus_model::data::OrderBookDepth],
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_historical_book_depth(depths);
+            Ok(())
+        }
+
+        fn on_historical_book_deltas(
+            &mut self,
+            deltas: &[::nautilus_model::data::OrderBookDelta],
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_historical_book_deltas(deltas);
+            Ok(())
+        }
+
+        fn on_historical_data(&mut self, data: &dyn ::std::any::Any) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_historical_data(data);
+            Ok(())
+        }
+
+        fn on_quote(&mut self, quote: &::nautilus_model::data::QuoteTick) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_quote(quote)
+        }
+
+        fn on_trade(&mut self, trade: &::nautilus_model::data::TradeTick) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_trade(trade)
+        }
+    };
+}
+
 impl Deciding {
     /// The decision of `strategy` at `now` on `row`: the stores listed again,
     /// a failure logged and the previous lists kept; the target set once for
@@ -550,7 +657,8 @@ mod tests {
         cache::Cache,
         clock::{Clock, VirtualClock},
         messages::data::{
-            CustomDataResponse, DataCommand, RequestCommand, SubscribeCommand, TradesResponse,
+            CustomDataResponse, DataCommand, QuotesResponse, RequestCommand, SubscribeCommand,
+            TradesResponse,
         },
         msgbus::{
             self, MessagingSwitchboard, TypedIntoHandler,
@@ -578,13 +686,14 @@ mod tests {
     use super::*;
     use crate::model::{
         config::{Margins, Sizing},
+        decide::FeatureRow,
         deciding::testing::{
             AUD, GOLD, STRATEGY, at, baseline, baseline_for, c, config, features, gold, meta,
             meta_baseline, model_set, requirements, side_store, store, venue, with_meta,
         },
-        features::testing::last_mid,
+        features::testing::{last_mid, mid_over},
         schedule::Retrain,
-        targets::{BracketSpec, DEFAULT_ATR, Distance, Side, Target},
+        targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target},
     };
     use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
     use rust_decimal::Decimal;
@@ -608,28 +717,65 @@ mod tests {
 
     nautilus_strategy!(Decider);
 
+    /// Hands the warmup, once given, the custom data, quotes and trades of a
+    /// response and the live quotes and trades, as a model strategy does
+    /// (`model_data_hooks!`).
     impl DataActor for Decider {
-        /// Hands the warmup the custom data of a response, as a model
-        /// strategy does.
         fn on_historical_data(&mut self, data: &dyn std::any::Any) -> anyhow::Result<()> {
             if let Some(warmup) = &self.warmup {
                 warmup.on_historical_data(data);
             }
             Ok(())
         }
+
+        fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
+            self.warmup
+                .as_ref()
+                .map_or(Ok(()), |warmup| warmup.on_historical_quotes(quotes))
+        }
+
+        fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
+            self.warmup
+                .as_ref()
+                .map_or(Ok(()), |warmup| warmup.on_historical_trades(trades))
+        }
+
+        fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+            self.warmup
+                .as_ref()
+                .map_or(Ok(()), |warmup| warmup.on_quote(quote))
+        }
+
+        fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
+            self.warmup
+                .as_ref()
+                .map_or(Ok(()), |warmup| warmup.on_trade(trade))
+        }
+    }
+
+    /// The core of a strategy of id `STRATEGY`.
+    fn strategy_core() -> StrategyCore {
+        StrategyCore::new(StrategyConfig {
+            strategy_id: Some(StrategyId::from(STRATEGY)),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        })
     }
 
     /// A strategy registered without a node at `now`, as the EMA's tests
     /// do, and its clock.
     fn registered(now: Timestamp) -> (Decider, Rc<RefCell<VirtualClock>>) {
         let mut probe = Decider {
-            core: StrategyCore::new(StrategyConfig {
-                strategy_id: Some(StrategyId::from(STRATEGY)),
-                order_id_tag: Some("001".to_string()),
-                ..Default::default()
-            }),
+            core: strategy_core(),
             warmup: None,
         };
+        let clock = register(&mut probe.core, now);
+        (probe, clock)
+    }
+
+    /// Registers `core` without a node at `now`, AUD/USD in its cache: its
+    /// clock.
+    fn register(core: &mut StrategyCore, now: Timestamp) -> Rc<RefCell<VirtualClock>> {
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
         clock.borrow_mut().advance_time(UnixNanos::from(now), true);
         clock
@@ -659,11 +805,9 @@ mod tests {
             cache.clone(),
             None,
         )));
-        probe
-            .core
-            .register(TraderId::from("HELIX-001"), clock.clone(), cache, portfolio)
+        core.register(TraderId::from("HELIX-001"), clock.clone(), cache, portfolio)
             .unwrap();
-        (probe, clock)
+        clock
     }
 
     /// Advances `clock` to `to`, when a quote of AUD/USD comes to
@@ -1261,6 +1405,197 @@ mod tests {
         );
     }
 
+    /// The handle decides only once the target's ATR is initialized, which
+    /// it reads itself, not from Nautilus' registered indicators: at 12:00,
+    /// the features warm from a quote and the ATR of 2 hourly bars without
+    /// a bar, the decision publishes no row and makes no trade.
+    #[test]
+    fn no_row_is_published_while_the_targets_atr_is_cold() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let backtest = Mode::Backtest {
+            models: models.path().to_path_buf(),
+            venue: venue(),
+        };
+        let handle = sides_handle_in(
+            backtest,
+            &probe,
+            models.path(),
+            &atr_config(),
+            (Some(8), None),
+        );
+        handle.start(&mut probe).unwrap();
+        let rows = published();
+
+        let decision = handle.decide(&mut probe).unwrap();
+
+        assert_eq!(decision, None);
+        assert_eq!(rows.borrow().len(), 0);
+    }
+
+    /// Features reading bars alone, as model_ema's: the set is registered
+    /// with Nautilus for its bars as before, and the quotes the strategy
+    /// hands its warmup reach none of its features. Worked by hand: at
+    /// 12:00 the last hourly close is cold, a quote of AUD/USD handed over
+    /// leaves it cold, and the bar closing at 12:00, which Nautilus hands
+    /// it, warms it: the long model of 0.8 trades.
+    #[test]
+    fn features_reading_no_ticks_warm_on_their_bars_through_nautilus_as_before() {
+        let models = tempfile::tempdir().unwrap();
+        let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
+        let features = FeatureSet::builder()
+            .bars(hours, HOURLY_CLOSE, &tables())
+            .build()
+            .unwrap();
+        let mut long = baseline_for(&features, &config(), Side::Long, "2026-10-22T00:00:00Z", 8);
+        long.manifest.feature_names = features.names().to_vec();
+        side_store(models.path(), &features, &config(), Side::Long)
+            .publish(&long)
+            .unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config(),
+            &requirements(),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap();
+        probe.warmup = Some(handle.warmup());
+        handle.start(&mut probe).unwrap();
+        let quote = QuoteTick::new(
+            InstrumentId::from(AUD),
+            Price::from("0.69990"),
+            Price::from("0.70010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(at("2026-10-22T12:00:00Z")),
+            UnixNanos::from(at("2026-10-22T12:00:00Z")),
+        );
+
+        let cold = handle.decide(&mut probe).unwrap();
+        DataActor::on_quote(&mut probe, &quote).unwrap();
+        let quoted = handle.decide(&mut probe).unwrap();
+        probe.handle_bar(&hour_bar(
+            "2026-10-22T12:00:00Z",
+            ["0.69950", "0.70020", "0.69940", "0.70000"],
+        ));
+        let barred = handle.decide(&mut probe).unwrap();
+
+        assert_eq!(
+            (probability(cold), probability(quoted), probability(barred)),
+            (None, None, Some(c(0.8)))
+        );
+    }
+
+    /// A model strategy whose data hooks are `model_data_hooks!`'s.
+    #[derive(Debug)]
+    struct Hooked {
+        core: StrategyCore,
+        model: Rc<ModelHandle>,
+    }
+
+    nautilus_strategy!(Hooked);
+
+    impl DataActor for Hooked {
+        crate::model_data_hooks!(model);
+    }
+
+    /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
+    /// ticks, of the history and live. Live on 2026-08-10 at 14:30, features
+    /// on AUD/USD's quotes and GCZ26's trades, an average of two: a
+    /// response of a quote and one of two trades warm them; once the group
+    /// ends, a live quote at 14:30:01 and a live trade at 14:30:02 reach them.
+    #[test]
+    fn the_hooks_of_model_data_hooks_hand_the_warmup_a_strategys_ticks() {
+        let models = tempfile::tempdir().unwrap();
+        let gcz26 = InstrumentId::from("GCZ26.GLBX");
+        let features = last_mid(InstrumentId::from(AUD))
+            .trades(gcz26, GC_2_TRADES, &tables())
+            .build()
+            .unwrap();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                aud_quotes(),
+                TickSeries {
+                    data: NautilusDataType::TradeTick,
+                    instrument_id: gcz26,
+                },
+            ],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let model = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            Rc::clone(&features),
+            &config(),
+            &requirements,
+            live(models.path().to_path_buf()),
+        )
+        .unwrap();
+        let mut hooked = Hooked {
+            core: strategy_core(),
+            model: Rc::clone(&model),
+        };
+        register(&mut hooked.core, at("2026-08-10T14:30:00Z"));
+        model.start(&mut hooked).unwrap();
+        let aud_quote = |time: &str| {
+            let ts = UnixNanos::from(at(time));
+            QuoteTick::new(
+                InstrumentId::from(AUD),
+                Price::from("0.69990"),
+                Price::from("0.70010"),
+                Quantity::from(1),
+                Quantity::from(1),
+                ts,
+                ts,
+            )
+        };
+
+        hooked.handle_quotes_response(&QuotesResponse::new(
+            UUID4::new(),
+            ClientId::from("SIM"),
+            InstrumentId::from(AUD),
+            vec![aud_quote("2026-08-10T14:29:00Z")],
+            None,
+            None,
+            UnixNanos::from(at("2026-08-10T14:30:00Z")),
+            None,
+        ));
+        hooked.handle_trades_response(&TradesResponse::new(
+            UUID4::new(),
+            ClientId::from("GLBX"),
+            gcz26,
+            vec![
+                gcz6_trade("2026-08-10T14:00:00Z", "4000.0"),
+                gcz6_trade("2026-08-10T14:29:00Z", "4002.0"),
+            ],
+            None,
+            None,
+            UnixNanos::from(at("2026-08-10T14:30:00Z")),
+            None,
+        ));
+        let warm = features.initialized();
+        model.warmup().complete(&hooked).unwrap();
+        DataActor::on_quote(&mut hooked, &aud_quote("2026-08-10T14:30:01Z")).unwrap();
+        DataActor::on_trade(&mut hooked, &gcz6_trade("2026-08-10T14:30:02Z", "4003.0")).unwrap();
+
+        assert!(warm);
+        assert_eq!(
+            (
+                features.last_update(InstrumentId::from(AUD)),
+                features.last_update(gcz26)
+            ),
+            (
+                Some(UnixNanos::from(at("2026-08-10T14:30:01Z"))),
+                Some(UnixNanos::from(at("2026-08-10T14:30:02Z")))
+            )
+        );
+    }
+
     /// Hour bars built from minute bars, a composite bar type.
     const COMPOSITE: &str = "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 
@@ -1303,6 +1638,123 @@ mod tests {
             first_decision(live, COMPOSITE),
             at("2026-10-22T12:00:05.010Z")
         );
+    }
+
+    /// `config` with a take profit and a stop 1 ATR of one hourly bar away,
+    /// from 0.30 USD on the long, and the width of that bracket.
+    fn width_config() -> (ModelConfig, Rc<BracketWidth>) {
+        let mut config = bracket_config(10);
+        config.target.spec.bracket = Some(BracketSpec {
+            take_profit: Distance::Atr(Decimal::ONE),
+            stop: Distance::Atr(Decimal::ONE),
+            atr: Some(AtrArgs {
+                period: 1,
+                ..DEFAULT_ATR
+            }),
+        });
+        let width = config
+            .target
+            .width(config.decision, &requirements())
+            .unwrap();
+        (config, Rc::new(width))
+    }
+
+    /// The hourly bar of AUD/USD's mids closing at `close_at`, from `low`
+    /// to `high`, opening and closing at 0.70000.
+    fn mid_bar(close_at: &str, low: &str, high: &str) -> Bar {
+        hour_bar(close_at, ["0.70000", high, low, "0.70000"])
+    }
+
+    /// The rows the decisions of `STRATEGY` publish from now on.
+    fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
+        let rows = Rc::new(RefCell::new(vec![]));
+        let sink = Rc::clone(&rows);
+        let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
+            if let Some(row) = data.data.as_any().downcast_ref::<FeatureRow>() {
+                sink.borrow_mut().push(row.clone());
+            }
+        });
+        let topic = get_custom_topic(&FeatureRow::data_type(StrategyId::from(STRATEGY)));
+        msgbus::subscribe_any(topic.into(), handler, None);
+        rows
+    }
+
+    /// Worked by hand. The features read the mid over the width of the
+    /// bracket, 1 ATR of one hourly bar a side, and the long's model of 0.8
+    /// trades. At 12:00, after a bar from 0.69900 to 0.70100, the ATR is
+    /// 0.00200: the row reads the mid of 0.70000 over it, 350, and the
+    /// long's stop is 0.00200 below the mid, 0.69800. At 13:00, after a bar
+    /// from 0.69800 to 0.70200, it is 0.00400: the row reads 175, the stop
+    /// 0.69600. Each decision's row reads the width its trade is set at.
+    #[test]
+    fn a_decisions_row_reads_the_width_its_trade_is_set_at() {
+        let models = tempfile::tempdir().unwrap();
+        let (config, width) = width_config();
+        let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
+        let mut long = baseline_for(&features, &config, Side::Long, "2026-10-22T00:00:00Z", 8);
+        long.manifest.feature_names = features.names().to_vec();
+        side_store(models.path(), &features, &config, Side::Long)
+            .publish(&long)
+            .unwrap();
+        let (mut probe, clock) = registered(at("2026-10-22T12:00:00Z"));
+        warm(&features, probe.clock().timestamp_ns());
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            Rc::clone(&features),
+            &config,
+            &requirements(),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap();
+        handle.start(&mut probe).unwrap();
+        let rows = published();
+        let stop =
+            |decision: Option<Decision>| decision.and_then(|d| d.bracket).map(|b| b.stop_loss);
+
+        probe.handle_bar(&mid_bar("2026-10-22T12:00:00Z", "0.69900", "0.70100"));
+        let noon = stop(handle.decide(&mut probe).unwrap());
+        advance(&features, &clock, "2026-10-22T13:00:00Z");
+        probe.handle_bar(&mid_bar("2026-10-22T13:00:00Z", "0.69800", "0.70200"));
+        let one = stop(handle.decide(&mut probe).unwrap());
+
+        let read: Vec<f64> = rows.borrow().iter().map(|row| row.features[0]).collect();
+        assert_eq!(read.len(), 2, "{read:?}");
+        assert!((read[0] - 350.0).abs() < 1e-9, "{read:?}");
+        assert!((read[1] - 175.0).abs() < 1e-9, "{read:?}");
+        assert_eq!(
+            (noon, one),
+            (Some(Price::from("0.69800")), Some(Price::from("0.69600")))
+        );
+    }
+
+    /// A dataset run's targets run on the ATR of the width the features
+    /// read: started, the handle has the target's bars, AUD/USD's hourly
+    /// mids, reach it, and nothing else does. One bar from 0.699 to 0.701
+    /// warms an ATR of one bar.
+    #[test]
+    fn a_dataset_runs_targets_run_on_the_atr_of_the_features_width() {
+        let (config, width) = width_config();
+        let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
+        let (mut probe, _) = registered(at("2026-10-22T11:30:00Z"));
+        let handle = ModelHandle::new(
+            StrategyId::from(STRATEGY),
+            features,
+            &config,
+            &requirements(),
+            Mode::Dataset {
+                rows: SettledRows::default(),
+            },
+        )
+        .unwrap();
+        handle.start(&mut probe).unwrap();
+        assert!(!width.initialized());
+
+        probe.handle_bar(&mid_bar("2026-10-22T11:00:00Z", "0.69900", "0.70100"));
+
+        assert!(width.initialized());
     }
 
     #[test]
@@ -1874,8 +2326,9 @@ mod tests {
     /// warmup ends, and loads GCG27, the post contract of the next roll;
     /// the traded AUD/USD's quotes, which no feature reads, are subscribed
     /// with no warmup. The response's two trades, which Nautilus hands to
-    /// the indicators registered for GCZ26's trades, make the strategy's
-    /// indicators initialized: the first decision after the warmup is warm.
+    /// the strategy's `on_historical_trades` and that to the warmup, make
+    /// the features initialized: the first decision after the warmup is
+    /// warm.
     #[test]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
         let models = tempfile::tempdir().unwrap();
@@ -1897,16 +2350,17 @@ mod tests {
         };
         let handle = ModelHandle::new(
             StrategyId::from(STRATEGY),
-            features,
+            Rc::clone(&features),
             &config(),
             &requirements,
             live(models.path().to_path_buf()),
         )
         .unwrap();
+        probe.warmup = Some(handle.warmup());
         let sent = sent_commands();
 
         handle.start(&mut probe).unwrap();
-        let cold = probe.core().indicators_initialized().unwrap();
+        let cold = features.initialized();
         probe.handle_trades_response(&TradesResponse::new(
             UUID4::new(),
             ClientId::from("GLBX"),
@@ -1938,7 +2392,7 @@ mod tests {
             "{sent:#?}"
         );
         assert!(!cold);
-        assert!(probe.core().indicators_initialized().unwrap());
+        assert!(features.initialized());
     }
 
     /// The model strategy of `features`, on the hourly decisions of

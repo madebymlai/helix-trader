@@ -35,6 +35,8 @@
 pub mod ema;
 #[cfg(gold_scalp)]
 pub mod gold_scalp;
+#[cfg(gold_scalp_v2)]
+pub mod gold_scalp_v2;
 mod indicators;
 pub mod model_ema;
 pub mod orders;

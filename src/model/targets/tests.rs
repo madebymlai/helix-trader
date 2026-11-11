@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use jiff::Timestamp;
 use nautilus_common::{
     cache::Cache,
     clock::{Clock, VirtualClock},
@@ -1105,6 +1106,151 @@ fn a_target_with_no_price_to_set_it_from_says_so() {
 
         assert_eq!(set, Err(NoTarget::NoPrice), "{spec:?}");
     }
+}
+
+/// Gold's bracket 0.3 of Wilder's ATR of 4 bars a side, closed after 5
+/// minutes: the gold scalpers'.
+fn symmetric() -> TargetConfig {
+    let distance = Distance::Atr(Decimal::new(3, 1));
+    of(Target {
+        bracket: Some(BracketSpec {
+            take_profit: distance,
+            stop: distance,
+            atr: Some(AtrArgs {
+                period: 4,
+                ..DEFAULT_ATR
+            }),
+        }),
+        limit: SignedDuration::from_mins(5),
+    })
+}
+
+/// A 15-minute bar of gold's mids from 3999 to 4001, closing at 4000: a
+/// true range of 2, after a close of 4000 as before it.
+fn gold_bar() -> Bar {
+    let price = |p: &str| Price::from(p);
+    Bar::new(
+        BarType::from("XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"),
+        price("4000.00"),
+        price("4001.00"),
+        price("3999.00"),
+        price("4000.00"),
+        Quantity::from(1),
+        UnixNanos::default(),
+        UnixNanos::default(),
+    )
+}
+
+/// A 15-minute bar of gold's mids from 3997 to 4003, closing at 4000: a
+/// true range of 6, after a close of 4000 as before it.
+fn wide_gold_bar() -> Bar {
+    let price = |p: &str| Price::from(p);
+    Bar::new(
+        BarType::from("XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"),
+        price("4000.00"),
+        price("4003.00"),
+        price("3997.00"),
+        price("4000.00"),
+        Quantity::from(1),
+        UnixNanos::default(),
+        UnixNanos::default(),
+    )
+}
+
+/// Worked by hand. The setter of `symmetric` sharing its width's ATR,
+/// started alone, sets the long's stop from gold's mid of 4000.00 at the
+/// width read at the same moment: none for 3 bars; after a 4th, Wilder's
+/// ATR seeded by the mean of 4 true ranges of 2 is 2, the width 0.6 and
+/// the stop 3999.40; after a 5th of 6, (3 × 2 + 6) / 4 = 3, the width 0.9
+/// and the stop 3999.10.
+#[test]
+fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
+    let config = symmetric();
+    let width = config.width(rule(), &quotes()).unwrap();
+    let setter = TargetSetter::sharing(&config, rule(), &quotes(), Some(&width)).unwrap();
+    let mut probe = Probe::holding(Some(gold()));
+    probe.quoted_at(InstrumentId::from(GOLD), "3999.99", "4000.01");
+    setter.start(&mut probe);
+    let read = |probe: &Probe| {
+        let set = setter.at(probe).unwrap().ok();
+        let stop = set.map(|set| set.long.bracket.unwrap().stop_loss);
+        (width.length(4000.0), stop)
+    };
+
+    for _ in 0..3 {
+        probe.handle_bar(&gold_bar());
+    }
+    let cold = read(&probe);
+    probe.handle_bar(&gold_bar());
+    let warm = read(&probe);
+    probe.handle_bar(&wide_gold_bar());
+    let wider = read(&probe);
+
+    assert_eq!(cold, (None, None));
+    assert_eq!(warm, (Some(0.6), Some(Price::from("3999.40"))));
+    assert_eq!(wider, (Some(0.9), Some(Price::from("3999.10"))));
+}
+
+/// A setter shares only the ATR it would run itself: a width's of another
+/// period, or a width in basis points with none, is refused.
+#[test]
+fn a_setter_refuses_to_share_the_atr_of_another_width() {
+    let fourteen = Target {
+        bracket: symmetric().spec.bracket.map(|bracket| BracketSpec {
+            atr: Some(DEFAULT_ATR),
+            ..bracket
+        }),
+        ..symmetric().spec
+    };
+
+    for other in [fourteen, in_bps(10, 10)] {
+        let width = of(other).width(rule(), &quotes()).unwrap();
+        let err = TargetSetter::sharing(&symmetric(), rule(), &quotes(), Some(&width)).unwrap_err();
+
+        assert!(err.to_string().contains("ATR"), "{other:?}: {err}");
+    }
+}
+
+/// 10 bps of 4000 is 4, of 2000 is 2, with no ATR to warm.
+#[test]
+fn a_width_in_basis_points_is_of_the_price_it_is_read_at() {
+    let width = of(in_bps(10, 10)).width(rule(), &quotes()).unwrap();
+
+    assert!(width.initialized());
+    assert_eq!(width.length(4000.0), Some(4.0));
+    assert_eq!(width.length(2000.0), Some(2.0));
+}
+
+/// A bracket has one width only if its take profit and stop are as far.
+#[test]
+fn a_width_needs_a_bracket_of_one_distance() {
+    let err = time_only(SignedDuration::from_hours(1))
+        .width(rule(), &quotes())
+        .unwrap_err();
+    assert!(err.to_string().contains("bracket"), "{err}");
+
+    let err = of(in_bps(20, 10)).width(rule(), &quotes()).unwrap_err();
+    assert!(err.to_string().contains("take profit"), "{err}");
+}
+
+/// Read at the decisions of the target's cadence, every 15 minutes, each
+/// firing 10 ms after its grid time: a quote then is the decision's, one
+/// later the next one's. Its target closes after 5 minutes.
+#[test]
+fn a_width_is_read_at_the_decisions_of_its_cadence() {
+    let width = symmetric().width(rule(), &quotes()).unwrap();
+    let quarter = "2026-10-21T10:15:00Z".parse::<Timestamp>().unwrap();
+    let at = |offset: SignedDuration| UnixNanos::from(quarter + offset);
+
+    assert_eq!(
+        width.decision(at(SignedDuration::from_millis(10))),
+        at(SignedDuration::ZERO)
+    );
+    assert_eq!(
+        width.decision(at(SignedDuration::from_nanos(10_000_001))),
+        at(SignedDuration::from_mins(15))
+    );
+    assert_eq!(width.limit(), SignedDuration::from_mins(5));
 }
 
 #[test]

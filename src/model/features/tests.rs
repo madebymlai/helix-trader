@@ -13,8 +13,16 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 
+use rust_decimal::Decimal;
+
 use super::*;
-use crate::strategy::EmaArgs;
+use crate::{
+    model::{
+        decide::DecisionRule,
+        targets::{BracketSpec, Distance, Target, TargetConfig},
+    },
+    strategy::{AtrArgs, DataRequirements, EmaArgs},
+};
 
 const AUD: &str = "AUD/USD.SIM";
 const GBP: &str = "GBP/USD.SIM";
@@ -736,42 +744,131 @@ fn registered() -> Probe {
     probe
 }
 
-/// The data engine hands Nautilus' handler of the strategy each
-/// update, which feeds its registered indicators first.
+/// The data engine hands Nautilus' handler of the strategy each update,
+/// which feeds its registered indicators first: the set is registered for
+/// its bars, and not for its quotes or trades, which the strategy hands its
+/// warmup (`Warmup::feeding_ticks`). Through Nautilus, the features on
+/// GBP/USD's quotes and trades read neither, and the one on AUD/USD's bars
+/// reads its bar.
 #[test]
-fn registered_features_get_quotes_trades_and_bars_through_nautilus() {
+fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_trades() {
     let mut probe = registered();
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
+        .quotes(id(GBP), LAST, &tables)
         .trades(id(GBP), LAST, &tables)
         .bars(BarType::from(AUD_BARS), LAST, &tables)
         .build()
         .unwrap();
     features.register(&mut probe);
 
-    probe.handle_quote(&quote(AUD, 0.7));
+    probe.handle_quote(&quote(GBP, 1.3));
     probe.handle_trade(&trade(GBP, 1.3));
     probe.handle_bar(&bar(AUD_BARS, 0.75));
 
-    let values = features.values().unwrap();
-    assert!((values[0] - 0.7).abs() < 1e-9, "{values:?}");
-    assert!((values[1] - 1.3).abs() < 1e-9, "{values:?}");
-    assert!((values[2] - 0.75).abs() < 1e-9, "{values:?}");
+    assert_eq!(features.last_update(id(GBP)), None);
+    assert_eq!(features.last_update(id(AUD)), Some(UnixNanos::default()));
 }
 
-/// Registered twice, as on a restart: each update still counts once.
+/// Registered twice, as on a restart: each bar still counts once, and the
+/// average of two is cold after one.
 #[test]
 fn a_set_registered_twice_gets_each_update_once() {
     let mut probe = registered();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), TWO, &tables())
+        .bars(BarType::from(AUD_BARS), TWO, &tables())
         .build()
         .unwrap();
     features.register(&mut probe);
     features.register(&mut probe);
 
-    probe.handle_quote(&quote(AUD, 0.7));
+    probe.handle_bar(&bar(AUD_BARS, 0.75));
 
     assert_eq!(features.values(), None);
+}
+
+/// The width of AUD/USD's bracket `distance` a side, of an ATR of one bar
+/// if in ATRs, deciding every 15 minutes on its quotes.
+fn width_of(distance: Distance) -> Rc<BracketWidth> {
+    let target = TargetConfig::builder()
+        .instrument_id(id(AUD))
+        .quantity(Quantity::from(1))
+        .spec(Target {
+            bracket: Some(BracketSpec {
+                take_profit: distance,
+                stop: distance,
+                atr: matches!(distance, Distance::Atr(_)).then_some(AtrArgs {
+                    period: 1,
+                    ma_type: None,
+                    use_previous: None,
+                    value_floor: None,
+                }),
+            }),
+            limit: SignedDuration::from_mins(5),
+        })
+        .build();
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![crate::strategy::TickSeries {
+            data: nautilus_model::data::NautilusDataType::QuoteTick,
+            instrument_id: id(AUD),
+        }],
+        warmup: SignedDuration::from_hours(24),
+    };
+    let rule = DecisionRule::Every(SignedDuration::from_mins(15));
+    Rc::new(target.width(rule, &requirements).unwrap())
+}
+
+/// The feature over `width` of AUD/USD's quotes.
+fn over(width: &Rc<BracketWidth>) -> Rc<FeatureSet> {
+    testing::mid_over(id(AUD), width).build().unwrap()
+}
+
+/// 10 bps of the mid 0.7 is 0.0007: the mid is 1000 of it.
+#[test]
+fn a_feature_over_the_bracket_reads_its_quotes_over_its_width() {
+    let features = over(&width_of(Distance::BasisPoints(Decimal::from(10))));
+
+    features.handle_quote(&quote(AUD, 0.7)).unwrap();
+
+    let values = features.values().unwrap();
+    assert!((values[0] - 1000.0).abs() < 1e-9, "{values:?}");
+}
+
+/// `[indicators.also]`, a second feature over the bracket.
+const ALSO: Declared<testing::MidOverWidthArgs> = Declared::new("also");
+
+/// The tables of `over` and `also`.
+fn over_tables() -> IndicatorsConfig {
+    toml::from_str("over = {}\nalso = {}").unwrap()
+}
+
+/// Two features over one width read it, the one the target's setter is
+/// handed (`bracket_width`).
+#[test]
+fn features_over_one_width_hand_it_to_the_target() {
+    let width = width_of(Distance::BasisPoints(Decimal::from(10)));
+
+    let features = testing::mid_over(id(AUD), &width)
+        .over_bracket(id(AUD), ALSO, &over_tables(), &width)
+        .build()
+        .unwrap();
+
+    let handed = features.bracket_width().unwrap();
+    assert!(std::ptr::eq(handed, Rc::as_ptr(&width)));
+}
+
+/// The target's setter runs on the ATR of one width: features over two
+/// are refused as they are declared.
+#[test]
+#[should_panic(expected = "two widths")]
+fn features_over_two_widths_panic() {
+    let in_bps = || width_of(Distance::BasisPoints(Decimal::from(10)));
+
+    let _ = testing::mid_over(id(AUD), &in_bps()).over_bracket(
+        id(AUD),
+        ALSO,
+        &over_tables(),
+        &in_bps(),
+    );
 }

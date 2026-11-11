@@ -3,9 +3,9 @@
 //! indicators before the live stream. A backtest or a dataset run makes no
 //! request: its strategy only subscribes (`subscribe`), and its indicators
 //! warm on the data replayed, from the run's start. Either way a strategy
-//! decides once its indicators are initialized (`indicators_initialized`);
-//! a model strategy, on a timer, also waits for a live warmup to end
-//! (`Warmup::is_warming`).
+//! decides once its indicators are initialized (`indicators_initialized`,
+//! a model strategy's handle reading its own); a model strategy, on a
+//! timer, also waits for a live warmup to end (`Warmup::is_warming`).
 //!
 //! Owns Nautilus' protocol, so that no strategy names it. The request is
 //! chosen from the bar type alone: a composite bar type is built from its
@@ -103,16 +103,23 @@
 //! subscription at the catalog's end; it filters nothing from the live
 //! stream. A venue can resend its latest tick on a subscription, as IC and
 //! IB do on quotes, and Nautilus forwards it, so the warmup's last tick can
-//! come once more as the first live one, stamped as it was. Nautilus hands a
-//! response's quotes and trades to the indicators registered for their
-//! instrument, so a strategy's features registered for the contract
-//! before the requests read them with no further call; it routes depth
-//! and deltas to no indicator, so the
-//! warmup hands them to its book indicators (`BookIndicator`), the deltas
-//! in the batches the live stream carries (`batches`). Ticks arriving on
-//! the live stream while a venue's part of a response is pending reach the
-//! features before that part: Nautilus buffers no ticks for indicators as
-//! it aggregates bars across a request's end.
+//! come once more as the first live one, made as it was.
+//!
+//! The windows of a response arrive one at a time with the node running
+//! between them, and the live stream starts at once, so live ticks come
+//! while older windows are pending. Nautilus holds live ticks for the bar
+//! aggregators it builds a request's bars with, not for an actor's
+//! indicators. So the warmup hands its tick indicators (`feeding_ticks`, a
+//! model strategy's features) the quotes and trades of its responses, from
+//! the actor's `on_historical_quotes` and `on_historical_trades`, and holds
+//! the live ones the actor hands it from `on_quote` and `on_trade` until
+//! the group ends, then hands them over in the order they came, dropping
+//! those the history holds (`hold`, which says the rule and what upstream
+//! change replaces it); after the warmup, and in a replay, live ticks go
+//! straight through. Nautilus routes depth and deltas to no indicator, so
+//! the warmup hands a response's to its book indicators (`BookIndicator`),
+//! the deltas in the batches the live stream carries (`batches`), with no
+//! hold: no strategy's features read them.
 //!
 //! Custom data the features read (a raw feature's, a root's on its
 //! contract's data type) is requested in the same group over the same
@@ -123,10 +130,12 @@
 //! custom data indicators (`CustomDataIndicator`), oldest first.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
-//! hooks to it; a model strategy's `ModelHandle` builds and owns it. The
-//! functions are its parts: `start` from `on_start`,
-//! `Warmup::on_historical_book_depth`, `on_historical_book_deltas` and
-//! `on_historical_data` from the hooks of the same names, and
+//! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
+//! `model_data_hooks!` writes the model strategy's hooks. The functions are
+//! its parts: `start` from `on_start`, `Warmup::on_historical_quotes`,
+//! `on_historical_trades`, `on_historical_book_depth`,
+//! `on_historical_book_deltas` and `on_historical_data` from the hooks of
+//! the same names, `Warmup::on_quote` and `on_trade` from those, and
 //! `Warmup::on_data_response`, or `finished` alone, from `on_data_response`,
 //! then, on bars on a root, `continuous_bars`; in a backtest or a dataset run
 //! `subscribe` from `on_start` alone.
@@ -152,7 +161,7 @@ use nautilus_live::config::LiveDataEngineConfig;
 use nautilus_model::{
     data::{
         Bar, BarType, CustomData, DataType, NautilusDataType, OrderBookDelta, OrderBookDeltas,
-        OrderBookDepth,
+        OrderBookDepth, QuoteTick, TradeTick,
     },
     enums::RecordFlag,
     identifiers::{ClientId, Venue},
@@ -164,6 +173,10 @@ use crate::{
     strategy::{DataRequirements, Source, TickSeries, bar_sources},
     time_range,
 };
+
+mod hold;
+
+use hold::{Hold, Tick};
 
 /// The window a warmup is asked in (see `time_range`): under a day, as IB's
 /// client asks a duration of a day or more in days and IB counts those as
@@ -206,20 +219,23 @@ pub trait CustomDataIndicator {
 /// owner of the protocol above, so that a strategy holds one and its hooks
 /// delegate to it. Nautilus delivers historical data only to the
 /// strategy's own hooks, so a strategy calls `start` from `on_start`,
-/// `on_data_response` from `on_data_response`, and
-/// `on_historical_book_depth`, `on_historical_book_deltas` and
-/// `on_historical_data` from theirs.
+/// `on_data_response` from `on_data_response`, `on_historical_quotes`,
+/// `on_historical_trades`, `on_historical_book_depth`,
+/// `on_historical_book_deltas` and `on_historical_data` from theirs, and
+/// `on_quote` and `on_trade` from its live hooks.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the target's
 /// ATR's) and of the tick series its features read (`reading`), and
 /// subscribes to the bars from the warmup's end; the bars each request built
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest
-/// first, when it completes, each response's depth and deltas to its book
-/// indicators (`feeding_books`), its custom data to its custom data
-/// indicators (`feeding_custom_data`).
+/// first, when it completes, each response's quotes and trades to its tick
+/// indicators (`feeding_ticks`), holding the live ones until the group ends,
+/// its depth and deltas to its book indicators (`feeding_books`), its
+/// custom data to its custom data indicators (`feeding_custom_data`).
 /// On a replay `start` subscribes to the strategy's bar types alone: the
-/// harness subscribes to its own.
+/// harness subscribes to its own; the live ticks go straight to the tick
+/// indicators.
 /// The strategies read no bars on a root, so a warmup has no continuous
 /// bars. A live node sizes its cache from `cache_config`, which holds the
 /// warmup of every bar type the warmup builds.
@@ -239,6 +255,10 @@ pub struct Warmup {
     books: Vec<Rc<dyn BookIndicator>>,
     /// What the warmup's custom data is handed to.
     custom_data: Vec<Rc<dyn CustomDataIndicator>>,
+    /// What hands the quotes and trades, of the warmup and live, to the
+    /// indicators reading them, holding the live ones while a live start's
+    /// group is pending.
+    hold: Hold,
     /// The request group of the last live start.
     group: Cell<UUID4>,
     /// Whether that group has not ended yet.
@@ -281,6 +301,7 @@ impl Warmup {
             indicators: Vec::new(),
             books: Vec::new(),
             custom_data: Vec::new(),
+            hold: Hold::default(),
             group: Cell::new(UUID4::new()),
             warming: Cell::new(false),
             building: RefCell::default(),
@@ -312,9 +333,9 @@ impl Warmup {
     /// each on the contract standing for its instrument at the start
     /// (`rolls::front`): the series a strategy's features read, which its
     /// roller subscribes to from the warmup's end. Quotes and trades reach
-    /// the indicators Nautilus has registered for them; depth and deltas
-    /// reach those `feeding_books` names, custom data, requested from the
-    /// catalog alone (see `CATALOG`), those `feeding_custom_data` names.
+    /// the indicators `feeding_ticks` names; depth and deltas reach those
+    /// `feeding_books` names, custom data, requested from the catalog alone
+    /// (see `CATALOG`), those `feeding_custom_data` names.
     #[must_use]
     pub fn reading(mut self, ticks: Vec<TickSeries>) -> Self {
         self.ticks = ticks;
@@ -337,6 +358,16 @@ impl Warmup {
         self
     }
 
+    /// The warmup handing the quotes and trades of its responses to
+    /// `indicator` too, and the live ones the strategy hands it (`on_quote`,
+    /// `on_trade`): live, those held until its group ends, and those the
+    /// history holds dropped (see `hold`).
+    #[must_use]
+    pub fn feeding_ticks(mut self, indicator: SharedActorIndicator) -> Self {
+        self.hold.feeding(indicator);
+        self
+    }
+
     /// Starts the warmup of `actor`, from its `on_start`: live, requests it
     /// as a new request group and subscribes to the bars it builds from
     /// its end (see `start`); on a replay, subscribes to the strategy's
@@ -354,6 +385,7 @@ impl Warmup {
             Start::Request => {
                 self.group.set(UUID4::new());
                 self.warming.set(true);
+                self.hold.hold();
                 let requested = start(
                     actor,
                     &self.built(),
@@ -364,6 +396,7 @@ impl Warmup {
                 )?;
                 if requested.is_empty() {
                     self.warming.set(false);
+                    self.hold.release()?;
                 }
                 *self.building.borrow_mut() = requested.into_iter().collect();
                 Ok(())
@@ -393,7 +426,8 @@ impl Warmup {
     where
         A: DataActor + DataActorNative,
     {
-        if *response.correlation_id() == self.group.get() {
+        let ends = *response.correlation_id() == self.group.get();
+        if ends {
             self.warming.set(false);
         }
         if response.completed() {
@@ -403,6 +437,9 @@ impl Warmup {
                     indicator.handle_bar(&bar)?;
                 }
             }
+        }
+        if ends {
+            self.hold.release()?;
         }
         if finished(self.group.get(), response)? {
             log::info!("Warmup complete");
@@ -422,6 +459,18 @@ impl Warmup {
             self.on_data_response(actor, &DataResponseEnvelope::terminal(id, None))?;
         }
         Ok(())
+    }
+
+    /// Reads the end of the last start's group, failed with `reason`, as a
+    /// node whose request failed brings it: the warmup's error naming it.
+    #[cfg(test)]
+    pub(crate) fn fail<A>(&self, actor: &A, reason: &str) -> anyhow::Error
+    where
+        A: DataActor + DataActorNative,
+    {
+        let failed = DataResponseEnvelope::terminal(self.group.get(), Some(reason.to_string()));
+        self.on_data_response(actor, &failed)
+            .expect_err("a failed group is an error")
     }
 
     /// Whether a live start's requests are not all answered yet: its windows
@@ -471,6 +520,54 @@ impl Warmup {
         }
     }
 
+    /// Hands the quotes of `response`, a response to the warmup's request,
+    /// to the indicators it feeds ticks (`feeding_ticks`), oldest first,
+    /// from the actor's `on_historical_quotes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error of an indicator reading a quote, which ends
+    /// the hand-over.
+    pub fn on_historical_quotes(&self, response: &[QuoteTick]) -> anyhow::Result<()> {
+        response
+            .iter()
+            .try_for_each(|quote| self.hold.history(Tick::Quote(*quote)))
+    }
+
+    /// Hands the trades of `response` over as `on_historical_quotes` does
+    /// quotes, from the actor's `on_historical_trades`.
+    ///
+    /// # Errors
+    ///
+    /// As `on_historical_quotes`.
+    pub fn on_historical_trades(&self, response: &[TradeTick]) -> anyhow::Result<()> {
+        response
+            .iter()
+            .try_for_each(|trade| self.hold.history(Tick::Trade(*trade)))
+    }
+
+    /// Takes `quote`, a live one, from the actor's `on_quote`: the
+    /// indicators it feeds ticks read it once a live start's group has
+    /// ended, held until then, and never if the history holds it (see
+    /// `hold`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of an indicator reading it.
+    pub fn on_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.hold.live(Tick::Quote(*quote))
+    }
+
+    /// Takes `trade`, a live one, from the actor's `on_trade`, as
+    /// `on_quote` does a quote.
+    ///
+    /// # Errors
+    ///
+    /// As `on_quote`.
+    pub fn on_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.hold.live(Tick::Trade(*trade))
+    }
+
     /// The cache config of a live node running the warmup: sized for the
     /// warmup of every bar type it builds (see `cache_config`).
     ///
@@ -503,6 +600,7 @@ impl Debug for Warmup {
             .field("indicators", &self.indicators.len())
             .field("books", &self.books.len())
             .field("custom_data", &self.custom_data.len())
+            .field("hold", &self.hold)
             .field("group", &self.group)
             .field("warming", &self.warming)
             .field("building", &self.building)
@@ -1480,6 +1578,366 @@ mod tests {
         let (mut probe, _) = registered();
         replayed.start(&mut probe).unwrap();
         assert!(!replayed.is_warming());
+    }
+
+    /// What `Ticks` records of a tick: its kind, its instrument and its
+    /// `ts_event`.
+    type Read = (&'static str, InstrumentId, UnixNanos);
+
+    /// An indicator recording each quote and trade it reads.
+    #[derive(Default)]
+    struct Ticks {
+        read: RefCell<Vec<Read>>,
+    }
+
+    impl ActorIndicator for Ticks {
+        fn key(&self) -> usize {
+            std::ptr::from_ref(self).addr()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn initialized(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
+            let read = ("quote", quote.instrument_id, quote.ts_event);
+            self.read.borrow_mut().push(read);
+            Ok(())
+        }
+
+        fn handle_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
+            let read = ("trade", trade.instrument_id, trade.ts_event);
+            self.read.borrow_mut().push(read);
+            Ok(())
+        }
+
+        fn handle_bar(&self, _bar: &Bar) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    const XAU: &str = "XAUUSD.ICMARKETS";
+    const EUR: &str = "EURUSD.ICMARKETS";
+
+    /// `time` on 2026-08-10, UTC, the day `registered` starts on.
+    fn on_the_day(time: &str) -> UnixNanos {
+        let at: Timestamp = format!("2026-08-10T{time}Z").parse().unwrap();
+        UnixNanos::from(at)
+    }
+
+    /// A quote of `instrument_id` made at `made` (`ts_event`) and stamped
+    /// by its client at `received` (`ts_init`).
+    fn quote_of(instrument_id: &str, made: &str, received: &str) -> QuoteTick {
+        QuoteTick::new(
+            InstrumentId::from(instrument_id),
+            Price::from("4000.00"),
+            Price::from("4000.10"),
+            Quantity::from(1),
+            Quantity::from(1),
+            on_the_day(made),
+            on_the_day(received),
+        )
+    }
+
+    /// A quote of XAUUSD made at `made` and stamped then, as a history's.
+    fn quote(made: &str) -> QuoteTick {
+        quote_of(XAU, made, made)
+    }
+
+    /// A trade of XAUUSD made at `made` and stamped by its client at
+    /// `received`.
+    fn trade(made: &str, received: &str) -> TradeTick {
+        TradeTick::new(
+            InstrumentId::from(XAU),
+            Price::from("4000.00"),
+            Quantity::from(1),
+            nautilus_model::enums::AggressorSide::Buy,
+            nautilus_model::identifiers::TradeId::from(made),
+            on_the_day(made),
+            on_the_day(received),
+        )
+    }
+
+    /// What `Ticks` records of a quote of `instrument_id` made at `made`.
+    fn read_quote(instrument_id: &str, made: &str) -> Read {
+        ("quote", InstrumentId::from(instrument_id), on_the_day(made))
+    }
+
+    /// What `Ticks` records of a trade of XAUUSD made at `made`.
+    fn read_trade(made: &str) -> Read {
+        ("trade", InstrumentId::from(XAU), on_the_day(made))
+    }
+
+    /// The live warmup of a day of XAUUSD's quotes and trades handing its
+    /// ticks to `ticks`, started at 14:30 (`registered`), its group pending,
+    /// and the strategy it started on.
+    fn warming(ticks: &Rc<Ticks>) -> (Warmup, Probe) {
+        let warmup = Warmup::live(&reading(&[]))
+            .reading(vec![
+                tick(NautilusDataType::QuoteTick, XAU),
+                tick(NautilusDataType::TradeTick, XAU),
+            ])
+            .feeding_ticks(Rc::clone(ticks) as SharedActorIndicator);
+        let (mut probe, _) = registered();
+        warmup.start(&mut probe).unwrap();
+        (warmup, probe)
+    }
+
+    /// Worked by hand. Started at 14:30, the warmup is answered in two
+    /// windows, 23 hours up to 13:30 then the hour since: the first holds
+    /// quotes made at 12:00 and 13:29; a live quote made at 14:30:01 comes
+    /// before the second, which holds 14:00 and 14:29; another, made at
+    /// 14:30:02, before the group ends. The live quotes are held until then:
+    /// the features read the four of the history, then the two live ones as
+    /// they came, in time order.
+    #[test]
+    fn live_quotes_reach_the_features_after_the_warmups_last_window_in_the_order_they_came() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+
+        warmup
+            .on_historical_quotes(&[quote("12:00:00"), quote("13:29:00")])
+            .unwrap();
+        warmup
+            .on_quote(&quote_of(XAU, "14:30:01", "14:30:01.050"))
+            .unwrap();
+        warmup
+            .on_historical_quotes(&[quote("14:00:00"), quote("14:29:00")])
+            .unwrap();
+        warmup
+            .on_quote(&quote_of(XAU, "14:30:02", "14:30:02.050"))
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *ticks.read.borrow(),
+            [
+                read_quote(XAU, "12:00:00"),
+                read_quote(XAU, "13:29:00"),
+                read_quote(XAU, "14:00:00"),
+                read_quote(XAU, "14:29:00"),
+                read_quote(XAU, "14:30:01"),
+                read_quote(XAU, "14:30:02"),
+            ]
+        );
+    }
+
+    /// The hold ends with the group, not with one of its requests. Started
+    /// at 14:30, the warmup asks XAUUSD's quotes and its trades, a request
+    /// each: the quotes' answers a quote made at 14:29:00 and completes,
+    /// then a live quote made at 14:30:01 comes while the trades' request
+    /// is still pending, and is held; the trades' answers a trade made at
+    /// 14:29:30, and the group ends. The features read the live quote last.
+    #[test]
+    fn live_ticks_are_held_until_the_group_ends_not_one_of_its_requests() {
+        let ticks = Rc::new(Ticks::default());
+        let warmup = Warmup::live(&reading(&[]))
+            .reading(vec![
+                tick(NautilusDataType::QuoteTick, XAU),
+                tick(NautilusDataType::TradeTick, XAU),
+            ])
+            .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
+        let (mut probe, commands) = registered();
+        warmup.start(&mut probe).unwrap();
+        let quotes = sent_requests(&commands)
+            .into_iter()
+            .find_map(|(source, id, _)| {
+                (source == Source::Ticks(tick(NautilusDataType::QuoteTick, XAU))).then_some(id)
+            })
+            .unwrap();
+
+        warmup.on_historical_quotes(&[quote("14:29:00")]).unwrap();
+        warmup
+            .on_data_response(&probe, &DataResponseEnvelope::terminal(quotes, None))
+            .unwrap();
+        warmup
+            .on_quote(&quote_of(XAU, "14:30:01", "14:30:01.050"))
+            .unwrap();
+        let pending = ticks.read.borrow().clone();
+        warmup
+            .on_historical_trades(&[trade("14:29:30", "14:29:30")])
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(pending, [read_quote(XAU, "14:29:00")]);
+        assert_eq!(
+            *ticks.read.borrow(),
+            [
+                read_quote(XAU, "14:29:00"),
+                read_trade("14:29:30"),
+                read_quote(XAU, "14:30:01"),
+            ]
+        );
+    }
+
+    /// Worked by hand: the overlap at the seam. The history's last quote
+    /// was made at 14:29:59. Held while the warmup is pending: the venue's
+    /// resend of it on the subscription, made at 14:29:59 and stamped on
+    /// receipt at 14:30:00.200, a `ts_init` after the history's; a quote
+    /// made at 14:29:57 and received at 14:30:00.300; and one made at
+    /// 14:30:00.400. The first two are at or before the history's last by
+    /// `ts_event`, which the history holds, so dropped whatever their
+    /// `ts_init`; the third is after it, and read.
+    #[test]
+    fn live_quotes_at_or_before_the_historys_last_are_dropped_whatever_their_ts_init() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+
+        warmup
+            .on_historical_quotes(&[quote("14:29:58"), quote("14:29:59")])
+            .unwrap();
+        for live in [
+            quote_of(XAU, "14:29:59", "14:30:00.200"),
+            quote_of(XAU, "14:29:57", "14:30:00.300"),
+            quote_of(XAU, "14:30:00.400", "14:30:00.450"),
+        ] {
+            warmup.on_quote(&live).unwrap();
+        }
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *ticks.read.borrow(),
+            [
+                read_quote(XAU, "14:29:58"),
+                read_quote(XAU, "14:29:59"),
+                read_quote(XAU, "14:30:00.400"),
+            ]
+        );
+    }
+
+    /// The overlap is judged within a series, the quotes or the trades of
+    /// one instrument: the history of XAUUSD's quotes ends at 14:29:59, and
+    /// a live trade of XAUUSD made at 14:29:30 and a live quote of EURUSD
+    /// made at 14:29:00, series without history, are read.
+    #[test]
+    fn a_series_without_history_drops_none_of_its_live_ticks() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+
+        warmup.on_historical_quotes(&[quote("14:29:59")]).unwrap();
+        warmup.on_trade(&trade("14:29:30", "14:30:00.100")).unwrap();
+        warmup
+            .on_quote(&quote_of(EUR, "14:29:00", "14:30:00.200"))
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *ticks.read.borrow(),
+            [
+                read_quote(XAU, "14:29:59"),
+                read_trade("14:29:30"),
+                read_quote(EUR, "14:29:00"),
+            ]
+        );
+    }
+
+    /// Worked by hand: trades as quotes. The history answers a trade made
+    /// at 14:29:58; a live trade made at 14:30:01 comes, held; the history
+    /// answers one made at 14:29:59, then the venue resends it live, made at
+    /// 14:29:59 and received at 14:30:01.500, dropped. The features read
+    /// the history's two, then the live one.
+    #[test]
+    fn live_trades_are_held_and_dropped_at_the_seam_as_quotes_are() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+
+        warmup
+            .on_historical_trades(&[trade("14:29:58", "14:29:58")])
+            .unwrap();
+        warmup.on_trade(&trade("14:30:01", "14:30:01.050")).unwrap();
+        warmup
+            .on_historical_trades(&[trade("14:29:59", "14:29:59")])
+            .unwrap();
+        warmup.on_trade(&trade("14:29:59", "14:30:01.500")).unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *ticks.read.borrow(),
+            [
+                read_trade("14:29:58"),
+                read_trade("14:29:59"),
+                read_trade("14:30:01"),
+            ]
+        );
+    }
+
+    /// Once the group has ended, a live quote, made at 14:30:05, is read as
+    /// it comes.
+    #[test]
+    fn after_the_warmup_live_ticks_reach_the_features_as_they_come() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+        warmup.on_historical_quotes(&[quote("14:29:59")]).unwrap();
+        warmup.complete(&probe).unwrap();
+
+        warmup
+            .on_quote(&quote_of(XAU, "14:30:05", "14:30:05.050"))
+            .unwrap();
+
+        assert_eq!(
+            *ticks.read.borrow(),
+            [read_quote(XAU, "14:29:59"), read_quote(XAU, "14:30:05")]
+        );
+    }
+
+    /// The venue's resend of the history's last quote, made at 14:29:59,
+    /// can come after a warmup the catalog answered at once: dropped then
+    /// too.
+    #[test]
+    fn after_the_warmup_a_live_quote_the_history_holds_is_dropped() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+        warmup.on_historical_quotes(&[quote("14:29:59")]).unwrap();
+        warmup.complete(&probe).unwrap();
+
+        warmup
+            .on_quote(&quote_of(XAU, "14:29:59", "14:30:00.200"))
+            .unwrap();
+
+        assert_eq!(*ticks.read.borrow(), [read_quote(XAU, "14:29:59")]);
+    }
+
+    /// A group ending failed ends the warmup all the same: the live quote
+    /// held, made at 14:30:01, is read, and the live ones after it as they
+    /// come.
+    #[test]
+    fn a_failed_warmup_hands_over_the_live_ticks_it_held() {
+        let ticks = Rc::new(Ticks::default());
+        let (warmup, probe) = warming(&ticks);
+        warmup
+            .on_quote(&quote_of(XAU, "14:30:01", "14:30:01.050"))
+            .unwrap();
+
+        let err = warmup.fail(&probe, "venue cut the history").to_string();
+        warmup
+            .on_quote(&quote_of(XAU, "14:30:02", "14:30:02.050"))
+            .unwrap();
+
+        assert!(err.contains("venue cut the history"), "{err}");
+        assert_eq!(
+            *ticks.read.borrow(),
+            [read_quote(XAU, "14:30:01"), read_quote(XAU, "14:30:02")]
+        );
+    }
+
+    /// A replay requests no warmup and holds nothing: a quote is read as it
+    /// comes.
+    #[test]
+    fn a_replays_ticks_reach_the_features_as_they_come() {
+        let ticks = Rc::new(Ticks::default());
+        let replayed = Warmup::replayed(&reading(&[]))
+            .reading(vec![tick(NautilusDataType::QuoteTick, XAU)])
+            .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
+        let (mut probe, _) = registered();
+        replayed.start(&mut probe).unwrap();
+
+        replayed.on_quote(&quote("14:30:01")).unwrap();
+
+        assert_eq!(*ticks.read.borrow(), [read_quote(XAU, "14:30:01")]);
     }
 
     /// Custom data of the tests: an imbalance of a book.

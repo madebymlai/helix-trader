@@ -142,7 +142,7 @@ pub fn start<A: DataActor + DataActorNative>(
     let DecisionRule::Every(interval) = rule;
     let clock = actor.clock();
     let now = clock.timestamp_ns();
-    let offset = delay + DECISION_MARGIN;
+    let offset = firing(delay);
     let (interval_ns, offset_ns) = (
         DurationNanos::try_from(interval)?,
         DurationNanos::try_from(offset)?,
@@ -161,6 +161,31 @@ pub fn start<A: DataActor + DataActorNative>(
         Some(true),
         Some(false),
     )
+}
+
+/// How long after its grid time a decision of a cadence deciding `delay`
+/// after its grid times fires (`start`).
+fn firing(delay: SignedDuration) -> SignedDuration {
+    delay + DECISION_MARGIN
+}
+
+/// The grid time of the decision on `rule`, deciding `delay` after its
+/// grid times (`start`), that first reads what is made at `ts`: the first
+/// to fire at or after it. What is made at a decision's firing is read by
+/// it, as the data engine hands it over before the timer.
+///
+/// # Panics
+///
+/// Panics if the rule is invalid (`DecisionRule::validate`).
+#[must_use]
+pub fn decision_of(rule: DecisionRule, delay: SignedDuration, ts: UnixNanos) -> UnixNanos {
+    let DecisionRule::Every(interval) = rule;
+    let interval = interval.as_nanos();
+    assert!(interval > 0, "a cadence of {interval} ns");
+    let since = i128::from(ts.as_u64()) - firing(delay).as_nanos();
+    let grid = since.div_euclid(interval) * interval;
+    let grid = if grid == since { grid } else { grid + interval };
+    UnixNanos::from(u64::try_from(grid).expect("a decision after the epoch"))
 }
 
 /// Whether `event` is a decision of the clock cadence.

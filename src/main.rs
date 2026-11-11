@@ -17,6 +17,8 @@ use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(gold_scalp)]
 use helix_trader::strategy::gold_scalp::GoldScalp;
+#[cfg(gold_scalp_v2)]
+use helix_trader::strategy::gold_scalp_v2::GoldScalpV2;
 use helix_trader::{
     backtest::{self, Backtest},
     live::{Live, Recording},
@@ -376,6 +378,9 @@ enum Strategy {
     #[cfg(gold_scalp)]
     #[value(name = "gold_scalp")]
     GoldScalp,
+    #[cfg(gold_scalp_v2)]
+    #[value(name = "gold_scalp_v2")]
+    GoldScalpV2,
 }
 
 /// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
@@ -437,6 +442,8 @@ fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequ
         Strategy::ModelEma => model_requirements::<ModelEma>(path)?,
         #[cfg(gold_scalp)]
         Strategy::GoldScalp => model_requirements::<GoldScalp>(path)?,
+        #[cfg(gold_scalp_v2)]
+        Strategy::GoldScalpV2 => model_requirements::<GoldScalpV2>(path)?,
     })
 }
 
@@ -529,6 +536,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         Strategy::ModelEma => backtest_on_models::<ModelEma>(&args, backtest)?,
         #[cfg(gold_scalp)]
         Strategy::GoldScalp => backtest_on_models::<GoldScalp>(&args, backtest)?,
+        #[cfg(gold_scalp_v2)]
+        Strategy::GoldScalpV2 => backtest_on_models::<GoldScalpV2>(&args, backtest)?,
     }
     Ok(())
 }
@@ -736,6 +745,8 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         Strategy::ModelEma => live_on_models::<ModelEma>(&args, &live).await,
         #[cfg(gold_scalp)]
         Strategy::GoldScalp => live_on_models::<GoldScalp>(&args, &live).await,
+        #[cfg(gold_scalp_v2)]
+        Strategy::GoldScalpV2 => live_on_models::<GoldScalpV2>(&args, &live).await,
     }
 }
 
@@ -837,6 +848,8 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
         Strategy::ModelEma => train::<ModelEma>(&args, &run)?,
         #[cfg(gold_scalp)]
         Strategy::GoldScalp => train::<GoldScalp>(&args, &run)?,
+        #[cfg(gold_scalp_v2)]
+        Strategy::GoldScalpV2 => train::<GoldScalpV2>(&args, &run)?,
     };
     reported(&outcome)
 }
@@ -869,6 +882,8 @@ fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
         Strategy::ModelEma => build_dataset::<ModelEma>(&args, &run, first, last)?,
         #[cfg(gold_scalp)]
         Strategy::GoldScalp => build_dataset::<GoldScalp>(&args, &run, first, last)?,
+        #[cfg(gold_scalp_v2)]
+        Strategy::GoldScalpV2 => build_dataset::<GoldScalpV2>(&args, &run, first, last)?,
     };
     match (built.first(), built.last()) {
         (Some(from), Some(to)) => {

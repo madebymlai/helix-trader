@@ -42,7 +42,7 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::DataActor,
+    actor::{DataActor, indicators::ActorIndicator},
     logging::logger::LoggerConfig,
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
@@ -233,6 +233,17 @@ impl DataActor for TargetProbe {
             Source::Bars(bar_type) => self.subscribe_bars(bar_type, None, None),
         }
         decide::start(self, DecisionRule::Every(self.every), SignedDuration::ZERO)
+    }
+
+    /// Hands the features its quotes and trades: the set is registered with
+    /// Nautilus for its bars alone, a model strategy's warmup handing it its
+    /// ticks.
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.features.handle_quote(quote)
+    }
+
+    fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.features.handle_trade(trade)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
