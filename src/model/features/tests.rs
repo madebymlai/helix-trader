@@ -744,42 +744,45 @@ fn registered() -> Probe {
     probe
 }
 
-/// The data engine hands Nautilus' handler of the strategy each
-/// update, which feeds its registered indicators first.
+/// The data engine hands Nautilus' handler of the strategy each update,
+/// which feeds its registered indicators first: the set is registered for
+/// its bars, and not for its quotes or trades, which the strategy hands its
+/// warmup (`Warmup::feeding_ticks`). Through Nautilus, the features on
+/// GBP/USD's quotes and trades read neither, and the one on AUD/USD's bars
+/// reads its bar.
 #[test]
-fn registered_features_get_quotes_trades_and_bars_through_nautilus() {
+fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_trades() {
     let mut probe = registered();
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
+        .quotes(id(GBP), LAST, &tables)
         .trades(id(GBP), LAST, &tables)
         .bars(BarType::from(AUD_BARS), LAST, &tables)
         .build()
         .unwrap();
     features.register(&mut probe);
 
-    probe.handle_quote(&quote(AUD, 0.7));
+    probe.handle_quote(&quote(GBP, 1.3));
     probe.handle_trade(&trade(GBP, 1.3));
     probe.handle_bar(&bar(AUD_BARS, 0.75));
 
-    let values = features.values().unwrap();
-    assert!((values[0] - 0.7).abs() < 1e-9, "{values:?}");
-    assert!((values[1] - 1.3).abs() < 1e-9, "{values:?}");
-    assert!((values[2] - 0.75).abs() < 1e-9, "{values:?}");
+    assert_eq!(features.last_update(id(GBP)), None);
+    assert_eq!(features.last_update(id(AUD)), Some(UnixNanos::default()));
 }
 
-/// Registered twice, as on a restart: each update still counts once.
+/// Registered twice, as on a restart: each bar still counts once, and the
+/// average of two is cold after one.
 #[test]
 fn a_set_registered_twice_gets_each_update_once() {
     let mut probe = registered();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), TWO, &tables())
+        .bars(BarType::from(AUD_BARS), TWO, &tables())
         .build()
         .unwrap();
     features.register(&mut probe);
     features.register(&mut probe);
 
-    probe.handle_quote(&quote(AUD, 0.7));
+    probe.handle_bar(&bar(AUD_BARS, 0.75));
 
     assert_eq!(features.values(), None);
 }

@@ -23,13 +23,13 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::DataActor,
+    actor::{DataActor, indicators::ActorIndicator},
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarType, CustomData},
+    data::{BarType, CustomData, QuoteTick},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
@@ -112,6 +112,12 @@ impl DataActor for FeatureProbe {
         self.subscribe_quotes(InstrumentId::from(INSTRUMENT_ID), None, None);
         self.subscribe_bars(BarType::from(MID_BAR_TYPE), None, None);
         decide::start(self, EVERY, SignedDuration::ZERO)
+    }
+
+    /// Hands the features its quotes: the set is registered with Nautilus
+    /// for its bars alone, a model strategy's warmup handing it its ticks.
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.features.handle_quote(quote)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

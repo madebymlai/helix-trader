@@ -937,6 +937,13 @@ impl TargetSetter {
         }
     }
 
+    /// Whether a target can be set as far as its ATR goes: none, or
+    /// initialized.
+    #[must_use]
+    pub fn initialized(&self) -> bool {
+        self.atr.as_ref().is_none_or(|atr| atr.value().is_some())
+    }
+
     /// `warmup` building the bars of the target's ATR, if any, and handing
     /// them to it (`Warmup::building`): the warmup's bars reach only the
     /// cache, and live the first decision after a start then sets the stop
@@ -1209,6 +1216,13 @@ impl Targets {
         }
         self.setter.start(actor);
         Ok(())
+    }
+
+    /// Whether the targets can be set as far as their ATR goes
+    /// (`TargetSetter::initialized`).
+    #[must_use]
+    pub fn initialized(&self) -> bool {
+        self.setter.initialized()
     }
 
     /// Opens the target of the decision of `row`, as the setter sets it

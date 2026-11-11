@@ -23,6 +23,7 @@ use helix_trader::{
         decide::DecisionRule,
         targets::{SideTarget, Target, TargetConfig, TargetSetter},
     },
+    rolls::Roller,
     strategy::{
         DataRequirements, TickSeries,
         warmup::{self, BookIndicator, Warmup},
@@ -44,7 +45,8 @@ use nautilus_common::{
         DataEvent, DataResponse,
         data::{
             BarsResponse, BookDeltasResponse, DataRequestFailed, DataResponseEnvelope,
-            QuotesResponse, RequestBars, RequestBookDeltas, RequestQuotes,
+            QuotesResponse, RequestBars, RequestBookDeltas, RequestQuotes, RequestTrades,
+            SubscribeQuotes, SubscribeTrades, TradesResponse,
         },
     },
     nautilus_actor,
@@ -56,16 +58,18 @@ use nautilus_live::{
 };
 use nautilus_model::{
     data::{
-        Bar, BarType, BookOrder, NautilusDataType, OrderBookDelta, OrderBookDeltas, QuoteTick,
-        TradeTick,
+        Bar, BarType, BookOrder, Data, NautilusDataType, OrderBookDelta, OrderBookDeltas,
+        QuoteTick, TradeTick,
     },
-    enums::{BookAction, BookType, OrderSide, RecordFlag},
-    identifiers::{ClientId, InstrumentId, TraderId, Venue},
+    enums::{AggressorSide, BookAction, BookType, OrderSide, RecordFlag},
+    identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{InstrumentAny, stubs::futures_contract_es},
     orderbook::OrderBook,
     types::{Price, Quantity},
 };
-use nautilus_persistence::config::DataCatalogConfig;
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
 
 const GCZ26: &str = "GCZ26.GLBX";
 /// Hour bars built from the venue's minute bars.
@@ -120,8 +124,28 @@ struct FakeVenue {
     answer: Answer,
     /// A span it holds no data over, in ns: a closed market.
     closed: Option<(u64, u64)>,
+    /// How long it takes to answer a request, as over a network; none
+    /// answers at once.
+    latency: Option<Duration>,
+    /// If a subscription resends the warmup's last tick first, made as it
+    /// was and stamped on receipt, as IC does its latest: the warmup's
+    /// length, from which and the start of the first window asked, an empty
+    /// catalog's, the venue tells the warmup's end, and so its last minute.
+    resends: Option<SignedDuration>,
     /// Each request's window, in ns.
     asked: Vec<(u64, u64)>,
+    /// Each live tick it sent.
+    live: Vec<Live>,
+}
+
+/// A live tick the fake venue sent.
+#[derive(Debug, Clone, Copy)]
+struct Live {
+    /// When it was made (`ts_event`), in ns.
+    made: u64,
+    /// How many windows the venue had been asked by then: fewer than it is
+    /// asked in all, the tick came before the warmup's last window.
+    asked: usize,
 }
 
 impl FakeVenue {
@@ -129,7 +153,10 @@ impl FakeVenue {
         Rc::new(RefCell::new(Self {
             answer,
             closed: None,
+            latency: None,
+            resends: None,
             asked: vec![],
+            live: vec![],
         }))
     }
 }
@@ -205,9 +232,83 @@ impl FakeClient {
                 DataEvent::ResponseEnvelope(DataResponseEnvelope::new(response, true, None))
             }
         };
-        self.sender.send(event)?;
+        match venue.latency {
+            None => self.sender.send(event)?,
+            Some(latency) => {
+                let sender = self.sender.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(latency).await;
+                    sender.send(event).unwrap();
+                });
+            }
+        }
         Ok(())
     }
+
+    /// Sends the live ticks of a subscription to `instrument_id`, as `tick`
+    /// makes them of the time made and the time stamped, in ns: at once, one
+    /// made and stamped now, after the warmup's last minute's, made as it was
+    /// and stamped now, if the venue resends it (`FakeVenue::resends`): made
+    /// at or before the warmup's end, whatever the time now, so the history
+    /// holds it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the venue resends before it was asked a window.
+    fn subscribed(
+        &self,
+        instrument_id: InstrumentId,
+        tick: impl Fn(InstrumentId, u64, u64) -> Data,
+    ) -> anyhow::Result<()> {
+        let now = UnixNanos::from(Timestamp::now()).as_u64();
+        let mut venue = self.venue.borrow_mut();
+        let mut made = vec![];
+        if let Some(length) = venue.resends {
+            let (start, _) = *venue
+                .asked
+                .first()
+                .expect("a window asked before the subscription");
+            let end = start + u64::try_from(length.as_nanos()).unwrap();
+            made.push((end / MINUTE_NS) * MINUTE_NS);
+        }
+        made.push(now);
+        for made in made {
+            let asked = venue.asked.len();
+            venue.live.push(Live { made, asked });
+            self.sender
+                .send(DataEvent::Data(tick(instrument_id, made, now)))?;
+        }
+        Ok(())
+    }
+}
+
+/// A quote of `instrument_id` at the venue's price, made at `made` and
+/// stamped at `stamped`, in ns.
+fn quote_at(instrument_id: InstrumentId, made: u64, stamped: u64) -> QuoteTick {
+    let price = price_at(made);
+    QuoteTick::new(
+        instrument_id,
+        price,
+        price,
+        Quantity::from(1),
+        Quantity::from(1),
+        made.into(),
+        stamped.into(),
+    )
+}
+
+/// A trade of `instrument_id` at the venue's price, made at `made` and
+/// stamped at `stamped`, in ns, its id the time made.
+fn trade_at(instrument_id: InstrumentId, made: u64, stamped: u64) -> TradeTick {
+    TradeTick::new(
+        instrument_id,
+        price_at(made),
+        Quantity::from(1),
+        AggressorSide::Buy,
+        TradeId::new(made.to_string()),
+        made.into(),
+        stamped.into(),
+    )
 }
 
 fn window(start: Option<Timestamp>, end: Option<Timestamp>) -> (u64, u64) {
@@ -313,18 +414,7 @@ impl DataClient for FakeClient {
         let id = request.single_instrument_id()?;
         let closed = self.venue.borrow().closed;
         let rows: Vec<QuoteTick> = minutes(start, end, closed)
-            .map(|ns| {
-                let price = price_at(ns);
-                QuoteTick::new(
-                    id,
-                    price,
-                    price,
-                    Quantity::from(1),
-                    Quantity::from(1),
-                    ns.into(),
-                    ns.into(),
-                )
-            })
+            .map(|ns| quote_at(id, ns, ns))
             .collect();
         let response = DataResponse::Quotes(QuotesResponse::new(
             request.request_id,
@@ -337,6 +427,48 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(request.request_id, (start, end), response)
+    }
+
+    /// The venue's trades in the request's window, one on each minute.
+    fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
+        let (start, end) = window(request.start, request.end);
+        let id = request.single_instrument_id()?;
+        let closed = self.venue.borrow().closed;
+        let rows: Vec<TradeTick> = minutes(start, end, closed)
+            .map(|ns| trade_at(id, ns, ns))
+            .collect();
+        let response = DataResponse::Trades(TradesResponse::new(
+            request.request_id,
+            self.id,
+            id,
+            rows,
+            Some(UnixNanos::from(start)),
+            Some(UnixNanos::from(end)),
+            UnixNanos::from(end),
+            request.params.clone(),
+        ));
+        self.answer(request.request_id, (start, end), response)
+    }
+
+    /// A quote of each instrument at once, as IC and IB send one on a
+    /// subscription (`FakeClient::subscribed`).
+    fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
+        for id in cmd.instrument_ids {
+            self.subscribed(id, |id, made, stamped| {
+                Data::Quote(quote_at(id, made, stamped))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A trade of each instrument at once (`FakeClient::subscribed`).
+    fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
+        for id in cmd.instrument_ids {
+            self.subscribed(id, |id, made, stamped| {
+                Data::Trade(trade_at(id, made, stamped))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -400,10 +532,13 @@ impl BookIndicator for Books {
     }
 }
 
-/// An indicator recording each bar the warmup hands it.
+/// An indicator recording each bar the warmup hands it, and when each quote
+/// and trade it reads was made.
 #[derive(Debug, Default)]
 struct Fed {
     bars: RefCell<Vec<Bar>>,
+    quotes: RefCell<Vec<u64>>,
+    trades: RefCell<Vec<u64>>,
 }
 
 impl ActorIndicator for Fed {
@@ -419,11 +554,13 @@ impl ActorIndicator for Fed {
         Ok(true)
     }
 
-    fn handle_quote(&self, _quote: &QuoteTick) -> anyhow::Result<()> {
+    fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.quotes.borrow_mut().push(quote.ts_event.as_u64());
         Ok(())
     }
 
-    fn handle_trade(&self, _trade: &TradeTick) -> anyhow::Result<()> {
+    fn handle_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.trades.borrow_mut().push(trade.ts_event.as_u64());
         Ok(())
     }
 
@@ -439,6 +576,9 @@ impl ActorIndicator for Fed {
 struct Warming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
+    /// The roller of the tick series the warmup's features read, started
+    /// after the warmup, as a model handle starts it.
+    roller: Option<Roller>,
     /// The target, started as a model handle does, and read for the long
     /// side when the warmup ends.
     traded: Option<Rc<TargetSetter>>,
@@ -452,6 +592,9 @@ impl DataActor for Warming {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.cache_rc().borrow_mut().add_instrument(gcz26())?;
         Rc::clone(&self.warmup).start(self)?;
+        if let Some(roller) = self.roller.clone() {
+            roller.start(self)?;
+        }
         if let Some(traded) = self.traded.clone() {
             traded.start(self);
         }
@@ -461,6 +604,24 @@ impl DataActor for Warming {
     fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
         self.warmup.on_historical_book_deltas(deltas);
         Ok(())
+    }
+
+    /// The ticks, of the warmup and live, go to the warmup, as a model
+    /// strategy hands them (`model_data_hooks!`).
+    fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
+        self.warmup.on_historical_quotes(quotes)
+    }
+
+    fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
+        self.warmup.on_historical_trades(trades)
+    }
+
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.warmup.on_quote(quote)
+    }
+
+    fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.warmup.on_trade(trade)
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -500,21 +661,22 @@ fn warm(
     };
     let fed = Rc::new(Fed::default());
     let warmup = Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator);
-    let (failure, _) = run(dir, venue, &requirements, warmup, None);
+    let (failure, _) = run(dir, venue, &requirements, warmup, None, None);
     Warmed {
         bars: fed.bars.borrow().clone(),
         failure,
     }
 }
 
-/// Runs `warmup`, and `traded`, of a strategy of `requirements` on a node with
-/// the catalog in `dir`, its history asked of `venue`: why it failed, if it
-/// did, and the long side's target when it ended.
+/// Runs `warmup`, `roller` and `traded` of a strategy of `requirements` on a
+/// node with the catalog in `dir`, its history asked of `venue`: why it
+/// failed, if it did, and the long side's target when it ended.
 fn run(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
     requirements: &DataRequirements,
     warmup: Warmup,
+    roller: Option<Roller>,
     traded: Option<Rc<TargetSetter>>,
 ) -> (Option<String>, Option<SideTarget>) {
     let warmup = Rc::new(warmup);
@@ -558,6 +720,7 @@ fn run(
         node.add_actor(Warming {
             core: DataActorCore::new(DataActorConfig::default()),
             warmup,
+            roller,
             traded,
             exits: Rc::clone(&exits),
             failure: Rc::clone(&failure),
@@ -812,7 +975,14 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
     let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements).unwrap());
     let warmup = traded.warmed(Warmup::live(&requirements));
-    let (failure, exits) = run(dir.path(), &venue, &requirements, warmup, Some(traded));
+    let (failure, exits) = run(
+        dir.path(),
+        &venue,
+        &requirements,
+        warmup,
+        None,
+        Some(traded),
+    );
     assert_eq!(failure, None);
     assert_eq!(venue.borrow().asked.len(), 4);
     exits.expect("a bracket: the ATR is warm when the warmup ends")
@@ -852,6 +1022,198 @@ fn a_warmup_of_composite_bars_warms_the_atr_of_a_bracket() {
     assert_three_atrs_wide(&exits);
 }
 
+/// The `data` of GCZ26.
+fn of_gcz26(data: NautilusDataType) -> TickSeries {
+    TickSeries {
+        data,
+        instrument_id: InstrumentId::from(GCZ26),
+    }
+}
+
+/// Runs a live warmup of `length` of `series` on a node with the catalog in
+/// `dir`, its history asked of `venue`, as a model handle starts one: the
+/// warmup hands features its ticks, of the history and live, and the roller
+/// subscribes to the series after the warmup's start. The features, once the
+/// warmup has ended.
+fn read_live(
+    dir: &Path,
+    venue: &Rc<RefCell<FakeVenue>>,
+    series: TickSeries,
+    length: SignedDuration,
+) -> Rc<Fed> {
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![series.clone()],
+        warmup: length,
+    };
+    let features = Rc::new(Fed::default());
+    let warmup = Warmup::live(&requirements)
+        .reading(vec![series.clone()])
+        .feeding_ticks(Rc::clone(&features) as SharedActorIndicator);
+    let roller = Roller::live(vec![series]);
+    let (failure, _) = run(dir, venue, &requirements, warmup, Some(roller), None);
+    assert_eq!(failure, None);
+    features
+}
+
+/// Asserts the venue sent its first live tick before it was asked its last
+/// window: the tick came while the warmup was pending.
+fn assert_live_before_the_last_window(venue: &FakeVenue) {
+    let first = venue.live.first().expect("a live tick");
+    assert!(
+        first.asked < venue.asked.len(),
+        "the live tick came once {} of {} windows were asked",
+        first.asked,
+        venue.asked.len()
+    );
+}
+
+/// The venue answers each window after a while, as over a network, and sends
+/// a quote at once on the subscription, while the warmup is not answered yet:
+/// the features read every quote of the warmup, two windows of 23 hours over
+/// 30, then the live one, in time order.
+#[test]
+fn features_read_every_warmup_quote_before_a_live_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().latency = Some(Duration::from_millis(20));
+
+    let features = read_live(
+        dir.path(),
+        &venue,
+        of_gcz26(NautilusDataType::QuoteTick),
+        SignedDuration::from_hours(30),
+    );
+
+    let venue = venue.borrow();
+    assert_eq!(venue.asked.len(), 2);
+    assert_live_before_the_last_window(&venue);
+    let read = features.quotes.borrow();
+    assert!(read.len() >= 29 * 60, "{} quotes", read.len());
+    let older = read.windows(2).position(|pair| pair[1] < pair[0]);
+    assert_eq!(older, None, "a quote older than the one read before it");
+    assert_eq!(
+        read.last().copied(),
+        venue.live.first().map(|live| live.made)
+    );
+}
+
+/// So with trades: the features read every trade of the warmup, then the
+/// live one the venue sends on the subscription.
+#[test]
+fn features_read_every_warmup_trade_before_a_live_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().latency = Some(Duration::from_millis(20));
+
+    let features = read_live(
+        dir.path(),
+        &venue,
+        of_gcz26(NautilusDataType::TradeTick),
+        SignedDuration::from_hours(30),
+    );
+
+    let venue = venue.borrow();
+    assert_eq!(venue.asked.len(), 2);
+    assert_live_before_the_last_window(&venue);
+    let read = features.trades.borrow();
+    assert!(read.len() >= 29 * 60, "{} trades", read.len());
+    let older = read.windows(2).position(|pair| pair[1] < pair[0]);
+    assert_eq!(older, None, "a trade older than the one read before it");
+    assert_eq!(
+        read.last().copied(),
+        venue.live.first().map(|live| live.made)
+    );
+}
+
+/// The venue resends its latest quote on the subscription, as IC does: made
+/// at the warmup's last minute, which the history holds, stamped on receipt;
+/// then sends a new one. The features read that minute once, from the
+/// warmup, then the new quote.
+#[test]
+fn the_venues_resend_of_the_warmups_last_quote_is_read_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let length = SignedDuration::from_hours(30);
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().latency = Some(Duration::from_millis(20));
+    venue.borrow_mut().resends = Some(length);
+
+    let features = read_live(
+        dir.path(),
+        &venue,
+        of_gcz26(NautilusDataType::QuoteTick),
+        length,
+    );
+
+    let venue = venue.borrow();
+    assert_live_before_the_last_window(&venue);
+    let [resent, new] = venue.live[..] else {
+        panic!("{:?}", venue.live)
+    };
+    let (_, end) = *venue.asked.last().expect("a window asked");
+    assert_eq!(
+        resent.made,
+        (end / MINUTE_NS) * MINUTE_NS,
+        "the resend is of the history's last minute, the last window ending at {end}"
+    );
+    let read = features.quotes.borrow();
+    let of_the_minute = read.iter().filter(|&&made| made == resent.made).count();
+    assert_eq!(
+        of_the_minute, 1,
+        "the resent minute read {of_the_minute} times"
+    );
+    assert_eq!(read.last(), Some(&new.made));
+    let older = read.windows(2).position(|pair| pair[1] < pair[0]);
+    assert_eq!(older, None, "a quote older than the one read before it");
+}
+
+/// A catalog holds the oldest windows of a warmup of 72 hours, its quotes up
+/// to 30 hours ago: of the four windows of 23 hours, the first is read from
+/// it, the second from it up to its end, and the venue is asked the rest of
+/// the second and the two after, each answered after a while, the live quote
+/// coming while they are pending. The features read every minute of the
+/// warmup once, oldest first, the catalog's and the venue's alike, then the
+/// live quote.
+#[test]
+fn features_read_a_catalogs_windows_then_the_venues_before_a_live_quote() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = UnixNanos::from(Timestamp::now()).as_u64();
+    let (from, to) = (now - 73 * HOUR_NS, now - 30 * HOUR_NS);
+    let id = InstrumentId::from(GCZ26);
+    let quotes: Vec<QuoteTick> = minutes(from, to, None)
+        .map(|ns| quote_at(id, ns, ns))
+        .collect();
+    ParquetDataCatalog::new(dir.path(), None, None, None, None)
+        .write_to_parquet(&quotes, Some(from.into()), Some(to.into()), None)
+        .unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().latency = Some(Duration::from_millis(20));
+
+    let features = read_live(
+        dir.path(),
+        &venue,
+        of_gcz26(NautilusDataType::QuoteTick),
+        WARMUP,
+    );
+
+    let venue = venue.borrow();
+    assert_eq!(venue.asked.len(), 3, "{:?}", venue.asked);
+    assert!(
+        venue.asked.iter().all(|&(asked_from, _)| asked_from > to),
+        "{:?} asked of the venue, the catalog ending at {to}",
+        venue.asked
+    );
+    assert_live_before_the_last_window(&venue);
+    let read = features.quotes.borrow();
+    let (live, warmup) = read.split_last().expect("quotes");
+    assert!(warmup.len() >= 72 * 60, "{} quotes", warmup.len());
+    assert!(
+        warmup.windows(2).all(|pair| pair[1] == pair[0] + MINUTE_NS),
+        "a minute repeated, lost or out of order"
+    );
+    assert_eq!(Some(*live), venue.live.first().map(|live| live.made));
+}
+
 /// A warmup of 72 hours of deltas on `dir`'s catalog: the book they build, how
 /// many batches cleared it, and what the venue was asked.
 fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
@@ -873,7 +1235,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     let warmup = Warmup::live(&requirements)
         .reading(ticks)
         .feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
-    let (failure, _) = run(dir, &venue, &requirements, warmup, None);
+    let (failure, _) = run(dir, &venue, &requirements, warmup, None, None);
     assert_eq!(failure, None);
     let asked = venue.borrow().asked.clone();
     (books, asked)
