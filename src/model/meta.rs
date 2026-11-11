@@ -3,11 +3,12 @@
 //!
 //! The side picked is the one the decision picks (`deciding`) among the
 //! side models of a `ModelConfig` with a meta section, on the expected net
-//! P&L of each side's calibrated probability
-//! (`store::SideModel::expected_pnl`, `payoff::pick`). The meta model
-//! decides only when a side is picked, on the decision's features, the
-//! strategy's without either side's payoff features, with the side picked
-//! and its probability after them (`PICKED_FEATURES`), and
+//! P&L of each side, its calibrated expected R of the pair times its unit
+//! (`store::Pair::expect`, `payoff::pick`). The meta model decides only
+//! when a side is picked, on the decision's features, the strategy's
+//! without either side's payoff features, with the side picked and the
+//! decision's calibrated level and side call after them (`PICKED_FEATURES`),
+//! and
 //! learns whether the trade of the side picked, the target on that side,
 //! with exits or time only, wins after its costs, read from its row as the
 //! side models read their trades (`dataset::DatasetRow`): a dataset row opens a
@@ -41,9 +42,9 @@ use super::{
 };
 
 /// The meta's examples of the dataset `rows` of the sides, in time order:
-/// each row a side is picked on, its features with that side and its
-/// probability, its label whether the trade on that side won, with the trade
-/// and its unit. The side picked on a row is the one
+/// each row a side is picked on, its features with that side and the
+/// decision's level and side call, its label whether the trade on that side
+/// won, with the trade and its unit. The side picked on a row is the one
 /// `DecidingModels` picks, on each side's row (`DatasetRow::sides`), among the
 /// sides of the pair of `models` in use then, as its stores list them now,
 /// none before the first.
@@ -59,7 +60,7 @@ pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Resul
             continue;
         };
         examples.push(Example {
-            features: meta_row(&row.features, picked.side.order_side(), picked.probability),
+            features: meta_row(&row.features, picked.side.order_side(), picked.expected),
             ..Example::of_side(row, picked.side)
         });
     }

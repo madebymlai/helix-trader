@@ -1,18 +1,29 @@
-//! Calibration: a model's probabilities turned into win rates, so that an
-//! expected P&L can be computed from them.
+//! Calibration: a model's predictions turned into what a decision weighs.
 //!
-//! A model is calibrated by Platt scaling on the log-odds of its prediction:
-//! a logistic curve, `1 / (1 + exp(a x + b))`, `x` being `ln(p / (1 - p))`,
-//! fitted by maximum likelihood to the labels of rows it was not fitted on.
-//! So `a = -1, b = 0` leaves a prediction as it is, a slope between -1 and 0
-//! says the model was too sure of itself, and none says it shows no signal,
-//! `b` alone then giving the rate. Each label is taken as Platt's
-//! smoothed target, `(N+ + 1) / (N+ + 2)` for a true one and `1 / (N- + 2)`
-//! for a false one, so that a few rows of one label do not make a
-//! certainty. The fit is Newton's method with a backtracking line search,
-//! as Lin, Lin and Weng's note on Platt's probabilistic outputs (2007)
-//! gives it: deterministic, so a calibration refitted on the same rows is
-//! the same to the bit. Nautilus has no calibration.
+//! A strategy's side models predict R, and a pair's predictions are
+//! calibrated together (`Ksplit`), on the rows of the calibration period of
+//! the split, which no model was fitted on: the level, the mean of the
+//! sides' predictions, by a line, and the side call, the long's prediction
+//! less the short's, by a slope through nought, each slope clipped to
+//! `[0, 1.5]`, so that a part with no signal shrinks toward nothing without
+//! the other moving. A decision's expected R of each side is its calibrated
+//! level plus or less half its calibrated side call (`Expected`). A
+//! one-sided strategy's calibration is the level line alone, on its one
+//! side's prediction. Least squares on so few parameters has a closed form:
+//! a calibration refitted on the same rows is the same to the bit.
+//!
+//! A meta model's probabilities are calibrated by Platt scaling on their
+//! log-odds (`Platt`): a logistic curve, `1 / (1 + exp(a x + b))`, `x`
+//! being `ln(p / (1 - p))`, fitted by maximum likelihood to the labels of
+//! rows it was not fitted on. So `a = -1, b = 0` leaves a prediction as it
+//! is, a slope between -1 and 0 says the model was too sure of itself, and
+//! none says it shows no signal, `b` alone then giving the rate. Each label
+//! is taken as Platt's smoothed target, `(N+ + 1) / (N+ + 2)` for a true one
+//! and `1 / (N- + 2)` for a false one, so that a few rows of one label do
+//! not make a certainty. The fit is Newton's method with a backtracking line
+//! search, as Lin, Lin and Weng's note on Platt's probabilistic outputs
+//! (2007) gives it: deterministic, so a calibration refitted on the same
+//! rows is the same to the bit. Nautilus has no calibration.
 
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
@@ -45,12 +56,12 @@ fn log_odds(p: f64) -> f64 {
 /// A Platt scaling on log-odds: the probability of a prediction whose
 /// log-odds are `x` is `1 / (1 + exp(a x + b))`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Calibration {
+pub struct Platt {
     pub a: f64,
     pub b: f64,
 }
 
-impl Calibration {
+impl Platt {
     /// The calibration fitted on `rows`, each a model's prediction and its
     /// label.
     ///
@@ -228,7 +239,14 @@ impl Ksplit {
         let (covariance, variance) = levels.iter().fold((0.0, 0.0), |(cov, var), &(x, r)| {
             ((x - c).mul_add(r - y, cov), (x - c).mul_add(x - c, var))
         });
-        let beta = slope(covariance, variance);
+        // Their mean rounded, levels that never vary would have a variance
+        // of rounding, and a slope of noise.
+        let varies = levels.iter().any(|level| level.0 != levels[0].0);
+        let beta = if varies {
+            slope(covariance, variance)
+        } else {
+            0.0
+        };
         let side_call = pair.then(|| {
             let (product, square) = rows.iter().fold((0.0, 0.0), |(product, square), sides| {
                 let (d, t) = (sides[0].0 - sides[1].0, sides[0].1 - sides[1].1);
@@ -288,7 +306,7 @@ mod tests {
     /// 2/3, which two parameters fit exactly, and 0.5 half way.
     #[test]
     fn a_false_and_a_true_row_calibrate_to_platts_targets() {
-        let calibration = Calibration::fit(&[(0.25, false), (0.75, true)]).unwrap();
+        let calibration = Platt::fit(&[(0.25, false), (0.75, true)]).unwrap();
 
         close(calibration.apply(0.25), 1.0 / 3.0);
         close(calibration.apply(0.75), 2.0 / 3.0);
@@ -301,12 +319,12 @@ mod tests {
     fn a_constant_prediction_calibrates_to_the_mean_of_the_targets() {
         let rows = [(0.9, true), (0.9, true), (0.9, true), (0.9, false)];
 
-        close(Calibration::fit(&rows).unwrap().apply(0.9), 41.0 / 60.0);
+        close(Platt::fit(&rows).unwrap().apply(0.9), 41.0 / 60.0);
     }
 
     #[test]
     fn a_slope_of_minus_one_and_no_intercept_leaves_a_prediction_as_it_is() {
-        let unchanged = Calibration { a: -1.0, b: 0.0 };
+        let unchanged = Platt { a: -1.0, b: 0.0 };
 
         for p in [0.05, 0.5, 0.6, 0.8, 0.95] {
             close(unchanged.apply(p), p);
@@ -316,13 +334,13 @@ mod tests {
     /// Half the slope takes the root of the odds: 4 to 1 become 2 to 1.
     #[test]
     fn half_the_slope_takes_the_root_of_the_odds() {
-        close(Calibration { a: -0.5, b: 0.0 }.apply(0.8), 2.0 / 3.0);
+        close(Platt { a: -0.5, b: 0.0 }.apply(0.8), 2.0 / 3.0);
     }
 
     /// With no slope, `b` alone is the odds against: 3 to 1 is 1/4.
     #[test]
     fn no_slope_gives_every_prediction_the_same_rate() {
-        let same = Calibration {
+        let same = Platt {
             a: 0.0,
             b: 3f64.ln(),
         };
@@ -343,7 +361,7 @@ mod tests {
     fn a_model_already_calibrated_fits_the_curve_leaving_it_as_it_is() {
         let rows: Vec<_> = at(0.8, 10_000, 0.8).chain(at(0.2, 10_000, 0.2)).collect();
 
-        let fit = Calibration::fit(&rows).unwrap();
+        let fit = Platt::fit(&rows).unwrap();
 
         assert!((fit.a + 1.0).abs() < 1e-3 && fit.b.abs() < 1e-3, "{fit:?}");
     }
@@ -353,7 +371,7 @@ mod tests {
     fn a_model_with_no_signal_fits_no_slope() {
         let rows: Vec<_> = at(0.8, 10_000, 0.5).chain(at(0.2, 10_000, 0.5)).collect();
 
-        let fit = Calibration::fit(&rows).unwrap();
+        let fit = Platt::fit(&rows).unwrap();
 
         assert!(fit.a.abs() < 1e-3 && fit.b.abs() < 1e-3, "{fit:?}");
     }
@@ -362,7 +380,7 @@ mod tests {
     /// kind, whose log-odds are infinite.
     #[test]
     fn a_prediction_of_a_certainty_calibrates_to_a_finite_rate() {
-        let unchanged = Calibration { a: -1.0, b: 0.0 };
+        let unchanged = Platt { a: -1.0, b: 0.0 };
         close(unchanged.apply(0.0), 0.0);
         close(unchanged.apply(1.0), 1.0);
 
@@ -371,7 +389,7 @@ mod tests {
             vec![(1.0, true), (1.0, true), (1.0, false)],
             vec![(0.0, false), (0.0, false), (0.0, true)],
         ] {
-            let fit = Calibration::fit(&rows).unwrap();
+            let fit = Platt::fit(&rows).unwrap();
 
             assert!(fit.a.is_finite() && fit.b.is_finite(), "{fit:?}");
             for p in [0.0, 0.5, 1.0] {
@@ -384,7 +402,7 @@ mod tests {
     fn a_ranking_the_wrong_way_round_calibrates_decreasing() {
         let rows = [(0.2, true), (0.3, true), (0.7, false), (0.8, false)];
 
-        let calibration = Calibration::fit(&rows).unwrap();
+        let calibration = Platt::fit(&rows).unwrap();
 
         assert!(
             calibration.apply(0.2) > calibration.apply(0.8),
@@ -402,15 +420,12 @@ mod tests {
             (0.6, true),
         ];
 
-        assert_eq!(
-            Calibration::fit(&rows).unwrap(),
-            Calibration::fit(&rows).unwrap()
-        );
+        assert_eq!(Platt::fit(&rows).unwrap(), Platt::fit(&rows).unwrap());
     }
 
     #[test]
     fn no_row_is_refused() {
-        assert!(Calibration::fit(&[]).is_err());
+        assert!(Platt::fit(&[]).is_err());
     }
 
     fn near(actual: f64, expected: f64) {
@@ -555,6 +570,21 @@ mod tests {
 
         assert_eq!((fit.level.beta, fit.side_call), (0.0, Some(0.0)));
         near(fit.level.alpha, 0.5);
+    }
+
+    /// Many rows of one level, 0.1 a side, whose mean in floating point is
+    /// not 0.1 to the bit: still no slope, the level the mean R.
+    #[test]
+    fn a_level_that_never_varies_over_many_rows_has_no_slope() {
+        for count in [24, 30, 37, 50] {
+            let rows: Vec<Vec<(f64, f64)>> = (0..count)
+                .map(|i| vec![(0.1, f64::from(i % 3) + 0.1), (0.1, 0.3)])
+                .collect();
+
+            let fit = Ksplit::fit(&rows).unwrap();
+
+            assert_eq!(fit.level.beta, 0.0, "{count} rows");
+        }
     }
 
     #[test]

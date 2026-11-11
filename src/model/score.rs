@@ -53,7 +53,12 @@ impl ExpectedScore {
             rows: rows.len(),
             skill: (baseline_error > 0.0).then(|| 1.0 - error / baseline_error),
             mean_error: Some(mean(|r| r.1 - r.0)),
-            slope: (variance > 0.0).then(|| covariance / variance),
+            // Their mean rounded, values that never vary would have a
+            // variance of rounding, and a slope of noise.
+            slope: rows
+                .iter()
+                .any(|row| row.0 != rows[0].0)
+                .then(|| covariance / variance),
             top_decile_gap: Some(top.iter().map(|r| r.1 - r.0).sum::<f64>() / top.len() as f64),
         }
     }
@@ -229,6 +234,17 @@ mod tests {
 
         assert_eq!((score.skill, score.slope), (None, None));
         close(score.mean_error, 0.5);
+    }
+
+    /// Many rows of one expectation, -0.2, whose mean in floating point is not
+    /// -0.2 to the bit: still no slope.
+    #[test]
+    fn one_expectation_over_many_rows_has_no_slope() {
+        let rows: Vec<(f64, f64, f64)> = (0..24)
+            .map(|i| (-0.2, f64::from(i % 3) - 1.0, 0.0))
+            .collect();
+
+        assert_eq!(ExpectedScore::of(&rows).slope, None);
     }
 
     #[test]

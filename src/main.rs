@@ -918,8 +918,9 @@ fn build_dataset<S: ModelStrategy>(
 mod tests {
     use super::*;
     use helix_trader::model::{
-        holdout::{Earnings, Holdout, Refusal},
+        holdout::{Earnings, Holdout, Refusal, Score},
         schedule::Retrain,
+        score::ExpectedScore,
         train::{Kept, Outcome},
     };
     use jiff::SignedDuration;
@@ -1276,18 +1277,20 @@ mod tests {
 
     #[test]
     fn a_train_keeping_the_model_fails_with_the_reason() {
-        let holdout = Holdout {
+        let holdout = Box::new(Holdout {
             earnings: Earnings::default(),
-            log_loss: 0.6,
-            baseline_log_loss: 0.69,
-            auc: Some(0.6),
-        };
+            score: Score::Expected(ExpectedScore {
+                rows: 2,
+                skill: Some(0.1),
+                ..ExpectedScore::default()
+            }),
+        });
         let kept = Outcome::Kept(Kept::Refused {
             why: Refusal::MinPnl {
                 pnl: 0.48,
                 min_pnl: 0.55,
             },
-            holdout,
+            holdout: holdout.clone(),
         });
         let published = Outcome::Published {
             valid_from: "2026-10-23T00:00:00Z".parse().unwrap(),
@@ -1319,12 +1322,14 @@ mod tests {
             }),
             short: Some(Outcome::Published {
                 valid_from: t,
-                holdout: Holdout {
+                holdout: Box::new(Holdout {
                     earnings: Earnings::default(),
-                    log_loss: 0.6,
-                    baseline_log_loss: 0.69,
-                    auc: Some(0.6),
-                },
+                    score: Score::Expected(ExpectedScore {
+                        rows: 2,
+                        skill: Some(0.1),
+                        ..ExpectedScore::default()
+                    }),
+                }),
             }),
             meta: None,
         };

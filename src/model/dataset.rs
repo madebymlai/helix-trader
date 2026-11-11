@@ -631,7 +631,8 @@ impl DatasetRow {
         }
     }
 
-    /// Whether `side`'s trade gained after its costs: the label of its model.
+    /// Whether `side`'s trade gained after its costs: the label of a meta's
+    /// example of it.
     #[must_use]
     pub fn gained(&self, side: Side) -> bool {
         self.trade(side).pnl > 0.0

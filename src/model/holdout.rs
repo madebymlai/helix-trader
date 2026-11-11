@@ -1,5 +1,5 @@
 //! A retrained model's holdout as its publication reads it: what the decision
-//! would have earned there, not how well a model ranks the rows.
+//! would have earned there, and how well the model predicted it.
 //!
 //! The decision takes some of the trades of its rows: the sides', the side
 //! picked on each row (`deciding::DecidingModels`), which a train's gate and
@@ -14,15 +14,22 @@
 //! the rates among the trades that gained or lost: a trade at nought,
 //! counted among the trades, weighs in neither.
 //!
-//! A model is published (`Holdout::refusal` none) when, on its holdout,
-//! its calibrated probabilities' log loss is below the baseline's, the
-//! training mean's (`Holdout::log_loss_refusal`), and the trades taken, at
-//! least the minimum count (`Minimums`), earned per trade at least the minimum
-//! net P&L and more than every trade of the rows did. A side's model is
-//! published only with the other sides of its pair, each below its own
-//! baseline's log loss, on the earnings of the pair's picks (`train`). The
-//! log loss and the AUC are ours (`score`): Nautilus scores trades, not
-//! probabilities. The AUC is reported, never required.
+//! How well the model predicted the holdout (`Score`) is a side's calibrated
+//! expected R, `E'`, against its trades' realised R (`score::ExpectedScore`):
+//! its skill, one less its squared error over that of the training mean of R,
+//! the mean of `R - E'`, the slope of `R` on `E'` and the gap of the tenth of
+//! the rows expected the most; and a meta's calibrated probabilities' log
+//! loss beside the training mean's and their AUC (`score`). Nautilus scores
+//! trades, not predictions.
+//!
+//! A model is published (`Holdout::refusal` none) when, on its holdout, its
+//! score passes (`Holdout::score_refusal`: a side's skill above nought, a
+//! meta's log loss below the baseline's), and the trades taken, at least the
+//! minimum count (`Minimums`), earned per trade at least the minimum net P&L
+//! and more than every trade of the rows did. A side's model is published
+//! only with the other sides of its pair, each of a skill above nought, on
+//! the earnings of the pair's picks (`train`). The AUC, the slope and the
+//! gap are reported, never required.
 
 use std::fmt;
 
@@ -33,7 +40,7 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{dataset::DatasetRow, deciding::SideRow, targets::Side};
+use super::{dataset::DatasetRow, deciding::SideRow, score::ExpectedScore, targets::Side};
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -46,17 +53,18 @@ pub struct Trade {
     pub commission: f64,
 }
 
-/// A row as a model is fitted and judged on it: its features and its
-/// label, the trade the label is of and the unit of that trade's payoff,
-/// the decision's time and when its target settled.
+/// A row as a model is fitted and judged on it: its features, the trade it
+/// is of and the unit of that trade's payoff, whose realised value a side's
+/// model learns (`realised`), and whether the trade gained, which a meta's
+/// learns, the decision's time and when its target settled.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Example {
     pub features: Vec<f64>,
     pub label: bool,
-    /// The trade whose gain the label is: of a side model's side, or of the
-    /// side picked for a meta.
+    /// The trade of the row: of a side model's side, or of the side picked
+    /// for a meta.
     pub trade: Trade,
-    /// The unit of the trade's payoff in the row (`DatasetRow::units`).
+    /// The unit of the trade's payoff in the row (`DatasetRow::side`).
     pub unit: f64,
     pub ts_event: UnixNanos,
     pub settled_at: UnixNanos,
@@ -93,13 +101,26 @@ pub struct Holdout {
     /// What was judged: a meta's own, or the picks between the sides of a
     /// pair, the same for each side.
     pub earnings: Earnings,
-    /// The log loss of the model's calibrated probabilities.
-    pub log_loss: f64,
-    /// The log loss of the baseline, the training mean.
-    pub baseline_log_loss: f64,
-    /// The AUC of the model's calibrated probabilities; none without a row
-    /// of each label.
-    pub auc: Option<f64>,
+    /// How well the model predicted the holdout's rows.
+    pub score: Score,
+}
+
+/// How well a model predicted its holdout's rows, beside its baseline, the
+/// training mean of what it learned.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Score {
+    /// A side's: its calibrated expected R against its trades' realised R,
+    /// the baseline the training mean of R.
+    Expected(ExpectedScore),
+    /// A meta's: its calibrated probabilities against its labels.
+    Probability {
+        log_loss: f64,
+        /// The log loss of the baseline, the training mean.
+        baseline_log_loss: f64,
+        /// None without a row of each label.
+        auc: Option<f64>,
+    },
 }
 
 /// The least a model's holdout is published with: the net P&L per trade taken,
@@ -113,7 +134,9 @@ pub struct Minimums {
 /// Why a model was not published.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Refusal {
-    /// Its log loss is not below the baseline's.
+    /// A side's skill is not above nought, or it has none.
+    Skill { skill: Option<f64> },
+    /// A meta's log loss is not below the baseline's.
     LogLoss { log_loss: f64, baseline: f64 },
     /// Fewer trades were taken than the minimum.
     Trades { trades: usize, min_trades: usize },
@@ -180,11 +203,11 @@ impl Earnings {
 
 impl Holdout {
     /// Why a model of this holdout is not published under `minimums`, the
-    /// first reason of its log loss, its count of trades, the minimum net
+    /// first reason of its score, its count of trades, the minimum net
     /// P&L and every trade's; none if it is.
     #[must_use]
     pub fn refusal(&self, minimums: Minimums) -> Option<Refusal> {
-        if let Some(refusal) = self.log_loss_refusal() {
+        if let Some(refusal) = self.score_refusal() {
             return Some(refusal);
         }
         let Earnings { taken, every, .. } = self.earnings;
@@ -206,21 +229,31 @@ impl Holdout {
         (pnl <= every).then_some(Refusal::Every { pnl, every })
     }
 
-    /// Why a model of this holdout is not published whatever it earned: its
-    /// log loss not below the baseline's.
+    /// Why a model of this holdout is not published whatever it earned: a
+    /// side's skill not above nought, or none; a meta's log loss not below
+    /// the baseline's.
     #[must_use]
-    pub fn log_loss_refusal(&self) -> Option<Refusal> {
-        (self.log_loss >= self.baseline_log_loss).then_some(Refusal::LogLoss {
-            log_loss: self.log_loss,
-            baseline: self.baseline_log_loss,
-        })
+    pub fn score_refusal(&self) -> Option<Refusal> {
+        match self.score {
+            Score::Expected(ExpectedScore { skill, .. }) => {
+                (!skill.is_some_and(|skill| skill > 0.0)).then_some(Refusal::Skill { skill })
+            }
+            Score::Probability {
+                log_loss,
+                baseline_log_loss,
+                ..
+            } => (log_loss >= baseline_log_loss).then_some(Refusal::LogLoss {
+                log_loss,
+                baseline: baseline_log_loss,
+            }),
+        }
     }
 }
 
 impl Example {
     /// The example of `row` on `side`'s trade: the side's row
-    /// (`DatasetRow::side`), whether the trade gained, the trade, and its
-    /// payoff's unit.
+    /// (`DatasetRow::side`), the trade and its payoff's unit, and whether it
+    /// gained.
     pub(super) fn of_side(row: &DatasetRow, side: Side) -> Self {
         let SideRow { features, unit } = row.side(side);
         Self {
@@ -267,19 +300,45 @@ impl fmt::Display for Holdout {
         write!(
             f,
             "taken {taken}; every trade {every}; at {STRESS}x the commission, taken {}, \
-             every trade {}; log loss {:.6}, baseline {:.6}; AUC {}",
+             every trade {}; {}",
             value(taken_stressed.expectancy),
             value(every_stressed.expectancy),
-            self.log_loss,
-            self.baseline_log_loss,
-            value(self.auc)
+            self.score
         )
+    }
+}
+
+impl fmt::Display for Score {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Expected(score) => write!(
+                f,
+                "skill {}, mean R - E' {}, calibration slope {}, top-decile gap {} over {} rows",
+                value(score.skill),
+                value(score.mean_error),
+                value(score.slope),
+                value(score.top_decile_gap),
+                score.rows
+            ),
+            Self::Probability {
+                log_loss,
+                baseline_log_loss,
+                auc,
+            } => write!(
+                f,
+                "log loss {log_loss:.6}, baseline {baseline_log_loss:.6}; AUC {}",
+                value(*auc)
+            ),
+        }
     }
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Skill { skill } => {
+                write!(f, "holdout skill {} not above nought", value(*skill))
+            }
             Self::LogLoss { log_loss, baseline } => write!(
                 f,
                 "holdout log loss {log_loss:.6} not below the baseline's {baseline:.6}"
@@ -374,8 +433,8 @@ mod tests {
         );
     }
 
-    /// A holdout whose decision took 3 trades of 1.2 each, every trade's 0.4,
-    /// its log loss 0.6 against the baseline's 0.69.
+    /// A side's holdout whose decision took 3 trades of 1.2 each, every
+    /// trade's 0.4, its skill 0.1.
     fn holdout() -> Holdout {
         let trades = |count, expectancy| Trades {
             count,
@@ -388,10 +447,17 @@ mod tests {
                 every: trades(8, 0.4),
                 ..Earnings::default()
             },
-            log_loss: 0.6,
-            baseline_log_loss: 0.69,
-            auc: None,
+            score: of_skill(Some(0.1)),
         }
+    }
+
+    /// A side's score of `skill`.
+    fn of_skill(skill: Option<f64>) -> Score {
+        Score::Expected(ExpectedScore {
+            rows: 8,
+            skill,
+            ..ExpectedScore::default()
+        })
     }
 
     const MINIMUMS: Minimums = Minimums {
@@ -410,20 +476,45 @@ mod tests {
         assert_eq!(holdout().refusal(at_the_minimum), None);
     }
 
+    /// A side whose expected R errs no less than the training mean, or
+    /// has no skill to read, is refused whatever its picks earned.
+    #[test]
+    fn a_skill_not_above_nought_is_refused() {
+        for skill in [Some(0.0), Some(-0.2), None] {
+            let worse = Holdout {
+                score: of_skill(skill),
+                ..holdout()
+            };
+
+            assert_eq!(
+                worse.refusal(MINIMUMS),
+                Some(Refusal::Skill { skill }),
+                "{skill:?}"
+            );
+        }
+    }
+
+    /// A meta's probabilities whose log loss is not below the baseline's
+    /// are refused, and published below it.
     #[test]
     fn a_log_loss_not_below_the_baselines_is_refused() {
-        let worse = Holdout {
-            log_loss: 0.69,
+        let meta = |log_loss| Holdout {
+            score: Score::Probability {
+                log_loss,
+                baseline_log_loss: 0.69,
+                auc: None,
+            },
             ..holdout()
         };
 
         assert_eq!(
-            worse.refusal(MINIMUMS),
+            meta(0.69).refusal(MINIMUMS),
             Some(Refusal::LogLoss {
                 log_loss: 0.69,
                 baseline: 0.69
             })
         );
+        assert_eq!(meta(0.6).refusal(MINIMUMS), None);
     }
 
     #[test]

@@ -58,7 +58,8 @@
 //! snapshots the features in that order, once every one is initialized. A
 //! side model reads them, then its side's payoff features, which the target
 //! names (`side_names`, `side_row`); a meta model reads them, then the side
-//! picked and its probability (`meta_names`, `meta_row`).
+//! picked and the decision's level and side call (`meta_names`,
+//! `meta_row`).
 //! A feature exposes its current value through `Feature`, which every
 //! Nautilus moving average has with no extra code. Custom data of an
 //! instrument, which Nautilus' `Indicator` does not handle, feeds a raw
@@ -122,7 +123,7 @@ use nautilus_model::{
 };
 use sha2::{Digest, Sha256};
 
-use super::targets::BracketWidth;
+use super::{calibration::Expected, targets::BracketWidth};
 use crate::{
     rolls::{Transition, front},
     strategy::{
@@ -146,19 +147,21 @@ pub fn side_row(features: &[f64], payoff: &[f64]) -> Vec<f64> {
     features.iter().chain(payoff).copied().collect()
 }
 
-/// The names of the side picked and its probability, the last values of
-/// a meta model's rows.
-pub const PICKED_FEATURES: [&str; 2] = ["picked_side", "picked_probability"];
+/// The names of the side picked and the decision's calibrated level and
+/// side call, the last values of a meta model's rows.
+pub const PICKED_FEATURES: [&str; 3] = ["picked_side", "level", "side_call"];
 
-/// The values of the `side` picked and its `probability`, in the order of
-/// `PICKED_FEATURES`: the side 1 a buy, -1 a sell.
-fn picked_values(side: OrderSide, probability: f64) -> [f64; 2] {
+/// The values of the `side` picked and the decision's level and side call
+/// of `expected`, in the order of `PICKED_FEATURES`: the side 1 a buy, -1 a
+/// sell.
+fn picked_values(side: OrderSide, expected: Expected) -> [f64; 3] {
     let side = if side == OrderSide::Buy { 1.0 } else { -1.0 };
-    [side, probability]
+    [side, expected.level, expected.side_call]
 }
 
 /// The names of a meta model's features, of its sides' `names`: those,
-/// then the side picked and its probability (`PICKED_FEATURES`).
+/// then the side picked and the decision's level and side call
+/// (`PICKED_FEATURES`).
 #[must_use]
 pub fn meta_names(names: &[String]) -> Vec<String> {
     names
@@ -169,13 +172,14 @@ pub fn meta_names(names: &[String]) -> Vec<String> {
 }
 
 /// A meta model's row: the sides' `features`, then the `side` picked and
-/// its `probability`, in the order of `meta_names`.
+/// the decision's level and side call of `expected`, in the order of
+/// `meta_names`.
 #[must_use]
-pub fn meta_row(features: &[f64], side: OrderSide, probability: f64) -> Vec<f64> {
+pub fn meta_row(features: &[f64], side: OrderSide, expected: Expected) -> Vec<f64> {
     features
         .iter()
         .copied()
-        .chain(picked_values(side, probability))
+        .chain(picked_values(side, expected))
         .collect()
 }
 

@@ -2,14 +2,14 @@
 //! `common::dataset` decides every hour on the last mid of IC's gold,
 //! trading in a backtest on the models of a store. On a fixed list of
 //! baseline long models of a strategy trading the long alone, each
-//! predicting its own probability whatever the row, calibrated alike, each
-//! decision's probability names the model it used: the latest valid at or
-//! before it. A LightGBM model fitted on the
-//! dataset's long rows and published as a train would, reloaded in the node,
-//! predicts on the decisions of its probe rows exactly as when fitted,
-//! calibrated; and one splitting on the payoff features alone predicts on
-//! every decision as on the long's row the dataset holds for it, the row a
-//! decision reads being the dataset's. The probe sends its
+//! predicting its own R whatever the row, its calibration leaving it as it
+//! is, each decision's level names the model it used: the latest valid at
+//! or before it. A LightGBM model fitted on the dataset's long rows'
+//! realised R and published as a train would, reloaded in the node,
+//! predicts on the decisions of its probe rows exactly as when fitted; and
+//! one splitting on the payoff features alone predicts on every decision
+//! as on the long's row the dataset holds for it, the row a decision reads
+//! being the dataset's. The probe sends its
 //! trades: on the hand-worked targets' quotes (`backtest_targets`), each
 //! trade of a model of either side realises the P&L the dataset row of
 //! its decision recorded of that side.
@@ -20,8 +20,8 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            CALIBRATION, STRATEGY, baseline_of, config, features, replay, replay_of, requirements,
-            target, trade, venue, walk,
+            STRATEGY, baseline_of, config, features, r, replay, replay_of, requirements, target,
+            trade, venue, walk,
         },
         ic,
     },
@@ -55,9 +55,10 @@ fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
 }
 
 /// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late,
-/// of a strategy trading the long alone; models valid from 02:00 (0.7),
-/// 04:00 (0.8), 04:30 (0.9) and 09:00 (after the run), each probability
-/// calibrated. Before 02:00 no model is valid: no trade.
+/// of a strategy trading the long alone; models valid from 02:00 (of 7
+/// tenths, 0.2R), 04:00 (8), 04:30 (9) and 09:00 (after the run), each
+/// decision's level its model's R, the strategy's one side calibrated to
+/// the bit as it is. Before 02:00 no model is valid: no trade.
 #[test]
 fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let catalog = walk(
@@ -105,32 +106,34 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
         decisions,
         ["00", "01", "02", "03", "04", "05", "06"].map(hour)
     );
-    let probabilities: Vec<(UnixNanos, f64)> = record
+    let levels: Vec<(UnixNanos, f64)> = record
         .trades
         .iter()
-        .map(|(time, trade)| (*time, trade.probability))
+        .map(|(time, trade)| (*time, trade.level))
         .collect();
     assert_eq!(
-        probabilities,
+        levels,
         [
-            (hour("02"), CALIBRATION.apply(0.7)),
-            (hour("03"), CALIBRATION.apply(0.7)),
-            (hour("04"), CALIBRATION.apply(0.8)),
-            (hour("05"), CALIBRATION.apply(0.9)),
-            (hour("06"), CALIBRATION.apply(0.9)),
+            (hour("02"), r(7)),
+            (hour("03"), r(7)),
+            (hour("04"), r(8)),
+            (hour("05"), r(9)),
+            (hour("06"), r(9)),
         ]
     );
 }
 
 /// A LightGBM model fitted on the long's rows of the 72 hours before t
 /// (16:00 of the 25th) but its last 12, enough for its leaves of 20 rows to
-/// split, whether each long gained, published as a train would, valid from
-/// the last 12 hours, whose decisions' long rows are its probe rows,
-/// calibrated by `CALIBRATION`; it then trades over them. The walk puts
-/// those mids on both sides of the fitted ones' split, so the probes fall in
-/// different leaves: the check is that the trees reloaded in the node give
-/// the bits they gave when fitted, on several predictions. The walk has no
-/// edge to earn, so no train would publish it: it is published straight.
+/// split, on each long's realised R, published as a train would, valid from
+/// the last 12 hours, whose decisions' long rows are its probe rows and its
+/// predictions on them; it then trades over them, each decision's level, the
+/// strategy's one side calibrated as it is, its prediction to the bit. The
+/// walk puts those mids on both sides of the fitted ones' split, so the
+/// probes fall in different leaves: the check is that the trees reloaded in
+/// the node give the bits they gave when fitted, on several predictions. The
+/// walk has no edge to earn, so no train would publish it: it is published
+/// straight.
 #[test]
 fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let catalog = walk(
@@ -148,7 +151,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let config = ModelConfig {
         learner: learner.clone(),
         window: SignedDuration::from_hours(72),
-        // Every decision a long, to record its probability.
+        // Every decision a long, to record its prediction.
         margins: Margins {
             long: Some(f64::MIN),
             short: None,
@@ -168,10 +171,13 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         .map(DatasetRow::of)
         .partition(|row| row.ts_event < UnixNanos::from(holdout));
     let long = |row: &DatasetRow| row.side(Side::Long).features;
-    let set = TrainingSet::new(
+    let set = TrainingSet::regression(
         4,
         fitted.iter().flat_map(long).collect(),
-        fitted.iter().map(|row| row.long_pnl > 0.0).collect(),
+        fitted
+            .iter()
+            .map(|row| row.long_pnl / row.long_unit)
+            .collect(),
     )
     .unwrap();
     let fitted = learner.fit(&set).unwrap();
@@ -181,7 +187,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         .iter()
         .map(|row| Probe {
             row: long(row),
-            prediction: CALIBRATION.apply(fitted.predict(&long(row)).unwrap()),
+            prediction: fitted.predict(&long(row)).unwrap(),
         })
         .collect();
     model.model = fitted.save().unwrap();
@@ -209,7 +215,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
             .find(|(time, _)| *time == row.ts_event)
             .unwrap_or_else(|| panic!("no prediction at {}", row.ts_event));
         assert_eq!(
-            trade.probability.to_bits(),
+            trade.level.to_bits(),
             probe.prediction.to_bits(),
             "{probe:?}"
         );
@@ -221,10 +227,11 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
 /// LightGBM model of the long's rows of the 72 hours before t (16:00 of the
 /// 25th), their first feature, the mid, zeroed so that its trees split on
 /// the payoff features alone, learning whether the take profit's R is above
-/// its median, is published straight; trading over the last 12 hours, every
-/// decision with a dataset row has the model's probability, calibrated, on
-/// the long's row of that dataset row, to the bit, and the probabilities are
-/// not all one, so what they read of the payoff is what the rows hold.
+/// its median, 1 or nought, is published straight; trading over the last 12
+/// hours, every decision with a dataset row has for its level the model's
+/// prediction on the long's row of that dataset row, to the bit, and the
+/// predictions are not all one, so what they read of the payoff is what the
+/// rows hold.
 #[test]
 fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let catalog = walk(
@@ -242,7 +249,7 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let config = ModelConfig {
         learner: learner.clone(),
         window: SignedDuration::from_hours(72),
-        // Every decision a long, to record its probability.
+        // Every decision a long, to record its prediction.
         margins: Margins {
             long: Some(f64::MIN),
             short: None,
@@ -268,13 +275,16 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let mut take_profits: Vec<f64> = long_rows.iter().map(|row| row[1]).collect();
     take_profits.sort_by(f64::total_cmp);
     let median = take_profits[take_profits.len() / 2];
-    let set = TrainingSet::new(
+    let set = TrainingSet::regression(
         4,
         long_rows
             .iter()
             .flat_map(|row| [0.0, row[1], row[2], row[3]])
             .collect(),
-        long_rows.iter().map(|row| row[1] > median).collect(),
+        long_rows
+            .iter()
+            .map(|row| f64::from(u8::from(row[1] > median)))
+            .collect(),
     )
     .unwrap();
     let fitted = learner.fit(&set).unwrap();
@@ -293,9 +303,9 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
         let Some(row) = rows.iter().find(|row| row.ts_event == *time) else {
             continue;
         };
-        let expected = CALIBRATION.apply(fitted.predict(&row.side(Side::Long).features).unwrap());
+        let expected = fitted.predict(&row.side(Side::Long).features).unwrap();
         assert_eq!(
-            decision.probability.to_bits(),
+            decision.level.to_bits(),
             expected.to_bits(),
             "at {time}: {decision:?}, the dataset's {row:?}"
         );

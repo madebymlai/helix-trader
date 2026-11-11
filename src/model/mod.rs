@@ -8,9 +8,9 @@
 //! `dataset` is the settled rows of a strategy stored by day in the
 //! catalog, its coverage the cache of the days built;
 //! `learner` is the model port, its learners fitting and loading the
-//! models that predict; `calibration` turns their predictions into win
-//! rates; `payoff` is what a side's trade is expected to make and the
-//! side a decision trades;
+//! models that predict; `calibration` turns a pair's predictions of R into
+//! each side's expected R, and a meta's into probabilities; `payoff` is the
+//! side a decision trades on its expected net P&L;
 //! `config` is the model section of a strategy's config; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset and publishing them together in the `store` if their `holdout`,
