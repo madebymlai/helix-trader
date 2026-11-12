@@ -1520,18 +1520,9 @@ impl ExecutionClient for CTraderExecutionClient {
         }
         // A position's protection goes in with its history.
         let histories: HashSet<i64> = kept.iter().map(|d| d.position_id).collect();
-        let mut fills = Vec::new();
-        for deal in kept {
-            match protections.get(&deal.order_id) {
-                Some(protection) => {
-                    for (leg, fill) in reports.protection_closed(protection, Some(deal))? {
-                        history.push(leg);
-                        fills.extend(fill);
-                    }
-                }
-                None => fills.extend(reports.fill(deal)?),
-            }
-        }
+        // A cancelled protection's legs before a filled one's, so that the
+        // report of a leg hit is the last of its venue order id, the one the
+        // mass status keeps: a position may have had both over the window.
         for protection in protections.values().filter(|o| {
             matches!(
                 o.order_status(),
@@ -1544,6 +1535,18 @@ impl ExecutionClient for CTraderExecutionClient {
                     .into_iter()
                     .map(|(leg, _)| leg),
             );
+        }
+        let mut fills = Vec::new();
+        for deal in kept {
+            match protections.get(&deal.order_id) {
+                Some(protection) => {
+                    for (leg, fill) in reports.protection_closed(protection, Some(deal))? {
+                        history.push(leg);
+                        fills.extend(fill);
+                    }
+                }
+                None => fills.extend(reports.fill(deal)?),
+            }
         }
         // An order or leg the reconcile request holds open is open.
         history.retain(|closed| {
@@ -2740,6 +2743,35 @@ mod tests {
                 .to_string(),
             "65947662"
         );
+        client.disconnect().await.unwrap();
+    }
+
+    /// As `stopped_out`, the position's protection first set as order
+    /// 76919226, cancelled when it was set again as 76919228, which the
+    /// stop loss then hit: the leg it filled is reported filled, whatever
+    /// order the two protections are read in.
+    #[tokio::test]
+    async fn a_leg_hit_stays_filled_when_an_earlier_protection_of_its_position_was_cancelled() {
+        let mut venue = stopped_out();
+        let mut replaced = venue.orders[1].clone();
+        replaced.order_id = 76_919_226;
+        replaced.order_status = ProtoOaOrderStatus::OrderStatusCancelled as i32;
+        replaced.execution_price = None;
+        replaced.executed_volume = None;
+        replaced.utc_last_update_timestamp = Some(1_794_443_800_000);
+        venue.orders.push(replaced);
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let orders = mass_status.order_reports();
+        let stop_loss = &orders[&VenueOrderId::from("59793251-SL")];
+        assert_eq!(stop_loss.order_status, OrderStatus::Filled);
+        assert_eq!(stop_loss.filled_qty, Quantity::from(1));
+        let take_profit = &orders[&VenueOrderId::from("59793251-TP")];
+        assert_eq!(take_profit.order_status, OrderStatus::Canceled);
         client.disconnect().await.unwrap();
     }
 
