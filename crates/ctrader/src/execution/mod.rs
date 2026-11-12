@@ -384,10 +384,13 @@ impl CTraderExecutionClient {
 
     /// A minute before the earliest creation of the orders the node's cache
     /// holds open or in flight on the venue (the venue's clock and the
-    /// node's may differ): a restart reads the orders from there, so one the
-    /// broker closed while the node was down, or never answered for, gets
-    /// its report.
-    fn earliest_cached_order(&self) -> Option<UnixNanos> {
+    /// node's may differ), but for those the broker lists open (`listed`,
+    /// the reconcile request's reports): a restart reads the orders from
+    /// there, so one the broker closed while the node was down, or never
+    /// answered for, gets its report. One the broker lists open has its
+    /// report already, and a long-lived one would take every start's window
+    /// back to its creation.
+    fn earliest_cached_order(&self, listed: &[OrderStatusReport]) -> Option<UnixNanos> {
         let cache = self.core.cache();
         let venue = Some(&self.core.venue);
         let open = cache.orders_open(venue, None, None, None, None);
@@ -395,6 +398,12 @@ impl CTraderExecutionClient {
         let margin = DurationNanos::from_millis(QUERY_MARGIN_MS.unsigned_abs());
         open.iter()
             .chain(&in_flight)
+            .filter(|o| {
+                !listed.iter().any(|r| {
+                    o.venue_order_id() == Some(r.venue_order_id)
+                        || r.client_order_id == Some(o.client_order_id())
+                })
+            })
             .map(|o| o.ts_init().saturating_sub(margin))
             .min()
     }
@@ -1414,7 +1423,8 @@ impl ExecutionClient for CTraderExecutionClient {
     /// of: `lookback_mins` ago, the creation of the deals that opened a
     /// position open at the broker or one the node's cache holds open, a
     /// minute before the creation of an order the cache holds open or in
-    /// flight. A position's deals go in only when they add up to it (see
+    /// flight that cTrader does not list open (see `earliest_cached_order`).
+    /// A position's deals go in only when they add up to it (see
     /// `reports::explained`), and a closed order only with all its deals;
     /// the report window says whether all did, and whether every closed
     /// order could be read. A deal of a protection order closes the legs of
@@ -1431,7 +1441,6 @@ impl ExecutionClient for CTraderExecutionClient {
     ) -> anyhow::Result<Option<ExecutionMassStatus>> {
         let ts_init = self.now();
         let cached = self.cached_open();
-        let ordered = self.earliest_cached_order();
         let mut openings: BTreeMap<i64, i64> =
             cached.iter().map(|c| (c.position, c.opened)).collect();
         let session = self.session()?;
@@ -1442,6 +1451,7 @@ impl ExecutionClient for CTraderExecutionClient {
         let until = orders::millis(self.now());
         let reports = self.reports(session, ts_init);
         let mut orders = Self::order_reports(&reports, &open)?;
+        let ordered = self.earliest_cached_order(&orders);
         let mut positions = Self::position_reports(&reports, &open)?;
         let held = open_volumes(&open.position);
         for gone in cached.iter().filter(|c| !held.contains_key(&c.position)) {
@@ -2809,6 +2819,51 @@ mod tests {
         let stop_loss = &orders[&VenueOrderId::from("59793251-SL")];
         assert_eq!(stop_loss.order_status, OrderStatus::Filled);
         assert!(mass_status.reports_complete());
+        client.disconnect().await.unwrap();
+    }
+
+    /// A GTC limit order the cache holds open since long before the
+    /// restart, which the broker lists open: the reconcile request reports
+    /// it, so it does not pull the window back to its creation.
+    #[tokio::test]
+    async fn an_order_the_broker_lists_open_does_not_widen_the_window() {
+        use nautilus_model::orders::{OrderTestBuilder, stubs::TestOrderEventStubs};
+
+        let now = ns(T0 + 3_600_000);
+        let clock = Box::leak(Box::new(AtomicTime::new(false, now)));
+        let venue = Script {
+            reconcile: Some(ProtoOaReconcileRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                order: two_gold_positions().order,
+                ..Default::default()
+            }),
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started_at(venue, clock);
+        connect(&mut client, &mut events, &cache).await;
+        // Created at the epoch, accepted by the broker as its order 201.
+        let order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(InstrumentId::from(EURUSD))
+            .client_order_id(ClientOrderId::from("O-20261026-100000-001-000-1"))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(100_000))
+            .price(Price::from("1.08525"))
+            .build();
+        let account = AccountId::from("ACMEFX-DEMO");
+        cache
+            .borrow_mut()
+            .add_order(order.clone(), None, None, false)
+            .unwrap();
+        for event in [
+            TestOrderEventStubs::submitted(&order, account),
+            TestOrderEventStubs::accepted(&order, account, VenueOrderId::from("201")),
+        ] {
+            cache.borrow_mut().update_order(&event).unwrap();
+        }
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        assert_eq!(mass_status.lookback_start(), Some(now));
         client.disconnect().await.unwrap();
     }
 
