@@ -150,12 +150,12 @@ use nautilus_model::{
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
+    blueprint::ModelBlueprint,
     config::ModelConfig,
     dataset::DatasetVenue,
     decide::{self, DecisionRule},
     deciding::{DecidingModels, SideRow},
     features::FeatureSet,
-    store::ModelSet,
     targets::{TargetConfig, TargetRow, TargetSetter, Targets},
 };
 use crate::{
@@ -304,12 +304,15 @@ struct Deciding {
 
 impl ModelHandle {
     /// The handle of `strategy_id`, deciding on `features` as `config`
-    /// says, for a strategy of `requirements`, in `mode`.
+    /// says, for a strategy of `requirements`, in `mode`: the model of their
+    /// blueprint (`ModelBlueprint`), deciding on its models
+    /// (`ModelBlueprint::model_set`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule is invalid, a store cannot be
-    /// keyed or, deciding, read, or, in a dataset run, the target is invalid.
+    /// Returns an error if the decision rule or the target is invalid
+    /// (`ModelBlueprint::new`), or if a store cannot be keyed or, deciding,
+    /// read.
     pub fn new(
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
@@ -317,9 +320,14 @@ impl ModelHandle {
         requirements: &DataRequirements,
         mode: Mode,
     ) -> anyhow::Result<Rc<Self>> {
+        let blueprint = ModelBlueprint::new(
+            strategy_id,
+            Rc::clone(&features),
+            config.clone(),
+            requirements.clone(),
+        )?;
         let deciding = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Deciding> {
-            let models =
-                ModelSet::new(models, strategy_id, &features, config, requirements, venue)?;
+            let models = blueprint.model_set(models, venue)?;
             Ok(Deciding {
                 models: RefCell::new(DecidingModels::new(&models)?),
                 target: TargetSetter::sharing(
@@ -344,10 +352,10 @@ impl ModelHandle {
     }
 
     /// The handle of `strategy_id` deciding with `features` on `rule`, with
-    /// `target`, for a strategy of `requirements`, in `mode`: deciding as
-    /// `deciding` builds it on the models under the store's root, of the
-    /// target of the dataset runs on the mode's venue, or opening the
-    /// target.
+    /// `target`, both valid, for a strategy of `requirements`, in `mode`:
+    /// deciding as `deciding` builds it on the models under the store's
+    /// root, of the target of the dataset runs on the mode's venue, or
+    /// opening the target.
     fn built(
         strategy_id: StrategyId,
         features: &Rc<FeatureSet>,
@@ -356,7 +364,6 @@ impl ModelHandle {
         mode: Mode,
         deciding: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Deciding>,
     ) -> anyhow::Result<Rc<Self>> {
-        rule.validate()?;
         let traded = target.instrument_id;
         let mut ticks = features.ticks();
         for tick in requirements
@@ -721,8 +728,9 @@ mod tests {
         config::Margins,
         decide::FeatureRow,
         deciding::testing::{
-            AUD, GOLD, STRATEGY, at, baseline, baseline_for, both_sides, config, features, gold,
-            meta, meta_baseline, model_set, r, requirements, side_store, store, venue, with_meta,
+            AUD, GOLD, STRATEGY, at, baseline, baseline_for, blueprint_of, both_sides, config,
+            features, gold, meta, meta_baseline, model_set, r, requirements, side_store, store,
+            venue, with_meta,
         },
         features::testing::{last_mid, mid_over},
         schedule::Retrain,
@@ -2218,26 +2226,20 @@ mod tests {
         config.target.instrument_id = eur;
         let features = last_mid(eur).build().unwrap();
         // The target's ATR, on the quotes of EUR/USD, keys its store.
-        ModelSet::new(
-            models.path(),
-            StrategyId::from(STRATEGY),
-            &features,
-            &config,
-            &reading_eur(eur),
-            &venue(),
-        )
-        .unwrap()
-        .side(Side::Long)
-        .unwrap()
-        .store()
-        .publish(&baseline_for(
-            &features,
-            &config,
-            Side::Long,
-            "2026-10-22T00:00:00Z",
-            8,
-        ))
-        .unwrap();
+        blueprint_of(&features, &config, reading_eur(eur))
+            .model_set(models.path(), &venue())
+            .unwrap()
+            .side(Side::Long)
+            .unwrap()
+            .store()
+            .publish(&baseline_for(
+                &features,
+                &config,
+                Side::Long,
+                "2026-10-22T00:00:00Z",
+                8,
+            ))
+            .unwrap();
         let handle = handle_on_an_instrument_not_in_the_cache(models.path(), &config, eur);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         probe

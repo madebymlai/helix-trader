@@ -20,7 +20,8 @@
 //! meta models of the same sides.
 //!
 //! A strategy's stores are built together, as its model set (`ModelSet`),
-//! and only there: the fingerprint is computed once and keys them all. The
+//! and only there, of its model's blueprint (`blueprint::ModelBlueprint`),
+//! which computes the fingerprint once and keys them all with it. The
 //! model set holds each side the margins trade, with its margin, its feature
 //! names (the strategy's, then the target's payoff names,
 //! `features::side_names`) and its store, and the meta level, if any, with
@@ -76,17 +77,16 @@ use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    blueprint::ModelBlueprint,
     calibration::{Expected, Ksplit, Line},
     config::{Margins, MetaConfig, ModelConfig},
-    dataset::{self, DatasetVenue},
     deciding::SideRow,
-    features::{FeatureSet, Fingerprint, meta_names, side_names},
+    features::{Fingerprint, meta_names, side_names},
     holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
     schedule::{Models, Retrain},
     targets::{PerSide, Side, TargetConfig},
 };
-use crate::strategy::DataRequirements;
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
@@ -384,33 +384,24 @@ impl Baselined for SideModel {
 }
 
 impl ModelSet {
-    /// The models, under `root`, of `strategy_id` deciding with `features`
-    /// as `config` says, on its target for a strategy of `requirements`, run
-    /// on `venue`, and trained as `config` says: the store of each side its
-    /// margins trade, and of its meta model if `config` has a meta section,
-    /// in the directory of its dataset's fingerprint and its training
-    /// settings.
+    /// The models, under `root`, of the model of `blueprint`, its dataset's
+    /// fingerprint `fingerprint`, its blueprint's on the venue of its
+    /// dataset runs (`ModelBlueprint::fingerprint`), and trained as its
+    /// config says: the store of each side its margins trade, and of its
+    /// meta model if its config has a meta section, in the directory of
+    /// that fingerprint and its training settings.
     ///
     /// # Errors
     ///
-    /// Returns an error if a learner cannot be written as JSON, or as
-    /// `dataset::fingerprint` does.
-    pub fn new(
+    /// Returns an error if a learner cannot be written as JSON.
+    pub(super) fn new(
         root: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: &ModelConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
+        blueprint: &ModelBlueprint,
+        fingerprint: Fingerprint,
     ) -> anyhow::Result<Self> {
-        let fingerprint = dataset::fingerprint(
-            features,
-            config.decision,
-            &config.target,
-            requirements,
-            venue,
-        )?;
-        let training = training_directory(root, strategy_id, fingerprint, config, VERSION)?;
+        let (features, config) = (blueprint.features(), blueprint.config());
+        let training =
+            training_directory(root, blueprint.strategy_id(), fingerprint, config, VERSION)?;
         let fingerprint = fingerprint.to_string();
         let side_names = side_names(features.names(), &config.target.payoff_names());
         let sides = config
@@ -985,12 +976,14 @@ mod tests {
         backtest::Commission,
         model::{
             calibration::Line,
+            dataset::DatasetVenue,
             decide::DecisionRule,
             deciding::testing::HOLDOUT,
-            features::testing::last_mid,
+            features::{FeatureSet, testing::last_mid},
             learner::{LearnerConfig, TrainingSet},
             targets::Target,
         },
+        strategy::DataRequirements,
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -1036,17 +1029,20 @@ mod tests {
         side_store(root, config, venue, Side::Long)
     }
 
-    /// The models under `root` of `config`, run on `venue`.
-    fn models(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelSet {
-        ModelSet::new(
-            root,
+    /// The model of `config`.
+    fn blueprint(config: &ModelConfig) -> ModelBlueprint {
+        ModelBlueprint::new(
             StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            venue,
+            features(),
+            config.clone(),
+            requirements(),
         )
         .unwrap()
+    }
+
+    /// The models under `root` of `config`, run on `venue`.
+    fn models(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelSet {
+        blueprint(config).model_set(root, venue).unwrap()
     }
 
     /// The store of the `side` models of `config`, run on `venue`.
@@ -1304,14 +1300,7 @@ mod tests {
     #[test]
     fn bumping_the_store_version_keys_another_store() {
         let config = config();
-        let fingerprint = dataset::fingerprint(
-            &features(),
-            config.decision,
-            &config.target,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap();
+        let fingerprint = blueprint(&config).fingerprint(&venue()).unwrap();
         let at = |version| {
             training_directory(
                 Path::new("models"),
@@ -1592,15 +1581,10 @@ mod tests {
     fn a_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config(), &venue());
-        let fingerprint = dataset::fingerprint(
-            &features(),
-            config().decision,
-            &config().target,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
-        .to_string();
+        let fingerprint = blueprint(&config())
+            .fingerprint(&venue())
+            .unwrap()
+            .to_string();
         let names = models.side(Side::Long).unwrap().feature_names().to_vec();
         for side in Side::BOTH {
             let mut stored = model("2026-10-22T00:00:00Z", &[]);

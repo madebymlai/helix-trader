@@ -12,8 +12,8 @@ use std::{collections::VecDeque, rc::Rc};
 
 use crate::common::{
     dataset::{
-        Lcg, MID, STRATEGY, config, features, mid_tables, replay, replay_of, replay_on,
-        requirements, rule, target, venue, walk,
+        Lcg, MID, blueprint, config, features, mid_tables, replay, replay_of, replay_on, target,
+        venue, walk,
     },
     features::tables,
     ic,
@@ -21,7 +21,7 @@ use crate::common::{
 use helix_trader::{
     model::{
         config::ModelConfig,
-        dataset::{Dataset, DatasetRow},
+        dataset::DatasetRow,
         features::{Feature, FeatureSet},
         targets::{BracketSpec, Distance, Target, TargetConfig},
     },
@@ -31,7 +31,7 @@ use jiff::{SignedDuration, Timestamp, civil::Date};
 use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{NautilusDataType, QuoteTick},
-    identifiers::{InstrumentId, StrategyId},
+    identifiers::InstrumentId,
 };
 use rust_decimal::Decimal;
 
@@ -46,16 +46,9 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
         ic::at("00:00:00") + SignedDuration::from_hours(51),
     );
-    let dataset = Dataset::new(
-        catalog.path(),
-        StrategyId::from(STRATEGY),
-        &features(),
-        rule(),
-        target(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap();
+    let dataset = blueprint(features(), config())
+        .dataset(catalog.path(), &venue())
+        .unwrap();
     let (mut replayed, mut settled) = (vec![], vec![]);
 
     let built = dataset
@@ -177,16 +170,9 @@ fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
             on(Date::constant(2026, 10, 20), "20:00:00"),
             on(Date::constant(2026, 10, 23), "03:00:00"),
         );
-        let dataset = Dataset::new(
-            catalog.path(),
-            StrategyId::from(STRATEGY),
-            &two_hour_mean(),
-            rule(),
-            target(),
-            &requirements(),
-            &venue(),
-        )
-        .unwrap();
+        let dataset = blueprint(two_hour_mean(), config())
+            .dataset(catalog.path(), &venue())
+            .unwrap();
         dataset
             .build(first, thursday, |from, to| {
                 replay_on(&catalog, two_hour_mean(), from, to)
@@ -251,16 +237,9 @@ fn weekend_walk() -> tempfile::TempDir {
 fn stored_by_a_build_to(last: Date, from: Timestamp, to: Timestamp) -> Vec<DatasetRow> {
     std::thread::spawn(move || {
         let catalog = weekend_walk();
-        let dataset = Dataset::new(
-            catalog.path(),
-            StrategyId::from(STRATEGY),
-            &features(),
-            rule(),
-            target(),
-            &requirements(),
-            &venue(),
-        )
-        .unwrap();
+        let dataset = blueprint(features(), config())
+            .dataset(catalog.path(), &venue())
+            .unwrap();
         dataset
             .build(Date::constant(2026, 10, 22), last, |from, to| {
                 replay(&catalog, from, to)
@@ -367,16 +346,9 @@ fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> 
             on(Date::constant(2026, 10, 23), "03:00:00"),
         );
         let config = atr_config();
-        let dataset = Dataset::new(
-            catalog.path(),
-            StrategyId::from(STRATEGY),
-            &mid_warming_for(warmup),
-            config.decision,
-            config.target.clone(),
-            &requirements(),
-            &venue(),
-        )
-        .unwrap();
+        let dataset = blueprint(mid_warming_for(warmup), config.clone())
+            .dataset(catalog.path(), &venue())
+            .unwrap();
         dataset
             .build(thursday, thursday, |from, to| {
                 replay_of(&catalog, mid_warming_for(warmup), &config, from, to)

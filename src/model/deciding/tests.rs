@@ -4,12 +4,12 @@
 
 use std::path::Path;
 
-use nautilus_model::{enums::OrderSide, identifiers::StrategyId, types::Money};
+use nautilus_model::{enums::OrderSide, types::Money};
 
 use super::{
     testing::{
-        STRATEGY, at, baseline, baseline_for, both_sides, config, features, meta, meta_baseline,
-        model_set, r, requirements, side_store, store, venue, with_meta,
+        at, baseline, baseline_for, blueprint_of, both_sides, config, features, meta,
+        meta_baseline, model_set, r, requirements, side_store, store, venue, with_meta,
     },
     *,
 };
@@ -115,18 +115,15 @@ fn a_model_of_another_commission_gives_no_trade() {
     store(models.path())
         .publish(&baseline(MIDNIGHT, 8))
         .unwrap();
-    let other_costs = ModelSet::new(
-        models.path(),
-        StrategyId::from(STRATEGY),
-        &features(),
-        &config(),
-        &requirements(),
-        &DatasetVenue {
-            commission: Commission::PerOrder(Money::from("3 USD")),
-            ..venue()
-        },
-    )
-    .unwrap();
+    let other_costs = blueprint_of(&features(), &config(), requirements())
+        .model_set(
+            models.path(),
+            &DatasetVenue {
+                commission: Commission::PerOrder(Money::from("3 USD")),
+                ..venue()
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         decided(&mut DecidingModels::new(&other_costs).unwrap(), NOON),

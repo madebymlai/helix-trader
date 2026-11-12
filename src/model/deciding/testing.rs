@@ -18,9 +18,10 @@ use rust_decimal::Decimal;
 use crate::{
     backtest::Commission,
     model::{
+        blueprint::ModelBlueprint,
         calibration::{Ksplit, Line},
         config::{Margins, MetaConfig, ModelConfig},
-        dataset::{self, DatasetVenue},
+        dataset::DatasetVenue,
         decide::DecisionRule,
         features::{FeatureSet, meta_names, side_names, testing::last_mid},
         holdout::{Earnings, Holdout, Trades},
@@ -217,24 +218,34 @@ pub fn venue() -> DatasetVenue {
     }
 }
 
-/// The models of `features` and `config` under `models`.
-pub fn model_set(models: &Path, features: &FeatureSet, config: &ModelConfig) -> ModelSet {
-    ModelSet::new(
-        models,
+/// The model of `features` and `config`, for a strategy of
+/// `requirements`.
+pub fn blueprint_of(
+    features: &Rc<FeatureSet>,
+    config: &ModelConfig,
+    requirements: DataRequirements,
+) -> ModelBlueprint {
+    ModelBlueprint::new(
         StrategyId::from(STRATEGY),
-        features,
-        config,
-        &requirements(),
-        &venue(),
+        Rc::clone(features),
+        config.clone(),
+        requirements,
     )
     .unwrap()
+}
+
+/// The models of `features` and `config` under `models`.
+pub fn model_set(models: &Path, features: &Rc<FeatureSet>, config: &ModelConfig) -> ModelSet {
+    blueprint_of(features, config, requirements())
+        .model_set(models, &venue())
+        .unwrap()
 }
 
 /// The store of the `side` models of `features` and `config` under
 /// `models`.
 pub fn side_store(
     models: &Path,
-    features: &FeatureSet,
+    features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
 ) -> ModelStore {
@@ -262,7 +273,7 @@ pub fn baseline(valid_from: &str, tenths: usize) -> StoredModel {
 /// is (`unchanged`), its baseline that R, as the store keeps it, probed on
 /// one row.
 pub fn baseline_for(
-    features: &FeatureSet,
+    features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
     valid_from: &str,
@@ -280,19 +291,18 @@ pub fn baseline_for(
             valid_from: at(valid_from),
             // Its strategy reads the quotes of what it trades, which the
             // target's ATR, if any, is built from.
-            fingerprint: dataset::fingerprint(
+            fingerprint: blueprint_of(
                 features,
-                config.decision,
-                &config.target,
-                &DataRequirements {
+                &config,
+                DataRequirements {
                     ticks: vec![TickSeries {
                         data: NautilusDataType::QuoteTick,
                         instrument_id: config.target.instrument_id,
                     }],
                     ..requirements()
                 },
-                &venue(),
             )
+            .fingerprint(&venue())
             .unwrap()
             .to_string(),
             feature_names: names,
@@ -315,7 +325,7 @@ pub fn baseline_for(
 /// R of `r(tenths)` whatever the row, calibrated by `CALIBRATION`, on the
 /// meta's features of `features`, its baseline that R, with no probe.
 pub fn meta_baseline(
-    features: &FeatureSet,
+    features: &Rc<FeatureSet>,
     config: &ModelConfig,
     valid_from: &str,
     tenths: usize,

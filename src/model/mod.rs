@@ -11,7 +11,9 @@
 //! models that predict; `calibration` turns a pair's predictions of R into
 //! each side's expected R, and a meta's into its expected R; `payoff` is the
 //! side a decision trades on its expected net P&L;
-//! `config` is the model section of a strategy's config; `train` trains
+//! `config` is the model section of a strategy's config; `blueprint` is
+//! what its config alone determines about its model, validated, the dataset,
+//! the stores, the training and the walk-forward built of it; `train` trains
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset and publishing them together in the `store` if their `holdout`,
 //! each side's `score` and what the decision would have earned there, meets
@@ -34,8 +36,11 @@
 //! harness: the binary's backtest, live, train and dataset runs are
 //! generic over it. Its part of its config builds its features
 //! (`ModelPart`), and the harness answers from them what it reads
-//! (`reads`), which the load checks `[data]` against.
+//! (`reads`), which the load checks `[data]` against; its model's
+//! blueprint (`ModelStrategy::blueprint`) is built of them and of its
+//! config.
 
+pub mod blueprint;
 pub mod calibration;
 pub mod config;
 pub mod dataset;
@@ -61,6 +66,7 @@ use nautilus_common::{actor::DataActorNative, component::Component, config::Conf
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use self::{
+    blueprint::ModelBlueprint,
     dataset::{Dataset, DatasetVenue},
     features::FeatureSet,
     handle::Mode,
@@ -134,8 +140,8 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
 /// A strategy trading on a model, as the binary runs it: built of its
 /// config in a `Mode`, deciding on the features its part builds of that
 /// config (`ModelPart::features`), its dataset, its training and its walk
-/// forward built of them and of the config's model
-/// (`StandardConfig::model`). A Nautilus strategy, as a node runs it.
+/// forward built of its model's blueprint (`blueprint`). A Nautilus
+/// strategy, as a node runs it.
 pub trait ModelStrategy:
     Strategy + StrategyNative + DataActorNative + Component + Debug + Sized + 'static
 {
@@ -171,28 +177,38 @@ pub trait ModelStrategy:
         Self::with_features(config, features, mode)
     }
 
+    /// The blueprint of the model of the strategy `config` describes: its
+    /// id, the features its part builds of `config`
+    /// (`ModelPart::features`), the config's model (`StandardConfig::model`)
+    /// and its data requirements.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error as `ModelPart::features` and `ModelBlueprint::new`
+    /// do.
+    fn blueprint(config: &StandardConfig<Self::Params>) -> anyhow::Result<ModelBlueprint> {
+        let features = Self::Params::features(config)?;
+        ModelBlueprint::new(
+            config.strategy_id(),
+            features,
+            config.model(),
+            config.data_requirements(),
+        )
+    }
+
     /// The dataset of the strategy `config` describes, run on `venue`, in
     /// the catalog at `catalog`; its replay runs the strategy in
     /// `Mode::Dataset`.
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelPart::features` and `Dataset::new` do.
+    /// Returns an error as `blueprint` and `ModelBlueprint::dataset` do.
     fn dataset(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Dataset> {
-        let (features, model) = (Self::Params::features(config)?, config.model());
-        Dataset::new(
-            catalog,
-            config.strategy_id(),
-            &features,
-            model.decision,
-            model.target,
-            &config.data_requirements(),
-            venue,
-        )
+        Self::blueprint(config)?.dataset(catalog, venue)
     }
 
     /// The training of the model of the strategy `config` describes, on
@@ -201,23 +217,14 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelPart::features` and `Training::new` do.
+    /// Returns an error as `blueprint` and `ModelBlueprint::training` do.
     fn training(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         models: &Path,
         venue: &DatasetVenue,
     ) -> anyhow::Result<Training> {
-        let features = Self::Params::features(config)?;
-        Training::new(
-            catalog,
-            models,
-            config.strategy_id(),
-            &features,
-            config.model(),
-            &config.data_requirements(),
-            venue,
-        )
+        Self::blueprint(config)?.training(catalog, models, venue)
     }
 
     /// The backtests of the model of the strategy `config` describes, on
@@ -227,23 +234,15 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelPart::features` and `WalkForward::new` do.
+    /// Returns an error as `blueprint` and `ModelBlueprint::walk_forward`
+    /// do.
     fn walk_forward(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         models: &Path,
         venue: &DatasetVenue,
     ) -> anyhow::Result<WalkForward> {
-        let features = Self::Params::features(config)?;
-        WalkForward::new(
-            catalog,
-            models,
-            config.strategy_id(),
-            &features,
-            config.model(),
-            &config.data_requirements(),
-            venue,
-        )
+        Self::blueprint(config)?.walk_forward(catalog, models, venue)
     }
 }
 

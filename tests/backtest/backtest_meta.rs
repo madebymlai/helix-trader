@@ -21,14 +21,13 @@ use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        STRATEGY, baseline_of, config, meta_baseline_of, missing, replay_on, requirements, rule,
-        target, trade_on, venue, walk,
+        baseline_of, blueprint, config, meta_baseline_of, missing, replay_on, trade_on, venue, walk,
     },
     ic,
 };
 use helix_trader::model::{
     config::{Margins, MetaConfig, ModelConfig},
-    dataset::{self, Dataset},
+    dataset,
     features::FeatureSet,
     handle::Decision,
     holdout::Earnings,
@@ -36,12 +35,11 @@ use helix_trader::model::{
     schedule::Retrain,
     store::{ModelSet, ModelStore},
     targets::Side,
-    train::{Kept, Outcome, Trained, Training},
-    walk::WalkForward,
+    train::{Kept, Outcome, Trained},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
-use nautilus_model::{enums::OrderSide, identifiers::StrategyId};
+use nautilus_model::enums::OrderSide;
 use tempfile::TempDir;
 
 /// The missing feature.
@@ -118,9 +116,10 @@ fn expects(store: &ModelStore, at: Timestamp, row: &[f64]) -> f64 {
 
 /// The calibrated expected R of the meta model of `store` valid from `at`
 /// on `row`, as a strategy of `features` loads it.
-fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64]) -> f64 {
+fn predicts(store: &ModelStore, features: Rc<FeatureSet>, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
-    let fingerprint = dataset::fingerprint(features, rule(), &target(), &requirements(), &venue())
+    let fingerprint = blueprint(features, long_only())
+        .fingerprint(&venue())
         .unwrap()
         .to_string();
     stored
@@ -139,77 +138,50 @@ fn predicts(store: &ModelStore, features: &FeatureSet, at: Timestamp, row: &[f64
 fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let mut trained = vec![];
-    WalkForward::new(
-        catalog.path(),
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        long_only(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
-    .prepare(
-        start,
-        end,
-        |from, to| {
-            on_thread(|| {
-                let dataset = Dataset::new(
-                    catalog.path(),
-                    StrategyId::from(STRATEGY),
+    blueprint(features(), long_only())
+        .walk_forward(catalog.path(), models, &venue())
+        .unwrap()
+        .prepare(
+            start,
+            end,
+            |from, to| {
+                on_thread(|| {
+                    let dataset =
+                        blueprint(features(), long_only()).dataset(catalog.path(), &venue())?;
+                    let (first, last) = dataset::days(from, to);
+                    dataset.build(first, last, |from, to| {
+                        replay_on(catalog, features(), from, to)
+                    })?;
+                    Ok(())
+                })
+            },
+            |at| {
+                let outcome = on_thread(|| {
+                    blueprint(features(), long_only())
+                        .training(catalog.path(), models, &venue())
+                        .unwrap()
+                        .train_at(at, |from, to| replay_on(catalog, features(), from, to))
+                });
+                trained.push((at, outcome));
+                let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+                long_store(models).publish(&baseline_of(
                     &features(),
-                    rule(),
-                    target(),
-                    &requirements(),
-                    &venue(),
-                )?;
-                let (first, last) = dataset::days(from, to);
-                dataset.build(first, last, |from, to| {
-                    replay_on(catalog, features(), from, to)
-                })?;
-                Ok(())
-            })
-        },
-        |at| {
-            let outcome = on_thread(|| {
-                Training::new(
-                    catalog.path(),
-                    models,
-                    StrategyId::from(STRATEGY),
-                    &features(),
-                    long_only(),
-                    &requirements(),
-                    &venue(),
-                )
-                .unwrap()
-                .train_at(at, |from, to| replay_on(catalog, features(), from, to))
-            });
-            trained.push((at, outcome));
-            let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
-            long_store(models).publish(&baseline_of(
-                &features(),
-                &long_only(),
-                Side::Long,
-                at,
-                tenths,
-            ))
-        },
-    )
-    .unwrap();
+                    &long_only(),
+                    Side::Long,
+                    at,
+                    tenths,
+                ))
+            },
+        )
+        .unwrap();
     trained
 }
 
 /// The models of `long_only` under `models`.
 fn model_set(models: &Path) -> ModelSet {
-    ModelSet::new(
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        &long_only(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
+    blueprint(features(), long_only())
+        .model_set(models, &venue())
+        .unwrap()
 }
 
 /// The store of the long models of `long_only` under `models`.
@@ -304,7 +276,7 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         // decision's level and no side call.
         let taken = predicts(
             &meta,
-            &features(),
+            features(),
             from,
             &[f64::NAN, 1.0, means[period], 0.0],
         );

@@ -55,18 +55,16 @@
 //! trade: no section adds the sides up, as the backtest's report gives what the
 //! strategy actually traded, which can differ whenever it filters its decisions.
 
-use std::{collections::BTreeSet, fmt, path::Path};
+use std::{collections::BTreeSet, fmt};
 
 use anyhow::ensure;
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
-use nautilus_model::identifiers::StrategyId;
 
 use super::{
-    config::ModelConfig,
-    dataset::{self, Dataset, DatasetRow, DatasetVenue},
+    blueprint::OnVenue,
+    dataset::{self, Dataset, DatasetRow},
     deciding::DecidingModels,
-    features::FeatureSet,
     holdout::{Earnings, Example, MetaMargin, STRESS},
     meta,
     schedule::{Models, Schedule},
@@ -74,7 +72,6 @@ use super::{
     store::{Baselined, ModelSet, Swap},
     targets::Side,
 };
-use crate::strategy::DataRequirements;
 
 /// The retrains and scores of one strategy's backtests.
 #[derive(Debug)]
@@ -122,37 +119,21 @@ pub struct Period {
 }
 
 impl WalkForward {
-    /// The backtests of `strategy_id`'s models, deciding with `features`,
-    /// on its dataset, for a strategy of `requirements`,
-    /// run on `venue`, in the catalog at `catalog` and its models in the
-    /// store under `models`, as `config` says.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the target is invalid, or a store cannot be keyed.
-    pub fn new(
-        catalog: &Path,
-        models: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: ModelConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Self> {
-        let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
-        Ok(Self {
-            dataset: Dataset::new(
-                catalog,
-                strategy_id,
-                features,
-                config.decision,
-                config.target.clone(),
-                requirements,
-                venue,
-            )?,
+    /// The backtests of the models of `model`, a strategy's model on the
+    /// venue of its dataset runs, on its dataset and in its model set, on
+    /// its schedule.
+    pub(super) fn new(model: OnVenue<'_>) -> Self {
+        let OnVenue {
+            dataset,
             models,
-            schedule: Schedule::of_model(&config),
-        })
+            schedule,
+            ..
+        } = model;
+        Self {
+            dataset,
+            schedule,
+            models,
+        }
     }
 
     /// Prepares a backtest over `[start, end)`: if the dataset lacks a day
@@ -433,11 +414,11 @@ fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, path::Path, rc::Rc};
 
     use jiff::SignedDuration;
     use nautilus_model::{
-        identifiers::InstrumentId,
+        identifiers::{InstrumentId, StrategyId},
         types::{Money, Quantity},
     };
     use rust_decimal::Decimal;
@@ -446,11 +427,13 @@ mod tests {
     use crate::{
         backtest::Commission,
         model::{
+            blueprint::ModelBlueprint,
             calibration::Line,
-            config::{Margins, MetaConfig},
+            config::{Margins, MetaConfig, ModelConfig},
+            dataset::DatasetVenue,
             decide::{DecisionRule, FeatureRow},
             deciding::testing::{HOLDOUT, unchanged},
-            features::{meta_names, side_names, testing::last_mid},
+            features::{FeatureSet, meta_names, side_names, testing::last_mid},
             holdout::Trades,
             learner::{LearnerConfig, TrainingSet},
             schedule::Retrain,
@@ -460,6 +443,7 @@ mod tests {
                 TargetRow,
             },
         },
+        strategy::DataRequirements,
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -523,6 +507,17 @@ mod tests {
         }
     }
 
+    /// The model of `config`.
+    fn blueprint(config: &ModelConfig) -> ModelBlueprint {
+        ModelBlueprint::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            config.clone(),
+            requirements(),
+        )
+        .unwrap()
+    }
+
     fn walk(dir: &Path) -> WalkForward {
         walk_of(dir, config())
     }
@@ -530,16 +525,9 @@ mod tests {
     /// The walk of `config` in `dir`, its catalog and store side by side.
     fn walk_of(dir: &Path, config: ModelConfig) -> WalkForward {
         std::fs::create_dir_all(dir.join("catalog")).unwrap();
-        WalkForward::new(
-            &dir.join("catalog"),
-            &dir.join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        blueprint(&config)
+            .walk_forward(&dir.join("catalog"), &dir.join("models"), &venue())
+            .unwrap()
     }
 
     fn at(time: &str) -> Timestamp {
@@ -605,16 +593,9 @@ mod tests {
 
     /// The dataset of a walk in `dir` as `config` says, in its catalog.
     fn dataset(dir: &Path, config: &ModelConfig) -> Dataset {
-        Dataset::new(
-            &dir.join("catalog"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            config.decision,
-            config.target.clone(),
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        blueprint(config)
+            .dataset(&dir.join("catalog"), &venue())
+            .unwrap()
     }
 
     /// Builds the dataset of `walk(dir)` from the 6th to the 8th.
@@ -674,15 +655,9 @@ mod tests {
 
     /// The models of a walk in `dir` as `config` says.
     fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
-        ModelSet::new(
-            &dir.join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        blueprint(config)
+            .model_set(&dir.join("models"), &venue())
+            .unwrap()
     }
 
     /// The store of the `side` models of a walk in `dir` as `config` says.
@@ -1502,16 +1477,13 @@ Meta model scores, out of sample, over the span
     fn a_backtest_with_a_meta_model_builds_its_window_and_trains_where_either_lacks() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
-        let walk = WalkForward::new(
-            &dir.path().join("catalog"),
-            &dir.path().join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            with_meta(),
-            &requirements(),
-            &venue(),
-        )
-        .unwrap();
+        let walk = blueprint(&with_meta())
+            .walk_forward(
+                &dir.path().join("catalog"),
+                &dir.path().join("models"),
+                &venue(),
+            )
+            .unwrap();
         for at in [
             at("2026-01-05T00:00:00Z"),
             at("2026-01-06T00:00:00Z"),

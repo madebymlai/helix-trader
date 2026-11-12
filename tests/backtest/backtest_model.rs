@@ -20,8 +20,8 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            STRATEGY, baseline_of, config, features, r, replay, replay_of, requirements, target,
-            trade, venue, walk,
+            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, venue,
+            walk,
         },
         ic,
     },
@@ -30,28 +30,22 @@ use helix_trader::model::{
     config::{Margins, ModelConfig},
     dataset::DatasetRow,
     learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-    store::{ModelSet, ModelStore, Probe},
+    store::{ModelStore, Probe},
     targets::{BracketSpec, Distance, Side, Target, TargetConfig},
 };
 use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
-use nautilus_model::{identifiers::StrategyId, types::Money};
+use nautilus_model::types::Money;
 use rust_decimal::Decimal;
 
 fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-    ModelSet::new(
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        config,
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
-    .side(side)
-    .unwrap()
-    .store()
-    .clone()
+    blueprint(features(), config.clone())
+        .model_set(models, &venue())
+        .unwrap()
+        .side(side)
+        .unwrap()
+        .store()
+        .clone()
 }
 
 /// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late,

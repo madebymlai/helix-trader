@@ -15,24 +15,20 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{
-        STRATEGY, baseline_of, config, missing, replay_on, requirements, rule, target, trade_on,
-        venue, walk,
-    },
+    dataset::{baseline_of, blueprint, config, missing, replay_on, trade_on, venue, walk},
     ic,
 };
 use helix_trader::model::{
     config::{Margins, ModelConfig},
-    dataset::{self, Dataset},
+    dataset,
     features::FeatureSet,
     schedule::Retrain,
-    store::{ModelSet, ModelStore},
+    store::ModelStore,
     targets::Side,
     walk::WalkForward,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
-use nautilus_model::identifiers::StrategyId;
 use tempfile::TempDir;
 
 fn features() -> Rc<FeatureSet> {
@@ -70,32 +66,19 @@ fn span() -> (Timestamp, Timestamp) {
 
 /// The store of the long models under `models`.
 fn long_store(models: &Path) -> ModelStore {
-    ModelSet::new(
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        &config_daily(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
-    .side(Side::Long)
-    .unwrap()
-    .store()
-    .clone()
+    blueprint(features(), config_daily())
+        .model_set(models, &venue())
+        .unwrap()
+        .side(Side::Long)
+        .unwrap()
+        .store()
+        .clone()
 }
 
 fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
-    WalkForward::new(
-        catalog.path(),
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        config_daily(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
+    blueprint(features(), config_daily())
+        .walk_forward(catalog.path(), models, &venue())
+        .unwrap()
 }
 
 /// Prepares the backtest of the span, each build and train on a thread of
@@ -115,15 +98,8 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
                 std::thread::scope(|scope| {
                     scope
                         .spawn(|| {
-                            let dataset = Dataset::new(
-                                catalog.path(),
-                                StrategyId::from(STRATEGY),
-                                &features(),
-                                rule(),
-                                target(),
-                                &requirements(),
-                                &venue(),
-                            )?;
+                            let dataset = blueprint(features(), config_daily())
+                                .dataset(catalog.path(), &venue())?;
                             let (first, last) = dataset::days(from, to);
                             dataset.build(first, last, |from, to| {
                                 replay_on(catalog, features(), from, to)
@@ -240,18 +216,11 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
         .unwrap();
 
     let store = long_store(models.path());
-    let rows = Dataset::new(
-        catalog.path(),
-        StrategyId::from(STRATEGY),
-        &features(),
-        rule(),
-        target(),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
-    .read(start, end)
-    .unwrap();
+    let rows = blueprint(features(), config_daily())
+        .dataset(catalog.path(), &venue())
+        .unwrap()
+        .read(start, end)
+        .unwrap();
     assert_eq!(scores.short, None);
     let long = scores.long.unwrap();
     assert_eq!(long.periods.len(), 3);
