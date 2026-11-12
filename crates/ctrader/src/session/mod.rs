@@ -21,7 +21,8 @@ use super::{
     common::{
         account::CTraderAccount,
         messages::{
-            self, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal, ProtoOaDealListReq,
+            self, CTraderError, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaDeal,
+            ProtoOaDealListByPositionIdReq, ProtoOaDealListByPositionIdRes, ProtoOaDealListReq,
             ProtoOaDealListRes, ProtoOaDynamicLeverage, ProtoOaGetDynamicLeverageByIdReq,
             ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
             ProtoOaOrder, ProtoOaOrderDetailsReq, ProtoOaOrderDetailsRes, ProtoOaOrderListReq,
@@ -169,11 +170,14 @@ impl CTraderSession {
             .with_context(|| format!("requesting the {} open positions and orders", self.venue))
     }
 
-    /// The deals over `[from_ms, to_ms]`, each once, oldest first; none
-    /// when the window is empty. A
-    /// window cTrader answers only in part (`hasMore`) is asked again in
-    /// halves, which needs no knowledge of the order or size of its pages
-    /// (neither is documented).
+    /// The deals created over `[from_ms, to_ms]`, each once, oldest first;
+    /// none when the window is empty. cTrader's deal lists filter on a
+    /// deal's creation (or its last update, the same on every deal
+    /// measured), bounds included, which can come a millisecond before its
+    /// execution (demo, 2026-11-12): a deal executed at `from_ms` may be
+    /// left out. A window cTrader answers only in part (`hasMore`) is asked
+    /// again in halves, which needs no knowledge of the order or size of
+    /// its pages (neither is documented).
     ///
     /// # Errors
     ///
@@ -215,6 +219,52 @@ impl CTraderSession {
             deals.extend(page.deal.into_iter().map(|d| (d.deal_id, d)));
         }
         let mut deals: Vec<ProtoOaDeal> = deals.into_values().collect();
+        deals.sort_by_key(|d| (d.execution_timestamp, d.deal_id));
+        Ok(deals)
+    }
+
+    /// The deals of the account's position `position_id` created by
+    /// `to_ms`, oldest first, as `deals` reads them; none if the account
+    /// holds no such position (`POSITION_NOT_FOUND`, demo, 2026-11-12).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails, or the position holds more
+    /// deals created by then than one answer carries.
+    pub(crate) async fn position_deals(
+        &self,
+        position_id: i64,
+        to_ms: i64,
+    ) -> anyhow::Result<Vec<ProtoOaDeal>> {
+        let asked = self
+            .client
+            .request(&ProtoOaDealListByPositionIdReq {
+                ctid_trader_account_id: self.account_id.get(),
+                position_id,
+                to_timestamp: Some(to_ms),
+                ..Default::default()
+            })
+            .await;
+        let page: ProtoOaDealListByPositionIdRes = match asked {
+            Ok(page) => page,
+            Err(CTraderError::Venue { code, .. }) if code == "POSITION_NOT_FOUND" => {
+                return Ok(Vec::new());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "requesting the {} deals of position {position_id} by {to_ms} ms",
+                        self.venue
+                    )
+                });
+            }
+        };
+        ensure!(
+            !page.has_more,
+            "{} holds more deals of position {position_id} by {to_ms} ms than one answer carries",
+            self.venue
+        );
+        let mut deals = page.deal;
         deals.sort_by_key(|d| (d.execution_timestamp, d.deal_id));
         Ok(deals)
     }

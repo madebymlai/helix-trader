@@ -24,8 +24,9 @@ pub(crate) use proto::{
     ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaApplicationAuthReq,
     ProtoOaApplicationAuthRes, ProtoOaAsset, ProtoOaAssetListReq, ProtoOaAssetListRes,
     ProtoOaCancelOrderReq, ProtoOaClientDisconnectEvent, ProtoOaClosePositionReq, ProtoOaDeal,
-    ProtoOaDealListReq, ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaDynamicLeverage,
-    ProtoOaErrorRes, ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaGetDynamicLeverageByIdReq,
+    ProtoOaDealListByPositionIdReq, ProtoOaDealListByPositionIdRes, ProtoOaDealListReq,
+    ProtoOaDealListRes, ProtoOaDealStatus, ProtoOaDynamicLeverage, ProtoOaErrorRes,
+    ProtoOaExecutionEvent, ProtoOaExecutionType, ProtoOaGetDynamicLeverageByIdReq,
     ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
     ProtoOaLightSymbol, ProtoOaNewOrderReq, ProtoOaOrder, ProtoOaOrderDetailsReq,
     ProtoOaOrderDetailsRes, ProtoOaOrderErrorEvent, ProtoOaOrderListReq, ProtoOaOrderListRes,
@@ -94,6 +95,8 @@ payload! {
     ProtoOaReconcileRes => ProtoOaPayloadType::ProtoOaReconcileRes,
     ProtoOaDealListReq => ProtoOaPayloadType::ProtoOaDealListReq,
     ProtoOaDealListRes => ProtoOaPayloadType::ProtoOaDealListRes,
+    ProtoOaDealListByPositionIdReq => ProtoOaPayloadType::ProtoOaDealListByPositionIdReq,
+    ProtoOaDealListByPositionIdRes => ProtoOaPayloadType::ProtoOaDealListByPositionIdRes,
     ProtoOaOrderListReq => ProtoOaPayloadType::ProtoOaOrderListReq,
     ProtoOaOrderListRes => ProtoOaPayloadType::ProtoOaOrderListRes,
     ProtoOaOrderDetailsReq => ProtoOaPayloadType::ProtoOaOrderDetailsReq,
@@ -133,12 +136,14 @@ trade_request! {
 
 /// Whether a request of `payload_type` counts against cTrader's limit of
 /// historical requests (5 a second per connection): the tick requests, and
-/// the deal and order lists, history too (Spotware's docs name no list of
-/// either kind, so they are held to the lower limit).
+/// the deal lists (the account's, a position's) and the order list,
+/// history too (Spotware's docs name no list of either kind, so they are
+/// held to the lower limit).
 pub(crate) fn is_historical(payload_type: u32) -> bool {
     [
         ProtoOaGetTickDataReq::TYPE,
         ProtoOaDealListReq::TYPE,
+        ProtoOaDealListByPositionIdReq::TYPE,
         ProtoOaOrderListReq::TYPE,
     ]
     .contains(&payload_type)
@@ -366,6 +371,7 @@ mod tests {
     fn tick_deal_and_order_list_requests_are_historical_others_not() {
         assert!(is_historical(ProtoOaGetTickDataReq::TYPE));
         assert!(is_historical(ProtoOaDealListReq::TYPE));
+        assert!(is_historical(ProtoOaDealListByPositionIdReq::TYPE));
         assert!(is_historical(ProtoOaOrderListReq::TYPE));
         assert!(!is_historical(ProtoOaNewOrderReq::TYPE));
         assert!(!is_historical(ProtoOaReconcileReq::TYPE));

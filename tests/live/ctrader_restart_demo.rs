@@ -223,7 +223,7 @@ async fn a_bracket_leg_filled_while_the_node_was_down_fills_by_its_deal() {
         return;
     };
     let run = Run::new("HELIXTEST-104");
-    run.phase(Step::Open { distance: 1.0 });
+    run.phase(Step::Open { distance: 2.0 });
     let opened = run.saved();
     let closed = closed_at_broker(broker, Duration::from_secs(15 * 60)).await;
     run.phase(Step::Observe);
@@ -233,6 +233,10 @@ async fn a_bracket_leg_filled_while_the_node_was_down_fills_by_its_deal() {
         open_at_broker(broker).await,
         (0, 0),
         "the account is not flat"
+    );
+    let closed = closed.expect(
+        "the position was closed when first read after the node stopped: a leg may have filled \
+         while the node was up, so the run does not count; run it again",
     );
     assert!(closed, "neither protection was hit within 15 minutes");
 
@@ -403,19 +407,30 @@ async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     )
 }
 
-/// Whether the broker holds no open position, read every 5 s for up to
-/// `wait`: the bracket's position closed by one of its protections.
-async fn closed_at_broker(broker: &DemoBroker, wait: Duration) -> bool {
+/// Whether the broker holds no open position, read at once, then every 5 s
+/// for up to `wait`: the bracket's position closed by one of its
+/// protections. Called once the node is down, its process gone: `None` if
+/// the first read finds the position closed already, as it may have closed
+/// while the node was up.
+async fn closed_at_broker(broker: &DemoBroker, wait: Duration) -> Option<bool> {
     let mut client = connected(broker).await;
     let deadline = tokio::time::Instant::now() + wait;
-    let mut closed = false;
-    while !closed && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+    let flat = async || {
         let mass_status = client.generate_mass_status(Some(1)).await.unwrap().unwrap();
-        closed = mass_status.position_reports().is_empty();
-    }
+        mass_status.position_reports().is_empty()
+    };
+    let closed = if flat().await {
+        None
+    } else {
+        let mut closed = false;
+        while !closed && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            closed = flat().await;
+        }
+        Some(closed)
+    };
     client.disconnect().await.unwrap();
-    println!("closed at the broker: {closed}");
+    println!("closed at the broker: {closed:?}");
     closed
 }
 
