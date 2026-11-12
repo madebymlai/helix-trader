@@ -32,7 +32,7 @@ The account must be hedged, be the credential's, and use a deposit currency Naut
 
 ## Execution client
 
-On a hedging account an order without a position ID opens a separate position, even on the opposite side. Close or reduce a particular position by naming it; a reduce-only order without a position ID is denied. Reconciliation reports each position separately, including its protections and deals; incomplete deal history is marked incomplete rather than applied as a false position.
+On a hedging account an order without a position ID opens a separate position, even on the opposite side. Close or reduce a particular position by naming it; a reduce-only order without a position ID is denied. Reconciliation reports each position separately, including its protections and deals; incomplete deal history is marked incomplete rather than applied as a false position. An order's fills are its deals alone (`requires_authoritative_fills`): reconciliation waits for them rather than infer a fill from an order's status.
 
 The client supports market, limit and stop-market orders and supported brackets. Unsupported order types, time-in-force values and flags are denied. Bracket protections live on the cTrader position; amendments preserve the other protection because cTrader can otherwise remove it. Requests sent without an answer can remain in flight until venue events or reconciliation resolve them. Partial-close protection updates have only mock-peer coverage, not venue verification. Absolute protections on a market entry were accepted on a demo despite the protocol's stated restriction; do not assume the same behavior on every account.
 
