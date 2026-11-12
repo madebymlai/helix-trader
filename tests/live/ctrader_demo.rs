@@ -249,7 +249,14 @@ async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() 
     assert!(balance.total.as_f64() > 0.0, "{balance:?}");
     assert!(mass_status.reports_complete());
     // The demo account holds nothing open: each position or order there
-    // would be one report here.
+    // would be one report here, beside the orders closed over the window.
     assert!(mass_status.position_reports().is_empty());
-    assert!(mass_status.order_reports().is_empty());
+    assert!(
+        mass_status
+            .order_reports()
+            .values()
+            .all(|r| r.order_status.is_closed()),
+        "{:?}",
+        mass_status.order_reports()
+    );
 }

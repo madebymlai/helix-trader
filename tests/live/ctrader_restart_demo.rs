@@ -43,6 +43,7 @@ use nautilus_model::{
     identifiers::{ClientOrderId, InstrumentId, StrategyId, TraderId},
     orders::{Order, OrderAny},
     position::Position,
+    reports::PositionStatusReport,
     types::{Price, Quantity},
 };
 use nautilus_trading::{
@@ -395,15 +396,25 @@ async fn connected(broker: &DemoBroker) -> Box<dyn nautilus_common::clients::Exe
 }
 
 /// The open positions and orders the broker's execution client reports on
-/// the demo account, as the node's startup reconciliation reads them.
+/// the demo account, as the node's startup reconciliation reads them: the
+/// mass status also holds the orders closed over its window.
 async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let mut client = connected(broker).await;
     let mass_status = client.generate_mass_status(Some(60)).await;
     client.disconnect().await.unwrap();
     let mass_status = mass_status.unwrap().unwrap();
     (
-        mass_status.position_reports().len(),
-        mass_status.order_reports().len(),
+        mass_status
+            .position_reports()
+            .values()
+            .flatten()
+            .filter(|r| !r.is_flat())
+            .count(),
+        mass_status
+            .order_reports()
+            .values()
+            .filter(|r| !r.order_status.is_closed())
+            .count(),
     )
 }
 
@@ -417,7 +428,11 @@ async fn closed_at_broker(broker: &DemoBroker, wait: Duration) -> Option<bool> {
     let deadline = tokio::time::Instant::now() + wait;
     let flat = async || {
         let mass_status = client.generate_mass_status(Some(1)).await.unwrap().unwrap();
-        mass_status.position_reports().is_empty()
+        mass_status
+            .position_reports()
+            .values()
+            .flatten()
+            .all(PositionStatusReport::is_flat)
     };
     let closed = if flat().await {
         None

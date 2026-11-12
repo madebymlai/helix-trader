@@ -339,7 +339,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
 }
 
 /// The open positions and orders the execution client of `broker` reports
-/// on the demo account, as the node's startup reconciliation reads them.
+/// on the demo account, as the node's startup reconciliation reads them:
+/// the mass status also holds the orders closed over its window.
 async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
@@ -375,7 +376,16 @@ async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     client.disconnect().await.unwrap();
     let mass_status = mass_status.unwrap().unwrap();
     (
-        mass_status.position_reports().len(),
-        mass_status.order_reports().len(),
+        mass_status
+            .position_reports()
+            .values()
+            .flatten()
+            .filter(|r| !r.is_flat())
+            .count(),
+        mass_status
+            .order_reports()
+            .values()
+            .filter(|r| !r.order_status.is_closed())
+            .count(),
     )
 }
