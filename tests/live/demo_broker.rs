@@ -29,16 +29,21 @@ pub(crate) struct DemoBroker {
     /// The ounces of gold's synthetic quote size: its maximum order.
     gold_quote_size: u32,
     /// The currency of the account's commissions, and the range of the
-    /// commission of a side of 1 oz of gold at a price.
+    /// commission of a side of `GOLD_OUNCES` of gold at a price.
     commission_currency: &'static str,
     gold_commission: fn(f64) -> RangeInclusive<f64>,
 }
+
+/// The ounces of gold the orders test trades: 3, whose commission at
+/// Pepperstone's 0.035 USD an ounce is 0.105 USD, a half cent, so that the
+/// charge shows how the account rounds one.
+pub(crate) const GOLD_OUNCES: u32 = 3;
 
 const BROKERS: [DemoBroker; 2] = [
     // Measured on the demo account, 2026-10-26: the account's 1:30 under
     // the symbols' own 1:200 and 1:1000. IC's Raw charge, 30 USD per
     // million per side, in EUR on this account: 1 oz of gold, about 4,000
-    // USD, is charged 0.10 to 0.12 EUR.
+    // USD, is charged 0.10 to 0.12 EUR, and the test's ounces as many times.
     DemoBroker {
         name: "ic",
         venue: ic::VENUE,
@@ -49,7 +54,7 @@ const BROKERS: [DemoBroker; 2] = [
         gold_quote_size: 10_000,
         commission_currency: "EUR",
         gold_commission: |price| {
-            let usd = price * 30.0 / 1_000_000.0;
+            let usd = f64::from(GOLD_OUNCES) * price * 30.0 / 1_000_000.0;
             0.75 * usd..=usd
         },
     },
@@ -66,7 +71,7 @@ const BROKERS: [DemoBroker; 2] = [
         eurusd_leverage: 30,
         gold_quote_size: 5_000,
         commission_currency: "USD",
-        gold_commission: |_| 0.03..=0.04,
+        gold_commission: |_| 0.10..=0.11,
     },
 ];
 
