@@ -1416,13 +1416,13 @@ impl Outcome {
 }
 
 impl Targets {
-    /// The targets of `config`, for decisions on `rule` of a strategy of
-    /// `requirements`, at `commission`, the dataset run's.
+    /// The targets of `config`, valid for decisions on `rule` of a strategy
+    /// of `requirements` (`TargetConfig::validate`, which the model's
+    /// blueprint runs as it is built), at `commission`, the dataset run's.
     ///
     /// # Errors
     ///
-    /// Returns an error if `config` is invalid for `rule` and
-    /// `requirements`.
+    /// Returns an error as `TargetSetter::new` does.
     pub fn new(
         config: TargetConfig,
         rule: DecisionRule,
@@ -1445,7 +1445,6 @@ impl Targets {
         commission: Commission,
         width: Option<&BracketWidth>,
     ) -> anyhow::Result<Rc<Self>> {
-        config.validate(rule, requirements)?;
         Ok(Rc::new(Self {
             setter: TargetSetter::sharing(&config, rule, requirements, commission, width)?,
             config,

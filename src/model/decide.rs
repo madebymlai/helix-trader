@@ -127,18 +127,19 @@ impl DecisionRule {
 /// Starts the clock cadence of `rule` on `actor`, its decisions `delay`
 /// and `DECISION_MARGIN` after their grid times: `delay` is the node's bar
 /// build delay (`warmup::bar_build_delay`). The timer starts on the last
-/// decision time not after now, so it first fires on the next one.
+/// decision time not after now, so it first fires on the next one. The
+/// rule is valid (`DecisionRule::validate`, which the model's blueprint
+/// runs as it is built).
 ///
 /// # Errors
 ///
-/// Returns an error if the rule is invalid, the clock is not yet `delay`
-/// and `DECISION_MARGIN` past the epoch, or Nautilus refuses the timer.
+/// Returns an error if the clock is not yet `delay` and `DECISION_MARGIN`
+/// past the epoch, or Nautilus refuses the timer.
 pub fn start<A: DataActor + DataActorNative>(
     actor: &A,
     rule: DecisionRule,
     delay: SignedDuration,
 ) -> anyhow::Result<()> {
-    rule.validate()?;
     let DecisionRule::Every(interval) = rule;
     let clock = actor.clock();
     let now = clock.timestamp_ns();

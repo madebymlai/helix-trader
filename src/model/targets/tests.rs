@@ -26,8 +26,10 @@ use nautilus_trading::{
 use super::*;
 use crate::{
     model::{
+        blueprint::ModelBlueprint,
+        config::ModelConfig,
         dataset::DatasetRow,
-        deciding::testing::{GOLD, gold},
+        deciding::testing::{self, GOLD, gold},
         features::testing::last_mid,
         holdout::Example,
     },
@@ -389,6 +391,22 @@ fn refused_alone(config: &TargetConfig) -> (String, String) {
     }
 }
 
+/// The model of a strategy on the last mid of gold, reading its quotes,
+/// deciding on `rule()` with `target`, which the blueprint checks as it is
+/// built, before any target is run.
+fn blueprint(target: TargetConfig) -> anyhow::Result<ModelBlueprint> {
+    ModelBlueprint::new(
+        StrategyId::from("TARGETS-001"),
+        last_mid(InstrumentId::from(GOLD)).build().unwrap(),
+        ModelConfig {
+            decision: rule(),
+            target,
+            ..testing::config()
+        },
+        quotes(),
+    )
+}
+
 /// A time-only target's unit is the worth of its ATR: one without an `atr`
 /// table has none, and is refused under it, saying so.
 #[test]
@@ -404,7 +422,7 @@ fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
         reason.contains("ATR") && reason.contains("unit"),
         "{reason}"
     );
-    assert!(Targets::new(config, rule(), &quotes(), commission()).is_err());
+    assert!(blueprint(config).is_err());
 }
 
 /// A bracket's ATR is its own `atr` table's: one on the target beside it
@@ -484,7 +502,7 @@ fn sizes_distances_and_times_must_be_positive() {
 
     for config in invalid {
         assert!(config.validate(rule(), &quotes()).is_err(), "{config:?}");
-        assert!(Targets::new(config, rule(), &quotes(), commission()).is_err());
+        assert!(blueprint(config).is_err());
     }
 }
 
@@ -578,7 +596,7 @@ fn an_atr_table_is_refused_unless_a_distance_uses_the_atr() {
     }
     let err = format!("{:#}", unused.validate(rule(), &quotes()).unwrap_err());
     assert!(err.contains("no distance uses"), "{err}");
-    assert!(Targets::new(unused, rule(), &quotes(), commission()).is_err());
+    assert!(blueprint(unused).is_err());
 }
 
 /// A perpetual priced in half points, 0.5 a tick, as some futures are.
