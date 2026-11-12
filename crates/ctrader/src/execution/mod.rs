@@ -23,11 +23,13 @@
 //! rejects it.
 //!
 //! Reconciliation reads the reconcile request (open positions, their stop
-//! loss and take profit, pending orders), the deal list (fills), and for a
+//! loss and take profit, pending orders), the deal list (fills), the
+//! deals that opened the positions (where the deal list starts), the order
+//! list (the orders and protections closed over the window), and for a
 //! single order its details or the order list.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -74,7 +76,7 @@ use super::{
         account::CTraderAccount,
         messages::{
             ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
-            ProtoOaReconcileRes, TradeRequest,
+            ProtoOaOrderStatus, ProtoOaOrderType, ProtoOaReconcileRes, TradeRequest,
         },
     },
     config::{CTraderConnection, CTraderCredential},
@@ -361,16 +363,80 @@ impl CTraderExecutionClient {
         Ok(fills)
     }
 
-    /// The earliest opening, in ns, of the account's positions the node's
-    /// cache holds open: a restart reads the deals from there, so a
-    /// position closed while the node was down gets its closing fills.
-    fn earliest_cached_open(&self) -> Option<UnixNanos> {
+    /// The account's positions the node's cache holds open, by cTrader
+    /// position id: a restart reads the deals from their openings, so a
+    /// position closed while the node was down gets its closing fills. A
+    /// position of no cTrader id has no deal there.
+    fn cached_open(&self) -> Vec<CachedOpen> {
         let cache = self.core.cache();
         cache
             .positions_open(None, None, None, Some(&self.core.account_id), None)
             .iter()
-            .map(|p| p.ts_opened)
+            .filter_map(|p| {
+                Some(CachedOpen {
+                    position: p.id.as_str().parse().ok()?,
+                    instrument_id: p.instrument_id,
+                    opened: orders::millis(p.ts_opened),
+                })
+            })
+            .collect()
+    }
+
+    /// A minute before the earliest creation of the orders the node's cache
+    /// holds open or in flight on the venue (the venue's clock and the
+    /// node's may differ), but for those the broker lists open (`listed`,
+    /// the reconcile request's reports): a restart reads the orders from
+    /// there, so one the broker closed while the node was down, or never
+    /// answered for, gets its report. One the broker lists open has its
+    /// report already, and a long-lived one would take every start's window
+    /// back to its creation.
+    fn earliest_cached_order(&self, listed: &[OrderStatusReport]) -> Option<UnixNanos> {
+        let cache = self.core.cache();
+        let venue = Some(&self.core.venue);
+        let open = cache.orders_open(venue, None, None, None, None);
+        let in_flight = cache.orders_inflight(venue, None, None, None, None);
+        let margin = DurationNanos::from_millis(QUERY_MARGIN_MS.unsigned_abs());
+        open.iter()
+            .chain(&in_flight)
+            .filter(|o| {
+                !listed.iter().any(|r| {
+                    o.venue_order_id() == Some(r.venue_order_id)
+                        || r.client_order_id == Some(o.client_order_id())
+                })
+            })
+            .map(|o| o.ts_init().saturating_sub(margin))
             .min()
+    }
+
+    /// The earliest creation, in ms, of the deals that opened `openings`
+    /// (cTrader position ids and their openings, in ms), if any: a
+    /// position's opening is its first deal's execution, which can come a
+    /// millisecond after the deal's creation, the time cTrader's deal list
+    /// filters on. Only the positions opened within `QUERY_MARGIN_MS` of
+    /// the first are asked for, a request each: a later one's opening deal,
+    /// created moments before it executed, is not created before the
+    /// first's. Asking for every position would cost each a historical
+    /// request's 250 ms, on a startup Nautilus times out.
+    async fn earliest_opening_deal(
+        session: &Session,
+        openings: &BTreeMap<i64, i64>,
+    ) -> anyhow::Result<Option<i64>> {
+        let Some(first) = openings.values().min().copied() else {
+            return Ok(None);
+        };
+        let mut earliest = None;
+        for (&position, &opened) in openings
+            .iter()
+            .filter(|(_, opened)| **opened <= first + QUERY_MARGIN_MS)
+        {
+            let deals = session.ctrader.position_deals(position, opened).await?;
+            earliest = deals
+                .iter()
+                .map(|d| d.create_timestamp)
+                .chain(earliest)
+                .min();
+        }
+        Ok(earliest)
     }
 
     fn spawn_command<F>(&self, description: &'static str, future: F)
@@ -847,6 +913,14 @@ impl CTraderExecutionClient {
         }
         Ok(Held::Order(status, fills))
     }
+}
+
+/// A position the node's cache holds open: its cTrader position id, its
+/// instrument and its opening, in ms.
+struct CachedOpen {
+    position: i64,
+    instrument_id: InstrumentId,
+    opened: i64,
 }
 
 /// What the broker holds of an order a query looks for.
@@ -1345,45 +1419,72 @@ impl ExecutionClient for CTraderExecutionClient {
     }
 
     /// The open positions and orders of one reconcile request, and the
-    /// fills of the deals since the earliest of: `lookback_mins` ago, the
-    /// opening of a position open at the broker, the opening of a position
-    /// the node's cache holds open. A position's deals go in only when they
-    /// add up to it (see `reports::explained`); the report window says
-    /// whether all did.
+    /// orders closed and the fills of the deals created since the earliest
+    /// of: `lookback_mins` ago, the creation of the deals that opened a
+    /// position open at the broker or one the node's cache holds open, a
+    /// minute before the creation of an order the cache holds open or in
+    /// flight that cTrader does not list open (see `earliest_cached_order`).
+    /// A position's deals go in only when they add up to it (see
+    /// `reports::explained`), and a closed order only with all its deals;
+    /// the report window says whether all did, and whether every closed
+    /// order could be read. A deal of a protection order closes the legs of
+    /// its position, as its trade event does (see
+    /// `Reports::protection_closed`), and so does a protection order
+    /// cancelled or expired over the window, of a position whose deals go
+    /// in, but for a leg still open. A
+    /// position the cache holds open that cTrader does not is reported
+    /// flat, as Nautilus applies bounded fills to the positions of an
+    /// instrument with a position report only.
     async fn generate_mass_status(
         &self,
         lookback_mins: Option<u64>,
     ) -> anyhow::Result<Option<ExecutionMassStatus>> {
         let ts_init = self.now();
-        let cached_open = self.earliest_cached_open();
+        let cached = self.cached_open();
+        let mut openings: BTreeMap<i64, i64> =
+            cached.iter().map(|c| (c.position, c.opened)).collect();
         let session = self.session()?;
         let open = session.ctrader.reconcile().await?;
+        // The lists' end, once the reconcile request is answered: a deal or
+        // order of a position it no longer holds, made while it was on its
+        // way, is in them.
+        let until = orders::millis(self.now());
         let reports = self.reports(session, ts_init);
-        let orders = Self::order_reports(&reports, &open)?;
-        let positions = Self::position_reports(&reports, &open)?;
+        let mut orders = Self::order_reports(&reports, &open)?;
+        let ordered = self.earliest_cached_order(&orders);
+        let mut positions = Self::position_reports(&reports, &open)?;
+        let held = open_volumes(&open.position);
+        for gone in cached.iter().filter(|c| !held.contains_key(&c.position)) {
+            let instrument = session
+                .symbols
+                .get(&gone.instrument_id)
+                .and_then(|symbol| session.instruments.get(symbol));
+            if let Some(instrument) = instrument {
+                positions.push(reports.flat(instrument, gone.position));
+            }
+        }
 
         let lookback = lookback_mins
             .map(DurationNanos::try_from_mins)
             .transpose()?
             .map(|lookback| ts_init.saturating_sub(lookback));
-        let venue_open = open
-            .position
-            .iter()
-            .filter_map(|p| p.trade_data.open_timestamp)
-            .filter_map(UnixNanos::from_millis_checked)
-            .min();
-        let start = [lookback, venue_open, cached_open]
+        for position in &open.position {
+            if let Some(opened) = position.trade_data.open_timestamp {
+                openings.insert(position.position_id, opened);
+            }
+        }
+        let opening = Self::earliest_opening_deal(session, &openings)
+            .await?
+            .and_then(UnixNanos::from_millis_checked);
+        let start = [lookback, opening, ordered]
             .into_iter()
             .flatten()
             .min()
             .unwrap_or(ts_init);
         // One cutoff for the request and the report window: cTrader's, in ms.
         let start = start.floor(DurationNanos::from_millis(1));
-        let deals = session
-            .ctrader
-            .deals(orders::millis(start), orders::millis(ts_init))
-            .await?;
-        let (kept, unexplained) = explained(&deals, &open_volumes(&open.position));
+        let deals = session.ctrader.deals(orders::millis(start), until).await?;
+        let (kept, unexplained) = explained(&deals, &held);
         if !unexplained.is_empty() {
             log::warn!(
                 "{} deals of positions {unexplained:?} left out: their history starts before \
@@ -1391,10 +1492,76 @@ impl ExecutionClient for CTraderExecutionClient {
                 self.core.venue
             );
         }
+        // The orders closed over the window: cTrader's order list holds the
+        // orders last updated in it.
+        let updated = session.ctrader.orders(orders::millis(start), until).await?;
+        let protections: HashMap<i64, &ProtoOaOrder> = updated
+            .iter()
+            .filter(|o| o.order_type() == ProtoOaOrderType::StopLossTakeProfit)
+            .map(|o| (o.order_id, o))
+            .collect();
+        // The other orders closed over the window, whose deals all go in: an
+        // order the node sent but never heard back about is named by its
+        // client order id. One that cannot be read leaves the history
+        // incomplete.
+        let mut history = Vec::new();
+        let mut history_complete = true;
+        for order in updated.iter().filter(|o| {
+            o.order_type() != ProtoOaOrderType::StopLossTakeProfit
+                && o.order_status() != ProtoOaOrderStatus::OrderStatusAccepted
+        }) {
+            let reported: i64 = kept
+                .iter()
+                .filter(|d| d.order_id == order.order_id)
+                .map(|d| d.filled_volume)
+                .sum();
+            if reported != order.executed_volume.unwrap_or_default() {
+                continue;
+            }
+            match reports.order(order) {
+                Ok(report) => history.extend(report),
+                Err(e) => {
+                    log::warn!("{} order history incomplete: {e:#}", self.core.venue);
+                    history_complete = false;
+                }
+            }
+        }
+        // A position's protection goes in with its history.
+        let histories: HashSet<i64> = kept.iter().map(|d| d.position_id).collect();
+        // A cancelled protection's legs before a filled one's, so that the
+        // report of a leg hit is the last of its venue order id, the one the
+        // mass status keeps: a position may have had both over the window.
+        for protection in protections.values().filter(|o| {
+            matches!(
+                o.order_status(),
+                ProtoOaOrderStatus::OrderStatusCancelled | ProtoOaOrderStatus::OrderStatusExpired
+            ) && o.position_id.is_some_and(|p| histories.contains(&p))
+        }) {
+            history.extend(
+                reports
+                    .protection_closed(protection, None)?
+                    .into_iter()
+                    .map(|(leg, _)| leg),
+            );
+        }
         let mut fills = Vec::new();
         for deal in kept {
-            fills.extend(reports.fill(deal)?);
+            match protections.get(&deal.order_id) {
+                Some(protection) => {
+                    for (leg, fill) in reports.protection_closed(protection, Some(deal))? {
+                        history.push(leg);
+                        fills.extend(fill);
+                    }
+                }
+                None => fills.extend(reports.fill(deal)?),
+            }
         }
+        // An order or leg the reconcile request holds open is open.
+        history.retain(|closed| {
+            orders
+                .iter()
+                .all(|o| o.venue_order_id != closed.venue_order_id)
+        });
 
         let mut mass_status = ExecutionMassStatus::new(
             self.core.client_id,
@@ -1404,16 +1571,19 @@ impl ExecutionClient for CTraderExecutionClient {
             None,
         );
         log::info!(
-            "{} mass status: {} positions, {} open orders, {} fills since {start}",
+            "{} mass status: {} positions, {} open orders, {} orders and legs closed, {} fills \
+             since {start}",
             self.core.venue,
             positions.len(),
             orders.len(),
+            history.len(),
             fills.len()
         );
+        orders.extend(history);
         mass_status.add_order_reports(orders);
         mass_status.add_fill_reports(fills);
         mass_status.add_position_reports(positions);
-        mass_status.set_report_window(Some(start), unexplained.is_empty());
+        mass_status.set_report_window(Some(start), unexplained.is_empty() && history_complete);
         Ok(Some(mass_status))
     }
 }
@@ -1445,12 +1615,14 @@ mod tests {
         common::messages::{
             Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
             ProtoOaAccountType, ProtoOaAssetListReq, ProtoOaAssetListRes,
-            ProtoOaClosePositionDetail, ProtoOaDeal, ProtoOaDealListReq, ProtoOaDealListRes,
-            ProtoOaDealStatus, ProtoOaErrorRes, ProtoOaOrder, ProtoOaOrderStatus,
-            ProtoOaOrderTriggerMethod, ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus,
-            ProtoOaReconcileReq, ProtoOaReconcileRes, ProtoOaRefreshTokenReq, ProtoOaSymbolByIdReq,
-            ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTimeInForce,
-            ProtoOaTradeData, ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
+            ProtoOaClosePositionDetail, ProtoOaDeal, ProtoOaDealListByPositionIdReq,
+            ProtoOaDealListByPositionIdRes, ProtoOaDealListReq, ProtoOaDealListRes,
+            ProtoOaDealStatus, ProtoOaErrorRes, ProtoOaOrder, ProtoOaOrderListReq,
+            ProtoOaOrderListRes, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod, ProtoOaOrderType,
+            ProtoOaPosition, ProtoOaPositionStatus, ProtoOaReconcileReq, ProtoOaReconcileRes,
+            ProtoOaRefreshTokenReq, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTimeInForce, ProtoOaTradeData,
+            ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
         },
         testing::{
             self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, ASSET_LIST_RES, Action, CLIENT,
@@ -1473,17 +1645,21 @@ mod tests {
     /// How the peer answers trade requests and order queries.
     type Answers = Arc<dyn Fn(&ProtoMessage) -> Vec<Action> + Send + Sync>;
 
-    /// What the peer answers to the account, the open positions and the
-    /// deals: the captured responses unless a test sets others; trade
-    /// requests and order queries as `trades` does.
+    /// What the peer answers to the account, the open positions, the deals
+    /// and the order list: the captured responses unless a test sets
+    /// others, no order; trade requests and order queries as `trades` does.
     #[derive(Clone, Default)]
     struct Script {
         trader: Option<ProtoOaTraderRes>,
         reconcile: Option<ProtoOaReconcileRes>,
         deals: Option<Vec<ProtoOaDeal>>,
+        orders: Vec<ProtoOaOrder>,
         refuse_token: bool,
         other_account: bool,
         trades: Option<Answers>,
+        /// A client clock the reconcile request moves to a time as it is
+        /// answered: the time it took.
+        reconcile_takes: Option<(&'static AtomicTime, UnixNanos)>,
     }
 
     mod order_flow;
@@ -1539,6 +1715,14 @@ mod tests {
                     None => replay::<ProtoOaTraderRes>(request, TRADER_RES),
                 },
                 t if t == ProtoOaReconcileReq::TYPE => match &venue.reconcile {
+                    _ if venue.reconcile_takes.is_some() => {
+                        let (clock, answered) = venue.reconcile_takes.unwrap();
+                        clock.set_time(answered);
+                        match &venue.reconcile {
+                            Some(open) => reply(request, open),
+                            None => replay::<ProtoOaReconcileRes>(request, RECONCILE_RES_EMPTY),
+                        }
+                    }
                     Some(open) => reply(request, open),
                     None => replay::<ProtoOaReconcileRes>(request, RECONCILE_RES_EMPTY),
                 },
@@ -1557,6 +1741,9 @@ mod tests {
                         },
                     )
                 }
+                // As on the demo (2026-11-12): a deal list holds the deals
+                // created over its window, bounds included, which may have
+                // executed after it.
                 t if t == ProtoOaDealListReq::TYPE => match &venue.deals {
                     Some(deals) => {
                         let asked = ProtoOaDealListReq::decode(payload).unwrap();
@@ -1564,9 +1751,7 @@ mod tests {
                             (asked.from_timestamp.unwrap(), asked.to_timestamp.unwrap());
                         let deal = deals
                             .iter()
-                            .filter(|d| {
-                                from <= d.execution_timestamp && d.execution_timestamp <= to
-                            })
+                            .filter(|d| from <= d.create_timestamp && d.create_timestamp <= to)
                             .cloned()
                             .collect();
                         reply(
@@ -1581,6 +1766,70 @@ mod tests {
                     }
                     None => replay::<ProtoOaDealListRes>(request, DEAL_LIST_RES_EMPTY),
                 },
+                // As on the demo (2026-11-12): the orders last updated over
+                // the window, bounds included.
+                t if t == ProtoOaOrderListReq::TYPE => {
+                    let asked = ProtoOaOrderListReq::decode(payload).unwrap();
+                    let (from, to) = (asked.from_timestamp.unwrap(), asked.to_timestamp.unwrap());
+                    let order = venue
+                        .orders
+                        .iter()
+                        .filter(|o| {
+                            o.utc_last_update_timestamp
+                                .is_some_and(|t| from <= t && t <= to)
+                        })
+                        .cloned()
+                        .collect();
+                    reply(
+                        request,
+                        &ProtoOaOrderListRes {
+                            ctid_trader_account_id: ACCOUNT_ID,
+                            order,
+                            has_more: false,
+                            ..Default::default()
+                        },
+                    )
+                }
+                // As on the demo (2026-11-12): the deals of a position
+                // created over the window, a bound left out unbounding it;
+                // a position the account never held is not found.
+                t if t == ProtoOaDealListByPositionIdReq::TYPE => {
+                    let asked = ProtoOaDealListByPositionIdReq::decode(payload).unwrap();
+                    let deals = venue.deals.iter().flatten();
+                    let deal: Vec<ProtoOaDeal> = deals
+                        .filter(|d| {
+                            d.position_id == asked.position_id
+                                && asked.from_timestamp.is_none_or(|t| t <= d.create_timestamp)
+                                && asked.to_timestamp.is_none_or(|t| d.create_timestamp <= t)
+                        })
+                        .cloned()
+                        .collect();
+                    let held = venue
+                        .deals
+                        .iter()
+                        .flatten()
+                        .any(|d| d.position_id == asked.position_id);
+                    if held {
+                        reply(
+                            request,
+                            &ProtoOaDealListByPositionIdRes {
+                                ctid_trader_account_id: ACCOUNT_ID,
+                                deal,
+                                has_more: false,
+                                ..Default::default()
+                            },
+                        )
+                    } else {
+                        reply(
+                            request,
+                            &ProtoOaErrorRes {
+                                error_code: "POSITION_NOT_FOUND".to_owned(),
+                                description: Some("Position not found".to_owned()),
+                                ..Default::default()
+                            },
+                        )
+                    }
+                }
                 other => panic!("unexpected request {other}"),
             };
             vec![answer]
@@ -2129,6 +2378,45 @@ mod tests {
         assert!(!mass_status.reports_complete());
     }
 
+    /// As the demo had it (2026-11-12, position 59798583 of another run):
+    /// position 105 closed at `T0` + 5 min by a close of its own, cTrader
+    /// cancelling its protection order; its opening is before the window,
+    /// so its history, protection with it, is left out.
+    #[tokio::test]
+    async fn the_protection_of_a_position_opened_before_the_window_is_left_out() {
+        let mut deals = gold_deals();
+        deals.push(deal(7, 105, ProtoOaTradeSide::Sell, 2_000, 4011.0, 5));
+        let protection = ProtoOaOrder {
+            order_id: 1_105,
+            trade_data: ProtoOaTradeData {
+                symbol_id: XAUUSD_SYMBOL_ID,
+                volume: 2_000,
+                trade_side: ProtoOaTradeSide::Sell as i32,
+                open_timestamp: Some(T0 - 60 * 60_000),
+                ..Default::default()
+            },
+            order_type: ProtoOaOrderType::StopLossTakeProfit as i32,
+            order_status: ProtoOaOrderStatus::OrderStatusCancelled as i32,
+            utc_last_update_timestamp: Some(T0 + 5 * 60_000 + 20),
+            closing_order: Some(true),
+            stop_price: Some(3990.0),
+            limit_price: Some(4030.0),
+            position_id: Some(105),
+            ..Default::default()
+        };
+        let venue = Script {
+            deals: Some(deals),
+            orders: vec![protection],
+            ..gold_venue()
+        };
+
+        let (mass_status, _) = mass_status(venue, None).await;
+
+        let orders = mass_status.order_reports();
+        assert!(!orders.contains_key(&VenueOrderId::from("105-SL")));
+        assert!(!orders.contains_key(&VenueOrderId::from("105-TP")));
+    }
+
     /// The client's clock stopped at `T0` + 1 h.
     #[tokio::test]
     async fn a_longer_lookback_reads_the_deals_from_its_start() {
@@ -2151,31 +2439,31 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// After a restart on a persisted cache: a position the cache holds
-    /// open, opened an hour before the venue's, may have closed while the
-    /// node was down; its deals are read from its opening.
-    #[tokio::test]
-    async fn the_deals_are_read_from_the_opening_of_a_position_the_cache_holds_open() {
+    /// Plays a persisted cache: `cache`, `client`'s, holds the long of 10 oz
+    /// of XAUUSD of cTrader position `position` open, opened at `opened`.
+    fn hold_open(
+        client: &CTraderExecutionClient,
+        cache: &Rc<RefCell<Cache>>,
+        position: &str,
+        opened: UnixNanos,
+    ) {
         use nautilus_model::{
             events::OrderEventAny,
             orders::{OrderTestBuilder, stubs::TestOrderEventStubs},
             position::Position,
         };
 
-        let (mut client, cache, mut events, received, _tokens) = started(gold_venue());
-        connect(&mut client, &mut events, &cache).await;
         let gold = client.session().unwrap().instruments[&XAUUSD_SYMBOL_ID].clone();
         let order = OrderTestBuilder::new(OrderType::Market)
             .instrument_id(gold.id())
             .side(OrderSide::Buy)
             .quantity(Quantity::from(10))
             .build();
-        let opened = ns(T0 - 3_600_000);
         let OrderEventAny::Filled(fill) = TestOrderEventStubs::filled(
             &order,
             &gold,
             None,
-            Some(PositionId::from("99")),
+            Some(PositionId::from(position)),
             Some(Price::from("4000.00")),
             None,
             None,
@@ -2189,13 +2477,616 @@ mod tests {
             .borrow_mut()
             .add_position(&Position::new(&gold, fill), OmsType::Hedging)
             .unwrap();
+    }
+
+    /// After a restart on a persisted cache: a position the cache holds
+    /// open, opened an hour before the venue's, may have closed while the
+    /// node was down; its deals are read from its opening deal's creation.
+    #[tokio::test]
+    async fn the_deals_are_read_from_the_opening_of_a_position_the_cache_holds_open() {
+        let mut deals = gold_deals();
+        deals.push(deal(9, 99, ProtoOaTradeSide::Buy, 1_000, 4000.0, -60));
+        let venue = Script {
+            deals: Some(deals),
+            ..gold_venue()
+        };
+        let (mut client, cache, mut events, received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        // Its fill's time, the deal's execution.
+        hold_open(&client, &cache, "99", ns(T0 - 3_600_000 + 20));
 
         let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
 
         let asked: Vec<ProtoOaDealListReq> = requests_of(&received);
         assert_eq!(asked[0].from_timestamp, Some(T0 - 3_600_000));
-        assert_eq!(mass_status.lookback_start(), Some(opened));
+        assert_eq!(mass_status.lookback_start(), Some(ns(T0 - 3_600_000)));
         client.disconnect().await.unwrap();
+    }
+
+    /// The deal that opened position 59791668 on the demo (2026-11-11), as
+    /// its times went: created at `created`, executed a millisecond later,
+    /// the position's opening, 1 oz of XAUUSD bought.
+    fn opening_deal(id: i64, position: i64, created: i64) -> ProtoOaDeal {
+        let mut opening = deal(id, position, ProtoOaTradeSide::Buy, 100, 4012.35, 0);
+        opening.create_timestamp = created;
+        opening.execution_timestamp = created + 1;
+        opening
+    }
+
+    fn trade_ids(mass_status: &ExecutionMassStatus) -> Vec<String> {
+        let mut trades: Vec<String> = mass_status
+            .fill_reports()
+            .values()
+            .flatten()
+            .map(|f| f.trade_id.to_string())
+            .collect();
+        trades.sort();
+        trades
+    }
+
+    /// As on the demo (2026-11-11, position 59791668): the position's
+    /// opening, its deal's execution, is a millisecond after the deal's
+    /// creation, which the deal list filters on.
+    #[tokio::test]
+    async fn a_position_open_at_the_broker_comes_with_the_deal_that_opened_it() {
+        let created = T0 + 7;
+        let mut open = position(59_791_668, ProtoOaTradeSide::Buy, 100, 0);
+        open.trade_data.open_timestamp = Some(created + 1);
+        open.price = Some(4012.35);
+        let venue = Script {
+            reconcile: Some(ProtoOaReconcileRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                position: vec![open],
+                ..Default::default()
+            }),
+            deals: Some(vec![opening_deal(65_945_613, 59_791_668, created)]),
+            ..Script::default()
+        };
+
+        let (mass_status, _) = mass_status(venue, None).await;
+
+        assert_eq!(trade_ids(&mass_status), ["65945613"]);
+        assert!(mass_status.reports_complete());
+        assert_eq!(mass_status.lookback_start(), Some(ns(created)));
+    }
+
+    /// After a restart on a persisted cache, as on the demo (2026-11-11,
+    /// position 59791558): the position the cache holds open closed while
+    /// the node was down; the deal that opened it, created a millisecond
+    /// before the position's opening, and the deal that closed it are its
+    /// fills.
+    #[tokio::test]
+    async fn a_position_the_cache_holds_open_closed_meanwhile_comes_with_its_deals() {
+        let created = T0 + 7;
+        let mut closing = deal(
+            65_945_411,
+            59_791_558,
+            ProtoOaTradeSide::Sell,
+            100,
+            4011.0,
+            1,
+        );
+        closing.execution_timestamp = closing.create_timestamp;
+        closing.close_position_detail = Some(ProtoOaClosePositionDetail {
+            entry_price: 4012.35,
+            closed_volume: Some(100),
+            ..Default::default()
+        });
+        let venue = Script {
+            deals: Some(vec![opening_deal(65_945_399, 59_791_558, created), closing]),
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59791558", ns(created + 1));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        assert_eq!(trade_ids(&mass_status), ["65945399", "65945411"]);
+        assert!(mass_status.reports_complete());
+        assert_eq!(mass_status.lookback_start(), Some(ns(created)));
+        client.disconnect().await.unwrap();
+    }
+
+    /// Position 59793251 of the demo (2026-11-12), 1 oz of XAUUSD bought by
+    /// order 76919227 (deal 65947597) with a stop loss at 3983.38 and a
+    /// take profit at 3987.52, which cTrader holds as its protection order
+    /// 76919228, under the entry's client order id; the stop loss hit while
+    /// the node was down, the order filled at 3983.05 by deal 65947662.
+    fn stopped_out() -> Script {
+        let opening = ProtoOaDeal {
+            deal_id: 65_947_597,
+            order_id: 76_919_227,
+            position_id: 59_793_251,
+            volume: 100,
+            filled_volume: 100,
+            symbol_id: XAUUSD_SYMBOL_ID,
+            create_timestamp: 1_794_443_791_942,
+            execution_timestamp: 1_794_443_791_943,
+            utc_last_update_timestamp: Some(1_794_443_791_942),
+            execution_price: Some(3985.52),
+            trade_side: ProtoOaTradeSide::Buy as i32,
+            deal_status: ProtoOaDealStatus::Filled as i32,
+            commission: Some(-4),
+            money_digits: Some(2),
+            ..Default::default()
+        };
+        let closing = ProtoOaDeal {
+            deal_id: 65_947_662,
+            order_id: 76_919_228,
+            create_timestamp: 1_794_443_906_550,
+            execution_timestamp: 1_794_443_906_550,
+            utc_last_update_timestamp: Some(1_794_443_906_550),
+            execution_price: Some(3983.05),
+            trade_side: ProtoOaTradeSide::Sell as i32,
+            close_position_detail: Some(ProtoOaClosePositionDetail {
+                entry_price: 3985.52,
+                closed_volume: Some(100),
+                ..Default::default()
+            }),
+            ..opening
+        };
+        let entry = ProtoOaOrder {
+            order_id: 76_919_227,
+            trade_data: ProtoOaTradeData {
+                symbol_id: XAUUSD_SYMBOL_ID,
+                volume: 100,
+                trade_side: ProtoOaTradeSide::Buy as i32,
+                open_timestamp: Some(1_794_443_791_942),
+                close_timestamp: Some(1_794_443_791_943),
+                ..Default::default()
+            },
+            order_type: ProtoOaOrderType::Market as i32,
+            order_status: ProtoOaOrderStatus::OrderStatusFilled as i32,
+            execution_price: Some(3985.52),
+            executed_volume: Some(100),
+            utc_last_update_timestamp: Some(1_794_443_791_943),
+            closing_order: Some(false),
+            stop_loss: Some(3983.38),
+            take_profit: Some(3987.52),
+            client_order_id: Some("O-20261112-003631-104-001-1".to_owned()),
+            time_in_force: Some(ProtoOaTimeInForce::ImmediateOrCancel as i32),
+            position_id: Some(59_793_251),
+            ..Default::default()
+        };
+        let protection = ProtoOaOrder {
+            order_id: 76_919_228,
+            trade_data: ProtoOaTradeData {
+                trade_side: ProtoOaTradeSide::Sell as i32,
+                open_timestamp: Some(1_794_443_791_947),
+                close_timestamp: Some(1_794_443_906_550),
+                ..entry.trade_data.clone()
+            },
+            order_type: ProtoOaOrderType::StopLossTakeProfit as i32,
+            execution_price: Some(3983.05),
+            utc_last_update_timestamp: Some(1_794_443_906_550),
+            closing_order: Some(true),
+            stop_loss: None,
+            take_profit: None,
+            limit_price: Some(3987.52),
+            stop_price: Some(3983.38),
+            time_in_force: Some(ProtoOaTimeInForce::GoodTillCancel as i32),
+            stop_trigger_method: Some(ProtoOaOrderTriggerMethod::Trade as i32),
+            ..entry.clone()
+        };
+        Script {
+            deals: Some(vec![opening, closing]),
+            orders: vec![entry, protection],
+            ..Script::default()
+        }
+    }
+
+    /// After a restart on a persisted cache holding the position open, its
+    /// legs accepted: the leg the protection order filled is reported
+    /// filled by its deal, under its own venue order id, and the other
+    /// cancelled.
+    #[tokio::test]
+    async fn a_leg_hit_while_the_node_was_down_is_filled_by_its_deal_and_the_other_cancelled() {
+        let (mut client, cache, mut events, _, _tokens) = started(stopped_out());
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let orders = mass_status.order_reports();
+        let stop_loss = &orders[&VenueOrderId::from("59793251-SL")];
+        assert_eq!(stop_loss.order_status, OrderStatus::Filled);
+        assert_eq!(stop_loss.filled_qty, Quantity::from(1));
+        assert_eq!(stop_loss.avg_px, Some(Decimal::new(398_305, 2)));
+        let take_profit = &orders[&VenueOrderId::from("59793251-TP")];
+        assert_eq!(take_profit.order_status, OrderStatus::Canceled);
+        let fills = mass_status.fill_reports();
+        let trades = |venue: &str| -> Vec<String> {
+            fills
+                .get(&VenueOrderId::from(venue))
+                .into_iter()
+                .flatten()
+                .map(|f| f.trade_id.to_string())
+                .collect()
+        };
+        assert_eq!(trades("59793251-SL"), ["65947662"]);
+        assert_eq!(trades("76919228"), Vec::<String>::new());
+        assert_eq!(trades("76919227"), ["65947597"]);
+        assert!(mass_status.reports_complete());
+        // The position, which cTrader no longer holds, reported flat: the
+        // leg's fill closes it (an instrument without a position report
+        // takes bounded fills on its orders only).
+        let positions = mass_status.position_reports();
+        let flat: Vec<_> = positions[&InstrumentId::from(XAUUSD)]
+            .iter()
+            .map(|r| (r.venue_position_id, r.position_side, r.quantity))
+            .collect();
+        assert_eq!(
+            flat,
+            [(
+                Some(PositionId::from("59793251")),
+                PositionSide::Flat,
+                Quantity::from(0)
+            )]
+        );
+        client.disconnect().await.unwrap();
+    }
+
+    /// As `stopped_out`, but the position closed while the node was down by
+    /// a close of its own (order 76919300) before either protection was
+    /// hit: cTrader cancelled the protection order, so both legs are
+    /// reported cancelled.
+    #[tokio::test]
+    async fn the_legs_of_a_position_closed_otherwise_while_the_node_was_down_are_cancelled() {
+        let mut venue = stopped_out();
+        let deals = venue.deals.as_mut().unwrap();
+        deals[1].order_id = 76_919_300;
+        deals[1].execution_price = Some(3984.0);
+        let protection = &mut venue.orders[1];
+        protection.order_status = ProtoOaOrderStatus::OrderStatusCancelled as i32;
+        protection.execution_price = None;
+        protection.executed_volume = None;
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let orders = mass_status.order_reports();
+        for leg in ["59793251-SL", "59793251-TP"] {
+            assert_eq!(
+                orders[&VenueOrderId::from(leg)].order_status,
+                OrderStatus::Canceled,
+                "{leg}"
+            );
+        }
+        let fills = mass_status.fill_reports();
+        assert_eq!(
+            fills[&VenueOrderId::from("76919300")][0]
+                .trade_id
+                .to_string(),
+            "65947662"
+        );
+        client.disconnect().await.unwrap();
+    }
+
+    /// As `stopped_out`, the position's protection first set as order
+    /// 76919226, cancelled when it was set again as 76919228, which the
+    /// stop loss then hit: the leg it filled is reported filled, whatever
+    /// order the two protections are read in.
+    #[tokio::test]
+    async fn a_leg_hit_stays_filled_when_an_earlier_protection_of_its_position_was_cancelled() {
+        let mut venue = stopped_out();
+        let mut replaced = venue.orders[1].clone();
+        replaced.order_id = 76_919_226;
+        replaced.order_status = ProtoOaOrderStatus::OrderStatusCancelled as i32;
+        replaced.execution_price = None;
+        replaced.executed_volume = None;
+        replaced.utc_last_update_timestamp = Some(1_794_443_800_000);
+        venue.orders.push(replaced);
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let orders = mass_status.order_reports();
+        let stop_loss = &orders[&VenueOrderId::from("59793251-SL")];
+        assert_eq!(stop_loss.order_status, OrderStatus::Filled);
+        assert_eq!(stop_loss.filled_qty, Quantity::from(1));
+        let take_profit = &orders[&VenueOrderId::from("59793251-TP")];
+        assert_eq!(take_profit.order_status, OrderStatus::Canceled);
+        client.disconnect().await.unwrap();
+    }
+
+    /// As `stopped_out`, the stop loss hit while the mass status' reconcile
+    /// request was on its way: the client's clock, 5 ms before the closing
+    /// deal's creation as the mass status starts, 5 ms after it as the
+    /// reconcile request is answered, without the position. The deal that
+    /// closed the position is in the mass status, and fills the leg.
+    #[tokio::test]
+    async fn a_leg_hit_while_the_reconcile_request_was_answered_comes_with_its_deal() {
+        let closed: i64 = 1_794_443_906_550;
+        let clock = Box::leak(Box::new(AtomicTime::new(false, ns(closed - 60_000))));
+        let venue = Script {
+            reconcile_takes: Some((clock, ns(closed + 5))),
+            ..stopped_out()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started_at(venue, clock);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
+        clock.set_time(ns(closed - 5));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        assert_eq!(trade_ids(&mass_status), ["65947597", "65947662"]);
+        let orders = mass_status.order_reports();
+        let stop_loss = &orders[&VenueOrderId::from("59793251-SL")];
+        assert_eq!(stop_loss.order_status, OrderStatus::Filled);
+        assert!(mass_status.reports_complete());
+        client.disconnect().await.unwrap();
+    }
+
+    /// A GTC limit order the cache holds open since long before the
+    /// restart, which the broker lists open: the reconcile request reports
+    /// it, so it does not pull the window back to its creation.
+    #[tokio::test]
+    async fn an_order_the_broker_lists_open_does_not_widen_the_window() {
+        use nautilus_model::orders::{OrderTestBuilder, stubs::TestOrderEventStubs};
+
+        let now = ns(T0 + 3_600_000);
+        let clock = Box::leak(Box::new(AtomicTime::new(false, now)));
+        let venue = Script {
+            reconcile: Some(ProtoOaReconcileRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                order: two_gold_positions().order,
+                ..Default::default()
+            }),
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started_at(venue, clock);
+        connect(&mut client, &mut events, &cache).await;
+        // Created at the epoch, accepted by the broker as its order 201.
+        let order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(InstrumentId::from(EURUSD))
+            .client_order_id(ClientOrderId::from("O-20261026-100000-001-000-1"))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(100_000))
+            .price(Price::from("1.08525"))
+            .build();
+        let account = AccountId::from("ACMEFX-DEMO");
+        cache
+            .borrow_mut()
+            .add_order(order.clone(), None, None, false)
+            .unwrap();
+        for event in [
+            TestOrderEventStubs::submitted(&order, account),
+            TestOrderEventStubs::accepted(&order, account, VenueOrderId::from("201")),
+        ] {
+            cache.borrow_mut().update_order(&event).unwrap();
+        }
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        assert_eq!(mass_status.lookback_start(), Some(now));
+        client.disconnect().await.unwrap();
+    }
+
+    /// Three positions open at the broker, opened ten minutes apart, and
+    /// one the cache holds open, opened an hour after them: the window
+    /// starts at the creation of the first one's opening deal, the only
+    /// one asked for, rather than one request per position, each a
+    /// historical request's 250 ms of a startup Nautilus times out.
+    #[tokio::test]
+    async fn only_the_opening_deals_of_the_first_opened_positions_are_asked_for() {
+        let opened = [(201, 0), (202, 10), (203, 20)];
+        let venue = Script {
+            reconcile: Some(ProtoOaReconcileRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                position: opened
+                    .iter()
+                    .map(|&(id, minutes)| {
+                        let mut open = position(id, ProtoOaTradeSide::Buy, 100, minutes);
+                        open.trade_data.open_timestamp = Some(T0 + minutes * 60_000 + 20);
+                        open.price = Some(4000.0);
+                        open
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            deals: Some(
+                opened
+                    .iter()
+                    .map(|&(id, minutes)| deal(id, id, ProtoOaTradeSide::Buy, 100, 4000.0, minutes))
+                    .chain([deal(204, 204, ProtoOaTradeSide::Buy, 100, 4000.0, 80)])
+                    .collect(),
+            ),
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "204", ns(T0 + 80 * 60_000 + 20));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let asked: Vec<ProtoOaDealListByPositionIdReq> = requests_of(&received);
+        let positions: Vec<i64> = asked.iter().map(|r| r.position_id).collect();
+        assert_eq!(positions, [201]);
+        assert_eq!(mass_status.lookback_start(), Some(ns(T0)));
+        assert_eq!(trade_ids(&mass_status), ["201", "202", "203"]);
+        client.disconnect().await.unwrap();
+    }
+
+    /// The demo (2026-11-12): market buy O-20261112-003352-106-001-1 of
+    /// 1 oz of XAUUSD, sent by a node that died before the broker's answer;
+    /// cTrader filled it as its order 76919114, by deal 65947517 at
+    /// 3982.28, opening position 59793188, open since.
+    fn crashed() -> Script {
+        let order = ProtoOaOrder {
+            order_id: 76_919_114,
+            trade_data: ProtoOaTradeData {
+                symbol_id: XAUUSD_SYMBOL_ID,
+                volume: 100,
+                trade_side: ProtoOaTradeSide::Buy as i32,
+                open_timestamp: Some(1_794_443_632_347),
+                close_timestamp: Some(1_794_443_632_348),
+                ..Default::default()
+            },
+            order_type: ProtoOaOrderType::Market as i32,
+            order_status: ProtoOaOrderStatus::OrderStatusFilled as i32,
+            execution_price: Some(3982.28),
+            executed_volume: Some(100),
+            utc_last_update_timestamp: Some(1_794_443_632_348),
+            closing_order: Some(false),
+            client_order_id: Some("O-20261112-003352-106-001-1".to_owned()),
+            time_in_force: Some(ProtoOaTimeInForce::ImmediateOrCancel as i32),
+            position_id: Some(59_793_188),
+            ..Default::default()
+        };
+        let mut deal = opening_deal(65_947_517, 59_793_188, 1_794_443_632_347);
+        deal.order_id = 76_919_114;
+        deal.execution_price = Some(3982.28);
+        let mut open = position(59_793_188, ProtoOaTradeSide::Buy, 100, 0);
+        open.trade_data.open_timestamp = Some(1_794_443_632_348);
+        open.utc_last_update_timestamp = Some(1_794_443_632_348);
+        open.price = Some(3982.28);
+        Script {
+            reconcile: Some(ProtoOaReconcileRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                position: vec![open],
+                ..Default::default()
+            }),
+            deals: Some(vec![deal]),
+            orders: vec![order],
+            ..Script::default()
+        }
+    }
+
+    /// The order in flight when the node died, filled meanwhile, is
+    /// reported filled under its client order id, with its deal: the order
+    /// the node's cache holds submitted.
+    #[tokio::test]
+    async fn an_order_in_flight_at_a_crash_and_filled_meanwhile_is_reported_by_its_client_order_id()
+    {
+        let (mass_status, _) = mass_status(crashed(), None).await;
+
+        let orders = mass_status.order_reports();
+        let order = &orders[&VenueOrderId::from("76919114")];
+        assert_eq!(
+            order.client_order_id,
+            Some(ClientOrderId::from("O-20261112-003352-106-001-1"))
+        );
+        assert_eq!(order.order_status, OrderStatus::Filled);
+        assert_eq!(order.filled_qty, Quantity::from(1));
+        assert_eq!(trade_ids(&mass_status), ["65947517"]);
+        assert!(mass_status.reports_complete());
+    }
+
+    /// The captured close of position 690004734 (`execution_close_filled`):
+    /// the node sent close `C:PROBE-1` and died before the answer; cTrader
+    /// filled the closing order it made of it, under that tag, so the
+    /// order is reported as Nautilus' PROBE-1.
+    #[tokio::test]
+    async fn a_close_in_flight_at_a_crash_is_reported_as_the_order_it_was_sent_for() {
+        use crate::{common::messages::ProtoOaExecutionEvent, testing::EXECUTION_CLOSE_FILLED};
+
+        let closed = ProtoOaExecutionEvent::decode(EXECUTION_CLOSE_FILLED).unwrap();
+        let (order, closing) = (closed.order.unwrap(), closed.deal.unwrap());
+        let opening = opening_deal(953_555_100, 690_004_734, 1_793_027_466_284);
+        let venue = Script {
+            deals: Some(vec![opening, closing]),
+            orders: vec![order],
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "690004734", ns(1_793_027_466_285));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let orders = mass_status.order_reports();
+        let close = &orders[&VenueOrderId::from("1031776330")];
+        assert_eq!(close.client_order_id, Some(ClientOrderId::from("PROBE-1")));
+        assert_eq!(close.order_status, OrderStatus::Filled);
+        client.disconnect().await.unwrap();
+    }
+
+    /// Synthetic: a limit buy the node sent at `T`, and died before the
+    /// answer; cTrader accepted it as its order 76919500 and cancelled it
+    /// 5 s later, nothing filled. Nothing is open, so only the order the
+    /// cache holds in flight starts the window, a minute before it (the
+    /// venue's clock and the node's may differ).
+    #[tokio::test]
+    async fn an_order_in_flight_at_a_crash_and_cancelled_meanwhile_is_reported_cancelled() {
+        use nautilus_model::orders::{OrderTestBuilder, stubs::TestOrderEventStubs};
+
+        const T: i64 = 1_794_445_200_000;
+        let id = ClientOrderId::from("O-20261112-010000-001-001-7");
+        let cancelled = ProtoOaOrder {
+            order_id: 76_919_500,
+            trade_data: ProtoOaTradeData {
+                symbol_id: XAUUSD_SYMBOL_ID,
+                volume: 100,
+                trade_side: ProtoOaTradeSide::Buy as i32,
+                open_timestamp: Some(T),
+                ..Default::default()
+            },
+            order_type: ProtoOaOrderType::Limit as i32,
+            order_status: ProtoOaOrderStatus::OrderStatusCancelled as i32,
+            utc_last_update_timestamp: Some(T + 5_000),
+            limit_price: Some(3900.0),
+            client_order_id: Some(id.to_string()),
+            time_in_force: Some(ProtoOaTimeInForce::GoodTillCancel as i32),
+            ..Default::default()
+        };
+        let venue = Script {
+            orders: vec![cancelled],
+            deals: Some(Vec::new()),
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        let order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(InstrumentId::from(XAUUSD))
+            .client_order_id(id)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(1))
+            .price(Price::from("3900.00"))
+            .ts_init(ns(T - 20))
+            .build();
+        let submitted = TestOrderEventStubs::submitted(&order, AccountId::from("ACMEFX-DEMO"));
+        {
+            let mut cache = cache.borrow_mut();
+            cache.add_order(order, None, None, false).unwrap();
+            cache.update_order(&submitted).unwrap();
+        }
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let orders = mass_status.order_reports();
+        let report = &orders[&VenueOrderId::from("76919500")];
+        assert_eq!(report.client_order_id, Some(id));
+        assert_eq!(report.order_status, OrderStatus::Canceled);
+        assert_eq!(mass_status.lookback_start(), Some(ns(T - 20 - 60_000)));
+        client.disconnect().await.unwrap();
+    }
+
+    /// Beside `crashed`, a stop limit order placed elsewhere and cancelled
+    /// over the window: Nautilus has no order of cTrader's stop limit, so
+    /// the history is incomplete, the rest of it reported.
+    #[tokio::test]
+    async fn an_order_closed_over_the_window_that_cannot_be_read_leaves_the_history_incomplete() {
+        let mut venue = crashed();
+        let mut stop_limit = venue.orders[0].clone();
+        stop_limit.order_id = 76_919_120;
+        stop_limit.order_type = ProtoOaOrderType::StopLimit as i32;
+        stop_limit.order_status = ProtoOaOrderStatus::OrderStatusCancelled as i32;
+        stop_limit.executed_volume = None;
+        stop_limit.client_order_id = None;
+        stop_limit.stop_price = Some(3990.0);
+        venue.orders.push(stop_limit);
+
+        let (mass_status, _) = mass_status(venue, None).await;
+
+        assert!(!mass_status.reports_complete());
+        let orders = mass_status.order_reports();
+        assert!(orders.contains_key(&VenueOrderId::from("76919114")));
+        assert!(!orders.contains_key(&VenueOrderId::from("76919120")));
     }
 
     /// The captured reconcile and deal list answers of the demo account,

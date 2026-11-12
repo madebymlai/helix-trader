@@ -8,7 +8,10 @@
 //!   (`stopLoss`, `takeProfit`, amended by position id), so each becomes an
 //!   open reduce-only order of the position, its venue order id the
 //!   position's with `-SL` or `-TP`: a stop market order at the stop loss,
-//!   a limit order at the take profit, for the position's volume.
+//!   a limit order at the take profit, for the position's volume. cTrader
+//!   holds both as one protection order (`STOP_LOSS_TAKE_PROFIT`): its deal
+//!   fills the leg it hit, under the leg's venue order id, and cancels the
+//!   other; its cancellation cancels both.
 //! - **Pending orders** (`ProtoOAOrder`): an `OrderStatusReport` each, by
 //!   `orderId`, with the position it opens into or closes, if any.
 //! - **Deals** (`ProtoOADeal`, filled): a `FillReport` each, by `dealId`,
@@ -37,7 +40,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use super::orders::{Leg, protection_id};
+use super::orders::{Leg, Tag, protection_id};
 use crate::common::messages::{
     ProtoOaDeal, ProtoOaDealStatus, ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod,
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
@@ -99,6 +102,22 @@ impl Reports<'_> {
             Some(position_id(position.position_id)),
             avg_px_open,
         )))
+    }
+
+    /// The report of position `id` of `instrument`, which cTrader no longer
+    /// holds open: flat.
+    pub(super) fn flat(&self, instrument: &InstrumentAny, id: i64) -> PositionStatusReport {
+        PositionStatusReport::new(
+            self.account_id,
+            instrument.id(),
+            PositionSide::Flat,
+            Quantity::zero(instrument.size_precision()),
+            self.ts_init,
+            self.ts_init,
+            None,
+            Some(position_id(id)),
+            None,
+        )
     }
 
     /// The stop loss and take profit of `position`, if open and of a loaded
@@ -249,6 +268,42 @@ impl Reports<'_> {
         Ok(Some((status, fill)))
     }
 
+    /// The reports of the legs of the protection order `order`, closed:
+    /// filled by `deal`, the leg it hit (see `triggered`) filled with the
+    /// deal's fill under the leg's venue order id, and the other cancelled;
+    /// else, cancelled or expired, both legs cancelled. Only the legs the
+    /// order holds, if of a loaded symbol.
+    ///
+    /// # Errors
+    ///
+    /// As `protection_status` and `fill`.
+    pub(super) fn protection_closed(
+        &self,
+        order: &ProtoOaOrder,
+        deal: Option<&ProtoOaDeal>,
+    ) -> anyhow::Result<Vec<(OrderStatusReport, Option<FillReport>)>> {
+        let mut reports = Vec::new();
+        let cancelled = match deal {
+            Some(deal) => {
+                let hit = triggered(order, deal);
+                if let Some((status, fill)) = self.protection_fill(order, deal, hit)? {
+                    reports.push((status, Some(fill)));
+                }
+                match hit {
+                    Leg::StopLoss => vec![Leg::TakeProfit],
+                    Leg::TakeProfit => vec![Leg::StopLoss],
+                }
+            }
+            None => vec![Leg::StopLoss, Leg::TakeProfit],
+        };
+        for leg in cancelled {
+            if let Some(status) = self.protection_status(order, leg, OrderStatus::Canceled)? {
+                reports.push((status, None));
+            }
+        }
+        Ok(reports)
+    }
+
     /// The instrument of `position`, if open and loaded: cTrader also
     /// lists a position created empty for a pending order, which holds
     /// nothing.
@@ -342,15 +397,10 @@ impl Reports<'_> {
         let accepted = millis(trade.open_timestamp).with_context(what)?;
         let last =
             millis(order.utc_last_update_timestamp.or(trade.open_timestamp)).with_context(what)?;
-        let client_order_id = order
-            .client_order_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(ClientOrderId::new);
         let mut report = OrderStatusReport::new(
             self.account_id,
             instrument.id(),
-            client_order_id,
+            client_order_id(order),
             VenueOrderId::new(order.order_id.to_string()),
             Some(side(trade.trade_side())),
             order_type,
@@ -460,6 +510,35 @@ pub(super) fn explained<'d>(
         .filter(|d| fills(d) && unexplained.binary_search(&d.position_id).is_err())
         .collect();
     (kept, unexplained)
+}
+
+/// The Nautilus order an order of cTrader's is: its `clientOrderId`, or for
+/// a closing order the close request's tag cTrader made it.
+pub(super) fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
+    let raw = order
+        .client_order_id
+        .as_deref()
+        .filter(|id| !id.is_empty())?;
+    match raw.parse::<Tag>() {
+        Ok(Tag::Close(id)) => Some(id),
+        _ => ClientOrderId::new_checked(raw).ok(),
+    }
+}
+
+/// Which leg of the protection order `order` filled `deal`: the one set
+/// alone, or the one whose price is nearer the deal's.
+pub(super) fn triggered(order: &ProtoOaOrder, deal: &ProtoOaDeal) -> Leg {
+    let price = deal.execution_price.unwrap_or_default();
+    match (
+        order.stop_price.filter(|p| *p > 0.0),
+        order.limit_price.filter(|p| *p > 0.0),
+    ) {
+        (Some(stop), Some(limit)) if (limit - price).abs() < (stop - price).abs() => {
+            Leg::TakeProfit
+        }
+        (None, Some(_)) => Leg::TakeProfit,
+        _ => Leg::StopLoss,
+    }
 }
 
 /// The signed volume, in cents, of each open position of `positions`.

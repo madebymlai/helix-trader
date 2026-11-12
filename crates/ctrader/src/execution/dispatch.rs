@@ -45,7 +45,7 @@ use nautilus_common::{cache::fifo::FifoCache, messages::ExecutionReport};
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_live::execution::context::OrderIdentity;
 use nautilus_model::{
-    enums::{LiquiditySide, OrderStatus},
+    enums::LiquiditySide,
     events::{
         OrderAccepted, OrderCancelRejected, OrderCanceled, OrderEventAny, OrderExpired,
         OrderFilled, OrderModifyRejected, OrderRejected, OrderUpdated,
@@ -55,6 +55,7 @@ use nautilus_model::{
     },
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
+    reports::{FillReport, OrderStatusReport},
     types::{Currency, Price, Quantity},
 };
 use ustr::Ustr;
@@ -517,7 +518,7 @@ impl Dispatch {
         let outputs = if order.order_type() == ProtoOaOrderType::StopLossTakeProfit {
             self.protection_event(event, order, ts_init)
         } else {
-            match client_order_id(order).filter(|id| self.orders.contains_key(id)) {
+            match reports::client_order_id(order).filter(|id| self.orders.contains_key(id)) {
                 Some(id) => self.tracked_event(id, event, order, ts_init),
                 None => self.external(event, order, ts_init),
             }
@@ -937,7 +938,7 @@ impl Dispatch {
         let position = order
             .position_id
             .context("a protection order without a position")?;
-        let entry = client_order_id(order)
+        let entry = reports::client_order_id(order)
             .filter(|id| {
                 matches!(
                     self.orders.get(id).map(|t| t.role),
@@ -970,7 +971,7 @@ impl Dispatch {
                 if !self.first_seen(deal) {
                     return Ok(Vec::new());
                 }
-                let hit = triggered(order, deal);
+                let hit = reports::triggered(order, deal);
                 let legs = self.legs(entry);
                 let mut out = Vec::new();
                 // The leg hit fills first, then the other is cancelled.
@@ -1081,36 +1082,12 @@ impl Dispatch {
                 let Some(deal) = event.deal.as_ref().filter(|d| reports::fills(d)) else {
                     return Ok(Vec::new());
                 };
-                let hit = triggered(order, deal);
-                let mut out = Vec::new();
-                if let Some((status, fill)) = reports.protection_fill(order, deal, hit)? {
-                    out.push(Output::Report(ExecutionReport::OrderWithFills(
-                        Box::new(status),
-                        vec![fill],
-                    )));
-                }
-                let other = match hit {
-                    Leg::StopLoss => Leg::TakeProfit,
-                    Leg::TakeProfit => Leg::StopLoss,
-                };
-                out.extend(
-                    reports
-                        .protection_status(order, other, OrderStatus::Canceled)?
-                        .map(|r| Output::Report(ExecutionReport::Order(Box::new(r)))),
-                );
+                let out = legs_closed(reports.protection_closed(order, Some(deal))?);
                 self.deals.add(deal.deal_id);
                 out
             }
             ProtoOaExecutionType::OrderCancelled | ProtoOaExecutionType::OrderExpired => {
-                let mut out = Vec::new();
-                for leg in [Leg::StopLoss, Leg::TakeProfit] {
-                    out.extend(
-                        reports
-                            .protection_status(order, leg, OrderStatus::Canceled)?
-                            .map(|r| Output::Report(ExecutionReport::Order(Box::new(r)))),
-                    );
-                }
-                out
+                legs_closed(reports.protection_closed(order, None)?)
             }
             _ => Vec::new(),
         };
@@ -1118,33 +1095,17 @@ impl Dispatch {
     }
 }
 
-/// The Nautilus order an order of cTrader's is: its `clientOrderId`, or for
-/// a closing order the close request's tag cTrader made it.
-fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
-    let raw = order
-        .client_order_id
-        .as_deref()
-        .filter(|id| !id.is_empty())?;
-    match raw.parse::<Tag>() {
-        Ok(Tag::Close(id)) => Some(id),
-        _ => ClientOrderId::new_checked(raw).ok(),
-    }
-}
-
-/// Which leg of a protection order filled `deal`: the one set alone, or
-/// the one whose price is nearer the deal's.
-fn triggered(order: &ProtoOaOrder, deal: &ProtoOaDeal) -> Leg {
-    let price = deal.execution_price.unwrap_or_default();
-    match (
-        order.stop_price.filter(|p| *p > 0.0),
-        order.limit_price.filter(|p| *p > 0.0),
-    ) {
-        (Some(stop), Some(limit)) if (limit - price).abs() < (stop - price).abs() => {
-            Leg::TakeProfit
-        }
-        (None, Some(_)) => Leg::TakeProfit,
-        _ => Leg::StopLoss,
-    }
+/// The reports of a protection's legs closed (see
+/// `Reports::protection_closed`), a filled leg's with its fill.
+fn legs_closed(legs: Vec<(OrderStatusReport, Option<FillReport>)>) -> Vec<Output> {
+    legs.into_iter()
+        .map(|(status, fill)| {
+            Output::Report(match fill {
+                Some(fill) => ExecutionReport::OrderWithFills(Box::new(status), vec![fill]),
+                None => ExecutionReport::Order(Box::new(status)),
+            })
+        })
+        .collect()
 }
 
 /// A rejection's reason: cTrader's code, and its description if any.
