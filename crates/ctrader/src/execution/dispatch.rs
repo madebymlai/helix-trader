@@ -518,7 +518,7 @@ impl Dispatch {
         let outputs = if order.order_type() == ProtoOaOrderType::StopLossTakeProfit {
             self.protection_event(event, order, ts_init)
         } else {
-            match client_order_id(order).filter(|id| self.orders.contains_key(id)) {
+            match reports::client_order_id(order).filter(|id| self.orders.contains_key(id)) {
                 Some(id) => self.tracked_event(id, event, order, ts_init),
                 None => self.external(event, order, ts_init),
             }
@@ -938,7 +938,7 @@ impl Dispatch {
         let position = order
             .position_id
             .context("a protection order without a position")?;
-        let entry = client_order_id(order)
+        let entry = reports::client_order_id(order)
             .filter(|id| {
                 matches!(
                     self.orders.get(id).map(|t| t.role),
@@ -1106,19 +1106,6 @@ fn legs_closed(legs: Vec<(OrderStatusReport, Option<FillReport>)>) -> Vec<Output
             })
         })
         .collect()
-}
-
-/// The Nautilus order an order of cTrader's is: its `clientOrderId`, or for
-/// a closing order the close request's tag cTrader made it.
-fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
-    let raw = order
-        .client_order_id
-        .as_deref()
-        .filter(|id| !id.is_empty())?;
-    match raw.parse::<Tag>() {
-        Ok(Tag::Close(id)) => Some(id),
-        _ => ClientOrderId::new_checked(raw).ok(),
-    }
 }
 
 /// A rejection's reason: cTrader's code, and its description if any.

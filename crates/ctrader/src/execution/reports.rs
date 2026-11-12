@@ -40,7 +40,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use super::orders::{Leg, protection_id};
+use super::orders::{Leg, Tag, protection_id};
 use crate::common::messages::{
     ProtoOaDeal, ProtoOaDealStatus, ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderTriggerMethod,
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
@@ -397,15 +397,10 @@ impl Reports<'_> {
         let accepted = millis(trade.open_timestamp).with_context(what)?;
         let last =
             millis(order.utc_last_update_timestamp.or(trade.open_timestamp)).with_context(what)?;
-        let client_order_id = order
-            .client_order_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(ClientOrderId::new);
         let mut report = OrderStatusReport::new(
             self.account_id,
             instrument.id(),
-            client_order_id,
+            client_order_id(order),
             VenueOrderId::new(order.order_id.to_string()),
             Some(side(trade.trade_side())),
             order_type,
@@ -515,6 +510,19 @@ pub(super) fn explained<'d>(
         .filter(|d| fills(d) && unexplained.binary_search(&d.position_id).is_err())
         .collect();
     (kept, unexplained)
+}
+
+/// The Nautilus order an order of cTrader's is: its `clientOrderId`, or for
+/// a closing order the close request's tag cTrader made it.
+pub(super) fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
+    let raw = order
+        .client_order_id
+        .as_deref()
+        .filter(|id| !id.is_empty())?;
+    match raw.parse::<Tag>() {
+        Ok(Tag::Close(id)) => Some(id),
+        _ => ClientOrderId::new_checked(raw).ok(),
+    }
 }
 
 /// Which leg of the protection order `order` filled `deal`: the one set
