@@ -1,6 +1,6 @@
 //! End to end on a cTrader broker's demo, with orders: `Live` on XAU/USD
 //! and EUR/USD with the broker's clients, a strategy sending, once it has a quote
-//! of each, one bracket of gold's minimum, 1 oz
+//! of each, one bracket of 3 oz of gold (`GOLD_OUNCES`)
 //! (a market buy, its stop loss 30.00 below the bid, its take profit 30.00
 //! above the ask), closing the position it opens at once by its id
 //! (`close_position`), and recording every order event. The node stops
@@ -64,7 +64,7 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 
-use crate::demo_broker::{DemoBroker, opted_in};
+use crate::demo_broker::{DemoBroker, GOLD_OUNCES, opted_in};
 
 const TRADER: &str = "HELIXTEST-102";
 
@@ -185,7 +185,7 @@ impl DataActor for BracketOnce {
             .bracket()
             .instrument_id(quote.instrument_id)
             .order_side(OrderSide::Buy)
-            .quantity(Quantity::from(1))
+            .quantity(Quantity::from(GOLD_OUNCES))
             .sl_trigger_price(stop_loss)
             .tp_price(take_profit)
             .call();
@@ -287,7 +287,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         closed.realized_pnl
     );
     assert_eq!(opened.side, PositionSide::Long);
-    assert_eq!(opened.quantity, Quantity::from(1));
+    assert_eq!(opened.quantity, Quantity::from(GOLD_OUNCES));
     assert_eq!(closed.position_id, opened.position_id);
     // The cTrader position id is the Nautilus position id.
     assert!(
@@ -318,7 +318,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     };
     for fill in [entry, close] {
         assert_eq!(fill.position_id, Some(opened.position_id));
-        assert_eq!(fill.last_qty, Quantity::from(1));
+        assert_eq!(fill.last_qty, Quantity::from(GOLD_OUNCES));
         let commission = fill.commission.expect("no commission");
         assert_eq!(
             commission.currency.code.as_str(),
