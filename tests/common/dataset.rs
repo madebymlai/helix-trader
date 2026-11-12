@@ -253,10 +253,7 @@ pub fn probe_reading(
             ..Default::default()
         }),
         model: ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            requirements,
+            &blueprint_reading(features, config.clone(), requirements.clone()),
             mode,
         )
         .unwrap(),
@@ -268,7 +265,17 @@ pub fn probe_reading(
 /// The model of the probe deciding on `features` as `config` says, of what
 /// it reads (`requirements`).
 pub fn blueprint(features: Rc<FeatureSet>, config: ModelConfig) -> ModelBlueprint {
-    ModelBlueprint::new(StrategyId::from(STRATEGY), features, config, requirements()).unwrap()
+    blueprint_reading(features, config, requirements())
+}
+
+/// The model of the probe deciding on `features` as `config` says, for a
+/// strategy of `requirements`.
+fn blueprint_reading(
+    features: Rc<FeatureSet>,
+    config: ModelConfig,
+    requirements: DataRequirements,
+) -> ModelBlueprint {
+    ModelBlueprint::new(StrategyId::from(STRATEGY), features, config, requirements).unwrap()
 }
 
 /// What the probe reads, as `backtest` replays it: IC's gold quotes.

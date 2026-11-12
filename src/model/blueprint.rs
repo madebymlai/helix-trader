@@ -12,9 +12,11 @@
 //! fingerprint computed once and keying the dataset and every store, and
 //! the training and the walk-forward are each built of them; a dataset
 //! alone, for a dataset build, and a model set alone, for a handle, which
-//! has no catalog, are built of the blueprint as well. The venue and the
-//! paths are not the blueprint's: a handle in a dataset run has a
-//! commission and no venue.
+//! has no catalog, are built of the blueprint as well. The strategy's
+//! model handle (`handle::ModelHandle`) is built of it and a mode, and
+//! registers the very feature set the dataset and the stores are
+//! fingerprinted from. The venue and the paths are not the blueprint's: a
+//! handle in a dataset run has a commission and no venue.
 
 use std::{path::Path, rc::Rc};
 
@@ -171,13 +173,17 @@ impl ModelBlueprint {
         self.strategy_id
     }
 
-    /// The features its model decides on.
-    pub(super) fn features(&self) -> &FeatureSet {
+    /// The features its model decides on, shared with the strategy.
+    pub(super) const fn features(&self) -> &Rc<FeatureSet> {
         &self.features
     }
 
     pub(super) const fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    pub(super) const fn requirements(&self) -> &DataRequirements {
+        &self.requirements
     }
 }
 

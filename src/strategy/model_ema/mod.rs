@@ -46,7 +46,9 @@ use std::rc::Rc;
 
 use crate::{
     model::{
-        self, ModelPart, ModelStrategy, decide,
+        self, ModelPart, ModelStrategy,
+        blueprint::ModelBlueprint,
+        decide,
         features::FeatureSet,
         handle::{Mode, ModelHandle},
     },
@@ -112,26 +114,21 @@ pub struct ModelEma {
 impl ModelStrategy for ModelEma {
     type Params = ModelEmaParams;
 
-    /// The strategy, deciding on `features`, its model handle in `mode`:
-    /// live, its warmup (`DataConfig::warmup`) is requested at start, which
-    /// hydrates its indicators; otherwise they warm on the data replayed.
+    /// The strategy, deciding on the model of `blueprint`, its model handle
+    /// in `mode`: live, its warmup (`DataConfig::warmup`) is requested at
+    /// start, which hydrates its indicators; otherwise they warm on the data
+    /// replayed.
     ///
     /// # Errors
     ///
     /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
     /// the base (`StrategyCore::new_checked`).
-    fn with_features(
+    fn with_blueprint(
         config: ModelEmaConfig,
-        features: Rc<FeatureSet>,
+        blueprint: ModelBlueprint,
         mode: Mode,
     ) -> anyhow::Result<Self> {
-        let model = ModelHandle::new(
-            config.strategy_id(),
-            features,
-            &config.model(),
-            &config.data_requirements(),
-            mode,
-        )?;
+        let model = ModelHandle::new(&blueprint, mode)?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             model,

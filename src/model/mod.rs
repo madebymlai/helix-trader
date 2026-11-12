@@ -13,7 +13,8 @@
 //! side a decision trades on its expected net P&L;
 //! `config` is the model section of a strategy's config; `blueprint` is
 //! what its config alone determines about its model, validated, the dataset,
-//! the stores, the training and the walk-forward built of it; `train` trains
+//! the stores, the training, the walk-forward and the handle built of it;
+//! `train` trains
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset and publishing them together in the `store` if their `holdout`,
 //! each side's `score` and what the decision would have earned there, meets
@@ -38,7 +39,8 @@
 //! (`ModelPart`), and the harness answers from them what it reads
 //! (`reads`), which the load checks `[data]` against; its model's
 //! blueprint (`ModelStrategy::blueprint`) is built of them and of its
-//! config.
+//! config, once for each strategy built, and handed to the strategy,
+//! whose model handle is built of it (`ModelStrategy::with_blueprint`).
 
 pub mod blueprint;
 pub mod calibration;
@@ -139,9 +141,9 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
 
 /// A strategy trading on a model, as the binary runs it: built of its
 /// config in a `Mode`, deciding on the features its part builds of that
-/// config (`ModelPart::features`), its dataset, its training and its walk
-/// forward built of its model's blueprint (`blueprint`). A Nautilus
-/// strategy, as a node runs it.
+/// config (`ModelPart::features`), its model handle, its dataset, its
+/// training and its walk forward built of its model's blueprint
+/// (`blueprint`). A Nautilus strategy, as a node runs it.
 pub trait ModelStrategy:
     Strategy + StrategyNative + DataActorNative + Component + Debug + Sized + 'static
 {
@@ -149,16 +151,17 @@ pub trait ModelStrategy:
     /// features.
     type Params: ModelPart;
 
-    /// The strategy of `config`, deciding on `features`, those its part
-    /// builds of `config`, its model handle in `mode`.
+    /// The strategy of `config`, deciding on the model `blueprint`
+    /// describes, that of `config` (`ModelStrategy::blueprint`), its model
+    /// handle built of it in `mode` (`ModelHandle::new`).
     ///
     /// # Errors
     ///
     /// Returns an error if the handle cannot be built in `mode`, or if
     /// Nautilus refuses the base.
-    fn with_features(
+    fn with_blueprint(
         config: StandardConfig<Self::Params>,
-        features: Rc<FeatureSet>,
+        blueprint: ModelBlueprint,
         mode: Mode,
     ) -> anyhow::Result<Self>;
 
@@ -166,15 +169,17 @@ pub trait ModelStrategy:
     /// it.
     fn warmup(&self) -> Rc<Warmup>;
 
-    /// The strategy of `config`, deciding on the features its part builds
-    /// (`ModelPart::features`), its model handle in `mode`.
+    /// The strategy of `config`, deciding on the model of its blueprint,
+    /// built once of `config` (`blueprint`), its model handle in `mode`.
+    /// Each call builds a blueprint of its own, and so features of its own,
+    /// which the strategy's handle feeds.
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelPart::features` and `with_features` do.
+    /// Returns an error as `blueprint` and `with_blueprint` do.
     fn new(config: StandardConfig<Self::Params>, mode: Mode) -> anyhow::Result<Self> {
-        let features = Self::Params::features(&config)?;
-        Self::with_features(config, features, mode)
+        let blueprint = Self::blueprint(&config)?;
+        Self::with_blueprint(config, blueprint, mode)
     }
 
     /// The blueprint of the model of the strategy `config` describes: its

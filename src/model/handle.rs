@@ -1,8 +1,8 @@
 //! The model handle: what a strategy trading on a learned model holds, the
 //! one place it decides, in a backtest, live and a dataset run alike.
 //!
-//! The strategy shares a `ModelHandle` (an `Rc`), built from its features
-//! and the model section of its config, in a `Mode`. `start` from
+//! The strategy shares a `ModelHandle` (an `Rc`), built from its model
+//! blueprint (`blueprint::ModelBlueprint`), in a `Mode`. `start` from
 //! `on_start` registers the features (and starts the target's ATR, if it
 //! has one) and starts the decision cadence; `decide`, at a decision
 //! of the cadence (its timer, `decide::is_decision`), snapshots the
@@ -127,12 +127,7 @@
 //! next decision, which lists the store again. Never retrained, a strategy
 //! has no retrain actor: the handle trades on the store as it is.
 
-use std::{
-    cell::RefCell,
-    fmt::Debug,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::{cell::RefCell, fmt::Debug, path::PathBuf, rc::Rc};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -151,18 +146,16 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
     blueprint::ModelBlueprint,
-    config::ModelConfig,
     dataset::DatasetVenue,
     decide::{self, DecisionRule},
     deciding::{DecidingModels, SideRow},
     features::FeatureSet,
-    targets::{TargetConfig, TargetRow, TargetSetter, Targets},
+    targets::{TargetRow, TargetSetter, Targets},
 };
 use crate::{
     backtest::Commission,
     rolls::Roller,
     strategy::{
-        DataRequirements,
         orders::{Bracket, Exits, Trade},
         warmup::{self, BookIndicator, CustomDataIndicator, Warmup},
     },
@@ -303,67 +296,18 @@ struct Deciding {
 }
 
 impl ModelHandle {
-    /// The handle of `strategy_id`, deciding on `features` as `config`
-    /// says, for a strategy of `requirements`, in `mode`: the model of their
-    /// blueprint (`ModelBlueprint`), deciding on its models
-    /// (`ModelBlueprint::model_set`).
+    /// The handle of the model `blueprint` describes, in `mode`: deciding
+    /// on its models under the store's root (`ModelBlueprint::model_set`),
+    /// of the target of its dataset runs on the mode's venue, or opening
+    /// its target. It decides on the blueprint's features, the very set its
+    /// dataset and its stores are fingerprinted from.
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule or the target is invalid
-    /// (`ModelBlueprint::new`), or if a store cannot be keyed or, deciding,
-    /// read.
-    pub fn new(
-        strategy_id: StrategyId,
-        features: Rc<FeatureSet>,
-        config: &ModelConfig,
-        requirements: &DataRequirements,
-        mode: Mode,
-    ) -> anyhow::Result<Rc<Self>> {
-        let blueprint = ModelBlueprint::new(
-            strategy_id,
-            Rc::clone(&features),
-            config.clone(),
-            requirements.clone(),
-        )?;
-        let deciding = |models: &Path, venue: &DatasetVenue| -> anyhow::Result<Deciding> {
-            let models = blueprint.model_set(models, venue)?;
-            Ok(Deciding {
-                models: RefCell::new(DecidingModels::new(&models)?),
-                target: TargetSetter::sharing(
-                    &config.target,
-                    config.decision,
-                    requirements,
-                    venue.commission,
-                    features.bracket_width(),
-                )?,
-                instrument_id: config.target.instrument_id,
-                quantity: config.target.quantity,
-            })
-        };
-        Self::built(
-            strategy_id,
-            &features,
-            (config.decision, &config.target),
-            requirements,
-            mode,
-            deciding,
-        )
-    }
-
-    /// The handle of `strategy_id` deciding with `features` on `rule`, with
-    /// `target`, both valid, for a strategy of `requirements`, in `mode`:
-    /// deciding as `deciding` builds it on the models under the store's
-    /// root, of the target of the dataset runs on the mode's venue, or
-    /// opening the target.
-    fn built(
-        strategy_id: StrategyId,
-        features: &Rc<FeatureSet>,
-        (rule, target): (DecisionRule, &TargetConfig),
-        requirements: &DataRequirements,
-        mode: Mode,
-        deciding: impl FnOnce(&Path, &DatasetVenue) -> anyhow::Result<Deciding>,
-    ) -> anyhow::Result<Rc<Self>> {
+    /// Returns an error if, deciding, a store cannot be keyed or read.
+    pub fn new(blueprint: &ModelBlueprint, mode: Mode) -> anyhow::Result<Rc<Self>> {
+        let (features, requirements) = (blueprint.features(), blueprint.requirements());
+        let (rule, target) = (blueprint.config().decision, &blueprint.config().target);
         let traded = target.instrument_id;
         let mut ticks = features.ticks();
         for tick in requirements
@@ -391,7 +335,19 @@ impl ModelHandle {
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
             Mode::Backtest { models, venue } | Mode::Live { models, venue } => {
-                Serving::Deciding(Box::new(deciding(&models, &venue)?))
+                let models = blueprint.model_set(&models, &venue)?;
+                Serving::Deciding(Box::new(Deciding {
+                    models: RefCell::new(DecidingModels::new(&models)?),
+                    target: TargetSetter::sharing(
+                        target,
+                        rule,
+                        requirements,
+                        venue.commission,
+                        features.bracket_width(),
+                    )?,
+                    instrument_id: target.instrument_id,
+                    quantity: target.quantity,
+                }))
             }
             Mode::Dataset { rows, commission } => Serving::Dataset {
                 targets: Targets::sharing(
@@ -410,7 +366,7 @@ impl ModelHandle {
             Serving::Dataset { .. } => warmup,
         };
         Ok(Rc::new(Self {
-            strategy_id,
+            strategy_id: blueprint.strategy_id(),
             features: Rc::clone(features),
             rule,
             delay,
@@ -725,7 +681,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        config::Margins,
+        config::{Margins, ModelConfig},
         decide::FeatureRow,
         deciding::testing::{
             AUD, GOLD, STRATEGY, at, baseline, baseline_for, blueprint_of, both_sides, config,
@@ -734,9 +690,11 @@ mod tests {
         },
         features::testing::{last_mid, mid_over},
         schedule::Retrain,
-        targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target},
+        targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig},
     };
-    use crate::strategy::{AtrArgs, Declared, EmaArgs, IndicatorsConfig, TickSeries};
+    use crate::strategy::{
+        AtrArgs, DataRequirements, Declared, EmaArgs, IndicatorsConfig, TickSeries,
+    };
     use rust_decimal::Decimal;
 
     /// The quotes of the AUD/USD traded, which the data requirements hold
@@ -880,10 +838,7 @@ mod tests {
     fn handle(probe: &Decider, models: &Path, features: Rc<FeatureSet>) -> Rc<ModelHandle> {
         warm(&features, probe.clock().timestamp_ns());
         ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &config(),
-            &requirements(),
+            &blueprint_of(&features, &config(), requirements()),
             Mode::Backtest {
                 models: models.to_path_buf(),
                 venue: venue(),
@@ -906,10 +861,7 @@ mod tests {
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let cold = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features(),
-            &config(),
-            &requirements(),
+            &blueprint_of(&features(), &config(), requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 venue: venue(),
@@ -965,10 +917,7 @@ mod tests {
             ))
             .unwrap();
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &config(),
-            &requirements(),
+            &blueprint_of(&features, &config(), requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 venue: venue(),
@@ -1002,10 +951,7 @@ mod tests {
             warmup: SignedDuration::ZERO,
         };
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &config(),
-            &requirements,
+            &blueprint_of(&features, &config(), requirements),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 venue: venue(),
@@ -1069,14 +1015,7 @@ mod tests {
             }
         }
         warm(&features, probe.clock().timestamp_ns());
-        ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            &requirements(),
-            mode,
-        )
-        .unwrap()
+        ModelHandle::new(&blueprint_of(&features, config, requirements()), mode).unwrap()
     }
 
     /// A long expecting 0.1R, 0.1 USD on a unit of 1 USD, clearing its
@@ -1378,10 +1317,7 @@ mod tests {
             ..requirements()
         };
         ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features(),
-            config,
-            &requirements,
+            &blueprint_of(&features(), config, requirements),
             live(models.to_path_buf()),
         )
         .unwrap()
@@ -1532,10 +1468,7 @@ mod tests {
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &config(),
-            &requirements(),
+            &blueprint_of(&features, &config(), requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 venue: venue(),
@@ -1607,10 +1540,7 @@ mod tests {
             warmup: SignedDuration::from_hours(1),
         };
         let model = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            Rc::clone(&features),
-            &config(),
-            &requirements,
+            &blueprint_of(&features, &config(), requirements),
             live(models.path().to_path_buf()),
         )
         .unwrap();
@@ -1685,14 +1615,8 @@ mod tests {
             ..requirements()
         };
         let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-        let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features(),
-            &config(),
-            &requirements,
-            mode,
-        )
-        .unwrap();
+        let handle =
+            ModelHandle::new(&blueprint_of(&features(), &config(), requirements), mode).unwrap();
         handle.start(&mut probe).unwrap();
         let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
         Timestamp::from(next)
@@ -1776,10 +1700,7 @@ mod tests {
         let (mut probe, clock) = registered(at("2026-10-22T12:00:00Z"));
         warm(&features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            Rc::clone(&features),
-            &config,
-            &requirements(),
+            &blueprint_of(&features, &config, requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 venue: venue(),
@@ -1817,10 +1738,7 @@ mod tests {
         let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
         let (mut probe, _) = registered(at("2026-10-22T11:30:00Z"));
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &config,
-            &requirements(),
+            &blueprint_of(&features, &config, requirements()),
             Mode::Dataset {
                 rows: SettledRows::default(),
                 commission: venue().commission,
@@ -1897,10 +1815,7 @@ mod tests {
         requirements: &DataRequirements,
     ) -> Rc<ModelHandle> {
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features(),
-            &never_retrained(),
-            requirements,
+            &blueprint_of(&features(), &never_retrained(), requirements.clone()),
             live(models.to_path_buf()),
         )
         .unwrap();
@@ -1957,10 +1872,7 @@ mod tests {
     ) -> Rc<ModelHandle> {
         warm(&features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &config(),
-            &requirements(),
+            &blueprint_of(&features, &config(), requirements()),
             live(models.to_path_buf()),
         )
         .unwrap();
@@ -2059,10 +1971,7 @@ mod tests {
             .unwrap();
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            &requirements(),
+            &blueprint_of(&features, config, requirements()),
             Mode::Backtest {
                 models: models.to_path_buf(),
                 venue: venue(),
@@ -2107,10 +2016,7 @@ mod tests {
         std::fs::write(&file, "").unwrap();
 
         let built = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features(),
-            &config(),
-            &requirements(),
+            &blueprint_of(&features(), &config(), requirements()),
             Mode::Backtest {
                 models: file,
                 venue: venue(),
@@ -2134,10 +2040,7 @@ mod tests {
         let mut config = bracket_config(10);
         config.target.instrument_id = inverse.id();
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features(),
-            &config,
-            &requirements(),
+            &blueprint_of(&features(), &config, requirements()),
             Mode::Dataset {
                 rows: SettledRows::default(),
                 commission: venue().commission,
@@ -2186,10 +2089,7 @@ mod tests {
         let features = last_mid(eur).build().unwrap();
         features.handle_quote(&eur_quote(eur)).unwrap();
         ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            &reading_eur(eur),
+            &blueprint_of(&features, config, reading_eur(eur)),
             Mode::Backtest {
                 models: models.to_path_buf(),
                 venue: venue(),
@@ -2425,10 +2325,7 @@ mod tests {
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            Rc::clone(&features),
-            &bracket_config(10),
-            &requirements,
+            &blueprint_of(&features, &bracket_config(10), requirements),
             live(models.path().to_path_buf()),
         )
         .unwrap();
@@ -2488,10 +2385,7 @@ mod tests {
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &bracket_config(10),
-            &requirements,
+            &blueprint_of(&features, &bracket_config(10), requirements),
             live(models.path().to_path_buf()),
         )
         .unwrap();
@@ -2623,10 +2517,7 @@ mod tests {
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            &bracket_config(10),
-            &requirements,
+            &blueprint_of(&features, &bracket_config(10), requirements),
             live(models.path().to_path_buf()),
         )
         .unwrap();
@@ -2746,10 +2637,7 @@ mod tests {
         };
         let features = last_imbalance("GC.GLBX");
         let handle = ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            Rc::clone(&features),
-            &config(),
-            &requirements,
+            &blueprint_of(&features, &config(), requirements),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
                 venue: venue(),
