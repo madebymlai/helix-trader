@@ -1326,6 +1326,30 @@ mod tests {
         assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
+    /// The directory of a fixed strategy's long store under a models root,
+    /// as a literal: its id, its dataset's fingerprint, its training
+    /// settings with the store `VERSION`, its side, and the margins of both
+    /// sides. A change that rekeyed every store, leaving the models
+    /// published to it behind, fails here. A deliberate rekey, a bump of
+    /// `VERSION` or of `dataset::VERSION`, or a new input to the dataset's
+    /// fingerprint or to the training settings, updates the literal here; a
+    /// rekey of the dataset updates the pinned dataset identifier too
+    /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
+    #[test]
+    fn a_fixed_strategys_side_store_keeps_its_directory() {
+        let store = side_store(Path::new("models"), &config(), &venue(), Side::Long);
+
+        assert_eq!(
+            store.directory,
+            Path::new(
+                "models/STORE-001/\
+                 f7277a9c98b9b984d5db7d1cb7bf8c1b6e42049548156f4dc3e992bc6394474a/\
+                 d8e8d5b98ec4b087d60cd5be6b5df0d0e42ee19eed327697daebb41eb9cd7b93/\
+                 long/71377877de7137be466c5b846b99bcf0d3c1c6675cde6be211646fce844e2dd4"
+            )
+        );
+    }
+
     /// One side's margin changes which side is picked on a row, so what the
     /// other publishes: a side's models list only beside the same margins of
     /// both sides, a side not traded being another margin.

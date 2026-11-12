@@ -1354,6 +1354,25 @@ mod tests {
         assert_ne!(current, at(VERSION + 1));
     }
 
+    /// The identifier the rows of a fixed strategy are stored under, as a
+    /// literal: its id, then the fingerprint of its features, its hourly
+    /// decisions, its bracket, what it reads and the venue of its dataset
+    /// runs. A change that rekeyed every dataset, leaving its rows and the
+    /// models trained on them behind, fails here. A deliberate rekey, a
+    /// bump of `VERSION` or a new input to the fingerprint, updates the
+    /// literal here, and the pinned directory of a store, which the
+    /// fingerprint keys too
+    /// (`store::tests::a_fixed_strategys_side_store_keeps_its_directory`).
+    #[test]
+    fn a_fixed_strategys_dataset_keeps_its_identifier() {
+        let dataset = dataset(Path::new("catalog"), STRATEGY, 1);
+
+        assert_eq!(
+            dataset.identifier(),
+            "DATASET-001-f05f404641b265ded277fdf0225f84d69ed83243becd8e9460763e46c761d8a1"
+        );
+    }
+
     /// A strategy reading a composite bar type decides 5 s after its grid
     /// (`warmup::bar_build_delay`), so its rows are another dataset than
     /// those of the same strategy with the delay ignored: the one reading
