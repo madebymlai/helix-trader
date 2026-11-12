@@ -32,6 +32,7 @@ mod common;
 mod ctrader_demo;
 mod ctrader_live_demo;
 mod ctrader_orders_demo;
+mod ctrader_restart_demo;
 mod ctrader_token_demo;
 mod demo_broker;
 mod ib_gateway;

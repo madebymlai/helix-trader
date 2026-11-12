@@ -959,6 +959,13 @@ impl ExecutionClient for CTraderExecutionClient {
         true
     }
 
+    /// An order's fills are the broker's deals, each with cTrader's deal id
+    /// and the commission charged, which a fill inferred from the order's
+    /// status would not carry: reconciliation waits for them.
+    fn requires_authoritative_fills(&self) -> bool {
+        true
+    }
+
     /// Publishes an account state of `balances` and `margins` in the
     /// account's currency.
     ///
