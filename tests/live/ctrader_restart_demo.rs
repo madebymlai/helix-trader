@@ -40,7 +40,7 @@ use nautilus_model::{
     data::{BarType, QuoteTick},
     enums::{OrderSide, OrderStatus},
     events::{OrderEventAny, OrderSubmitted},
-    identifiers::{ClientOrderId, InstrumentId, StrategyId, TraderId},
+    identifiers::{ClientOrderId, InstrumentId, StrategyId, TraderId, VenueOrderId},
     orders::{Order, OrderAny},
     position::Position,
     reports::PositionStatusReport,
@@ -73,8 +73,11 @@ enum Step {
     /// On a flat account, one bracket: a market buy of 1 oz, its stop loss
     /// `distance` below the bid, its take profit `distance` above the ask.
     /// Once the entry filled and the position holds both, saves the orders
-    /// and the entry's fills, and stops, the position left open.
-    Open { distance: f64 },
+    /// and the entry's fills, and stops, the position left open. With
+    /// `reduce`, the bracket is of 2 oz, and once the position holds both
+    /// protections it is reduced by 1 oz, by a sell naming it; the save
+    /// waits for the position and both legs to be of 1 oz.
+    Open { distance: f64, reduce: bool },
     /// On a flat account, a market buy of 1 oz, saved as the entry; once
     /// it is submitted, stops the process as a crash would, before the
     /// broker's answer is processed: the order is in flight in the cache.
@@ -108,6 +111,8 @@ struct Saved {
 struct Held {
     id: String,
     status: Option<OrderStatus>,
+    quantity: Option<String>,
+    filled: Option<String>,
     fills: Vec<Fill>,
 }
 
@@ -185,7 +190,10 @@ async fn a_bracket_held_over_a_restart_comes_back_as_it_was() {
         return;
     };
     let run = Run::new("HELIXTEST-103");
-    run.phase(Step::Open { distance: 30.0 });
+    run.phase(Step::Open {
+        distance: 30.0,
+        reduce: false,
+    });
     let opened = run.saved();
     run.phase(Step::Observe);
     let observed = run.saved();
@@ -224,7 +232,10 @@ async fn a_bracket_leg_filled_while_the_node_was_down_fills_by_its_deal() {
         return;
     };
     let run = Run::new("HELIXTEST-104");
-    run.phase(Step::Open { distance: 2.0 });
+    run.phase(Step::Open {
+        distance: 2.0,
+        reduce: false,
+    });
     let opened = run.saved();
     let closed = closed_at_broker(broker, Duration::from_secs(15 * 60)).await;
     run.phase(Step::Observe);
@@ -263,6 +274,68 @@ async fn a_bracket_leg_filled_while_the_node_was_down_fills_by_its_deal() {
         fill.is_a_deal(broker.commission_currency()),
         "the leg's fill is not a deal of the broker's: {fill:?}"
     );
+    let other = legs.iter().find(|l| l.id != filled.id).unwrap();
+    assert_eq!(other.status, Some(OrderStatus::Canceled), "{other:?}");
+}
+
+/// A bracket of 2 oz reduced by 1 oz, then closed by one of its legs
+/// while the node was down: the broker's leg reports fill what is left,
+/// 1 oz, as its deal does, and the restarted node fills that leg by the
+/// deal, its filled quantity the deal's, and cancels the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leg_hit_after_a_partial_close_fills_what_is_left() {
+    let Some(broker) = opted_in(
+        "a_leg_hit_after_a_partial_close_fills_what_is_left",
+        module_path!(),
+    ) else {
+        return;
+    };
+    let run = Run::new("HELIXTEST-107");
+    run.phase(Step::Open {
+        distance: 2.0,
+        reduce: true,
+    });
+    let opened = run.saved();
+    let closed = closed_at_broker(broker, Duration::from_secs(15 * 60)).await;
+    let at_broker = legs_at_broker(broker, &opened.position_id).await;
+    run.phase(Step::Observe);
+    let observed = run.saved();
+    run.phase(Step::Flatten);
+    assert_eq!(
+        open_at_broker(broker).await,
+        (0, 0),
+        "the account is not flat"
+    );
+    let closed = closed.expect(
+        "the position was closed when first read after the node stopped: a leg may have filled \
+         while the node was up, so the run does not count; run it again",
+    );
+    assert!(closed, "neither protection was hit within 15 minutes");
+
+    println!("opened: {opened:#?}\nat the broker: {at_broker:#?}\nobserved: {observed:#?}");
+    for leg in &at_broker {
+        assert_eq!(leg.filled, leg.fills, "{leg:?}");
+    }
+    assert!(observed.positions_open.is_empty(), "{observed:?}");
+    assert!(observed.live_orders.is_empty(), "{observed:?}");
+    let held = |id: &str| observed.orders.iter().find(|o| o.id == id).unwrap().clone();
+    let legs = [held(&opened.stop_loss), held(&opened.take_profit)];
+    let filled: Vec<&Held> = legs
+        .iter()
+        .filter(|l| l.status == Some(OrderStatus::Filled))
+        .collect();
+    let [filled] = filled.as_slice() else {
+        panic!("not one leg filled: {legs:?}");
+    };
+    let [fill] = filled.fills.as_slice() else {
+        panic!("not one fill of the leg: {filled:?}");
+    };
+    assert!(
+        fill.is_a_deal(broker.commission_currency()),
+        "the leg's fill is not a deal of the broker's: {fill:?}"
+    );
+    assert_eq!(fill.quantity, "1", "{fill:?}");
+    assert_eq!(filled.filled.as_deref(), Some("1"), "{filled:?}");
     let other = legs.iter().find(|l| l.id != filled.id).unwrap();
     assert_eq!(other.status, Some(OrderStatus::Canceled), "{other:?}");
 }
@@ -449,6 +522,50 @@ async fn closed_at_broker(broker: &DemoBroker, wait: Duration) -> Option<bool> {
     closed
 }
 
+/// A leg of a position as the broker's execution client reports it in a
+/// mass status: its venue order id, status, quantity and filled quantity,
+/// and the quantity its fills add up to.
+#[derive(Debug)]
+#[expect(dead_code, reason = "printed")]
+struct LegAtBroker {
+    venue_order_id: String,
+    status: OrderStatus,
+    quantity: Quantity,
+    filled: Quantity,
+    fills: Quantity,
+}
+
+/// The legs of `position` the broker's execution client reports, closed,
+/// in a mass status over the last hour.
+async fn legs_at_broker(broker: &DemoBroker, position: &str) -> Vec<LegAtBroker> {
+    let mut client = connected(broker).await;
+    let mass_status = client.generate_mass_status(Some(60)).await;
+    client.disconnect().await.unwrap();
+    let mass_status = mass_status.unwrap().unwrap();
+    let fills = mass_status.fill_reports();
+    ["SL", "TP"]
+        .map(|leg| VenueOrderId::from(format!("{position}-{leg}").as_str()))
+        .iter()
+        .filter_map(|id| {
+            let report = mass_status.order_reports().get(id)?.clone();
+            let filled_by_fills = fills
+                .get(id)
+                .into_iter()
+                .flatten()
+                .fold(Quantity::zero(report.filled_qty.precision), |sum, f| {
+                    sum + f.last_qty
+                });
+            Some(LegAtBroker {
+                venue_order_id: id.to_string(),
+                status: report.order_status,
+                quantity: report.quantity,
+                filled: report.filled_qty,
+                fills: filled_by_fills,
+            })
+        })
+        .collect()
+}
+
 /// What the probe saw, written next to `STATE` for the child's test.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Report {
@@ -472,7 +589,8 @@ struct Probe {
     bracket: Option<[ClientOrderId; 3]>,
     rate_known: bool,
     first_quote: Option<UnixNanos>,
-    /// `Crash`: whether the buy went out.
+    /// `Crash`: whether the buy went out; `Open` with `reduce`: whether
+    /// the reducing sell did.
     sent: bool,
     /// `Flatten`: whether the positions were closed, and when the orders
     /// left were cancelled.
@@ -544,6 +662,8 @@ impl Probe {
         Held {
             id: id.to_string(),
             status: order.as_ref().map(OrderAny::status),
+            quantity: order.as_ref().map(|o| o.quantity().to_string()),
+            filled: order.as_ref().map(|o| o.filled_qty().to_string()),
             fills: order.as_ref().map(fills).unwrap_or_default(),
         }
     }
@@ -597,7 +717,7 @@ impl Probe {
 
     /// `Open`: the bracket on a flat account; then, once the position
     /// holds both protections, the save and the stop.
-    fn open(&mut self, quote: &QuoteTick, distance: f64) -> anyhow::Result<()> {
+    fn open(&mut self, quote: &QuoteTick, distance: f64, reduce: bool) -> anyhow::Result<()> {
         let Some([entry, stop_loss, take_profit]) = self.bracket else {
             if !self.open_positions().is_empty() || !self.live_orders().is_empty() {
                 self.note_state("not flat");
@@ -609,7 +729,7 @@ impl Probe {
                 .bracket()
                 .instrument_id(self.gold)
                 .order_side(OrderSide::Buy)
-                .quantity(Quantity::from(1))
+                .quantity(Quantity::from(if reduce { 2 } else { 1 }))
                 .sl_trigger_price(Price::new(quote.bid_price.as_f64() - distance, 2))
                 .tp_price(Price::new(quote.ask_price.as_f64() + distance, 2))
                 .call();
@@ -653,11 +773,36 @@ impl Probe {
         {
             return Ok(());
         }
-        self.note_state("open");
         let [position] = self
             .open_positions()
             .try_into()
             .map_err(|positions| anyhow::anyhow!("one position expected: {positions:?}"))?;
+        if reduce {
+            if !self.sent {
+                self.sent = true;
+                self.note_state("reducing");
+                let order = self.order().market(
+                    self.gold,
+                    OrderSide::Sell,
+                    Quantity::from(1),
+                    None,
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                return self.submit_order(order, Some(position.id), None, None);
+            }
+            let one = Quantity::from(1);
+            let legs = [stop_loss, take_profit]
+                .map(|id| self.cache().order(&id).map(|order| order.quantity()));
+            if position.quantity != one || legs != [Some(one), Some(one)] {
+                return Ok(());
+            }
+        }
+        self.note_state("open");
         let entry_fills = self.held(entry.as_str()).fills;
         self.save(&Saved {
             position_id: position.id.to_string(),
@@ -822,7 +967,7 @@ impl DataActor for Probe {
             return Ok(());
         }
         match self.step {
-            Step::Open { distance } => self.open(quote, distance),
+            Step::Open { distance, reduce } => self.open(quote, distance, reduce),
             Step::Crash if !self.sent => self.crash(),
             Step::Crash => Ok(()),
             Step::Observe => {
