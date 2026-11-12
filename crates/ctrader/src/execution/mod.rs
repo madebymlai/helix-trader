@@ -1436,6 +1436,10 @@ impl ExecutionClient for CTraderExecutionClient {
             cached.iter().map(|c| (c.position, c.opened)).collect();
         let session = self.session()?;
         let open = session.ctrader.reconcile().await?;
+        // The lists' end, once the reconcile request is answered: a deal or
+        // order of a position it no longer holds, made while it was on its
+        // way, is in them.
+        let until = orders::millis(self.now());
         let reports = self.reports(session, ts_init);
         let mut orders = Self::order_reports(&reports, &open)?;
         let mut positions = Self::position_reports(&reports, &open)?;
@@ -1469,10 +1473,7 @@ impl ExecutionClient for CTraderExecutionClient {
             .unwrap_or(ts_init);
         // One cutoff for the request and the report window: cTrader's, in ms.
         let start = start.floor(DurationNanos::from_millis(1));
-        let deals = session
-            .ctrader
-            .deals(orders::millis(start), orders::millis(ts_init))
-            .await?;
+        let deals = session.ctrader.deals(orders::millis(start), until).await?;
         let (kept, unexplained) = explained(&deals, &held);
         if !unexplained.is_empty() {
             log::warn!(
@@ -1483,10 +1484,7 @@ impl ExecutionClient for CTraderExecutionClient {
         }
         // The orders closed over the window: cTrader's order list holds the
         // orders last updated in it.
-        let updated = session
-            .ctrader
-            .orders(orders::millis(start), orders::millis(ts_init))
-            .await?;
+        let updated = session.ctrader.orders(orders::millis(start), until).await?;
         let protections: HashMap<i64, &ProtoOaOrder> = updated
             .iter()
             .filter(|o| o.order_type() == ProtoOaOrderType::StopLossTakeProfit)
@@ -1649,6 +1647,9 @@ mod tests {
         refuse_token: bool,
         other_account: bool,
         trades: Option<Answers>,
+        /// A client clock the reconcile request moves to a time as it is
+        /// answered: the time it took.
+        reconcile_takes: Option<(&'static AtomicTime, UnixNanos)>,
     }
 
     mod order_flow;
@@ -1704,6 +1705,14 @@ mod tests {
                     None => replay::<ProtoOaTraderRes>(request, TRADER_RES),
                 },
                 t if t == ProtoOaReconcileReq::TYPE => match &venue.reconcile {
+                    _ if venue.reconcile_takes.is_some() => {
+                        let (clock, answered) = venue.reconcile_takes.unwrap();
+                        clock.set_time(answered);
+                        match &venue.reconcile {
+                            Some(open) => reply(request, open),
+                            None => replay::<ProtoOaReconcileRes>(request, RECONCILE_RES_EMPTY),
+                        }
+                    }
                     Some(open) => reply(request, open),
                     None => replay::<ProtoOaReconcileRes>(request, RECONCILE_RES_EMPTY),
                 },
@@ -2772,6 +2781,34 @@ mod tests {
         assert_eq!(stop_loss.filled_qty, Quantity::from(1));
         let take_profit = &orders[&VenueOrderId::from("59793251-TP")];
         assert_eq!(take_profit.order_status, OrderStatus::Canceled);
+        client.disconnect().await.unwrap();
+    }
+
+    /// As `stopped_out`, the stop loss hit while the mass status' reconcile
+    /// request was on its way: the client's clock, 5 ms before the closing
+    /// deal's creation as the mass status starts, 5 ms after it as the
+    /// reconcile request is answered, without the position. The deal that
+    /// closed the position is in the mass status, and fills the leg.
+    #[tokio::test]
+    async fn a_leg_hit_while_the_reconcile_request_was_answered_comes_with_its_deal() {
+        let closed: i64 = 1_794_443_906_550;
+        let clock = Box::leak(Box::new(AtomicTime::new(false, ns(closed - 60_000))));
+        let venue = Script {
+            reconcile_takes: Some((clock, ns(closed + 5))),
+            ..stopped_out()
+        };
+        let (mut client, cache, mut events, _, _tokens) = started_at(venue, clock);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
+        clock.set_time(ns(closed - 5));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        assert_eq!(trade_ids(&mass_status), ["65947597", "65947662"]);
+        let orders = mass_status.order_reports();
+        let stop_loss = &orders[&VenueOrderId::from("59793251-SL")];
+        assert_eq!(stop_loss.order_status, OrderStatus::Filled);
+        assert!(mass_status.reports_complete());
         client.disconnect().await.unwrap();
     }
 
