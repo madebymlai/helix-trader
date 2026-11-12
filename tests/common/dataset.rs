@@ -16,9 +16,10 @@ use crate::common::{
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
+        blueprint::ModelBlueprint,
         calibration::{Ksplit, Line},
         config::{Margins, ModelConfig},
-        dataset::{self, DatasetVenue},
+        dataset::DatasetVenue,
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES, side_names},
         handle::{Decision, Mode, ModelHandle, SettledRows},
@@ -252,16 +253,29 @@ pub fn probe_reading(
             ..Default::default()
         }),
         model: ModelHandle::new(
-            StrategyId::from(STRATEGY),
-            features,
-            config,
-            requirements,
+            &blueprint_reading(features, config.clone(), requirements.clone()),
             mode,
         )
         .unwrap(),
         record: Rc::clone(&record),
     };
     (probe, record)
+}
+
+/// The model of the probe deciding on `features` as `config` says, of what
+/// it reads (`requirements`).
+pub fn blueprint(features: Rc<FeatureSet>, config: ModelConfig) -> ModelBlueprint {
+    blueprint_reading(features, config, requirements())
+}
+
+/// The model of the probe deciding on `features` as `config` says, for a
+/// strategy of `requirements`.
+fn blueprint_reading(
+    features: Rc<FeatureSet>,
+    config: ModelConfig,
+    requirements: DataRequirements,
+) -> ModelBlueprint {
+    ModelBlueprint::new(StrategyId::from(STRATEGY), features, config, requirements).unwrap()
 }
 
 /// What the probe reads, as `backtest` replays it: IC's gold quotes.
@@ -480,7 +494,7 @@ pub fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibratio
 /// For a test whose models come from no train: the fixture's walk has no
 /// edge for a train to publish on (`backtest_train` trains on one).
 pub fn baseline_of(
-    features: &FeatureSet,
+    features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
     valid_from: Timestamp,
@@ -497,7 +511,7 @@ pub fn baseline_of(
 /// features), valid from `valid_from`, predicting an R of `r(tenths)`
 /// whatever the row, calibrated by `CALIBRATION`.
 pub fn meta_baseline_of(
-    features: &FeatureSet,
+    features: &Rc<FeatureSet>,
     config: &ModelConfig,
     valid_from: Timestamp,
     tenths: usize,
@@ -516,21 +530,16 @@ pub fn meta_baseline_of(
 /// A baseline of `feature_names`, of `side` for a side's model and none
 /// for a meta, of the probe deciding on `features`, fitted on `set`.
 fn stored_baseline(
-    features: &FeatureSet,
+    features: &Rc<FeatureSet>,
     config: &ModelConfig,
     feature_names: Vec<String>,
     side: Option<Side>,
     valid_from: Timestamp,
     set: &TrainingSet,
 ) -> StoredModel {
-    let fingerprint = dataset::fingerprint(
-        features,
-        config.decision,
-        &config.target,
-        &requirements(),
-        &venue(),
-    )
-    .unwrap();
+    let fingerprint = blueprint(Rc::clone(features), config.clone())
+        .fingerprint(&venue())
+        .unwrap();
     baseline_stored(
         StrategyId::from(STRATEGY),
         fingerprint.to_string(),

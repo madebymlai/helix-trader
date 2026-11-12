@@ -8,13 +8,10 @@
 use crate::common::{
     self, INSTRUMENT_ID, dataset, hour_bars, ic, noise, ohlc, recorder::Recorder, trades,
 };
-use helix_trader::{backtest::Backtest, model::dataset::Dataset};
+use helix_trader::backtest::Backtest;
 use jiff::{SignedDuration, civil::Date};
 use nautilus_core::UnixNanos;
-use nautilus_model::{
-    data::{BarType, NautilusDataType, QuoteTick},
-    identifiers::StrategyId,
-};
+use nautilus_model::data::{BarType, NautilusDataType, QuoteTick};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 /// The time exit's quotes written as a live node promotes them, in two
@@ -107,16 +104,9 @@ fn a_dataset_build_replays_through_a_sliver_between_promoted_files() {
         catalog.write_to_parquet(&file, None, None, None).unwrap();
     }
     let day = Date::constant(2026, 10, 21);
-    let dataset = Dataset::new(
-        dir.path(),
-        StrategyId::from(dataset::STRATEGY),
-        &dataset::features(),
-        dataset::rule(),
-        dataset::target(),
-        &dataset::requirements(),
-        &dataset::venue(),
-    )
-    .unwrap();
+    let dataset = dataset::blueprint(dataset::features(), dataset::config())
+        .dataset(dir.path(), &dataset::venue())
+        .unwrap();
 
     let built = dataset
         .build(day, day, |from, to| dataset::replay(&dir, from, to))

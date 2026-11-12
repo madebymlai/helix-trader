@@ -14,18 +14,17 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{STRATEGY, replay_on, requirements, rule, target, venue},
+    dataset::{blueprint, replay_on, rule, target, venue},
     features::tables,
     ic,
 };
 use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
-        dataset,
         features::{Feature, FeatureSet, side_names},
         holdout::{Holdout, Refusal},
         learner::{LearnerConfig, LightGbmConfig},
-        store::{ModelCalibration, ModelSet, ModelStore},
+        store::{ModelCalibration, ModelStore},
         targets::Side,
         train::{Kept, Outcome, Trained, Training},
     },
@@ -33,10 +32,7 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
-use nautilus_model::{
-    data::QuoteTick,
-    identifiers::{InstrumentId, StrategyId},
-};
+use nautilus_model::{data::QuoteTick, identifiers::InstrumentId};
 use tempfile::TempDir;
 
 /// The price of gold at the bottom of each even hour, and the rise over
@@ -158,34 +154,21 @@ fn config(min_pnl: f64) -> ModelConfig {
 }
 
 fn training(catalog: &TempDir, models: &Path, min_pnl: f64) -> Training {
-    Training::new(
-        catalog.path(),
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        config(min_pnl),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
+    blueprint(features(), config(min_pnl))
+        .training(catalog.path(), models, &venue())
+        .unwrap()
 }
 
 /// The store under `models` of the `side` models of a training of
 /// `min_pnl`, as `training` keys it.
 fn store(models: &Path, min_pnl: f64, side: Side) -> ModelStore {
-    ModelSet::new(
-        models,
-        StrategyId::from(STRATEGY),
-        &features(),
-        &config(min_pnl),
-        &requirements(),
-        &venue(),
-    )
-    .unwrap()
-    .side(side)
-    .unwrap()
-    .store()
-    .clone()
+    blueprint(features(), config(min_pnl))
+        .model_set(models, &venue())
+        .unwrap()
+        .side(side)
+        .unwrap()
+        .store()
+        .clone()
 }
 
 /// Quotes from 23:00 of the 19th of October 2026 to 03:00 of the 23rd.
@@ -269,10 +252,10 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
             "{holdout:?}"
         );
     }
-    let fingerprint =
-        dataset::fingerprint(&features(), rule(), &target(), &requirements(), &venue())
-            .unwrap()
-            .to_string();
+    let fingerprint = blueprint(features(), config(1.0))
+        .fingerprint(&venue())
+        .unwrap()
+        .to_string();
     // A side's model reads the strategy's features, then the bracket's payoff
     // features, the names the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());

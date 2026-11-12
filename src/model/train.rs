@@ -93,7 +93,7 @@
 //! kept with the reason (`Kept`), for each model trained. It succeeds when
 //! it kept no model (`Trained::succeeded`).
 
-use std::{fmt, path::Path};
+use std::fmt;
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
@@ -101,11 +101,10 @@ use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
 
 use super::{
+    blueprint::OnVenue,
     calibration::Ksplit,
-    config::ModelConfig,
-    dataset::{Dataset, DatasetRow, DatasetVenue, SchemaMismatch},
+    dataset::{Dataset, DatasetRow, SchemaMismatch},
     deciding::DecidingModels,
-    features::FeatureSet,
     holdout::{Earnings, Example, Holdout, MetaMargin, Minimums, Refusal},
     learner::{LearnerConfig, SavedModel, TrainingSet},
     meta,
@@ -117,7 +116,6 @@ use super::{
     },
     targets::{Side, TargetConfig, TargetRow},
 };
-use crate::strategy::DataRequirements;
 
 /// The most rows of the holdout a published model is probed on.
 const PROBES: usize = 16;
@@ -243,25 +241,18 @@ pub enum Kept {
 }
 
 impl Training {
-    /// The training of `strategy_id`'s models, one for each side of its
-    /// margins, and of its meta model if `config` has one, deciding with
-    /// `features`, on its dataset, for a strategy of `requirements`,
-    /// run on `venue`, in the catalog at `catalog` and its models in the
-    /// store under `models`, as `config` says.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the target is invalid, or a store cannot be keyed.
-    pub fn new(
-        catalog: &Path,
-        models: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        config: ModelConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Self> {
-        let models = ModelSet::new(models, strategy_id, features, &config, requirements, venue)?;
+    /// The training of the models of `model`, a strategy's model on the
+    /// venue of its dataset runs, one for each side of its margins, and of
+    /// its meta model if its config has one, on its dataset and in its
+    /// model set, as its config says.
+    pub(super) fn new(model: OnVenue<'_>) -> Self {
+        let OnVenue {
+            blueprint,
+            dataset,
+            models,
+            schedule,
+        } = model;
+        let config = blueprint.config();
         let side = |side| {
             models.side(side).map(|traded| Level {
                 feature_names: traded.feature_names().to_vec(),
@@ -276,22 +267,14 @@ impl Training {
             short: side(Side::Short),
             meta: models.meta().map(Level::of_meta),
         };
-        Ok(Self {
-            strategy_id,
-            dataset: Dataset::new(
-                catalog,
-                strategy_id,
-                features,
-                config.decision,
-                config.target.clone(),
-                requirements,
-                venue,
-            )?,
-            schedule: Schedule::of_model(&config),
+        Self {
+            strategy_id: blueprint.strategy_id(),
+            dataset,
+            schedule,
             models,
             levels,
-            target: config.target,
-        })
+            target: config.target.clone(),
+        }
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
@@ -916,7 +899,7 @@ impl fmt::Display for Kept {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
+    use std::{path::Path, rc::Rc};
 
     use jiff::SignedDuration;
     use nautilus_model::{
@@ -929,11 +912,13 @@ mod tests {
     use crate::{
         backtest::Commission,
         model::{
+            blueprint::ModelBlueprint,
             calibration::Line,
-            config::{Margins, MetaConfig},
+            config::{Margins, MetaConfig, ModelConfig},
+            dataset::DatasetVenue,
             decide::{DecisionRule, FeatureRow},
             deciding::testing::unchanged,
-            features::{side_names, side_row},
+            features::{FeatureSet, side_names, side_row},
             holdout::Trades,
             learner::LearnerConfig,
             targets::{
@@ -941,7 +926,7 @@ mod tests {
                 TargetRow,
             },
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig},
+        strategy::{DataRequirements, Declared, EmaArgs, IndicatorsConfig},
     };
 
     const AUD: &str = "AUD/USD.SIM";
@@ -1022,35 +1007,33 @@ mod tests {
         }
     }
 
+    /// The model of `config`.
+    fn blueprint(config: ModelConfig) -> ModelBlueprint {
+        ModelBlueprint::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            config,
+            requirements(),
+        )
+        .unwrap()
+    }
+
     /// The training in `dir`, its catalog and its store side by side: the
     /// catalog holds no instrument, none being read.
     fn training(dir: &Path, config: ModelConfig) -> Training {
         let catalog = dir.join("catalog");
         std::fs::create_dir_all(&catalog).unwrap();
-        Training::new(
-            &catalog,
-            &dir.join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        blueprint(config)
+            .training(&catalog, &dir.join("models"), &venue())
+            .unwrap()
     }
 
     /// The models of a training in `dir` as `config` says, as `training`
     /// keys them.
     fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
-        ModelSet::new(
-            &dir.join("models"),
-            StrategyId::from(STRATEGY),
-            &features(),
-            config,
-            &requirements(),
-            &venue(),
-        )
-        .unwrap()
+        blueprint(config.clone())
+            .model_set(&dir.join("models"), &venue())
+            .unwrap()
     }
 
     /// The store of the `side` models of a training in `dir` as `config`
@@ -1958,15 +1941,10 @@ mod tests {
         );
         assert_eq!(
             manifest.fingerprint,
-            crate::model::dataset::fingerprint(
-                &features(),
-                config().decision,
-                &config().target,
-                &requirements(),
-                &venue(),
-            )
-            .unwrap()
-            .to_string()
+            blueprint(config())
+                .fingerprint(&venue())
+                .unwrap()
+                .to_string()
         );
         assert_eq!(manifest.target, config().target);
         assert_eq!(manifest.learner, LearnerConfig::Fake {});
@@ -2275,15 +2253,10 @@ mod tests {
                 manifest: ModelManifest {
                     strategy_id: StrategyId::from(STRATEGY),
                     valid_from: at(valid_from),
-                    fingerprint: crate::model::dataset::fingerprint(
-                        &features(),
-                        config.decision,
-                        &config.target,
-                        &requirements(),
-                        &venue(),
-                    )
-                    .unwrap()
-                    .to_string(),
+                    fingerprint: blueprint(config.clone())
+                        .fingerprint(&venue())
+                        .unwrap()
+                        .to_string(),
                     feature_names: names,
                     calibration: unchanged(&config, at(valid_from)),
                     target: config.target,

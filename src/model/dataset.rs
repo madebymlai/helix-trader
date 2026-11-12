@@ -100,6 +100,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{
+    blueprint::ModelBlueprint,
     decide::{self, DecisionRule},
     deciding::SideRow,
     features::{FeatureSet, Fingerprint},
@@ -256,35 +257,27 @@ pub struct Dataset {
 }
 
 impl Dataset {
-    /// The dataset of `strategy_id`, deciding with `features` on `rule`,
-    /// of `target` for a strategy of `requirements`, run on `venue`,
-    /// in the catalog at `catalog`. Registers `DatasetRow` with Nautilus,
-    /// as any reader of the catalog must.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `target` is invalid for `rule` and
-    /// `requirements`.
-    pub fn new(
+    /// The dataset of the model of `blueprint`, stored under `fingerprint`,
+    /// its blueprint's on the venue of its runs
+    /// (`ModelBlueprint::fingerprint`), in the catalog at `catalog`.
+    /// Registers `DatasetRow` with Nautilus, as any reader of the catalog
+    /// must.
+    pub(super) fn new(
         catalog: &Path,
-        strategy_id: StrategyId,
-        features: &FeatureSet,
-        rule: DecisionRule,
-        target: TargetConfig,
-        requirements: &DataRequirements,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Self> {
-        target.validate(rule, requirements)?;
+        blueprint: &ModelBlueprint,
+        fingerprint: Fingerprint,
+    ) -> Self {
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
-        Ok(Self {
+        let (features, target) = (blueprint.features(), &blueprint.config().target);
+        Self {
             catalog: catalog.to_path_buf(),
-            strategy_id,
-            fingerprint: fingerprint(features, rule, &target, requirements, venue)?,
+            strategy_id: blueprint.strategy_id(),
+            fingerprint,
             warmup: features.warmup(),
             feature_names: features.names().to_vec(),
             payoff_names: target.payoff_names(),
-            target,
-        })
+            target: target.clone(),
+        }
     }
 
     /// Builds the days `first` to `last` the dataset is missing: `replay`
@@ -671,12 +664,13 @@ impl DatasetRow {
 /// decisions' (`decide::fingerprint`), deciding the bar build delay of the
 /// requirements' bar types after the grid (`warmup::bar_build_delay`),
 /// extended by the target's (`targets::fingerprint`), the venue's settings
-/// and the dataset `VERSION`.
+/// and the dataset `VERSION`. A model's blueprint computes it, and nothing
+/// else (`ModelBlueprint::fingerprint`).
 ///
 /// # Errors
 ///
 /// Returns an error as `targets::fingerprint` does.
-pub fn fingerprint(
+pub(super) fn fingerprint(
     features: &FeatureSet,
     rule: DecisionRule,
     target: &TargetConfig,
@@ -742,12 +736,16 @@ fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use nautilus_model::{identifiers::InstrumentId, types::Quantity};
 
     use super::*;
     use crate::{
         model::{
+            config::{Margins, ModelConfig},
             decide::FeatureRow,
+            learner::LearnerConfig,
             targets::{BracketSpec, Distance, Exit, Outcome, Outcomes, Target},
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig},
@@ -828,16 +826,41 @@ mod tests {
         }
     }
 
+    /// The model of `strategy` deciding with `features` on `rule`, with
+    /// `target`, for a strategy of `requirements`; its training settings,
+    /// which no dataset reads, the fake learner's on a day.
+    fn blueprint(
+        strategy: &str,
+        features: Rc<FeatureSet>,
+        rule: DecisionRule,
+        target: TargetConfig,
+        requirements: DataRequirements,
+    ) -> ModelBlueprint {
+        let config = ModelConfig::builder()
+            .decision(rule)
+            .target(target)
+            .window(SignedDuration::from_hours(24))
+            .holdout(SignedDuration::from_hours(6))
+            .margins(Margins {
+                long: Some(0.0),
+                short: Some(0.0),
+            })
+            .min_pnl(0.0)
+            .min_trades(1)
+            .learner(LearnerConfig::Fake {})
+            .build();
+        ModelBlueprint::new(StrategyId::from(strategy), features, config, requirements).unwrap()
+    }
+
     fn dataset(catalog: &Path, strategy: &str, width: usize) -> Dataset {
-        Dataset::new(
-            catalog,
-            StrategyId::from(strategy),
-            &features(width),
+        blueprint(
+            strategy,
+            features(width),
             DecisionRule::Every(SignedDuration::from_hours(1)),
             target(),
-            &requirements(),
-            &venue(),
+            requirements(),
         )
+        .dataset(catalog, &venue())
         .unwrap()
     }
 
@@ -1218,19 +1241,15 @@ mod tests {
             .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
             .unwrap();
         let changed = |rule, target, commission| {
-            Dataset::new(
-                dir.path(),
-                StrategyId::from(STRATEGY),
-                &features(1),
-                rule,
-                target,
-                &requirements(),
-                &DatasetVenue {
-                    commission,
-                    ..venue()
-                },
-            )
-            .unwrap()
+            blueprint(STRATEGY, features(1), rule, target, requirements())
+                .dataset(
+                    dir.path(),
+                    &DatasetVenue {
+                        commission,
+                        ..venue()
+                    },
+                )
+                .unwrap()
         };
         let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
         let changed = [
@@ -1348,10 +1367,30 @@ mod tests {
             )
             .unwrap()
         };
-        let current =
-            fingerprint(&features(1), rule, &target(), &requirements(), &venue()).unwrap();
+        let current = blueprint(STRATEGY, features(1), rule, target(), requirements())
+            .fingerprint(&venue())
+            .unwrap();
 
         assert_ne!(current, at(VERSION + 1));
+    }
+
+    /// The identifier the rows of a fixed strategy are stored under, as a
+    /// literal: its id, then the fingerprint of its features, its hourly
+    /// decisions, its bracket, what it reads and the venue of its dataset
+    /// runs. A change that rekeyed every dataset, leaving its rows and the
+    /// models trained on them behind, fails here. A deliberate rekey, a
+    /// bump of `VERSION` or a new input to the fingerprint, updates the
+    /// literal here, and the pinned directory of a store, which the
+    /// fingerprint keys too
+    /// (`store::tests::a_fixed_strategys_side_store_keeps_its_directory`).
+    #[test]
+    fn a_fixed_strategys_dataset_keeps_its_identifier() {
+        let dataset = dataset(Path::new("catalog"), STRATEGY, 1);
+
+        assert_eq!(
+            dataset.identifier(),
+            "DATASET-001-f05f404641b265ded277fdf0225f84d69ed83243becd8e9460763e46c761d8a1"
+        );
     }
 
     /// A strategy reading a composite bar type decides 5 s after its grid
@@ -1362,13 +1401,14 @@ mod tests {
     #[test]
     fn a_strategy_on_composite_bars_is_keyed_by_its_build_delay() {
         let of = |requirements: &DataRequirements| {
-            fingerprint(
-                &features(1),
+            blueprint(
+                STRATEGY,
+                features(1),
                 DecisionRule::Every(SignedDuration::from_hours(1)),
-                &target(),
-                requirements,
-                &venue(),
+                target(),
+                requirements.clone(),
             )
+            .fingerprint(&venue())
             .unwrap()
         };
         let composite = DataRequirements {
@@ -1387,13 +1427,14 @@ mod tests {
     #[test]
     fn another_balance_or_leverage_of_the_dataset_run_is_another_fingerprint() {
         let of = |venue: DatasetVenue| {
-            fingerprint(
-                &features(1),
+            blueprint(
+                STRATEGY,
+                features(1),
                 DecisionRule::Every(SignedDuration::from_hours(1)),
-                &target(),
-                &requirements(),
-                &venue,
+                target(),
+                requirements(),
             )
+            .fingerprint(&venue)
             .unwrap()
         };
 
@@ -1500,15 +1541,14 @@ mod tests {
             .warmup(SignedDuration::from_hours(2))
             .build()
             .unwrap();
-        Dataset::new(
-            catalog,
-            StrategyId::from(STRATEGY),
-            &features,
+        blueprint(
+            STRATEGY,
+            features,
             DecisionRule::Every(SignedDuration::from_hours(1)),
             target(),
-            &requirements(),
-            &venue(),
+            requirements(),
         )
+        .dataset(catalog, &venue())
         .unwrap()
     }
 
