@@ -403,13 +403,23 @@ impl CTraderExecutionClient {
     /// (cTrader position ids and their openings, in ms), if any: a
     /// position's opening is its first deal's execution, which can come a
     /// millisecond after the deal's creation, the time cTrader's deal list
-    /// filters on.
+    /// filters on. Only the positions opened within `QUERY_MARGIN_MS` of
+    /// the first are asked for, a request each: a later one's opening deal,
+    /// created moments before it executed, is not created before the
+    /// first's. Asking for every position would cost each a historical
+    /// request's 250 ms, on a startup Nautilus times out.
     async fn earliest_opening_deal(
         session: &Session,
         openings: &BTreeMap<i64, i64>,
     ) -> anyhow::Result<Option<i64>> {
+        let Some(first) = openings.values().min().copied() else {
+            return Ok(None);
+        };
         let mut earliest = None;
-        for (&position, &opened) in openings {
+        for (&position, &opened) in openings
+            .iter()
+            .filter(|(_, opened)| **opened <= first + QUERY_MARGIN_MS)
+        {
             let deals = session.ctrader.position_deals(position, opened).await?;
             earliest = deals
                 .iter()
@@ -2730,6 +2740,51 @@ mod tests {
                 .to_string(),
             "65947662"
         );
+        client.disconnect().await.unwrap();
+    }
+
+    /// Three positions open at the broker, opened ten minutes apart, and
+    /// one the cache holds open, opened an hour after them: the window
+    /// starts at the creation of the first one's opening deal, the only
+    /// one asked for, rather than one request per position, each a
+    /// historical request's 250 ms of a startup Nautilus times out.
+    #[tokio::test]
+    async fn only_the_opening_deals_of_the_first_opened_positions_are_asked_for() {
+        let opened = [(201, 0), (202, 10), (203, 20)];
+        let venue = Script {
+            reconcile: Some(ProtoOaReconcileRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                position: opened
+                    .iter()
+                    .map(|&(id, minutes)| {
+                        let mut open = position(id, ProtoOaTradeSide::Buy, 100, minutes);
+                        open.trade_data.open_timestamp = Some(T0 + minutes * 60_000 + 20);
+                        open.price = Some(4000.0);
+                        open
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            deals: Some(
+                opened
+                    .iter()
+                    .map(|&(id, minutes)| deal(id, id, ProtoOaTradeSide::Buy, 100, 4000.0, minutes))
+                    .chain([deal(204, 204, ProtoOaTradeSide::Buy, 100, 4000.0, 80)])
+                    .collect(),
+            ),
+            ..Script::default()
+        };
+        let (mut client, cache, mut events, received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "204", ns(T0 + 80 * 60_000 + 20));
+
+        let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
+
+        let asked: Vec<ProtoOaDealListByPositionIdReq> = requests_of(&received);
+        let positions: Vec<i64> = asked.iter().map(|r| r.position_id).collect();
+        assert_eq!(positions, [201]);
+        assert_eq!(mass_status.lookback_start(), Some(ns(T0)));
+        assert_eq!(trade_ids(&mass_status), ["201", "202", "203"]);
         client.disconnect().await.unwrap();
     }
 
