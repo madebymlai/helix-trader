@@ -14,7 +14,7 @@ Helix Trader is a Rust workspace built on NautilusTrader: the main crate, `helix
 
 Run no two Nautilus nodes of a process at once: a node's message bus is thread-local, while logging and the Tokio runtime are process-wide. A process may run backtest nodes one after another, each disposed before the next starts, as Nautilus documents: a backtest of a model strategy builds its dataset, trains and then runs so, in one process. A live node is the one node of its process while it runs, so its retrains are child processes. Backtest integration tests run their nodes at once, one per test thread, which Nautilus does not support: each thread has its own message bus and registries, but the logger, with the logging mode and clock each backtest switches, the logging worker and the Tokio runtime are the process's, shared by every node, so log timestamps may reflect another test's simulated time. Live nodes also install a tracing subscriber and take SIGINT; run live test modules in separate processes.
 
-Nautilus owns the global logger. Code uses `log` macros and configures the node's logger rather than installing another logger first. Backtests use `BacktestNode`, a fresh node per run, not parameter sweeps.
+Nautilus owns the global logger, and code logs through `log` macros. A backtest node installs Nautilus' logger from the config it is given; the live run and fill-catalog install it themselves (`init_logging`) before any node, since the live clients are set up before the node is built and a fill may run no node, and a node built afterwards keeps it. No other logger is installed. Backtests use `BacktestNode`, a fresh node per run, not parameter sweeps.
 
 ## Dependencies and tests
 
