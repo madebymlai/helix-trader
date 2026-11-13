@@ -601,17 +601,19 @@ impl DatasetRow {
         }
     }
 
-    /// `side`'s trade: its net P&L and its commission.
+    /// `side`'s trade: its net P&L, its commission and its unit.
     #[must_use]
     pub const fn trade(&self, side: Side) -> Trade {
         match side {
             Side::Long => Trade {
                 pnl: self.long_pnl,
                 commission: self.long_commission,
+                unit: self.long_unit,
             },
             Side::Short => Trade {
                 pnl: self.short_pnl,
                 commission: self.short_commission,
+                unit: self.short_unit,
             },
         }
     }
@@ -822,7 +824,7 @@ mod tests {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_pnl(0.0)
+            .min_pnl(R::new(0.0))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build();
@@ -984,14 +986,16 @@ mod tests {
             row.trade(Side::Long),
             Trade {
                 pnl: 0.25,
-                commission: 0.75
+                commission: 0.75,
+                unit: 3.0
             }
         );
         assert_eq!(
             row.trade(Side::Short),
             Trade {
                 pnl: 0.0,
-                commission: 0.5
+                commission: 0.5,
+                unit: 1.5
             }
         );
         assert_eq!(

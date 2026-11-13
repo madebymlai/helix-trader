@@ -646,7 +646,7 @@ const MODEL_EMA_CONFIG: &str = r#"
     window = "46h"
     holdout = "12h"
     margins = { long = "0R", short = "0R" }
-    min_pnl = 0.0
+    min_pnl = "0R"
     min_trades = 1
     learner = { kind = "fake" }
 "#;

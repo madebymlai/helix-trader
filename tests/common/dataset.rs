@@ -189,7 +189,7 @@ pub fn config() -> ModelConfig {
             long: Some(R::new(0.0)),
             short: Some(R::new(0.0)),
         })
-        .min_pnl(0.0)
+        .min_pnl(R::new(0.0))
         .min_trades(1)
         .learner(LearnerConfig::Fake {})
         .build()

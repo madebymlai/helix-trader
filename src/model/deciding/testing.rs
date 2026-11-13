@@ -159,7 +159,7 @@ pub fn config() -> ModelConfig {
             long: Some(R::new(0.0)),
             short: None,
         })
-        .min_pnl(0.0)
+        .min_pnl(R::new(0.0))
         .min_trades(1)
         .learner(LearnerConfig::Baseline {})
         .build()
@@ -182,7 +182,7 @@ pub fn meta() -> MetaConfig {
         window: SignedDuration::from_hours(48),
         holdout: SignedDuration::from_hours(12),
         margin: R::new(0.15),
-        min_pnl: 0.0,
+        min_pnl: R::new(0.0),
         min_trades: 1,
         learner: LearnerConfig::Baseline {},
     }

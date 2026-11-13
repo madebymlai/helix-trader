@@ -42,8 +42,8 @@
 //! Each side's skill against those baselines, mean `R - E'`, calibration
 //! slope and top-decile gap (`score::ExpectedScore`) are given per retrain
 //! period and over the span, on all the side's rows with a pair, and what was
-//! earned there (`holdout::Earnings`), beside every trade of those rows, its
-//! own, at the commission and at 1.5 times it; and the same of the meta, its
+//! earned there, in R (`holdout::Earnings`), beside every trade of those rows,
+//! its own, at the commission and at 1.5 times it; and the same of the meta, its
 //! calibrated expected R against the R of the trade of the side picked, on
 //! the rows a side is picked on with a meta model. A side's trades taken are
 //! those picked for it on each row by the decision itself
@@ -66,7 +66,7 @@ use super::{
     blueprint::OnVenue,
     dataset::{self, Dataset, DatasetRow},
     deciding::DecidingModels,
-    holdout::{Earnings, Example, MetaMargin, STRESS},
+    holdout::{Earnings, Example, MetaMargin, STRESS, in_r},
     meta,
     schedule::{Models, Schedule},
     score::ExpectedScore,
@@ -382,7 +382,7 @@ fn lines(f: &mut fmt::Formatter<'_>, score: ExpectedScore) -> fmt::Result {
 
 /// The lines of `earnings`: the trades taken, a side's those picked for it,
 /// every trade of the rows the model decided, and both at `STRESS` times the
-/// commission.
+/// commission, the net P&L per trade in R.
 fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
     let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
     let Earnings {
@@ -392,24 +392,24 @@ fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
         every_stressed,
     } = earnings;
     writeln!(f, "  Trades taken: {}", taken.count)?;
-    writeln!(f, "  Net P&L per trade taken: {}", value(taken.expectancy))?;
+    writeln!(f, "  Net P&L per trade taken: {}", in_r(taken.expectancy))?;
     writeln!(f, "  Win rate of trades taken: {}", value(taken.win_rate))?;
     writeln!(f, "  Every trade: {}", every.count)?;
     writeln!(
         f,
         "  Net P&L per trade, every trade: {}",
-        value(every.expectancy)
+        in_r(every.expectancy)
     )?;
     writeln!(f, "  Win rate, every trade: {}", value(every.win_rate))?;
     writeln!(
         f,
         "  Net P&L per trade taken at {STRESS}x the commission: {}",
-        value(taken_stressed.expectancy)
+        in_r(taken_stressed.expectancy)
     )?;
     writeln!(
         f,
         "  Net P&L per trade, every trade, at {STRESS}x the commission: {}",
-        value(every_stressed.expectancy)
+        in_r(every_stressed.expectancy)
     )
 }
 
@@ -480,7 +480,7 @@ mod tests {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_pnl(0.0)
+            .min_pnl(R::new(0.0))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -930,7 +930,7 @@ mod tests {
             .unwrap()
     }
 
-    /// `trades` are `count` trades of `expectancy` net P&L per trade.
+    /// `trades` are `count` trades of `expectancy` net P&L per trade, in R.
     fn trades_are(trades: Trades, count: usize, expectancy: f64) {
         assert_eq!(trades.count, count, "{trades:?}");
         close(trades.expectancy, expectancy);
@@ -1172,9 +1172,10 @@ mod tests {
     /// Worked by hand: `rows` with every unit 2 USD, the sides picking as on
     /// units of 1 USD, and the meta expecting the same R of each trade,
     /// `0.1 + 0.5p`: 0.5, 0.25, 0.4, 0.55 and 0.2, twice that in USD. Its
-    /// margin of 0.3R takes the trades at 0.8, 0.6 and 0.9, 1/3 per trade,
-    /// as on units of 1 USD, not those at 0.3 and 0.2, though they expect
-    /// 0.5 and 0.4 USD.
+    /// margin of 0.3R takes the trades at 0.8, 0.6 and 0.9, as on units of 1
+    /// USD, not those at 0.3 and 0.2, though they expect 0.5 and 0.4 USD. The
+    /// trades taken earn 1/3 USD a trade, as on units of 1 USD, beside every
+    /// trade's 0.2: over units of 2, 1/6R and 0.1R.
     #[test]
     fn the_metas_margin_is_in_r_whatever_the_unit_of_the_side_picked() {
         let dir = tempfile::tempdir().unwrap();
@@ -1192,14 +1193,14 @@ mod tests {
             .meta
             .unwrap();
 
-        trades_are(meta.earnings.taken, 3, 1.0 / 3.0);
-        trades_are(meta.earnings.every, 5, 0.2);
+        trades_are(meta.earnings.taken, 3, 1.0 / 6.0);
+        trades_are(meta.earnings.every, 5, 0.1);
     }
 
     /// Worked by hand. On the five rows the sides pick on, the trade of the
     /// side picked, each of a unit of 1 USD, the meta expecting `0.1 + 0.5p`
     /// R of the feature `p`: 0.5, 0.25 and 0.4 on the 7th, 0.55 and 0.2 on
-    /// the 8th, so its margin of 0.3 USD takes those at 0.8, 0.6 and 0.9,
+    /// the 8th, so its margin of 0.3R takes those at 0.8, 0.6 and 0.9,
     /// not at 0.3 and 0.2. The 7th: a win, the short's win and a loss, 1/3,
     /// of which it takes the first and the last, nought. The 8th: a win and
     /// the short's loss, nought, of which it takes the win, 1. The span, 1/3
@@ -1410,13 +1411,13 @@ Short model scores, out of sample, from 2026-01-07T00:00:00Z to 2026-01-08T00:00
   Top-decile gap: 0.500000
   Rows: 3
   Trades taken: 2
-  Net P&L per trade taken: 0.500000
+  Net P&L per trade taken: 0.500000R
   Win rate of trades taken: 0.500000
   Every trade: 3
-  Net P&L per trade, every trade: -0.250000
+  Net P&L per trade, every trade: -0.250000R
   Win rate, every trade: 0.500000
-  Net P&L per trade taken at 1.5x the commission: 0.450000
-  Net P&L per trade, every trade, at 1.5x the commission: -0.300000
+  Net P&L per trade taken at 1.5x the commission: 0.450000R
+  Net P&L per trade, every trade, at 1.5x the commission: -0.300000R
 
 Short model scores, out of sample, over the span
   Skill: n/a
@@ -1459,7 +1460,7 @@ Meta model scores, out of sample, over the span
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(6))
                 .margin(R::new(0.3))
-                .min_pnl(0.0)
+                .min_pnl(R::new(0.0))
                 .min_trades(1)
                 .learner(LearnerConfig::Fake {})
                 .build(),
