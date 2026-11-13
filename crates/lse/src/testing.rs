@@ -14,9 +14,9 @@ use std::{
 
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    enums::AssetClass,
+    enums::{AssetClass, OptionKind},
     identifiers::{InstrumentId, Symbol},
-    instruments::{FuturesContract, IndexInstrument, InstrumentAny},
+    instruments::{FuturesContract, IndexInstrument, InstrumentAny, OptionContract},
     types::{Currency, Price, Quantity},
 };
 use nautilus_network::http::Url;
@@ -101,6 +101,19 @@ pub const GCZ26_QUOTES: &[u8] = include_bytes!("../test_data/export_gcz6_quotes.
 
 /// The CME contract of `GCZ26_TRADES`.
 pub const GCZ26: &str = "GCZ26.GLBX";
+
+/// The trade slice of AAPL's 355 call of 20 November 2026 (`AAPL
+/// 261120C00355000` in `us_options`) over `[2026-11-12T14:30:00Z,
+/// 2026-11-12T14:31:00Z)`, and its 1-minute candles over
+/// `[2026-11-12T14:30:00Z, 2026-11-12T14:35:00Z)`, as LSE exported them to
+/// the free key: 23 trades, and four candles, opening at 14:30 to 14:33,
+/// none at 14:34, which had no trade.
+pub const AAPL_CALL_TRADES: &[u8] = include_bytes!("../test_data/export_aapl_call_tick.parquet");
+pub const AAPL_CALL_MINUTES: &[u8] = include_bytes!("../test_data/export_aapl_call_1m.parquet");
+
+/// The US option contract of `AAPL_CALL_TRADES`, under the id Databento
+/// gives it: its OSI symbol under `OPRA`.
+pub const AAPL_CALL: &str = "AAPL  261120C00355000.OPRA";
 
 /// The CME key the tests give the adapter, which the peer records.
 pub const CME_API_KEY: &str = "lse-cme-test-key-0123456789";
@@ -204,6 +217,37 @@ pub fn gcz26() -> InstrumentAny {
             .ts_init(at("2026-07-31T00:00:00Z"))
             .build()
             .expect("a valid futures contract"),
+    )
+}
+
+/// AAPL's 355 call of 20 November 2026 as Nautilus' Databento decoder
+/// gives Databento's definition of it of 12 November 2026
+/// (`decode_option_contract`), `AAPL_CALL`: an equity option in USD,
+/// priced to a cent, Databento giving no tick, expiring at 16:00 New York,
+/// its multiplier and lot size 1, Databento giving neither.
+#[must_use]
+pub fn aapl_call() -> InstrumentAny {
+    let at = |time: &str| UnixNanos::from(time.parse::<jiff::Timestamp>().expect("a time"));
+    InstrumentAny::OptionContract(
+        OptionContract::builder()
+            .instrument_id(InstrumentId::from(AAPL_CALL))
+            .raw_symbol(Symbol::from("AAPL  261120C00355000"))
+            .asset_class(AssetClass::Equity)
+            .exchange("OPRA".into())
+            .underlying("AAPL".into())
+            .option_kind(OptionKind::Call)
+            .strike_price(Price::from("355.00"))
+            .currency(Currency::USD())
+            .activation_ns(UnixNanos::default())
+            .expiration_ns(at("2026-11-20T21:00:00Z"))
+            .price_precision(2)
+            .price_increment(Price::from("0.01"))
+            .multiplier(Quantity::from(1))
+            .lot_size(Quantity::from(1))
+            .ts_event(UnixNanos::from(1_794_483_001_860_225_968))
+            .ts_init(UnixNanos::from(1_794_483_001_860_225_968))
+            .build()
+            .expect("a valid option contract"),
     )
 }
 
