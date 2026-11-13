@@ -65,8 +65,10 @@ impl DatabentoHistory {
             false,
         )
         .context("building Databento's client")?;
+        // GLBX instruments on GLBX, not their exchanges' MICs; bars stamped
+        // at their close, Nautilus' default, as IB's are.
         let config =
-            DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, false);
+            DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, true);
         Ok(Self { metadata, config })
     }
 
