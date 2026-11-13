@@ -3047,6 +3047,7 @@ dependencies = [
  "nautilus-model",
  "nautilus-network",
  "parquet",
+ "rstest",
  "rust_decimal",
  "serde",
  "serde_json",

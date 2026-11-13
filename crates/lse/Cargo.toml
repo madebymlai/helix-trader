@@ -41,4 +41,7 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 nautilus-model = { workspace = true, features = ["test-support"] }
+# Test functions, as Nautilus' adapter guide has them ("Rust testing"),
+# declared as Nautilus declares it.
+rstest = { version = "0.28.0", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }

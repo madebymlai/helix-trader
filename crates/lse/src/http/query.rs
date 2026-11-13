@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 
 use crate::common::symbol::LseSymbol;
@@ -51,6 +51,34 @@ impl ExportQuery {
             format: ExportFormat::Parquet,
         }
     }
+
+    /// The span the export selects, `[from, to)`.
+    pub(crate) fn window(&self) -> (Timestamp, Timestamp) {
+        (self.from, self.to)
+    }
+
+    /// The export's selection over `[from, to)`.
+    pub(crate) fn over(&self, from: Timestamp, to: Timestamp) -> Self {
+        Self {
+            from,
+            to,
+            ..self.clone()
+        }
+    }
+
+    /// The export split at the middle of its span, or none if it spans a
+    /// second or less: no second of any series LSE serves holds the
+    /// 2,500,000 rows one export may read (ESZ6's busiest minute of book
+    /// held 99,104, LSE's docs, "The market: cme"), so halving one further
+    /// would not get past a refusal.
+    pub(crate) fn halves(&self) -> Option<(Self, Self)> {
+        let span = self.to.duration_since(self.from);
+        if span <= SignedDuration::from_secs(1) {
+            return None;
+        }
+        let middle = self.from + span / 2;
+        Some((self.over(self.from, middle), self.over(middle, self.to)))
+    }
 }
 
 impl fmt::Display for ExportQuery {
@@ -70,5 +98,50 @@ impl fmt::Display for ExportQuery {
             f,
             "the {rows} of {symbol} in LSE's {market} over [{from}, {to})"
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn gold(from: &str, to: &str) -> ExportQuery {
+        let gold = LseSymbol::new("futures", "GOLD").unwrap();
+        ExportQuery::trades(&gold, from.parse().unwrap(), to.parse().unwrap())
+    }
+
+    #[rstest]
+    fn an_export_halves_at_its_middle() {
+        let (first, second) = gold("2026-10-21T00:00:00Z", "2026-10-22T00:00:00Z")
+            .halves()
+            .unwrap();
+
+        assert_eq!(first, gold("2026-10-21T00:00:00Z", "2026-10-21T12:00:00Z"));
+        assert_eq!(second, gold("2026-10-21T12:00:00Z", "2026-10-22T00:00:00Z"));
+    }
+
+    #[rstest]
+    fn an_export_of_three_seconds_halves_at_a_second_and_a_half() {
+        let (first, second) = gold("2026-10-21T10:00:00Z", "2026-10-21T10:00:03Z")
+            .halves()
+            .unwrap();
+
+        assert_eq!(
+            first,
+            gold("2026-10-21T10:00:00Z", "2026-10-21T10:00:01.5Z")
+        );
+        assert_eq!(
+            second,
+            gold("2026-10-21T10:00:01.5Z", "2026-10-21T10:00:03Z")
+        );
+    }
+
+    #[rstest]
+    #[case::a_second("2026-10-21T10:00:01Z")]
+    #[case::half_a_second("2026-10-21T10:00:00.5Z")]
+    fn an_export_of_a_second_or_less_does_not_halve(#[case] to: &str) {
+        assert_eq!(gold("2026-10-21T10:00:00Z", to).halves(), None);
     }
 }
