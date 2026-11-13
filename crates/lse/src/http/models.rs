@@ -1,7 +1,9 @@
-//! LSE's answers in JSON, as LSE sends them.
+//! LSE's answers in JSON, as LSE sends them: its refusals and its
+//! catalogue's listings.
 
 use std::fmt;
 
+use jiff::civil::Date;
 use serde::Deserialize;
 
 /// The codes of an export LSE holds no row of: no stored row in the
@@ -31,6 +33,40 @@ pub(crate) struct LseRefusal {
     /// market or a level the key lacks.
     #[serde(default)]
     pub(crate) required_plan: Option<RequiredPlan>,
+}
+
+/// A page of LSE's catalogue of a market's instruments (`/v3/pairs`), of
+/// which the listings are kept.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LsePairs {
+    pub(crate) pairs: Vec<LsePair>,
+}
+
+/// A listing in LSE's catalogue: its number, which always names one
+/// instrument, its symbol, its name and, where LSE knows them, the days it
+/// was listed and delisted. A CME contract's name says its month, as in
+/// `GC futures 2026-12`, or is its symbol alone, as in `GCZ4`, for some of
+/// the contracts delisted (LSE's docs, "The market: cme", and `test_data/`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LsePair {
+    pub(crate) pair_id: u64,
+    pub(crate) symbol: String,
+    pub(crate) name: String,
+    pub(crate) listed_date: Option<Date>,
+    pub(crate) delisted_date: Option<Date>,
+}
+
+impl fmt::Display for LsePair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({}, pair {}", self.symbol, self.name, self.pair_id)?;
+        if let Some(listed) = self.listed_date {
+            write!(f, ", listed {listed}")?;
+        }
+        if let Some(delisted) = self.delisted_date {
+            write!(f, ", delisted {delisted}")?;
+        }
+        f.write_str(")")
+    }
 }
 
 /// A plan LSE names in a refusal.

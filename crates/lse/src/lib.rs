@@ -6,15 +6,17 @@
 //!
 //! Nautilus has no LSE adapter; this one is laid out as Nautilus' adapters
 //! are (`docs/developer_guide/adapters.md`): `common` (the venue and the
-//! variable of the key, the key, and the symbol boundary between LSE's
-//! market and symbol and an instrument id), `http` (the HTTP client, its
-//! typed export query, an export over any span, LSE's refusals and the
-//! parsing of an export's Parquet file), `config` (the data client's
-//! config), `data` (the data client) and `factories`.
+//! variables of the keys, the keys by the product each opens, and the
+//! symbol boundary between an instrument id and what LSE is asked for, a
+//! derived market's symbol or a CME contract's listing), `http` (the HTTP
+//! client, its typed queries, an export over any span, the listings of CME
+//! contracts, LSE's answers and refusals and the parsing of an export's
+//! Parquet file), `config` (the data client's config), `data` (the data
+//! client) and `factories`.
 
 pub use self::{
     common::{
-        consts::{LSE_API_KEY, LSEDGE_VENUE},
+        consts::{LSE_API_KEY, LSE_CME_API_KEY, LSEDGE_VENUE},
         symbol::LseSymbol,
     },
     config::LseDataClientConfig,

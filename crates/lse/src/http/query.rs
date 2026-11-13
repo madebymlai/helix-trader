@@ -1,20 +1,76 @@
-//! The query of an export (`/v3/export`), typed: LSE's selection of a
-//! series, as LSE's docs name its parameters.
+//! The queries of LSE's calls, typed: an export's (`/v3/export`), LSE's
+//! selection of an instrument's rows, and a catalogue lookup's
+//! (`/v3/pairs`), as LSE's docs name their parameters.
 
 use std::fmt;
 
 use jiff::{SignedDuration, Timestamp};
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::common::symbol::LseSymbol;
 
-/// The width of an export's rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Timeframe {
-    /// The tick slice of a derived market: its trades, `time, price, size,
-    /// kind`.
-    Tick,
+/// What an export's rows are, and the parameter that selects them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rows {
+    /// The tick slice of a derived market, its trades, `time, price, size,
+    /// kind` (`timeframe=tick`).
+    TradeSlice,
+    /// The trades of an exchange market, `time, price, size, kind`
+    /// (`data=trades`).
+    Trades,
+    /// The quotes of an exchange market, `time, bid_price, ask_price,
+    /// bid_size, ask_size` (`data=quotes`).
+    Quotes,
+}
+
+impl Rows {
+    /// The parameter selecting the rows, and its value.
+    const fn parameter(self) -> (&'static str, &'static str) {
+        match self {
+            Self::TradeSlice => ("timeframe", "tick"),
+            Self::Trades => ("data", "trades"),
+            Self::Quotes => ("data", "quotes"),
+        }
+    }
+}
+
+/// The one parameter selecting the rows, flattened into the query.
+impl Serialize for Rows {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (name, value) = self.parameter();
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(name, value)?;
+        map.end()
+    }
+}
+
+impl fmt::Display for Rows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::TradeSlice => "trade slice",
+            Self::Trades => "trades",
+            Self::Quotes => "quotes",
+        })
+    }
+}
+
+/// The instrument an export selects: a symbol, as `/v3/pairs` lists it, or
+/// the number of a listing, which always names one instrument (LSE's docs,
+/// "Symbols").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Selection {
+    Symbol(String),
+    PairId(u64),
+}
+
+impl fmt::Display for Selection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Symbol(symbol) => f.write_str(symbol),
+            Self::PairId(pair_id) => write!(f, "pair {pair_id}"),
+        }
+    }
 }
 
 /// The file format of an export.
@@ -24,14 +80,16 @@ pub(crate) enum ExportFormat {
     Parquet,
 }
 
-/// An export of a series over `[from, to)`, two UTC timestamps, the second
-/// excluded, at prices as published: LSE adjusts them for splits unless
-/// told not to (`adjusted=0`), and the adapter adjusts nothing.
+/// An export of an instrument's rows over `[from, to)`, two UTC timestamps,
+/// the second excluded, at prices as published: LSE adjusts them for splits
+/// unless told not to (`adjusted=0`), and the adapter adjusts nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ExportQuery {
     market: String,
-    symbol: String,
-    timeframe: Timeframe,
+    #[serde(flatten)]
+    instrument: Selection,
+    #[serde(flatten)]
+    rows: Rows,
     from: Timestamp,
     to: Timestamp,
     adjusted: u8,
@@ -39,12 +97,41 @@ pub(crate) struct ExportQuery {
 }
 
 impl ExportQuery {
-    /// The trade slice of `series` over `[from, to)`, as Parquet.
-    pub(crate) fn trades(series: &LseSymbol, from: Timestamp, to: Timestamp) -> Self {
+    /// The `rows` of `series`, a derived market's, over `[from, to)`, as
+    /// Parquet.
+    pub(crate) fn series(series: &LseSymbol, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
+        Self::new(
+            series.market(),
+            Selection::Symbol(series.symbol().to_owned()),
+            rows,
+            from,
+            to,
+        )
+    }
+
+    /// The `rows` of LSE's listing `pair_id` in `market` over `[from,
+    /// to)`, as Parquet.
+    pub(crate) fn listing(
+        market: &str,
+        pair_id: u64,
+        rows: Rows,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Self {
+        Self::new(market, Selection::PairId(pair_id), rows, from, to)
+    }
+
+    fn new(
+        market: &str,
+        instrument: Selection,
+        rows: Rows,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Self {
         Self {
-            market: series.market().to_owned(),
-            symbol: series.symbol().to_owned(),
-            timeframe: Timeframe::Tick,
+            market: market.to_owned(),
+            instrument,
+            rows,
             from,
             to,
             adjusted: 0,
@@ -85,18 +172,43 @@ impl fmt::Display for ExportQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             market,
-            symbol,
-            timeframe,
+            instrument,
+            rows,
             from,
             to,
             ..
         } = self;
-        let rows = match timeframe {
-            Timeframe::Tick => "trade slice",
-        };
         write!(
             f,
-            "the {rows} of {symbol} in LSE's {market} over [{from}, {to})"
+            "the {rows} of {instrument} in LSE's {market} over [{from}, {to})"
+        )
+    }
+}
+
+/// A lookup of LSE's catalogue (`/v3/pairs`): the listings of one symbol,
+/// exactly, in one market. A symbol names a few listings, one page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PairsQuery {
+    market: String,
+    symbol: String,
+}
+
+impl PairsQuery {
+    /// The listings of `symbol` in LSE's `market`.
+    pub(crate) fn new(market: &str, symbol: &str) -> Self {
+        Self {
+            market: market.to_owned(),
+            symbol: symbol.to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for PairsQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the listings of {} in LSE's {}",
+            self.symbol, self.market
         )
     }
 }
@@ -109,7 +221,12 @@ mod tests {
 
     fn gold(from: &str, to: &str) -> ExportQuery {
         let gold = LseSymbol::new("futures", "GOLD").unwrap();
-        ExportQuery::trades(&gold, from.parse().unwrap(), to.parse().unwrap())
+        ExportQuery::series(
+            &gold,
+            Rows::TradeSlice,
+            from.parse().unwrap(),
+            to.parse().unwrap(),
+        )
     }
 
     #[rstest]

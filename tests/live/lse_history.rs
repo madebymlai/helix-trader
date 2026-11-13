@@ -1,10 +1,15 @@
 //! End to end on LSE: fill-catalog fills one UTC day, Thursday 12 November
-//! 2026, of LSE's gold and 10-year Treasury futures trades,
-//! `GOLD-FUTURES.LSEDGE` and `US10Y-FUTURES.LSEDGE`, into a temporary
-//! catalog holding their definitions, written by hand as LSE publishes
-//! none, through the node from LSE's exports. It needs the LSE key,
-//! `LSE_API_KEY`, from the environment or `.env`; the free key serves both
-//! series. The day's exports count against the key's rows a day.
+//! 2026, into a temporary catalog, through the node from LSE's exports: of
+//! LSE's gold and 10-year Treasury futures trades, `GOLD-FUTURES.LSEDGE`
+//! and `US10Y-FUTURES.LSEDGE`, the catalog holding their definitions,
+//! written by hand as LSE publishes none; and of the trades and quotes of
+//! GCZ6 of 2026, `GCZ26.GLBX`, from LSE's CME Globex, its definition from
+//! Databento. It needs the LSE key, `LSE_API_KEY`, a CME Group key,
+//! `LSE_CME_API_KEY`, and Databento's, `DATABENTO_API_KEY`, from the
+//! environment or `.env`; the free LSE key serves the derived series, CME
+//! Group Lite+ the CME contract's Level 1. The derived series' exports
+//! count against the free key's rows a day; Databento charges about
+//! $0.000001 for the definition.
 //!
 //! Gated as `okx_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
@@ -31,6 +36,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 const US10Y: &str = "US10Y-FUTURES.LSEDGE";
+const GCZ26: &str = "GCZ26.GLBX";
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
 /// that the file cannot opt in.
@@ -65,6 +71,24 @@ fn index(id: &str, raw: &str, tick: &str) -> InstrumentAny {
     )
 }
 
+/// The UTC day filled, Thursday 12 November 2026: `[start, end]`.
+fn the_12th() -> (Timestamp, Timestamp) {
+    let start: Timestamp = "2026-11-12T00:00:00Z".parse().unwrap();
+    (
+        start,
+        start + SignedDuration::from_hours(24) - SignedDuration::from_nanos(1),
+    )
+}
+
+/// fill-catalog's venue flags, none given.
+fn venues() -> HistoryVenueArgs {
+    HistoryVenueArgs::from_arg_matches(
+        &HistoryVenueArgs::augment_args(Command::new("fill-catalog"))
+            .get_matches_from(["fill-catalog"]),
+    )
+    .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
     if !opted_in("a_day_of_gold_and_treasury_futures_trades_fills_from_lse") {
@@ -90,15 +114,9 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
             .to_vec(),
         warmup: SignedDuration::ZERO,
     };
-    let start: Timestamp = "2026-11-12T00:00:00Z".parse().unwrap();
-    let end = start + SignedDuration::from_hours(24) - SignedDuration::from_nanos(1);
-    let venues = HistoryVenueArgs::from_arg_matches(
-        &HistoryVenueArgs::augment_args(Command::new("fill-catalog"))
-            .get_matches_from(["fill-catalog"]),
-    )
-    .unwrap();
+    let (start, end) = the_12th();
 
-    fill_history(&requirements, start, end, &venues, dir.path())
+    fill_history(&requirements, start, end, &venues(), dir.path())
         .await
         .unwrap();
 
@@ -123,5 +141,74 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
             )
             .unwrap();
         assert_eq!(lacking, [], "{id}");
+    }
+}
+
+/// A day of GCZ6 of 2026's quotes, about 2.7 million, is past the 2,500,000
+/// rows one export may read, so LSE is asked for it in halves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definition_from_databento() {
+    if !opted_in(
+        "a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definition_from_databento",
+    ) {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: [NautilusDataType::TradeTick, NautilusDataType::QuoteTick]
+            .map(|data| TickSeries {
+                data,
+                instrument_id: InstrumentId::from(GCZ26),
+            })
+            .to_vec(),
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_12th();
+
+    fill_history(&requirements, start, end, &venues(), dir.path())
+        .await
+        .unwrap();
+
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let definitions = catalog
+        .instruments(Some(&[GCZ26.to_string()]), None, None)
+        .unwrap();
+    let [InstrumentAny::FuturesContract(definition)] = &definitions[..] else {
+        panic!("{GCZ26}: {definitions:?}");
+    };
+    assert_eq!(definition.raw_symbol.as_str(), "GCZ6");
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let trades = catalog
+        .trade_ticks(Some(vec![GCZ26.to_string()]), None, None)
+        .unwrap();
+    let quotes = catalog
+        .quote_ticks(Some(vec![GCZ26.to_string()]), None, None)
+        .unwrap();
+    println!("{GCZ26}: {} trades, {} quotes", trades.len(), quotes.len());
+    assert!(!trades.is_empty() && !quotes.is_empty());
+    assert!(
+        trades.iter().all(|t| (from..=to).contains(&t.ts_event)
+            && t.aggressor_side == AggressorSide::NoAggressor
+            && t.price.precision == definition.price_precision),
+        "a trade outside the day, with a side or off the definition's precision"
+    );
+    assert!(
+        quotes
+            .iter()
+            .all(|q| (from..=to).contains(&q.ts_event) && q.bid_price < q.ask_price),
+        "a quote outside the day or crossed"
+    );
+    for data in [NautilusDataType::TradeTick, NautilusDataType::QuoteTick] {
+        let lacking = catalog
+            .get_missing_intervals_for_request(
+                from.as_u64(),
+                to.as_u64(),
+                &data.clone().into(),
+                Some(GCZ26),
+            )
+            .unwrap();
+        assert_eq!(lacking, [], "{data}");
     }
 }

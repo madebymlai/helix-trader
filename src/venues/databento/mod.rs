@@ -1,16 +1,15 @@
-//! Databento history of `GLBX` instruments (CME Globex, `GLBX.MDP3`),
+//! Databento definitions of `GLBX` instruments (CME Globex, `GLBX.MDP3`),
 //! filled through the node (see `catalog::NodeFill`) by Nautilus' Databento
 //! data client (`DatabentoDataClient`), whose answers the data engine
-//! writes back to the catalog: definitions, MBP-10 as `OrderBookDepth`
-//! snapshots, trades as `TradeTick`s, quotes, each contract under its own
-//! id. What stays here is what Nautilus' client does not do: the dataset's
-//! end, checked before the node starts, and the period each series is
-//! asked in. See `README.md`.
+//! writes back to the catalog, each contract under its own id; their
+//! history is LSE's (see `lse`). What stays here is what Nautilus' client
+//! does not do: the dataset's end, checked before the node starts. See
+//! `README.md`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, ensure};
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_databento::{
     common::Credential,
@@ -19,8 +18,11 @@ use nautilus_databento::{
     historical::{DatabentoHistoricalClient, DatasetRange},
 };
 
-use super::{DefinitionsSource, HistorySource, Row};
+use super::{DefinitionsSource, Row};
 use crate::catalog::{FillData, FillRequest, NodeClient};
+
+#[cfg(test)]
+pub(super) mod testing;
 
 /// Nautilus' map of Databento publishers to venues, copied from
 /// `crates/adapters/databento/publishers.json` at the pinned commit: the
@@ -33,13 +35,7 @@ const PUBLISHERS: &str = concat!(
 /// The Databento dataset of `GLBX` instruments.
 const DATASET: &str = "GLBX.MDP3";
 
-/// The window of one request of any series: a day. A busy day of
-/// COMEX gold MBP-10 is about 7 million snapshots, some 7.5 GB decoded,
-/// which Nautilus' write copies once more; Databento answers each request
-/// after a wait that shorter windows only multiply.
-const DAY: SignedDuration = SignedDuration::from_hours(24);
-
-/// Databento's historical API, for the history of `GLBX` instruments.
+/// Databento's historical API, for the definitions of `GLBX` instruments.
 #[derive(Debug)]
 pub struct DatabentoHistory {
     /// Nautilus' historical client, for the dataset's end.
@@ -63,41 +59,44 @@ impl DatabentoHistory {
             false,
         )
         .context("building Databento's client")?;
-        // GLBX instruments on GLBX, not their exchanges' MICs; bars stamped
-        // at their close, Nautilus' default, as IB's are.
-        let config =
-            DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, true);
+        Ok(Self {
+            metadata,
+            config: config(api_key),
+        })
+    }
+
+    /// The clients, with `api_key`, on the historical API at `base_url`, a
+    /// mock peer's.
+    #[cfg(test)]
+    pub(super) fn with_base_url(api_key: &str, base_url: &str) -> anyhow::Result<Self> {
+        let metadata = DatabentoHistoricalClient::new_with_base_url(
+            Credential::new(api_key),
+            PathBuf::from(PUBLISHERS),
+            get_atomic_clock_realtime(),
+            false,
+            base_url,
+        )?;
+        let mut config = config(api_key);
+        config.historical_base_url = Some(base_url.to_owned());
         Ok(Self { metadata, config })
     }
 
-    /// The window one request of any series holds at most (see
-    /// `NodeFill::add`): a day.
-    #[must_use]
-    pub fn period(_data: FillData) -> SignedDuration {
-        DAY
-    }
-
-    /// Checks `requests`, of `GLBX` instruments (see `catalog::missing`),
-    /// against the dataset's end, before any data is asked for.
+    /// Checks `requests` (see `catalog::missing`), definitions of `GLBX`
+    /// instruments, against the dataset's end, before any is asked for.
     ///
     /// # Errors
     ///
-    /// Returns an error if a request is not Databento's in its instrument's
-    /// row of the routing table, a definition of an instrument Databento
-    /// defines or a series of one it gives the history of (before any
+    /// Returns an error if a request is not a definition of an instrument
+    /// Databento defines in its row of the routing table (before any
     /// request), if one ends at or past the data Databento has (a request
     /// over it would fail), or if the metadata request fails.
     pub async fn check(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
         for request in requests {
-            let row = Row::of(request.instrument_id.venue);
-            let databento_gives = match request.data {
-                FillData::Instrument => row.definitions == DefinitionsSource::Databento,
-                _ => row.history == HistorySource::Databento,
-            };
             ensure!(
-                databento_gives,
-                "Databento serves GLBX instruments here, not {}",
-                request.instrument_id
+                request.data == FillData::Instrument
+                    && Row::of(request.instrument_id.venue).definitions
+                        == DefinitionsSource::Databento,
+                "Databento gives the definitions of GLBX instruments here, not {request}"
             );
         }
         let Some(end) = requests.iter().map(|request| request.to).max() else {
@@ -122,6 +121,12 @@ impl DatabentoHistory {
             config: Box::new(self.config.clone()),
         }
     }
+}
+
+/// The config of Nautilus' data client with `api_key`: `GLBX` instruments
+/// on `GLBX`, not their exchanges' MICs, as IB maps them.
+fn config(api_key: &str) -> DatabentoDataClientConfig {
+    DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, true)
 }
 
 /// The exclusive end of `range`, which Nautilus' client gives as the
@@ -152,6 +157,8 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+
+    use jiff::SignedDuration;
 
     use super::*;
     use crate::{
@@ -203,19 +210,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_series_is_asked_a_day_a_request() {
-        for data in [
-            FillData::Depth,
-            FillData::Deltas,
-            FillData::Trades,
-            FillData::Quotes,
-        ] {
-            assert_eq!(
-                DatabentoHistory::period(data),
-                SignedDuration::from_hours(24)
-            );
-        }
+    /// GLBX's history is LSE's.
+    #[tokio::test]
+    async fn a_series_of_glbx_is_refused_before_any_request() {
+        let history = DatabentoHistory::new(&format!("db-{}", "0".repeat(29))).unwrap();
+        let request = FillRequest {
+            data: FillData::Trades,
+            instrument_id: InstrumentId::from("GCZ26.GLBX"),
+            from: ts("2026-10-26T00:00:00Z"),
+            to: ts("2026-10-26T12:00:00Z"),
+        };
+
+        let err = history.check(&[request]).await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("the trades of GCZ26.GLBX"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

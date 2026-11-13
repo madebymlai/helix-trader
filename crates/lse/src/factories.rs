@@ -28,14 +28,15 @@ impl LseDataClientFactory {
 }
 
 impl DataClientFactory for LseDataClientFactory {
-    /// The client named `name`, on its config's key and API, reading the
-    /// instruments it converts data of from `cache`.
+    /// The client named `name`, on its config's keys and API, each key not
+    /// given read from its variable, reading the instruments it converts
+    /// data of from `cache`.
     ///
     /// # Errors
     ///
     /// Returns an error if `config` is not an `LseDataClientConfig`, if no
-    /// key is given or in `LSE_API_KEY`, or if the HTTP client cannot be
-    /// built.
+    /// key is given or in `LSE_API_KEY` or `LSE_CME_API_KEY`, or if an HTTP
+    /// client cannot be built.
     fn create(
         &self,
         name: &str,
@@ -53,6 +54,7 @@ impl DataClientFactory for LseDataClientFactory {
             ClientId::from(name),
             config,
             cache,
+            |name| std::env::var(name).ok(),
         )?))
     }
 

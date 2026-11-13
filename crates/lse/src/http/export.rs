@@ -130,8 +130,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        common::{credential::LseCredential, symbol::LseSymbol},
-        http::client::LseHttpClient,
+        common::{
+            credential::{LseCredential, LseProduct},
+            symbol::LseSymbol,
+        },
+        http::{client::LseHttpClient, query::Rows},
         testing::{
             API_KEY, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, EXPORT_ID, EXPORT_TOO_WIDE,
             GOLD_TRADES, MockLse, Reply,
@@ -139,8 +142,12 @@ mod tests {
     };
 
     fn client(lse: &MockLse) -> LseHttpClient {
-        let credential =
-            LseCredential::resolve(Some(SecretString::from(API_KEY)), |_| None).unwrap();
+        let credential = LseCredential::resolve(
+            LseProduct::Global,
+            Some(SecretString::from(API_KEY)),
+            |_| None,
+        )
+        .unwrap();
         LseHttpClient::new(
             lse.url().to_string(),
             &credential,
@@ -156,7 +163,7 @@ mod tests {
     /// GOLD's trades in `futures` over `[from, to)`.
     fn gold(from: &str, to: &str) -> ExportQuery {
         let gold = LseSymbol::new("futures", "GOLD").unwrap();
-        ExportQuery::trades(&gold, at(from), at(to))
+        ExportQuery::series(&gold, Rows::TradeSlice, at(from), at(to))
     }
 
     /// The spans LSE was asked for, in order.

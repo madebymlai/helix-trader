@@ -60,6 +60,13 @@ impl LseHttpError {
         }
     }
 
+    /// Whether LSE holds no row of the export: a 404 saying no stored row
+    /// is in the selection or no session in its dates. A 400
+    /// `data-unavailable` says the market serves no such rows at all.
+    pub(crate) fn is_no_rows(&self) -> bool {
+        matches!(self, Self::Refusal { status: 404, refusal, .. } if refusal.is_no_rows())
+    }
+
     /// Whether LSE refused the export as too wide: shorter dates may be
     /// served.
     pub(crate) fn is_too_wide(&self) -> bool {

@@ -24,7 +24,8 @@
 //! `RoutingConfig` are already the seam, and the venues' needs differ too much
 //! for a trait to hide them. OKX needs a leverage, IB an account, a client id
 //! and its fill after the node's, Databento an API key and its own check,
-//! LSE a key and definitions written into the catalog by hand.
+//! LSE a key per market and, for its own series, definitions written into
+//! the catalog by hand.
 
 pub mod databento;
 pub mod ib;
@@ -138,8 +139,6 @@ pub(crate) enum HistorySource {
     Okx,
     /// A cTrader broker's tick history.
     CTrader(CTraderBroker),
-    /// Databento's `GLBX.MDP3` dataset.
-    Databento,
     /// LSE's exports, through the LSE adapter's data client.
     Lse,
     /// Interactive Brokers' historical bars.
@@ -232,12 +231,13 @@ impl Row {
 
     /// The row of `venue`. A venue of `CTRADER_BROKERS` takes everything
     /// from its broker, and OKX from OKX. GLBX, CME Globex as Databento
-    /// names it, takes its definitions and history from Databento and its
-    /// live data and orders from IB, Databento having no live clients
-    /// here. LSEDGE, LSE's own series, takes its definitions from the
-    /// catalog alone, LSE publishing none, its history and live data from
-    /// LSE, and has no broker: LSE trades nothing. Every venue without a
-    /// row of its own takes everything from IB.
+    /// names it, takes its definitions from Databento, LSE publishing
+    /// none, its history from LSE's CME Globex, and its live data and
+    /// orders from IB, the LSE adapter streaming nothing yet. LSEDGE, LSE's
+    /// own series, takes its definitions from the catalog alone, its
+    /// history and live data from LSE, and has no broker: LSE trades
+    /// nothing. Every venue without a row of its own takes everything from
+    /// IB.
     #[rustfmt::skip]
     fn of(venue: Venue) -> Self {
         use {Broker as B, DefinitionsSource as D, HistorySource as H, LiveDataSource as L};
@@ -249,7 +249,7 @@ impl Row {
         match venue.as_str() {
             //                    definitions   history       live data  broker
             "OKX"    => Self::new(D::Okx,       H::Okx,       L::Okx,    Some(B::Okx)),
-            "GLBX"   => Self::new(D::Databento, H::Databento, L::Ib,     Some(B::Ib)),
+            "GLBX"   => Self::new(D::Databento, H::Lse,       L::Ib,     Some(B::Ib)),
             "LSEDGE" => Self::new(D::Catalog,   H::Lse,       L::Lse,    None),
             _        => Self::new(D::Ib,        H::Ib,        L::Ib,     Some(B::Ib)),
         }
@@ -371,31 +371,32 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// `requirements` reads over `[start, end]`, those its bars are built from
 /// and its ticks (see `DataRequirements::catalog_series`), each on a contract
 /// over its slice (`DataRequirements::slices`), every history source
-/// (`Row::of`, `HistorySource`) given its slices. Databento's, the cTrader
-/// brokers', OKX's and LSE's fill through a Nautilus node (see
-/// `catalog::NodeFill`), each request naming the client that answers it:
-/// Databento's data client for GLBX instruments (the series declared,
-/// checked against the dataset's end before the node starts), each cTrader
-/// broker's for its own (`add_ctrader_fill`), OKX's for OKX instruments
-/// (their series and funding) and LSE's for LSEDGE instruments
-/// (`lse::add_fill`). Then IB, connected only if it has instruments, on the
-/// client id of `venues`, fills the others, without a node until its client
-/// answers with response envelopes. Databento, the cTrader brokers and IB
-/// ask the definition of each contract they fill the series of, each row
-/// giving both to one source; OKX writes the definitions it gives
-/// (`DefinitionsSource`) before the node starts; LSEDGE's are the catalog's
-/// alone, which the data engine answers LSE's client's definition requests
-/// from. The cTrader brokers, LSE and IB refuse a series they do not serve.
-/// A source with nothing missing reads no credential, IB's connection aside.
+/// (`Row::of`, `HistorySource`) given its slices. The cTrader brokers', OKX's
+/// and LSE's fill through a Nautilus node (see `catalog::NodeFill`), each
+/// request naming the client that answers it: each cTrader broker's data
+/// client for its own instruments (`add_ctrader_fill`), OKX's for OKX
+/// instruments (their series and funding) and LSE's for LSEDGE and GLBX
+/// instruments (`lse::add_fill`). Then IB, connected only if it has
+/// instruments, on the client id of `venues`, fills the others, without a
+/// node until its client answers with response envelopes. Each contract's
+/// definition comes from its row's definitions source (`DefinitionsSource`):
+/// the cTrader brokers and IB ask the definition of each contract they fill
+/// the series of; OKX writes the definitions it gives before the node
+/// starts; GLBX's are asked of Databento's data client in LSE's fill, after
+/// a check against the dataset's end; LSEDGE's are the catalog's alone,
+/// which the data engine answers LSE's client's definition requests from.
+/// The cTrader brokers, LSE and IB refuse a series they do not serve. A
+/// source with nothing missing reads no credential, IB's connection aside.
 ///
 /// # Errors
 ///
 /// Returns an error if the catalog cannot be read, if `DATABENTO_API_KEY` is
-/// missing while Databento has something to fill, or as
-/// `DatabentoHistory::new`, `DatabentoHistory::check`, `add_ctrader_fill`,
-/// `OkxHistory::write_definitions`, `lse::add_fill`, `NodeFill::run`
-/// (`LSE_API_KEY` missing while LSE has something to fill among them),
-/// `IbHistory::connect` and `IbHistory::fill`.
+/// missing while Databento has a definition to give, or as
+/// `add_ctrader_fill`, `OkxHistory::write_definitions`, `lse::add_fill`
+/// (`DatabentoHistory::new` and `DatabentoHistory::check` among them),
+/// `NodeFill::run` (`LSE_API_KEY` or `LSE_CME_API_KEY` missing while LSE
+/// has something to fill of its market among them), `IbHistory::connect`
+/// and `IbHistory::fill`.
 pub async fn fill_history(
     requirements: &DataRequirements,
     start: Timestamp,
@@ -404,12 +405,11 @@ pub async fn fill_history(
     catalog_dir: &Path,
 ) -> anyhow::Result<()> {
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    let (mut okx_ids, mut databento_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
         match Row::of(id.venue).history {
             HistorySource::Okx => okx_ids.push(id),
-            HistorySource::Databento => databento_ids.push(id),
             HistorySource::CTrader(broker) => ctrader_ids.push((broker, id)),
             HistorySource::Lse => lse_ids.push(id),
             HistorySource::Ib => ib_ids.push(id),
@@ -419,16 +419,6 @@ pub async fn fill_history(
     // root's series contract by contract, each over its slice.
     let slices = requirements.slices(start, end);
     let mut node = NodeFill::new();
-    if !databento_ids.is_empty() {
-        let requests = missing(&catalog, &of_source(&slices, HistorySource::Databento))?;
-        if !requests.is_empty() {
-            let api_key =
-                std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
-            let databento = DatabentoHistory::new(&api_key)?;
-            databento.check(&requests).await?;
-            node.add(databento.node_client(), &requests, DatabentoHistory::period);
-        }
-    }
     for (broker, ids) in ctrader_brokers_present(&ctrader_ids) {
         add_ctrader_fill(
             &mut node,
@@ -458,7 +448,13 @@ pub async fn fill_history(
             &catalog,
             &of_source(&slices, HistorySource::Lse),
             LseDataClientConfig::default(),
-        )?;
+            || {
+                let api_key =
+                    std::env::var("DATABENTO_API_KEY").context("reading DATABENTO_API_KEY")?;
+                DatabentoHistory::new(&api_key)
+            },
+        )
+        .await?;
     }
     node.run(catalog_dir).await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
@@ -1175,7 +1171,7 @@ mod tests {
     }
 
     /// GC.GLBX rolls from GCQ26 to GCZ26 at 00:00 UTC on 29 July 2026: its
-    /// slices are Databento's, contract by contract.
+    /// slices are LSE's, contract by contract, as LSEDGE's are.
     #[test]
     fn each_history_source_takes_the_slices_of_its_own_contracts() {
         let requirements = ticks(&[
@@ -1195,8 +1191,8 @@ mod tests {
         };
 
         assert_eq!(
-            contracts(HistorySource::Databento),
-            ["GCQ26.GLBX", "GCZ26.GLBX"]
+            contracts(HistorySource::Lse),
+            ["GCQ26.GLBX", "GCZ26.GLBX", "GOLD-FUTURES.LSEDGE"]
         );
         assert_eq!(
             contracts(HistorySource::CTrader(ic::BROKER)),
@@ -1208,7 +1204,6 @@ mod tests {
         );
         assert_eq!(contracts(HistorySource::Okx), ["BTC-USDT-SWAP.OKX"]);
         assert_eq!(contracts(HistorySource::Ib), ["SXR8.IBIS"]);
-        assert_eq!(contracts(HistorySource::Lse), ["GOLD-FUTURES.LSEDGE"]);
     }
 
     /// Only a venue no broker trades, LSEDGE, has none.
@@ -1304,8 +1299,8 @@ mod tests {
         }
     }
 
-    /// GLBX takes its definitions and history from Databento and its live
-    /// data and orders from IB; OKX and each cTrader broker take all four
+    /// GLBX takes its definitions from Databento, its history from LSE and
+    /// its live data and orders from IB; OKX and each cTrader broker take all four
     /// from themselves; LSEDGE its definitions from the catalog and its
     /// history and live data from LSE, with no broker; and every other
     /// venue all four from IB.
@@ -1325,7 +1320,7 @@ mod tests {
         };
         let glbx = Row {
             definitions: DefinitionsSource::Databento,
-            history: HistorySource::Databento,
+            history: HistorySource::Lse,
             live_data: LiveDataSource::Ib,
             broker: Some(Broker::Ib),
         };
@@ -1365,7 +1360,10 @@ mod tests {
     #[test]
     fn the_table_s_venues_are_their_adapters() {
         assert_eq!(Row::of(*OKX_VENUE).history, HistorySource::Okx);
-        assert_eq!(Row::of(Venue::GLBX()).history, HistorySource::Databento);
+        assert_eq!(
+            Row::of(Venue::GLBX()).definitions,
+            DefinitionsSource::Databento
+        );
         assert_eq!(Row::of(*LSEDGE_VENUE).history, HistorySource::Lse);
     }
 
