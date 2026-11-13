@@ -62,9 +62,10 @@ pub struct Backtest {
     pub ticks: Vec<TickSeries>,
     /// The custom data of no instrument the strategy reads (see
     /// `strategy::DataRequirements::custom`): each series replayed over the
-    /// window, beside the others, its type registered with Nautilus by the
-    /// code declaring it (`lse::LseRow::register`), as Nautilus decodes
-    /// custom data by its type's name.
+    /// window, beside the others, each row when it is known (`lse::LseRow`:
+    /// a date's at its end). The run registers the types the venues'
+    /// sources serve with Nautilus, which decodes custom data by its type's
+    /// name (`venues::register_custom_data`).
     pub custom: Vec<DataType>,
     pub start: Timestamp,
     pub end: Timestamp,

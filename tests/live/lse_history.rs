@@ -3,11 +3,12 @@
 //! `GOLD-FUTURES.LSEDGE` and `US10Y-FUTURES.LSEDGE`, and of its gold spot
 //! candles as 1-minute bars, `XAU/USD-COMMODITIES.LSEDGE`, a series LSE
 //! serves only as candles, into a temporary catalog holding their
-//! definitions, written by hand as LSE publishes none, and of LSE's daily
-//! 10-year US bond yield, custom data of no instrument (`lse::LseRow`),
-//! through the node from LSE's exports. It needs the LSE key, `LSE_API_KEY`, from the
-//! environment or `.env`; the free key serves every series. The day's
-//! exports count against the key's rows a day.
+//! definitions, written by hand as LSE publishes none, and that day's row
+//! of LSE's daily 10-year US bond yield, custom data of no instrument
+//! (`lse::LseRow`) known at the day's end, through the node from LSE's
+//! exports. It needs the LSE key, `LSE_API_KEY`, from the environment or
+//! `.env`; the free key serves every series. The day's exports count
+//! against the key's rows a day.
 //!
 //! Gated as `okx_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
@@ -193,6 +194,8 @@ async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_clos
     assert_eq!(lacking, []);
 }
 
+/// The day's row, its close known at its end: the window from the day's
+/// start to the next day's holds it, stamped at the next day's 00:00.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
     if !opted_in("a_day_of_bond_yields_fills_from_lse_as_custom_data") {
@@ -207,7 +210,8 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
         custom: vec![us10y.clone()],
         warmup: SignedDuration::ZERO,
     };
-    let (start, end) = the_day();
+    let (start, _) = the_day();
+    let end = start + SignedDuration::from_hours(24);
 
     fill_history(&requirements, start, end, &history_venues(), dir.path())
         .await
@@ -239,12 +243,11 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
             custom.data.as_any().downcast_ref::<LseRow>().unwrap()
         })
         .collect();
-    assert_eq!(rows.len(), 1, "one daily row");
-    assert!(
-        rows.iter()
-            .all(|row| (from..=to).contains(&row.ts_init) && row.fields["close"].is_number()),
-        "a row outside the day or with no close: {rows:?}"
-    );
+    let [row] = &rows[..] else {
+        panic!("not one daily row: {rows:?}");
+    };
+    assert_eq!((row.ts_event, row.ts_init), (to, to), "{row:?}");
+    assert!(row.fields["close"].is_number(), "no close: {row:?}");
     let lacking = catalog
         .get_missing_intervals_for_request(
             from.as_u64(),

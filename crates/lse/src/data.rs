@@ -5,21 +5,21 @@
 //! a UTC day an export, one download at a time, an export LSE refuses as
 //! too wide asked again in halves (see `http::export`), and the rows of
 //! LSE's reference collections as custom data (`LseRow`), its source and
-//! symbol named in the metadata of the request's data type; its definitions
-//! request answers none, LSE publishing none. Every other request and every
-//! subscription is left to Nautilus' defaults: a request fails as
-//! unsupported, a subscription is logged as not implemented. A request is
-//! answered from a task, in one completed response envelope, the data
-//! engine writing it back to the catalog if asked (`update_catalog`); a
-//! failure is the envelope's, LSE's refusal with its code, message and
-//! required plan. A request of trades or bars reaching into the span LSE
-//! has not loaded yet, the current UTC day and the day before until LSE
-//! holds rows of it, is answered with what LSE holds in a plain response,
-//! which completes the request and which the data engine writes to no
-//! catalog (`DataEngine::response`: "Payload-only replies do not certify
-//! coverage for catalog write-back"), as Nautilus' OKX client answers a
-//! window it cannot confirm, so that a fill asks for it again; the span is
-//! logged.
+//! symbol named in the metadata of the request's data type, each row
+//! stamped when its values are known; its definitions request answers
+//! none, LSE publishing none. Every other request and every subscription
+//! is left to Nautilus' defaults: a request fails as unsupported, a
+//! subscription is logged as not implemented. A request is answered from a
+//! task, in one completed response envelope, the data engine writing it
+//! back to the catalog if asked (`update_catalog`); a failure is the
+//! envelope's, LSE's refusal with its code, message and required plan. A
+//! request reaching into the span LSE has not loaded yet, the current UTC
+//! day and the day before until LSE holds rows of it, is answered with what
+//! LSE holds in a plain response, which completes the request and which the
+//! data engine writes to no catalog (`DataEngine::response`: "Payload-only
+//! replies do not certify coverage for catalog write-back"), as Nautilus'
+//! OKX client answers a window it cannot confirm, so that a fill asks for it
+//! again; the span is logged.
 
 use std::{future::Future, num::NonZeroUsize, sync::Arc};
 
@@ -56,7 +56,7 @@ use crate::{
     config::LseDataClientConfig,
     http::{
         client::LseHttpClient,
-        export::fetch,
+        export::{fetch, loaded, midnight},
         parse::{parse_candles, parse_rows, parse_trade_slice},
         query::{CandleWidth, ExportQuery, ReferenceQuery},
     },
@@ -375,15 +375,18 @@ impl DataClient for LseDataClient {
 
     /// Answers with the rows of the reference collection and the symbol
     /// the request's data type names (`LseRow::data_type`: `source` and
-    /// `symbol` in its metadata) whose time is in `[start, end]` (end: now
-    /// if none), the newest `limit` if one is given, each an `LseRow` of
-    /// that data type, in one completed response envelope. LSE is asked
-    /// its catalogue, for the column of the collection's time, then the
-    /// collection's export over the UTC dates the window spans. A failure,
-    /// the data type not `LseRow`'s or naming no source or symbol, the
-    /// source no collection LSE lists, or LSE's refusal of a call, is the
-    /// envelope's, with no rows: LSE's refusal carries its code, message
-    /// and required plan.
+    /// `symbol` in its metadata) known over `[start, end]` (end: now if
+    /// none), each stamped when its values are known (`RowKey::span`: a
+    /// date at its end, an interval at its close), the newest `limit` if
+    /// one is given, each an `LseRow` of that data type, in one completed
+    /// response envelope; or in a plain response, logging the span, if the
+    /// last date asked is one LSE has not loaded yet (`http::export`'s
+    /// rule). LSE is asked its catalogue, for the collection's time column
+    /// and so its key, then the collection's export over the UTC dates of
+    /// the rows known in the window. A failure, the data type not
+    /// `LseRow`'s or naming no source or symbol, the source no collection
+    /// LSE lists, or LSE's refusal of a call, is the envelope's, with no
+    /// rows: LSE's refusal carries its code, message and required plan.
     fn request_data(&self, request: RequestCustomData) -> anyhow::Result<()> {
         let data_type = request.data_type.clone();
         let checked = (|| {
@@ -414,15 +417,13 @@ impl DataClient for LseDataClient {
                 return Ok(());
             }
         };
-        let end = request
-            .end
-            .unwrap_or_else(|| Timestamp::from(self.clock.get_time_ns()));
+        let now = Timestamp::from(self.clock.get_time_ns());
+        let end = request.end.unwrap_or(now);
         let http = Arc::clone(&self.http);
         let sender = self.data_sender.clone();
         let client_id = request.client_id;
         let clock = self.clock;
         self.spawn_request(async move {
-            let window = UnixNanos::from(start)..=UnixNanos::from(end);
             let fetched = async {
                 let collections = http
                     .reference_collections()
@@ -432,50 +433,79 @@ impl DataClient for LseDataClient {
                     .into_iter()
                     .find(|collection| collection.dataset == source)
                     .with_context(|| format!("LSE lists no reference collection {source}"))?;
-                let query = ReferenceQuery::new(&source, &symbol, utc_date(start), utc_date(end));
+                let key = collection.key();
+                // The rows known over `[start, end]`, each a span after its
+                // time (`RowKey::span`).
+                let (first, last) = (start - key.span(), end - key.span());
+                let query = ReferenceQuery::new(&source, &symbol, utc_date(first), utc_date(last));
                 let file = http
                     .reference_export(&query)
                     .await
                     .with_context(|| format!("exporting {query}"))?;
                 let rows = match file {
-                    Some(file) => parse_rows(file, &source, &symbol, &collection.time_column)
+                    Some(file) => parse_rows(file, &source, &symbol, &collection.time_column, key)
                         .with_context(|| format!("reading {query}"))?,
                     None => Vec::new(),
                 };
-                Ok::<_, anyhow::Error>(
-                    rows.into_iter()
-                        .filter(|row| window.contains(&row.ts_init))
-                        .map(|row| CustomData::new(Arc::new(row), data_type.clone()))
-                        .collect::<Vec<_>>(),
-                )
+                // The last date asked, of the rows known last, is the one
+                // LSE may not have loaded yet.
+                let rows_of_last = rows.iter().any(|row| {
+                    midnight(Timestamp::from(row.ts_init) - key.span()) == midnight(last)
+                });
+                let unloaded_from =
+                    (!loaded(last, rows_of_last, now)).then(|| midnight(last) + key.span());
+                let window = UnixNanos::from(start)..=UnixNanos::from(end);
+                let rows = rows
+                    .into_iter()
+                    .filter(|row| window.contains(&row.ts_init))
+                    .map(|row| CustomData::new(Arc::new(row), data_type.clone()))
+                    .collect::<Vec<_>>();
+                Ok::<_, anyhow::Error>((rows, unloaded_from))
             }
             .await;
-            let envelope = match fetched {
-                Ok(mut rows) => {
+            let event = match fetched {
+                Ok((mut rows, unloaded_from)) => {
                     if let Some(limit) = request.limit {
                         let excess = rows.len().saturating_sub(limit.get());
                         rows.drain(..excess);
                     }
-                    let response = CustomDataResponse::new(
+                    let count = rows.len();
+                    let response = DataResponse::Data(CustomDataResponse::new(
                         request.request_id,
                         client_id,
                         None,
-                        data_type,
+                        data_type.clone(),
                         rows,
                         datetime_to_unix_nanos(request.start),
                         datetime_to_unix_nanos(request.end),
                         clock.get_time_ns(),
                         request.params,
-                    );
-                    DataResponseEnvelope::new(DataResponse::Data(response), true, None)
+                    ));
+                    match unloaded_from {
+                        None => DataEvent::ResponseEnvelope(DataResponseEnvelope::new(
+                            response, true, None,
+                        )),
+                        Some(from) => {
+                            log::warn!(
+                                "{client_id}: LSE has not loaded the rows of {data_type} known \
+                                 over [{from}, {end}] yet, a date being stored the morning after \
+                                 it: answered with the {count} rows it holds, written to no \
+                                 catalog"
+                            );
+                            DataEvent::Response(response)
+                        }
+                    }
                 }
                 Err(e) => {
                     let reason = format!("{e:#}");
                     log::error!("{client_id} request failed: {reason}");
-                    DataResponseEnvelope::terminal(request.request_id, Some(reason))
+                    DataEvent::ResponseEnvelope(DataResponseEnvelope::terminal(
+                        request.request_id,
+                        Some(reason),
+                    ))
                 }
             };
-            send(&sender, DataEvent::ResponseEnvelope(envelope));
+            send(&sender, event);
         });
         Ok(())
     }
@@ -933,7 +963,9 @@ mod tests {
         UnixNanos::from(at(&format!("{date}T00:00:00Z")))
     }
 
-    /// The captured rows: of the 9th, 10th and 12th, each at its date.
+    /// The captured rows, of the 9th, 10th and 12th, each stamped at its
+    /// date's end, when its close is known: a window from the 10th's 00:00
+    /// to the 13th's is the dates of the 9th to the 12th.
     #[tokio::test]
     async fn a_custom_data_request_is_answered_with_lse_s_rows_in_one_complete_envelope() {
         let lse = MockLse::start(vec![
@@ -941,7 +973,7 @@ mod tests {
             Reply::file(US10Y_BOND_YIELDS),
         ]);
         let (client, mut events) = connected(&lse, false).await;
-        let mut request = bond_yields("2026-11-09T00:00:00Z", "2026-11-12T23:59:59.999999999Z");
+        let mut request = bond_yields("2026-11-10T00:00:00Z", "2026-11-13T00:00:00Z");
         let params = Params::new([("update_catalog".to_string(), serde_json::json!(true))].into());
         request.params = Some(params.clone());
         let id = request.request_id;
@@ -960,7 +992,7 @@ mod tests {
         let times: Vec<_> = rows.iter().map(CustomData::ts_init).collect();
         assert_eq!(
             times,
-            [day("2026-11-09"), day("2026-11-10"), day("2026-11-12")]
+            [day("2026-11-10"), day("2026-11-11"), day("2026-11-13")]
         );
         let [catalogue, export] = &lse.calls()[..] else {
             panic!("{:?}", lse.calls())
@@ -983,8 +1015,9 @@ mod tests {
         );
     }
 
-    /// LSE selects rows by date: the 10th's export, which the mock answers
-    /// with the three days, keeps the 10th's row alone.
+    /// The 11th's window is the 10th's date: its export, which the mock
+    /// answers with the three days, keeps the 10th's row alone, stamped at
+    /// the 11th's 00:00.
     #[tokio::test]
     async fn rows_outside_the_request_s_window_are_left_out() {
         let lse = MockLse::start(vec![
@@ -995,8 +1028,8 @@ mod tests {
 
         client
             .request_data(bond_yields(
-                "2026-11-10T00:00:00Z",
-                "2026-11-10T23:59:59.999999999Z",
+                "2026-11-11T00:00:00Z",
+                "2026-11-11T23:59:59.999999999Z",
             ))
             .unwrap();
 
@@ -1005,12 +1038,41 @@ mod tests {
             .iter()
             .map(CustomData::ts_init)
             .collect();
-        assert_eq!(times, [day("2026-11-10")]);
+        assert_eq!(times, [day("2026-11-11")]);
         let export = &lse.calls()[1];
         assert_eq!(
             (export.param("from"), export.param("to")),
             (Some("2026-11-10"), Some("2026-11-10"))
         );
+    }
+
+    /// From the start of the day before until now: the day before's row,
+    /// stamped at today's 00:00, is LSE's once it has loaded the day, the
+    /// morning after it (`http::export`), and LSE holds none of it yet. A
+    /// plain response completes the request, and the data engine writes it
+    /// to no catalog (`DataEngine::response`), so that a fill asks for the
+    /// window again.
+    #[tokio::test]
+    async fn a_request_reaching_into_a_day_lse_has_not_loaded_is_answered_unwritten() {
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::refusal(404, REFERENCE_DATA_UNAVAILABLE),
+        ]);
+        let (client, mut events) = connected(&lse, false).await;
+        let today = Timestamp::from_second(Timestamp::now().as_second() / 86_400 * 86_400).unwrap();
+        let mut request = bond_yields("2026-11-10T00:00:00Z", "2026-11-13T00:00:00Z");
+        request.start = Some(today - SignedDuration::from_hours(24));
+        request.end = None;
+        let id = request.request_id;
+
+        client.request_data(request).unwrap();
+
+        let event = next_event(&mut events).await;
+        let DataEvent::Response(DataResponse::Data(response)) = event else {
+            panic!("not a plain custom data response: {event:?}");
+        };
+        assert_eq!(response.correlation_id, id);
+        assert_eq!(custom_data(&response), []);
     }
 
     #[tokio::test]
@@ -1023,14 +1085,19 @@ mod tests {
 
         client
             .request_data(bond_yields(
-                "2026-11-07T00:00:00Z",
-                "2026-11-08T23:59:59.999999999Z",
+                "2026-11-08T00:00:00Z",
+                "2026-11-09T23:59:59.999999999Z",
             ))
             .unwrap();
 
         let envelope = next_envelope(&mut events).await;
         assert_eq!(envelope.failure_reason(), None);
         assert_eq!(custom_data(&rows_in(&envelope)), []);
+        let export = &lse.calls()[1];
+        assert_eq!(
+            (export.param("from"), export.param("to")),
+            (Some("2026-11-07"), Some("2026-11-08"))
+        );
     }
 
     #[tokio::test]

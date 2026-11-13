@@ -239,6 +239,7 @@ pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCros
                 BarSpecification::new(1, BarAggregation::Hour, PriceType::Mid),
                 AggregationSource::Internal,
             ))],
+            custom: vec![],
             warmup: LIVE_WARMUP,
             session,
         },

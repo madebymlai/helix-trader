@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use jiff::SignedDuration;
 use serde::Deserialize;
 
 /// The codes of an export LSE holds no row of: no stored row in the
@@ -54,6 +55,53 @@ pub(crate) struct ReferenceCatalogue {
 pub(crate) struct ReferenceCollection {
     pub(crate) dataset: String,
     pub(crate) time_column: String,
+}
+
+/// LSE's reference collections of a row an interval, each keyed by the
+/// open of its interval (`ts`), and the interval's width: the bond yields
+/// at 1, 5, 15 and 30 minutes, an hour (`bond_yields_hourly`, and
+/// `bond_yields_intraday`, LSE's "Hourly bond yields") and 4 hours (LSE's
+/// catalogue, `/v3/reference`; `test_data/README.md`: a 4-hour row of
+/// 20:00 closes at the day's close).
+const INTERVALS: &[(&str, SignedDuration)] = &[
+    ("bond_yields_minute", SignedDuration::from_mins(1)),
+    ("bond_yields_five_minute", SignedDuration::from_mins(5)),
+    ("bond_yields_fifteen_minute", SignedDuration::from_mins(15)),
+    ("bond_yields_thirty_minute", SignedDuration::from_mins(30)),
+    ("bond_yields_hourly", SignedDuration::from_hours(1)),
+    ("bond_yields_intraday", SignedDuration::from_hours(1)),
+    ("bond_yields_four_hour", SignedDuration::from_hours(4)),
+];
+
+/// What a reference collection keys its rows by, its time column: a date,
+/// a row of each, or the open of an interval of a width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowKey {
+    Date,
+    Open(SignedDuration),
+}
+
+impl RowKey {
+    /// How long after its key a row's values are all known: a date's day,
+    /// an interval's width. A row is stamped then, as a candle is at its
+    /// close, so that no reader sees a value before it is known.
+    pub(crate) fn span(self) -> SignedDuration {
+        match self {
+            Self::Date => SignedDuration::from_hours(24),
+            Self::Open(width) => width,
+        }
+    }
+}
+
+impl ReferenceCollection {
+    /// What the collection keys its rows by: the open of its interval for
+    /// LSE's interval collections (`INTERVALS`), a date for every other.
+    pub(crate) fn key(&self) -> RowKey {
+        INTERVALS
+            .iter()
+            .find(|(dataset, _)| *dataset == self.dataset)
+            .map_or(RowKey::Date, |&(_, width)| RowKey::Open(width))
+    }
 }
 
 impl LseRefusal {
@@ -117,6 +165,39 @@ mod tests {
     fn an_export_past_the_rows_one_export_may_read_is_too_wide() {
         assert!(refusal(EXPORT_TOO_WIDE).is_too_wide());
         assert!(!refusal(ROWS_EXHAUSTED).is_too_wide());
+    }
+
+    fn collection(dataset: &str) -> ReferenceCollection {
+        ReferenceCollection {
+            dataset: dataset.to_string(),
+            time_column: "date".to_string(),
+        }
+    }
+
+    /// LSE's catalogue lists the bond yields at every interval beside the
+    /// daily ones; its other collections key their rows by date.
+    #[rstest]
+    #[case::daily("bond_yields", RowKey::Date)]
+    #[case::four_hours("bond_yields_four_hour", RowKey::Open(SignedDuration::from_hours(4)))]
+    #[case::hourly("bond_yields_intraday", RowKey::Open(SignedDuration::from_hours(1)))]
+    #[case::a_minute("bond_yields_minute", RowKey::Open(SignedDuration::from_mins(1)))]
+    #[case::cot("cot", RowKey::Date)]
+    fn a_collection_keys_its_rows_by_date_or_by_the_open_of_its_interval(
+        #[case] dataset: &str,
+        #[case] key: RowKey,
+    ) {
+        assert_eq!(collection(dataset).key(), key);
+    }
+
+    /// A row of a date is known at the date's end, one of an interval at
+    /// its close.
+    #[rstest]
+    fn a_row_is_known_a_day_or_an_interval_after_its_key() {
+        assert_eq!(RowKey::Date.span(), SignedDuration::from_hours(24));
+        assert_eq!(
+            RowKey::Open(SignedDuration::from_hours(4)).span(),
+            SignedDuration::from_hours(4)
+        );
     }
 
     #[test]
