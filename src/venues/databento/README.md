@@ -1,6 +1,6 @@
 # Databento history
 
-`fill-catalog` fills the history of `GLBX` instruments from Databento's `GLBX.MDP3` dataset through the [node fill](../../catalog/README.md); [IB](../ib/README.md) trades them live (see the [routing table](../mod.rs)). Set `DATABENTO_API_KEY` in the environment or `.env`. The declared series can include MBP-10 depth, MBO deltas, trades or quotes; custom historical data is refused.
+`fill-catalog` fills the definitions and history of `GLBX` instruments from Databento's `GLBX.MDP3` dataset through the [node fill](../../catalog/README.md), each request naming Databento's client; [IB](../ib/README.md) serves their live data and trades them (see the [routing table](../mod.rs)). Set `DATABENTO_API_KEY` in the environment or `.env`. The declared series can include MBP-10 depth, MBO deltas, trades or quotes; custom historical data is refused.
 
 Before starting the node, the fill checks the dataset's available end. The dataset lags real time, so an end beyond its available range is refused.
 

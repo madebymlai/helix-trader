@@ -18,10 +18,8 @@ use nautilus_databento::{
     factories::DatabentoDataClientFactory,
     historical::{DatabentoHistoricalClient, DatasetRange},
 };
-use nautilus_live::config::RoutingConfig;
-use nautilus_model::identifiers::Venue;
 
-use super::HistorySource;
+use super::{DefinitionsSource, HistorySource, Row};
 use crate::catalog::{FillData, FillRequest, NodeClient};
 
 /// Nautilus' map of Databento publishers to venues, copied from
@@ -84,13 +82,20 @@ impl DatabentoHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error if a request is not of a `GLBX` instrument (before
-    /// any request), if one ends at or past the data Databento has (a
-    /// request over it would fail), or if the metadata request fails.
+    /// Returns an error if a request is not Databento's in its instrument's
+    /// row of the routing table, a definition of an instrument Databento
+    /// defines or a series of one it gives the history of (before any
+    /// request), if one ends at or past the data Databento has (a request
+    /// over it would fail), or if the metadata request fails.
     pub async fn check(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
         for request in requests {
+            let row = Row::of(request.instrument_id.venue);
+            let databento_gives = match request.data {
+                FillData::Instrument => row.definitions == DefinitionsSource::Databento,
+                _ => row.history == HistorySource::Databento,
+            };
             ensure!(
-                HistorySource::of(request.instrument_id) == HistorySource::Databento,
+                databento_gives,
                 "Databento serves GLBX instruments here, not {}",
                 request.instrument_id
             );
@@ -106,18 +111,15 @@ impl DatabentoHistory {
         ensure_available(end, end_of(&available)?)
     }
 
-    /// The node's data client: Nautilus' Databento client, routed the
-    /// requests of `GLBX` instruments. It opens no live feed: its
-    /// `connect` starts nothing, only a subscription would.
+    /// The node's data client: Nautilus' Databento client, on no venue, so
+    /// asked only by the requests naming it (see `NodeFill::add`). It opens
+    /// no live feed: its `connect` starts nothing, only a subscription
+    /// would.
     #[must_use]
     pub fn node_client(&self) -> NodeClient {
         NodeClient {
             factory: Box::new(DatabentoDataClientFactory::new()),
             config: Box::new(self.config.clone()),
-            routing: RoutingConfig {
-                default: false,
-                venues: Some(vec![Venue::GLBX().to_string()]),
-            },
         }
     }
 }
@@ -221,6 +223,22 @@ mod tests {
         let history = DatabentoHistory::new(&format!("db-{}", "0".repeat(29))).unwrap();
         let request = FillRequest {
             data: FillData::Trades,
+            instrument_id: InstrumentId::from("GCZ26.XCEC"),
+            from: ts("2026-10-26T00:00:00Z"),
+            to: ts("2026-10-26T12:00:00Z"),
+        };
+
+        let err = history.check(&[request]).await.unwrap_err();
+
+        assert!(err.to_string().contains("GCZ26.XCEC"), "{err}");
+    }
+
+    /// IB defines XCEC's instruments, as it gives their history.
+    #[tokio::test]
+    async fn a_definition_of_another_venue_is_refused_before_any_request() {
+        let history = DatabentoHistory::new(&format!("db-{}", "0".repeat(29))).unwrap();
+        let request = FillRequest {
+            data: FillData::Instrument,
             instrument_id: InstrumentId::from("GCZ26.XCEC"),
             from: ts("2026-10-26T00:00:00Z"),
             to: ts("2026-10-26T12:00:00Z"),
