@@ -3,7 +3,8 @@
 //! (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), filled through the node (see
 //! `catalog::NodeFill`) by the LSE adapter's data client (`lse`), whose
 //! answers the data engine writes back to the catalog: trades, from LSE's
-//! tick slices. Their definitions are the catalog's alone, written there by
+//! tick slices, and bars, from its candles, each stamped at its close.
+//! Their definitions are the catalog's alone, written there by
 //! hand: LSE publishes none, the data engine answers a definition request
 //! from the catalog before asking the client, and the client converts
 //! LSE's prices at the definition's precision. See `README.md`.
@@ -66,12 +67,13 @@ mod tests {
 
     use ::lse::testing::{
         ALLOWANCE_EXHAUSTED, API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES,
-        GOLD_TRADES, MockLse, PLAN_REQUIRED, ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, gold_futures,
+        GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PLAN_REQUIRED, ROWS_EXHAUSTED, Reply,
+        SYMBOL_UNKNOWN, gold_futures, gold_spot,
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
-        data::{NautilusDataType, TradeTick},
+        data::{BarType, NautilusDataType, TradeTick},
         enums::AggressorSide,
         identifiers::{InstrumentId, TradeId},
         instruments::InstrumentAny,
@@ -126,10 +128,6 @@ mod tests {
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<()> {
-        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-        if !definitions.is_empty() {
-            catalog.write_instruments(definitions).unwrap();
-        }
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![TickSeries {
@@ -138,6 +136,23 @@ mod tests {
             }],
             warmup: SignedDuration::ZERO,
         };
+        fill_requirements(dir, lse, &requirements, definitions, from, to)
+    }
+
+    /// fill-catalog's fill of `requirements` over `[from, to]` into the
+    /// catalog in `dir`, from `lse`, the catalog holding `definitions`.
+    fn fill_requirements(
+        dir: &Path,
+        lse: &MockLse,
+        requirements: &DataRequirements,
+        definitions: Vec<InstrumentAny>,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> anyhow::Result<()> {
+        let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        if !definitions.is_empty() {
+            catalog.write_instruments(definitions).unwrap();
+        }
         let slices = requirements.slices(from, to);
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
@@ -211,6 +226,74 @@ mod tests {
         assert_eq!(
             (export.param("from"), export.param("to")),
             (Some("2026-10-21T10:00:00Z"), Some("2026-10-21T10:00:01Z"))
+        );
+    }
+
+    /// The captured five minutes of gold spot, candles LSE stamps at 10:00
+    /// to 10:04, their open, as pyarrow reads them; the bars closing over
+    /// `[10:01, 10:05]`.
+    #[test]
+    fn lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![Reply::file(GOLD_SPOT_MINUTES)]);
+        let bars = format!("{GOLD_SPOT}-1-MINUTE-LAST-EXTERNAL");
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from(bars.as_str())],
+            ticks: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_requirements(
+            dir.path(),
+            &lse,
+            &requirements,
+            vec![gold_spot()],
+            at("10:01:00"),
+            at("10:05:00"),
+        )
+        .unwrap();
+
+        let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
+            .bars(Some(vec![bars.clone()]), None, None)
+            .unwrap();
+        let rows: Vec<_> = stored
+            .iter()
+            .map(|b| (b.ts_event, b.open, b.high, b.low, b.close, b.volume))
+            .collect();
+        let row = |close, [open, high, low, last]: [&str; 4]| {
+            (
+                UnixNanos::from(at(close)),
+                Price::from(open),
+                Price::from(high),
+                Price::from(low),
+                Price::from(last),
+                Quantity::from(0),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                row("10:01:00", ["4118.01", "4119.21", "4116.91", "4118.01"]),
+                row("10:02:00", ["4118.15", "4118.24", "4116.25", "4116.94"]),
+                row("10:03:00", ["4116.97", "4117.27", "4115.27", "4116.17"]),
+                row("10:04:00", ["4116.02", "4116.93", "4115.62", "4116.12"]),
+                row("10:05:00", ["4116.25", "4118.36", "4116.25", "4118.16"]),
+            ]
+        );
+        let [export] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(
+            (
+                export.param("timeframe"),
+                export.param("from"),
+                export.param("to")
+            ),
+            (
+                Some("1m"),
+                Some("2026-10-21T10:00:00Z"),
+                Some("2026-10-21T10:05:00Z")
+            )
         );
     }
 

@@ -24,6 +24,15 @@ use sha2::{Digest, Sha256};
 /// `[2026-10-21T10:00:00Z, 2026-10-21T10:00:01Z)`, as LSE exported it:
 /// six trades.
 pub const GOLD_TRADES: &[u8] = include_bytes!("../test_data/export_gold_futures_tick.parquet");
+/// The 1-minute candles of LSE's gold spot series (`XAU/USD` in
+/// `commodities`) over `[2026-10-21T10:00:00Z, 2026-10-21T10:05:00Z)`, as LSE
+/// exported them: five candles, stamped at their open, of no volume.
+pub const GOLD_SPOT_MINUTES: &[u8] =
+    include_bytes!("../test_data/export_xau_usd_commodities_1m.parquet");
+/// The 4-hour candles of `GOLD` in `futures` over
+/// `[2026-10-21T00:00:00Z, 2026-10-21T12:00:00Z)`, as LSE exported them:
+/// three candles, stamped at their open.
+pub const GOLD_FUTURES_4H: &[u8] = include_bytes!("../test_data/export_gold_futures_4h.parquet");
 /// LSE's refusals, captured with the free key, but the calls a minute and
 /// the quotas, which are LSE's documented answers, and the export too wide,
 /// captured with the CME key (`test_data/README.md`).
@@ -33,8 +42,7 @@ pub const DATA_UNAVAILABLE: &str = include_str!("../test_data/refusal_data_unava
 pub const DATE_NOT_TRADING: &str = include_str!("../test_data/refusal_date_not_trading.json");
 pub const CALLS_EXHAUSTED: &str = include_str!("../test_data/refusal_calls_exhausted.json");
 pub const ROWS_EXHAUSTED: &str = include_str!("../test_data/refusal_rows_exhausted.json");
-pub const ALLOWANCE_EXHAUSTED: &str =
-    include_str!("../test_data/refusal_allowance_exhausted.json");
+pub const ALLOWANCE_EXHAUSTED: &str = include_str!("../test_data/refusal_allowance_exhausted.json");
 /// LSE's refusal of a day of GCZ6's quotes, past the rows one export may
 /// read.
 pub const EXPORT_TOO_WIDE: &str = include_str!("../test_data/refusal_export_too_wide.json");
@@ -48,8 +56,11 @@ pub const TICKS_NOT_STORED: &str = include_str!("../test_data/refusal_data_unava
 /// `GOLD_TRADES`; the peer sends it with every file.
 pub const EXPORT_ID: &str = "15f88a2dca3f401d90c7acae13236f86";
 
-/// The series of `GOLD_TRADES`.
+/// The series of `GOLD_TRADES` and `GOLD_FUTURES_4H`.
 pub const GOLD_FUTURES: &str = "GOLD-FUTURES.LSEDGE";
+
+/// The series of `GOLD_SPOT_MINUTES`.
+pub const GOLD_SPOT: &str = "XAU/USD-COMMODITIES.LSEDGE";
 
 /// The key the tests give the adapter, which the peer records.
 pub const API_KEY: &str = "lse-test-key-0123456789";
@@ -67,6 +78,27 @@ pub fn gold_futures() -> InstrumentAny {
             .price_precision(1)
             .size_precision(0)
             .price_increment(Price::from("0.1"))
+            .size_increment(Quantity::from(1))
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .expect("a valid index"),
+    )
+}
+
+/// A definition of `GOLD_SPOT` as one would be written by hand: an index in
+/// USD, its prices to a cent, as LSE sends them, and its sizes whole,
+/// stamped at 1970 so that it stands for any time.
+#[must_use]
+pub fn gold_spot() -> InstrumentAny {
+    InstrumentAny::IndexInstrument(
+        IndexInstrument::builder()
+            .instrument_id(InstrumentId::from(GOLD_SPOT))
+            .raw_symbol(Symbol::from("XAU/USD"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .size_precision(0)
+            .price_increment(Price::from("0.01"))
             .size_increment(Quantity::from(1))
             .ts_event(UnixNanos::default())
             .ts_init(UnixNanos::default())

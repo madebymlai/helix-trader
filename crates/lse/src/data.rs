@@ -1,9 +1,10 @@
 //! The data client: Nautilus' `DataClient` on LSE's REST API.
 //!
-//! It serves trades, the tick slices of LSE's derived markets, asked a UTC
-//! day an export, one download at a time, an export LSE refuses as too
-//! wide asked again in halves (see `http::export`); its definitions request
-//! fails, LSE publishing none. Every other request and every
+//! It serves trades, the tick slices of LSE's derived markets, and bars,
+//! LSE's candles 1 second to 4 hours wide, each stamped at its close, asked
+//! a UTC day an export, one download at a time, an export LSE refuses as
+//! too wide asked again in halves (see `http::export`); its definitions
+//! request fails, LSE publishing none. Every other request and every
 //! subscription is left to Nautilus' defaults: a request fails as
 //! unsupported, a subscription is logged as not implemented. A request is
 //! answered from a task, in one completed response envelope, the data
@@ -17,10 +18,11 @@
 //! for catalog write-back"), as Nautilus' OKX client answers a window it
 //! cannot confirm, so that a fill asks for it again; the span is logged.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, num::NonZeroUsize, sync::Arc};
 
 use anyhow::Context;
 use async_trait::async_trait;
+use bytes::Bytes;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     cache::CacheView,
@@ -28,11 +30,14 @@ use nautilus_common::{
     live::{dst::time::Duration, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
-        data::{DataResponseEnvelope, RequestInstrument, RequestTrades, TradesResponse},
+        data::{
+            BarsResponse, DataResponseEnvelope, RequestBars, RequestInstrument, RequestTrades,
+            TradesResponse,
+        },
     },
 };
 use nautilus_core::{
-    UUID4,
+    UUID4, UnixNanos,
     datetime::datetime_to_unix_nanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
@@ -45,7 +50,12 @@ use nautilus_model::{
 use crate::{
     common::{credential::LseCredential, symbol::LseSymbol},
     config::LseDataClientConfig,
-    http::{client::LseHttpClient, export::fetch, parse::parse_trade_slice, query::ExportQuery},
+    http::{
+        client::LseHttpClient,
+        export::fetch,
+        parse::{parse_candles, parse_trade_slice},
+        query::{CandleWidth, ExportQuery},
+    },
 };
 
 /// How long the request tasks get to finish at a disconnect, then to abort.
@@ -143,6 +153,77 @@ impl LseDataClient {
                 self.client_id
             );
         }
+    }
+
+    /// Answers the request `request_id`, from a task, with the rows of the
+    /// export `query` (see `http::export::fetch`), each file read by `read`,
+    /// the newest `limit` if one is given, in `respond`'s response of the
+    /// rows and the time it is made; no export answers with no rows, asking
+    /// nothing. The response comes in one completed response envelope, or,
+    /// if the export reaches into the span LSE has not loaded as of `now`,
+    /// in a plain response, which completes the request and which the data
+    /// engine writes to no catalog, the span logged. A failure, LSE's
+    /// refusal of an export or a file not read, is the envelope's, with no
+    /// rows.
+    fn answer_export<T: Send + 'static>(
+        &self,
+        request_id: UUID4,
+        query: Option<ExportQuery>,
+        now: Timestamp,
+        limit: Option<NonZeroUsize>,
+        read: impl Fn(Bytes) -> anyhow::Result<Vec<T>> + Send + Sync + 'static,
+        respond: impl FnOnce(Vec<T>, UnixNanos) -> DataResponse + Send + 'static,
+    ) {
+        let http = Arc::clone(&self.http);
+        let sender = self.data_sender.clone();
+        let client_id = self.client_id;
+        let clock = self.clock;
+        self.spawn_request(async move {
+            let fetched = async {
+                let Some(query) = &query else {
+                    return Ok((Vec::new(), None));
+                };
+                let exported = fetch(&http, query, now).await?;
+                let mut rows = Vec::new();
+                for (export, file) in exported.files {
+                    rows.extend(read(file).with_context(|| format!("reading {export}"))?);
+                }
+                Ok::<_, anyhow::Error>((rows, exported.unloaded_from))
+            }
+            .await;
+            let event = match fetched {
+                Ok((mut rows, unloaded_from)) => {
+                    if let Some(limit) = limit {
+                        let excess = rows.len().saturating_sub(limit.get());
+                        rows.drain(..excess);
+                    }
+                    let count = rows.len();
+                    let response = respond(rows, clock.get_time_ns());
+                    match (unloaded_from, query) {
+                        (Some(from), Some(query)) => {
+                            log::warn!(
+                                "{client_id}: LSE has not loaded {query} from {from} yet, a UTC \
+                                 day being stored the morning after it: answered with the \
+                                 {count} rows it holds, written to no catalog"
+                            );
+                            DataEvent::Response(response)
+                        }
+                        _ => DataEvent::ResponseEnvelope(DataResponseEnvelope::new(
+                            response, true, None,
+                        )),
+                    }
+                }
+                Err(e) => {
+                    let reason = format!("{e:#}");
+                    log::error!("{client_id} request failed: {reason}");
+                    DataEvent::ResponseEnvelope(DataResponseEnvelope::terminal(
+                        request_id,
+                        Some(reason),
+                    ))
+                }
+            };
+            send(&sender, event);
+        });
     }
 
     async fn teardown(&mut self) -> anyhow::Result<()> {
@@ -272,66 +353,85 @@ impl DataClient for LseDataClient {
         let end = request.end.unwrap_or(now);
         // `[start, end]` as LSE takes a span, `[from, to)`.
         let query = ExportQuery::trades(&series, start, end + SignedDuration::from_nanos(1));
-        let http = Arc::clone(&self.http);
-        let sender = self.data_sender.clone();
         let client_id = request.client_id.unwrap_or(self.client_id);
-        let clock = self.clock;
-        self.spawn_request(async move {
-            let fetched = async {
-                let exported = fetch(&http, &query, now).await?;
-                let mut trades = Vec::new();
-                for (export, file) in exported.files {
-                    trades.extend(
-                        parse_trade_slice(file, id, price_precision, size_precision)
-                            .with_context(|| format!("reading {export}"))?,
-                    );
-                }
-                Ok::<_, anyhow::Error>((trades, exported.unloaded_from))
+        let (request_id, params) = (request.request_id, request.params);
+        let (start, end) = (
+            datetime_to_unix_nanos(request.start),
+            datetime_to_unix_nanos(request.end),
+        );
+        self.answer_export(
+            request_id,
+            Some(query),
+            now,
+            request.limit,
+            move |file| parse_trade_slice(file, id, price_precision, size_precision),
+            move |trades, ts_init| {
+                DataResponse::Trades(TradesResponse::new(
+                    request_id, client_id, id, trades, start, end, ts_init, params,
+                ))
+            },
+        );
+        Ok(())
+    }
+
+    /// Answers with the bars of the bar type that close over `[start, end]`
+    /// (end: now if none), the newest `limit` if one is given, from LSE's
+    /// candles of the instrument's series (see `http::export`), in one
+    /// completed response envelope, or in a plain response, logging the
+    /// span, if the request reaches into the span LSE has not loaded yet.
+    /// LSE stamps a candle at its open; its bar is stamped at its close, as
+    /// Nautilus' adapters stamp bars by default (Databento's
+    /// `bars_timestamp_on_close`). Only whole candles are asked, LSE folding
+    /// a candle from the rows inside the export alone, and none if no bar
+    /// closes in the window. A failure, the series not an LSEDGE one, the
+    /// bars not of LSE's candles, the instrument not in the cache or LSE's
+    /// refusal of an export, is the envelope's, with no bars.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request is of more than one bar type.
+    fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
+        let bar_type = request.single_bar_type()?;
+        let id = bar_type.instrument_id();
+        let checked = (|| {
+            let series = LseSymbol::from_instrument_id(id)?;
+            let width = CandleWidth::of(bar_type)?;
+            let precisions = self.precisions(id)?;
+            let start = request
+                .start
+                .with_context(|| format!("a request of the {bar_type} bars needs a start"))?;
+            Ok::<_, anyhow::Error>((series, width, precisions, start))
+        })();
+        let (series, width, (price_precision, size_precision), start) = match checked {
+            Ok(checked) => checked,
+            Err(e) => {
+                self.fail(request.request_id, format!("{e:#}"));
+                return Ok(());
             }
-            .await;
-            let event = match fetched {
-                Ok((mut trades, unloaded_from)) => {
-                    if let Some(limit) = request.limit {
-                        let excess = trades.len().saturating_sub(limit.get());
-                        trades.drain(..excess);
-                    }
-                    let count = trades.len();
-                    let response = DataResponse::Trades(TradesResponse::new(
-                        request.request_id,
-                        client_id,
-                        id,
-                        trades,
-                        datetime_to_unix_nanos(request.start),
-                        datetime_to_unix_nanos(request.end),
-                        clock.get_time_ns(),
-                        request.params,
-                    ));
-                    match unloaded_from {
-                        None => DataEvent::ResponseEnvelope(DataResponseEnvelope::new(
-                            response, true, None,
-                        )),
-                        Some(from) => {
-                            log::warn!(
-                                "{client_id}: LSE has not loaded the trades of {id} over \
-                                 [{from}, {end}] yet, a UTC day being stored the morning after \
-                                 it: answered with the {count} trades it holds, written to no \
-                                 catalog"
-                            );
-                            DataEvent::Response(response)
-                        }
-                    }
-                }
-                Err(e) => {
-                    let reason = format!("{e:#}");
-                    log::error!("{client_id} request failed: {reason}");
-                    DataEvent::ResponseEnvelope(DataResponseEnvelope::terminal(
-                        request.request_id,
-                        Some(reason),
-                    ))
-                }
-            };
-            send(&sender, event);
-        });
+        };
+        let now = Timestamp::from(self.clock.get_time_ns());
+        let end = request.end.unwrap_or(now);
+        let query = width
+            .candles_closing(start, end)
+            .map(|(from, to)| ExportQuery::candles(&series, width, from, to));
+        let client_id = request.client_id.unwrap_or(self.client_id);
+        let (request_id, params) = (request.request_id, request.params);
+        let (start, end) = (
+            datetime_to_unix_nanos(request.start),
+            datetime_to_unix_nanos(request.end),
+        );
+        self.answer_export(
+            request_id,
+            query,
+            now,
+            request.limit,
+            move |file| parse_candles(file, bar_type, price_precision, size_precision),
+            move |bars, ts_init| {
+                DataResponse::Bars(BarsResponse::new(
+                    request_id, client_id, bar_type, bars, start, end, ts_init, params,
+                ))
+            },
+        );
         Ok(())
     }
 }
@@ -355,33 +455,35 @@ mod tests {
         live::runner::replace_data_event_sender,
         messages::{
             DataResponse,
-            data::{DataResponseEnvelope, RequestQuotes, TradesResponse},
+            data::{DataResponseEnvelope, RequestQuotes},
         },
     };
     use nautilus_core::{UUID4, UnixNanos, string::secret::SecretString};
-    use nautilus_model::identifiers::InstrumentId;
+    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Price};
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::{
         LseDataClientFactory,
         testing::{
-            API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES, GOLD_TRADES, MockLse,
-            PLAN_REQUIRED, Reply, SYMBOL_UNKNOWN, gold_futures,
+            API_KEY, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES,
+            GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PLAN_REQUIRED, Reply,
+            SYMBOL_UNKNOWN, gold_futures, gold_spot,
         },
     };
 
     type Events = mpsc::UnboundedReceiver<DataEvent>;
 
-    /// The client the factory creates on `lse`, its cache holding
-    /// `GOLD_FUTURES`'s definition if `defined`, connected, and the
-    /// node's data events.
+    /// The client the factory creates on `lse`, its cache holding the
+    /// definitions of `GOLD_FUTURES` and `GOLD_SPOT` if `defined`,
+    /// connected, and the node's data events.
     async fn connected(lse: &MockLse, defined: bool) -> (Box<dyn DataClient>, Events) {
         let (tx, events) = mpsc::unbounded_channel();
         replace_data_event_sender(tx);
         let mut cache = Cache::default();
         if defined {
             cache.add_instrument(gold_futures()).unwrap();
+            cache.add_instrument(gold_spot()).unwrap();
         }
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
@@ -449,6 +551,43 @@ mod tests {
             other => panic!("not a trades response: {other:?}"),
         }
     }
+
+    /// The bars of `bar_type` closing over `[from, to]`, as the data
+    /// engine asks for a window, naming no client.
+    fn bars(bar_type: &str, from: &str, to: &str) -> RequestBars {
+        RequestBars::new(
+            BarType::from(bar_type),
+            Some(at(from)),
+            Some(at(to)),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        )
+    }
+
+    fn bars_of(envelope: &DataResponseEnvelope) -> BarsResponse {
+        match envelope.response() {
+            Some(DataResponse::Bars(response)) => response.clone(),
+            other => panic!("not a bars response: {other:?}"),
+        }
+    }
+
+    /// The `from` and `to` of each call `lse` received.
+    fn asked_windows(lse: &MockLse) -> Vec<(String, String)> {
+        lse.calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.param("from").unwrap().to_string(),
+                    call.param("to").unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    const GOLD_SPOT_MINUTE_BARS: &str = "XAU/USD-COMMODITIES.LSEDGE-1-MINUTE-LAST-EXTERNAL";
 
     #[tokio::test]
     async fn the_factory_creates_the_client_named_lse_on_no_venue() {
@@ -680,5 +819,287 @@ mod tests {
         let err = client.request_quotes(request).unwrap_err();
 
         assert!(err.to_string().contains("does not support"), "{err}");
+    }
+
+    /// The captured five minutes, candles LSE stamps at 10:00 to 10:04,
+    /// their open, as pyarrow reads them.
+    #[tokio::test]
+    async fn a_bars_request_is_answered_with_lse_s_candles_stamped_at_their_close() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_SPOT_MINUTES)]);
+        let (client, mut events) = connected(&lse, true).await;
+        let request = bars(
+            GOLD_SPOT_MINUTE_BARS,
+            "2026-10-21T10:01:00Z",
+            "2026-10-21T10:05:00Z",
+        );
+        let id = request.request_id;
+
+        client.request_bars(request).unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let response = bars_of(&envelope);
+        assert_eq!(response.correlation_id, id);
+        assert_eq!(response.client_id, ClientId::from("LSE"));
+        assert_eq!(response.bar_type, BarType::from(GOLD_SPOT_MINUTE_BARS));
+        let closes: Vec<_> = response
+            .data
+            .iter()
+            .map(|bar| (bar.ts_event, bar.ts_init, bar.close))
+            .collect();
+        let close = |time: &str, price| {
+            let time = UnixNanos::from(at(&format!("2026-10-21T{time}Z")));
+            (time, time, Price::from(price))
+        };
+        assert_eq!(
+            closes,
+            [
+                close("10:01:00", "4118.01"),
+                close("10:02:00", "4116.94"),
+                close("10:03:00", "4116.17"),
+                close("10:04:00", "4116.12"),
+                close("10:05:00", "4118.16"),
+            ]
+        );
+        assert_eq!(
+            asked_windows(&lse),
+            [(
+                "2026-10-21T10:00:00Z".to_string(),
+                "2026-10-21T10:05:00Z".to_string()
+            )]
+        );
+    }
+
+    /// LSE adjusts prices and volumes for splits unless told not to.
+    #[tokio::test]
+    async fn candles_are_asked_of_the_series_as_published() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_SPOT_MINUTES)]);
+        let (client, mut events) = connected(&lse, true).await;
+
+        client
+            .request_bars(bars(
+                GOLD_SPOT_MINUTE_BARS,
+                "2026-10-21T10:01:00Z",
+                "2026-10-21T10:05:00Z",
+            ))
+            .unwrap();
+
+        next_envelope(&mut events).await;
+        let [call] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(call.path, "/v3/export");
+        let mut query = call.query.clone();
+        query.sort();
+        let expected = [
+            ("adjusted", "0"),
+            ("format", "parquet"),
+            ("from", "2026-10-21T10:00:00Z"),
+            ("market", "commodities"),
+            ("symbol", "XAU/USD"),
+            ("timeframe", "1m"),
+            ("to", "2026-10-21T10:05:00Z"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        assert_eq!(query, expected);
+    }
+
+    /// Bars closing from 02:00: the first closes at 04:00 and opens at
+    /// 00:00. LSE folds a candle from the rows inside the export alone, so
+    /// an export from 22:00 or 02:00 would cut it.
+    #[tokio::test]
+    async fn only_whole_candles_are_asked() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_FUTURES_4H)]);
+        let (client, mut events) = connected(&lse, true).await;
+
+        client
+            .request_bars(bars(
+                &format!("{GOLD_FUTURES}-4-HOUR-LAST-EXTERNAL"),
+                "2026-10-21T02:00:00Z",
+                "2026-10-21T12:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(bars_of(&envelope).data.len(), 3);
+        assert_eq!(
+            asked_windows(&lse),
+            [(
+                "2026-10-21T00:00:00Z".to_string(),
+                "2026-10-21T12:00:00Z".to_string()
+            )]
+        );
+    }
+
+    /// Bars closing at 23:59 to 00:01: candles opening at 23:58 and 23:59
+    /// on the 20th, then at 00:00 on the 21st.
+    #[tokio::test]
+    async fn candles_over_midnight_are_asked_a_utc_day_at_a_time() {
+        let lse = MockLse::start(vec![
+            Reply::refusal(404, DATA_UNAVAILABLE),
+            Reply::refusal(404, DATA_UNAVAILABLE),
+        ]);
+        let (client, mut events) = connected(&lse, true).await;
+
+        client
+            .request_bars(bars(
+                GOLD_SPOT_MINUTE_BARS,
+                "2026-10-20T23:59:00Z",
+                "2026-10-21T00:01:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let day = |from: &str, to: &str| (from.to_string(), to.to_string());
+        assert_eq!(
+            asked_windows(&lse),
+            [
+                day("2026-10-20T23:58:00Z", "2026-10-21T00:00:00Z"),
+                day("2026-10-21T00:00:00Z", "2026-10-21T00:01:00Z"),
+            ]
+        );
+    }
+
+    /// No 1-minute bar closes between 10:00:30 and 10:00:50.
+    #[tokio::test]
+    async fn a_window_no_bar_closes_in_is_answered_with_none_unasked() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = connected(&lse, true).await;
+
+        client
+            .request_bars(bars(
+                GOLD_SPOT_MINUTE_BARS,
+                "2026-10-21T10:00:30Z",
+                "2026-10-21T10:00:50Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(bars_of(&envelope).data.len(), 0);
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
+    }
+
+    /// LSE's candle widths below a day (LSE's API docs, "The selection",
+    /// `timeframe`), each a bar specification of Nautilus'.
+    #[tokio::test]
+    async fn each_lse_candle_width_is_asked_for_its_bar_specification() {
+        let widths = [
+            ("1-SECOND", "1s"),
+            ("5-SECOND", "5s"),
+            ("15-SECOND", "15s"),
+            ("30-SECOND", "30s"),
+            ("1-MINUTE", "1m"),
+            ("3-MINUTE", "3m"),
+            ("5-MINUTE", "5m"),
+            ("15-MINUTE", "15m"),
+            ("30-MINUTE", "30m"),
+            ("1-HOUR", "1h"),
+            ("4-HOUR", "4h"),
+        ];
+        let lse = MockLse::start(
+            widths
+                .iter()
+                .map(|_| Reply::refusal(404, DATA_UNAVAILABLE))
+                .collect(),
+        );
+        let (client, mut events) = connected(&lse, true).await;
+
+        for (spec, _) in widths {
+            client
+                .request_bars(bars(
+                    &format!("{GOLD_FUTURES}-{spec}-LAST-EXTERNAL"),
+                    "2026-10-21T10:00:00Z",
+                    "2026-10-21T14:00:00Z",
+                ))
+                .unwrap();
+            let envelope = next_envelope(&mut events).await;
+            assert_eq!(envelope.failure_reason(), None, "{spec}");
+        }
+
+        let asked: Vec<_> = lse
+            .calls()
+            .iter()
+            .map(|call| call.param("timeframe").unwrap().to_string())
+            .collect();
+        assert_eq!(asked, widths.map(|(_, timeframe)| timeframe));
+    }
+
+    /// A width LSE has no candles of; LSE's daily, weekly and monthly
+    /// candles, which follow exchange sessions; a price LSE's candles do not
+    /// carry; and bars Nautilus builds.
+    #[tokio::test]
+    async fn a_bar_type_lse_does_not_serve_is_refused_naming_it_unasked() {
+        for spec in [
+            "2-MINUTE-LAST-EXTERNAL",
+            "1-DAY-LAST-EXTERNAL",
+            "1-WEEK-LAST-EXTERNAL",
+            "1-MONTH-LAST-EXTERNAL",
+            "100-TICK-LAST-EXTERNAL",
+            "1-MINUTE-MID-EXTERNAL",
+            "1-MINUTE-LAST-INTERNAL",
+        ] {
+            let bar_type = format!("{GOLD_FUTURES}-{spec}");
+            let lse = MockLse::start(vec![Reply::file(GOLD_FUTURES_4H)]);
+            let (client, mut events) = connected(&lse, true).await;
+
+            client
+                .request_bars(bars(
+                    &bar_type,
+                    "2026-10-21T10:00:00Z",
+                    "2026-10-21T14:00:00Z",
+                ))
+                .unwrap();
+
+            let envelope = next_envelope(&mut events).await;
+            let reason = envelope.failure_reason().expect("a failure");
+            assert!(reason.contains(&bar_type), "{reason}");
+            assert!(lse.calls().is_empty(), "{bar_type}: {:?}", lse.calls());
+        }
+    }
+
+    /// Bars closing from 00:01 the day before the current one: LSE holds the
+    /// day before's candles and none of the current day's, which it stores
+    /// the morning after. A plain response completes the request, and the
+    /// data engine writes it to no catalog, so that a fill asks for the
+    /// window again.
+    #[tokio::test]
+    async fn a_bars_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
+        let lse = MockLse::start(vec![
+            Reply::file(GOLD_SPOT_MINUTES),
+            Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
+            // Should the request come after midnight.
+            Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
+        ]);
+        let (client, mut events) = connected(&lse, true).await;
+        let today = Timestamp::from_second(Timestamp::now().as_second() / 86_400 * 86_400).unwrap();
+        let day_before = today - SignedDuration::from_hours(24);
+        let request = RequestBars::new(
+            BarType::from(GOLD_SPOT_MINUTE_BARS),
+            Some(day_before + SignedDuration::from_mins(1)),
+            None,
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        );
+        let id = request.request_id;
+
+        client.request_bars(request).unwrap();
+
+        let event = next_event(&mut events).await;
+        let DataEvent::Response(DataResponse::Bars(response)) = event else {
+            panic!("not a plain bars response: {event:?}");
+        };
+        assert_eq!(response.correlation_id, id);
+        assert_eq!(response.data.len(), 5);
+        let day_before = day_before.to_string();
+        assert_eq!(
+            lse.calls().first().and_then(|call| call.param("from")),
+            Some(day_before.as_str())
+        );
     }
 }
