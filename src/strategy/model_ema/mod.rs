@@ -52,7 +52,7 @@ use crate::{
         features::FeatureSet,
         handle::{Mode, ModelHandle},
     },
-    strategy::{Declaration, Part, Series, StandardConfig, orders, warmup::Warmup},
+    strategy::{Declaration, Part, Series, StandardConfig, Visitor, orders, warmup::Warmup},
 };
 
 /// Config of the `model_ema` strategy, loaded from TOML: the standard
@@ -140,6 +140,12 @@ impl ModelStrategy for ModelEma {
     fn warmup(&self) -> Rc<Warmup> {
         self.model.warmup()
     }
+}
+
+/// Hands the strategy to `visitor`, as one trading on a model
+/// (`strategy::Visitor`): the command line runs it by this folder's name.
+pub fn visit<V: Visitor>(visitor: V) -> V::Output {
+    visitor.model::<ModelEma>()
 }
 
 nautilus_strategy!(ModelEma, {

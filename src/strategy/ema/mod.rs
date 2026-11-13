@@ -47,7 +47,8 @@ use serde::Deserialize;
 
 use self::signal::Signal;
 use crate::strategy::{
-    DataRequirements, Declaration, Declared, EmaArgs, Part, Series, StandardConfig,
+    DataRequirements, Declaration, Declared, EmaArgs, Part, PlainStrategy, Series, StandardConfig,
+    Visitor,
     orders::{self, Bracket, Exits, Trade},
     warmup::Warmup,
 };
@@ -283,6 +284,28 @@ fn exit_prices(close: Decimal, side: OrderSide) -> (Decimal, Decimal) {
         close + favour * bps(TAKE_PROFIT_BPS),
         close - favour * bps(STOP_LOSS_BPS),
     )
+}
+
+/// Hands the strategy to `visitor`, as one trading on no model
+/// (`strategy::Visitor`): the command line runs it by this folder's name.
+pub fn visit<V: Visitor>(visitor: V) -> V::Output {
+    visitor.plain::<EmaCross>()
+}
+
+impl PlainStrategy for EmaCross {
+    type Params = EmaParams;
+
+    fn backtest(config: EmaCrossConfig) -> anyhow::Result<Self> {
+        Self::new(config)
+    }
+
+    fn live(config: EmaCrossConfig) -> anyhow::Result<Self> {
+        Self::live(config)
+    }
+
+    fn warmup(&self) -> Rc<Warmup> {
+        Self::warmup(self)
+    }
 }
 
 nautilus_strategy!(EmaCross);

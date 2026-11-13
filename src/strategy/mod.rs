@@ -2,10 +2,15 @@
 //!
 //! Build step 5. The port is the Nautilus `Strategy` trait
 //! (`nautilus_trading`): backtest and live are generic over it and never
-//! name a concrete strategy. `main` picks one by name and builds it.
+//! name a concrete strategy, nor does `main`, which picks one by name
+//! (`StrategyName`) and hands it a `Visitor` of its subcommand.
 //!
-//! Each strategy is its own submodule and exposes only its constructor and
-//! config. Inside, `mod.rs` is the thin Nautilus wiring: a struct holding a
+//! Each strategy is a folder of its own, `strategy/<name>/mod.rs`, found
+//! by the build script (`build.rs`): the folder's name is the strategy's
+//! module and command-line name, and no other file names it. Its `mod.rs`
+//! exposes its constructor, its config and `visit`, which hands the
+//! strategy to a visitor by its kind (`PlainStrategy` or
+//! `model::ModelStrategy`). Inside, `mod.rs` is the thin Nautilus wiring: a struct holding a
 //! `StrategyCore`, wired with `nautilus_strategy!`, implementing `DataActor`
 //! (`on_start`, `on_bar`) and placing orders with Nautilus' own API. Pure
 //! modules beside it (the EMA's `signal.rs`) turn bars into decisions,
@@ -32,19 +37,18 @@
 //! requests none. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
-pub mod ema;
-#[cfg(gold_scalp)]
-pub mod gold_scalp;
-#[cfg(gold_scalp_v2)]
-pub mod gold_scalp_v2;
 mod indicators;
-pub mod model_ema;
+mod kind;
 pub mod orders;
 mod session;
 mod standard;
 pub mod warmup;
 
+// The strategies, a module each, and `StrategyName` (see `build.rs`).
+include!(concat!(env!("OUT_DIR"), "/strategies.rs"));
+
 pub use indicators::{AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig};
+pub use kind::{PlainStrategy, Visitor};
 pub use session::Session;
 pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};
 

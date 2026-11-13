@@ -11,16 +11,13 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    pin::Pin,
     rc::Rc,
     str::FromStr,
 };
 
 use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-#[cfg(gold_scalp)]
-use helix_trader::strategy::gold_scalp::GoldScalp;
-#[cfg(gold_scalp_v2)]
-use helix_trader::strategy::gold_scalp_v2::GoldScalpV2;
 use helix_trader::{
     backtest::{self, Backtest, Commission},
     live::{Live, Recording},
@@ -31,11 +28,7 @@ use helix_trader::{
         targets::TargetRow,
         train::Trained,
     },
-    strategy::{
-        DataRequirements, Part, StandardConfig,
-        ema::{EmaCross, EmaParams},
-        model_ema::ModelEma,
-    },
+    strategy::{DataRequirements, Part, PlainStrategy, StandardConfig, StrategyName, Visitor},
     venues::{self, HistoryVenueArgs, LiveVenueArgs},
 };
 use jiff::Timestamp;
@@ -76,7 +69,7 @@ enum Command {
 #[derive(Debug, Args)]
 struct RunArgs {
     /// The strategy whose instruments and warmup are used.
-    strategy: Strategy,
+    strategy: StrategyName,
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
@@ -142,7 +135,7 @@ struct BacktestArgs {
 #[derive(Debug, Args)]
 struct TrainArgs {
     /// The strategy whose model is trained.
-    strategy: Strategy,
+    strategy: StrategyName,
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
@@ -241,7 +234,7 @@ fn commission_args(commission: &Commission) -> [String; 2] {
 #[derive(Debug, Args)]
 struct LiveArgs {
     /// The strategy to run.
-    strategy: Strategy,
+    strategy: StrategyName,
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
@@ -370,20 +363,6 @@ impl RetrainCosts {
     }
 }
 
-/// The strategies, by command-line name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Strategy {
-    Ema,
-    #[value(name = "model_ema")]
-    ModelEma,
-    #[cfg(gold_scalp)]
-    #[value(name = "gold_scalp")]
-    GoldScalp,
-    #[cfg(gold_scalp_v2)]
-    #[value(name = "gold_scalp_v2")]
-    GoldScalpV2,
-}
-
 /// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
 /// UTC, or Unix nanoseconds or seconds.
 fn parse_time(s: &str) -> Result<Timestamp, String> {
@@ -434,21 +413,24 @@ fn load_config<P: Part>(path: &Path) -> anyhow::Result<StandardConfig<P>> {
 }
 
 /// The data requirements of `strategy`'s config at `path`.
-fn data_requirements(strategy: Strategy, path: &Path) -> anyhow::Result<DataRequirements> {
-    Ok(match strategy {
-        Strategy::Ema => load_config::<EmaParams>(path)?.data_requirements(),
-        Strategy::ModelEma => model_requirements::<ModelEma>(path)?,
-        #[cfg(gold_scalp)]
-        Strategy::GoldScalp => model_requirements::<GoldScalp>(path)?,
-        #[cfg(gold_scalp_v2)]
-        Strategy::GoldScalpV2 => model_requirements::<GoldScalpV2>(path)?,
-    })
+fn data_requirements(strategy: StrategyName, path: &Path) -> anyhow::Result<DataRequirements> {
+    strategy.visit(Requirements(path))
 }
 
-/// The data requirements of the config at `path` of the model strategy
-/// `S`.
-fn model_requirements<S: ModelStrategy>(path: &Path) -> anyhow::Result<DataRequirements> {
-    Ok(load_config::<S::Params>(path)?.data_requirements())
+/// The visitor reading the data requirements of a strategy's config at
+/// its path.
+struct Requirements<'a>(&'a Path);
+
+impl Visitor for Requirements<'_> {
+    type Output = anyhow::Result<DataRequirements>;
+
+    fn plain<S: PlainStrategy>(self) -> Self::Output {
+        Ok(load_config::<S::Params>(self.0)?.data_requirements())
+    }
+
+    fn model<S: ModelStrategy>(self) -> Self::Output {
+        Ok(load_config::<S::Params>(self.0)?.data_requirements())
+    }
 }
 
 /// The logger config from `NAUTILUS_LOG`: the default when it is unset, an
@@ -524,21 +506,35 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         venue_oms: venues::oms_type,
         logging,
     };
-    match args.run.strategy {
-        Strategy::Ema => {
-            let config = load_config::<EmaParams>(&args.run.config)?;
-            let outcome = backtest(config.data_requirements()).run(EmaCross::new(config)?)?;
-            print!("{}", backtest::report(&outcome));
-        }
-        Strategy::ModelEma => backtest_on_models::<ModelEma>(&args, dataset_logging, backtest)?,
-        #[cfg(gold_scalp)]
-        Strategy::GoldScalp => backtest_on_models::<GoldScalp>(&args, dataset_logging, backtest)?,
-        #[cfg(gold_scalp_v2)]
-        Strategy::GoldScalpV2 => {
-            backtest_on_models::<GoldScalpV2>(&args, dataset_logging, backtest)?
-        }
+    args.run.strategy.visit(Backtesting {
+        args: &args,
+        dataset_logging,
+        backtest,
+    })
+}
+
+/// The visitor backtesting a strategy: `backtest` builds its `Backtest`
+/// of its data requirements; a model strategy's dataset runs log as
+/// `dataset_logging` says (`backtest_on_models`).
+struct Backtesting<'a, B> {
+    args: &'a BacktestArgs,
+    dataset_logging: LoggerConfig,
+    backtest: B,
+}
+
+impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
+    type Output = anyhow::Result<()>;
+
+    fn plain<S: PlainStrategy>(self) -> Self::Output {
+        let config = load_config::<S::Params>(&self.args.run.config)?;
+        let outcome = (self.backtest)(config.data_requirements()).run(S::backtest(config)?)?;
+        print!("{}", backtest::report(&outcome));
+        Ok(())
     }
-    Ok(())
+
+    fn model<S: ModelStrategy>(self) -> Self::Output {
+        backtest_on_models::<S>(self.args, self.dataset_logging, self.backtest)
+    }
 }
 
 /// The backtest of `args` of the model strategy `S`, its `Backtest` of
@@ -610,7 +606,7 @@ fn backtest_on_models<S: ModelStrategy>(
 /// while it runs, and a train replays the dataset days it lacks through a
 /// node of its own, so each retrain is a process.
 struct Children {
-    strategy: Strategy,
+    strategy: StrategyName,
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
@@ -679,19 +675,37 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         catalog: args.catalog.clone(),
         recording: args.recording(),
     };
-    match args.strategy {
-        Strategy::Ema => {
-            let config = load_config::<EmaParams>(&args.config)?;
+    args.strategy
+        .visit(Running {
+            args: &args,
+            live: &live,
+        })
+        .await
+}
+
+/// The visitor running a strategy on a live node until Ctrl-C: its
+/// output, the run, is boxed, a future of each kind's own type.
+struct Running<'a> {
+    args: &'a LiveArgs,
+    live: &'a Live,
+}
+
+impl<'a> Visitor for Running<'a> {
+    type Output = Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>>;
+
+    fn plain<S: PlainStrategy>(self) -> Self::Output {
+        Box::pin(async move {
+            let config = load_config::<S::Params>(&self.args.config)?;
             let requirements = config.data_requirements();
-            let strategy = EmaCross::live(config)?;
-            live.run(&requirements, &strategy.warmup(), strategy, None)
+            let strategy = S::live(config)?;
+            self.live
+                .run(&requirements, &strategy.warmup(), strategy, None)
                 .await
-        }
-        Strategy::ModelEma => live_on_models::<ModelEma>(&args, &live).await,
-        #[cfg(gold_scalp)]
-        Strategy::GoldScalp => live_on_models::<GoldScalp>(&args, &live).await,
-        #[cfg(gold_scalp_v2)]
-        Strategy::GoldScalpV2 => live_on_models::<GoldScalpV2>(&args, &live).await,
+        })
+    }
+
+    fn model<S: ModelStrategy>(self) -> Self::Output {
+        Box::pin(live_on_models::<S>(self.args, self.live))
     }
 }
 
@@ -789,15 +803,35 @@ fn run_train(args: TrainArgs) -> anyhow::Result<()> {
         leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
-    let outcome = match args.strategy {
-        Strategy::Ema => bail!("the EMA strategy trades on no model"),
-        Strategy::ModelEma => train::<ModelEma>(&args, &run)?,
-        #[cfg(gold_scalp)]
-        Strategy::GoldScalp => train::<GoldScalp>(&args, &run)?,
-        #[cfg(gold_scalp_v2)]
-        Strategy::GoldScalpV2 => train::<GoldScalpV2>(&args, &run)?,
-    };
+    let outcome = args.strategy.visit(Training {
+        args: &args,
+        run: &run,
+    })?;
     reported(&outcome)
+}
+
+/// The visitor training a strategy's model (`train`): a strategy trading
+/// on no model has none.
+struct Training<'a> {
+    args: &'a TrainArgs,
+    run: &'a DatasetRun,
+}
+
+impl Visitor for Training<'_> {
+    type Output = anyhow::Result<Trained>;
+
+    fn plain<S: PlainStrategy>(self) -> Self::Output {
+        let name = self
+            .args
+            .strategy
+            .to_possible_value()
+            .expect("every strategy has a name");
+        bail!("the {} strategy trades on no model", name.get_name())
+    }
+
+    fn model<S: ModelStrategy>(self) -> Self::Output {
+        train::<S>(self.args, self.run)
+    }
 }
 
 /// Trains the model of the model strategy `S` of `args` at `--at`, the
@@ -812,11 +846,14 @@ fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use helix_trader::model::{
-        holdout::{Earnings, Holdout, Refusal},
-        schedule::Retrain,
-        score::ExpectedScore,
-        train::{Kept, Outcome},
+    use helix_trader::{
+        model::{
+            holdout::{Earnings, Holdout, Refusal},
+            schedule::Retrain,
+            score::ExpectedScore,
+            train::{Kept, Outcome},
+        },
+        strategy::ema::EmaParams,
     };
     use jiff::SignedDuration;
 
@@ -862,7 +899,7 @@ mod tests {
     #[test]
     fn parses_fill_catalog_over_a_window_of_the_catalog() {
         let args = parse(&REQUIRED).unwrap();
-        assert_eq!(args.run.strategy, Strategy::Ema);
+        assert_eq!(args.run.strategy, StrategyName::Ema);
         assert_eq!(args.run.config, PathBuf::from("ema.toml"));
         assert_eq!(
             args.run.start,
@@ -896,7 +933,7 @@ mod tests {
     #[test]
     fn parses_a_backtest_with_its_costs() {
         let args = parse_backtest(&backtest_required()).unwrap();
-        assert_eq!(args.run.strategy, Strategy::Ema);
+        assert_eq!(args.run.strategy, StrategyName::Ema);
         assert_eq!(args.run.config, PathBuf::from("ema.toml"));
         assert_eq!(
             args.run.end,
@@ -1036,7 +1073,7 @@ mod tests {
     #[test]
     fn parses_live_with_its_strategy_config_and_catalog() {
         let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
-        assert_eq!(args.strategy, Strategy::Ema);
+        assert_eq!(args.strategy, StrategyName::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
         assert_eq!(args.catalog, PathBuf::from("catalog"));
     }
@@ -1129,7 +1166,7 @@ mod tests {
     #[test]
     fn parses_a_train_at_a_time_with_its_costs_into_the_models_store() {
         let args = parse_train(&TRAIN).unwrap();
-        assert_eq!(args.strategy, Strategy::ModelEma);
+        assert_eq!(args.strategy, StrategyName::ModelEma);
         assert_eq!(args.config, PathBuf::from("model_ema.toml"));
         assert_eq!(
             args.at,
@@ -1290,7 +1327,7 @@ mod tests {
         let children = Children::of_live(&parse_live(&argv).unwrap()).unwrap();
         let train = started_train(&children);
 
-        assert_eq!(train.strategy, Strategy::ModelEma);
+        assert_eq!(train.strategy, StrategyName::ModelEma);
         assert_eq!(train.config, PathBuf::from("model_ema.toml"));
         assert_eq!(train.catalog, PathBuf::from("/data/catalog"));
         assert_eq!(train.models, PathBuf::from("/data/models"));
