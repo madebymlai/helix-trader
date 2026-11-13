@@ -27,8 +27,8 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// only if something is missing. Each contract's definition is asked of
 /// the client too: the data engine answers it from the catalog, before the
 /// client, and puts it in the cache, where the client reads the precision
-/// of its prices; a definition the catalog lacks leaves the series' request
-/// to fail naming the instrument.
+/// of its prices; a definition the catalog lacks fails its request, naming
+/// the instrument, before LSE is asked.
 ///
 /// # Errors
 ///
@@ -227,7 +227,8 @@ mod tests {
         assert!(err.contains("symbol-unknown"), "{err}");
     }
 
-    /// LSE is never asked: its prices could not be read.
+    /// The definition request fails, LSE publishing none, and LSE is never
+    /// asked.
     #[test]
     fn a_fill_of_an_lsedge_instrument_with_no_definition_fails_naming_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -237,10 +238,10 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(
-            err.contains(&format!("{GOLD_FUTURES} is not in the cache")),
-            "{err}"
-        );
+        let request = format!("the definition of {GOLD_FUTURES}");
+        for part in [request.as_str(), "LSE publishes no instrument definitions"] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
         assert_eq!(stored_trades(dir.path()), []);
     }
