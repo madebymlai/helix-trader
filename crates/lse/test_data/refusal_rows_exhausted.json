@@ -1,0 +1,1 @@
+{"code":"rows-exhausted","message":"Your plan allows 12,500,000 rows a day; 11,900,000 are used and this export would read 6,743. It resets at 00:00 UTC, in 5 h 12 min.","retry_after":18720}

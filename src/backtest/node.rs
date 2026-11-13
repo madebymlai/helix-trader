@@ -32,6 +32,7 @@ use nautilus_model::{
     data::{Data, DataBatch, NautilusDataType, QuoteTick},
     enums::{AccountType, BookType},
     identifiers::{InstrumentId, Venue},
+    types::Money,
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::CatalogQuery,
@@ -43,6 +44,7 @@ use super::{Backtest, report::Outcome};
 use crate::{
     catalog::catalog_config,
     strategy::{SeriesSlice, warmup},
+    venues,
 };
 
 /// The id of the one run of the node.
@@ -64,24 +66,24 @@ const DATASET_PURGE_MINS: u32 = 1;
 
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
-/// says of it, each with the run's balance, leverage (Nautilus' default
-/// margin model: the notional / leverage times the instrument's margin)
-/// and fee model, which fills orders on the replayed data and settles
-/// funding, the series of the window from the catalog (the only data
-/// replayed: the data engine builds the strategy's bars from them and
-/// keeps the books the strategy subscribes to, the venue settles the
-/// funding; see `Backtest::series` and `data_config`), each over its
-/// slice of `[start, end]`, the window the engine runs, `start` before
-/// `end`. No catalog is registered in the engine: it serves no request,
-/// and the strategy warms up on the replay. The cache is Nautilus'
-/// default, the data engine builds no bar for an hour without quotes and
-/// builds time bars as late after their close as a live node does, by the
-/// backtest's bar types (`warmup::data_engine_config`). The data is
-/// streamed `CHUNK_SIZE` points at a time, unless the run replays custom
-/// data, which `BacktestDataConfig` refuses: then the custom series are
-/// left out (see `custom_data`) and the data is loaded at once. Build and
-/// run errors are raised, not only logged; the engine outlives the run
-/// (see `run`).
+/// says of it, each with the run's balance, or nothing if no broker trades
+/// it, its leverage (Nautilus' default margin model: the notional /
+/// leverage times the instrument's margin) and fee model, which fills
+/// orders on the replayed data and settles funding, the series of the
+/// window from the catalog (the only data replayed: the data engine builds
+/// the strategy's bars from them and keeps the books the strategy
+/// subscribes to, the venue settles the funding; see `Backtest::series` and
+/// `data_config`), each over its slice of `[start, end]`, the window the
+/// engine runs, `start` before `end`. No catalog is registered in the
+/// engine: it serves no request, and the strategy warms up on the replay.
+/// The cache is Nautilus' default, the data engine builds no bar for an
+/// hour without quotes and builds time bars as late after their close as a
+/// live node does, by the backtest's bar types
+/// (`warmup::data_engine_config`). The data is streamed `CHUNK_SIZE` points
+/// at a time, unless the run replays custom data, which
+/// `BacktestDataConfig` refuses: then the custom series are left out (see
+/// `custom_data`) and the data is loaded at once. Build and run errors are
+/// raised, not only logged; the engine outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     config(backtest, None)
 }
@@ -145,18 +147,24 @@ fn config(
 }
 
 /// The simulated `venue` of `backtest`: a margin account keeping positions
-/// as `backtest.venue_oms` says, with the run's balance, leverage and the
-/// fee model of its commission, filling on the top of the book on
-/// Nautilus' default fill model: a market order fills at the quote (a buy
-/// at the ask, a sell at the bid), or on bars at the last price, with no
-/// slippage, and a limit order whenever touched.
+/// as `backtest.venue_oms` says, with the run's balance if a broker trades
+/// the venue (`venues::has_broker`), else nothing in its currency, its
+/// leverage and the fee model of its commission, filling on the top of the
+/// book on Nautilus' default fill model: a market order fills at the quote
+/// (a buy at the ask, a sell at the bid), or on bars at the last price,
+/// with no slippage, and a limit order whenever touched.
 fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVenueConfig> {
+    let balance = if venues::has_broker(venue) {
+        backtest.balance
+    } else {
+        Money::zero(backtest.balance.currency)
+    };
     Ok(BacktestVenueConfig::builder()
         .name(venue.as_str())
         .oms_type((backtest.venue_oms)(venue))
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
-        .starting_balances(vec![backtest.balance.to_string()])
+        .starting_balances(vec![balance.to_string()])
         .default_leverage(backtest.leverage)
         .fee_model(backtest.commission.fee_model()?)
         .build()?)
@@ -692,5 +700,60 @@ mod tests {
             assert_eq!(venue.account_type(), AccountType::Margin);
             assert!(matches!(venue.fee_model(), Some(FeeModelAny::Fixed(_))));
         }
+    }
+
+    /// IC's gold traded, LSE's read: LSEDGE, which no broker trades, starts
+    /// with nothing in the run's currency, keeping positions as Nautilus'
+    /// venue default in a normal run, and hedging in a dataset run, as
+    /// every venue there.
+    #[test]
+    fn a_venue_no_broker_trades_starts_with_nothing_in_the_run_s_currency() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")],
+            ticks: vec![crate::strategy::TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+            }],
+            venue_oms: crate::venues::oms_type,
+            ..backtest(dir.path())
+        };
+        let dataset = Backtest {
+            venue_oms: |_| OmsType::Hedging,
+            ..backtest.clone()
+        };
+        let venues = |config: BacktestRunConfig| -> Vec<(String, OmsType, Vec<String>)> {
+            config
+                .venues()
+                .iter()
+                .map(|venue| {
+                    (
+                        venue.name().to_string(),
+                        venue.oms_type(),
+                        venue.starting_balances().to_vec(),
+                    )
+                })
+                .collect()
+        };
+
+        let normal = venues(run_config(&backtest).unwrap());
+        let dataset = venues(dataset_run_config(&dataset).unwrap());
+
+        let venue =
+            |name: &str, oms, balance: &str| (name.to_string(), oms, vec![balance.to_string()]);
+        assert_eq!(
+            normal,
+            [
+                venue("ICMARKETS", OmsType::Hedging, "10000.00 EUR"),
+                venue("LSEDGE", OmsType::Unspecified, "0.00 EUR"),
+            ]
+        );
+        assert_eq!(
+            dataset,
+            [
+                venue("ICMARKETS", OmsType::Hedging, "10000.00 EUR"),
+                venue("LSEDGE", OmsType::Hedging, "0.00 EUR"),
+            ]
+        );
     }
 }

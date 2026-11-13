@@ -20,7 +20,7 @@ Fixed commission is charged on an order's first fill; a rate and an amount per u
 
 ## Leverage and venues
 
-Each simulated venue starts with the specified balance and uses its live position mode, which it takes from `venues::oms_type`: IC Markets and Pepperstone are hedging, other venues netting. The same balance, leverage and fee model apply to every venue in a multi-venue run.
+Each simulated venue a broker trades starts with the specified balance and uses its live position mode, which it takes from `venues::oms_type`: IC Markets and Pepperstone are hedging, other venues netting. A venue no broker trades, only read, such as `LSEDGE`, starts with nothing in the balance's currency and Nautilus' default position mode, so that it adds no money: a run reading its series ends with the balances and return statistics of the run without them, its empty account aside, which the report lists. Dataset runs hedge on every venue. The same leverage and fee model apply to every venue in a multi-venue run.
 
 The margin model applies both the instrument margin and `--leverage` (default 1). IC and Pepperstone instruments already carry the venue's margin: use 1x unless deliberately modelling a further division. OKX instruments have margin 1, so set leverage to the account's per-instrument leverage. IB instruments have zero margins and lock no margin in this simulation. Orders exceeding free initial margin can be denied, but liquidation is disabled; the simulation does not reproduce venue liquidations.
 

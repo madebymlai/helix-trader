@@ -43,6 +43,7 @@ mod backtest_netting_venue;
 mod backtest_okx_swap;
 mod backtest_okx_swap_funding;
 mod backtest_quote_gap;
+mod backtest_read_only_venue;
 mod backtest_relative_catalog;
 mod backtest_retrain;
 mod backtest_rolls;

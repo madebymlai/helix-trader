@@ -1,18 +1,18 @@
-//! The venues: each one's history, live clients and command-line settings
-//! in a module of its own, and the routing table, a row per venue (`Row`)
-//! saying, each on its own, where its instruments' definitions
-//! (`DefinitionsSource`), history (`HistorySource`) and live data
-//! (`LiveDataSource`) come from, and which broker trades them (`Broker`), if
-//! one does. Everything else asks here and names no venue, each caller the
-//! row's part it needs: fill-catalog for its fill (`fill_history`: the
-//! definitions and history), the live runner for its node's clients
-//! (`live_clients`: the live data), a backtest for how a venue keeps
-//! positions (`oms_type`, its broker's answer), a trade whether its orders
-//! may be reduce-only and post-only (`takes_reduce_only_and_post_only`, its
-//! broker's answer); venue code checks its own instruments against the
+//! The venues: each one's history, live clients and command-line settings in a
+//! module of its own, and the routing table, a row per venue (`Row`) saying,
+//! each on its own, where its instruments' definitions (`DefinitionsSource`),
+//! history (`HistorySource`) and live data (`LiveDataSource`) come from, and
+//! which broker trades them (`Broker`), if one does. Everything else asks here
+//! and names no venue, each caller the row's part it needs: fill-catalog for
+//! its fill (`fill_history`: the definitions and history), the live runner for
+//! its node's clients (`live_clients`: the live data), a backtest for how a
+//! venue keeps positions (`oms_type`, its broker's answer) and whether it has
+//! money (`has_broker`: a venue no broker trades has none), a trade whether its
+//! orders may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
+//! its broker's answer); venue code checks its own instruments against the
 //! table. The settings each command takes of the venues are composed here,
-//! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which
-//! the commands flatten.
+//! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which the
+//! commands flatten.
 //!
 //! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches
 //! loop over: each one's module names its venue and account, and its row of
@@ -23,17 +23,20 @@
 //! No trait stands for a venue: Nautilus' factories, configs and
 //! `RoutingConfig` are already the seam, and the venues' needs differ too much
 //! for a trait to hide them. OKX needs a leverage, IB an account, a client id
-//! and its fill after the node's, Databento an API key and its own check.
+//! and its fill after the node's, Databento an API key and its own check,
+//! LSE a key and definitions written into the catalog by hand.
 
 pub mod databento;
 pub mod ib;
 pub mod ic;
+pub mod lse;
 pub mod okx;
 pub mod pepperstone;
 
 use std::path::Path;
 
-use anyhow::Context;
+use ::lse::LseDataClientConfig;
+use anyhow::{Context, ensure};
 use clap::Args;
 use ctrader::{
     CTraderAccountVars, CTraderConnection, CTraderDataClientConfig, CTraderDataClientFactory,
@@ -46,7 +49,6 @@ use nautilus_model::{
     enums::OmsType,
     identifiers::{InstrumentId, Venue},
 };
-use nautilus_okx::common::consts::OKX_VENUE;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -84,6 +86,14 @@ impl CTraderBroker {
 /// order a fill asks them and a node takes their clients.
 const CTRADER_BROKERS: &[CTraderBroker] = &[ic::BROKER, pepperstone::BROKER];
 
+/// The cTrader broker of `venue`, if one of `CTRADER_BROKERS` is on it.
+fn ctrader_broker(venue: Venue) -> Option<CTraderBroker> {
+    CTRADER_BROKERS
+        .iter()
+        .copied()
+        .find(|broker| venue.as_str() == broker.venue)
+}
+
 /// The cTrader brokers among `ids`, in the order of `CTRADER_BROKERS` whatever
 /// the order of `ids`, each with its instruments in the order they come.
 fn ctrader_brokers_present(
@@ -106,6 +116,10 @@ fn ctrader_brokers_present(
 /// The source of a venue's instrument definitions in the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefinitionsSource {
+    /// The catalog alone: definitions written into it by hand, which
+    /// Nautilus' data engine answers a fill's definition requests with
+    /// before asking any client.
+    Catalog,
     /// OKX's public API, written into the catalog before the node starts
     /// (`OkxHistory::write_definitions`).
     Okx,
@@ -126,6 +140,8 @@ pub(crate) enum HistorySource {
     CTrader(CTraderBroker),
     /// Databento's `GLBX.MDP3` dataset.
     Databento,
+    /// LSE's exports, through the LSE adapter's data client.
+    Lse,
     /// Interactive Brokers' historical bars.
     Ib,
 }
@@ -137,6 +153,8 @@ pub(crate) enum LiveDataSource {
     Okx,
     /// A cTrader broker's data client.
     CTrader(CTraderBroker),
+    /// The LSE adapter's data client, which streams nothing yet.
+    Lse,
     /// Interactive Brokers' data client, on the gateway.
     Ib,
 }
@@ -198,43 +216,42 @@ struct Row {
 }
 
 impl Row {
+    const fn new(
+        definitions: DefinitionsSource,
+        history: HistorySource,
+        live_data: LiveDataSource,
+        broker: Option<Broker>,
+    ) -> Self {
+        Self {
+            definitions,
+            history,
+            live_data,
+            broker,
+        }
+    }
+
     /// The row of `venue`. A venue of `CTRADER_BROKERS` takes everything
     /// from its broker, and OKX from OKX. GLBX, CME Globex as Databento
     /// names it, takes its definitions and history from Databento and its
     /// live data and orders from IB, Databento having no live clients
-    /// here; every venue without a row of its own takes everything from IB.
+    /// here. LSEDGE, LSE's own series, takes its definitions from the
+    /// catalog alone, LSE publishing none, its history and live data from
+    /// LSE, and has no broker: LSE trades nothing. Every venue without a
+    /// row of its own takes everything from IB.
+    #[rustfmt::skip]
     fn of(venue: Venue) -> Self {
-        if venue == *OKX_VENUE {
-            Self {
-                definitions: DefinitionsSource::Okx,
-                history: HistorySource::Okx,
-                live_data: LiveDataSource::Okx,
-                broker: Some(Broker::Okx),
-            }
-        } else if let Some(&broker) = CTRADER_BROKERS
-            .iter()
-            .find(|broker| venue.as_str() == broker.venue)
-        {
-            Self {
-                definitions: DefinitionsSource::CTrader(broker),
-                history: HistorySource::CTrader(broker),
-                live_data: LiveDataSource::CTrader(broker),
-                broker: Some(Broker::CTrader(broker)),
-            }
-        } else if venue == Venue::GLBX() {
-            Self {
-                definitions: DefinitionsSource::Databento,
-                history: HistorySource::Databento,
-                live_data: LiveDataSource::Ib,
-                broker: Some(Broker::Ib),
-            }
-        } else {
-            Self {
-                definitions: DefinitionsSource::Ib,
-                history: HistorySource::Ib,
-                live_data: LiveDataSource::Ib,
-                broker: Some(Broker::Ib),
-            }
+        use {Broker as B, DefinitionsSource as D, HistorySource as H, LiveDataSource as L};
+        if let Some(broker) = ctrader_broker(venue) {
+            return Self::new(
+                D::CTrader(broker), H::CTrader(broker), L::CTrader(broker), Some(B::CTrader(broker)),
+            );
+        }
+        match venue.as_str() {
+            //                    definitions   history       live data  broker
+            "OKX"    => Self::new(D::Okx,       H::Okx,       L::Okx,    Some(B::Okx)),
+            "GLBX"   => Self::new(D::Databento, H::Databento, L::Ib,     Some(B::Ib)),
+            "LSEDGE" => Self::new(D::Catalog,   H::Lse,       L::Lse,    None),
+            _        => Self::new(D::Ib,        H::Ib,        L::Ib,     Some(B::Ib)),
         }
     }
 }
@@ -249,6 +266,14 @@ pub fn oms_type(venue: Venue) -> OmsType {
     Row::of(venue)
         .broker
         .map_or(OmsType::Unspecified, Broker::oms_type)
+}
+
+/// Whether a broker trades the instruments of `venue`: every venue's but
+/// LSEDGE's, which is only read. A backtest gives a venue no broker trades
+/// no money.
+#[must_use]
+pub fn has_broker(venue: Venue) -> bool {
+    Row::of(venue).broker.is_some()
 }
 
 /// Whether the broker of `venue` takes reduce-only and post-only orders
@@ -347,27 +372,30 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// and its ticks (see `DataRequirements::catalog_series`), each on a contract
 /// over its slice (`DataRequirements::slices`), every history source
 /// (`Row::of`, `HistorySource`) given its slices. Databento's, the cTrader
-/// brokers' and OKX's fill through a Nautilus node (see `catalog::NodeFill`),
-/// each request naming the client that answers it: Databento's data client
-/// for GLBX instruments (the series declared, checked against the dataset's
-/// end before the node starts), each cTrader broker's for its own
-/// (`add_ctrader_fill`) and OKX's for OKX instruments (their series and
-/// funding). Then IB, connected only if it has instruments, on the client id
-/// of `venues`, fills the others, without a node until its client answers
-/// with response envelopes. Databento, the cTrader brokers and IB ask the
-/// definition of each contract they fill the series of, each row giving
-/// both to one source; OKX writes the definitions it gives
-/// (`DefinitionsSource`) before the node starts. The cTrader brokers and IB
-/// refuse a series they do not serve. A source with nothing missing reads no
-/// credential, IB's connection aside.
+/// brokers', OKX's and LSE's fill through a Nautilus node (see
+/// `catalog::NodeFill`), each request naming the client that answers it:
+/// Databento's data client for GLBX instruments (the series declared,
+/// checked against the dataset's end before the node starts), each cTrader
+/// broker's for its own (`add_ctrader_fill`), OKX's for OKX instruments
+/// (their series and funding) and LSE's for LSEDGE instruments
+/// (`lse::add_fill`). Then IB, connected only if it has instruments, on the
+/// client id of `venues`, fills the others, without a node until its client
+/// answers with response envelopes. Databento, the cTrader brokers and IB
+/// ask the definition of each contract they fill the series of, each row
+/// giving both to one source; OKX writes the definitions it gives
+/// (`DefinitionsSource`) before the node starts; LSEDGE's are the catalog's
+/// alone, which the data engine answers LSE's client's definition requests
+/// from. The cTrader brokers, LSE and IB refuse a series they do not serve.
+/// A source with nothing missing reads no credential, IB's connection aside.
 ///
 /// # Errors
 ///
 /// Returns an error if the catalog cannot be read, if `DATABENTO_API_KEY` is
 /// missing while Databento has something to fill, or as
 /// `DatabentoHistory::new`, `DatabentoHistory::check`, `add_ctrader_fill`,
-/// `OkxHistory::write_definitions`, `NodeFill::run`, `IbHistory::connect` and
-/// `IbHistory::fill`.
+/// `OkxHistory::write_definitions`, `lse::add_fill`, `NodeFill::run`
+/// (`LSE_API_KEY` missing while LSE has something to fill among them),
+/// `IbHistory::connect` and `IbHistory::fill`.
 pub async fn fill_history(
     requirements: &DataRequirements,
     start: Timestamp,
@@ -376,13 +404,14 @@ pub async fn fill_history(
     catalog_dir: &Path,
 ) -> anyhow::Result<()> {
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    let (mut okx_ids, mut databento_ids, mut ctrader_ids, mut ib_ids) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut okx_ids, mut databento_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
         match Row::of(id.venue).history {
             HistorySource::Okx => okx_ids.push(id),
             HistorySource::Databento => databento_ids.push(id),
             HistorySource::CTrader(broker) => ctrader_ids.push((broker, id)),
+            HistorySource::Lse => lse_ids.push(id),
             HistorySource::Ib => ib_ids.push(id),
         }
     }
@@ -422,6 +451,14 @@ pub async fn fill_history(
         if !requests.is_empty() {
             node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
         }
+    }
+    if !lse_ids.is_empty() {
+        lse::add_fill(
+            &mut node,
+            &catalog,
+            &of_source(&slices, HistorySource::Lse),
+            LseDataClientConfig::default(),
+        )?;
     }
     node.run(catalog_dir).await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
@@ -478,20 +515,23 @@ fn ctrader_read(
 /// data source (`Row::of`, `LiveDataSource`), for the instruments
 /// `requirements` reads: OKX's, each cTrader broker's
 /// (`ctrader_brokers_present`), then IB's, each a data client with the
-/// execution client of the same adapter on its connection, every row taking
-/// its live data from its broker (`Broker`). The cTrader brokers' bar types
-/// are checked and their environments and credential read before anything
-/// connects; OKX's clients are set up at `leverage`, the run's, IB's trading
-/// the IB account of `venues` with its client id.
+/// execution client of the same adapter on its connection, each of those
+/// rows taking its live data from its broker (`Broker`). LSE's client
+/// streams nothing yet, so LSEDGE instruments are refused before anything
+/// connects. The cTrader brokers' bar types are checked and their
+/// environments and credential read before anything connects; OKX's
+/// clients are set up at `leverage`, the run's, IB's trading the IB account
+/// of `venues` with its client id.
 ///
 /// # Errors
 ///
-/// Returns an error if a cTrader broker's bar type is not built from quotes
-/// or its environment or credential is missing (see `ctrader_read`, checked
-/// before anything connects), if OKX's clients cannot be set up or the OKX
-/// account does not suit the run (see `okx::clients`), if cTrader is
-/// unreachable or a broker's account is not hedging or not the credential's
-/// (see `CTraderConnection::check_account`), if the strategy trades IB
+/// Returns an error naming them if instruments are LSEDGE's, if a cTrader
+/// broker's bar type is not built from quotes or its environment or
+/// credential is missing (see `ctrader_read`, checked before anything
+/// connects), if OKX's clients cannot be set up or the OKX account does not
+/// suit the run (see `okx::clients`), if cTrader is unreachable or a
+/// broker's account is not hedging or not the credential's (see
+/// `CTraderConnection::check_account`), if the strategy trades IB
 /// instruments and no account is given, or if IB's clients cannot be set up
 /// (see `ib::clients`).
 pub(crate) async fn live_clients(
@@ -500,14 +540,25 @@ pub(crate) async fn live_clients(
     venues: &LiveVenueArgs,
     leverage: Decimal,
 ) -> anyhow::Result<Vec<Clients>> {
-    let (mut okx_ids, mut ctrader_ids, mut ib_ids) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for &id in instrument_ids {
         match Row::of(id.venue).live_data {
             LiveDataSource::Okx => okx_ids.push(id),
             LiveDataSource::CTrader(broker) => ctrader_ids.push((broker, id)),
+            LiveDataSource::Lse => lse_ids.push(id),
             LiveDataSource::Ib => ib_ids.push(id),
         }
     }
+    ensure!(
+        lse_ids.is_empty(),
+        "the LSE adapter streams no live data yet: {}",
+        lse_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     // Read before anything connects.
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
@@ -537,6 +588,7 @@ pub(crate) async fn live_clients(
 mod tests {
     use std::{cell::RefCell, collections::HashMap, ffi::OsStr, os::unix::ffi::OsStrExt, rc::Rc};
 
+    use ::lse::LSEDGE_VENUE;
     use clap::{Command, FromArgMatches};
     use ctrader::CTraderEnvironment;
     use jiff::SignedDuration;
@@ -552,6 +604,7 @@ mod tests {
         instruments::{InstrumentAny, stubs::crypto_perpetual_ethusdt},
         types::{Price, Quantity},
     };
+    use nautilus_okx::common::consts::OKX_VENUE;
 
     use super::*;
     use crate::{
@@ -1131,6 +1184,7 @@ mod tests {
             (NautilusDataType::QuoteTick, "XAUUSD.PEPPERSTONE"),
             (NautilusDataType::TradeTick, "BTC-USDT-SWAP.OKX"),
             (NautilusDataType::TradeTick, "SXR8.IBIS"),
+            (NautilusDataType::TradeTick, "GOLD-FUTURES.LSEDGE"),
         ]);
         let slices = requirements.slices(at("2026-07-28T00:00:00Z"), at("2026-07-29T12:00:00Z"));
         let contracts = |source| {
@@ -1154,6 +1208,21 @@ mod tests {
         );
         assert_eq!(contracts(HistorySource::Okx), ["BTC-USDT-SWAP.OKX"]);
         assert_eq!(contracts(HistorySource::Ib), ["SXR8.IBIS"]);
+        assert_eq!(contracts(HistorySource::Lse), ["GOLD-FUTURES.LSEDGE"]);
+    }
+
+    /// Only a venue no broker trades, LSEDGE, has none.
+    #[test]
+    fn every_venue_has_a_broker_but_lsedge() {
+        for (venue, has) in [
+            ("ICMARKETS", true),
+            ("OKX", true),
+            ("GLBX", true),
+            ("IBIS", true),
+            ("LSEDGE", false),
+        ] {
+            assert_eq!(has_broker(Venue::new(venue)), has, "{venue}");
+        }
     }
 
     fn live_args() -> LiveVenueArgs {
@@ -1193,7 +1262,8 @@ mod tests {
     }
 
     /// The cTrader brokers' accounts hedge; IB's and OKX's net, whether the
-    /// venue has a row of its own, as GLBX has, or none.
+    /// venue has a row of its own, as GLBX has, or none; LSEDGE, which no
+    /// broker trades, keeps positions as Nautilus' venue default.
     #[test]
     fn each_venue_keeps_positions_as_the_account_of_its_live_broker_does() {
         for (venue, kept) in [
@@ -1207,6 +1277,7 @@ mod tests {
             ("LSEETF", OmsType::Netting),
             ("IDEALPRO", OmsType::Netting),
             ("BINANCE", OmsType::Netting),
+            ("LSEDGE", OmsType::Unspecified),
         ] {
             assert_eq!(oms_type(Venue::new(venue)), kept, "{venue}");
         }
@@ -1223,6 +1294,7 @@ mod tests {
             ("GLBX", false),
             ("IBIS", false),
             ("IDEALPRO", false),
+            ("LSEDGE", false),
         ] {
             assert_eq!(
                 takes_reduce_only_and_post_only(Venue::new(venue)),
@@ -1234,7 +1306,9 @@ mod tests {
 
     /// GLBX takes its definitions and history from Databento and its live
     /// data and orders from IB; OKX and each cTrader broker take all four
-    /// from themselves, and every other venue from IB.
+    /// from themselves; LSEDGE its definitions from the catalog and its
+    /// history and live data from LSE, with no broker; and every other
+    /// venue all four from IB.
     #[test]
     fn each_instrument_routes_to_the_row_of_its_venue() {
         let okx = Row {
@@ -1261,7 +1335,15 @@ mod tests {
             live_data: LiveDataSource::Ib,
             broker: Some(Broker::Ib),
         };
+        let lsedge = Row {
+            definitions: DefinitionsSource::Catalog,
+            history: HistorySource::Lse,
+            live_data: LiveDataSource::Lse,
+            broker: None,
+        };
         for (id, row) in [
+            ("GOLD-FUTURES.LSEDGE", lsedge),
+            ("US10Y-FUTURES.LSEDGE", lsedge),
             ("BTC-USDT-SWAP.OKX", okx),
             ("XAUUSD.ICMARKETS", ctrader(ic::BROKER)),
             ("XAUUSD.PEPPERSTONE", ctrader(pepperstone::BROKER)),
@@ -1277,5 +1359,36 @@ mod tests {
             let id = InstrumentId::from(id);
             assert_eq!(Row::of(id.venue), row, "{id}");
         }
+    }
+
+    /// The table names its venues as their adapters do.
+    #[test]
+    fn the_table_s_venues_are_their_adapters() {
+        assert_eq!(Row::of(*OKX_VENUE).history, HistorySource::Okx);
+        assert_eq!(Row::of(Venue::GLBX()).history, HistorySource::Databento);
+        assert_eq!(Row::of(*LSEDGE_VENUE).history, HistorySource::Lse);
+    }
+
+    /// The live run is refused before anything connects, OKX's clients
+    /// among them, which would fail on its missing environment.
+    #[tokio::test]
+    async fn a_run_reading_lsedge_instruments_is_refused_naming_them_before_anything_connects() {
+        let requirements = ticks(&[
+            (NautilusDataType::QuoteTick, "BTC-USDT-SWAP.OKX"),
+            (NautilusDataType::TradeTick, "GOLD-FUTURES.LSEDGE"),
+        ]);
+
+        let Err(err) = live_clients(
+            &requirements,
+            &requirements.instrument_ids(),
+            &live_args(),
+            Decimal::ONE,
+        )
+        .await
+        else {
+            panic!("set up clients for LSEDGE instruments");
+        };
+
+        assert!(err.to_string().contains("GOLD-FUTURES.LSEDGE"), "{err:#}");
     }
 }

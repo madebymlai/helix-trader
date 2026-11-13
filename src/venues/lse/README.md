@@ -1,0 +1,17 @@
+# LSE history
+
+`fill-catalog` fills the history of `LSEDGE` instruments, London Strategic Edge's own derived series, through the [node fill](../../catalog/README.md), each request naming the client of the [LSE adapter](../../../crates/lse/README.md). Their row of the [routing table](../mod.rs) takes definitions from the catalog alone, history and live data from LSE, and no broker: LSE trades nothing. Set `LSE_API_KEY` in the environment or `.env`; it is read only when something is missing. The declared series can be trades, LSE's tick slices; any other request fails as unsupported.
+
+An instrument is LSE's symbol, a hyphen and its LSE market in capitals: GOLD in `futures` is `GOLD-FUTURES.LSEDGE`, the 10-year Treasury futures `US10Y-FUTURES.LSEDGE` (see [the adapter's instruments](../../../crates/lse/README.md#instruments)). LSE publishes no definitions, so write each into the catalog by hand before filling, as an `IndexInstrument` of that id, LSE's symbol as raw symbol, the currency of its prices, a price precision and increment to its tick (gold to 0.1, the 10-year note to 1/64, 0.015625) and whole lots as sizes, stamped at 1970 so that it stands for any time; write it with Nautilus' catalog API (`ParquetDataCatalog::write_instruments`) on the pinned crates. No helix command writes one and the repository keeps none. The data engine answers each definition request from the catalog before asking LSE; a fill of an instrument the catalog does not define fails naming it before LSE is asked, and a definition coarser than LSE's prices fails the fill rather than round them.
+
+Requests are split into day-long windows from the request start, as Databento's; the adapter asks LSE a UTC day an export within each, one download at a time, within the calls a minute of the free plan unless configured otherwise. LSE's refusal, such as `symbol-unknown` for a symbol it does not list or `plan-required`, fails the fill with its code, message and required plan; a quota (`rows-exhausted`, the free plan's 12.5 million rows a day) stops it, and the next run asks for what is still missing. See the [adapter's exports](../../../crates/lse/README.md#exports) for retries, checksums and conversion, and [shared fill semantics](../../catalog/README.md) for coverage and resume.
+
+A live run reading `LSEDGE` instruments is refused at startup: the adapter streams no live data yet. A backtest simulates `LSEDGE` as a venue no broker trades: it starts with no money and keeps positions as Nautilus' venue default (see [backtest venues](../../backtest/README.md#leverage-and-venues)).
+
+## Tests
+
+Offline tests of the fill through the node against the adapter's mock LSE peer are in `src/venues/lse`, and a backtest reading a filled `LSEDGE` series beside IC's trade in `tests/backtest/backtest_read_only_venue.rs`; the adapter's own are in [the crate](../../../crates/lse/README.md#tests). The gated test `tests/live/lse_history.rs` fills one day of gold and 10-year Treasury futures trades from LSE into a temporary catalog, with the key of the environment or `.env`; it runs only with `NAUTILUS_LSE_RUN=1` set in the shell and counts against the key's rows a day:
+
+```sh
+NAUTILUS_LSE_RUN=1 cargo test --test live lse_history:: -- --nocapture
+```
