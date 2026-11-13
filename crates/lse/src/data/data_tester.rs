@@ -57,7 +57,7 @@ async fn the_data_tester_receives_lse_s_quotes_and_ends_their_subscription_on_st
     };
     let lse = LseDataClientConfig::builder()
         .api_key(SecretString::from(API_KEY))
-        .base_url_ws(socket.url().to_string())
+        .base_url_ws_data(socket.url().to_string())
         .stream_ids(vec![gold])
         .build();
     let mut node = LiveNodeBuilder::from_config(config)

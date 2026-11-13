@@ -139,21 +139,22 @@ mod tests {
     use ::lse::{
         LseRow,
         testing::{
-            ALLOWANCE_EXHAUSTED, API_KEY, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
-            GCZ26, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
-            GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
-            REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
-            gold_futures, gold_spot,
+            AAPL_TRADES, ALLOWANCE_EXHAUSTED, API_KEY, BTCUSDT_TRADES, CME_API_KEY,
+            DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_QUOTES,
+            GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse,
+            PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE,
+            ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
+            VOD_TRADES, gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
-        data::{BarType, Data, DataType, NautilusDataType, TradeTick},
+        data::{Bar, BarType, Data, DataType, NautilusDataType, TradeTick},
         enums::AggressorSide,
-        identifiers::{InstrumentId, TradeId},
-        instruments::InstrumentAny,
-        types::{Price, Quantity},
+        identifiers::{InstrumentId, Symbol, TradeId},
+        instruments::{IndexInstrument, InstrumentAny},
+        types::{Currency, Price, Quantity},
     };
 
     use super::*;
@@ -408,6 +409,271 @@ mod tests {
                 Some("2026-10-21T10:05:00Z")
             )
         );
+    }
+
+    /// `id`'s definition, as one is written by hand: an index of LSE's
+    /// symbol `raw`, its prices at `precision`, its sizes whole lots.
+    fn index(id: &str, raw: &str, precision: u8) -> InstrumentAny {
+        InstrumentAny::IndexInstrument(
+            IndexInstrument::builder()
+                .instrument_id(InstrumentId::from(id))
+                .raw_symbol(Symbol::from(raw))
+                .currency(Currency::USD())
+                .price_precision(precision)
+                .size_precision(0)
+                .price_increment(Price::new(10f64.powi(-i32::from(precision)), precision))
+                .size_increment(Quantity::from(1))
+                .ts_event(UnixNanos::default())
+                .ts_init(UnixNanos::default())
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn on_the_12th(time: &str) -> Timestamp {
+        format!("2026-11-12T{time}Z").parse().unwrap()
+    }
+
+    /// A series of each derived market LSE stores trades of, its trade
+    /// slice of 12 November captured from LSE, filled over the captured
+    /// window under its `LSEDGE` id, as pyarrow reads LSE's file: the
+    /// count, the first and last times, the total size and the lowest and
+    /// highest prices. LSE is asked the slice of its market and symbol.
+    /// Futures' are `the_trades_lse_exports_are_written_back_to_the_catalog`'s.
+    #[test]
+    fn the_trades_of_a_series_of_each_derived_market_fill_under_its_lsedge_id() {
+        struct Case {
+            id: &'static str,
+            market: &'static str,
+            symbol: &'static str,
+            precision: u8,
+            export: &'static [u8],
+            window: (&'static str, &'static str),
+            count: usize,
+            times: (&'static str, &'static str),
+            total_size: u64,
+            prices: (&'static str, &'static str),
+        }
+        let cases = [
+            Case {
+                id: "AAPL-US_STOCKS.LSEDGE",
+                market: "us_stocks",
+                symbol: "AAPL",
+                precision: 4,
+                export: AAPL_TRADES,
+                window: ("15:00:00", "15:00:00.999999999"),
+                count: 54,
+                times: ("15:00:00.00557", "15:00:00.968094"),
+                total_size: 1829,
+                prices: ("358.54", "358.91"),
+            },
+            Case {
+                id: "VOD-UK_STOCKS.LSEDGE",
+                market: "uk_stocks",
+                symbol: "VOD",
+                precision: 2,
+                export: VOD_TRADES,
+                window: ("10:00:00", "10:00:59.999999999"),
+                count: 9,
+                times: ("10:00:12.677", "10:00:35.279"),
+                total_size: 33765,
+                prices: ("117.8", "117.85"),
+            },
+            Case {
+                id: "RY-CA_STOCKS.LSEDGE",
+                market: "ca_stocks",
+                symbol: "RY",
+                precision: 2,
+                export: RY_TRADES,
+                window: ("15:00:00", "15:00:59.999999999"),
+                count: 23,
+                times: ("15:00:05.973", "15:00:36.614"),
+                total_size: 3135,
+                prices: ("288.65", "288.86"),
+            },
+            Case {
+                id: "BTCUSDT-CRYPTO.LSEDGE",
+                market: "crypto",
+                symbol: "BTCUSDT",
+                precision: 2,
+                export: BTCUSDT_TRADES,
+                window: ("10:00:00", "10:00:00.999999999"),
+                count: 36,
+                times: ("10:00:00.124", "10:00:00.124"),
+                total_size: 831_000,
+                prices: ("73496.29", "73497.39"),
+            },
+        ];
+        for case in cases {
+            let id = case.id;
+            let dir = tempfile::tempdir().unwrap();
+            let lse = MockLse::start(vec![Reply::file(case.export)]);
+            let requirements = DataRequirements {
+                bar_types: vec![],
+                ticks: vec![TickSeries {
+                    data: NautilusDataType::TradeTick,
+                    instrument_id: InstrumentId::from(id),
+                }],
+                custom: vec![],
+                warmup: SignedDuration::ZERO,
+            };
+
+            fill_requirements(
+                dir.path(),
+                &lse,
+                &requirements,
+                vec![index(id, case.symbol, case.precision)],
+                on_the_12th(case.window.0),
+                on_the_12th(case.window.1),
+            )
+            .unwrap();
+
+            let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
+                .trade_ticks(Some(vec![id.to_string()]), None, None)
+                .unwrap();
+            let at = |time| UnixNanos::from(on_the_12th(time));
+            assert_eq!(stored.len(), case.count, "{id}");
+            assert_eq!(
+                (stored[0].ts_event, stored[stored.len() - 1].ts_event),
+                (at(case.times.0), at(case.times.1)),
+                "{id}"
+            );
+            assert_eq!(
+                stored.iter().map(|t| t.size.as_f64()).sum::<f64>(),
+                case.total_size as f64,
+                "{id}"
+            );
+            let price = |price: &str| Price::from(price).as_f64();
+            let (low, high) = stored.iter().fold((f64::MAX, f64::MIN), |(low, high), t| {
+                (low.min(t.price.as_f64()), high.max(t.price.as_f64()))
+            });
+            assert_eq!(
+                (low, high),
+                (price(case.prices.0), price(case.prices.1)),
+                "{id}"
+            );
+            let [export] = &lse.calls()[..] else {
+                panic!("{id}: {:?}", lse.calls())
+            };
+            assert_eq!(
+                (
+                    export.param("market"),
+                    export.param("symbol"),
+                    export.param("timeframe")
+                ),
+                (Some(case.market), Some(case.symbol), Some("tick")),
+                "{id}"
+            );
+        }
+    }
+
+    /// The forex pair and the index of LSE's 1-minute candles of 12
+    /// November captured from LSE, filled as the bars closing over
+    /// `[10:01, 10:05]` and `[15:01, 15:05]` under their `LSEDGE` ids, as
+    /// pyarrow reads LSE's files: five bars, the first and the last of
+    /// them stamped at their close. LSE stores no trades of forex, and an
+    /// index's tick slice carries no size. Commodities' bars are gold
+    /// spot's (`lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close`).
+    #[test]
+    fn the_bars_of_a_forex_pair_and_an_index_fill_under_their_lsedge_ids() {
+        /// A bar's close, then its open, high, low and last prices.
+        type Row = (&'static str, [&'static str; 4]);
+        struct Case {
+            id: &'static str,
+            market: &'static str,
+            symbol: &'static str,
+            precision: u8,
+            export: &'static [u8],
+            window: (&'static str, &'static str),
+            first: Row,
+            last: Row,
+        }
+        let cases = [
+            Case {
+                id: "EUR_USD-FOREX.LSEDGE",
+                market: "forex",
+                symbol: "EUR_USD",
+                precision: 5,
+                export: EUR_USD_MINUTES,
+                window: ("10:01:00", "10:05:00"),
+                first: ("10:01:00", ["1.10942", "1.10946", "1.10941", "1.10944"]),
+                last: ("10:05:00", ["1.10936", "1.10941", "1.10930", "1.10930"]),
+            },
+            Case {
+                id: "SPX-INDICES.LSEDGE",
+                market: "indices",
+                symbol: "SPX",
+                precision: 2,
+                export: SPX_MINUTES,
+                window: ("15:01:00", "15:05:00"),
+                first: ("15:01:00", ["7600.07", "7600.07", "7589.80", "7590.37"]),
+                last: ("15:05:00", ["7583.60", "7590.34", "7582.70", "7588.98"]),
+            },
+        ];
+        for Case {
+            id,
+            market,
+            symbol,
+            precision,
+            export,
+            window,
+            first,
+            last,
+        } in cases
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let lse = MockLse::start(vec![Reply::file(export)]);
+            let bars = format!("{id}-1-MINUTE-LAST-EXTERNAL");
+            let requirements = DataRequirements {
+                bar_types: vec![BarType::from(bars.as_str())],
+                ticks: vec![],
+                custom: vec![],
+                warmup: SignedDuration::ZERO,
+            };
+
+            fill_requirements(
+                dir.path(),
+                &lse,
+                &requirements,
+                vec![index(id, symbol, precision)],
+                on_the_12th(window.0),
+                on_the_12th(window.1),
+            )
+            .unwrap();
+
+            let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
+                .bars(Some(vec![bars.clone()]), None, None)
+                .unwrap();
+            let row = |b: &Bar| (b.ts_event, b.open, b.high, b.low, b.close, b.volume);
+            let expected = |(close, [open, high, low, last]): Row| {
+                (
+                    UnixNanos::from(on_the_12th(close)),
+                    Price::from(open),
+                    Price::from(high),
+                    Price::from(low),
+                    Price::from(last),
+                    Quantity::from(0),
+                )
+            };
+            assert_eq!(stored.len(), 5, "{id}");
+            assert_eq!(
+                (row(&stored[0]), row(&stored[4])),
+                (expected(first), expected(last)),
+                "{id}"
+            );
+            let [export] = &lse.calls()[..] else {
+                panic!("{id}: {:?}", lse.calls())
+            };
+            assert_eq!(
+                (
+                    export.param("market"),
+                    export.param("symbol"),
+                    export.param("timeframe")
+                ),
+                (Some(market), Some(symbol), Some("1m")),
+                "{id}"
+            );
+        }
     }
 
     #[test]

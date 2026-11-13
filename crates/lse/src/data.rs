@@ -794,9 +794,9 @@ mod tests {
     use nautilus_core::{Params, UUID4, UnixNanos, string::secret::SecretString};
     use nautilus_model::{
         data::{BarType, CustomData, CustomDataTrait, Data, DataType, HasTsInit, QuoteTick},
-        identifiers::InstrumentId,
-        instruments::InstrumentAny,
-        types::{Price, Quantity},
+        identifiers::{InstrumentId, Symbol},
+        instruments::{IndexInstrument, InstrumentAny},
+        types::{Currency, Price, Quantity},
     };
     use serde_json::{Value, json};
     use tokio::sync::mpsc;
@@ -809,8 +809,10 @@ mod tests {
             DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GCZ26, GCZ26_QUOTES, GCZ26_TRADES,
             GOLD_FUTURES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, MockLse,
             MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
-            REFERENCE_DATA_UNAVAILABLE, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, data_ws_answer,
-            gcz26, gold_futures, gold_spot,
+            REFERENCE_DATA_UNAVAILABLE, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
+            WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON, WS_AUTHENTICATED_TSX, WS_TICKS_DATA,
+            WS_TICKS_LONDON, WS_TICKS_TSX, data_ws_answer, gcz26, gold_futures, gold_spot,
+            socket_answer,
         },
     };
 
@@ -854,26 +856,31 @@ mod tests {
         streamed: &[&str],
         defined: bool,
     ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
-        let (tx, events) = mpsc::unbounded_channel();
-        replace_data_event_sender(tx);
-        let mut cache = Cache::default();
-        if defined {
-            cache.add_instrument(gold_futures()).unwrap();
-        }
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
-            .base_url_ws(socket.url().to_string())
+            .base_url_ws_data(socket.url().to_string())
             .stream_ids(streamed.iter().map(|&id| InstrumentId::from(id)).collect())
             .build();
+        let definitions = if defined {
+            vec![gold_futures()]
+        } else {
+            vec![]
+        };
+        connecting(&config, definitions).await
+    }
+
+    /// The client the factory creates on `config`, its cache holding
+    /// `definitions`, and the node's data events, once it connected or
+    /// failed to.
+    async fn connecting(
+        config: &LseDataClientConfig,
+        definitions: Vec<InstrumentAny>,
+    ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
+        let events = events();
         let factory = LseDataClientFactory::new();
         let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
         let mut client = factory
-            .create(
-                factory.name(),
-                &config,
-                Rc::new(RefCell::new(cache)).into(),
-                clock,
-            )
+            .create(factory.name(), config, cache_of(definitions), clock)
             .unwrap();
         let connected = client.connect().await;
         (client, connected, events)
@@ -1055,13 +1062,123 @@ mod tests {
         assert_eq!(sent(&socket), Vec::<Value>::new());
     }
 
+    /// An index definition of `id`, as one would be written by hand: LSE's
+    /// symbol `raw`, prices in USD at `precision`, sizes whole.
+    fn index(id: &str, raw: &str, precision: u8) -> InstrumentAny {
+        InstrumentAny::IndexInstrument(
+            IndexInstrument::builder()
+                .instrument_id(InstrumentId::from(id))
+                .raw_symbol(Symbol::from(raw))
+                .currency(Currency::USD())
+                .price_precision(precision)
+                .size_precision(0)
+                .price_increment(Price::new(10f64.powi(-i32::from(precision)), precision))
+                .size_increment(Quantity::from(1))
+                .ts_event(UnixNanos::default())
+                .ts_init(UnixNanos::default())
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// The symbols `socket` was asked to stream, in order.
+    fn subscribed(socket: &MockLseSocket) -> Vec<String> {
+        sent(socket)
+            .iter()
+            .filter(|frame| frame["action"] == "subscribe")
+            .map(|frame| frame["symbol"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A series of each derived market, each socket a mock answering as
+    /// LSE's did on 13 November 2026, with its list and the series' last
+    /// tick: each quote comes from its series' socket. data-ws lists
+    /// `BTC/USD` too, and sent a tick of 8 November for it, bid 75891.65,
+    /// crypto streaming on london-ws since.
+    #[tokio::test]
+    async fn a_series_of_each_derived_market_subscribes_on_its_socket_under_that_socket_s_name() {
+        let data = MockLseSocket::start(|_, frame| {
+            socket_answer(WS_AUTHENTICATED_DATA, WS_TICKS_DATA, frame)
+        });
+        let london = MockLseSocket::start(|_, frame| {
+            socket_answer(WS_AUTHENTICATED_LONDON, WS_TICKS_LONDON, frame)
+        });
+        let tsx = MockLseSocket::start(|_, frame| {
+            socket_answer(WS_AUTHENTICATED_TSX, WS_TICKS_TSX, frame)
+        });
+        // Each series, its LSE symbol, its prices' precision, and the bid
+        // and ask of the tick captured.
+        let series = [
+            ("GOLD-FUTURES.LSEDGE", "GOLD", 1, "3888.1", "3888.5"),
+            ("AAPL-US_STOCKS.LSEDGE", "AAPL", 2, "355.55", "355.64"),
+            ("EUR_USD-FOREX.LSEDGE", "EUR_USD", 5, "1.10209", "1.10221"),
+            (
+                "XAU/USD-COMMODITIES.LSEDGE",
+                "XAU/USD",
+                2,
+                "3881.06",
+                "3882.03",
+            ),
+            ("SPX-INDICES.LSEDGE", "SPX", 2, "7561.67", "7561.67"),
+            (
+                "BTCUSDT-CRYPTO.LSEDGE",
+                "BTCUSDT",
+                2,
+                "68267.34",
+                "68267.35",
+            ),
+            ("VOD-UK_STOCKS.LSEDGE", "VOD", 1, "114.2", "120.0"),
+            ("NVDA-CA_STOCKS.LSEDGE", "NVDA", 2, "36.15", "36.15"),
+        ];
+        let ids: Vec<&str> = series.iter().map(|(id, ..)| *id).collect();
+        let config = LseDataClientConfig::builder()
+            .api_key(SecretString::from(API_KEY))
+            .base_url_ws_data(data.url().to_string())
+            .base_url_ws_london(london.url().to_string())
+            .base_url_ws_tsx(tsx.url().to_string())
+            .stream_ids(ids.iter().map(|&id| InstrumentId::from(id)).collect())
+            .build();
+        let definitions = series
+            .iter()
+            .map(|&(id, raw, precision, ..)| index(id, raw, precision))
+            .collect();
+        let (mut client, connected, mut events) = connecting(&config, definitions).await;
+        connected.unwrap();
+
+        client.subscribe_quotes(quotes_of(&ids)).unwrap();
+
+        let mut quoted = Vec::new();
+        while quoted.len() < series.len() {
+            let event = next_event(&mut events).await;
+            let DataEvent::Data(Data::Quote(quote)) = event else {
+                panic!("not a quote: {event:?}")
+            };
+            quoted.push((quote.instrument_id, quote.bid_price, quote.ask_price));
+        }
+        quoted.sort_by_key(|(id, ..)| id.to_string());
+        let mut captured: Vec<_> = series
+            .iter()
+            .map(|&(id, .., bid, ask)| (InstrumentId::from(id), Price::from(bid), Price::from(ask)))
+            .collect();
+        captured.sort_by_key(|(id, ..)| id.to_string());
+        assert_eq!(quoted, captured);
+        assert_eq!(
+            subscribed(&data),
+            ["GOLD.F", "AAPL", "EUR/USD", "XAU/USD", "SPX.IDX"]
+        );
+        assert_eq!(subscribed(&london), ["BTC/USD", "VOD.L"]);
+        assert_eq!(subscribed(&tsx), ["NVDA.TO"]);
+    }
+
     /// A config of the client on `lse` with both keys, calls unthrottled.
     fn config(lse: &MockLse) -> LseDataClientConfig {
         LseDataClientConfig {
             api_key: Some(SecretString::from(API_KEY)),
             cme_api_key: Some(SecretString::from(CME_API_KEY)),
             base_url_http: Some(lse.url().to_string()),
-            base_url_ws: None,
+            base_url_ws_data: None,
+            base_url_ws_london: None,
+            base_url_ws_tsx: None,
             calls_per_minute: NonZeroU32::new(6000).unwrap(),
             cme_calls_per_minute: NonZeroU32::new(6000).unwrap(),
             stream_ids: vec![],
