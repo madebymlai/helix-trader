@@ -779,7 +779,7 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
 /// of the store `version` (`VERSION`): its dataset's, then the side
 /// models' training settings, the learner and its settings, the retrain
 /// interval, the window, the holdout and the minimums of its
-/// holdout, and the version.
+/// holdout, the minimum net P&L in its R text, and the version.
 fn training_directory(
     root: &Path,
     strategy_id: StrategyId,
@@ -792,7 +792,7 @@ fn training_directory(
         .with(retrain_setting(config.retrain).as_bytes())
         .with(&config.window.as_nanos().to_le_bytes())
         .with(&config.holdout.as_nanos().to_le_bytes())
-        .with(&config.min_pnl.to_le_bytes())
+        .with(config.min_pnl.to_string().as_bytes())
         .with(&config.min_trades.to_le_bytes())
         .with(format!("store version {version}").as_bytes());
     Ok(dataset_directory(root, strategy_id, fingerprint).join(settings.to_string()))
@@ -824,15 +824,15 @@ fn margins_text(margins: Margins) -> String {
 }
 
 /// The training settings of `meta`: its learner, window, holdout, and
-/// the margin deciding the trades its holdout is judged on, in R, and the
-/// minimums of its holdout.
+/// the margin deciding the trades its holdout is judged on, and the
+/// minimums of its holdout, both in R.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
         .with(meta.margin.to_string().as_bytes())
-        .with(&meta.min_pnl.to_le_bytes())
+        .with(meta.min_pnl.to_string().as_bytes())
         .with(&meta.min_trades.to_le_bytes()))
 }
 
@@ -1022,7 +1022,7 @@ mod tests {
                 long: Some(R::new(0.5)),
                 short: Some(R::new(0.5)),
             })
-            .min_pnl(1.0)
+            .min_pnl(R::new(1.0))
             .min_trades(30)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -1277,7 +1277,7 @@ mod tests {
         }
         let held_to_more = [
             ModelConfig {
-                min_pnl: 2.0,
+                min_pnl: R::new(2.0),
                 ..config()
             },
             ModelConfig {
@@ -1324,9 +1324,10 @@ mod tests {
 
     /// The directory of a fixed strategy's long store under a models root,
     /// as a literal: its id, its dataset's fingerprint, its training
-    /// settings with the store `VERSION`, its side, and the margins of both
-    /// sides in R, `long 0.5R short 0.5R`, so that no model published under
-    /// a margin of another unit is listed. A change that rekeyed every store, leaving the models
+    /// settings, its minimum net P&L in R, `1R`, among them, with the store
+    /// `VERSION`, its side, and the margins of both sides in R, `long 0.5R
+    /// short 0.5R`, so that no model published under a margin or a minimum
+    /// of another unit is listed. A change that rekeyed every store, leaving the models
     /// published to it behind, fails here. A deliberate rekey, a bump of
     /// `VERSION` or of `dataset::VERSION`, or a new input to the dataset's
     /// fingerprint or to the training settings, updates the literal here; a
@@ -1341,7 +1342,7 @@ mod tests {
             Path::new(
                 "models/STORE-001/\
                  1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
-                 d8e8d5b98ec4b087d60cd5be6b5df0d0e42ee19eed327697daebb41eb9cd7b93/\
+                 4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
                  long/7172a4d37d514662d105b99d75e9f7b1fc21aac68322ca53912d5254d40403c5"
             )
         );
@@ -1349,7 +1350,8 @@ mod tests {
 
     /// The directory of the fixed strategy's meta store (`meta_config`), as
     /// a literal: under its sides' training settings, the meta's own, its
-    /// margin in R, `0.55R`, among them, and the sides' margins in R.
+    /// margin and its minimum net P&L in R, `0.55R` and `1R`, among them,
+    /// and the sides' margins in R.
     #[test]
     fn a_fixed_strategys_meta_store_keeps_its_directory() {
         let store = meta_store(Path::new("models"), &config(), &meta_config());
@@ -1359,8 +1361,8 @@ mod tests {
             Path::new(
                 "models/STORE-001/\
                  1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
-                 d8e8d5b98ec4b087d60cd5be6b5df0d0e42ee19eed327697daebb41eb9cd7b93/\
-                 meta/2f55dec2a165e98be9c15fdbe104b42461c6cdd0aa12db48680cff4e5a9e6a9b"
+                 4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
+                 meta/d88b50a1d9ca9158b6a0506a4ed81d6e0e83914b2edcecf8a216f544d09b557f"
             )
         );
     }
@@ -1427,7 +1429,7 @@ mod tests {
                 .learner(LearnerConfig::Fake {})
                 .build()
         };
-        meta_store(dir.path(), &config(), &meta(R::new(0.55), 1.0))
+        meta_store(dir.path(), &config(), &meta(R::new(0.55), R::new(1.0)))
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
         let long_only = ModelConfig {
@@ -1439,9 +1441,9 @@ mod tests {
         };
 
         for (config, meta) in [
-            (config(), meta(R::new(0.55), 2.0)),
-            (config(), meta(R::new(0.6), 1.0)),
-            (long_only, meta(R::new(0.55), 1.0)),
+            (config(), meta(R::new(0.55), R::new(2.0))),
+            (config(), meta(R::new(0.6), R::new(1.0))),
+            (long_only, meta(R::new(0.55), R::new(1.0))),
         ] {
             assert!(
                 meta_store(dir.path(), &config, &meta)
@@ -1460,7 +1462,7 @@ mod tests {
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
             .margin(R::new(0.55))
-            .min_pnl(1.0)
+            .min_pnl(R::new(1.0))
             .min_trades(20)
             .learner(LearnerConfig::Fake {})
             .build()

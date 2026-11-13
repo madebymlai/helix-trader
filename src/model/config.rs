@@ -1,9 +1,9 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
 //! target of its decisions, which its model learns, how often a model is
 //! retrained, if ever, and the window it is trained on, the least its
-//! holdout earns to be published, the margins in R its expected R must
-//! clear to trade a side, and its learner; and, optionally, the meta model
-//! filtering its trades.
+//! holdout earns to be published, in R, the margins in R its expected R
+//! must clear to trade a side, and its learner; and, optionally, the meta
+//! model filtering its trades.
 //!
 //! A strategy has at most two levels of models: the side models of a
 //! `ModelConfig`, and one meta model (`MetaConfig`) deciding whether to
@@ -34,7 +34,7 @@ use crate::strategy::{DataRequirements, TradedInstrument, r::R};
 /// window = "720h"
 /// holdout = "120h"
 /// margins = { long = "0.5R", short = "0.5R" }
-/// min_pnl = 1.0
+/// min_pnl = "0.1R"
 /// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
@@ -64,10 +64,10 @@ pub struct ModelConfig<T = TargetConfig> {
     pub holdout: SignedDuration,
     /// The sides traded, each with the expected net R it trades from.
     pub margins: Margins,
-    /// The least net P&L per trade the trades picked between the sides earn
-    /// on the holdout for the sides' models to be published, in the target's
-    /// P&L currency (`holdout`, `train`).
-    pub min_pnl: f64,
+    /// The least net P&L per trade, in R, the trades picked between the
+    /// sides earn on the holdout for the sides' models to be published
+    /// (`holdout`, `train`).
+    pub min_pnl: R,
     /// The fewest trades picked between the sides on the holdout for the
     /// sides' models to be published.
     pub min_trades: usize,
@@ -102,10 +102,9 @@ pub struct MetaConfig {
     /// calibrated expected R, from which the trade is taken
     /// (`holdout::MetaMargin`).
     pub margin: R,
-    /// The least net P&L per trade the meta's decisions earn on the
-    /// holdout for its model to be published, in the target's P&L
-    /// currency (`holdout`).
-    pub min_pnl: f64,
+    /// The least net P&L per trade, in R, the meta's decisions earn on the
+    /// holdout for its model to be published (`holdout`).
+    pub min_pnl: R,
     /// The fewest trades the meta's decisions take on the holdout for its
     /// model to be published.
     pub min_trades: usize,
@@ -122,7 +121,7 @@ struct MetaFields {
     window: SignedDuration,
     holdout: SignedDuration,
     margin: Option<R>,
-    min_pnl: f64,
+    min_pnl: R,
     min_trades: usize,
     learner: LearnerConfig,
     threshold: Option<IgnoredAny>,
@@ -422,19 +421,9 @@ fn validate_window(
 }
 
 /// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
-/// violations of the minimum net P&L of `minimums` not a number and their
-/// minimum count of trades below one.
+/// violation of the minimum count of trades of `minimums` below one; their
+/// minimum net P&L, an R, is a finite number as it is parsed.
 fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigErrorCollector) {
-    errors.check(
-        minimums.min_pnl.is_finite(),
-        ConfigError::invalid_value(
-            format!("{section}.min_pnl"),
-            format!(
-                "the minimum net P&L per trade {} is not a number",
-                minimums.min_pnl
-            ),
-        ),
-    );
     errors.check(
         minimums.min_trades >= 1,
         ConfigError::invalid_value(
@@ -472,7 +461,7 @@ mod tests {
         window = "48h"
         holdout = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_pnl = 1.0
+        min_pnl = "1R"
         min_trades = 30
         learner = { kind = "fake" }
     "#;
@@ -589,7 +578,7 @@ mod tests {
         assert_eq!(
             config.minimums(),
             Minimums {
-                min_pnl: 1.0,
+                min_pnl: R::new(1.0),
                 min_trades: 30
             }
         );
@@ -837,12 +826,38 @@ mod tests {
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
+    /// The minimum net P&L per trade is in R: a bare number, a minimum in
+    /// money say, is refused as the section is parsed, at its field, saying
+    /// so.
     #[test]
-    fn a_minimum_net_pnl_not_a_number_or_no_minimum_trade_is_refused() {
-        for line in ["min_pnl = nan", "min_pnl = -inf", "min_trades = 0"] {
-            assert!(refused(&section(line)).contains("minimum"), "{line}");
+    fn a_bare_number_minimum_net_pnl_is_refused_at_parsing_saying_it_is_in_r() {
+        for line in ["min_pnl = 1.0", "min_pnl = 1"] {
+            let err = refused_parsing(&section(line));
+
+            assert!(err.contains(line) && err.contains("in R"), "{err}");
         }
-        assert!(load(&section("min_pnl = -0.5")).is_ok());
+    }
+
+    #[test]
+    fn a_minimum_net_pnl_not_a_finite_number_of_r_is_refused_at_parsing() {
+        for line in [r#"min_pnl = "nanR""#, r#"min_pnl = "-infR""#] {
+            let err = refused_parsing(&section(line));
+
+            assert!(err.contains("not a finite number of R"), "{err}");
+        }
+    }
+
+    /// A minimum below nought publishes a model expected to lose a little.
+    #[test]
+    fn a_minimum_net_pnl_below_nought_loads_and_no_minimum_trade_is_refused() {
+        assert_eq!(
+            load(&section(r#"min_pnl = "-0.5R""#)).unwrap().min_pnl,
+            R::new(-0.5)
+        );
+        assert_eq!(
+            refused_fields(&section("min_trades = 0")),
+            ["model.min_trades"]
+        );
     }
 
     #[test]
@@ -1084,7 +1099,7 @@ mod tests {
         window = "36h"
         holdout = "12h"
         margin = "0.25R"
-        min_pnl = 0.5
+        min_pnl = "0.5R"
         min_trades = 20
         learner = { kind = "baseline" }
     "#;
@@ -1100,7 +1115,7 @@ mod tests {
         assert_eq!(
             meta.minimums(),
             Minimums {
-                min_pnl: 0.5,
+                min_pnl: R::new(0.5),
                 min_trades: 20
             }
         );
@@ -1213,6 +1228,18 @@ mod tests {
         let err = refused_parsing(&format!("{SECTION}\n{meta}"));
 
         assert!(err.contains("not a finite number of R"), "{err}");
+    }
+
+    #[test]
+    fn a_bare_number_meta_minimum_net_pnl_is_refused_at_parsing_saying_it_is_in_r() {
+        let meta = META.replace(r#"min_pnl = "0.5R""#, "min_pnl = 0.5");
+
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+
+        assert!(
+            err.contains("min_pnl = 0.5") && err.contains("in R"),
+            "{err}"
+        );
     }
 
     #[test]

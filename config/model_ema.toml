@@ -72,8 +72,10 @@ holdout = "120h"
 # ATR near 15 USD. A margin is in R, written with its suffix.
 margins = { long = "0.03R", short = "0.03R" }
 # The sides' models are published together if the trades picked between them
-# earn at least 1 USD a trade over at least 30 trades of the holdout.
-min_pnl = 1.0
+# earn at least a net 0.07R a trade over at least 30 trades of the holdout:
+# about 1 USD on an ounce with gold's hourly ATR near 15 USD. Like a margin,
+# it is in R, written with its suffix.
+min_pnl = "0.07R"
 min_trades = 30
 # LightGBM, its trees of up to 31 leaves of 20 rows at least, over 100
 # rounds at a rate of 0.1: each side's model is fitted on the window less
