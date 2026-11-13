@@ -65,15 +65,15 @@ mod tests {
     use std::{collections::HashSet, path::Path};
 
     use ::lse::testing::{
-        API_KEY, GOLD_FUTURES, GOLD_TRADES, MockLse, PLAN_REQUIRED, Reply, SYMBOL_UNKNOWN,
-        gold_futures,
+        ALLOWANCE_EXHAUSTED, API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES,
+        GOLD_TRADES, MockLse, PLAN_REQUIRED, ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, gold_futures,
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
         data::{NautilusDataType, TradeTick},
         enums::AggressorSide,
-        identifiers::InstrumentId,
+        identifiers::{InstrumentId, TradeId},
         instruments::InstrumentAny,
         types::{Price, Quantity},
     };
@@ -106,6 +106,26 @@ mod tests {
         id: &str,
         definitions: Vec<InstrumentAny>,
     ) -> anyhow::Result<()> {
+        fill_over(
+            dir,
+            lse,
+            id,
+            definitions,
+            at("10:00:00"),
+            at("10:00:00.999999999"),
+        )
+    }
+
+    /// fill-catalog's fill of the trades of `id` over `[from, to]`, as
+    /// `fill`'s.
+    fn fill_over(
+        dir: &Path,
+        lse: &MockLse,
+        id: &str,
+        definitions: Vec<InstrumentAny>,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> anyhow::Result<()> {
         let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
         if !definitions.is_empty() {
             catalog.write_instruments(definitions).unwrap();
@@ -118,7 +138,7 @@ mod tests {
             }],
             warmup: SignedDuration::ZERO,
         };
-        let slices = requirements.slices(at("10:00:00"), at("10:00:00.999999999"));
+        let slices = requirements.slices(from, to);
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
             .base_url_http(lse.url().to_string())
@@ -130,6 +150,19 @@ mod tests {
             .build()
             .unwrap()
             .block_on(node.run(dir))
+    }
+
+    /// The spans LSE was asked for, in order.
+    fn asked(lse: &MockLse) -> Vec<(String, String)> {
+        lse.calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.param("from").unwrap().to_string(),
+                    call.param("to").unwrap().to_string(),
+                )
+            })
+            .collect()
     }
 
     fn stored_trades(dir: &Path) -> Vec<TradeTick> {
@@ -228,5 +261,109 @@ mod tests {
         ] {
             assert!(err.contains(part), "{part}: {err}");
         }
+    }
+    /// The 21st is filled and the 22nd refused for a quota, which ends the
+    /// fill with LSE's message. The next run asks for the 22nd alone, of
+    /// which LSE holds no row as on a date with no session, and the run
+    /// after asks for nothing.
+    #[test]
+    fn a_quota_stops_the_fill_with_lse_s_message_and_the_next_run_asks_only_what_is_missing() {
+        let day = |time: &str| -> Timestamp { time.parse().unwrap() };
+        let (from, to) = (
+            day("2026-10-21T00:00:00Z"),
+            day("2026-10-22T23:59:59.999999999Z"),
+        );
+        for quota in [ROWS_EXHAUSTED, ALLOWANCE_EXHAUSTED] {
+            let dir = tempfile::tempdir().unwrap();
+            let refusing = MockLse::start(vec![
+                Reply::file(GOLD_TRADES),
+                // The first window ends at the first instant of the 22nd.
+                Reply::refusal(404, DATE_NOT_TRADING),
+                Reply::refusal(429, quota),
+            ]);
+
+            let err = fill_over(
+                dir.path(),
+                &refusing,
+                GOLD_FUTURES,
+                vec![gold_futures()],
+                from,
+                to,
+            )
+            .unwrap_err()
+            .to_string();
+
+            let refusal: serde_json::Value = serde_json::from_str(quota).unwrap();
+            let message = refusal["message"].as_str().unwrap();
+            assert!(err.contains(message), "{message}: {err}");
+            assert_eq!(stored_trades(dir.path()).len(), 6);
+
+            let resuming = MockLse::start(vec![Reply::refusal(404, DATE_NOT_TRADING)]);
+            fill_over(dir.path(), &resuming, GOLD_FUTURES, vec![], from, to).unwrap();
+
+            assert_eq!(
+                asked(&resuming),
+                [(
+                    "2026-10-22T00:00:00.000000001Z".to_string(),
+                    "2026-10-23T00:00:00Z".to_string()
+                )]
+            );
+
+            let done = MockLse::start(vec![]);
+            fill_over(dir.path(), &done, GOLD_FUTURES, vec![], from, to).unwrap();
+
+            assert!(done.calls().is_empty(), "{:?}", done.calls());
+        }
+    }
+
+    /// Trades stored until 20 hours ago, then a window until now, which
+    /// reaches into the current UTC day, LSE storing a day the morning after
+    /// it. The fill ends, but the window is not recorded as stored beside
+    /// the stored trades, so that the next run asks for it again.
+    #[test]
+    fn a_window_lse_has_not_loaded_is_left_missing_for_the_next_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Timestamp::now();
+        let from = now - SignedDuration::from_hours(72);
+        let stored_to = now - SignedDuration::from_hours(20);
+        let trade = TradeTick::new(
+            InstrumentId::from(GOLD_FUTURES),
+            Price::from("4136.4"),
+            Quantity::from(1),
+            AggressorSide::NoAggressor,
+            TradeId::new("1"),
+            UnixNanos::from(from),
+            UnixNanos::from(from),
+        );
+        ParquetDataCatalog::new(dir.path(), None, None, None, None)
+            .write_to_parquet(
+                &[trade],
+                Some(from.into()),
+                Some((stored_to - SignedDuration::from_nanos(1)).into()),
+                None,
+            )
+            .unwrap();
+        // The day before's part, if any, and the current day's.
+        let not_loaded = || vec![Reply::refusal(404, DATA_UNAVAILABLE_TODAY); 2];
+        let first = MockLse::start(not_loaded());
+
+        fill_over(
+            dir.path(),
+            &first,
+            GOLD_FUTURES,
+            vec![gold_futures()],
+            from,
+            now,
+        )
+        .unwrap();
+
+        let again = MockLse::start(not_loaded());
+        fill_over(dir.path(), &again, GOLD_FUTURES, vec![], from, now).unwrap();
+        let asked = asked(&again);
+        assert_eq!(
+            asked.first().map(|(from, _)| from.as_str()),
+            Some(stored_to.to_string().as_str()),
+            "{asked:?}"
+        );
     }
 }

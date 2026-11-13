@@ -6,7 +6,7 @@
 
 use std::{
     io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -24,14 +24,27 @@ use sha2::{Digest, Sha256};
 /// `[2026-10-21T10:00:00Z, 2026-10-21T10:00:01Z)`, as LSE exported it:
 /// six trades.
 pub const GOLD_TRADES: &[u8] = include_bytes!("../test_data/export_gold_futures_tick.parquet");
-/// LSE's refusals, captured with the free key, but the two quotas, which
-/// are LSE's documented answers (`test_data/README.md`).
+/// LSE's refusals, captured with the free key, but the calls a minute and
+/// the quotas, which are LSE's documented answers, and the export too wide,
+/// captured with the CME key (`test_data/README.md`).
 pub const SYMBOL_UNKNOWN: &str = include_str!("../test_data/refusal_symbol_unknown.json");
 pub const PLAN_REQUIRED: &str = include_str!("../test_data/refusal_plan_required.json");
 pub const DATA_UNAVAILABLE: &str = include_str!("../test_data/refusal_data_unavailable.json");
 pub const DATE_NOT_TRADING: &str = include_str!("../test_data/refusal_date_not_trading.json");
 pub const CALLS_EXHAUSTED: &str = include_str!("../test_data/refusal_calls_exhausted.json");
 pub const ROWS_EXHAUSTED: &str = include_str!("../test_data/refusal_rows_exhausted.json");
+pub const ALLOWANCE_EXHAUSTED: &str =
+    include_str!("../test_data/refusal_allowance_exhausted.json");
+/// LSE's refusal of a day of GCZ6's quotes, past the rows one export may
+/// read.
+pub const EXPORT_TOO_WIDE: &str = include_str!("../test_data/refusal_export_too_wide.json");
+/// LSE's answer for a day it had not loaded yet, the current one.
+pub const DATA_UNAVAILABLE_TODAY: &str =
+    include_str!("../test_data/refusal_data_unavailable_today.json");
+
+/// The export id LSE sends with a file (`x-export-id`), the one it gave
+/// `GOLD_TRADES`; the peer sends it with every file.
+pub const EXPORT_ID: &str = "15f88a2dca3f401d90c7acae13236f86";
 
 /// The series of `GOLD_TRADES`.
 pub const GOLD_FUTURES: &str = "GOLD-FUTURES.LSEDGE";
@@ -67,16 +80,36 @@ pub struct Reply {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     delay: Duration,
+    /// The bytes of the body sent before the connection is closed, if not
+    /// all of it.
+    cut_at: Option<usize>,
 }
 
 impl Reply {
-    /// An export's file, as LSE sends one: 200, its SHA-256 beside it.
+    /// An export's file, as LSE sends one: 200, its SHA-256 and LSE's id
+    /// of the export beside it.
     #[must_use]
     pub fn file(bytes: &[u8]) -> Self {
-        let sha = Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        Self::file_named_by(bytes, Sha256::digest(bytes).as_slice())
+    }
+
+    /// A file whose download is cut halfway: its headers, then half of it,
+    /// then the connection closed.
+    #[must_use]
+    pub fn cut_file(bytes: &[u8]) -> Self {
+        let mut reply = Self::file(bytes);
+        reply.cut_at = Some(bytes.len() / 2);
+        reply
+    }
+
+    /// A file sent whole beside the SHA-256 of other bytes.
+    #[must_use]
+    pub fn corrupt_file(bytes: &[u8]) -> Self {
+        Self::file_named_by(bytes, Sha256::digest(b"other bytes").as_slice())
+    }
+
+    fn file_named_by(bytes: &[u8], sha: &[u8]) -> Self {
+        let sha = sha.iter().map(|byte| format!("{byte:02x}")).collect();
         Self {
             status: 200,
             headers: vec![
@@ -85,18 +118,12 @@ impl Reply {
                     "application/vnd.apache.parquet".into(),
                 ),
                 ("x-checksum-sha256".into(), sha),
+                ("x-export-id".into(), EXPORT_ID.into()),
             ],
             body: bytes.to_vec(),
             delay: Duration::ZERO,
+            cut_at: None,
         }
-    }
-
-    /// A file whose SHA-256 is another's, as a download cut short would be.
-    #[must_use]
-    pub fn cut_file(bytes: &[u8]) -> Self {
-        let mut reply = Self::file(bytes);
-        reply.body.truncate(bytes.len() / 2);
-        reply
     }
 
     /// A refusal: `status` and LSE's JSON `body`.
@@ -107,6 +134,7 @@ impl Reply {
             headers: vec![("Content-Type".into(), "application/json".into())],
             body: body.as_bytes().to_vec(),
             delay: Duration::ZERO,
+            cut_at: None,
         }
     }
 
@@ -235,6 +263,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
                 headers: vec![],
                 body: b"no reply left in the mock's script".to_vec(),
                 delay: Duration::ZERO,
+                cut_at: None,
             });
         std::thread::sleep(reply.delay);
         // Logged before the answer goes, so that a caller reading the calls
@@ -256,11 +285,13 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
             head.push_str(&format!("{name}: {value}\r\n"));
         }
         head.push_str("\r\n");
+        let body = &reply.body[..reply.cut_at.unwrap_or(reply.body.len())];
         let sent = writer
             .write_all(head.as_bytes())
-            .and_then(|()| writer.write_all(&reply.body))
+            .and_then(|()| writer.write_all(body))
             .and_then(|()| writer.flush());
-        if sent.is_err() {
+        if sent.is_err() || reply.cut_at.is_some() {
+            let _ = writer.shutdown(Shutdown::Both);
             return;
         }
     }
@@ -271,6 +302,7 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         403 => "Forbidden",
         404 => "Not Found",
+        413 => "Payload Too Large",
         429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "Status",

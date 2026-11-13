@@ -8,9 +8,9 @@
 //! are (`docs/developer_guide/adapters.md`): `common` (the venue and the
 //! variable of the key, the key, and the symbol boundary between LSE's
 //! market and symbol and an instrument id), `http` (the HTTP client, its
-//! typed export query, LSE's refusals and the parsing of an export's
-//! Parquet file), `config` (the data client's config), `data` (the data
-//! client) and `factories`.
+//! typed export query, an export over any span, LSE's refusals and the
+//! parsing of an export's Parquet file), `config` (the data client's
+//! config), `data` (the data client) and `factories`.
 
 pub use self::{
     common::{
