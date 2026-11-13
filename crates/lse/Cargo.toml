@@ -43,7 +43,22 @@ thiserror = "2"
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+# The data tester's: the key from `.env`, the node's catalog (registered
+# through nautilus-live's `streaming`) and Nautilus' `DataTester`.
+dotenvy = "0.15"
+nautilus-live = { workspace = true, features = ["streaming"] }
 nautilus-model = { workspace = true, features = ["test-support"] }
-# Nautilus' test functions (adapter guide, "Rust testing"), as Nautilus pins it.
+nautilus-persistence.workspace = true
+nautilus-testkit.workspace = true
+# Test functions, as Nautilus' adapter guide has them ("Rust testing"),
+# declared as Nautilus declares it.
 rstest = { version = "0.28.0", default-features = false }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+# Nautilus' data tester on LSE (see the README, "Data testing"), on the
+# crate's test definitions.
+[[example]]
+name = "lse-data-tester"
+path = "examples/node_data_tester.rs"
+required-features = ["test-support"]

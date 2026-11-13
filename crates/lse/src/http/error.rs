@@ -31,9 +31,16 @@ pub(crate) enum LseHttpError {
         what: &'static str,
         source: serde_json::Error,
     },
-    /// A file whose SHA-256 is not the one LSE named: cut short.
-    #[error("the file LSE sent, {len} bytes, is not the one its SHA-256 names")]
-    Checksum { len: usize },
+    /// A whole file whose SHA-256 is not the one LSE gave with it, with
+    /// LSE's id of the export (`x-export-id`), if it gave one.
+    #[error(
+        "the file of LSE's export {}, {len} bytes, does not have the SHA-256 LSE gave for it",
+        export_id.as_deref().unwrap_or("with no id")
+    )]
+    Checksum {
+        len: usize,
+        export_id: Option<String>,
+    },
     /// The retries ended without an answer.
     #[error("{0}")]
     Retry(RetryError),
@@ -41,21 +48,32 @@ pub(crate) enum LseHttpError {
 
 impl LseHttpError {
     /// Whether asking again may get the answer: a transport failure or a
-    /// timeout, a cut file, and LSE's refusals for the moment, a 429 of
-    /// calls or of the one download at a time and a busy 503, but not a
-    /// 429 of a quota, which lasts until it resets.
+    /// timeout, a file cut short among them, and LSE's refusals for the
+    /// moment, a 429 of calls or of the one download at a time and a busy
+    /// 503, but not a 429 of a quota, which lasts until it resets. A whole
+    /// file whose SHA-256 is not LSE's is no transient failure: LSE builds
+    /// the file before sending it, so that its checksum is exact (LSE's
+    /// docs, "Files").
     pub(crate) fn is_transient(&self) -> bool {
         match self {
             Self::Transport(e) => matches!(
                 e,
                 HttpClientError::TransportError(_) | HttpClientError::TimeoutError(_)
             ),
-            Self::Checksum { .. } => true,
             Self::Refusal {
                 status, refusal, ..
             } => (*status == 429 && !refusal.is_quota()) || *status == 503,
-            Self::Unexpected { .. } | Self::Malformed { .. } | Self::Retry(_) => false,
+            Self::Checksum { .. }
+            | Self::Unexpected { .. }
+            | Self::Malformed { .. }
+            | Self::Retry(_) => false,
         }
+    }
+
+    /// Whether LSE refused the export as too wide: shorter dates may be
+    /// served.
+    pub(crate) fn is_too_wide(&self) -> bool {
+        matches!(self, Self::Refusal { refusal, .. } if refusal.is_too_wide())
     }
 
     /// How long LSE asked to wait before asking again (`Retry-After`).

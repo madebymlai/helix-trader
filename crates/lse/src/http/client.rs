@@ -34,9 +34,10 @@ const REFERENCE_PATH: &str = "/v3/reference";
 const REFERENCE_EXPORT_PATH: &str = "/v3/reference/export";
 /// The header carrying the key.
 const API_KEY_HEADER: &str = "X-API-Key";
-/// The headers read of LSE's answers: a file's SHA-256, and how long to
-/// wait before asking again.
+/// The headers read of LSE's answers: a file's SHA-256 and LSE's id of
+/// its export, and how long to wait before asking again.
 const CHECKSUM_HEADER: &str = "x-checksum-sha256";
+const EXPORT_ID_HEADER: &str = "x-export-id";
 const RETRY_AFTER_HEADER: &str = "retry-after";
 /// The key of the one quota every call counts against.
 const RATE_KEY: &str = "lse";
@@ -86,6 +87,7 @@ impl LseHttpClient {
             .headers(headers)
             .header_keys(vec![
                 CHECKSUM_HEADER.to_string(),
+                EXPORT_ID_HEADER.to_string(),
                 RETRY_AFTER_HEADER.to_string(),
             ])
             .keyed_quotas(vec![(RATE_KEY.to_string(), quota)])
@@ -108,11 +110,20 @@ impl LseHttpClient {
         })
     }
 
+    /// The client, asking again as `retry` says, for a test that cannot
+    /// wait out the backoff.
+    #[cfg(test)]
+    pub(crate) fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retries = RetryManager::new(retry);
+        self
+    }
+
     /// The file of the export `query` selects, or `None` if LSE holds no
     /// row of it (`data-unavailable`, `date-not-trading`). One download at
     /// a time: a second export waits for the first. A call LSE refuses for
     /// the moment, or a file cut short, is asked again after the
-    /// `Retry-After` LSE gave, or a backoff.
+    /// `Retry-After` LSE gave, or a backoff; a whole file whose SHA-256 is
+    /// not the one LSE gave fails the export.
     ///
     /// # Errors
     ///
@@ -204,6 +215,7 @@ impl LseHttpClient {
             if !expected.eq_ignore_ascii_case(&hex(&actual)) {
                 return Err(LseHttpError::Checksum {
                     len: response.body.len(),
+                    export_id: response.headers.get(EXPORT_ID_HEADER).cloned(),
                 });
             }
         }
@@ -277,9 +289,9 @@ mod tests {
         common::symbol::LseSymbol,
         http::query::ReferenceQuery,
         testing::{
-            API_KEY, CALLS_EXHAUSTED, DATA_UNAVAILABLE, DATE_NOT_TRADING, GOLD_TRADES, MockLse,
-            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, Reply,
-            US10Y_BOND_YIELDS,
+            API_KEY, CALLS_EXHAUSTED, DATA_UNAVAILABLE, DATE_NOT_TRADING, EXPORT_ID, GOLD_TRADES,
+            MockLse, PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE,
+            ROWS_EXHAUSTED, Reply, US10Y_BOND_YIELDS,
         },
     };
 
@@ -396,6 +408,8 @@ mod tests {
         assert_eq!(lse.calls().len(), 1);
     }
 
+    /// LSE's docs, "Files": a download that is cut is requested again from
+    /// the start.
     #[tokio::test]
     async fn a_file_cut_short_is_fetched_again() {
         let lse = MockLse::start(vec![Reply::cut_file(GOLD_TRADES), Reply::file(GOLD_TRADES)]);
@@ -404,6 +418,40 @@ mod tests {
 
         assert_eq!(file.as_deref(), Some(GOLD_TRADES));
         assert_eq!(lse.calls().len(), 2);
+    }
+
+    /// A whole file LSE built before sending, whose SHA-256 is not the one
+    /// LSE gave: the export is named by LSE's id, for LSE to look into.
+    #[tokio::test]
+    async fn a_file_whose_sha_256_is_not_lse_s_fails_naming_lse_s_export_asked_once() {
+        let lse = MockLse::start(vec![
+            Reply::corrupt_file(GOLD_TRADES),
+            Reply::file(GOLD_TRADES),
+        ]);
+
+        let err = client(&lse, 6000).export(&gold_second()).await.unwrap_err();
+
+        assert!(err.to_string().contains(EXPORT_ID), "{err}");
+        assert_eq!(lse.calls().len(), 1);
+    }
+
+    /// Two retries, 10 ms apart: three calls, then LSE's last refusal.
+    #[tokio::test]
+    async fn retries_that_run_out_end_in_lse_s_last_refusal() {
+        let lse = MockLse::start(vec![Reply::refusal(429, CALLS_EXHAUSTED); 4]);
+        let client = client(&lse, 6000).with_retry(RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 10,
+            max_delay_ms: 10,
+            jitter_ms: 0,
+            operation_timeout_ms: None,
+            ..RetryConfig::default()
+        });
+
+        let err = client.export(&gold_second()).await.unwrap_err();
+
+        assert!(err.to_string().contains("calls-exhausted"), "{err}");
+        assert_eq!(lse.calls().len(), 3);
     }
 
     /// 120 calls a minute: one every half second.

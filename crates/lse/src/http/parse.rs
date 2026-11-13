@@ -1,21 +1,21 @@
-//! An export's Parquet file into Nautilus data: trades at the instrument's
-//! precision, LSE sending prices and sizes as doubles, each converted once
-//! here through its shortest decimal form, which must fit the precision;
-//! and the rows of a reference collection as `LseRow`s.
+//! An export's Parquet file into Nautilus data: trades and bars at the
+//! instrument's precision, LSE sending prices and sizes as doubles, each
+//! converted once here through its shortest decimal form, which must fit
+//! the precision; and the rows of a reference collection as `LseRow`s.
 
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, bail, ensure};
 use arrow::{
-    array::{Array, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray},
+    array::{Array, AsArray, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray},
     compute::cast,
-    datatypes::{DataType, TimeUnit},
+    datatypes::{DataType, TimeUnit, TimestampNanosecondType},
     json::{WriterBuilder, writer::JsonArray},
 };
 use bytes::Bytes;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::TradeTick,
+    data::{Bar, BarType, TradeTick},
     enums::AggressorSide,
     identifiers::{InstrumentId, TradeId},
     types::{Price, Quantity},
@@ -53,12 +53,14 @@ pub(crate) fn parse_trade_slice(
     let mut last_time = None;
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
-        let (times, prices, sizes, kinds) = tick_columns(&batch)?;
+        let times = times(&batch)?;
+        let prices = column::<Float64Array>(&batch, "price")?;
+        let sizes = column::<Float64Array>(&batch, "size")?;
+        let kinds = column::<StringArray>(&batch, "kind")?;
         for row in 0..batch.num_rows() {
             let kind = kinds.value(row);
             ensure!(kind == TRADE, "a row of kind {kind:?}, not a {TRADE}");
-            let time =
-                UnixNanos::from(u64::try_from(times.value(row)).context("a time before 1970")?);
+            let time = UnixNanos::from(time(&times, row)?);
             let price = Price::from_decimal_dp(
                 decimal(prices.value(row), price_precision, "price")?,
                 price_precision,
@@ -86,6 +88,68 @@ pub(crate) fn parse_trade_slice(
         }
     }
     Ok(trades)
+}
+
+/// The bars of a file of candles (`time, open, high, low, close, volume,
+/// trades`), each candle, which LSE stamps at its open, a bar of
+/// `bar_type` stamped at its close, its open and the bar's width (Nautilus'
+/// `BarSpecification::timedelta`), both `ts_event` and `ts_init`, as
+/// history is.
+///
+/// # Errors
+///
+/// Returns an error if the file holds no candles, if a price or a volume
+/// has more decimals than `price_precision` or `size_precision`, the
+/// instrument's, if a volume is negative, or if a candle's prices are not
+/// a bar's (its high below another price, its low above one).
+pub(crate) fn parse_candles(
+    file: Bytes,
+    bar_type: BarType,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<Vec<Bar>> {
+    let width = u64::try_from(bar_type.spec().timedelta().as_nanos())
+        .with_context(|| format!("the width of {bar_type}"))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("reading LSE's Parquet file")?
+        .build()?;
+    let mut bars = Vec::new();
+    for batch in reader {
+        let batch = batch.context("reading LSE's Parquet file")?;
+        let times = times(&batch)?;
+        let open = column::<Float64Array>(&batch, "open")?;
+        let high = column::<Float64Array>(&batch, "high")?;
+        let low = column::<Float64Array>(&batch, "low")?;
+        let close = column::<Float64Array>(&batch, "close")?;
+        let volume = column::<Float64Array>(&batch, "volume")?;
+        for row in 0..batch.num_rows() {
+            let price = |prices: &Float64Array, what| -> anyhow::Result<Price> {
+                Ok(Price::from_decimal_dp(
+                    decimal(prices.value(row), price_precision, what)?,
+                    price_precision,
+                )?)
+            };
+            let closed = UnixNanos::from(
+                time(&times, row)?
+                    .checked_add(width)
+                    .context("a candle closing past 2554")?,
+            );
+            bars.push(Bar::new_checked(
+                bar_type,
+                price(open, "open")?,
+                price(high, "high")?,
+                price(low, "low")?,
+                price(close, "close")?,
+                Quantity::from_decimal_dp(
+                    decimal(volume.value(row), size_precision, "volume")?,
+                    size_precision,
+                )?,
+                closed,
+                closed,
+            )?);
+        }
+    }
+    Ok(bars)
 }
 
 /// The rows of a reference export of `symbol` in LSE's collection
@@ -135,69 +199,69 @@ pub(crate) fn parse_rows(
     Ok(rows)
 }
 
-/// The times of the rows of `batch`, its column `time_column`'s, in UTC.
+/// The times of the rows of `batch`, its column `time_column`'s, in UTC:
+/// a date at its start, a time as it is.
 fn row_times(batch: &RecordBatch, time_column: &str) -> anyhow::Result<Vec<UnixNanos>> {
     let column = batch
         .column_by_name(time_column)
         .with_context(|| format!("no time column {time_column} in LSE's file"))?;
-    ensure!(
-        column.null_count() == 0,
-        "the time column {time_column} of LSE's file has empty rows"
-    );
     match column.data_type() {
         DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _) => {}
         other => bail!("the time column {time_column} of LSE's file is {other}"),
     }
-    let utc = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
-    let times = cast(column, &utc)?;
-    let times = times
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .expect("cast to nanoseconds");
-    times
-        .values()
-        .iter()
-        .map(|&ns| {
-            Ok(UnixNanos::from(
-                u64::try_from(ns).context("a time before 1970")?,
-            ))
-        })
+    let nanos = cast(
+        column,
+        &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+    )?;
+    ensure!(
+        nanos.null_count() == 0,
+        "the time column {time_column} of LSE's file has empty rows, or times past 2262"
+    );
+    let nanos = nanos.as_primitive::<TimestampNanosecondType>();
+    (0..nanos.len())
+        .map(|row| time(nanos, row).map(UnixNanos::from))
         .collect()
 }
 
-/// The columns of a tick slice, LSE's types checked.
-fn tick_columns(
-    batch: &RecordBatch,
-) -> anyhow::Result<(
-    &TimestampNanosecondArray,
-    &Float64Array,
-    &Float64Array,
-    &StringArray,
-)> {
-    fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
-        let column = batch
-            .column_by_name(name)
-            .with_context(|| format!("no column {name} in LSE's file"))?;
-        ensure!(
-            column.null_count() == 0,
-            "the column {name} of LSE's file has empty rows"
-        );
-        column
-            .as_any()
-            .downcast_ref::<A>()
-            .with_context(|| format!("the column {name} of LSE's file is {}", column.data_type()))
+/// The column `name` of `batch`, LSE's type `A` checked, with no empty row.
+fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
+    let column = batch
+        .column_by_name(name)
+        .with_context(|| format!("no column {name} in LSE's file"))?;
+    ensure!(
+        column.null_count() == 0,
+        "the column {name} of LSE's file has empty rows"
+    );
+    column
+        .as_any()
+        .downcast_ref::<A>()
+        .with_context(|| format!("the column {name} of LSE's file is {}", column.data_type()))
+}
+
+/// The `time` column of `batch` in nanoseconds: UTC timestamps, which LSE
+/// gives in nanoseconds in a tick slice and in milliseconds in candles.
+fn times(batch: &RecordBatch) -> anyhow::Result<TimestampNanosecondArray> {
+    let column = batch
+        .column_by_name("time")
+        .context("no column time in LSE's file")?;
+    match column.data_type() {
+        DataType::Timestamp(_, Some(zone)) if zone.as_ref() == "UTC" => {}
+        other => bail!("the times of LSE's file are {other}, not UTC timestamps"),
     }
-    let times = column::<TimestampNanosecondArray>(batch, "time")?;
-    match times.data_type() {
-        DataType::Timestamp(TimeUnit::Nanosecond, Some(zone)) if zone.as_ref() == "UTC" => {}
-        other => bail!("the times of LSE's file are {other}, not UTC nanoseconds"),
-    }
-    Ok((
-        times,
-        column(batch, "price")?,
-        column(batch, "size")?,
-        column(batch, "kind")?,
-    ))
+    let nanos = cast(
+        column,
+        &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+    )?;
+    ensure!(
+        nanos.null_count() == 0,
+        "the column time of LSE's file has empty rows, or times past 2262"
+    );
+    Ok(nanos.as_primitive::<TimestampNanosecondType>().clone())
+}
+
+/// The time of `row` in nanoseconds from 1970.
+fn time(times: &TimestampNanosecondArray, row: usize) -> anyhow::Result<u64> {
+    u64::try_from(times.value(row)).context("a time before 1970")
 }
 
 /// `value`, a double, as the decimal it is written as at its shortest,
@@ -255,7 +319,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::testing::{GOLD_TRADES, US10Y_BOND_YIELDS};
+    use crate::testing::{GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, US10Y_BOND_YIELDS};
 
     fn gold() -> InstrumentId {
         InstrumentId::from("GOLD-FUTURES.LSEDGE")
@@ -426,5 +490,63 @@ mod tests {
         let err = parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 0, 0).unwrap_err();
 
         assert!(err.to_string().contains("4136.4"), "{err:#}");
+    }
+
+    /// The captured four hours, as pyarrow reads the file: candles LSE
+    /// stamps at 00:00, 04:00 and 08:00, their open.
+    #[test]
+    fn candles_are_bars_stamped_at_their_close_at_the_instrument_s_precision() {
+        let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-4-HOUR-LAST-EXTERNAL");
+
+        let bars = parse_candles(Bytes::from_static(GOLD_FUTURES_4H), bar_type, 1, 0).unwrap();
+
+        let rows: Vec<_> = bars
+            .iter()
+            .map(|b| {
+                (
+                    b.bar_type, b.ts_event, b.ts_init, b.open, b.high, b.low, b.close, b.volume,
+                )
+            })
+            .collect();
+        let row = |close, [open, high, low, last]: [&str; 4], volume| {
+            (
+                bar_type,
+                at(close),
+                at(close),
+                Price::from(open),
+                Price::from(high),
+                Price::from(low),
+                Price::from(last),
+                Quantity::from(volume),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                row("04:00:00", ["4132.1", "4143.8", "4124.1", "4135.9"], 13191),
+                row("08:00:00", ["4135.6", "4147.8", "4128.3", "4142.2"], 12585),
+                row("12:00:00", ["4142.1", "4160.0", "4129.4", "4158.7"], 15369),
+            ]
+        );
+    }
+
+    /// A malformed input: a tick slice, a real file of LSE's, read as
+    /// candles.
+    #[test]
+    fn a_file_of_no_candles_is_refused_naming_the_column_it_lacks() {
+        let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
+
+        let err = parse_candles(Bytes::from_static(GOLD_TRADES), bar_type, 1, 0).unwrap_err();
+
+        assert!(err.to_string().contains("no column open"), "{err:#}");
+    }
+
+    #[test]
+    fn a_candle_price_finer_than_the_instrument_s_precision_is_refused() {
+        let bar_type = BarType::from("XAU/USD-COMMODITIES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
+
+        let err = parse_candles(Bytes::from_static(GOLD_SPOT_MINUTES), bar_type, 1, 0).unwrap_err();
+
+        assert!(err.to_string().contains("4118.01"), "{err:#}");
     }
 }
