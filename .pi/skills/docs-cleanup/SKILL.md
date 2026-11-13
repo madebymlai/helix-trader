@@ -1,10 +1,10 @@
 ---
-name: prune-docs
-description: Audit and prune Helix documentation while accounting for retained and removed guidance.
+name: docs-cleanup
+description: Audit and clean up Helix documentation while accounting for retained and removed guidance.
 disable-model-invocation: true
 ---
 
-# Prune documentation
+# Documentation cleanup
 
 Before any writing or writing-style audit in this workflow, every participating agent reads and applies the `writing-for-agents` skill; it owns the writing rules. Read this repository's `AGENTS.md` for documentation ownership.
 
