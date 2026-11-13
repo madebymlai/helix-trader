@@ -47,9 +47,9 @@
 //! become the position's stop loss and take profit), and OKX takes GTC
 //! orders alone in an order list.
 
-use std::{collections::BTreeSet, str::FromStr};
+use std::{cmp::Ordering, collections::BTreeSet, str::FromStr};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -59,12 +59,13 @@ use nautilus_common::{
 use nautilus_model::{
     enums::{OrderSide, OrderStatus},
     identifiers::{ClientOrderId, InstrumentId},
-    instruments::Instrument,
+    instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     position::Position,
     types::{Price, Quantity},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use ustr::Ustr;
 
 use crate::venues;
@@ -106,6 +107,39 @@ pub struct Exits {
 pub struct Bracket {
     pub take_profit: Price,
     pub stop_loss: Price,
+}
+
+/// `price` on the nearer of `instrument`'s ticks around it, Nautilus' tick
+/// grid, as its venue takes an exit; at a tie, the one `away` (1 up, -1
+/// down) from the decision's price, so that an exit is not nearer than its
+/// distance. Nautilus' `make_price` rounds to the instrument's precision
+/// alone, which is no tick when the tick is coarser.
+///
+/// # Errors
+///
+/// Returns an error if `price` is outside the instrument's prices.
+pub fn nearest_tick(
+    instrument: &InstrumentAny,
+    price: Decimal,
+    away: Decimal,
+) -> anyhow::Result<Price> {
+    let id = instrument.id();
+    let value = price
+        .to_f64()
+        .with_context(|| format!("the exit {price} of {id}"))?;
+    let (Some(below), Some(above)) = (
+        instrument.next_bid_price(value, 0),
+        instrument.next_ask_price(value, 0),
+    ) else {
+        bail!("the exit {price} is outside the prices of {id}");
+    };
+    let (down, up) = (price - below.as_decimal(), above.as_decimal() - price);
+    Ok(match down.cmp(&up) {
+        Ordering::Less => below,
+        Ordering::Greater => above,
+        Ordering::Equal if away.is_sign_positive() => above,
+        Ordering::Equal => below,
+    })
 }
 
 /// The client order ids a trade's orders take, for a caller naming them:

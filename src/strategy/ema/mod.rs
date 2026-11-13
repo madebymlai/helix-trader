@@ -35,14 +35,13 @@ use nautilus_model::{
     data::{Bar, BarType},
     enums::OrderSide,
     identifiers::{InstrumentId, StrategyId},
-    instruments::Instrument,
     types::Quantity,
 };
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::Signed};
 use serde::Deserialize;
 
 use self::signal::Signal;
@@ -245,7 +244,8 @@ impl EmaCross {
 
     /// The trade on `side` decided on `bar`: `trade_size` of the traded
     /// instrument, its take profit and stop loss at their distances from
-    /// the bar's close, rounded to the instrument's prices, held `HOLD`.
+    /// the bar's close, each on the instrument's nearest tick, a tie away
+    /// from the close (`orders::nearest_tick`), held `HOLD`.
     /// The module rounds the size to the instrument's sizes: one rounding
     /// to zero, as a trade size off that grid leaves, is an error and no
     /// order, logged by Nautilus.
@@ -255,15 +255,18 @@ impl EmaCross {
             .cache()
             .instrument(&instrument_id)
             .ok_or_else(|| anyhow::anyhow!("instrument {instrument_id} not in cache"))?;
-        let (take_profit, stop_loss) = exit_prices(bar.close.as_decimal(), side);
+        let close = bar.close.as_decimal();
+        let (take_profit, stop_loss) = exit_prices(close, side);
+        let on_tick =
+            |exit: Decimal| orders::nearest_tick(&instrument, exit, (exit - close).signum());
         Ok(Trade {
             instrument_id,
             side,
             quantity: self.config.trade_size(),
             exits: Exits {
                 bracket: Some(Bracket {
-                    take_profit: instrument.try_make_price_from_decimal(take_profit)?,
-                    stop_loss: instrument.try_make_price_from_decimal(stop_loss)?,
+                    take_profit: on_tick(take_profit)?,
+                    stop_loss: on_tick(stop_loss)?,
                 }),
                 time_limit: Some(HOLD),
             },
