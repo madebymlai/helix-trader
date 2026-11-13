@@ -22,12 +22,19 @@ pub(crate) const LSE_HTTP_BASE_URL: &str = "https://download.londonstrategicedge
 pub(crate) const FREE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(60).expect("not zero");
 
 /// An LSE socket of the protocol four of them share (LSE's WebSocket
-/// documentation, "The sockets"), each carrying its markets.
+/// documentation, "The sockets"), each carrying its markets: those a
+/// derived market's series streams on. The fourth, chicago-ws, carries
+/// futures and forex, which data-ws carries whole, sending the same ticks
+/// (captured on 13 November 2026), so no series streams there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LseSocket {
     /// data-ws: US stocks and ETFs, US option contracts, forex,
-    /// commodities, futures and US bond yields.
+    /// commodities, futures, indices and US bond yields.
     Data,
+    /// london-ws: UK stocks, and crypto since 8 November 2026.
+    London,
+    /// tsx-ws: Canadian stocks.
+    Tsx,
 }
 
 impl LseSocket {
@@ -35,6 +42,8 @@ impl LseSocket {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Data => "data-ws",
+            Self::London => "london-ws",
+            Self::Tsx => "tsx-ws",
         }
     }
 
@@ -42,6 +51,8 @@ impl LseSocket {
     pub(crate) fn url(self) -> &'static str {
         match self {
             Self::Data => "wss://data-ws.londonstrategicedge.com",
+            Self::London => "wss://london-ws.londonstrategicedge.com",
+            Self::Tsx => "wss://tsx-ws.londonstrategicedge.com",
         }
     }
 }

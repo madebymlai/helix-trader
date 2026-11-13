@@ -56,10 +56,11 @@ type QuotedBySymbol = Arc<AtomicMap<(LseSocket, String), Quoted>>;
 #[derive(Debug)]
 pub(super) struct LseStreams {
     credential: LseCredential,
-    /// The address of every socket, if not LSE's own.
-    url: Option<String>,
     /// Each instrument streamed, with its socket and its symbol there.
     streamed: Vec<(InstrumentId, LseSocket, String)>,
+    /// The sockets of the instruments streamed, in the order first named,
+    /// each with its address.
+    urls: Vec<(LseSocket, String)>,
     sockets: AHashMap<LseSocket, LseWebSocketClient>,
     quoted: QuotedBySymbol,
     /// The tasks turning each socket's ticks into quotes.
@@ -82,7 +83,7 @@ impl LseStreams {
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
-        let streamed = config
+        let streamed: Vec<(InstrumentId, LseSocket, String)> = config
             .stream_ids
             .iter()
             .map(|&id| {
@@ -92,10 +93,16 @@ impl LseStreams {
                 Ok((id, socket, symbol))
             })
             .collect::<anyhow::Result<_>>()?;
+        let mut urls: Vec<(LseSocket, String)> = Vec::new();
+        for &(_, socket, _) in &streamed {
+            if !urls.iter().any(|(of, _)| *of == socket) {
+                urls.push((socket, config.ws_url(socket).to_owned()));
+            }
+        }
         Ok(Self {
             credential,
-            url: config.base_url_ws.clone(),
             streamed,
+            urls,
             sockets: AHashMap::new(),
             quoted: Arc::default(),
             tasks: TaskGroup::new(),
@@ -122,14 +129,8 @@ impl LseStreams {
                 .start_generation()
                 .map_err(|e| anyhow::anyhow!("reopening the LSE tick tasks: {e}"))?;
         }
-        let mut sockets: Vec<LseSocket> = Vec::new();
-        for (_, socket, _) in &self.streamed {
-            if !sockets.contains(socket) {
-                sockets.push(*socket);
-            }
-        }
-        for socket in sockets {
-            if let Err(e) = self.open_socket(socket).await {
+        for (socket, url) in self.urls.clone() {
+            if let Err(e) = self.open_socket(socket, &url).await {
                 self.close().await?;
                 return Err(e);
             }
@@ -137,10 +138,9 @@ impl LseStreams {
         Ok(())
     }
 
-    async fn open_socket(&mut self, socket: LseSocket) -> anyhow::Result<()> {
+    async fn open_socket(&mut self, socket: LseSocket, url: &str) -> anyhow::Result<()> {
         let name = socket.name();
         let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
-        let url = self.url.as_deref().unwrap_or(socket.url());
         let client =
             LseWebSocketClient::connect(socket, url, &self.credential, KEEPALIVE_SECS, out_tx)
                 .await?;
