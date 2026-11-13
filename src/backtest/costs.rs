@@ -51,9 +51,7 @@ impl Commission {
     /// negative amount, and would take a negative rate as a rebate.
     pub fn fee_model(&self) -> anyhow::Result<FeeModelAny> {
         Ok(match *self {
-            Self::PerOrder(commission) => {
-                FeeModelAny::Fixed(FixedFeeModel::new(commission, Some(true))?)
-            }
+            Self::PerOrder(commission) => FeeModelAny::Fixed(FixedFeeModel::new(commission, None)?),
             Self::Rate(rate) => {
                 ensure!(
                     !rate.is_sign_negative(),

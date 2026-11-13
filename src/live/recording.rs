@@ -84,7 +84,6 @@ impl Recording {
             u64::try_from(PROMOTION_INTERVAL.as_millis())
                 .expect("a day of milliseconds fits in u64"),
         );
-        streaming.promote_on_close = true;
         streaming.delete_feather_after_promotion = true;
         streaming.data_types = Some(STREAMED.to_vec());
         streaming
@@ -220,6 +219,7 @@ mod tests {
             dir.path().join("catalog").to_str().unwrap()
         );
         assert_eq!(streaming.promotion_interval_ms, Some(24 * 60 * 60 * 1_000));
+        // Nautilus' default, which `promote_staged` relies on.
         assert!(streaming.promote_on_close);
         assert!(streaming.delete_feather_after_promotion);
     }
