@@ -42,7 +42,7 @@
 //! for a period without data (`warmup::data_engine_config`), so a bar is
 //! data.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
@@ -52,11 +52,12 @@ use nautilus_common::{
 };
 use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::{
-    data::{CustomData, CustomDataTrait, DataType, HasTsInit},
+    custom_data,
+    data::{CustomData, CustomDataTrait, DataType},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::features::{FeatureSet, Fingerprint};
 
@@ -82,7 +83,7 @@ pub enum DecisionRule {
 }
 
 /// The features of one decision, published on the message bus.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[custom_data]
 pub struct FeatureRow {
     /// The strategy that decided.
     pub strategy_id: StrategyId,
@@ -271,42 +272,6 @@ impl FeatureRow {
             None,
             Some(strategy_id.to_string()),
         )
-    }
-}
-
-impl HasTsInit for FeatureRow {
-    fn ts_init(&self) -> UnixNanos {
-        self.ts_init
-    }
-}
-
-impl CustomDataTrait for FeatureRow {
-    fn type_name(&self) -> &'static str {
-        Self::type_name_static()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn ts_event(&self) -> UnixNanos {
-        self.ts_event
-    }
-
-    fn to_json(&self) -> anyhow::Result<String> {
-        Ok(serde_json::to_string(self)?)
-    }
-
-    fn clone_arc(&self) -> Arc<dyn CustomDataTrait> {
-        Arc::new(self.clone())
-    }
-
-    fn eq_arc(&self, other: &dyn CustomDataTrait) -> bool {
-        other.as_any().downcast_ref::<Self>() == Some(self)
-    }
-
-    fn type_name_static() -> &'static str {
-        "FeatureRow"
     }
 }
 
