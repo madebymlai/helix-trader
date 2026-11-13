@@ -195,11 +195,13 @@ where
 ///
 /// The costs of each currency: the commission, the spread paid, their sum
 /// per trade (a fill), and the gross PnL, the PnL before both: Nautilus'
-/// `PnL (total)` plus the two. That PnL is realized only, so the gross
-/// also holds the spread a position still open at the end paid to open. A
-/// currency with a fill on no quote (a run on bars) prints its spread as
-/// not applicable, and its cost per trade and gross PnL hold the commission
-/// alone.
+/// `PnL (total)` plus the two. That PnL is realized only, the account's
+/// balance change after every fill's commission: of a position still open
+/// at the end, the commission and the gross count the commission it paid
+/// to open, which no closed position's PnL holds, and the gross also holds
+/// the spread it paid to open. A currency with a fill on no quote (a run on
+/// bars) prints its spread as not applicable, and its cost per trade and
+/// gross PnL hold the commission alone.
 #[must_use]
 pub fn report(outcome: &Outcome) -> String {
     let result = &outcome.result;

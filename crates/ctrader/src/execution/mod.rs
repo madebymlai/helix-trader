@@ -1405,7 +1405,10 @@ impl ExecutionClient for CTraderExecutionClient {
     }
 
     /// One report per open cTrader position: the reconcile request lists
-    /// every open position, so an instrument without one is flat.
+    /// every open position, so an instrument without one is flat. Nautilus
+    /// reads an absent report so because
+    /// `ExecutionClient::provides_bulk_position_coverage` is true by
+    /// default, which this client leaves as it is.
     async fn generate_position_status_reports(
         &self,
         cmd: &GeneratePositionStatusReports,

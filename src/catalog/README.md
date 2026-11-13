@@ -16,7 +16,7 @@ The direct writer resumes each series 1 ns after its stored end, even if the req
 
 ## Instrument identity
 
-The source, catalog, strategy and live broker must agree on instrument IDs. IB and Databento use different default venues for the same contract; matching them requires explicit venue configuration. Changing source or venue requires matching config IDs and a refilled catalog.
+The source, catalog, strategy and live broker must agree on instrument IDs. IB keeps the venue of an instrument it loads by ID, so a contract the config names under Databento's venue (`ESZ21.GLBX`) keeps it live; only a contract IB has not loaded takes its exchange's venue (`ESZ21.CME`, Nautilus' `determine_venue`). Changing source or venue requires matching config IDs and a refilled catalog.
 
 ## Tests
 

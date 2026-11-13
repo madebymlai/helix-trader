@@ -203,8 +203,9 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// The custom data `backtest` replays (see `Backtest::series`), read from
 /// its catalog, each series over its slice, both ends included: the data
 /// the node cannot load (see `run_config`). Nautilus decodes each type by
-/// its name, so the strategy registers its custom types with Nautilus
-/// before (`nautilus_serialization::ensure_custom_data_registered`).
+/// its name, so each must be registered with Nautilus before the run
+/// (`nautilus_serialization::ensure_custom_data_registered`) by the code
+/// declaring its series, as the tests do: the run registers none.
 ///
 /// # Errors
 ///
