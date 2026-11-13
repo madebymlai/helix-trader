@@ -1365,8 +1365,9 @@ impl DataActor for Streaming {
 /// the roller's subscription reaches the LSE client: that reads the
 /// definition's precision, and LSE's quote streams at it, bid and ask with
 /// no sizes. GCZ26's, which the cache holds, is not asked, so the broker's
-/// stays. LSE has no quotes of the gold series' past: the warmup ends with
-/// what the venue served and its failure naming LSE's client.
+/// stays. LSE serves no quotes of the gold series' past: LSE's mock peer
+/// refuses them as LSE does (`400 data-unavailable`), and the warmup ends
+/// with what the venue served and LSE's refusal.
 #[test]
 fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_streams_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1381,6 +1382,10 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
         .write_instruments(vec![lse::testing::gold_futures(), older])
         .unwrap();
     let socket = lse::testing::MockLseSocket::start(|_, frame| lse::testing::data_ws_answer(frame));
+    let history = lse::testing::MockLse::start(vec![lse::testing::Reply::refusal(
+        400,
+        lse::testing::DATA_UNAVAILABLE_QUOTES,
+    )]);
     let gold = InstrumentId::from(lse::testing::GOLD_FUTURES);
     let ticks = vec![
         TickSeries {
@@ -1414,6 +1419,7 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
         .api_key(nautilus_core::string::secret::SecretString::from(
             lse::testing::API_KEY,
         ))
+        .base_url_http(history.url().to_string())
         .base_url_ws(socket.url().to_string())
         .stream_ids(vec![gold])
         .build();
@@ -1498,5 +1504,5 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
         .borrow()
         .clone()
         .expect("LSE serves no quotes of the past");
-    assert!(failure.contains("LSE"), "{failure}");
+    assert!(failure.contains("data-unavailable"), "{failure}");
 }

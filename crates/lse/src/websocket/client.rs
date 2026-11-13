@@ -515,15 +515,23 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::testing::{
-        API_KEY, MockLseSocket, SocketAction, WS_INVALID_KEY, WS_LIMIT_REACHED, WS_TICKS_GOLD,
-        WS_TOO_MANY_CONNECTIONS, data_ws_answer,
+    use crate::{
+        common::credential::LseProduct,
+        testing::{
+            API_KEY, MockLseSocket, SocketAction, WS_INVALID_KEY, WS_LIMIT_REACHED, WS_TICKS_GOLD,
+            WS_TOO_MANY_CONNECTIONS, data_ws_answer,
+        },
     };
 
     type Out = tokio::sync::mpsc::UnboundedReceiver<LseWsMessage>;
 
     fn credential() -> LseCredential {
-        LseCredential::resolve(Some(SecretString::from(API_KEY)), |_| None).unwrap()
+        LseCredential::resolve(
+            LseProduct::Global,
+            Some(SecretString::from(API_KEY)),
+            |_| None,
+        )
+        .unwrap()
     }
 
     async fn connect(peer: &MockLseSocket) -> anyhow::Result<(LseWebSocketClient, Out)> {

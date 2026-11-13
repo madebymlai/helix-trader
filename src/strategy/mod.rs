@@ -78,8 +78,8 @@ pub struct DataRequirements {
     /// The tick series the strategy reads as they are, beside or instead
     /// of bars, book deltas and custom data among them (see
     /// `TickSeries`): fetched by fill-catalog from their instrument's
-    /// source (Databento fetches a GLBX instrument's book and trades
-    /// whatever is declared; no source serves an instrument's custom data)
+    /// source (LSE fetches a GLBX instrument's trades and quotes, and
+    /// refuses its book; no source serves an instrument's custom data)
     /// and replayed in a backtest as declared, those of its harness among
     /// them (a model strategy's traded quotes when no series prices the
     /// traded instrument, `StandardConfig::data_requirements`). Their

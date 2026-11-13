@@ -1,16 +1,19 @@
-//! LSE history and live data of `LSEDGE` instruments, London Strategic
-//! Edge's own derived series, each an index instrument named after its LSE
-//! market (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), both from the LSE
-//! adapter's data client (`lse`). History is filled through the node (see
-//! `catalog::NodeFill`), the data engine writing the client's answers back
-//! to the catalog: trades, from LSE's tick slices, and bars, from its
-//! candles, each stamped at its close. Live, the client streams their
-//! quotes on the live node, routed their venue (`live_clients`). Their
-//! definitions are the catalog's alone, written there by hand: LSE
-//! publishes none, the data engine answers a definition request from the
-//! catalog before asking the client, and the client converts LSE's prices
-//! at the definition's precision. LSE's reference series, the rows of its
-//! reference collections, are custom data of no instrument
+//! LSE history and live data, from the LSE adapter's data client (`lse`).
+//! History is filled through the node (see `catalog::NodeFill`), the data
+//! engine writing the client's answers back to the catalog: of `LSEDGE`
+//! instruments, London Strategic Edge's own derived series, each an index
+//! instrument named after its LSE market (`GOLD-FUTURES.LSEDGE`: GOLD in
+//! `futures`), trades, from LSE's tick slices, and bars, from its candles,
+//! each stamped at its close; and of `GLBX` contracts, CME Globex's Level 1
+//! under the ids Databento gives them (`GCZ26.GLBX`), trades and quotes.
+//! Live, the client streams the quotes of `LSEDGE` instruments on the live
+//! node, routed their venue (`live_clients`). Each contract's definition is
+//! its row's definitions source's: `LSEDGE`'s the catalog's alone, written
+//! there by hand, LSE publishing none, the data engine answering a
+//! definition request from the catalog before asking the client; `GLBX`'s
+//! Databento's, asked of Nautilus' Databento client. The client converts
+//! LSE's prices at the definition's precision. LSE's reference series, the
+//! rows of its reference collections, are custom data of no instrument
 //! (`lse::LseRow`), filled by the same client with no definition. See
 //! `README.md`.
 
@@ -20,6 +23,7 @@ use nautilus_live::config::RoutingConfig;
 use nautilus_model::{data::DataType, identifiers::InstrumentId};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
+use super::{DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     live::node::Clients,
@@ -30,22 +34,28 @@ use crate::{
 /// client asks LSE a UTC day an export whatever the window.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// Adds to `node` the fill of what the catalog lacks of `slices`, series of
-/// `LSEDGE` instruments (see `catalog::missing`), and of `custom`, LSE's
-/// rows (`lse::LseRow`) over `[start, end]` (see `catalog::missing_custom`),
-/// asked of the LSE client `config` configures, its key read only when the
-/// node creates it, so only if something is missing. Each contract's
-/// definition is asked of the client too: the data engine answers it from
-/// the catalog, before the client, and puts it in the cache, where the
-/// client reads the precision of its prices; a definition the catalog lacks
-/// fails its request, naming the instrument, before LSE is asked. LSE's rows
-/// are of no instrument and have none.
+/// Adds to `node` the fill of what the catalog lacks of `slices`, series
+/// LSE gives the history of (see `catalog::missing`), and of `custom`,
+/// LSE's rows (`lse::LseRow`) over `[start, end]` (see
+/// `catalog::missing_custom`): first each contract's definition, asked of
+/// its row's definitions source, Databento's client, which `databento`
+/// makes only if Databento has a definition to give, checked against its
+/// dataset's end, for the contracts Databento defines, and LSE's for the
+/// others, the data engine answering them from the catalog before the
+/// client, which fails a definition the catalog lacks, naming the
+/// instrument, before LSE is asked; then the series and the rows, asked of
+/// the LSE client `config` configures, its keys read only when the node
+/// creates it, so only if something is missing. The data engine puts each
+/// definition in the cache, where the client reads the precision of its
+/// prices. LSE's rows are of no instrument and have none.
 ///
 /// # Errors
 ///
 /// Returns an error if a series is not one the node fills (see `missing`),
-/// if a custom series has no identifier, or if the catalog cannot be read.
-pub(super) fn add_fill(
+/// if a custom series has no identifier, if the catalog cannot be read, or
+/// as `databento` and `DatabentoHistory::check`.
+#[expect(clippy::too_many_arguments, reason = "a fill's parts")]
+pub(super) async fn add_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -53,9 +63,21 @@ pub(super) fn add_fill(
     start: Timestamp,
     end: Timestamp,
     config: LseDataClientConfig,
+    databento: impl FnOnce() -> anyhow::Result<DatabentoHistory>,
 ) -> anyhow::Result<()> {
-    let requests = missing(catalog, slices)?;
+    let (definitions, requests): (Vec<_>, Vec<_>) =
+        missing(catalog, slices)?.into_iter().partition(|request| {
+            request.data == FillData::Instrument
+                && Row::of(request.instrument_id.venue).definitions == DefinitionsSource::Databento
+        });
     let custom = missing_custom(catalog, custom, start, end)?;
+    if !definitions.is_empty() {
+        let databento = databento()?;
+        databento.check(&definitions).await?;
+        node.add(databento.node_client(), &definitions, |data| {
+            unreachable!("Databento's check passes definitions alone, not {data}")
+        });
+    }
     node.add_with_custom(node_client(config), &requests, &custom, period);
     Ok(())
 }
@@ -117,8 +139,9 @@ mod tests {
     use ::lse::{
         LseRow,
         testing::{
-            ALLOWANCE_EXHAUSTED, API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES,
-            GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PLAN_REQUIRED, REFERENCE_CATALOGUE,
+            ALLOWANCE_EXHAUSTED, API_KEY, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
+            GCZ26, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
+            GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
             REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
             gold_futures, gold_spot,
         },
@@ -134,7 +157,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::strategy::{DataRequirements, TickSeries};
+    use crate::{
+        strategy::{DataRequirements, TickSeries},
+        venues::databento::testing::MockDatabento,
+    };
 
     /// LSE lists no such series.
     const NOSUCH: &str = "NOSUCH-FUTURES.LSEDGE";
@@ -203,6 +229,21 @@ mod tests {
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<()> {
+        fill_from(dir, lse, None, requirements, definitions, (from, to))
+    }
+
+    /// fill-catalog's fill of `requirements` over `[from, to]` into the
+    /// catalog in `dir`, from `lse` and `databento`, Databento's mock peer,
+    /// the catalog holding `definitions`. With no peer of Databento's,
+    /// Databento is never asked.
+    fn fill_from(
+        dir: &Path,
+        lse: &MockLse,
+        databento: Option<&MockDatabento>,
+        requirements: &DataRequirements,
+        definitions: Vec<InstrumentAny>,
+        (from, to): (Timestamp, Timestamp),
+    ) -> anyhow::Result<()> {
         let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
         if !definitions.is_empty() {
             catalog.write_instruments(definitions).unwrap();
@@ -210,23 +251,32 @@ mod tests {
         let slices = requirements.slices(from, to);
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
+            .cme_api_key(SecretString::from(CME_API_KEY))
             .base_url_http(lse.url().to_string())
             .build();
-        let mut node = NodeFill::new();
-        add_fill(
-            &mut node,
-            &catalog,
-            &slices,
-            &requirements.custom,
-            from,
-            to,
-            config,
-        )?;
+        let databento = || {
+            let peer = databento.expect("Databento asked for a definition");
+            DatabentoHistory::with_base_url(&format!("db-{}", "0".repeat(29)), peer.url())
+        };
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(node.run(dir))
+            .block_on(async {
+                let mut node = NodeFill::new();
+                add_fill(
+                    &mut node,
+                    &catalog,
+                    &slices,
+                    &requirements.custom,
+                    from,
+                    to,
+                    config,
+                    databento,
+                )
+                .await?;
+                node.run(dir).await
+            })
     }
 
     /// The spans LSE was asked for, in order.
@@ -646,6 +696,140 @@ mod tests {
             asked.first().map(|(from, _)| from.as_str()),
             Some(stored_to.to_string().as_str()),
             "{asked:?}"
+        );
+    }
+
+    /// GCZ6 of 2026's trades and quotes over the captured second: its
+    /// definition is Databento's, asked of Databento's client, which the
+    /// mock Databento peer answers with Databento's records of GCZ6, and its
+    /// trades and quotes LSE's, asked of LSE's client, which looks the
+    /// contract up in LSE's catalogue and asks for its listing's rows with
+    /// the CME key. Neither client claims a venue: each request reaches the
+    /// client it names. The definition is the one Databento's client wrote
+    /// into this repository's catalog before.
+    #[test]
+    fn a_glbx_fill_takes_its_definition_from_databento_and_its_trades_and_quotes_from_lse() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(PAIRS_GCZ6),
+            Reply::file(GCZ26_TRADES),
+            Reply::file(GCZ26_QUOTES),
+        ]);
+        let databento = MockDatabento::start();
+        let second: (Timestamp, Timestamp) = (
+            "2026-11-12T14:30:00Z".parse().unwrap(),
+            "2026-11-12T14:30:00.999999999Z".parse().unwrap(),
+        );
+
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: [NautilusDataType::TradeTick, NautilusDataType::QuoteTick]
+                .map(|data| TickSeries {
+                    data,
+                    instrument_id: InstrumentId::from(GCZ26),
+                })
+                .to_vec(),
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_from(
+            dir.path(),
+            &lse,
+            Some(&databento),
+            &requirements,
+            vec![],
+            second,
+        )
+        .unwrap();
+
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let [InstrumentAny::FuturesContract(definition)] = &catalog
+            .instruments(Some(&[GCZ26.to_string()]), None, None)
+            .unwrap()[..]
+        else {
+            panic!("not one futures contract");
+        };
+        assert_eq!(
+            (
+                definition.raw_symbol.as_str(),
+                definition.price_precision,
+                definition.price_increment,
+                definition.multiplier,
+                Timestamp::from(definition.expiration_ns),
+            ),
+            (
+                "GCZ6",
+                2,
+                Price::from("0.10"),
+                Quantity::from(100),
+                "2026-12-29T18:30:00Z".parse().unwrap(),
+            )
+        );
+        let trades = catalog
+            .trade_ticks(Some(vec![GCZ26.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(trades.len(), 38);
+        assert_eq!(
+            (trades[0].ts_event, trades[0].price),
+            (
+                UnixNanos::from(1_794_493_800_001_418_191),
+                Price::from("3908.10")
+            )
+        );
+        let quotes = catalog
+            .quote_ticks(Some(vec![GCZ26.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(quotes.len(), 636);
+        let asked_of_databento: Vec<_> = databento
+            .calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.path.clone(),
+                    call.param("schema").map(ToString::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked_of_databento,
+            [
+                ("/v0/metadata.get_dataset_range".to_string(), None),
+                (
+                    "/v0/timeseries.get_range".to_string(),
+                    Some("definition".to_string())
+                ),
+            ]
+        );
+        let asked_of_lse: Vec<_> = lse
+            .calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.path.clone(),
+                    call.param("pair_id")
+                        .or(call.param("symbol"))
+                        .map(ToString::to_string),
+                    call.param("data").map(ToString::to_string),
+                    call.api_key.clone(),
+                )
+            })
+            .collect();
+        let call = |path: &str, instrument: &str, data: Option<&str>| {
+            (
+                path.to_string(),
+                Some(instrument.to_string()),
+                data.map(ToString::to_string),
+                Some(CME_API_KEY.to_string()),
+            )
+        };
+        assert_eq!(
+            asked_of_lse,
+            [
+                call("/v3/pairs", "GCZ6", None),
+                call("/v3/export", "4000000002", Some("trades")),
+                call("/v3/export", "4000000002", Some("quotes")),
+            ]
         );
     }
 }

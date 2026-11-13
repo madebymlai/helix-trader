@@ -5,7 +5,8 @@
 //! definition loaded from the node's catalog (TC-D01, LSE publishing none,
 //! from the catalog alone), quotes flowing after start (TC-D20) and their
 //! subscription ended on stop (TC-D70). TC-D21, historical quotes, is
-//! skipped: LSE has no quotes of a derived market's series.
+//! skipped here: LSE has no quotes of a derived market's past, and a CME
+//! contract's run against LSE in `examples/node_data_tester.rs`.
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 

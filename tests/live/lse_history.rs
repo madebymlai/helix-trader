@@ -6,9 +6,13 @@
 //! definitions, written by hand as LSE publishes none, and that day's row
 //! of LSE's daily 10-year US bond yield, custom data of no instrument
 //! (`lse::LseRow`) known at the day's end, through the node from LSE's
-//! exports. It needs the LSE key, `LSE_API_KEY`, from the environment or
-//! `.env`; the free key serves every series. The day's exports count
-//! against the key's rows a day.
+//! exports; and of the trades and quotes of GCZ6 of 2026, `GCZ26.GLBX`,
+//! from LSE's CME Globex, its definition from Databento. It needs the LSE
+//! key, `LSE_API_KEY`, a CME Group key, `LSE_CME_API_KEY`, and
+//! Databento's, `DATABENTO_API_KEY`, from the environment or `.env`; the
+//! free LSE key serves the derived series and the bond yield, CME Group
+//! Lite+ the CME contract's Level 1. The free key's exports count against
+//! its rows a day; Databento charges about $0.000001 for the definition.
 //!
 //! Gated as `okx_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
@@ -37,6 +41,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 const US10Y: &str = "US10Y-FUTURES.LSEDGE";
 const GOLD_SPOT: &str = "XAU/USD-COMMODITIES.LSEDGE";
+const GCZ26: &str = "GCZ26.GLBX";
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
 /// that the file cannot opt in.
@@ -260,4 +265,74 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
         )
         .unwrap();
     assert_eq!(lacking, []);
+}
+
+/// A day of GCZ6 of 2026's quotes, about 2.6 million, is past the 2,500,000
+/// rows one export may read, so LSE is asked for it in halves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definition_from_databento() {
+    if !opted_in(
+        "a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definition_from_databento",
+    ) {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: [NautilusDataType::TradeTick, NautilusDataType::QuoteTick]
+            .map(|data| TickSeries {
+                data,
+                instrument_id: InstrumentId::from(GCZ26),
+            })
+            .to_vec(),
+        custom: vec![],
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_day();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let definitions = catalog
+        .instruments(Some(&[GCZ26.to_string()]), None, None)
+        .unwrap();
+    let [InstrumentAny::FuturesContract(definition)] = &definitions[..] else {
+        panic!("{GCZ26}: {definitions:?}");
+    };
+    assert_eq!(definition.raw_symbol.as_str(), "GCZ6");
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let trades = catalog
+        .trade_ticks(Some(vec![GCZ26.to_string()]), None, None)
+        .unwrap();
+    let quotes = catalog
+        .quote_ticks(Some(vec![GCZ26.to_string()]), None, None)
+        .unwrap();
+    println!("{GCZ26}: {} trades, {} quotes", trades.len(), quotes.len());
+    assert!(!trades.is_empty() && !quotes.is_empty());
+    assert!(
+        trades.iter().all(|t| (from..=to).contains(&t.ts_event)
+            && t.aggressor_side == AggressorSide::NoAggressor
+            && t.price.precision == definition.price_precision),
+        "a trade outside the day, with a side or off the definition's precision"
+    );
+    assert!(
+        quotes
+            .iter()
+            .all(|q| (from..=to).contains(&q.ts_event) && q.bid_price < q.ask_price),
+        "a quote outside the day or crossed"
+    );
+    for data in [NautilusDataType::TradeTick, NautilusDataType::QuoteTick] {
+        let lacking = catalog
+            .get_missing_intervals_for_request(
+                from.as_u64(),
+                to.as_u64(),
+                &data.clone().into(),
+                Some(GCZ26),
+            )
+            .unwrap();
+        assert_eq!(lacking, [], "{data}");
+    }
 }
