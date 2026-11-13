@@ -1357,7 +1357,9 @@ mod tests {
 
     /// The hourly mid bar of AUD/USD closing at noon of the 22nd, from
     /// 0.69950 to 0.70050: `config`'s target's ATR of one bar of it is
-    /// 0.00100, its unit worth 1 USD on 1000 AUD/USD.
+    /// 0.00100, its unit 1,000 USD, 0.5% of the dataset balance of
+    /// 10,000,000 USD over it buying 50,000,000 AUD/USD, which AUD/USD's
+    /// maximum quantity caps at 1,000,000.
     fn unit_bar() -> Bar {
         hour_bar(
             "2026-10-22T12:00:00Z",
@@ -1366,7 +1368,7 @@ mod tests {
     }
 
     /// Starts `handle` on `probe` in a backtest and hands it `unit_bar`,
-    /// which the ATR of `config`'s target reads: its unit is 1 USD.
+    /// which the ATR of `config`'s target reads: its unit is 1,000 USD.
     fn started(handle: &ModelHandle, probe: &mut Decider) {
         handle.start(probe).unwrap();
         probe.handle_bar(&unit_bar());
@@ -1712,7 +1714,7 @@ mod tests {
     }
 
     /// `config` with a take profit and a stop 1 ATR of one hourly bar away,
-    /// from 0.30 USD on the long, and the width of that bracket.
+    /// the long traded from 0.3R, and the width of that bracket.
     fn width_config() -> (ModelConfig, Rc<BracketWidth>) {
         let mut config = bracket_config(10);
         config.target.spec.bracket = Some(BracketSpec {
