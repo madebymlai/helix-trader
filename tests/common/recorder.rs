@@ -15,7 +15,8 @@ use std::{cell::RefCell, rc::Rc};
 use helix_trader::{
     rolls::ContinuousBars,
     strategy::{
-        orders::{Exits, Stake, Trade},
+        orders::{Exits, Trade},
+        risk::Stake,
         warmup,
     },
 };

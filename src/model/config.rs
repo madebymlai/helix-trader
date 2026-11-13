@@ -22,7 +22,10 @@ use super::{
     schedule::Retrain,
     targets::{Side, Target, TargetConfig},
 };
-use crate::strategy::{DataRequirements, TradedInstrument, orders::Risk, r::R};
+use crate::strategy::{
+    DataRequirements, TradedInstrument,
+    risk::{R, Risk},
+};
 
 /// A strategy's model, loaded from TOML, such as
 ///

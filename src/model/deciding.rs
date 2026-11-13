@@ -50,7 +50,7 @@ use super::{
     store::{LoadedModel, ModelSet, Pair, Swap},
     targets::{PerSide, Side},
 };
-use crate::strategy::r::R;
+use crate::strategy::risk::R;
 
 /// A strategy's models as they decide: its model set's stores as last listed,
 /// and the sides' pair and the meta's model swapped in so far.

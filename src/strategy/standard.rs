@@ -10,12 +10,12 @@ use nautilus_model::{
 use nautilus_trading::strategy::StrategyConfig;
 use serde::{
     Deserialize, Deserializer,
-    de::{self, DeserializeOwned, MapAccess, Visitor},
+    de::{self, DeserializeOwned, DeserializeSeed, MapAccess, Visitor},
 };
 
 use super::{
     DataRequirements, Declaration, IndicatorsConfig, TickSeries,
-    orders::{Risk, Stake},
+    risk::{Risk, Stake},
     session::Session,
     tick_data,
 };
@@ -35,7 +35,10 @@ use crate::{
 /// - `[indicators]`: the indicators its code reads, by name (see
 ///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
 ///   without one.
-/// - `[trade]`: what it trades (see `TradeConfig`).
+/// - `[trade]`: what it trades and, of a strategy sizing its trades by
+///   risk (`Part::SIZES_BY_RISK`), how much each risks, its `risk` (see
+///   `TradeConfig`); required of such a strategy, and a key `[trade]` takes
+///   of no other.
 /// - `[model]`: the model of a strategy trading on one
 ///   (`Part::TAKES_MODEL`), whose target trades `[trade]`'s instrument (see
 ///   `ModelSection`, `model`); required of such a strategy, and a key no
@@ -61,8 +64,9 @@ pub struct StandardConfig<P: Part> {
 /// A strategy's part of its config: its own fields, at the top level of
 /// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
 /// how many instruments it trades, the indicators it reads, whether it
-/// trades on a model, its default `[base]`, the series it reads and its
-/// own rules. The standard tables are not its to drop or rename.
+/// trades on a model, whether it sizes its trades by risk, its default
+/// `[base]`, the series it reads and its own rules. The standard tables
+/// are not its to drop or rename.
 pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
@@ -75,6 +79,13 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// and it builds its features (`model::ModelPart`). None unless it
     /// says.
     const TAKES_MODEL: bool = false;
+    /// Whether it sizes its trades by risk, at a stake of `[trade] risk`
+    /// (`StandardConfig::stake`): if so its `[trade]` has a `risk`, and
+    /// otherwise takes none, the strategy sizing its orders itself rather
+    /// than sending `orders::Trade`s at a stake. A part trading on a model
+    /// sizes by risk, its model priced at the reference stake. Every part
+    /// does unless it says.
+    const SIZES_BY_RISK: bool = true;
     /// Its `[base]` when the TOML has none: its strategy id alone, since
     /// Nautilus tags its orders with the id's tag when `order_id_tag` is
     /// unset (`StrategyCore::new_checked`).
@@ -115,7 +126,7 @@ impl<P: Part> StandardConfig<P> {
     /// `DataConfig`), of `[indicators]` (those the strategy declares, each
     /// table parsed and built by its declaration; see `IndicatorsConfig`),
     /// of `[trade]` (as many instruments as the strategy trades, none a
-    /// futures root, `risk` a proper fraction; see `TradeConfig`), of a
+    /// futures root, a `risk` a proper fraction; see `TradeConfig`), of a
     /// strategy trading on a model (see `validate_model`), of the series
     /// read (see `validate_series`) and of the strategy's own
     /// (`Part::validate`): Nautilus' `ConfigError` of each, with its field,
@@ -191,7 +202,7 @@ impl<P: Part> StandardConfig<P> {
             errors.collect(
                 model
                     .clone()
-                    .trading(traded, self.trade.risk)
+                    .trading(traded, self.risk())
                     .validate(&self.data_requirements()),
             );
         }
@@ -217,20 +228,37 @@ impl<P: Part> StandardConfig<P> {
     ///
     /// Panics if the config has no model, or `[trade]` does not list
     /// exactly one instrument, which a validated config of a strategy
-    /// trading on a model has and lists.
+    /// trading on a model has and lists, or has no risk (see `stake`).
     #[must_use]
     pub fn model(&self) -> ModelConfig {
         let (Some(model), [traded]) = (&self.model, self.trade.instruments.as_slice()) else {
             panic!("a validated config of a strategy trading on a model has it, of one instrument");
         };
-        model.clone().trading(traded, self.trade.risk)
+        model.clone().trading(traded, self.risk())
     }
 
     /// The config's stake: `[trade] risk`, multiple 1. A strategy stakes
     /// a trade otherwise as a multiple of it (`Stake::times`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the config has no risk, which only a config of a strategy
+    /// not sizing its trades by risk (`Part::SIZES_BY_RISK`) lacks.
     #[must_use]
-    pub const fn stake(&self) -> Stake {
-        Stake::new(self.trade.risk)
+    pub fn stake(&self) -> Stake {
+        Stake::new(self.risk())
+    }
+
+    /// `[trade] risk`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the config has none (see `stake`).
+    fn risk(&self) -> Risk {
+        self.trade.risk.expect(
+            "the strategy does not size its trades by risk (`Part::SIZES_BY_RISK`): its \
+             `[trade]` has no risk, so no stake",
+        )
     }
 
     /// What the strategy needs from data: the bars and the ticks of its
@@ -514,7 +542,8 @@ pub struct CompositeSource {
     pub aggregation_source: AggregationSource,
 }
 
-/// `[trade]`: what the strategy trades, and how much each trade risks.
+/// `[trade]`: what the strategy trades and, if it sizes its trades by risk
+/// (`Part::SIZES_BY_RISK`), how much each trade risks.
 /// The execution data of an instrument traded comes from it: its quotes,
 /// when no series of `[data]` prices it (`quotes_unpriced_by`).
 #[derive(Debug, Clone, Deserialize)]
@@ -524,9 +553,11 @@ pub struct TradeConfig {
     /// strategy trades (`Part::INSTRUMENTS`).
     pub instruments: Vec<TradedInstrument>,
     /// The fraction of equity a trade risks at the config's stake
-    /// (`StandardConfig::stake`), `"0.5%"`: every trade is sized from it,
-    /// whatever its instrument, a model's targets at the reference stake.
-    pub risk: Risk,
+    /// (`StandardConfig::stake`), `"0.5%"`, if the strategy sizes its
+    /// trades by risk (`Part::SIZES_BY_RISK`): then always. Every trade it
+    /// stakes is sized from it, whatever its instrument, a model's targets
+    /// at the reference stake.
+    pub risk: Option<Risk>,
 }
 
 impl TradeConfig {
@@ -543,7 +574,7 @@ impl TradeConfig {
     /// `count` instruments listed; an instrument a futures root of the
     /// roll calendar (`rolls::Transition`), since an order goes to a
     /// contract; a `risk` not a proper fraction of equity
-    /// (`Risk::is_proper`).
+    /// (`Risk::is_proper`), if it has one.
     fn validate(&self, count: usize, errors: &mut ConfigErrorCollector) {
         let listed = self.instruments.len();
         errors.check(
@@ -568,7 +599,7 @@ impl TradeConfig {
             }
         }
         errors.check(
-            self.risk.is_proper(),
+            self.risk.is_none_or(Risk::is_proper),
             ConfigError::range("trade.risk", "must be above 0% and below 100% of equity"),
         );
     }
@@ -596,9 +627,10 @@ impl TradeConfig {
     }
 }
 
-/// An instrument traded, by its id alone: no size is its own, every trade
-/// being sized at a stake of `[trade] risk`. In the TOML, a `trade_size`
-/// is refused as it is read (`TradedFields`).
+/// An instrument traded, by its id alone: no size is its own, a trade
+/// being sized at a stake of `[trade] risk`, or by a strategy not sizing
+/// by risk itself. In the TOML, a `trade_size` is refused as it is read
+/// (`TradedFields`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(from = "TradedFields")]
 pub struct TradedInstrument {
@@ -647,7 +679,8 @@ impl<'de, P: Part> Deserialize<'de> for StandardConfig<P> {
 
 /// Reads the top-level keys of a `StandardConfig<P>`: the standard tables,
 /// `model` among them only of a strategy trading on a model
-/// (`Part::TAKES_MODEL`), then every other key into the strategy's part
+/// (`Part::TAKES_MODEL`) and `trade` with the keys its part takes
+/// (`TradeKeys`), then every other key into the strategy's part
 /// `P`, so its fields cannot stand for a standard table and its
 /// `deny_unknown_fields` refuses any key neither takes.
 struct Keys<P>(PhantomData<P>);
@@ -671,7 +704,7 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
                 "base" => base = Some(map.next_value()?),
                 "data" => data = Some(map.next_value()?),
                 "indicators" => indicators = Some(map.next_value()?),
-                "trade" => trade = Some(map.next_value()?),
+                "trade" => trade = Some(map.next_value_seed(TradeKeys::<P>(PhantomData))?),
                 // Of any other strategy, `model` is a key of its own, which
                 // it refuses.
                 "model" if P::TAKES_MODEL => model = Some(map.next_value()?),
@@ -697,6 +730,24 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
             },
             own,
         })
+    }
+}
+
+/// Reads `[trade]` with the keys the strategy's part `P` takes: its
+/// `risk`, required, only of a part sizing its trades by risk
+/// (`Part::SIZES_BY_RISK`), and of any other a key it does not take.
+struct TradeKeys<P>(PhantomData<P>);
+
+impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
+    type Value = TradeConfig;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<TradeConfig, D::Error> {
+        let trade = TradeConfig::deserialize(deserializer)?;
+        match (P::SIZES_BY_RISK, trade.risk) {
+            (true, None) => Err(de::Error::missing_field("risk")),
+            (false, Some(_)) => Err(de::Error::unknown_field("risk", &["instruments"])),
+            _ => Ok(trade),
+        }
     }
 }
 
@@ -1383,6 +1434,81 @@ mod tests {
         );
     }
 
+    /// A strategy that does not size its trades by risk, holding a target
+    /// exposure say, which sizes its orders itself: its `[trade]` has no
+    /// risk.
+    mod sizing_itself {
+        use super::*;
+
+        /// A rebalancer: one instrument, no fields of its own, its orders
+        /// sized by itself.
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Rebalancer {}
+
+        impl Part for Rebalancer {
+            const INSTRUMENTS: usize = 1;
+            const SIZES_BY_RISK: bool = false;
+
+            fn default_base() -> StrategyConfig {
+                StrategyConfig {
+                    strategy_id: Some(StrategyId::from("REBALANCER-001")),
+                    ..Default::default()
+                }
+            }
+
+            /// Every series it lists.
+            fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
+                Ok(config.data.series.clone())
+            }
+        }
+
+        const TOML: &str = r#"
+            [data]
+            series = [
+                { data = "bars", instrument_id = "SPY.XNAS", bar_spec = { step = 1, aggregation = "DAY", price_type = "LAST" } },
+            ]
+            warmup = "720h"
+
+            [trade]
+            instruments = [{ instrument_id = "SPY.XNAS" }]
+        "#;
+
+        fn load(toml: &str) -> anyhow::Result<StandardConfig<Rebalancer>> {
+            StandardConfig::load(toml)
+        }
+
+        #[test]
+        fn a_strategy_not_sizing_by_risk_loads_without_a_risk() {
+            let config = load(TOML).unwrap();
+            assert_eq!(
+                config.trade.instrument_ids(),
+                [InstrumentId::from("SPY.XNAS")]
+            );
+        }
+
+        /// A risk it would never read is refused, not ignored, as a key its
+        /// `[trade]` does not take.
+        #[test]
+        fn a_strategy_not_sizing_by_risk_refuses_a_risk_as_an_unknown_key() {
+            let toml = TOML.replace(
+                r#"instruments = [{ instrument_id = "SPY.XNAS" }]"#,
+                "instruments = [{ instrument_id = \"SPY.XNAS\" }]\nrisk = \"0.5%\"",
+            );
+            assert_ne!(toml, TOML);
+            let err = shape_of(&load(&toml).unwrap_err());
+            assert!(err.contains("unknown") && err.contains("`risk`"), "{err}");
+        }
+
+        /// It has no stake to ask for: asking is the code's mistake, which
+        /// a config of such a strategy cannot satisfy.
+        #[test]
+        #[should_panic(expected = "does not size its trades by risk")]
+        fn a_strategy_not_sizing_by_risk_has_no_stake() {
+            let _ = load(TOML).unwrap().stake();
+        }
+    }
+
     /// The rules of a strategy trading on a model, the shared config's:
     /// its `[model]`, its strategy id; and the quotes of what it trades,
     /// which its harness reads.
@@ -1396,7 +1522,7 @@ mod tests {
                 learner::LearnerConfig,
                 targets::{BracketSpec, Distance, Target},
             },
-            strategy::{AtrArgs, r::R},
+            strategy::{AtrArgs, risk::R},
         };
 
         /// A strategy trading on a model: one instrument, no fields of its

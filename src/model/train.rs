@@ -117,7 +117,7 @@ use super::{
     },
     targets::{Side, TargetConfig, TargetRow},
 };
-use crate::strategy::r::R;
+use crate::strategy::risk::R;
 
 /// The most rows of the holdout a published model is probed on.
 const PROBES: usize = 16;

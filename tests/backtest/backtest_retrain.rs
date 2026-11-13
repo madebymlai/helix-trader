@@ -30,7 +30,7 @@ use helix_trader::{
         targets::Side,
         walk::WalkForward,
     },
-    strategy::r::R,
+    strategy::risk::R,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;

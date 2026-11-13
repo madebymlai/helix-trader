@@ -42,7 +42,7 @@ use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
 use super::{dataset::DatasetRow, score::ExpectedScore, targets::Side};
-use crate::strategy::r::R;
+use crate::strategy::risk::R;
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;

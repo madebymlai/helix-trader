@@ -13,7 +13,7 @@
 //! `deciding::DecidingModels::pick_among`); of two, the larger, none at a tie
 //! (`pick`).
 
-use crate::strategy::r::R;
+use crate::strategy::risk::R;
 
 /// The side traded of `sides`, each a side (or what the caller has of it,
 /// its expectation say), its expected R and its margin: of those at

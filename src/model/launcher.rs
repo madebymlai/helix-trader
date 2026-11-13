@@ -426,7 +426,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::{TickSeries, r::R},
+        strategy::{TickSeries, risk::R},
     };
 
     fn at(time: &str) -> Timestamp {

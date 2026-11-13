@@ -270,7 +270,7 @@ pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCros
         ))),
         trade: TradeConfig {
             instruments: vec![TradedInstrument { instrument_id }],
-            risk: RISK.parse().unwrap(),
+            risk: Some(RISK.parse().unwrap()),
         },
         model: None,
         own: EmaParams {},

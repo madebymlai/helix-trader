@@ -87,7 +87,7 @@ use super::{
     schedule::{Models, Retrain},
     targets::{PerSide, Side, TargetConfig},
 };
-use crate::strategy::r::R;
+use crate::strategy::risk::R;
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
