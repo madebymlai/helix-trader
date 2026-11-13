@@ -151,7 +151,10 @@ where
 {
     let mut by_instrument: BTreeMap<InstrumentId, Vec<usize>> = BTreeMap::new();
     for (at, fill) in fills.iter().enumerate() {
-        by_instrument.entry(fill.instrument_id).or_default().push(at);
+        by_instrument
+            .entry(fill.instrument_id)
+            .or_default()
+            .push(at);
     }
     for ats in by_instrument.values_mut() {
         ats.sort_by_key(|&at| fills[at].ts_event);
@@ -508,7 +511,11 @@ mod tests {
         cache.add_order(order, None, None, false).unwrap();
         let stream = [Ok(quote(&sxr8, "99.90", "100.10", 3))];
         let err = Outcome::new(empty_result(), &cache, [stream]).unwrap_err();
-        assert!(err.to_string().contains("no quote of SXR8.IBIS before its fill"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("no quote of SXR8.IBIS before its fill"),
+            "{err}"
+        );
     }
 
     #[test]

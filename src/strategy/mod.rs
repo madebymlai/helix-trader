@@ -81,7 +81,7 @@ pub struct DataRequirements {
     /// source (Databento fetches a GLBX instrument's book and trades
     /// whatever is declared; no source serves custom data) and replayed in
     /// a backtest as declared, those of its harness among them (a model
-    /// strategy's traded quotes when no series reads the traded
+    /// strategy's traded quotes when no series prices the traded
     /// instrument, `StandardConfig::data_requirements`). Their instruments
     /// are read too: live sets up their clients but subscribes to none of
     /// the ticks, which the strategy (a model strategy's handle) subscribes
