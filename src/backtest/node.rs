@@ -273,6 +273,11 @@ where
 /// streams them by (Nautilus' `BacktestNode::load_data_config` collects
 /// the same query into memory, all at once). An error opening the catalog
 /// or reading a batch is an item.
+///
+/// It stands in for Nautilus: the query is built here as Nautilus' private
+/// `dispatch_batch_query` builds it (`backtest/src/node.rs`), no public
+/// call streaming a data config. Once Nautilus has one, this is that call
+/// and a match on quotes: helix-trader issue #15 (<https://github.com/madebymlai/helix-trader/issues/15>).
 fn replayed_quotes(
     data: &BacktestDataConfig,
     start: Option<UnixNanos>,

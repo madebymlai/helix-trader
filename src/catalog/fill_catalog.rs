@@ -15,7 +15,8 @@
 //! Temporary, with IB's fill that uses it: IB's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its
 //! answers back. Once nautilus_trader#5472 is fixed, IB fills through the
-//! node (see `node_fill`), and this file goes.
+//! node (see `node_fill`), and this file goes: helix-trader issue #4
+//! (<https://github.com/madebymlai/helix-trader/issues/4>).
 
 use std::collections::HashSet;
 

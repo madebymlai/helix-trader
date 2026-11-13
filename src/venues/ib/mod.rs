@@ -9,7 +9,8 @@
 //! IB's fill (`IbHistory::fill`) is temporary: IB's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
 //! back. Once nautilus_trader#5472 is fixed, IB fills through the node as
-//! Databento and IC do (see `catalog::NodeFill`), and `fill` and `data` go.
+//! Databento and IC do (see `catalog::NodeFill`), and `fill` and `data` go:
+//! helix-trader issue #4 (<https://github.com/madebymlai/helix-trader/issues/4>).
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
@@ -287,7 +288,9 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
 /// One request per cursor, each ending where the previous answer starts,
 /// so no hole opens between requests: the adapter's own split of a window
 /// into a days segment and a seconds remainder loses bars, because IB
-/// counts days in trading sessions.
+/// counts days in trading sessions (nautilus_trader#5384; helix-trader
+/// issue #6, <https://github.com/madebymlai/helix-trader/issues/6>). Temporary, as IB's fill, the one thing it serves:
+/// it goes with it, whatever becomes of the split (helix-trader issue #4).
 async fn walk_back(
     start: Timestamp,
     end: Timestamp,

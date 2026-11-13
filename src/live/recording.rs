@@ -148,6 +148,11 @@ impl Recording {
 /// promotion (`StreamingConfig::promote_on_close`); it is reopened in the
 /// same run directory, empty, before the node runs.
 ///
+/// It stands in for Nautilus. Once Nautilus promotes a crashed run's
+/// recovered files as the node starts (nautilus_trader#5546), this
+/// function and its call in the live node go: helix-trader issue #14
+/// (<https://github.com/madebymlai/helix-trader/issues/14>).
+///
 /// # Errors
 ///
 /// Returns an error if the staged files cannot be promoted, the catalog
