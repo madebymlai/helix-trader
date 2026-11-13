@@ -1,6 +1,7 @@
 archive/
 target/
 .claude/
+/.pi/skills/docs-cleanup/
 .env
 /catalog/*
 !/catalog/.gitkeep
