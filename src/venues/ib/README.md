@@ -28,13 +28,13 @@ The paper and live containers use ports 4002 and 4001 respectively and remain ru
 
 ## Trading and warmup
 
-IB is netting, which the broker's answer (`LiveBroker::oms_type`) copies from Nautilus' client, a test pinning it. IB's execution adapter denies reduce-only and post-only orders, which the broker's answer `LiveBroker::takes_reduce_only_and_post_only` copies, so a trade on an instrument IB trades, GLBX's included, sends its bracket's exits neither reduce-only nor post-only and its time close not reduce-only, in a backtest as live (`strategy::orders`).
+IB is netting. Its execution adapter denies reduce-only and post-only orders, so a trade on an instrument IB trades, GLBX's included, sends its bracket's exits neither reduce-only nor post-only and its time close not reduce-only, in a backtest as live (`strategy::orders`).
 
 **Such exits lose the reduce-only guarantee**, as Nautilus' IB guide warns: IB cancels no exit when another order closes the position, so an exit filling after that opens a position the other way, which no trade's exits or time close end. The time close cancels the trade's exits and closes its position without waiting for the cancels, so an exit filling before its cancel lands leaves such a position, opened by the close or the exit, whichever fills second. On the netting account a trade's time close, or an entry on the other side, also closes the other trades in the position, whose exits stay working: the EMA crossover, whose trades overlap, meets this; a model strategy's trades do not overlap.
 
 Live bars use full-session IB minute TRADES bars, matching history. Market orders can be priced from cached LAST bars; MID bars alone do not supply that price. Warmup ends at the request time, excluding the partial minute; the live subscription starts there. The data client does not write its historical answer back to the catalog.
 
-IB counts a duration of days as sessions, the current one included: 72 hours asked at once within a session lost the oldest of them (841 of 2,791 minute bars of SXR8, measured). So a warmup asks in windows under a day, which IB's client asks in seconds, and holds every bar of IB's history over them (`tests/live/ib_warmup_days.rs`). IB's client reports a failed history request as an answer with what it got, so a window failing leaves a gap in the warmup with no failure. See [history](#history) for history limitations.
+IB counts a duration of days as sessions, the current one included, so a multi-day request can lose the oldest session. Warmup asks in windows under a day, which IB's client asks in seconds, and holds every bar of IB's history over them. IB's client reports a failed history request as an answer with what it got, so a window failing leaves a gap in the warmup with no failure. See [history](#history) for history limitations.
 
 ## Tests
 

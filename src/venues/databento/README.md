@@ -4,7 +4,7 @@
 
 Before starting the node, the fill checks the dataset's available end. The dataset lags real time, so an end beyond its available range is refused.
 
-Requests are split into UTC-day windows. The client collects a full response before returning it, and catalog writing copies data again; a busy day of depth can require many gigabytes of memory. Smaller windows would reduce peak memory but increase request latency. See [shared fill semantics](../../catalog/README.md) for coverage and resume.
+Requests are split into day-long windows relative to the request start, not aligned to UTC midnight. The client collects a full response before returning it, and catalog writing copies data again; a busy day of depth can require many gigabytes of memory. Smaller windows would reduce peak memory but increase request latency. See [shared fill semantics](../../catalog/README.md) for coverage and resume.
 
 Continuous symbols are stored under the continuous ID; dated contracts are stored under their own IDs. Rolled roots fill their dated contracts over their respective slices, not the root itself. Backtest and live IDs must be chosen deliberately: Databento's default venue differs from IB's; see [instrument identity](../../catalog/README.md).
 
