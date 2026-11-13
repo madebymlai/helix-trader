@@ -6,7 +6,7 @@
 //! too wide asked again in halves (see `http::export`), and the rows of
 //! LSE's reference collections as custom data (`LseRow`), its source and
 //! symbol named in the metadata of the request's data type; its definitions
-//! request answers none, LSE publishing none. Every other request and every
+//! request fails, LSE publishing none. Every other request and every
 //! subscription is left to Nautilus' defaults: a request fails as
 //! unsupported, a subscription is logged as not implemented. A request is
 //! answered from a task, in one completed response envelope, the data
@@ -308,12 +308,21 @@ impl DataClient for LseDataClient {
         finished
     }
 
-    /// Answers with no definition, in one completed response envelope: LSE
-    /// publishes none. A catalog the data engine holds answers first.
+    /// Fails naming the instruments, in the response envelope: LSE
+    /// publishes no definitions. The data engine asks the client only for
+    /// one its catalogs lack (`DataEngine::dispatch_instrument_request`).
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
-        send(
-            &self.data_sender,
-            DataEvent::ResponseEnvelope(DataResponseEnvelope::terminal(request.request_id, None)),
+        let ids: Vec<String> = request
+            .instrument_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        self.fail(
+            request.request_id,
+            format!(
+                "{}: LSE publishes no instrument definitions; each must come from a catalog",
+                ids.join(", ")
+            ),
         );
         Ok(())
     }
@@ -716,9 +725,10 @@ mod tests {
         assert!(client.is_connected());
     }
 
-    /// LSE publishes no definitions.
+    /// LSE publishes no definitions: the data engine asks the client for
+    /// one only when its catalogs lack it.
     #[tokio::test]
-    async fn an_instrument_request_is_answered_complete_with_no_definition() {
+    async fn an_instrument_request_fails_naming_the_instrument_unasked() {
         let lse = MockLse::start(vec![]);
         let (client, mut events) = connected(&lse, false).await;
         let request = RequestInstrument::new(
@@ -737,7 +747,10 @@ mod tests {
         let envelope = next_envelope(&mut events).await;
         assert_eq!(*envelope.correlation_id(), id);
         assert!(envelope.response().is_none());
-        assert_eq!(envelope.failure_reason(), None);
+        let reason = envelope.failure_reason().expect("a failure");
+        for part in [GOLD_FUTURES, "LSE publishes no instrument definitions"] {
+            assert!(reason.contains(part), "{part}: {reason}");
+        }
         assert!(lse.calls().is_empty());
     }
 
@@ -763,6 +776,24 @@ mod tests {
             (call.param("from"), call.param("to")),
             (Some("2026-10-21T10:00:00Z"), Some("2026-10-21T10:00:01Z"))
         );
+    }
+
+    /// Nautilus' adapter guide, "Connection lifecycle": a stopped client
+    /// connects again.
+    #[tokio::test]
+    async fn a_stopped_client_connects_again_and_answers_requests() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
+        let (mut client, mut events) = connected(&lse, true).await;
+
+        client.stop().unwrap();
+        assert!(!client.is_connected());
+        client.connect().await.unwrap();
+
+        assert!(client.is_connected());
+        client.request_trades(captured_second()).unwrap();
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(trades_of(&envelope).data.len(), 6);
     }
 
     /// 23:00 on the 20th to 00:59:59.999999999 on the 21st: the 20th's
@@ -802,6 +833,31 @@ mod tests {
                 day("2026-10-20T23:00:00Z", "2026-10-21T00:00:00Z"),
                 day("2026-10-21T00:00:00Z", "2026-10-21T01:00:00Z"),
             ]
+        );
+    }
+
+    /// A day as the data engine asks for one, its window closed at the
+    /// next midnight: one export, through the midnight's instant.
+    #[tokio::test]
+    async fn a_day_window_ending_at_a_midnight_is_one_export() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
+        let (client, mut events) = connected(&lse, true).await;
+
+        client
+            .request_trades(trades("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let [call] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(
+            (call.param("from"), call.param("to")),
+            (
+                Some("2026-10-20T00:00:00Z"),
+                Some("2026-10-21T00:00:00.000000001Z")
+            )
         );
     }
 

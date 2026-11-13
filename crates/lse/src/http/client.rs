@@ -4,7 +4,7 @@
 //! out, as long as its `Retry-After` says. It calls a market's exports,
 //! and the reference catalogue and a reference collection's exports.
 
-use std::{collections::HashMap, fmt, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, num::NonZeroU32, time::Duration};
 
 use bytes::Bytes;
 use jiff::Timestamp;
@@ -52,7 +52,7 @@ pub(crate) struct LseHttpClient {
     client: HttpClient,
     /// Held over an export: a key has one download open at a time (LSE's
     /// docs, "One download at a time").
-    downloads: Arc<Mutex<()>>,
+    downloads: Mutex<()>,
     retries: RetryManager<LseHttpError>,
 }
 
@@ -105,7 +105,7 @@ impl LseHttpClient {
         Ok(Self {
             base_url,
             client,
-            downloads: Arc::default(),
+            downloads: Mutex::default(),
             retries,
         })
     }
@@ -118,12 +118,12 @@ impl LseHttpClient {
         self
     }
 
-    /// The file of the export `query` selects, or `None` if LSE holds no
-    /// row of it (`data-unavailable`, `date-not-trading`). One download at
-    /// a time: a second export waits for the first. A call LSE refuses for
-    /// the moment, or a file cut short, is asked again after the
-    /// `Retry-After` LSE gave, or a backoff; a whole file whose SHA-256 is
-    /// not the one LSE gave fails the export.
+    /// The file of the export `query` selects, LSE's 200 beside its SHA-256,
+    /// or `None` if LSE holds no row of it (see `LseRefusal::is_no_rows`).
+    /// One download at a time: a second export waits for the first. A call
+    /// LSE refuses for the moment, or a file cut short, is asked again after
+    /// the `Retry-After` LSE gave, or a backoff; a whole file whose SHA-256
+    /// is not the one LSE gave fails the export.
     ///
     /// # Errors
     ///
@@ -210,14 +210,19 @@ impl LseHttpClient {
             }
             answer => answer?,
         };
-        if let Some(expected) = response.headers.get(CHECKSUM_HEADER) {
-            let actual = Sha256::digest(&response.body);
-            if !expected.eq_ignore_ascii_case(&hex(&actual)) {
-                return Err(LseHttpError::Checksum {
-                    len: response.body.len(),
-                    export_id: response.headers.get(EXPORT_ID_HEADER).cloned(),
-                });
-            }
+        // LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files").
+        let (200, Some(expected)) = (
+            response.status.as_u16(),
+            response.headers.get(CHECKSUM_HEADER),
+        ) else {
+            return Err(unexpected(&response));
+        };
+        let actual = Sha256::digest(&response.body);
+        if !expected.eq_ignore_ascii_case(&hex(&actual)) {
+            return Err(LseHttpError::Checksum {
+                len: response.body.len(),
+                export_id: response.headers.get(EXPORT_ID_HEADER).cloned(),
+            });
         }
         Ok(Some(response.body))
     }
@@ -291,7 +296,7 @@ mod tests {
         testing::{
             API_KEY, CALLS_EXHAUSTED, DATA_UNAVAILABLE, DATE_NOT_TRADING, EXPORT_ID, GOLD_TRADES,
             MockLse, PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE,
-            ROWS_EXHAUSTED, Reply, US10Y_BOND_YIELDS,
+            ROWS_EXHAUSTED, Reply, TICKS_NOT_STORED, US10Y_BOND_YIELDS,
         },
     };
 
@@ -375,6 +380,63 @@ mod tests {
         }
     }
 
+    /// LSE's `data-unavailable` for a market storing no trades: no empty
+    /// selection, whose message alone begins "No stored data for this
+    /// selection" (LSE's docs, "Refusal codes").
+    #[tokio::test]
+    async fn data_unavailable_other_than_an_empty_selection_is_lse_s_refusal_asked_once() {
+        let lse = MockLse::start(vec![
+            Reply::refusal(404, TICKS_NOT_STORED),
+            Reply::file(GOLD_TRADES),
+        ]);
+
+        let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
+
+        let err = err.to_string();
+        for part in [
+            "404",
+            "data-unavailable",
+            "Tick trades are not stored for this market",
+        ] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
+        assert_eq!(lse.calls().len(), 1);
+    }
+
+    /// LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files");
+    /// a 202 is how LSE once answered an export it was still building.
+    #[tokio::test]
+    async fn an_answer_other_than_a_200_is_no_file_but_an_unexpected_answer_asked_once() {
+        let lse = MockLse::start(vec![
+            Reply::file(GOLD_TRADES).with_status(202),
+            Reply::file(GOLD_TRADES),
+        ]);
+
+        let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
+
+        assert!(
+            matches!(err, LseHttpError::Unexpected { status: 202, .. }),
+            "{err}"
+        );
+        assert_eq!(lse.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_200_without_lse_s_sha_256_is_no_file_but_an_unexpected_answer_asked_once() {
+        let lse = MockLse::start(vec![
+            Reply::file(GOLD_TRADES).without_checksum(),
+            Reply::file(GOLD_TRADES),
+        ]);
+
+        let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
+
+        assert!(
+            matches!(err, LseHttpError::Unexpected { status: 200, .. }),
+            "{err}"
+        );
+        assert_eq!(lse.calls().len(), 1);
+    }
+
     /// LSE's documented 429, its wait cut to a second.
     #[tokio::test]
     async fn a_429_of_calls_is_waited_out_by_its_retry_after_then_asked_again() {
@@ -391,6 +453,28 @@ mod tests {
         };
         let waited = asked_again.received - refused.answered;
         assert!(waited >= Duration::from_secs(1), "{waited:?}");
+    }
+
+    /// No `Retry-After`: the retry's own backoff, cut to 10 ms.
+    #[tokio::test]
+    async fn a_429_of_calls_without_retry_after_is_asked_again_after_a_backoff() {
+        let lse = MockLse::start(vec![
+            Reply::refusal(429, CALLS_EXHAUSTED),
+            Reply::file(GOLD_TRADES),
+        ]);
+        let client = client(&lse, 6000).with_retry(RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 10,
+            max_delay_ms: 10,
+            jitter_ms: 0,
+            operation_timeout_ms: None,
+            ..RetryConfig::default()
+        });
+
+        let file = client.export(&gold_second()).await.unwrap();
+
+        assert_eq!(file.as_deref(), Some(GOLD_TRADES));
+        assert_eq!(lse.calls().len(), 2);
     }
 
     /// The rows a day reset at 00:00 UTC: no wait of a run's gets past
