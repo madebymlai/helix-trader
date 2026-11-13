@@ -1383,16 +1383,12 @@ mod tests {
         assert_eq!(asked, widths.map(|(_, timeframe)| timeframe));
     }
 
-    /// A width LSE has no candles of; LSE's daily, weekly and monthly
-    /// candles, which follow exchange sessions; a price LSE's candles do not
-    /// carry; and bars Nautilus builds.
+    /// A width LSE has no candles of; a price LSE's candles do not carry;
+    /// and bars Nautilus builds.
     #[tokio::test]
     async fn a_bar_type_lse_does_not_serve_is_refused_naming_it_unasked() {
         for spec in [
             "2-MINUTE-LAST-EXTERNAL",
-            "1-DAY-LAST-EXTERNAL",
-            "1-WEEK-LAST-EXTERNAL",
-            "1-MONTH-LAST-EXTERNAL",
             "100-TICK-LAST-EXTERNAL",
             "1-MINUTE-MID-EXTERNAL",
             "1-MINUTE-LAST-INTERNAL",
@@ -1412,6 +1408,39 @@ mod tests {
             let envelope = next_envelope(&mut events).await;
             let reason = envelope.failure_reason().expect("a failure");
             assert!(reason.contains(&bar_type), "{reason}");
+            assert!(lse.calls().is_empty(), "{bar_type}: {:?}", lse.calls());
+        }
+    }
+
+    /// LSE stamps them at their session's first traded minute and gives no
+    /// close, and builds them from its minute bars: the refusal says so,
+    /// and to declare the bar from a shorter LSE candle instead.
+    #[tokio::test]
+    async fn daily_weekly_and_monthly_candles_are_refused_saying_why_and_what_to_declare_instead() {
+        for spec in ["1-DAY", "1-WEEK", "1-MONTH"] {
+            let bar_type = format!("{GOLD_FUTURES}-{spec}-LAST-EXTERNAL");
+            let lse = MockLse::start(vec![Reply::file(GOLD_FUTURES_4H)]);
+            let (client, mut events) = connected(&lse, true).await;
+
+            client
+                .request_bars(bars(
+                    &bar_type,
+                    "2026-10-21T10:00:00Z",
+                    "2026-10-21T14:00:00Z",
+                ))
+                .unwrap();
+
+            let envelope = next_envelope(&mut events).await;
+            let reason = envelope.failure_reason().expect("a failure");
+            for part in [
+                bar_type.as_str(),
+                "first traded minute",
+                "no close",
+                "minute bars",
+                "declare the bar from a shorter LSE candle (1-MINUTE or 4-HOUR EXTERNAL)",
+            ] {
+                assert!(reason.contains(part), "{part}: {reason}");
+            }
             assert!(lse.calls().is_empty(), "{bar_type}: {:?}", lse.calls());
         }
     }
