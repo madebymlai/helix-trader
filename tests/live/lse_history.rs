@@ -1,10 +1,12 @@
 //! End to end on LSE: fill-catalog fills one UTC day, Thursday 12 November
 //! 2026, of LSE's gold and 10-year Treasury futures trades,
-//! `GOLD-FUTURES.LSEDGE` and `US10Y-FUTURES.LSEDGE`, into a temporary
-//! catalog holding their definitions, written by hand as LSE publishes
-//! none, through the node from LSE's exports. It needs the LSE key,
-//! `LSE_API_KEY`, from the environment or `.env`; the free key serves both
-//! series. The day's exports count against the key's rows a day.
+//! `GOLD-FUTURES.LSEDGE` and `US10Y-FUTURES.LSEDGE`, and of its gold spot
+//! candles as 1-minute bars, `XAU/USD-COMMODITIES.LSEDGE`, a series LSE
+//! serves only as candles, into a temporary catalog holding their
+//! definitions, written by hand as LSE publishes none, through the node
+//! from LSE's exports. It needs the LSE key, `LSE_API_KEY`, from the
+//! environment or `.env`; the free key serves every series. The day's
+//! exports count against the key's rows a day.
 //!
 //! Gated as `okx_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
@@ -21,7 +23,7 @@ use helix_trader::{
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::NautilusDataType,
+    data::{BarType, NautilusDataType},
     enums::AggressorSide,
     identifiers::{InstrumentId, Symbol},
     instruments::{IndexInstrument, InstrumentAny},
@@ -31,6 +33,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 const US10Y: &str = "US10Y-FUTURES.LSEDGE";
+const GOLD_SPOT: &str = "XAU/USD-COMMODITIES.LSEDGE";
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
 /// that the file cannot opt in.
@@ -65,6 +68,24 @@ fn index(id: &str, raw: &str, tick: &str) -> InstrumentAny {
     )
 }
 
+/// The venues' settings of fill-catalog, by default.
+fn history_venues() -> HistoryVenueArgs {
+    HistoryVenueArgs::from_arg_matches(
+        &HistoryVenueArgs::augment_args(Command::new("fill-catalog"))
+            .get_matches_from(["fill-catalog"]),
+    )
+    .unwrap()
+}
+
+/// Thursday 12 November 2026, a UTC day, closed.
+fn the_day() -> (Timestamp, Timestamp) {
+    let start: Timestamp = "2026-11-12T00:00:00Z".parse().unwrap();
+    (
+        start,
+        start + SignedDuration::from_hours(24) - SignedDuration::from_nanos(1),
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
     if !opted_in("a_day_of_gold_and_treasury_futures_trades_fills_from_lse") {
@@ -90,15 +111,9 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
             .to_vec(),
         warmup: SignedDuration::ZERO,
     };
-    let start: Timestamp = "2026-11-12T00:00:00Z".parse().unwrap();
-    let end = start + SignedDuration::from_hours(24) - SignedDuration::from_nanos(1);
-    let venues = HistoryVenueArgs::from_arg_matches(
-        &HistoryVenueArgs::augment_args(Command::new("fill-catalog"))
-            .get_matches_from(["fill-catalog"]),
-    )
-    .unwrap();
+    let (start, end) = the_day();
 
-    fill_history(&requirements, start, end, &venues, dir.path())
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
         .await
         .unwrap();
 
@@ -124,4 +139,52 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
             .unwrap();
         assert_eq!(lacking, [], "{id}");
     }
+}
+
+/// Each bar closes on a minute of the day, LSE stamping its candles at
+/// their open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_close() {
+    if !opted_in("a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_close") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    // Gold spot to a cent; LSE gives it no volume.
+    catalog
+        .write_instruments(vec![index(GOLD_SPOT, "XAU/USD", "0.01")])
+        .unwrap();
+    let bar_type = format!("{GOLD_SPOT}-1-MINUTE-LAST-EXTERNAL");
+    let requirements = DataRequirements {
+        bar_types: vec![BarType::from(bar_type.as_str())],
+        ticks: vec![],
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_day();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let bars = catalog
+        .bars(Some(vec![bar_type.clone()]), None, None)
+        .unwrap();
+    println!("{bar_type}: {} bars", bars.len());
+    assert!(!bars.is_empty(), "no bars");
+    assert!(
+        bars.iter().all(|bar| (from..=to).contains(&bar.ts_event)
+            && bar.ts_event.as_u64() % 60_000_000_000 == 0),
+        "a bar outside the day or off the minute"
+    );
+    let lacking = catalog
+        .get_missing_intervals_for_request(
+            from.as_u64(),
+            to.as_u64(),
+            &NautilusDataType::Bar.into(),
+            Some(&bar_type),
+        )
+        .unwrap();
+    assert_eq!(lacking, []);
 }
