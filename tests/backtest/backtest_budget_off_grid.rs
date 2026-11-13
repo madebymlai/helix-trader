@@ -11,7 +11,7 @@ use helix_trader::strategy::ema::EmaCross;
 #[test]
 fn a_budget_off_the_share_grid_trades_the_shares_it_rounds_down_to() {
     let mut config = common::ema_config(1, 2, Some(common::session()));
-    config.trade.risk = "0.33%".parse().unwrap();
+    config.trade.risk = Some("0.33%".parse().unwrap());
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     let result = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR")

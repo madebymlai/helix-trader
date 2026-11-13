@@ -29,7 +29,7 @@ fn decimal(s: &str) -> Decimal {
 /// The crossover's trade of `trades::TIME_EXIT` at `risk`: its result.
 fn crossover_at(risk: &str) -> nautilus_backtest::result::BacktestResult {
     let mut config = common::ema_config(1, 2, Some(common::session()));
-    config.trade.risk = risk.parse().unwrap();
+    config.trade.risk = Some(risk.parse().unwrap());
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR")
