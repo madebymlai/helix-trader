@@ -56,9 +56,6 @@ const REGION: OKXRegion = OKXRegion::Eea;
 /// Cross margin: the account's whole balance backs every position.
 const MARGIN_MODE: OKXMarginMode = OKXMarginMode::Cross;
 
-/// The timeout of one account request.
-const REQUEST_TIMEOUT_SECS: u64 = 60;
-
 /// The OKX data and execution client configs of a node trading OKX swaps
 /// or X-Perps.
 #[derive(Debug, Clone)]
@@ -216,7 +213,7 @@ impl Account {
         let http = HttpClient::builder()
             .headers(headers)
             .redirect_policy(HttpRedirectPolicy::Reject)
-            .timeout_secs(REQUEST_TIMEOUT_SECS)
+            .timeout_secs(exec.http_timeout_secs)
             .build()
             .context("building the OKX account client")?;
         Ok(Self {
