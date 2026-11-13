@@ -350,6 +350,17 @@ mod tests {
         );
     }
 
+    /// A malformed input: a tick slice, a real file of LSE's, read as
+    /// candles.
+    #[test]
+    fn a_file_of_no_candles_is_refused_naming_the_column_it_lacks() {
+        let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
+
+        let err = parse_candles(Bytes::from_static(GOLD_TRADES), bar_type, 1, 0).unwrap_err();
+
+        assert!(err.to_string().contains("no column open"), "{err:#}");
+    }
+
     #[test]
     fn a_candle_price_finer_than_the_instrument_s_precision_is_refused() {
         let bar_type = BarType::from("XAU/USD-COMMODITIES.LSEDGE-1-MINUTE-LAST-EXTERNAL");

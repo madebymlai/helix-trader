@@ -3039,6 +3039,7 @@ dependencies = [
  "async-trait",
  "bon",
  "bytes",
+ "dotenvy",
  "jiff",
  "log",
  "nautilus-common",
@@ -3046,11 +3047,14 @@ dependencies = [
  "nautilus-live",
  "nautilus-model",
  "nautilus-network",
+ "nautilus-persistence",
+ "nautilus-testkit",
  "parquet",
  "rust_decimal",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -3663,6 +3667,30 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo 0.40.1",
+ "ustr",
+]
+
+[[package]]
+name = "nautilus-testkit"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "async-trait",
+ "bon",
+ "bytes",
+ "indexmap",
+ "jiff",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-model",
+ "nautilus-trading",
+ "parking_lot 0.13.0",
+ "rust_decimal",
+ "serde",
+ "tokio",
  "ustr",
 ]
 

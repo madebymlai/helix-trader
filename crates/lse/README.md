@@ -31,3 +31,11 @@ cargo test -p lse
 ```
 
 A test against LSE itself needs a key, so its caller holds and gates it, as this repository's caller does (`NAUTILUS_LSE_RUN=1`, see the root README).
+
+## Data testing
+
+`examples/node_data_tester.rs` runs Nautilus' `DataTester` on a live node with the client, against LSE itself with the key of the environment or `.env`, for the cases of Nautilus' [data testing spec](https://github.com/nautechsystems/nautilus_trader/blob/8b184c8af85068d788b591e10cb900fa2aba2cf2/docs/developer_guide/spec_data_testing.md) the adapter supports: TC-D01 (instruments), answered by the node's catalog, LSE publishing no definitions, into which the tester writes the crate's test definitions; TC-D31 (historical trades), of gold futures; and TC-D41 (historical bars), gold spot's 1-minute candles, over a past hour. The adapter streams nothing, so every subscription case is skipped, and every other request case, LSE having no call for it. The node runs until interrupted:
+
+```sh
+cargo run -p lse --features test-support --example lse-data-tester
+```
