@@ -29,8 +29,9 @@ const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
 /// What an export's rows are, and the parameter that selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rows {
-    /// The tick slice of a derived market or of US options, its trades,
-    /// `time, price, size, kind` (`timeframe=tick`).
+    /// The tick slice of a derived market or of US options, `time, price,
+    /// size, kind` (`timeframe=tick`): its trades, or an index's values, of
+    /// no size.
     TradeSlice,
     /// Candles, `time, open, high, low, close, volume, trades`, each
     /// stamped at its open (`timeframe=5m`, LSE's name of the width).

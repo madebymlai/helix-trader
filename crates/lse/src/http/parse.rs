@@ -97,6 +97,55 @@ pub(crate) fn parse_trade_slice(
     Ok(trades)
 }
 
+/// The values of an index's tick slice (`time, price, size, kind`, each row
+/// of kind trade and size 0) as quotes, as LSE's socket sends an index's
+/// ticks: bid and ask both the value, at `price_precision`, with no sizes,
+/// at `size_precision`; each stamped at its time, both `ts_event` and
+/// `ts_init`, as history is.
+///
+/// # Errors
+///
+/// Returns an error if the file is no tick slice, if a row is not of kind
+/// trade, or if a value has more decimals than `price_precision`, the
+/// instrument's.
+pub(crate) fn parse_index_quotes(
+    file: Bytes,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<Vec<QuoteTick>> {
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("reading LSE's Parquet file")?
+        .build()?;
+    let none = Quantity::zero(size_precision);
+    let mut quotes = Vec::new();
+    for batch in reader {
+        let batch = batch.context("reading LSE's Parquet file")?;
+        let times = times(&batch)?;
+        let values = column::<Float64Array>(&batch, "price")?;
+        let kinds = column::<StringArray>(&batch, "kind")?;
+        for row in 0..batch.num_rows() {
+            let kind = kinds.value(row);
+            ensure!(kind == TRADE, "a row of kind {kind:?}, not a {TRADE}");
+            let time = UnixNanos::from(time(&times, row)?);
+            let value = Price::from_decimal_dp(
+                decimal(values.value(row), price_precision, "value")?,
+                price_precision,
+            )?;
+            quotes.push(QuoteTick::new_checked(
+                instrument_id,
+                value,
+                value,
+                none,
+                none,
+                time,
+                time,
+            )?);
+        }
+    }
+    Ok(quotes)
+}
+
 /// The quotes of a file of an exchange market's quotes (`time, bid_price,
 /// ask_price, bid_size, ask_size`), each stamped at its time, both
 /// `ts_event` and `ts_init`, as history is, with the sizes LSE sends. A

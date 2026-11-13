@@ -66,6 +66,10 @@ pub const RY_TRADES: &[u8] = include_bytes!("../test_data/export_ry_ca_stocks_ti
 pub const BTCUSDT_TRADES: &[u8] = include_bytes!("../test_data/export_btcusdt_crypto_tick.parquet");
 pub const EUR_USD_MINUTES: &[u8] = include_bytes!("../test_data/export_eur_usd_forex_1m.parquet");
 pub const SPX_MINUTES: &[u8] = include_bytes!("../test_data/export_spx_indices_1m.parquet");
+/// The tick slice of `SPX` in `indices` over `[2026-11-12T15:00:00Z,
+/// 15:00:05Z)`, as LSE exported it on 13 November 2026: three of the
+/// index's values, each of kind `trade` and size 0.
+pub const SPX_TICKS: &[u8] = include_bytes!("../test_data/export_spx_indices_tick.parquet");
 /// LSE's refusals, captured with the free key, but the calls a minute and
 /// the quotas, which are LSE's documented answers, and the export too wide,
 /// captured with the CME key (`test_data/README.md`).

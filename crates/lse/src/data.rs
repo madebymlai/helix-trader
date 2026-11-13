@@ -11,16 +11,18 @@
 //! bars, its candles, as an `LSEDGE` series', by its OSI symbol, in LSE's
 //! US options, with the LSE key. An `LSEDGE` series' or an `OPRA`
 //! contract's quotes are asked too, and LSE refuses them, serving their
-//! past as timeframes alone. Exports are asked a UTC day an export, a book
-//! or orders a UTC hour, one download at a time on each key, an export LSE
-//! refuses as too wide asked again in halves (see `http::export`). It
-//! serves the rows of LSE's reference collections as custom data
-//! (`LseRow`) too, its source and symbol named in the metadata of the
-//! request's data type, each row stamped when its values are known, with
-//! the LSE key; its definitions request fails, LSE publishing none. Live,
-//! it streams the quotes of the instruments its config names, on their
-//! sockets (see `streams`). Every other request and subscription is left
-//! to Nautilus' defaults: a request fails as
+//! past as timeframes alone; an index's are the values of its tick slice
+//! instead, each a quote of no spread and no sizes, as its socket streams
+//! them, and its trades are refused, an index having none. Exports are
+//! asked a UTC day an export, a book or orders a UTC hour, one download at
+//! a time on each key, an export LSE refuses as too wide asked again in
+//! halves (see `http::export`). It serves the rows of LSE's reference
+//! collections as custom data (`LseRow`) too, its source and symbol named
+//! in the metadata of the request's data type, each row stamped when its
+//! values are known, with the LSE key; its definitions request fails, LSE
+//! publishing none. Live, it streams the quotes of the instruments its
+//! config names, on their sockets (see `streams`). Every other request and
+//! subscription is left to Nautilus' defaults: a request fails as
 //! unsupported, a subscription is logged as not implemented. A request is
 //! answered from a task, in one completed response envelope, the data
 //! engine writing it back to the catalog if asked (`update_catalog`); a
@@ -82,7 +84,8 @@ use crate::{
         export::{fetch, loaded, midnight},
         listing::CmeListings,
         parse::{
-            parse_book, parse_candles, parse_orders, parse_quotes, parse_rows, parse_trade_slice,
+            parse_book, parse_candles, parse_index_quotes, parse_orders, parse_quotes, parse_rows,
+            parse_trade_slice,
         },
         query::{CandleWidth, ExportQuery, ReferenceQuery, Rows},
     },
@@ -92,6 +95,10 @@ use crate::{
 /// How long the request tasks get to finish at a disconnect, then to abort.
 const TASK_GRACE: Duration = Duration::from_secs(1);
 const TASK_FORCE: Duration = Duration::from_secs(2);
+
+/// What reads an export's file into Nautilus data, at an instrument's
+/// price and size precisions.
+type Reader<T> = fn(Bytes, InstrumentId, u8, u8) -> anyhow::Result<Vec<T>>;
 
 /// The data client: LSE's history on the keys given and its live data on
 /// the LSE key, on no venue, so asked by the requests naming it or by the
@@ -235,43 +242,43 @@ impl LseDataClient {
     }
 
     /// Answers the request `request_id` of `id`'s rows over `[start, end]`
-    /// (end: now if none), the export of the rows `rows` selects of what
-    /// `id` stands for at LSE, each file read by `read` at the precisions
-    /// of `id`'s definition (see `answer_export`), the export asked of the
-    /// instrument's market with its product's key: a derived series' by its
-    /// symbol, a CME contract's by its listing's number, looked up first
-    /// (see `http::listing`), a US option's by its OSI symbol. A failure is
-    /// the envelope's, with no rows: an instrument LSE does not serve, no
-    /// key of its product, no definition in the cache or no start, before
-    /// LSE is asked; LSE's refusal of the lookup, or as `answer_export`.
-    #[expect(clippy::too_many_arguments, reason = "one request's parts")]
+    /// (end: now if none), the export of the rows `select` chooses for what
+    /// `id` stands for at LSE, each file read by the reader it chooses with
+    /// them at the precisions of `id`'s definition (see `answer_export`),
+    /// the export asked of the instrument's market with its product's key:
+    /// a derived series' by its symbol, a CME contract's by its listing's
+    /// number, looked up first (see `http::listing`), a US option's by its
+    /// OSI symbol. A failure is the envelope's, with no rows: an instrument
+    /// LSE does not serve, one whose rows `select` refuses, no key of its
+    /// product, no definition in the cache or no start, before LSE is
+    /// asked; LSE's refusal of the lookup, or as `answer_export`.
     fn answer_rows<T: Send + 'static>(
         &self,
         request_id: UUID4,
         id: InstrumentId,
         (start, end): (Option<Timestamp>, Option<Timestamp>),
         limit: Option<NonZeroUsize>,
-        rows: impl FnOnce(&LseInstrument) -> Rows,
-        read: impl Fn(Bytes, InstrumentId, u8, u8) -> anyhow::Result<Vec<T>> + Send + Sync + 'static,
+        select: impl FnOnce(&LseInstrument) -> anyhow::Result<(Rows, Reader<T>)>,
         respond: impl FnOnce(Vec<T>, UnixNanos) -> DataResponse + Send + 'static,
     ) {
         let now = Timestamp::from(self.clock.get_time_ns());
         let checked = (|| {
             let instrument =
                 LseInstrument::from_instrument_id(id, now.to_zoned(TimeZone::UTC).year())?;
+            let (rows, read) = select(&instrument)?;
             let http = self.http(instrument.product())?;
             let precisions = self.precisions(id)?;
             let start = start.with_context(|| format!("a request of {id} needs a start"))?;
-            Ok::<_, anyhow::Error>((instrument, http, precisions, start))
+            Ok::<_, anyhow::Error>((instrument, rows, read, http, precisions, start))
         })();
-        let (instrument, http, (price_precision, size_precision), start) = match checked {
+        let (instrument, rows, read, http, precisions, start) = match checked {
             Ok(checked) => checked,
             Err(e) => {
                 self.fail(request_id, format!("{e:#}"));
                 return;
             }
         };
-        let rows = rows(&instrument);
+        let (price_precision, size_precision) = precisions;
         // `[start, end]` as LSE takes a span, `[from, to)`.
         let to = end.unwrap_or(now) + SignedDuration::from_nanos(1);
         let listings = Arc::clone(&self.listings);
@@ -505,7 +512,9 @@ impl DataClient for LseDataClient {
     /// Answers with the trades over `[start, end]` (end: now if none), the
     /// newest `limit` if one is given (see `answer_rows`): an `LSEDGE`
     /// series' or an `OPRA` contract's tick slices, a `GLBX` contract's
-    /// trades, each with no aggressor side, LSE sending none.
+    /// trades, each with no aggressor side, LSE sending none. An index's
+    /// fail naming it before LSE is asked: an index has no trades, its
+    /// ticks being its values, served as quotes.
     ///
     /// # Errors
     ///
@@ -524,10 +533,15 @@ impl DataClient for LseDataClient {
             (request.start, request.end),
             request.limit,
             |instrument| match instrument {
-                LseInstrument::Series(_) | LseInstrument::Opra(_) => Rows::TradeSlice,
-                LseInstrument::Cme(_) => Rows::Trades,
+                LseInstrument::Series(series) if series.is_index() => bail!(
+                    "{id} is an index, which has no trades: its ticks are quotes, its candles \
+                     bars"
+                ),
+                LseInstrument::Series(_) | LseInstrument::Opra(_) => {
+                    Ok((Rows::TradeSlice, parse_trade_slice))
+                }
+                LseInstrument::Cme(_) => Ok((Rows::Trades, parse_trade_slice)),
             },
-            parse_trade_slice,
             move |trades, ts_init| {
                 DataResponse::Trades(TradesResponse::new(
                     request_id, client_id, id, trades, start, end, ts_init, params,
@@ -541,7 +555,10 @@ impl DataClient for LseDataClient {
     /// newest `limit` if one is given (see `answer_rows`), with the sizes
     /// LSE sends: a `GLBX` contract's, CME Globex's best bid and offer. LSE
     /// refuses an `LSEDGE` series' and an `OPRA` contract's (`400
-    /// data-unavailable`), serving their past as timeframes alone.
+    /// data-unavailable`), serving their past as timeframes alone, but for
+    /// an index, whose quotes are the values of its tick slice, each a quote
+    /// whose bid and ask are the value, with no sizes, as its socket streams
+    /// them (`http::parse::parse_index_quotes`).
     ///
     /// # Errors
     ///
@@ -559,8 +576,14 @@ impl DataClient for LseDataClient {
             id,
             (request.start, request.end),
             request.limit,
-            |_| Rows::Quotes,
-            parse_quotes,
+            |instrument| {
+                Ok(match instrument {
+                    LseInstrument::Series(series) if series.is_index() => {
+                        (Rows::TradeSlice, parse_index_quotes)
+                    }
+                    _ => (Rows::Quotes, parse_quotes),
+                })
+            },
             move |quotes, ts_init| {
                 DataResponse::Quotes(QuotesResponse::new(
                     request_id, client_id, id, quotes, start, end, ts_init, params,
@@ -603,8 +626,7 @@ impl DataClient for LseDataClient {
             id,
             (request.start, request.end),
             request.limit,
-            |_| Rows::Book,
-            parse_book,
+            |_| Ok((Rows::Book, parse_book)),
             move |depths, ts_init| {
                 DataResponse::BookDepth(BookDepthResponse::new(
                     request_id, client_id, id, depths, start, end, ts_init, params,
@@ -638,8 +660,7 @@ impl DataClient for LseDataClient {
             id,
             (request.start, request.end),
             request.limit,
-            |_| Rows::Orders,
-            parse_orders,
+            |_| Ok((Rows::Orders, parse_orders)),
             move |deltas, ts_init| {
                 DataResponse::BookDeltas(BookDeltasResponse::new(
                     request_id, client_id, id, deltas, start, end, ts_init, params,
@@ -915,7 +936,7 @@ mod tests {
             GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES,
             GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK,
             LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED,
-            REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SYMBOL_UNKNOWN,
+            REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN,
             US10Y_BOND_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
             WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, aapl_call,
             data_ws_answer, gcz26, gold_futures, gold_spot, socket_answer,
@@ -2706,6 +2727,105 @@ mod tests {
             asked(&lse),
             [call("/v3/export", "GOLD", Some("quotes"), API_KEY)]
         );
+    }
+
+    const SPX: &str = "SPX-INDICES.LSEDGE";
+
+    /// `SPX`'s `request` over `[from, to]`, as the data engine asks for a
+    /// window, naming no client.
+    fn of_spx<R>(
+        request: impl FnOnce(
+            InstrumentId,
+            Option<Timestamp>,
+            Option<Timestamp>,
+            Option<NonZeroUsize>,
+            Option<ClientId>,
+            UUID4,
+            UnixNanos,
+            Option<Params>,
+        ) -> R,
+        from: &str,
+        to: &str,
+    ) -> R {
+        request(
+            InstrumentId::from(SPX),
+            Some(at(from)),
+            Some(at(to)),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        )
+    }
+
+    /// The captured five seconds of the S&P 500's tick slice, its values of
+    /// no size, as pyarrow reads LSE's file: each a quote whose bid and ask
+    /// are the value, with no sizes, as data-ws sends an index's ticks.
+    #[tokio::test]
+    async fn an_index_s_quotes_are_the_values_of_its_tick_slice_as_bid_and_ask_with_no_sizes() {
+        let lse = MockLse::start(vec![Reply::file(SPX_TICKS)]);
+        let (client, mut events) = connected_with(config(&lse), vec![index(SPX, "SPX", 2)]).await;
+
+        client
+            .request_quotes(of_spx(
+                RequestQuotes::new,
+                "2026-11-12T15:00:00Z",
+                "2026-11-12T15:00:04.999999999Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let Some(DataResponse::Quotes(response)) = envelope.response() else {
+            panic!("not a quotes response: {:?}", envelope.response())
+        };
+        let quote = |time: &str, value: &str| {
+            let at = UnixNanos::from(at(&format!("2026-11-12T{time}Z")));
+            QuoteTick::new(
+                InstrumentId::from(SPX),
+                Price::from(value),
+                Price::from(value),
+                Quantity::from(0),
+                Quantity::from(0),
+                at,
+                at,
+            )
+        };
+        assert_eq!(
+            response.data[..],
+            [
+                quote("15:00:00.034", "7600.07"),
+                quote("15:00:02.035", "7599.15"),
+                quote("15:00:03.067", "7599.18"),
+            ]
+        );
+        assert_eq!(
+            asked(&lse),
+            [call("/v3/export", "SPX", Some("tick"), API_KEY)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_s_trades_are_refused_naming_it_unasked() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = connected_with(config(&lse), vec![index(SPX, "SPX", 2)]).await;
+
+        client
+            .request_trades(of_spx(
+                RequestTrades::new,
+                "2026-11-12T15:00:00Z",
+                "2026-11-12T15:00:04.999999999Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert!(envelope.response().is_none());
+        let reason = envelope.failure_reason().expect("a failure");
+        for part in [SPX, "no trades"] {
+            assert!(reason.contains(part), "{part}: {reason}");
+        }
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
     /// The client serves the bars of LSEDGE series and OPRA contracts alone.
