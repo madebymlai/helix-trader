@@ -836,6 +836,31 @@ mod tests {
         );
     }
 
+    /// A day as the data engine asks for one, its window closed at the
+    /// next midnight: one export, through the midnight's instant.
+    #[tokio::test]
+    async fn a_day_window_ending_at_a_midnight_is_one_export() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
+        let (client, mut events) = connected(&lse, true).await;
+
+        client
+            .request_trades(trades("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let [call] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(
+            (call.param("from"), call.param("to")),
+            (
+                Some("2026-10-20T00:00:00Z"),
+                Some("2026-10-21T00:00:00.000000001Z")
+            )
+        );
+    }
+
     /// From the start of the day before until now: LSE sends the day
     /// before's trades and none of the current day's, which it stores the
     /// morning after. A plain response completes the request, and the data
