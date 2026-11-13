@@ -144,6 +144,7 @@ fn reading(ticks: &[&str], bar_types: &[&str]) -> DataRequirements {
                 instrument_id: InstrumentId::from(GOLD),
             })
             .collect(),
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }
@@ -332,6 +333,7 @@ fn an_atr_on_an_instrument_the_strategy_reads_no_prices_of_is_refused() {
                 instrument_id: InstrumentId::from(GOLD),
             },
         ],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     };
 
@@ -1090,6 +1092,7 @@ fn reading_its_quotes(config: &TargetConfig) -> DataRequirements {
             data: NautilusDataType::QuoteTick,
             instrument_id: config.instrument_id,
         }],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }

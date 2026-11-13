@@ -3,8 +3,9 @@
 //! `GOLD-FUTURES.LSEDGE` and `US10Y-FUTURES.LSEDGE`, and of its gold spot
 //! candles as 1-minute bars, `XAU/USD-COMMODITIES.LSEDGE`, a series LSE
 //! serves only as candles, into a temporary catalog holding their
-//! definitions, written by hand as LSE publishes none, through the node
-//! from LSE's exports. It needs the LSE key, `LSE_API_KEY`, from the
+//! definitions, written by hand as LSE publishes none, and of LSE's daily
+//! 10-year US bond yield, custom data of no instrument (`lse::LseRow`),
+//! through the node from LSE's exports. It needs the LSE key, `LSE_API_KEY`, from the
 //! environment or `.env`; the free key serves every series. The day's
 //! exports count against the key's rows a day.
 //!
@@ -21,9 +22,10 @@ use helix_trader::{
     venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::{SignedDuration, Timestamp};
+use lse::LseRow;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarType, NautilusDataType},
+    data::{BarType, Data, NautilusDataType},
     enums::AggressorSide,
     identifiers::{InstrumentId, Symbol},
     instruments::{IndexInstrument, InstrumentAny},
@@ -109,6 +111,7 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
                 instrument_id: InstrumentId::from(id),
             })
             .to_vec(),
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     };
     let (start, end) = the_day();
@@ -159,6 +162,7 @@ async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_clos
     let requirements = DataRequirements {
         bar_types: vec![BarType::from(bar_type.as_str())],
         ticks: vec![],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     };
     let (start, end) = the_day();
@@ -184,6 +188,72 @@ async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_clos
             to.as_u64(),
             &NautilusDataType::Bar.into(),
             Some(&bar_type),
+        )
+        .unwrap();
+    assert_eq!(lacking, []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
+    if !opted_in("a_day_of_bond_yields_fills_from_lse_as_custom_data") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let us10y = LseRow::data_type("bond_yields", "US10Y");
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![],
+        custom: vec![us10y.clone()],
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_day();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    LseRow::register();
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let identifier = us10y.identifier().unwrap().to_string();
+    let stored = catalog
+        .query_custom_data_dynamic(
+            us10y.type_name(),
+            Some(std::slice::from_ref(&identifier)),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+    println!("{us10y}: {} rows", stored.len());
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let rows: Vec<&LseRow> = stored
+        .iter()
+        .map(|data| {
+            let Data::Custom(custom) = data else {
+                panic!("not custom data: {data:?}");
+            };
+            assert_eq!(custom.data_type, us10y);
+            custom.data.as_any().downcast_ref::<LseRow>().unwrap()
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "one daily row");
+    assert!(
+        rows.iter()
+            .all(|row| (from..=to).contains(&row.ts_init) && row.fields["close"].is_number()),
+        "a row outside the day or with no close: {rows:?}"
+    );
+    let lacking = catalog
+        .get_missing_intervals_for_request(
+            from.as_u64(),
+            to.as_u64(),
+            &NautilusDataType::Custom {
+                type_name: us10y.type_name().to_string(),
+            }
+            .into(),
+            Some(&identifier),
         )
         .unwrap();
     assert_eq!(lacking, []);

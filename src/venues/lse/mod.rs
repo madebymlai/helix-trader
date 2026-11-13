@@ -7,14 +7,18 @@
 //! Their definitions are the catalog's alone, written there by
 //! hand: LSE publishes none, the data engine answers a definition request
 //! from the catalog before asking the client, and the client converts
-//! LSE's prices at the definition's precision. See `README.md`.
+//! LSE's prices at the definition's precision. LSE's reference series, the
+//! rows of its reference collections, are custom data of no instrument
+//! (`lse::LseRow`), filled by the same client with no definition. See
+//! `README.md`.
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
+use nautilus_model::data::DataType;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use crate::{
-    catalog::{FillData, NodeClient, NodeFill, missing},
+    catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     strategy::SeriesSlice,
 };
 
@@ -23,26 +27,32 @@ use crate::{
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
 /// Adds to `node` the fill of what the catalog lacks of `slices`, series of
-/// `LSEDGE` instruments (see `catalog::missing`), asked of the LSE client
-/// `config` configures, its key read only when the node creates it, so
-/// only if something is missing. Each contract's definition is asked of
-/// the client too: the data engine answers it from the catalog, before the
-/// client, and puts it in the cache, where the client reads the precision
-/// of its prices; a definition the catalog lacks fails its request, naming
-/// the instrument, before LSE is asked.
+/// `LSEDGE` instruments (see `catalog::missing`), and of `custom`, LSE's
+/// rows (`lse::LseRow`) over `[start, end]` (see `catalog::missing_custom`),
+/// asked of the LSE client `config` configures, its key read only when the
+/// node creates it, so only if something is missing. Each contract's
+/// definition is asked of the client too: the data engine answers it from
+/// the catalog, before the client, and puts it in the cache, where the
+/// client reads the precision of its prices; a definition the catalog lacks
+/// fails its request, naming the instrument, before LSE is asked. LSE's rows
+/// are of no instrument and have none.
 ///
 /// # Errors
 ///
 /// Returns an error if a series is not one the node fills (see `missing`),
-/// or if the catalog cannot be read.
+/// if a custom series has no identifier, or if the catalog cannot be read.
 pub(super) fn add_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
+    custom: &[DataType],
+    start: Timestamp,
+    end: Timestamp,
     config: LseDataClientConfig,
 ) -> anyhow::Result<()> {
     let requests = missing(catalog, slices)?;
-    node.add(node_client(config), &requests, period);
+    let custom = missing_custom(catalog, custom, start, end)?;
+    node.add_with_custom(node_client(config), &requests, &custom, period);
     Ok(())
 }
 
@@ -65,15 +75,18 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 mod tests {
     use std::{collections::HashSet, path::Path};
 
-    use ::lse::testing::{
-        ALLOWANCE_EXHAUSTED, API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES,
-        GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PLAN_REQUIRED, ROWS_EXHAUSTED, Reply,
-        SYMBOL_UNKNOWN, gold_futures, gold_spot,
+    use ::lse::{
+        LseRow,
+        testing::{
+            ALLOWANCE_EXHAUSTED, API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GOLD_FUTURES,
+            GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PLAN_REQUIRED, REFERENCE_CATALOGUE,
+            ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, gold_futures, gold_spot,
+        },
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
-        data::{BarType, NautilusDataType, TradeTick},
+        data::{BarType, Data, DataType, NautilusDataType, TradeTick},
         enums::AggressorSide,
         identifiers::{InstrumentId, TradeId},
         instruments::InstrumentAny,
@@ -134,6 +147,7 @@ mod tests {
                 data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from(id),
             }],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         fill_requirements(dir, lse, &requirements, definitions, from, to)
@@ -159,7 +173,15 @@ mod tests {
             .base_url_http(lse.url().to_string())
             .build();
         let mut node = NodeFill::new();
-        add_fill(&mut node, &catalog, &slices, config)?;
+        add_fill(
+            &mut node,
+            &catalog,
+            &slices,
+            &requirements.custom,
+            from,
+            to,
+            config,
+        )?;
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -240,6 +262,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from(bars.as_str())],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
 
@@ -327,6 +350,91 @@ mod tests {
         }
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
         assert_eq!(stored_trades(dir.path()), []);
+    }
+
+    /// US10Y's daily bond yields, custom data of no instrument.
+    fn us10y() -> DataType {
+        LseRow::data_type("bond_yields", "US10Y")
+    }
+
+    /// fill-catalog's fill of `us10y()` over the captured days, the 9th to
+    /// the 12th of November, into the catalog in `dir`, from `lse`.
+    fn fill_bond_yields(dir: &Path, lse: &MockLse) -> anyhow::Result<()> {
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![],
+            custom: vec![us10y()],
+            warmup: SignedDuration::ZERO,
+        };
+        fill_requirements(
+            dir,
+            lse,
+            &requirements,
+            vec![],
+            november("09T00:00:00"),
+            november("12T23:59:59.999999999"),
+        )
+    }
+
+    fn november(time: &str) -> Timestamp {
+        format!("2026-11-{time}Z").parse().unwrap()
+    }
+
+    /// The captured rows, as pyarrow reads LSE's file: the 9th's, the
+    /// 10th's and the 12th's, read back as Nautilus decodes custom data.
+    #[test]
+    fn the_bond_yields_lse_exports_are_written_back_as_custom_data_of_their_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+        ]);
+
+        fill_bond_yields(dir.path(), &lse).unwrap();
+
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let identifier = us10y().identifier().unwrap().to_string();
+        let stored = catalog
+            .query_custom_data_dynamic("LseRow", Some(&[identifier]), None, None, None, None, true)
+            .unwrap();
+        let rows: Vec<_> = stored
+            .iter()
+            .map(|data| {
+                let Data::Custom(custom) = data else {
+                    panic!("not custom data: {data:?}");
+                };
+                let row = custom.data.as_any().downcast_ref::<LseRow>().unwrap();
+                (
+                    custom.data_type.clone(),
+                    row.ts_init,
+                    row.fields["close"].clone(),
+                )
+            })
+            .collect();
+        let row = |day: &str, close: f64| {
+            (
+                us10y(),
+                UnixNanos::from(november(&format!("{day}T00:00:00"))),
+                serde_json::json!(close),
+            )
+        };
+        assert_eq!(rows, [row("09", 4.884), row("10", 5.0), row("12", 5.133)]);
+    }
+
+    /// The window is stored whole, the days without a row too: a second
+    /// fill asks LSE nothing.
+    #[test]
+    fn a_filled_window_of_bond_yields_is_not_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+        ]);
+        fill_bond_yields(dir.path(), &lse).unwrap();
+
+        fill_bond_yields(dir.path(), &lse).unwrap();
+
+        assert_eq!(lse.calls().len(), 2, "{:?}", lse.calls());
     }
 
     #[test]

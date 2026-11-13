@@ -47,6 +47,20 @@ pub(crate) struct RequiredPlan {
     pub(crate) subscribe_url: Option<String>,
 }
 
+/// LSE's catalogue of its reference collections (`/v3/reference`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ReferenceCatalogue {
+    pub(crate) datasets: Vec<ReferenceCollection>,
+}
+
+/// A reference collection, as LSE's catalogue lists it: its name and the
+/// column holding its rows' time, a date or a time.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ReferenceCollection {
+    pub(crate) dataset: String,
+    pub(crate) time_column: String,
+}
+
 impl LseRefusal {
     /// Whether the refusal says LSE holds no row of the selection.
     pub(crate) fn is_no_rows(&self) -> bool {

@@ -13,8 +13,9 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-# The columns of an export's Parquet file.
-arrow.workspace = true
+# The columns of an export's Parquet file, and a row's fields as JSON, its
+# times in their named zone, LSE's UTC (chrono-tz).
+arrow = { workspace = true, features = ["chrono-tz", "json"] }
 # The `DataClient` trait of the data client.
 async-trait.workspace = true
 bon.workspace = true
@@ -27,6 +28,8 @@ nautilus-core.workspace = true
 nautilus-live.workspace = true
 nautilus-model.workspace = true
 nautilus-network.workspace = true
+# The arrow encoding and registry of the custom data type of LSE's rows.
+nautilus-serialization = { workspace = true, features = ["arrow"] }
 # The version Nautilus' persistence reads with, and the codec LSE's exports
 # are compressed with.
 parquet = { version = "59.3", default-features = false, features = ["arrow", "zstd"] }

@@ -1,6 +1,7 @@
-//! An export's Parquet file into Nautilus data, at the instrument's
-//! precision: LSE sends prices and sizes as doubles, each converted once
-//! here through its shortest decimal form, which must fit the precision.
+//! An export's Parquet file into Nautilus data: trades and bars at the
+//! instrument's precision, LSE sending prices and sizes as doubles, each
+//! converted once here through its shortest decimal form, which must fit
+//! the precision; and the rows of a reference collection as `LseRow`s.
 
 use std::{collections::HashMap, str::FromStr};
 
@@ -9,6 +10,7 @@ use arrow::{
     array::{Array, AsArray, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray},
     compute::cast,
     datatypes::{DataType, TimeUnit, TimestampNanosecondType},
+    json::{WriterBuilder, writer::JsonArray},
 };
 use bytes::Bytes;
 use nautilus_core::UnixNanos;
@@ -20,6 +22,9 @@ use nautilus_model::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rust_decimal::Decimal;
+use serde_json::{Map, Value};
+
+use crate::types::LseRow;
 
 /// The kind of every row of a tick slice: a trade.
 const TRADE: &str = "trade";
@@ -147,6 +152,77 @@ pub(crate) fn parse_candles(
     Ok(bars)
 }
 
+/// The rows of a reference export of `symbol` in LSE's collection
+/// `source`, each stamped at its value of `time_column`, the column LSE
+/// names its time, both `ts_event` and `ts_init`: a date at its start in
+/// UTC, a time as it is. Every other column but `symbol` is a field of the
+/// row, as LSE sent it, in JSON (Arrow's): numbers, strings, `null`, and
+/// dates and times in ISO 8601.
+///
+/// # Errors
+///
+/// Returns an error if the file is not Parquet, or if its time column is
+/// missing, holds an empty row or a time before 1970, or is not a date or
+/// a time.
+pub(crate) fn parse_rows(
+    file: Bytes,
+    source: &str,
+    symbol: &str,
+    time_column: &str,
+) -> anyhow::Result<Vec<LseRow>> {
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("reading LSE's Parquet file")?
+        .build()?;
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.context("reading LSE's Parquet file")?;
+        let times = row_times(&batch, time_column)?;
+        let mut writer = WriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, JsonArray>(Vec::new());
+        writer.write(&batch)?;
+        writer.finish()?;
+        let objects: Vec<Map<String, Value>> =
+            serde_json::from_slice(&writer.into_inner()).context("reading LSE's rows as JSON")?;
+        for (mut fields, time) in objects.into_iter().zip(times) {
+            fields.remove(time_column);
+            fields.remove("symbol");
+            rows.push(LseRow::new(
+                source.to_owned(),
+                symbol.to_owned(),
+                fields,
+                time,
+                time,
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+/// The times of the rows of `batch`, its column `time_column`'s, in UTC:
+/// a date at its start, a time as it is.
+fn row_times(batch: &RecordBatch, time_column: &str) -> anyhow::Result<Vec<UnixNanos>> {
+    let column = batch
+        .column_by_name(time_column)
+        .with_context(|| format!("no time column {time_column} in LSE's file"))?;
+    match column.data_type() {
+        DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _) => {}
+        other => bail!("the time column {time_column} of LSE's file is {other}"),
+    }
+    let nanos = cast(
+        column,
+        &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+    )?;
+    ensure!(
+        nanos.null_count() == 0,
+        "the time column {time_column} of LSE's file has empty rows, or times past 2262"
+    );
+    let nanos = nanos.as_primitive::<TimestampNanosecondType>();
+    (0..nanos.len())
+        .map(|row| time(nanos, row).map(UnixNanos::from))
+        .collect()
+}
+
 /// The column `name` of `batch`, LSE's type `A` checked, with no empty row.
 fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
     let column = batch
@@ -243,7 +319,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::testing::{GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES};
+    use crate::testing::{GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, US10Y_BOND_YIELDS};
 
     fn gold() -> InstrumentId {
         InstrumentId::from("GOLD-FUTURES.LSEDGE")
@@ -315,6 +391,108 @@ mod tests {
             err.to_string().contains("reading LSE's Parquet file"),
             "{err:#}"
         );
+    }
+
+    /// The captured rows of US10Y, as pyarrow reads LSE's file.
+    fn us10y_rows() -> Vec<LseRow> {
+        parse_rows(
+            Bytes::from_static(US10Y_BOND_YIELDS),
+            "bond_yields",
+            "US10Y",
+            "date",
+        )
+        .unwrap()
+    }
+
+    fn day(date: &str) -> UnixNanos {
+        UnixNanos::from(
+            format!("{date}T00:00:00Z")
+                .parse::<jiff::Timestamp>()
+                .unwrap(),
+        )
+    }
+
+    /// A date is its day's start, in UTC, LSE's time.
+    #[rstest]
+    fn a_reference_export_is_its_rows_each_at_the_time_of_its_time_column() {
+        let rows: Vec<_> = us10y_rows()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.ts_event,
+                    row.ts_init,
+                    row.source,
+                    row.symbol,
+                    row.fields["close"].clone(),
+                )
+            })
+            .collect();
+
+        let row = |date, close: f64| {
+            (
+                day(date),
+                day(date),
+                "bond_yields".to_string(),
+                "US10Y".to_string(),
+                serde_json::json!(close),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                row("2026-11-09", 4.884),
+                row("2026-11-10", 5.0),
+                row("2026-11-12", 5.133),
+            ]
+        );
+    }
+
+    /// As pyarrow reads them: LSE's row id, the yield's country, maturity
+    /// and currency, its day's open, high, low and close, and when LSE
+    /// fetched it, a time in UTC.
+    #[rstest]
+    fn a_row_s_fields_are_its_other_columns_as_lse_sent_them() {
+        let fields: Vec<_> = us10y_rows()
+            .into_iter()
+            .map(|row| serde_json::Value::Object(row.fields))
+            .collect();
+
+        let row = |id: u32, [open, high, low, close]: [f64; 4]| {
+            serde_json::json!({
+                "id": id,
+                "country_iso2": "US",
+                "country_name": "United States",
+                "maturity": "10Y",
+                "maturity_days": 3650,
+                "currency": "USD",
+                "open": open,
+                "high": high,
+                "low": low,
+                "close": close,
+                "fetched_at": "2026-11-13T01:34:04Z",
+            })
+        };
+        assert_eq!(
+            fields,
+            [
+                row(2_606_679, [4.864, 4.888, 4.831, 4.884]),
+                row(2_606_680, [4.876, 5.021, 4.855, 5.0]),
+                row(2_606_681, [4.988, 5.137, 4.98, 5.133]),
+            ]
+        );
+    }
+
+    #[rstest]
+    fn a_time_column_the_file_lacks_is_refused_naming_it() {
+        let err = parse_rows(
+            Bytes::from_static(US10Y_BOND_YIELDS),
+            "bond_yields",
+            "US10Y",
+            "ts",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ts"), "{err:#}");
     }
 
     /// A definition too coarse for the prices LSE sends: refused, not
