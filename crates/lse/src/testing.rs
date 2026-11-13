@@ -36,6 +36,11 @@ pub const REFERENCE_CATALOGUE: &str = include_str!("../test_data/reference_catal
 /// rows, of the 9th, 10th and 12th.
 pub const US10Y_BOND_YIELDS: &[u8] =
     include_bytes!("../test_data/reference_bond_yields_us10y.parquet");
+/// The 4-hour rows of `US10Y` in LSE's `bond_yields_four_hour` of 10
+/// November 2026, as LSE exported them: six rows, stamped at their open,
+/// 00:00 to 20:00.
+pub const US10Y_BOND_YIELDS_FOUR_HOURS: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_four_hour_us10y.parquet");
 /// The 1-minute candles of LSE's gold spot series (`XAU/USD` in
 /// `commodities`) over `[2026-10-21T10:00:00Z, 2026-10-21T10:05:00Z)`, as LSE
 /// exported them: five candles, stamped at their open, of no volume.

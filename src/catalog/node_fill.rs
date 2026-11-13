@@ -229,8 +229,8 @@ impl fmt::Display for CustomFillRequest {
 /// What `catalog` lacks of each of `custom`, custom data of no instrument,
 /// over `[from, to]`: its missing windows (Nautilus'
 /// `get_missing_intervals_for_request`, of its type and identifier), in time
-/// order, the series in the order given. No definition: it is of no
-/// instrument.
+/// order, the series in the order given, each once. No definition: it is
+/// of no instrument.
 ///
 /// # Errors
 ///
@@ -243,7 +243,10 @@ pub fn missing_custom(
     to: Timestamp,
 ) -> anyhow::Result<Vec<CustomFillRequest>> {
     let mut requests = Vec::new();
-    for data_type in custom {
+    for (i, data_type) in custom.iter().enumerate() {
+        if custom[..i].contains(data_type) {
+            continue;
+        }
         let identifier = data_type.identifier().with_context(|| {
             format!("{data_type:?} has no identifier, which keys custom data in the catalog")
         })?;
@@ -1026,6 +1029,21 @@ mod tests {
                 to,
             }]
         );
+    }
+
+    /// Asked twice, its answer would be written twice over one window.
+    #[test]
+    fn custom_data_listed_twice_is_lacking_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = (
+            ts("2026-11-09T00:00:00Z"),
+            ts("2026-11-12T23:59:59.999999999Z"),
+        );
+
+        let asked = missing_custom(&catalog, &[bond_yields(), bond_yields()], from, to).unwrap();
+
+        assert_eq!(asked.len(), 1, "{asked:?}");
     }
 
     /// Nautilus would store it under its type alone, beside every other

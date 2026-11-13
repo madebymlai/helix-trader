@@ -93,9 +93,10 @@ pub struct DataRequirements {
     /// data in the catalog, its metadata saying what its source asks for
     /// (`lse::LseRow::data_type`). Fetched by fill-catalog from the source
     /// of its type, with no definition, and replayed in a backtest over the
-    /// run's window; a live run neither warms it up nor streams it. Custom
-    /// data of an instrument is a tick series, keyed by the instrument and
-    /// rolled with it.
+    /// run's window; a live run reading any is refused (`venues::live_clients`),
+    /// no source streaming it yet. A config lists it in `[data].custom`
+    /// (`DataConfig::custom`). Custom data of an instrument is a tick
+    /// series, keyed by the instrument and rolled with it.
     pub custom: Vec<DataType>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.

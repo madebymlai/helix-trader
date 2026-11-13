@@ -39,7 +39,7 @@ pub mod pepperstone;
 use std::path::Path;
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory, LseRow};
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use clap::Args;
 use ctrader::{
     CTraderAccountVars, CTraderConnection, CTraderDataClientConfig, CTraderDataClientFactory,
@@ -50,7 +50,7 @@ use nautilus_common::factories::DataClientFactory;
 use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
-    data::{CustomDataTrait, NautilusDataType},
+    data::{CustomDataTrait, DataType, NautilusDataType},
     enums::OmsType,
     identifiers::{ClientId, InstrumentId, Venue},
 };
@@ -286,6 +286,56 @@ impl Row {
     }
 }
 
+/// Checks that a source serves custom data of no instrument of the type
+/// `type_name`: such data has no venue, its type naming its source, and LSE
+/// alone serves any, its rows (`lse::LseRow`).
+fn custom_source(type_name: &str) -> anyhow::Result<()> {
+    let rows = LseRow::type_name_static();
+    ensure!(
+        type_name == rows,
+        "no source fills the custom data {type_name} of no instrument: LSE fills its {rows}"
+    );
+    Ok(())
+}
+
+/// The data type of custom data of no instrument of the type `type_name`
+/// and the `metadata` a strategy's config gives it, keyed as its source
+/// keys it: LSE's rows of a `source` and a `symbol`, both strings, keyed by
+/// `lse::LseRow::data_type`.
+///
+/// # Errors
+///
+/// Returns an error naming the type if no source serves it (see
+/// `fill_history`), or the key if the metadata lacks `source` or `symbol`,
+/// holds another, or holds one not a string.
+pub fn custom_data_type(
+    type_name: &str,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<DataType> {
+    custom_source(type_name)?;
+    let text = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("{type_name} names its {key}, a string, in its metadata"))
+    };
+    let (source, symbol) = (text("source")?, text("symbol")?);
+    if let Some(other) = metadata
+        .keys()
+        .find(|key| !["source", "symbol"].contains(&key.as_str()))
+    {
+        bail!("{type_name} takes a source and a symbol in its metadata, not {other}");
+    }
+    Ok(LseRow::data_type(source, symbol))
+}
+
+/// Registers with Nautilus the custom data types a source serves, LSE's
+/// rows, so that a catalog's are read: Nautilus decodes custom data by its
+/// type's name. Idempotent.
+pub fn register_custom_data() {
+    LseRow::register();
+}
+
 /// How the accounts of `venue` keep positions: as those of its broker do
 /// (`Broker::oms_type`), so every venue without a row of its own as IB's;
 /// a venue no broker trades as Nautilus' venue default
@@ -448,14 +498,8 @@ pub async fn fill_history(
     venues: &HistoryVenueArgs,
     catalog_dir: &Path,
 ) -> anyhow::Result<()> {
-    // Custom data of no instrument has no venue: its type names its
-    // source, and LSE alone serves any, its rows.
     for data_type in &requirements.custom {
-        ensure!(
-            data_type.type_name() == LseRow::type_name_static(),
-            "no source fills the custom data {data_type} of no instrument: LSE fills its {}",
-            LseRow::type_name_static()
-        );
+        custom_source(data_type.type_name())?;
     }
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     let (mut okx_ids, mut databento_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
@@ -576,19 +620,22 @@ fn ctrader_read(
 /// the same adapter on its connection, each of those rows taking its live
 /// data from its broker (`Broker`); LSE's is a data client alone, routed
 /// LSEDGE, which no broker trades (see `lse::live_clients`), its key read
-/// when the node creates it. The cTrader brokers' bar types are checked
-/// and their environments and credential read before anything connects;
-/// OKX's clients are set up at `leverage`, the run's, IB's trading the IB
-/// account of `venues` with its client id.
+/// when the node creates it. No source streams custom data of no
+/// instrument, LSE's rows, so a run reading any is refused before anything
+/// connects. The cTrader brokers' bar types are checked and their
+/// environments and credential read before anything connects; OKX's
+/// clients are set up at `leverage`, the run's, IB's trading the IB account
+/// of `venues` with its client id.
 ///
 /// # Errors
 ///
-/// Returns an error naming them if a cTrader broker's bar type is not built
-/// from quotes or its environment or credential is missing (see
-/// `ctrader_read`, checked before anything connects), if OKX's clients
-/// cannot be set up or the OKX account does not suit the run (see
-/// `okx::clients`), if cTrader is unreachable or a broker's account is not
-/// hedging or not the credential's (see
+/// Returns an error naming them if `requirements` reads custom data of no
+/// instrument, if a cTrader broker's bar type is not built from quotes or
+/// its environment or credential is missing (see `ctrader_read`, checked
+/// before anything connects), if OKX's clients cannot be set up or the OKX
+/// account does not suit the run (see `okx::clients`), if cTrader is
+/// unreachable or a broker's account is not hedging or not the
+/// credential's (see
 /// `CTraderConnection::check_account`), if the strategy trades IB
 /// instruments and no account is given, or if IB's clients cannot be set up
 /// (see `ib::clients`).
@@ -608,6 +655,16 @@ pub(crate) async fn live_clients(
             LiveDataSource::Ib => ib_ids.push(id),
         }
     }
+    ensure!(
+        requirements.custom.is_empty(),
+        "no source streams custom data of no instrument live yet: {}",
+        requirements
+            .custom
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     // Read before anything connects.
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
@@ -1519,5 +1576,30 @@ mod tests {
         }
         let lse = lse::live_clients(&[InstrumentId::from("GOLD-FUTURES.LSEDGE")]);
         assert_eq!(lse.data_factory.name(), "LSE");
+    }
+
+    /// LSE streams none yet: refused before anything connects, OKX's
+    /// clients among them, which would fail on its missing environment.
+    #[tokio::test]
+    async fn a_run_reading_custom_data_of_no_instrument_is_refused_naming_it_before_anything_connects()
+     {
+        let us10y = LseRow::data_type("bond_yields", "US10Y");
+        let requirements = DataRequirements {
+            custom: vec![us10y.clone()],
+            ..ticks(&[(NautilusDataType::QuoteTick, "BTC-USDT-SWAP.OKX")])
+        };
+
+        let Err(err) = live_clients(
+            &requirements,
+            &requirements.instrument_ids(),
+            &live_args(),
+            Decimal::ONE,
+        )
+        .await
+        else {
+            panic!("set up clients for custom data of no instrument");
+        };
+
+        assert!(err.to_string().contains(&us10y.to_string()), "{err:#}");
     }
 }
