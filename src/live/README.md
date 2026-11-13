@@ -6,7 +6,7 @@
 helix-trader live ema --config ema.toml
 ```
 
-See `helix-trader live --help` and the maintained config for options. The command reads `.env` without overriding variables already in the environment; keep credentials out of code and git. It starts the IB gateway when needed and starts or reuses Redis. Stop with SIGINT or SIGTERM. Concurrent live processes need distinct trader IDs and, for IB, distinct client IDs; a client ID divisible by 1000 is refused.
+See `helix-trader live --help` and the maintained config for options. The command reads `.env` without overriding variables already in the environment; keep credentials out of code and git. It starts the IB gateway when needed and starts or reuses Redis. Stop with SIGINT or SIGTERM. Concurrent live processes need distinct trader IDs and, for IB, distinct client IDs; a client ID divisible by 1000 is refused. Processes trading one venue account also need distinct trader ID tags, the part after the final hyphen: Nautilus puts only the tag in client order, order list and position IDs, so `HELIX-001` and `OTHER-001` collide.
 
 ## Startup and routing
 
@@ -39,7 +39,7 @@ This destroys that trader's cached execution history across all venues, not its 
 
 ## Recording and recovery
 
-The node streams market data to `--staging` outside the catalog, promotes it daily and on clean shutdown, and deletes each promoted staging file. Readers and retrains see data only through the last promotion. Built bars are stored as external bars; warmup data itself is not streamed. Catalog files accumulate and may need consolidation.
+The node streams market data to `--staging` outside the catalog, promotes it daily and on clean shutdown, and deletes each promoted staging file. Readers and retrains see data only through the last promotion. Built bars are stored as external bars; warmup data itself is not streamed. Catalog files accumulate. Do not consolidate them plainly: Nautilus' `consolidate_catalog` and `consolidate_data` merge a directory's files into one spanning the first start to the last end, across the slivers between them, which then count as covered and are never asked of the venue; the `_by_period` variants keep such holes.
 
 Each trader's persistent instance ID is stored in staging. After a crash, restart with the same trader and staging directory: recovery seals complete batches and promotes them **before warmup**, so warmup write-back cannot overlap unrecovered data. An empty identity file fails startup rather than orphaning the old run. The last unflushed second can be lost. A staged interval overlapping catalog data fails promotion and remains staged; resolve the overlap before restarting. In particular, interval promotion can split OKX rows with the same timestamp across files, causing an overlap and a subsequent startup failure.
 

@@ -12,7 +12,7 @@ The environment's pair seeds `$XDG_STATE_HOME/ctrader/token.json`, or `~/.local/
 
 A session authenticates the app, then the account, with the token file's pair. A running session renews before expiry and reauthenticates when necessary.
 
-After reconnect the session reauthenticates and resubscribes; in-flight requests fail. Trade outcomes require live reconciliation. Each frame is bound to the connection it was sent on and is never replayed on another: one refused at a drop waits for the new session's authentication, and one whose write timed out counts as sent, its outcome left to reconciliation. Historical requests go one every 250 ms: one every 200 ms was rate limited on a demo.
+After reconnect the session reauthenticates and resubscribes; in-flight requests fail. Trade outcomes require live reconciliation. Each frame is bound to the connection it was sent on and is never replayed on another: one refused at a drop waits for the new session's authentication, and one whose write timed out or failed after it began counts as sent, its outcome left to reconciliation. Historical requests go one every 250 ms: one every 200 ms was rate limited on a demo.
 
 ## Tick history
 

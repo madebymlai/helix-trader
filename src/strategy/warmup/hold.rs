@@ -10,7 +10,8 @@
 //! in `common/src/actor/data_actor.rs`), and a response's ticks to the same
 //! indicators (`handle_quotes_response`), holding nothing while a request is
 //! pending; it holds live ticks for its bar aggregators alone (`WarmupBuffer`
-//! in `data/src/engine/bar.rs`). A warmup is answered a window at a time,
+//! in `data/src/engine/handlers.rs`, which `data/src/engine/bar.rs` gives
+//! them). A warmup is answered a window at a time,
 //! the node running between, so features registered for ticks read the live
 //! ones before the older windows, and time runs backwards for them. So the
 //! features are not registered for quotes and trades (`FeatureSet::register`)

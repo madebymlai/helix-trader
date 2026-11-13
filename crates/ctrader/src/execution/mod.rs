@@ -1324,7 +1324,8 @@ impl ExecutionClient for CTraderExecutionClient {
     /// The order of the query: open, from the reconcile request; else, by
     /// its venue order id or among the orders the broker updated since the
     /// cached order was created, from its details. `None` once the broker
-    /// answered it holds no such order.
+    /// answered it holds no such order; an error if it holds it on a symbol
+    /// the run did not load, which is no answer of absence.
     async fn generate_order_status_report(
         &self,
         cmd: &GenerateOrderStatusReport,
@@ -1351,10 +1352,14 @@ impl ExecutionClient for CTraderExecutionClient {
             .filter(|v| parse_protection_id(*v).is_none());
         let found =
             Self::find_order(&session.ctrader, &reports, id, venue, since, self.now()).await?;
-        Ok(match found {
-            Held::Order(status, _) => Some(status),
-            Held::Nothing | Held::Unreported => None,
-        })
+        match found {
+            Held::Order(status, _) => Ok(Some(status)),
+            Held::Nothing => Ok(None),
+            Held::Unreported => anyhow::bail!(
+                "{} holds order {id} on a symbol the run did not load: it cannot report it",
+                self.core.venue
+            ),
+        }
     }
 
     /// The open orders (the pending orders, the positions' stop loss and
@@ -1400,7 +1405,10 @@ impl ExecutionClient for CTraderExecutionClient {
     }
 
     /// One report per open cTrader position: the reconcile request lists
-    /// every open position, so an instrument without one is flat.
+    /// every open position, so an instrument without one is flat. Nautilus
+    /// reads an absent report so because
+    /// `ExecutionClient::provides_bulk_position_coverage` is true by
+    /// default, which this client leaves as it is.
     async fn generate_position_status_reports(
         &self,
         cmd: &GeneratePositionStatusReports,

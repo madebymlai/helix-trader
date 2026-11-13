@@ -44,7 +44,7 @@ use nautilus_common::{
         },
     },
 };
-use nautilus_core::{Params, UnixNanos, datetime::datetime_to_unix_nanos};
+use nautilus_core::{UnixNanos, datetime::datetime_to_unix_nanos};
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{
@@ -172,8 +172,8 @@ enum Answer {
 struct FakeVenue {
     book: Vec<OrderBookDepth>,
     answer: Answer,
-    /// Each request: what, from, to (ns), and its `price_precision` param.
-    asked: Vec<(FillData, u64, u64, Option<u64>)>,
+    /// Each request: what, from, to (ns).
+    asked: Vec<(FillData, u64, u64)>,
     /// Requests asked and not answered yet, and the most at once.
     in_flight: Arc<AtomicUsize>,
     most_in_flight: usize,
@@ -238,19 +238,17 @@ struct FakeClient {
 }
 
 impl FakeClient {
-    /// Records the request of `data` over `[start, end]` with `params`,
-    /// then answers it with `response` as the venue says.
+    /// Records the request of `data` over `[start, end]`, then answers it
+    /// with `response` as the venue says.
     fn answer(
         &self,
         data: FillData,
         request_id: nautilus_core::UUID4,
         (start, end): (u64, u64),
-        params: Option<&Params>,
         response: DataResponse,
     ) -> anyhow::Result<()> {
         let mut venue = self.venue.borrow_mut();
-        let precision = params.and_then(|p| p.get_u64("price_precision"));
-        venue.asked.push((data, start, end, precision));
+        venue.asked.push((data, start, end));
         let in_flight = venue.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         venue.most_in_flight = venue.most_in_flight.max(in_flight);
         let done = Arc::clone(&venue.in_flight);
@@ -334,14 +332,10 @@ impl DataClient for FakeClient {
     /// The definition, at once, whatever the venue's answer to data.
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
-        let precision = request
-            .params
-            .as_ref()
-            .and_then(|p| p.get_u64("price_precision"));
         self.venue
             .borrow_mut()
             .asked
-            .push((FillData::Instrument, start, end, precision));
+            .push((FillData::Instrument, start, end));
         let response = InstrumentResponse::new(
             request.request_id,
             self.id,
@@ -378,13 +372,7 @@ impl DataClient for FakeClient {
             UnixNanos::from(end),
             request.params.clone(),
         ));
-        self.answer(
-            FillData::Depth,
-            request.request_id,
-            (start, end),
-            request.params.as_ref(),
-            response,
-        )
+        self.answer(FillData::Depth, request.request_id, (start, end), response)
     }
 
     /// One delta, on Monday at 10:00, if the window holds it.
@@ -404,13 +392,7 @@ impl DataClient for FakeClient {
             UnixNanos::from(end),
             request.params.clone(),
         ));
-        self.answer(
-            FillData::Deltas,
-            request.request_id,
-            (start, end),
-            request.params.as_ref(),
-            response,
-        )
+        self.answer(FillData::Deltas, request.request_id, (start, end), response)
     }
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
@@ -430,13 +412,7 @@ impl DataClient for FakeClient {
             UnixNanos::from(end),
             request.params.clone(),
         ));
-        self.answer(
-            FillData::Trades,
-            request.request_id,
-            (start, end),
-            request.params.as_ref(),
-            response,
-        )
+        self.answer(FillData::Trades, request.request_id, (start, end), response)
     }
 
     /// One bar, closing on Friday at 10:00, if the window holds it.
@@ -461,7 +437,6 @@ impl DataClient for FakeClient {
             FillData::Bars(bar_type),
             request.request_id,
             (start, end),
-            request.params.as_ref(),
             response,
         )
     }
@@ -487,7 +462,6 @@ impl DataClient for FakeClient {
             FillData::Funding,
             request.request_id,
             (start, end),
-            request.params.as_ref(),
             response,
         )
     }
@@ -595,20 +569,19 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let asked_twice = venue.borrow().asked.len();
     fill(dir.path(), &venue, &book_of, (ts(FRI), ts(WED)), DAY).unwrap();
 
-    // The definition over the window, then a day a request from its start,
-    // each with the definition's price precision; the weekend asked once,
-    // answered empty. Then only what Tuesday adds; then nothing.
-    let precision = Some(2);
+    // The definition over the window, then a day a request from its start;
+    // the weekend asked once, answered empty. Then only what Tuesday adds;
+    // then nothing.
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(FRI), before(TUE), None),
-            (FillData::Depth, ns(FRI), ns(SAT), precision),
-            (FillData::Depth, after(SAT), ns(SUN), precision),
-            (FillData::Depth, after(SUN), ns(MON), precision),
-            (FillData::Depth, after(MON), before(TUE), precision),
+            (FillData::Instrument, ns(FRI), before(TUE)),
+            (FillData::Depth, ns(FRI), ns(SAT)),
+            (FillData::Depth, after(SAT), ns(SUN)),
+            (FillData::Depth, after(SUN), ns(MON)),
+            (FillData::Depth, after(MON), before(TUE)),
             // The definition stored, the catalog answers it.
-            (FillData::Depth, ns(TUE), ns(WED), precision),
+            (FillData::Depth, ns(TUE), ns(WED)),
         ]
     );
     assert_eq!(asked_twice, 6);
@@ -674,8 +647,8 @@ fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, sliver.0, sliver.1, None),
-            (FillData::Depth, sliver.0, sliver.1, Some(2)),
+            (FillData::Instrument, sliver.0, sliver.1),
+            (FillData::Depth, sliver.0, sliver.1),
         ]
     );
 }
@@ -703,7 +676,7 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
 
     let windows: Vec<(u64, u64)> = venue.borrow().asked[1..]
         .iter()
-        .map(|&(_, from, to, _)| (from, to))
+        .map(|&(_, from, to)| (from, to))
         .collect();
     assert_eq!(
         windows,
@@ -741,7 +714,7 @@ fn a_run_of_empty_windows_does_not_end_the_fill() {
 
     let windows: Vec<(u64, u64)> = venue.borrow().asked[1..]
         .iter()
-        .map(|&(_, from, to, _)| (from, to))
+        .map(|&(_, from, to)| (from, to))
         .collect();
     assert_eq!(
         windows,
@@ -789,8 +762,8 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Depth, after(SUN), ns(MON) + 1, Some(2)),
-            (FillData::Depth, ns(MON) + 2, before(TUE), Some(2)),
+            (FillData::Depth, after(SUN), ns(MON) + 1),
+            (FillData::Depth, ns(MON) + 2, before(TUE)),
         ]
     );
     assert_eq!(
@@ -873,13 +846,12 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
     )
     .unwrap();
 
-    let precision = Some(2);
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(MON), before(WED), None),
-            (FillData::Deltas, ns(MON), ns(TUE), precision),
-            (FillData::Deltas, after(TUE), before(WED), precision),
+            (FillData::Instrument, ns(MON), before(WED)),
+            (FillData::Deltas, ns(MON), ns(TUE)),
+            (FillData::Deltas, after(TUE), before(WED)),
         ]
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -891,7 +863,8 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
 
 const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-/// GCZ26's minute bar closing at `close`, stamped at its open.
+/// GCZ26's minute bar closing at `close`, stamped at its close, as
+/// Databento's client stamps bars by default (`bars_timestamp_on_close`).
 fn bar(close: &str) -> Bar {
     let price = Price::from("4000.00");
     Bar::new(
@@ -901,7 +874,7 @@ fn bar(close: &str) -> Bar {
         price,
         price,
         Quantity::from(1),
-        (ts(close) - SignedDuration::from_mins(1)).into(),
+        ts(close).into(),
         ts(close).into(),
     )
 }
@@ -943,15 +916,14 @@ fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_serie
     fill_slices(dir.path(), &venue, &slices, DAY).unwrap();
 
     let bars = FillData::Bars(BarType::from(BARS));
-    let precision = Some(2);
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(FRI), before(SUN), None),
-            (FillData::Funding, ns(FRI), ns(SAT), precision),
-            (FillData::Funding, after(SAT), before(SUN), precision),
-            (bars, ns(FRI), ns(SAT), precision),
-            (bars, after(SAT), before(SUN), precision),
+            (FillData::Instrument, ns(FRI), before(SUN)),
+            (FillData::Funding, ns(FRI), ns(SAT)),
+            (FillData::Funding, after(SAT), before(SUN)),
+            (bars, ns(FRI), ns(SAT)),
+            (bars, after(SAT), before(SUN)),
         ]
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);

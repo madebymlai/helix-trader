@@ -108,7 +108,9 @@
 //! so an exit hit at the time limit counts as inside the window. On bars
 //! alone the venue replays each bar's open, high, low and close, fills an
 //! entry at the last close, a take profit at its limit and a stop at its
-//! trigger: bars-only targets are as optimistic as bars-only backtests.
+//! trigger when the bar moves through it after its open, at the open when
+//! the bar opens beyond it (a sell stop at 100 fills at 90 on a bar opening
+//! at 90): bars-only targets are as optimistic as bars-only backtests.
 
 use std::{
     any::Any,

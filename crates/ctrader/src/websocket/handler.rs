@@ -37,7 +37,7 @@
 //! change waits in the subscription state, which the new session sends;
 //! the auth frames and a renewal wait for the new connection. The
 //! heartbeat goes to the current connection. A frame whose write timed out
-//! may have reached cTrader: it counts as sent.
+//! or failed after it began may have reached cTrader: it counts as sent.
 //!
 //! Trade requests (orders, amendments, cancels, closes) go out under the
 //! `clientMsgId` their caller chose, who learns only whether the frame was
@@ -97,8 +97,8 @@ fn playground(names: &CTraderSettingNames) -> String {
 pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 
 /// Where a trade request's sending goes: `Ok` once its frame is written
-/// (or its write timed out: cTrader may have it), an error if it never
-/// was.
+/// (or its write timed out or failed after it began: cTrader may have
+/// it), an error if it never was.
 pub(super) type Sent = oneshot::Sender<Result<(), CTraderError>>;
 
 /// Why a frame was not sent.
@@ -420,18 +420,10 @@ impl CTraderWsHandler {
         if client.connection_mode().is_reconnect() {
             return Err(Unsent::ConnectionChanged);
         }
-        match client
+        client
             .send_bytes_on_connection(frame, None, connection)
             .await
-        {
-            Ok(()) => Ok(()),
-            Err(SendError::WriteTimeout) => {
-                log::warn!("cTrader frame write timed out: cTrader may have it");
-                Ok(())
-            }
-            Err(SendError::ConnectionChanged) => Err(Unsent::ConnectionChanged),
-            Err(e) => Err(Unsent::Failed(CTraderError::Transport(e.to_string()))),
-        }
+            .or_else(failed_send)
     }
 
     /// cTrader's keepalive: a `ProtoHeartbeatEvent` frame, every 10 s
@@ -1142,6 +1134,26 @@ fn renewal_failure(error: &CTraderError, names: &CTraderSettingNames) -> String 
     }
 }
 
+/// A frame whose send failed with `error`: sent, as far as the session can
+/// tell, if its write may have begun, its outcome left to cTrader's answer
+/// or the reconciliation; else unsent. A write that timed out
+/// (`WriteTimeout`) or failed (`BrokenPipe`) may have begun, and Nautilus
+/// then reconnects; `BrokenPipe` also stands for the writer gone, with the
+/// frame or before it, which is no proof that it was never sent.
+fn failed_send(error: SendError) -> Result<(), Unsent> {
+    match error {
+        SendError::WriteTimeout | SendError::BrokenPipe(_) => {
+            log::warn!("cTrader frame write failed ({error}): cTrader may have it");
+            Ok(())
+        }
+        SendError::ConnectionChanged => Err(Unsent::ConnectionChanged),
+        SendError::InvalidInput(_)
+        | SendError::BufferFull
+        | SendError::Closed
+        | SendError::Timeout => Err(Unsent::Failed(CTraderError::Transport(error.to_string()))),
+    }
+}
+
 /// The error of a refused authentication, with what to check, in the
 /// settings `names` names. Only the code: the description is not shown,
 /// so nothing cTrader echoes from the request can reach a log.
@@ -1169,4 +1181,35 @@ fn auth_failure(stage: &str, error: &CTraderError, names: &CTraderSettingNames) 
         _ => format!("see {}", names.guide),
     };
     format!("cTrader refused the {stage} authentication ({code}): {hint}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write that began and failed, the transport broken under it, may
+    /// have reached cTrader, as one that timed out may: Nautilus' adapter
+    /// guide leaves such an outcome unknown, never a rejection.
+    #[test]
+    fn a_frame_whose_write_failed_after_it_began_counts_as_sent() {
+        assert!(failed_send(SendError::BrokenPipe("connection reset".to_owned())).is_ok());
+        assert!(failed_send(SendError::WriteTimeout).is_ok());
+    }
+
+    /// Refused before its write began: never sent.
+    #[test]
+    fn a_frame_refused_before_its_write_is_unsent() {
+        for refused in [
+            SendError::InvalidInput("empty".to_owned()),
+            SendError::BufferFull,
+            SendError::Closed,
+            SendError::Timeout,
+        ] {
+            assert!(matches!(failed_send(refused), Err(Unsent::Failed(_))));
+        }
+        assert!(matches!(
+            failed_send(SendError::ConnectionChanged),
+            Err(Unsent::ConnectionChanged)
+        ));
+    }
 }

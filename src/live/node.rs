@@ -9,7 +9,8 @@
 //! (`promote_staged`), adds the actor of the strategy's retrains, if it is
 //! retrained (`add_actor`), then the strategy (`add_strategy`), claims its
 //! instruments' external orders, calls `run`, which stops on SIGINT or
-//! SIGTERM, and disposes the node, which closes the cache database.
+//! SIGTERM, and disposes the node, which closes the cache database, as
+//! it does when a step after its build fails.
 //! Follows the IB adapter's `node_exec_tester` example.
 //! Never names a broker.
 
@@ -51,7 +52,8 @@ pub struct Clients {
 /// configuring the cache (sized for the warmup) and `data_engine`
 /// the data engine (see `warmup::live_data_engine_config`), then promotes
 /// what the last run of its instance left staged (`promote_staged`), so
-/// that the catalog holds it before anything reads or writes it.
+/// that the catalog holds it before anything reads or writes it; a node
+/// that cannot promote it is disposed.
 ///
 /// The cache is persisted to `cache_database`, if given (`Live`'s Redis,
 /// see `redis::start`), under `trader_id`'s keys: the node loads the orders,
@@ -113,14 +115,19 @@ pub fn build(
         }
     }
     let mut node = builder.build()?;
-    promote_staged(&mut node)?;
-    Ok(node)
+    match promote_staged(&mut node) {
+        Ok(()) => Ok(node),
+        Err(e) => {
+            node.dispose();
+            Err(e)
+        }
+    }
 }
 
 /// Adds `retraining`, the actor of the retrains of `strategy` if it is
 /// retrained, then `strategy` to `node` claiming the external orders of
 /// `instrument_ids`, and runs it until SIGINT or SIGTERM, then disposes
-/// it.
+/// it, as it does when any of that fails.
 ///
 /// # Errors
 ///
@@ -130,6 +137,26 @@ pub fn build(
 /// unresolved after the post-stop delay included).
 pub(super) async fn run<S>(
     mut node: LiveNode,
+    instrument_ids: &[InstrumentId],
+    strategy: S,
+    retraining: Option<RetrainActor>,
+) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+{
+    let result = match add(&mut node, instrument_ids, strategy, retraining) {
+        Ok(()) => node.run().await,
+        Err(e) => Err(e),
+    };
+    // As Nautilus documents it: disposing closes the cache database.
+    node.dispose();
+    result
+}
+
+/// Adds `retraining`, if any, then `strategy` to `node`, claiming the
+/// external orders of `instrument_ids` (see `run`).
+fn add<S>(
+    node: &mut LiveNode,
     instrument_ids: &[InstrumentId],
     strategy: S,
     retraining: Option<RetrainActor>,
@@ -151,11 +178,7 @@ where
         node.add_actor(retraining)?;
     }
     node.add_strategy(strategy)?;
-    node.register_external_order_claims(strategy_id, &unclaimed)?;
-    // As Nautilus documents it: disposing closes the cache database.
-    let result = node.run().await;
-    node.dispose();
-    result
+    node.register_external_order_claims(strategy_id, &unclaimed)
 }
 
 /// How often Nautilus purges the cache of closed orders, closed positions

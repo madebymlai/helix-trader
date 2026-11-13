@@ -114,7 +114,9 @@ impl Live {
         let instrument_ids = loaded_instrument_ids(requirements, Timestamp::now())?;
         // The node would install the logger when built, after the clients
         // are set up: install it now with the node's trader and config, and
-        // the node keeps it. The adapter's `tracing` output joins it.
+        // the node keeps it. The adapters' `tracing` output goes to stdout
+        // beside it, filtered by RUST_LOG (warn by default), never to its
+        // log files (`init_tracing`).
         let file_config = self.logging.file_config.clone().unwrap_or_default();
         let _log_guard = init_logging(
             self.trader_id,

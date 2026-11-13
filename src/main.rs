@@ -247,8 +247,11 @@ struct LiveArgs {
     #[arg(long, default_value = "1")]
     leverage: Decimal,
     /// The node's trader: its cache in Redis is the trader's, which each run
-    /// loads. Live processes running at once each need their own. Parsed by
-    /// Nautilus' checked `FromStr`, since clap would otherwise pick
+    /// loads. Live processes running at once each need their own, and on
+    /// one venue account their own tag, the part after the last hyphen:
+    /// Nautilus puts only the tag in client order, order list and position
+    /// ids, so `HELIX-001` and `OTHER-001` collide. Parsed by Nautilus'
+    /// checked `FromStr`, since clap would otherwise pick
     /// `TraderId: From<&str>`, which panics.
     #[arg(long, default_value = "HELIX-001", value_parser = TraderId::from_str)]
     trader_id: TraderId,
@@ -460,13 +463,12 @@ async fn main() -> anyhow::Result<()> {
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = data_requirements(args.run.strategy, &args.run.config)?;
-    // A fill may run no node, so no node installs Nautilus' logger for it:
-    // install it here, as a node would (the fill's node keeps it), so the
-    // `log` output of this crate and Nautilus, and the adapters' `tracing`
-    // warnings (why a contract did not resolve), reach the console.
-    // Configured by NAUTILUS_LOG and RUST_LOG. Temporary until
-    // nautilus_trader#5472 is fixed: every source then fills through the
-    // node, which installs the logger.
+    // A fill may run no node (one whose catalog lacks nothing runs none),
+    // so no node installs Nautilus' logger for it: install it here, as
+    // Nautilus' logging guide says for a run without a kernel (the fill's
+    // node keeps it), so the `log` output of this crate and Nautilus, and
+    // the adapters' `tracing` warnings (why a contract did not resolve),
+    // reach the console. Configured by NAUTILUS_LOG and RUST_LOG.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),

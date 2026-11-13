@@ -11,7 +11,7 @@
 //! cannot: a node stops on the SIGINT its test sends to the whole process,
 //! the `tracing` subscriber `Live::run` installs can be installed only once
 //! per process, there is one node per process (`docs/ARCHITECTURE.md`,
-//! "Nautilus v2 constraints"), and modules of one venue read and trade the
+//! "Process constraints"), and modules of one venue read and trade the
 //! same account. So the first module to opt in claims the process
 //! (`claim_process`), and another module's test fails before connecting.
 //!

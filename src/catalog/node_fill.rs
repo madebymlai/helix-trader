@@ -21,13 +21,7 @@
 //! records the first failure (a failed request, a failure envelope) and stops
 //! the node; `run` returns it. See `README.md`, "Fill paths".
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, VecDeque},
-    fmt,
-    path::Path,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::VecDeque, fmt, path::Path, rc::Rc};
 
 use anyhow::{Context, bail, ensure};
 use jiff::{SignedDuration, Timestamp};
@@ -46,7 +40,6 @@ use nautilus_live::{
 use nautilus_model::{
     data::{BarType, NautilusDataType},
     identifiers::{InstrumentId, TraderId},
-    instruments::Instrument,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
@@ -283,11 +276,8 @@ impl NodeFill {
     /// Fills the catalog in `catalog_dir` through a live node with the
     /// clients and the catalog, one request at a time, each with
     /// `update_catalog`, so the data engine writes each answer back over
-    /// its window, and what was written stays if a later window fails. Each
-    /// series request carries the price precision of its
-    /// instrument's definition, asked first (`price_precision`: Databento's
-    /// client then asks for no definitions of its own). Nothing asked
-    /// builds no node.
+    /// its window, and what was written stays if a later window fails.
+    /// Nothing asked builds no node.
     ///
     /// # Errors
     ///
@@ -332,7 +322,6 @@ impl NodeFill {
             requests: requests.into(),
             pending: None,
             rows: 0,
-            precisions: HashMap::new(),
             outcome: Rc::clone(&outcome),
         })?;
         let ran = node.run().await;
@@ -374,8 +363,6 @@ struct FillActor {
     pending: Option<(UUID4, FillRequest)>,
     /// The rows the request in flight has got so far, over its windows.
     rows: usize,
-    /// The price precision of each instrument whose definition came back.
-    precisions: HashMap<InstrumentId, u8>,
     outcome: Rc<RefCell<Outcome>>,
 }
 
@@ -409,11 +396,6 @@ impl FillActor {
         let mut params = vec![("update_catalog".to_string(), json!(true))];
         if let Some(period) = asked.period {
             params.extend(time_range::params(from, to, period));
-        }
-        if data != FillData::Instrument
-            && let Some(precision) = self.precisions.get(&instrument_id)
-        {
-            params.push(("price_precision".to_string(), json!(precision)));
         }
         let params = Some(Params::new(params.into_iter().collect()));
         let (from, to) = (Some(from), Some(to));
@@ -467,11 +449,7 @@ impl DataActor for FillActor {
             return Ok(());
         }
         self.rows += match response.response() {
-            Some(DataResponse::Instrument(answer)) => {
-                self.precisions
-                    .insert(answer.instrument_id, answer.data.price_precision());
-                1
-            }
+            Some(DataResponse::Instrument(_)) => 1,
             Some(DataResponse::Quotes(answer)) => answer.data.len(),
             Some(DataResponse::Trades(answer)) => answer.data.len(),
             Some(DataResponse::BookDepth(answer)) => answer.data.len(),

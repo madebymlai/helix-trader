@@ -15,7 +15,7 @@ A strategy implements Nautilus' `Strategy` trait; backtest and live do not depen
 
 **Model strategies:** for features, decisions, labels, training, stores, meta-labeling or version bumps, read the [model guide](../model/README.md). `model_ema/` and [`config/model_ema.toml`](../../config/model_ema.toml) are the example. For run orchestration see [backtest](../backtest/README.md); for live operations see [live](../live/README.md).
 
-The runtime calls `DataActor::on_start`, not `Strategy::on_start`; call the latter explicitly from the former if its behavior is needed, such as reactivating GTD timers.
+Nautilus' `nautilus_strategy!` starts a strategy with `Strategy::on_start`, which reactivates GTD timers when `manage_gtd_expiry` is set, then `DataActor::on_start`, where the strategy's own start goes; it need not call the former.
 
 ## Configuration and series
 

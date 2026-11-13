@@ -203,8 +203,9 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// The custom data `backtest` replays (see `Backtest::series`), read from
 /// its catalog, each series over its slice, both ends included: the data
 /// the node cannot load (see `run_config`). Nautilus decodes each type by
-/// its name, so the strategy registers its custom types with Nautilus
-/// before (`nautilus_serialization::ensure_custom_data_registered`).
+/// its name, so each must be registered with Nautilus before the run
+/// (`nautilus_serialization::ensure_custom_data_registered`) by the code
+/// declaring its series, as the tests do: the run registers none.
 ///
 /// # Errors
 ///
@@ -252,20 +253,19 @@ pub(super) fn run<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let mut node = build(config, custom, strategy)?;
-    let results = node.run()?;
-    let [result] = <[BacktestResult; 1]>::try_from(results)
-        .map_err(|results| anyhow!("{} results from one run", results.len()))?;
-    let config = &node.configs()[0];
-    let quotes = config
-        .data()
-        .iter()
-        .filter(|data| *data.data_type() == NautilusDataType::QuoteTick)
-        .map(|data| replayed_quotes(data, config.start(), config.end()));
-    let engine = node.get_engine(RUN_ID).context("no engine for the run")?;
-    let outcome = Outcome::new(result, &engine.kernel().cache.borrow(), quotes);
-    node.dispose();
-    outcome
+    on_node(config, custom, strategy, |node| {
+        let results = node.run()?;
+        let [result] = <[BacktestResult; 1]>::try_from(results)
+            .map_err(|results| anyhow!("{} results from one run", results.len()))?;
+        let config = &node.configs()[0];
+        let quotes = config
+            .data()
+            .iter()
+            .filter(|data| *data.data_type() == NautilusDataType::QuoteTick)
+            .map(|data| replayed_quotes(data, config.start(), config.end()));
+        let engine = node.get_engine(RUN_ID).context("no engine for the run")?;
+        Outcome::new(result, &engine.kernel().cache.borrow(), quotes)
+    })
 }
 
 /// The quotes `data` replays in a run from `start` to `end`, in time
@@ -323,23 +323,35 @@ pub(super) fn run_dataset<S>(
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let mut node = build(config, custom, strategy)?;
-    node.run()?;
-    node.dispose();
-    Ok(())
+    on_node(config, custom, strategy, |node| node.run().map(drop))
 }
 
-/// A built `BacktestNode` of `config`, `MaxDrawdown` registered with the
-/// portfolio, `strategy` added and `custom` added to its engine.
-fn build<S>(
+/// What `run` makes of a new `BacktestNode` of `config`, built (see
+/// `build`), the node then disposed whatever came of it, as Nautilus
+/// requires of a node before the next starts on the thread
+/// (`concepts/architecture.md`, "Processes and threads"): a model
+/// backtest goes on to further nodes after a failed dataset run.
+fn on_node<S, T>(
     config: BacktestRunConfig,
     custom: Vec<Data>,
     strategy: S,
-) -> anyhow::Result<BacktestNode>
+    run: impl FnOnce(&mut BacktestNode) -> anyhow::Result<T>,
+) -> anyhow::Result<T>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
     let mut node = BacktestNode::new(vec![config])?;
+    let outcome = build(&mut node, custom, strategy).and_then(|()| run(&mut node));
+    node.dispose();
+    outcome
+}
+
+/// Builds `node`, registers `MaxDrawdown` with the portfolio, adds
+/// `strategy` and `custom` to its engine.
+fn build<S>(node: &mut BacktestNode, custom: Vec<Data>, strategy: S) -> anyhow::Result<()>
+where
+    S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
+{
     node.build()?;
     let engine = node
         .get_engine_mut(RUN_ID)
@@ -353,7 +365,7 @@ where
     if !custom.is_empty() {
         engine.add_data(custom, None, false, true)?;
     }
-    Ok(node)
+    Ok(())
 }
 
 #[cfg(test)]
