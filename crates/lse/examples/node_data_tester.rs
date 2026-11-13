@@ -3,12 +3,13 @@
 //! Nautilus' data testing spec (`docs/developer_guide/spec_data_testing.md`)
 //! the adapter supports: TC-D01, the venue's instruments, which the node's
 //! catalog answers, LSE publishing no definitions; TC-D31, historical
-//! trades, of gold futures (gold spot, a commodity, has none); and TC-D41,
-//! historical bars, gold spot's 1-minute candles; and, by a second tester,
-//! TC-D20, gold futures' quotes, which the client streams on data-ws, and
-//! TC-D70, their subscription ended on stop. The adapter streams no other
-//! kind, so every other subscription case is skipped, and LSE has no
-//! quotes of a derived market's past, so TC-D21 is.
+//! trades, of gold futures (gold spot's fails with LSE's refusal, a
+//! commodity, of which LSE stores no trades); TC-D41, historical bars,
+//! gold spot's 1-minute candles; and, by a second tester, TC-D20, gold
+//! futures' quotes, which the client streams on data-ws, and TC-D70, their
+//! subscription ended on stop. The adapter streams no other kind, so every
+//! other subscription case is skipped, and LSE has no quotes of a derived
+//! market's past, so TC-D21 is.
 //!
 //! LSE publishes no definitions: the tester writes the crate's test
 //! definitions of the two series into a temporary catalog the node reads,
