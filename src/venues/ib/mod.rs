@@ -44,6 +44,8 @@ mod gateway;
 pub use gateway::IbAccount;
 use gateway::IbGateway;
 mod live;
+#[cfg(test)]
+pub(in crate::venues) use live::offline_clients;
 pub(crate) use live::{IbLiveArgs, clients};
 
 /// IB's settings of a catalog fill, fill-catalog's flags: the client id its

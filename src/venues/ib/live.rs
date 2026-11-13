@@ -17,10 +17,10 @@ use nautilus_interactive_brokers::{
     factories::{InteractiveBrokersDataClientFactory, InteractiveBrokersExecutionClientFactory},
 };
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::identifiers::InstrumentId;
+use nautilus_model::identifiers::{InstrumentId, Venue};
 
 use super::{IbAccount, IbGateway, data_client_config};
-use crate::live::node::Clients;
+use crate::live::node::{Clients, ExecClient};
 
 /// IB's settings of a live node, the live command's flags: the account
 /// traded and the client id of the node's IB clients (see `clients`).
@@ -98,19 +98,40 @@ fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[Instrumen
 }
 
 impl IbClients {
-    /// The factories and configs, for the node: the default route for
-    /// data and orders, since IB spans many venues.
-    pub(crate) fn into_node_clients(self) -> Clients {
+    /// The factories and configs, for the node: the data client routed the
+    /// venues of `data_venues`, those whose live data is IB's, and none if
+    /// none is, never the default (see `live::node::Clients`); the execution
+    /// client the default route of orders, since IB trades many venues, GLBX
+    /// among them, whose data is LSE's.
+    pub(crate) fn into_node_clients(self, data_venues: &[Venue]) -> Clients {
         Clients {
             data_factory: Box::new(InteractiveBrokersDataClientFactory::new()),
             data_config: Box::new(self.data),
-            exec: Some((
-                Box::new(InteractiveBrokersExecutionClientFactory::new()),
-                Box::new(self.exec),
-            )),
-            routing: RoutingConfig::builder().default(true).build(),
+            data_routing: RoutingConfig {
+                default: false,
+                venues: (!data_venues.is_empty())
+                    .then(|| data_venues.iter().map(ToString::to_string).collect()),
+            },
+            exec: Some(ExecClient {
+                factory: Box::new(InteractiveBrokersExecutionClientFactory::new()),
+                config: Box::new(self.exec),
+                routing: RoutingConfig::builder().default(true).build(),
+            }),
         }
     }
+}
+
+/// IB's clients of a node trading `instrument_ids` on the paper account
+/// DU1234567, on a gateway at 127.0.0.1:4002 that is not started: created,
+/// they connect to nothing.
+#[cfg(test)]
+pub(in crate::venues) fn offline_clients(instrument_ids: &[InstrumentId]) -> IbClients {
+    let gateway = IbGateway {
+        host: "127.0.0.1".to_string(),
+        port: 4002,
+        client_id: 11,
+    };
+    configs(&gateway, &"DU1234567".parse().unwrap(), instrument_ids)
 }
 
 #[cfg(test)]
@@ -140,9 +161,34 @@ mod tests {
     fn the_execution_client_keeps_positions_as_the_broker_answers() {
         let clients = configs(&gateway(), &paper(), &[sxr8()]);
 
-        let created = created_oms_type(clients.into_node_clients());
+        let created = created_oms_type(clients.into_node_clients(&[]));
 
         assert_eq!(created, Broker::Ib.oms_type());
+    }
+
+    /// Never the default of data: Nautilus makes the first data client on
+    /// no venue the default, and refuses another made it after.
+    #[test]
+    fn the_data_client_is_routed_its_venues_and_the_execution_client_takes_every_order() {
+        let ibis = || configs(&gateway(), &paper(), &[sxr8()]);
+
+        let routed = ibis().into_node_clients(&[Venue::new("IBIS")]);
+        let none = ibis().into_node_clients(&[]);
+
+        assert_eq!(
+            routed.data_routing,
+            RoutingConfig {
+                default: false,
+                venues: Some(vec!["IBIS".to_string()])
+            }
+        );
+        assert_eq!(none.data_routing, RoutingConfig::default());
+        for clients in [routed, none] {
+            assert_eq!(
+                clients.exec.unwrap().routing,
+                RoutingConfig::builder().default(true).build()
+            );
+        }
     }
 
     #[test]

@@ -1,38 +1,55 @@
 //! The listings of CME contracts in LSE's catalogue: a contract is asked of
 //! LSE by the number of its listing, which names it alone, its exchange
-//! name naming a contract every ten years (see `CmeContract`).
+//! name naming a contract every ten years (see `CmeContract`), and streamed
+//! under the listing's symbol, the name LSE's CME stream takes it by.
 
 use anyhow::{Context, bail};
 use nautilus_core::collections::AtomicMap;
 use nautilus_model::identifiers::InstrumentId;
 
-use super::{client::LseHttpClient, query::PairsQuery};
+use super::{client::LseHttpClient, models::LsePair, query::PairsQuery};
 use crate::common::{consts::CME_MARKET, symbol::CmeContract};
 
-/// The numbers of the listings of the CME contracts looked up so far: a
-/// listing's number never changes, so each contract is looked up once.
+/// The listings of the CME contracts looked up so far: a listing never
+/// changes, so each contract is looked up once.
 #[derive(Debug, Default)]
-pub(crate) struct CmeListings(AtomicMap<InstrumentId, u64>);
+pub(crate) struct CmeListings(AtomicMap<InstrumentId, LsePair>);
 
 impl CmeListings {
-    /// The number of `contract`'s listing (`pair_id`): the one found
-    /// before, or the one LSE's catalogue lists under the contract's
-    /// exchange names, looked up through `http` in the order
-    /// `CmeContract::exchange_names` gives them, until one lists it.
+    /// The number of `contract`'s listing (`pair_id`), which names it alone
+    /// (see `listing`).
+    ///
+    /// # Errors
+    ///
+    /// As `listing`.
+    pub(crate) async fn pair_id(
+        &self,
+        http: &LseHttpClient,
+        contract: &CmeContract,
+    ) -> anyhow::Result<u64> {
+        Ok(self.listing(http, contract).await?.pair_id)
+    }
+
+    /// `contract`'s listing: the one found before, or the one LSE's
+    /// catalogue lists under the contract's exchange names, looked up
+    /// through `http` in the order `CmeContract::exchange_names` gives them,
+    /// until one lists it. Its symbol is the name LSE's CME stream takes the
+    /// contract by, the HTTP API's (LSE's WebSocket documentation,
+    /// "Contracts").
     ///
     /// # Errors
     ///
     /// Returns an error naming the contract if LSE lists it under neither
     /// name, with the listings LSE has of them, if LSE lists it twice, or
     /// if a lookup fails (LSE's refusal in the error).
-    pub(crate) async fn pair_id(
+    pub(crate) async fn listing(
         &self,
         http: &LseHttpClient,
         contract: &CmeContract,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<LsePair> {
         let id = contract.instrument_id();
-        if let Some(pair_id) = self.0.get_cloned(&id) {
-            return Ok(pair_id);
+        if let Some(listing) = self.0.get_cloned(&id) {
+            return Ok(listing);
         }
         let names = contract.exchange_names();
         let mut listed = Vec::new();
@@ -44,8 +61,8 @@ impl CmeListings {
                 .with_context(|| format!("looking up {query}"))?;
             if let Some(listing) = contract.listing(&pairs)? {
                 log::info!("{contract} is LSE's listing {listing}");
-                self.0.insert(id, listing.pair_id);
-                return Ok(listing.pair_id);
+                self.0.insert(id, listing.clone());
+                return Ok(listing.clone());
             }
             listed.extend(pairs);
         }

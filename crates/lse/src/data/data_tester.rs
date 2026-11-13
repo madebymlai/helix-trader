@@ -1,14 +1,16 @@
 //! The data client on a Nautilus node, driven by Nautilus' `DataTester` as
 //! Nautilus' data testing specification runs an adapter
-//! (`docs/developer_guide/spec_data_testing.md`), for the data it streams,
+//! (`docs/developer_guide/spec_data_testing.md`), for the data it streams:
 //! a series' quotes and an option contract's trades, against the mock LSE
 //! socket replaying LSE's captured frames and, for the option, the frames
-//! LSE's documentation gives: the definition loaded from the node's catalog
-//! (TC-D01, LSE publishing none, from the catalog alone), quotes and trades
-//! flowing after start (TC-D20, TC-D30) and their subscription ended on
-//! stop (TC-D70). TC-D21, historical quotes, is
-//! skipped here: LSE has no quotes of a derived market's past, and a CME
-//! contract's run against LSE in `examples/node_data_tester.rs`. A CME
+//! LSE's documentation gives, and a `GLBX` contract's quotes and trades,
+//! against the mock CME stream replaying LSE's documented records; the
+//! definition loaded from the node's catalog (TC-D01, LSE publishing none,
+//! from the catalog alone), quotes and trades flowing after start (TC-D20,
+//! TC-D30) and their subscriptions ended on stop (TC-D70). TC-D21,
+//! historical quotes, is skipped here: LSE has no quotes of a derived
+//! market's past, and a CME contract's run against LSE in
+//! `examples/node_data_tester.rs`. A CME
 //! contract's history of book deltas and depth, which `DataTester` does not
 //! request, reaches a custom actor on a node against the mock LSE peer, as
 //! the specification asks historical book deltas to be tested.
@@ -42,8 +44,9 @@ use serde_json::json;
 use crate::{
     LseDataClientConfig, LseDataClientFactory,
     testing::{
-        AAPL_CALL, API_KEY, CME_API_KEY, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GOLD_FUTURES, MockLse,
-        MockLseSocket, PAIRS_GCZ6, Reply, aapl_call, data_ws_answer, gcz26, gold_futures,
+        AAPL_CALL, API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, ESZ26, GCZ26, GCZ26_BOOK,
+        GCZ26_ORDERS, GOLD_FUTURES, MockCmeStream, MockLse, MockLseSocket, PAIRS_ESZ6, PAIRS_GCZ6,
+        Reply, aapl_call, data_ws_answer, dbn_frames, esz26, gcz26, gold_futures, held,
     },
 };
 
@@ -401,5 +404,125 @@ async fn an_actor_receives_lse_s_book_deltas_and_depth_of_a_cme_contract() {
     assert_eq!(
         (depths[0].bids[0].price, depths[0].asks[0].price),
         (Price::from("3908.10"), Price::from("3908.30"))
+    );
+}
+
+/// LSE's documented ESZ6 at Level 1, its definition in the node's catalog:
+/// the tester's quotes open with its best bid and offer; then the stream
+/// sends its live records, the last a trade, and the node stops once the
+/// trade reached the message bus.
+#[tokio::test]
+async fn the_data_tester_receives_a_cme_contract_s_quotes_and_trades_from_lse() {
+    let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
+    let stream = MockCmeStream::start(|_, _| held(dbn_frames(CME_ESZ6_DOCUMENTED), 4));
+    let dir = tempfile::tempdir().unwrap();
+    ParquetDataCatalog::new(dir.path(), None, None, None, None)
+        .write_instruments(vec![esz26()])
+        .unwrap();
+    let es = InstrumentId::from(ESZ26);
+    let config = LiveNodeConfig {
+        environment: Environment::Live,
+        trader_id: TraderId::from("TESTER-001"),
+        load_state: false,
+        save_state: false,
+        catalogs: vec![DataCatalogConfig::new(
+            dir.path().to_str().unwrap().to_string(),
+            None,
+            None,
+        )],
+        ..Default::default()
+    };
+    let lse = LseDataClientConfig::builder()
+        .cme_api_key(SecretString::from(CME_API_KEY))
+        .base_url_http(lse.url().to_string())
+        .base_url_ws_cme(stream.url().to_string())
+        .stream_ids(vec![es])
+        .build();
+    let mut node = LiveNodeBuilder::from_config(config)
+        .unwrap()
+        .with_name("LSE-TESTER")
+        .with_delay_post_stop_secs(1)
+        .add_data_client(None, Box::new(LseDataClientFactory::new()), Box::new(lse))
+        .unwrap()
+        .build()
+        .unwrap();
+    let tester = DataTesterConfig::builder()
+        .client_id(ClientId::from("LSE"))
+        .instrument_ids(vec![es])
+        .request_instruments(true)
+        .subscribe_quotes(true)
+        .subscribe_trades(true)
+        .can_unsubscribe(true)
+        .build()
+        .unwrap();
+    node.add_actor(DataTester::new(tester)).unwrap();
+    let quotes: Rc<RefCell<Vec<QuoteTick>>> = Rc::default();
+    let trades: Rc<RefCell<Vec<TradeTick>>> = Rc::default();
+    let (seen_quotes, seen_trades) = (Rc::clone(&quotes), Rc::clone(&trades));
+    msgbus::subscribe_quotes(
+        get_quotes_topic(es).into(),
+        TypedHandler::from(move |quote: &QuoteTick| seen_quotes.borrow_mut().push(*quote)),
+        None,
+    );
+    msgbus::subscribe_trades(
+        get_trades_topic(es).into(),
+        TypedHandler::from(move |trade: &TradeTick| seen_trades.borrow_mut().push(*trade)),
+        None,
+    );
+    let handle = node.handle();
+    let stopped = async {
+        wait_until_async(
+            || {
+                let any = !quotes.borrow().is_empty();
+                async move { any }
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        stream.release();
+        wait_until_async(
+            || {
+                let any = !trades.borrow().is_empty();
+                async move { any }
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        handle.stop();
+    };
+
+    let (ran, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(node.run(), stopped)
+    })
+    .await
+    .expect("the node stops within a minute");
+    ran.unwrap();
+    node.dispose();
+
+    let quotes = quotes.borrow();
+    let first = quotes[0];
+    assert_eq!(
+        (
+            first.bid_price,
+            first.bid_size,
+            first.ask_price,
+            first.ask_size
+        ),
+        (
+            Price::from("7569.75"),
+            Quantity::from(2),
+            Price::from("7570.00"),
+            Quantity::from(11)
+        )
+    );
+    assert!(quotes.iter().all(|quote| quote.bid_price < quote.ask_price));
+    let trade = trades.borrow()[0];
+    assert_eq!(
+        (trade.price, trade.size, trade.aggressor_side),
+        (
+            Price::from("7570.00"),
+            Quantity::from(1),
+            AggressorSide::NoAggressor
+        )
     );
 }

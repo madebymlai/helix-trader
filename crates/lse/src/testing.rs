@@ -22,8 +22,15 @@ use nautilus_model::{
 use nautilus_network::http::Url;
 use sha2::{Digest, Sha256};
 
-pub use self::socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer};
+pub use self::{
+    cme::{
+        CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_JSON, CME_KEY_UNKNOWN, CME_SYMBOL_UNAVAILABLE,
+        CmeAction, CmeFrame, ESZ26, MockCmeStream, dbn_frame, dbn_frames, frames, held, sent,
+    },
+    socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer},
+};
 
+mod cme;
 mod socket;
 
 /// The trade slice of LSE's gold futures series (`GOLD` in `futures`) over
@@ -109,6 +116,10 @@ pub const PAIRS_GCZ4: &str = include_str!("../test_data/pairs_cme_gcz4.json");
 pub const PAIRS_NGZ6: &str = include_str!("../test_data/pairs_cme_ngz6.json");
 pub const PAIRS_NGZ26: &str = include_str!("../test_data/pairs_cme_ngz26.json");
 pub const PAIRS_ESZ26: &str = include_str!("../test_data/pairs_cme_esz26.json");
+/// LSE's catalogue of GCG7, captured the same way: the contracts of 2017
+/// and of 2027 (4000000192), the second the next GC contract after GCZ6 of
+/// 2026 that LSE's CME stream carries (`CME_GCZ6_GCG7`).
+pub const PAIRS_GCG7: &str = include_str!("../test_data/pairs_cme_gcg7.json");
 
 /// The pair id LSE gives GCZ6 of 2026, `GCZ26.GLBX`.
 pub const GCZ26_PAIR_ID: u64 = 4_000_000_002;
@@ -283,6 +294,36 @@ pub fn gcz26() -> InstrumentAny {
             .min_quantity(Quantity::from(1))
             .ts_event(at("2026-07-31T00:00:00Z"))
             .ts_init(at("2026-07-31T00:00:00Z"))
+            .build()
+            .expect("a valid futures contract"),
+    )
+}
+
+/// A definition of ESZ6 of 2026, `ESZ26.GLBX`, the contract of
+/// `CME_ESZ6_DOCUMENTED`, as one is written for a test: the E-mini S&P 500,
+/// $50 a point, priced in USD to two decimals in ticks of a quarter, listed
+/// on 17 September 2021 as LSE's catalogue lists it (`PAIRS_ESZ6`), its
+/// trading ending on the third Friday of December 2026 at 09:30 New York.
+#[must_use]
+pub fn esz26() -> InstrumentAny {
+    let at = |time: &str| UnixNanos::from(time.parse::<jiff::Timestamp>().expect("a time"));
+    InstrumentAny::FuturesContract(
+        FuturesContract::builder()
+            .instrument_id(InstrumentId::from(ESZ26))
+            .raw_symbol(Symbol::from("ESZ6"))
+            .asset_class(AssetClass::Index)
+            .exchange("XCME".into())
+            .underlying("ES".into())
+            .activation_ns(at("2021-09-17T00:00:00Z"))
+            .expiration_ns(at("2026-12-18T14:30:00Z"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .price_increment(Price::from("0.25"))
+            .multiplier(Quantity::from(50))
+            .lot_size(Quantity::from(1))
+            .min_quantity(Quantity::from(1))
+            .ts_event(at("2021-09-17T00:00:00Z"))
+            .ts_init(at("2021-09-17T00:00:00Z"))
             .build()
             .expect("a valid futures contract"),
     )
