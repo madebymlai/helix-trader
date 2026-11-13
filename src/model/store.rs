@@ -1332,7 +1332,7 @@ mod tests {
             store.directory,
             Path::new(
                 "models/STORE-001/\
-                 f7277a9c98b9b984d5db7d1cb7bf8c1b6e42049548156f4dc3e992bc6394474a/\
+                 1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
                  d8e8d5b98ec4b087d60cd5be6b5df0d0e42ee19eed327697daebb41eb9cd7b93/\
                  long/71377877de7137be466c5b846b99bcf0d3c1c6675cde6be211646fce844e2dd4"
             )

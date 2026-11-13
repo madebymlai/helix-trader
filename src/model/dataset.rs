@@ -73,9 +73,8 @@
 //! intervals, the cache: it is never consolidated.
 //!
 //! Beside the files, each dataset has a manifest, `manifest.json`: its
-//! strategy, fingerprint, feature names and payoff names in order, target
-//! spec and the days it holds, rewritten whole (write, then rename) at each
-//! write.
+//! strategy, fingerprint, feature names and payoff names in order, and
+//! target spec, rewritten whole (write, then rename) at each write.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -122,7 +121,7 @@ use crate::{
 /// then rebuilds every dataset and model. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows
 /// made without a bump; a change reaching none of them is bumped all the same.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -184,7 +183,9 @@ impl fmt::Display for SchemaMismatch {
 
 impl std::error::Error for SchemaMismatch {}
 
-/// What a dataset holds, enough to explain and rebuild it.
+/// What a dataset holds, enough to explain and rebuild it. The days it
+/// holds are the catalog's intervals of its rows (`Dataset::missing`),
+/// which it does not repeat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub strategy_id: StrategyId,
@@ -198,15 +199,6 @@ pub struct Manifest {
     pub payoff_names: Vec<String>,
     /// The target spec.
     pub target: TargetConfig,
-    /// The days stored, in runs of consecutive days.
-    pub days: Vec<Days>,
-}
-
-/// Consecutive UTC days, the first to the last.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Days {
-    pub first: Date,
-    pub last: Date,
 }
 
 /// The venue settings a dataset run takes, each of which its rows depend
@@ -533,29 +525,14 @@ impl Dataset {
         Ok(days)
     }
 
-    /// Writes the manifest of what the catalog holds, whole: beside the
-    /// last, then renamed over it.
+    /// Writes the manifest, whole: beside the last, then renamed over it.
     fn write_manifest(&self) -> anyhow::Result<()> {
-        let identifier = self.identifier();
-        let intervals = self
-            .catalog()
-            .get_intervals(&row_type().into(), Some(&identifier))
-            .with_context(|| format!("reading the days of the dataset {identifier}"))?;
-        let mut days: Vec<Days> = vec![];
-        for (start, end) in intervals {
-            let (first, last) = (day_of(start.into()), day_of(end.into()));
-            match days.last_mut() {
-                Some(days) if days.last.tomorrow()? == first => days.last = last,
-                _ => days.push(Days { first, last }),
-            }
-        }
         let manifest = Manifest {
             strategy_id: self.strategy_id,
             fingerprint: self.fingerprint.to_string(),
             feature_names: self.feature_names.clone(),
             payoff_names: self.payoff_names.clone(),
             target: self.target.clone(),
-            days,
         };
         let directory = self.directory()?;
         fs::create_dir_all(&directory)
@@ -1301,7 +1278,7 @@ mod tests {
         }
     }
     #[test]
-    fn the_manifest_names_the_features_the_payoff_the_target_the_days_and_the_fingerprint() {
+    fn the_manifest_names_the_features_the_payoff_the_target_and_the_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 2);
         for (time, from, to) in [
@@ -1335,19 +1312,6 @@ mod tests {
             ["take_profit_r", "stop_loss_r", "entry_cost"]
         );
         assert_eq!(manifest.target, target());
-        assert_eq!(
-            manifest.days,
-            [
-                Days {
-                    first: day("2026-01-05"),
-                    last: day("2026-01-06")
-                },
-                Days {
-                    first: day("2026-01-08"),
-                    last: day("2026-01-08")
-                },
-            ]
-        );
         assert_eq!(manifest.fingerprint, dataset.fingerprint().to_string());
     }
 
@@ -1389,7 +1353,7 @@ mod tests {
 
         assert_eq!(
             dataset.identifier(),
-            "DATASET-001-f05f404641b265ded277fdf0225f84d69ed83243becd8e9460763e46c761d8a1"
+            "DATASET-001-3d0e48528c359f4fdf8c9f3273cca169421759001ebfef577bacfa99940ea28d"
         );
     }
 
