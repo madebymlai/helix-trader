@@ -155,7 +155,7 @@ use crate::{
     rolls::Roller,
     strategy::{
         orders::{self, Trade},
-        r::R,
+        risk::R,
         warmup::{self, BookIndicator, CustomDataIndicator, Warmup},
     },
 };
@@ -718,7 +718,7 @@ mod tests {
     use crate::strategy::{
         AtrArgs, DataRequirements, Declared, EmaArgs, IndicatorsConfig, TickSeries,
         orders::{Bracket, Exits},
-        r::R,
+        risk::R,
     };
     use rust_decimal::Decimal;
 

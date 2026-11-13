@@ -15,7 +15,7 @@ use serde::{
 
 use super::{
     DataRequirements, Declaration, IndicatorsConfig, TickSeries,
-    orders::{Risk, Stake},
+    risk::{Risk, Stake},
     session::Session,
     tick_data,
 };
@@ -1396,7 +1396,7 @@ mod tests {
                 learner::LearnerConfig,
                 targets::{BracketSpec, Distance, Target},
             },
-            strategy::{AtrArgs, r::R},
+            strategy::{AtrArgs, risk::R},
         };
 
         /// A strategy trading on a model: one instrument, no fields of its

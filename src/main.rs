@@ -886,7 +886,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::{ema::EmaParams, r::R},
+        strategy::{ema::EmaParams, risk::R},
     };
     use jiff::SignedDuration;
 

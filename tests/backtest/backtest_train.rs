@@ -28,7 +28,7 @@ use helix_trader::{
         targets::Side,
         train::{Kept, Outcome, Trained, Training},
     },
-    strategy::{Declared, IndicatorArgs, r::R},
+    strategy::{Declared, IndicatorArgs, risk::R},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;

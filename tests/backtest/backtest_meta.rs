@@ -38,7 +38,7 @@ use helix_trader::{
         targets::Side,
         train::{Kept, Outcome, Trained},
     },
-    strategy::r::R,
+    strategy::risk::R,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;

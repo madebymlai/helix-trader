@@ -54,9 +54,7 @@ use crate::{
         handle::{Mode, ModelHandle},
     },
     strategy::{
-        Declaration, Part, Series, StandardConfig, Visitor,
-        orders::{self, Stake},
-        warmup::Warmup,
+        Declaration, Part, Series, StandardConfig, Visitor, orders, risk::Stake, warmup::Warmup,
     },
 };
 

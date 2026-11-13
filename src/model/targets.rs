@@ -175,7 +175,8 @@ use crate::{
     backtest::Commission,
     strategy::{
         AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
-        orders::{self, Bracket, Exits, OrderIds, Risk, Stake, Trade, worth},
+        orders::{self, Bracket, Exits, OrderIds, Trade, worth},
+        risk::{Risk, Stake},
         warmup::{self, Warmup},
     },
 };

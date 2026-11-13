@@ -76,11 +76,8 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use ustr::Ustr;
 
+use super::risk::Stake;
 use crate::venues;
-
-mod stake;
-
-pub use self::stake::{Risk, Stake};
 
 /// The prefix of a trade's time alert, followed by its entry's client
 /// order id.

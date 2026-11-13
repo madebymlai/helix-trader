@@ -31,8 +31,8 @@ use helix_trader::{
     },
     strategy::{
         DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries,
-        orders::{self, EntryRisk, Stake},
-        r::R,
+        orders::{self, EntryRisk},
+        risk::{R, Stake},
     },
 };
 use jiff::{SignedDuration, Timestamp};

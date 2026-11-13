@@ -22,7 +22,7 @@ use nautilus_model::{
 use nautilus_portfolio::portfolio::Portfolio;
 
 use super::*;
-use crate::strategy::orders::Stake;
+use crate::strategy::risk::Stake;
 
 const TOML: &str = r#"
     [data]

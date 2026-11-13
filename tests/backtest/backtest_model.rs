@@ -34,7 +34,7 @@ use helix_trader::{
         store::{ModelStore, Probe},
         targets::{BracketSpec, Distance, Side, Target, TargetConfig},
     },
-    strategy::r::R,
+    strategy::risk::R,
 };
 use jiff::SignedDuration;
 use nautilus_core::UnixNanos;

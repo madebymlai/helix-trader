@@ -727,7 +727,7 @@ mod tests {
             learner::LearnerConfig,
             targets::{BracketSpec, Distance, Exit, Outcome, Outcomes, Target},
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig, r::R},
+        strategy::{Declared, EmaArgs, IndicatorsConfig, risk::R},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";

@@ -33,7 +33,7 @@ use crate::{
         },
         targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
-    strategy::{AtrArgs, DataRequirements, TickSeries, r::R},
+    strategy::{AtrArgs, DataRequirements, TickSeries, risk::R},
 };
 
 /// The holdout of the models of the tests, as a train publishes it: a

@@ -73,7 +73,7 @@ use super::{
     store::{Baselined, ModelSet, Swap},
     targets::Side,
 };
-use crate::strategy::r::R;
+use crate::strategy::risk::R;
 
 /// The retrains and scores of one strategy's backtests.
 #[derive(Debug)]
@@ -445,7 +445,7 @@ mod tests {
                 TargetRow,
             },
         },
-        strategy::{DataRequirements, r::R},
+        strategy::{DataRequirements, risk::R},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";

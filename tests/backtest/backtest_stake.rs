@@ -8,7 +8,8 @@ use std::process::Command;
 
 use helix_trader::strategy::{
     ema::EmaCross,
-    orders::{EntryRisk, Stake, entry_risk},
+    orders::{EntryRisk, entry_risk},
+    risk::Stake,
 };
 use nautilus_model::{
     data::BarType,
