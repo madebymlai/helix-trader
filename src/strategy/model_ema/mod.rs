@@ -254,7 +254,7 @@ mod tests {
         period = 30
 
         [trade]
-        instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
+        instruments = [{ instrument_id = "AUD/USD.SIM" }]
         risk = "0.5%"
 
         [model]

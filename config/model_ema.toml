@@ -43,9 +43,9 @@ period = 10
 period = 30
 
 [trade]
-# The one instrument traded, whose target the model learns. Its trade_size
-# is read by nothing: a model's trades are sized at a stake.
-instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+# The one instrument traded, whose target the model learns, by its id
+# alone: a model's trades are sized at a stake of the risk.
+instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
 # The fraction of equity a trade sent at the config's stake risks over its
 # one R (see config/ema.toml): each decision's trade is sent at it, of the
 # account's equity. It is the reference stake too, of the dataset balance

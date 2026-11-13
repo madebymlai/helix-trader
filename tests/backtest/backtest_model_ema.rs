@@ -60,7 +60,7 @@ const CONFIG: &str = r#"
     period = 30
 
     [trade]
-    instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+    instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
     risk = "0.5%"
 
     [model]

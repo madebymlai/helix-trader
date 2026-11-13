@@ -600,7 +600,7 @@ const EMA_CONFIG: &str = r#"
     slow = { period = 30 }
 
     [trade]
-    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
+    instruments = [{ instrument_id = "AUD/USD.SIM" }]
     risk = "0.5%"
 "#;
 
@@ -638,7 +638,7 @@ const MODEL_EMA_CONFIG: &str = r#"
     period = 30
 
     [trade]
-    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
+    instruments = [{ instrument_id = "AUD/USD.SIM" }]
     risk = "0.5%"
 
     [model]

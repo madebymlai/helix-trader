@@ -1153,7 +1153,7 @@ mod tests {
             warmup = "720h"
 
             [trade]
-            instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
+            instruments = [{ instrument_id = "ESM24.CME" }]
             risk = "0.5%"
             "#,
         )
