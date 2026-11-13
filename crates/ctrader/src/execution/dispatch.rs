@@ -348,6 +348,7 @@ impl Dispatch {
     }
 
     fn refused_by_id(&mut self, id: Option<&str>, reason: &str, ts: UnixNanos) -> Vec<Output> {
+        let reason = interned(reason);
         match id.map(str::parse::<Tag>) {
             Some(Ok(tag)) => self.refuse(tag, reason, ts),
             _ => {
@@ -370,12 +371,12 @@ impl Dispatch {
         reason: &str,
         ts: UnixNanos,
     ) -> Vec<Output> {
+        let reason = interned(reason);
         let command = match tag {
             Tag::New(_) | Tag::Close(_) => return self.refuse(tag, reason, ts),
             Tag::Amend(_) | Tag::Protect(_) => Command::Modify,
             Tag::Cancel(_) | Tag::Unprotect(_) => Command::Cancel,
         };
-        let reason = Ustr::from(reason);
         commands
             .iter()
             .filter_map(|&(id, command_id)| {
@@ -401,13 +402,12 @@ impl Dispatch {
     /// (a removal of protections: the cancel of each protection of the
     /// position being removed). The changes of protections it asked are
     /// forgotten.
-    pub(super) fn refuse(&mut self, tag: Tag, reason: &str, ts: UnixNanos) -> Vec<Output> {
+    pub(super) fn refuse(&mut self, tag: Tag, reason: Ustr, ts: UnixNanos) -> Vec<Output> {
         let id = tag.client_order_id();
         let Some(tracked) = self.orders.get(&id).filter(|t| !t.closed).cloned() else {
             log::debug!("cTrader refused {tag} of an order no longer open: {reason}");
             return Vec::new();
         };
-        let reason = Ustr::from(reason);
         match tag {
             Tag::New(_) | Tag::Close(_) => {
                 let mut out = vec![self.rejected(id, &tracked, reason, ts)];
@@ -615,14 +615,14 @@ impl Dispatch {
             }
             ProtoOaExecutionType::OrderRejected => {
                 let code = event.error_code.as_deref().unwrap_or("ORDER_REJECTED");
-                out.extend(self.refuse(Tag::New(id), code, ts));
+                out.extend(self.refuse(Tag::New(id), interned(code), ts));
             }
             ProtoOaExecutionType::OrderCancelRejected => {
                 let code = event
                     .error_code
                     .as_deref()
                     .unwrap_or("ORDER_CANCEL_REJECTED");
-                out.extend(self.refuse(Tag::Cancel(id), code, ts));
+                out.extend(self.refuse(Tag::Cancel(id), interned(code), ts));
             }
             other => log::debug!("cTrader {} of {id} ignored", other.as_str_name()),
         }
@@ -1113,6 +1113,30 @@ fn reason(code: &str, description: Option<&str>) -> String {
     match description.filter(|d| !d.is_empty()) {
         Some(description) => format!("{code}: {description}"),
         None => code.to_owned(),
+    }
+}
+
+/// The most characters of a reason an order event carries.
+const REASON_MAX_CHARS: usize = 256;
+
+/// The reason of a refusal whose text is empty once cleaned.
+const NO_REASON: &str = "no reason given";
+
+/// `text`, a refusal's reason, as an order event carries it, interned for
+/// good: each run of control characters and whitespace one space,
+/// `REASON_MAX_CHARS` characters at most, `NO_REASON` if nothing is left,
+/// as Nautilus asks of a venue's text before it is logged or interned
+/// (`developer_guide/adapters.md`, "Separate diagnostics from
+/// strategy-facing reasons").
+fn interned(text: &str) -> Ustr {
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_control() || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let bounded: String = words.join(" ").chars().take(REASON_MAX_CHARS).collect();
+    match bounded.trim_end() {
+        "" => Ustr::from(NO_REASON),
+        reason => Ustr::from(reason),
     }
 }
 

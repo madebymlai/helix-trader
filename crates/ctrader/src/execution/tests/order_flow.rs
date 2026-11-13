@@ -493,6 +493,34 @@ async fn an_order_the_broker_refuses_is_rejected_with_its_reason() {
     node.client.disconnect().await.unwrap();
 }
 
+/// The captured refusal, its description long and holding control
+/// characters: the rejection's reason is its code and the start of its
+/// description, each run of control characters and whitespace one space,
+/// 256 characters at most.
+#[tokio::test]
+async fn a_refusal_is_rejected_with_its_reason_cleaned_and_bounded() {
+    let mut node = Node::start(|request| {
+        let mut error = decoded::<ProtoOaOrderErrorEvent>(ORDER_ERROR_BAD_VOLUME);
+        error.description = Some(format!(
+            "Order volume\r\n\tis too small\u{7}{}",
+            "x".repeat(1000)
+        ));
+        vec![event(&error, request.client_msg_id.as_deref())]
+    })
+    .await;
+
+    node.submit(&market("PROBE-3", OrderSide::Buy, 1), None);
+
+    let events = node.order_events(2).await;
+    let OrderEventAny::Rejected(rejected) = events[1] else {
+        panic!("not a rejection: {events:?}");
+    };
+    let start = "TRADING_BAD_VOLUME: Order volume is too small ";
+    let expected = format!("{start}{}", "x".repeat(256 - start.len()));
+    assert_eq!(rejected.reason.as_str(), expected);
+    node.client.disconnect().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_cancel_the_broker_refuses_is_rejected_and_the_order_stays_open() {
     let mut node = Node::start(|request| match request.payload_type {
