@@ -5,10 +5,11 @@ use std::{
     collections::HashSet,
     net::TcpListener,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use jiff::{SignedDuration, Timestamp};
+use nautilus_common::testing::wait_until_async;
 use nautilus_core::string::secret::SecretString;
 use prost::Message as _;
 use tempfile::TempDir;
@@ -252,23 +253,23 @@ pub(crate) fn start_delayed(
     (url, received)
 }
 
-/// Waits, up to 10 s, until `condition` holds on the frames received.
+/// Waits, up to 10 s, until `condition` holds on the frames received
+/// (Nautilus' `wait_until_async`); returns the frames received once it does.
 pub(crate) async fn wait_until(
     received: &Received,
     condition: impl Fn(&[(usize, ProtoMessage)]) -> bool,
 ) -> Vec<(usize, ProtoMessage)> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let frames = received.lock().unwrap().clone();
-        if condition(&frames) {
-            return frames;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "condition not met; received: {frames:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until_async(
+        || {
+            // Unlocked before `condition`, which may read `received` too.
+            let frames = received.lock().unwrap().clone();
+            let met = condition(&frames);
+            async move { met }
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    received.lock().unwrap().clone()
 }
 
 /// The made-up token pair that seeds the token file of `credential`.
