@@ -38,7 +38,12 @@ pub struct Outcome {
 /// What the fills paid in one currency.
 #[derive(Debug, Default)]
 struct Costs {
+    /// The commission of fills of positions settled in this currency,
+    /// which Nautilus nets into their PnL.
     commission: Decimal,
+    /// The commission of fills of positions settled in another currency,
+    /// which no PnL nets.
+    outside_pnl: Decimal,
     /// Each fill's value at its price less its value at the mid of the
     /// quote it filled on, for a buy, the reverse for a sell.
     spread: Decimal,
@@ -92,7 +97,12 @@ impl Outcome {
             cost.trades += 1;
             if let Some(commission) = fill.commission {
                 let code = commission.currency.code.to_string();
-                costs.entry(code).or_default().commission += commission.as_decimal();
+                let charged = costs.entry(code).or_default();
+                if commission.currency == instrument.cost_currency() {
+                    charged.commission += commission.as_decimal();
+                } else {
+                    charged.outside_pnl += commission.as_decimal();
+                }
             }
             if !quoted.contains(&id) {
                 costs
@@ -201,7 +211,13 @@ where
 /// to open, which no closed position's PnL holds, and the gross also holds
 /// the spread it paid to open. A currency with a fill on no quote (a run on
 /// bars) prints its spread as not applicable, and its cost per trade and
-/// gross PnL hold the commission alone.
+/// gross PnL hold the commission alone. A commission charged in another
+/// currency than its position's settlement currency is in no PnL, as
+/// Nautilus nets a fill's commission into its position's PnL only in that
+/// currency (`model/src/position.rs`, `handle_order_fill`): it is listed
+/// apart, as `Commission
+/// outside PnL` in its own currency, and counts toward neither the cost
+/// per trade nor the gross PnL.
 #[must_use]
 pub fn report(outcome: &Outcome) -> String {
     let result = &outcome.result;
@@ -218,6 +234,9 @@ pub fn report(outcome: &Outcome) -> String {
         let spread = (costs.unquoted == 0).then_some(costs.spread);
         let total = costs.commission + spread.unwrap_or_default();
         let mut figures = BTreeMap::from([("Commission".to_string(), f64(costs.commission))]);
+        if !costs.outside_pnl.is_zero() {
+            figures.insert("Commission outside PnL".to_string(), f64(costs.outside_pnl));
+        }
         if let Some(spread) = spread {
             figures.insert("Spread".to_string(), f64(spread));
         }
@@ -381,8 +400,9 @@ mod tests {
         cache.add_instrument(sxr8.clone()).unwrap();
         cache.add_instrument(aapl.clone()).unwrap();
         // Three fills of 10 SXR8.IBIS in EUR, each 0.10 off the mid of
-        // 100.00, 1.00 EUR of spread: two charged 3 EUR, one 1.25 GBP. Two
-        // fills of AAPL.XNAS in USD, of no quote, each charged 0.25 USD.
+        // 100.00, 1.00 EUR of spread: two charged 3 EUR, one 1.25 GBP,
+        // which no PnL nets, its position's being in EUR. Two fills of
+        // AAPL.XNAS in USD, of no quote, each charged 0.25 USD.
         for order in [
             filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR"),
             filled("O-2", &sxr8, OrderSide::Sell, 10, "99.90", "3 EUR"),
@@ -517,8 +537,9 @@ Costs (EUR)
   Spread: 3.000000
 
 Costs (GBP)
-  Commission: 1.250000
-  Gross PnL: 4.750000
+  Commission: 0.000000
+  Commission outside PnL: 1.250000
+  Gross PnL: 3.500000
   Spread: 0.000000
 
 Costs (USD)
