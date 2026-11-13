@@ -42,21 +42,22 @@
 //! for a period without data (`warmup::data_engine_config`), so a bar is
 //! data.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, ensure};
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
 use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::{
-    data::{CustomData, CustomDataTrait, DataType, HasTsInit},
+    custom_data,
+    data::{CustomData, CustomDataTrait, DataType},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::features::{FeatureSet, Fingerprint};
 
@@ -82,7 +83,7 @@ pub enum DecisionRule {
 }
 
 /// The features of one decision, published on the message bus.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[custom_data]
 pub struct FeatureRow {
     /// The strategy that decided.
     pub strategy_id: StrategyId,
@@ -177,16 +178,30 @@ fn firing(delay: SignedDuration) -> SignedDuration {
 ///
 /// # Panics
 ///
-/// Panics if the rule is invalid (`DecisionRule::validate`).
+/// Panics if the rule is invalid (`DecisionRule::validate`), its interval
+/// past Nautilus' nanoseconds, or its decisions firing before their grid
+/// times (`delay` negative past `DECISION_MARGIN`), or if that decision
+/// would be before the epoch: `ts` an interval or more before the epoch's
+/// fires.
 #[must_use]
 pub fn decision_of(rule: DecisionRule, delay: SignedDuration, ts: UnixNanos) -> UnixNanos {
     let DecisionRule::Every(interval) = rule;
-    let interval = interval.as_nanos();
-    assert!(interval > 0, "a cadence of {interval} ns");
-    let since = i128::from(ts.as_u64()) - firing(delay).as_nanos();
-    let grid = since.div_euclid(interval) * interval;
-    let grid = if grid == since { grid } else { grid + interval };
-    UnixNanos::from(u64::try_from(grid).expect("a decision after the epoch"))
+    assert!(interval.is_positive(), "a cadence of {interval:#}");
+    let interval = DurationNanos::try_from(interval).expect("a cadence in nanoseconds");
+    let firing = DurationNanos::try_from(firing(delay)).expect("a firing in nanoseconds");
+    match ts.checked_sub(firing) {
+        Some(since) => {
+            let grid = since.floor(interval);
+            if grid == since { grid } else { grid + interval }
+        }
+        None => {
+            assert!(
+                firing.as_u64() - ts.as_u64() < interval.as_u64(),
+                "a decision after the epoch"
+            );
+            UnixNanos::default()
+        }
+    }
 }
 
 /// Whether `event` is a decision of the clock cadence.
@@ -205,7 +220,9 @@ pub fn is_decision(event: &TimeEvent) -> bool {
 ///
 /// # Panics
 ///
-/// Panics if `strategy` is not registered with a trader, or has no id.
+/// Panics if `strategy` is not registered with a trader, or has no id, or
+/// if now is less than an interval after the epoch: there is no previous
+/// decision.
 pub fn decide<S>(
     strategy: &S,
     features: &FeatureSet,
@@ -217,7 +234,10 @@ where
 {
     let now = strategy.clock().timestamp_ns();
     let DecisionRule::Every(interval) = rule;
-    let previous = UnixNanos::from(Timestamp::from(now) - interval);
+    let previous = DurationNanos::try_from(interval)
+        .ok()
+        .and_then(|interval| now.checked_sub(interval))
+        .expect("a decision an interval after the epoch");
     let cache = strategy.cache();
     let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
     let traded = cache.trade(&instrument_id).map(|trade| trade.ts_init);
@@ -271,42 +291,6 @@ impl FeatureRow {
             None,
             Some(strategy_id.to_string()),
         )
-    }
-}
-
-impl HasTsInit for FeatureRow {
-    fn ts_init(&self) -> UnixNanos {
-        self.ts_init
-    }
-}
-
-impl CustomDataTrait for FeatureRow {
-    fn type_name(&self) -> &'static str {
-        Self::type_name_static()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn ts_event(&self) -> UnixNanos {
-        self.ts_event
-    }
-
-    fn to_json(&self) -> anyhow::Result<String> {
-        Ok(serde_json::to_string(self)?)
-    }
-
-    fn clone_arc(&self) -> Arc<dyn CustomDataTrait> {
-        Arc::new(self.clone())
-    }
-
-    fn eq_arc(&self, other: &dyn CustomDataTrait) -> bool {
-        other.as_any().downcast_ref::<Self>() == Some(self)
-    }
-
-    fn type_name_static() -> &'static str {
-        "FeatureRow"
     }
 }
 

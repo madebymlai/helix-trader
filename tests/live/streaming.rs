@@ -10,8 +10,9 @@
 //! configures it, into a temp-dir catalog, but promoting every
 //! `PROMOTION_MS` rather than daily, so that a test sees several
 //! promotions in seconds. The test, another process,
-//! reads the catalog while the node runs and after it stops, and backtests
-//! and builds a dataset over it with the binary, a third.
+//! reads the catalog while the node runs and after it stops, backtests
+//! over it with the binary, a third, and builds a dataset over it in a
+//! child of this binary (`streamed_dataset`).
 //!
 //! Hermetic and ungated: no node runs in the test's own process, so it
 //! claims none (`main.rs`). Run it with:
@@ -33,7 +34,16 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use helix_trader::live::{self, Recording};
+use helix_trader::{
+    backtest::{Backtest, Commission},
+    live::{self, Recording},
+    model::{
+        ModelStrategy,
+        dataset::{self, DatasetVenue},
+        handle::{Mode, SettledRows},
+    },
+    strategy::model_ema::{ModelEma, ModelEmaConfig},
+};
 use jiff::Timestamp;
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
@@ -53,14 +63,15 @@ use nautilus_model::{
         Bar, BarType, Data, NautilusDataType, OrderBookDepth, QuoteTick, TradeTick,
         stubs::stub_depth10,
     },
-    enums::{AggressorSide, BookType},
+    enums::{AggressorSide, BookType, OmsType},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
-    types::{Price, Quantity},
+    types::{Money, Price, Quantity},
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
+use rust_decimal::Decimal;
 
 const INSTRUMENT_ID: &str = "AUD/USD.SIM";
 /// The bars the actor subscribes to, which Nautilus builds from the trades.
@@ -84,6 +95,9 @@ const FIRST_SEQ: &str = "HELIX_STREAMING_FIRST_SEQ";
 /// Set, the child writes a venue's answer back over what the catalog lacks
 /// before its node runs, as a warmup does at the strategy's start.
 const WRITE_BACK: &str = "HELIX_STREAMING_WRITE_BACK";
+/// The span of the dataset build of `streamed_dataset`: its start and its
+/// end, a space between.
+const DATASET_SPAN: &str = "HELIX_STREAMING_DATASET_SPAN";
 
 /// How long a child gets to do what the test waits for.
 const PATIENCE: Duration = Duration::from_secs(60);
@@ -280,8 +294,9 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
     assert!(!missing.is_empty(), "no gap between promotions");
 }
 
-/// A dataset build, a retrain's replay, over the streamed data runs through
-/// the gaps between the files Nautilus promoted, as a backtest does.
+/// A dataset build, a model backtest's before its run or a retrain's
+/// replay, over the streamed data runs through the gaps between the files
+/// Nautilus promoted, as a backtest does.
 #[test]
 fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
@@ -294,6 +309,57 @@ fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotio
     assert!(dataset.status.success(), "{}", backtest_output(&dataset));
     let stdout = String::from_utf8_lossy(&dataset.stdout);
     assert!(stdout.contains("built "), "{stdout}");
+}
+
+/// Not a test: the dataset build the test above runs in a child process,
+/// over the days of `DATASET_SPAN` of the catalog of `ROOT`, as a model
+/// backtest builds before its run and a retrain replays: a dataset run of
+/// the strategy, a Nautilus node, here the one of its process. Passes at
+/// once outside one.
+#[test]
+fn streamed_dataset() {
+    let (Ok(root), Ok(span)) = (std::env::var(ROOT), std::env::var(DATASET_SPAN)) else {
+        return;
+    };
+    let (start, end) = span.split_once(' ').unwrap();
+    let (start, end): (Timestamp, Timestamp) = (start.parse().unwrap(), end.parse().unwrap());
+    let catalog = PathBuf::from(root).join("catalog");
+    let config = ModelEmaConfig::load(MODEL_EMA_CONFIG).unwrap();
+    let venue = DatasetVenue {
+        commission: Commission::PerOrder(Money::from("1 USD")),
+        balance: Money::from("1000000 USD"),
+        leverage: Decimal::ONE,
+    };
+    let (first, last) = dataset::days(start, end);
+
+    let built = ModelEma::dataset(&config, &catalog, &venue)
+        .unwrap()
+        .build(first, last, |from, to| {
+            let requirements = config.data_requirements();
+            let rows = SettledRows::default();
+            let mode = Mode::Dataset {
+                rows: Rc::clone(&rows),
+                commission: venue.commission,
+            };
+            Backtest {
+                catalog: catalog.clone(),
+                bar_types: requirements.bar_types,
+                ticks: requirements.ticks,
+                start: from,
+                end: to,
+                commission: venue.commission,
+                balance: venue.balance,
+                leverage: venue.leverage,
+                venue_oms: |_| OmsType::Hedging,
+                logging: LoggerConfig::default(),
+            }
+            .run_dataset(ModelEma::new(config.clone(), mode)?)?;
+            Ok(rows.take())
+        })
+        .unwrap();
+
+    assert!(!built.is_empty(), "the dataset held every day");
+    println!("built {} days of the dataset", built.len());
 }
 
 /// Not a test: the node the tests above run in a child process. Passes at
@@ -585,19 +651,14 @@ const MODEL_EMA_CONFIG: &str = r#"
     learner = { kind = "fake" }
 "#;
 
-/// The binary's dataset build of the `model_ema` strategy
+/// The build of the dataset of the `model_ema` strategy
 /// (`MODEL_EMA_CONFIG`) over the days of `[start, end]` of the catalog of
-/// `root`, in a process of its own.
+/// `root`, in a child process (`streamed_dataset`).
 fn dataset(root: &Path, start: Timestamp, end: Timestamp) -> Output {
-    let config = root.join("model_ema.toml");
-    std::fs::write(&config, MODEL_EMA_CONFIG).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_helix-trader"))
-        .args(["dataset", "model_ema", "--config"])
-        .arg(&config)
-        .arg("--catalog")
-        .arg(root.join("catalog"))
-        .args(["--start", &start.to_string(), "--end", &end.to_string()])
-        .args(["--commission", "1 USD", "--balance", "1000000 USD"])
+    Command::new(std::env::current_exe().unwrap())
+        .args(["streaming::streamed_dataset", "--exact", "--nocapture"])
+        .env(ROOT, root)
+        .env(DATASET_SPAN, format!("{start} {end}"))
         .output()
         .unwrap()
 }

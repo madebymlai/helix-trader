@@ -45,7 +45,8 @@
 //!
 //! The transport's own heartbeat is off: cTrader counts its
 //! `ProtoHeartbeatEvent`, which the transport cannot send (it sends Ping
-//! frames or text).
+//! frames or text). Its dead-peer timeout is on, against the heartbeats
+//! cTrader sends (`DEAD_PEER_TIMEOUT_SECS`).
 
 mod handler;
 
@@ -76,6 +77,17 @@ use super::{
 
 /// cTrader's heartbeat interval.
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a connection may bring no frame at all before the transport
+/// takes its peer for dead and reconnects (`heartbeat_timeout_secs`), as it
+/// would on a drop: three of the heartbeats cTrader's proxy sends every 30 s
+/// on an authenticated connection that is otherwise silent
+/// (`ProtoHeartbeatEvent`'s doc: the proxy's sign of a healthy connection
+/// when nothing else is sent; the interval, Spotware's support on its
+/// forum). Without it a peer gone silent, its TCP connection still open,
+/// would hold the session until the requests time out, and the spot events
+/// stopped.
+const DEAD_PEER_TIMEOUT_SECS: u64 = 90;
 
 /// How long the application and account authentication may take.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -212,6 +224,7 @@ impl CTraderWebSocketClient {
         });
         let config = WebSocketConfig::builder()
             .url(url.to_owned())
+            .heartbeat_timeout_secs(DEAD_PEER_TIMEOUT_SECS)
             .build()
             .context("the cTrader WebSocket config")?;
         let historical = Quota::with_period(HISTORICAL_PERIOD)

@@ -10,7 +10,9 @@
 //! second backtest of the span builds and publishes nothing, and the scores
 //! of each period are its model's, a constant, beside its own baseline, the
 //! training mean its manifest has.
-//! One node per thread: each build, train and run on a thread of its own.
+//! The build and the run are on the test's one thread, a node after
+//! another, each disposed before the next, as the binary's backtest runs
+//! them.
 
 use std::{path::Path, rc::Rc};
 
@@ -81,9 +83,9 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
         .unwrap()
 }
 
-/// Prepares the backtest of the span, each build and train on a thread of
-/// its own, as a backtest's children each run a node of their own; the
-/// spans built and the times trained at, each publishing a baseline
+/// Prepares the backtest of the span, its build a node on this thread, as
+/// the binary's backtest runs it; the spans built and the times trained
+/// at, each publishing a baseline
 /// predicting an R of `r(tenths)`, `tenths` 3 at the span's start and one
 /// more each day.
 fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
@@ -95,20 +97,13 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
             end,
             |from, to| {
                 built.push((from, to));
-                std::thread::scope(|scope| {
-                    scope
-                        .spawn(|| {
-                            let dataset = blueprint(features(), config_daily())
-                                .dataset(catalog.path(), &venue())?;
-                            let (first, last) = dataset::days(from, to);
-                            dataset.build(first, last, |from, to| {
-                                replay_on(catalog, features(), from, to)
-                            })?;
-                            Ok(())
-                        })
-                        .join()
-                        .unwrap()
-                })
+                let dataset =
+                    blueprint(features(), config_daily()).dataset(catalog.path(), &venue())?;
+                let (first, last) = dataset::days(from, to);
+                dataset.build(first, last, |from, to| {
+                    replay_on(catalog, features(), from, to)
+                })?;
+                Ok(())
             },
             |at| {
                 trained.push(at);
@@ -147,21 +142,14 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
         "the models must differ to be told apart: {means:?}"
     );
 
-    let record = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                trade_on(
-                    &catalog,
-                    features(),
-                    start,
-                    end,
-                    &config_daily(),
-                    models.path(),
-                )
-            })
-            .join()
-            .unwrap()
-    });
+    let record = trade_on(
+        &catalog,
+        features(),
+        start,
+        end,
+        &config_daily(),
+        models.path(),
+    );
 
     for (period, (&from, mean)) in retrains.iter().zip(&means).enumerate() {
         let (from, to) = (UnixNanos::from(from), UnixNanos::from(from + day));

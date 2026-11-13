@@ -3,11 +3,13 @@
 //!
 //! A `Launcher` starts a train at `t` (`train::Training::train_at`) off the
 //! node's thread and hands back a `Running`, which the retrain actor asks
-//! without waiting, and a backtest training before its run waits for: in
-//! production a child process, the binary's own `train` subcommand with
-//! `--at t` (`Launcher::process`), since a train replays the dataset days
-//! it lacks through a Nautilus node of its own and a process holds one
-//! node; in tests a thread of this process (`Launcher::in_process`). The
+//! without waiting: in production a child process, the binary's own
+//! `train` subcommand with `--at t` (`Launcher::process`), since a train
+//! replays the dataset days it lacks through a Nautilus node of its own,
+//! and Nautilus runs no second node in a process while the live node
+//! runs; in tests a thread of this process (`Launcher::in_process`). A
+//! backtest, holding no node while it trains, trains in its own process
+//! and starts no launcher (`backtest_on_models`, in `main.rs`). The
 //! child's exit status says what it did: success is a train that kept no
 //! model, each published or its current one in use; a failure, a current
 //! model kept, the reason the error it printed last (`train` exits with an
@@ -31,8 +33,7 @@
 //! the previous retrain is still running. A retrain logs what it did as it
 //! ends, on its own thread, waiting for no decision nor firing: as info
 //! when it succeeded, as an error with its reason when it kept a current
-//! model; a backtest, which waits for its trains, prints that reason
-//! itself (`Children::train`, in `main.rs`). The model a retrain publishes
+//! model. The model a retrain publishes
 //! is the strategy's from its next decision, at which its model handle
 //! lists the store again (`handle`).
 //!
