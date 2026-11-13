@@ -24,6 +24,13 @@ use sha2::{Digest, Sha256};
 /// `[2026-10-21T10:00:00Z, 2026-10-21T10:00:01Z)`, as LSE exported it:
 /// six trades.
 pub const GOLD_TRADES: &[u8] = include_bytes!("../test_data/export_gold_futures_tick.parquet");
+/// LSE's catalogue of its reference collections (`/v3/reference`).
+pub const REFERENCE_CATALOGUE: &str = include_str!("../test_data/reference_catalogue.json");
+/// The rows of the US 10-year yield (`US10Y`) in LSE's daily bond yields
+/// (`bond_yields`) from 9 to 12 November 2026, as LSE exported them: three
+/// rows, of the 9th, 10th and 12th.
+pub const US10Y_BOND_YIELDS: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_us10y.parquet");
 /// The 1-minute candles of LSE's gold spot series (`XAU/USD` in
 /// `commodities`) over `[2026-10-21T10:00:00Z, 2026-10-21T10:05:00Z)`, as LSE
 /// exported them: five candles, stamped at their open, of no volume.
@@ -40,6 +47,8 @@ pub const SYMBOL_UNKNOWN: &str = include_str!("../test_data/refusal_symbol_unkno
 pub const PLAN_REQUIRED: &str = include_str!("../test_data/refusal_plan_required.json");
 pub const DATA_UNAVAILABLE: &str = include_str!("../test_data/refusal_data_unavailable.json");
 pub const DATE_NOT_TRADING: &str = include_str!("../test_data/refusal_date_not_trading.json");
+pub const REFERENCE_DATA_UNAVAILABLE: &str =
+    include_str!("../test_data/refusal_reference_data_unavailable.json");
 pub const CALLS_EXHAUSTED: &str = include_str!("../test_data/refusal_calls_exhausted.json");
 pub const ROWS_EXHAUSTED: &str = include_str!("../test_data/refusal_rows_exhausted.json");
 pub const ALLOWANCE_EXHAUSTED: &str = include_str!("../test_data/refusal_allowance_exhausted.json");
@@ -49,6 +58,8 @@ pub const EXPORT_TOO_WIDE: &str = include_str!("../test_data/refusal_export_too_
 /// LSE's answer for a day it had not loaded yet, the current one.
 pub const DATA_UNAVAILABLE_TODAY: &str =
     include_str!("../test_data/refusal_data_unavailable_today.json");
+/// LSE's answer for the tick slice of a market storing no trades, `forex`.
+pub const TICKS_NOT_STORED: &str = include_str!("../test_data/refusal_data_unavailable_tick.json");
 
 /// The export id LSE sends with a file (`x-export-id`), the one it gave
 /// `GOLD_TRADES`; the peer sends it with every file.
@@ -158,6 +169,18 @@ impl Reply {
         }
     }
 
+    /// A JSON answer of the catalogue, as LSE sends one: 200.
+    #[must_use]
+    pub fn json(body: &str) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: body.as_bytes().to_vec(),
+            delay: Duration::ZERO,
+            cut_at: None,
+        }
+    }
+
     /// A refusal: `status` and LSE's JSON `body`.
     #[must_use]
     pub fn refusal(status: u16, body: &str) -> Self {
@@ -184,12 +207,27 @@ impl Reply {
         self.delay = delay;
         self
     }
+
+    /// The reply with the status `status`.
+    #[must_use]
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// The reply without the file's SHA-256.
+    #[must_use]
+    pub fn without_checksum(mut self) -> Self {
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("x-checksum-sha256"));
+        self
+    }
 }
 
 /// A call the peer received.
 #[derive(Debug, Clone)]
 pub struct Call {
-    /// The path, `/v3/export`.
+    /// The path, `/v3/export`, `/v3/reference`, `/v3/reference/export`.
     pub path: String,
     /// The query's parameters, decoded, in order.
     pub query: Vec<(String, String)>,
@@ -332,6 +370,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",

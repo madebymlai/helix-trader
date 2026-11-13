@@ -974,6 +974,7 @@ mod tests {
                 tick(NautilusDataType::TradeTick),
                 tick(NautilusDataType::OrderBookDepth),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let mut asked = Vec::new();

@@ -140,7 +140,7 @@ fn config(
         .engine(engine_config)
         .start(UnixNanos::from(start))
         .end(UnixNanos::from(end))
-        .maybe_chunk_size(custom.is_empty().then_some(CHUNK_SIZE))
+        .maybe_chunk_size((custom.is_empty() && backtest.custom.is_empty()).then_some(CHUNK_SIZE))
         .raise_exception(true)
         .dispose_on_completion(false)
         .build()?)
@@ -208,8 +208,10 @@ fn is_custom(series: &SeriesSlice) -> bool {
     matches!(series.series.0, NautilusDataType::Custom { .. })
 }
 
-/// The custom data `backtest` replays (see `Backtest::series`), read from
-/// its catalog, each series over its slice, both ends included: the data
+/// The custom data `backtest` replays, read from its catalog: that of its
+/// instruments (see `Backtest::series`), each series over its slice, and
+/// that of no instrument (`Backtest::custom`), each keyed by its data
+/// type's identifier, over the run's window, both ends included: the data
 /// the node cannot load (see `run_config`). Nautilus decodes each type by
 /// its name, so each must be registered with Nautilus before the run
 /// (`nautilus_serialization::ensure_custom_data_registered`) by the code
@@ -222,6 +224,21 @@ fn is_custom(series: &SeriesSlice) -> bool {
 pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let mut data = Vec::new();
+    for data_type in &backtest.custom {
+        let identifiers = data_type.identifier().map(|id| vec![id.to_string()]);
+        let read = catalog
+            .query_custom_data_dynamic(
+                data_type.type_name(),
+                identifiers.as_deref(),
+                Some(UnixNanos::from(backtest.start)),
+                Some(UnixNanos::from(backtest.end)),
+                None,
+                None,
+                true,
+            )
+            .with_context(|| format!("reading the {data_type}"))?;
+        data.extend(read);
+    }
     for series in backtest.series()?.into_iter().filter(is_custom) {
         let SeriesSlice {
             series: (data_type, identifier),
@@ -400,6 +417,7 @@ mod tests {
                 BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
             ],
             ticks: vec![],
+            custom: vec![],
             commission: Commission::PerOrder(Money::from("3 EUR")),
             balance: Money::from("10000 EUR"),
             leverage: Decimal::ONE,

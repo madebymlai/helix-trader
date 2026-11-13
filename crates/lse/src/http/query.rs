@@ -1,10 +1,11 @@
-//! The query of an export (`/v3/export`), typed: LSE's selection of a
-//! series, as LSE's docs name its parameters.
+//! The queries of LSE's exports, typed: of a market's series
+//! (`/v3/export`) and of a reference collection's (`/v3/reference/export`),
+//! as LSE's docs name their parameters.
 
 use std::fmt;
 
 use anyhow::{bail, ensure};
-use jiff::{SignedDuration, Timestamp};
+use jiff::{SignedDuration, Timestamp, civil::Date};
 use nautilus_model::{
     data::{BarSpecification, BarType},
     enums::{AggregationSource, BarAggregation, PriceType},
@@ -233,6 +234,49 @@ impl fmt::Display for ExportQuery {
         write!(
             f,
             "the {rows} of {symbol} in LSE's {market} over [{from}, {to})"
+        )
+    }
+}
+
+/// An export of the rows of `symbol` in LSE's reference collection
+/// `dataset` over the dates `[from, to]`, both included, which bound the
+/// collection's time column, a date or a time: LSE refuses a time
+/// (`filter-bad`) of a collection keyed by dates, and selects a day's rows
+/// by its date either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ReferenceQuery {
+    dataset: String,
+    symbol: String,
+    from: Date,
+    to: Date,
+    format: ExportFormat,
+}
+
+impl ReferenceQuery {
+    /// The rows of `symbol` in `dataset` over `[from, to]`, as Parquet.
+    pub(crate) fn new(dataset: &str, symbol: &str, from: Date, to: Date) -> Self {
+        Self {
+            dataset: dataset.to_owned(),
+            symbol: symbol.to_owned(),
+            from,
+            to,
+            format: ExportFormat::Parquet,
+        }
+    }
+}
+
+impl fmt::Display for ReferenceQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            dataset,
+            symbol,
+            from,
+            to,
+            ..
+        } = self;
+        write!(
+            f,
+            "the rows of {symbol} in LSE's reference collection {dataset} over [{from}, {to}]"
         )
     }
 }

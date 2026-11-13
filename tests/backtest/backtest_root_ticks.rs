@@ -99,6 +99,7 @@ fn requirements() -> DataRequirements {
             tick(NautilusDataType::TradeTick, ROOT),
             tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID),
         ],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }

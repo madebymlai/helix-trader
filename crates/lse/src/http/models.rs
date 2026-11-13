@@ -4,9 +4,14 @@ use std::fmt;
 
 use serde::Deserialize;
 
-/// The codes of an export LSE holds no row of: no stored row in the
-/// selection, or no session in its dates. Its answer is no rows.
-const NO_ROWS: &[&str] = &["data-unavailable", "date-not-trading"];
+/// The code of an export of no session in its dates. Its answer is no rows.
+const DATE_NOT_TRADING: &str = "date-not-trading";
+
+/// The code of data LSE does not serve, among which a selection with no
+/// stored row, whose message alone begins with `EMPTY_SELECTION` (LSE's
+/// docs, "Refusal codes"). Only that one's answer is no rows.
+const DATA_UNAVAILABLE: &str = "data-unavailable";
+const EMPTY_SELECTION: &str = "No stored data for this selection";
 
 /// The code of an export past the rows one export may read (2,500,000 on
 /// every plan), or one LSE could not count in time: shorter dates may be
@@ -42,10 +47,25 @@ pub(crate) struct RequiredPlan {
     pub(crate) subscribe_url: Option<String>,
 }
 
+/// LSE's catalogue of its reference collections (`/v3/reference`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ReferenceCatalogue {
+    pub(crate) datasets: Vec<ReferenceCollection>,
+}
+
+/// A reference collection, as LSE's catalogue lists it: its name and the
+/// column holding its rows' time, a date or a time.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ReferenceCollection {
+    pub(crate) dataset: String,
+    pub(crate) time_column: String,
+}
+
 impl LseRefusal {
     /// Whether the refusal says LSE holds no row of the selection.
     pub(crate) fn is_no_rows(&self) -> bool {
-        NO_ROWS.contains(&self.code.as_str())
+        self.code == DATE_NOT_TRADING
+            || (self.code == DATA_UNAVAILABLE && self.message.starts_with(EMPTY_SELECTION))
     }
 
     /// Whether the refusal says the export selects too many rows.
@@ -76,8 +96,8 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        ALLOWANCE_EXHAUSTED, DATA_UNAVAILABLE, DATE_NOT_TRADING, EXPORT_TOO_WIDE, PLAN_REQUIRED,
-        ROWS_EXHAUSTED,
+        ALLOWANCE_EXHAUSTED, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
+        EXPORT_TOO_WIDE, PLAN_REQUIRED, ROWS_EXHAUSTED, TICKS_NOT_STORED,
     };
 
     fn refusal(body: &str) -> LseRefusal {
@@ -95,8 +115,16 @@ mod tests {
     #[test]
     fn no_stored_row_and_no_session_are_no_rows() {
         assert!(refusal(DATA_UNAVAILABLE).is_no_rows());
+        assert!(refusal(DATA_UNAVAILABLE_TODAY).is_no_rows());
         assert!(refusal(DATE_NOT_TRADING).is_no_rows());
         assert!(!refusal(PLAN_REQUIRED).is_no_rows());
+    }
+
+    /// LSE's `data-unavailable` names an empty selection only by its
+    /// message.
+    #[rstest]
+    fn data_unavailable_for_a_market_storing_no_trades_is_not_no_rows() {
+        assert!(!refusal(TICKS_NOT_STORED).is_no_rows());
     }
 
     #[rstest]

@@ -387,6 +387,7 @@ mod tests {
                 BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@5-MINUTE-EXTERNAL"),
             ],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
         .slices(at(from), at(to))
@@ -442,6 +443,7 @@ mod tests {
                         ),
                     ],
                     ticks: vec![],
+                    custom: vec![],
                     warmup: SignedDuration::ZERO,
                 }
                 .slices(at("2026-10-01T00:00:00Z"), at("2026-10-08T00:00:00Z")),
